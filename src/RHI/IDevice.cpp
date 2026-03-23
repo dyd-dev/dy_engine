@@ -1,5 +1,3 @@
-﻿#include "RHIFactory.h"
-
 #if defined(ENABLE_D3D12)
 #include "Backends/D3D12/D3D12Device.h"
 #elif defined(ENABLE_METAL)
@@ -12,17 +10,22 @@
 #include "Backends/Null/NullDevice.h"
 #endif
 
-RHIDevice* CreateRHIDevice()
+using dy::RHI::IDevice;
+
+IDevice* IDevice::Create(const void *windowHandle)
 {
+	IDevice *device = nullptr;
 #if defined(ENABLE_D3D12)
-	return new D3D12Device();
+	device = new D3D12Device();
 #elif defined(ENABLE_METAL)
-	return new MetalDevice();
+	device = new MetalDevice();
 #elif defined(ENABLE_VULKAN)
-	return new VulkanDevice();
+	device = new VulkanDevice();
 #elif defined(ENABLE_SDL3)
-	return new SDL3Device();
+	device = new SDL3Device();
 #else
-	return nullptr;
+	// device = new Backends::NullDevice();
 #endif
+	if(device) device->Initialize(windowHandle);
+	return device;
 }

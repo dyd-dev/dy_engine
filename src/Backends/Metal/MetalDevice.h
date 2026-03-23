@@ -1,6 +1,9 @@
 #pragma once
-#include "RHI/RHIDevice.h"
+#include "RHI/IDevice.h"
 
-class MetalDevice : public RHIDevice
+namespace dy::Backends
 {
-};
+	class MetalDevice : public RHI::IDevice
+	{
+	};
+}
