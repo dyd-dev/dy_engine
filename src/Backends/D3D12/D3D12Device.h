@@ -1,6 +1,9 @@
 ﻿#pragma once
-#include "RHI/RHIDevice.h"
+#include "RHI/IDevice.h"
 
-class D3D12Device : public RHIDevice
+namespace dy::Backends
 {
-};
+	class D3D12Device : public RHI::IDevice
+	{
+	};
+}

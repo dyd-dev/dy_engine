@@ -4,9 +4,13 @@ project(dy_engine CXX)
 # add module path
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
+set(RHI_SOURCES
+	src/RHI/IDevice.cpp
+)
+
 # main target
 add_library(${PROJECT_NAME} STATIC
-	src/RHI/RHIFactory.cpp
+	${RHI_SOURCES}
 	src/Core/App/Window.cpp
 )
 
