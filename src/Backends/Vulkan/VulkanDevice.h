@@ -1,6 +1,9 @@
 ﻿#pragma once
-#include "RHI/RHIDevice.h"
+#include "RHI/IDevice.h"
 
-class VulkanDevice : public RHIDevice
+namespace dy::Backends
 {
-};
+	class VulkanDevice : public RHI::IDevice
+	{
+	};
+}
