@@ -12,6 +12,8 @@
 #endif
 #include <GLFW/glfw3native.h>
 
+using namespace dy::Platform;
+
 Window::Window(unsigned int width, unsigned int height)
 	: Window(width, height, "New Window") {}
 
@@ -36,7 +38,7 @@ Window::~Window()
 	glfwTerminate();
 }
 
-bool Window::ShouldClose() const { return glfwWindowShouldClose(m_window); }
+bool Window::IsRunning() const { return !glfwWindowShouldClose(m_window); }
 
 void Window::PollEvents() const { glfwPollEvents(); }
 
