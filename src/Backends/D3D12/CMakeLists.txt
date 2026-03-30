@@ -1,15 +1,14 @@
-﻿# ===== ===== Requirements ===== =====
-# message(STATUS "[${PROJECT_NAME}] Find DirectX 12...")
-
-# ===== ===== Backend Target ===== =====
-set(BACKEND_NAME "Backend_D3D12")
-
-add_library(${BACKEND_NAME} STATIC
+﻿add_library(Backend_D3D12 STATIC
 	D3D12Device.cpp
 )
-target_link_libraries(${BACKEND_NAME} PRIVATE
-	Engine_Options
-	d3d12 dxgi dxguid d3dcompiler
+
+target_link_libraries(Backend_D3D12 PRIVATE
+	glfw
+	d3d12.lib
+	dxgi.lib
+	d3dcompiler.lib
 )
 
-message(STATUS "[${PROJECT_NAME}] Ready to Use ${BACKEND_NAME}")
+target_include_directories(Backend_D3D12 PRIVATE
+	${CMAKE_SOURCE_DIR}/src
+)
