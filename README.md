@@ -1,4 +1,4 @@
-﻿# dy engine
+﻿# SuR engine
 
 cmake build options (-D =ON)
 - USE_D3D12

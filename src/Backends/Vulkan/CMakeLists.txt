@@ -79,4 +79,3 @@ target_compile_definitions(Backend_Vulkan PRIVATE
 if(MSVC)
 	target_compile_options(Backend_Vulkan PRIVATE /utf-8 /EHsc)
 endif()
-
