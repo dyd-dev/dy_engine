@@ -6,3 +6,5 @@ out/
 
 *.sln
 *.slnx
+
+CMakeUserPresets.json
