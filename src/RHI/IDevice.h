@@ -1,38 +1,59 @@
-﻿/* Device.h
-
+﻿#pragma once
+/* Device.h
+*
 * GPU와 통신하는 최상위 클래스입니다.
 * 물리/논리 디바이스 초기화, 메모리 할당자 역할을 합니다.
+*
+* SwapChain은 OS와 1:1 결합되는 객체이므로 Backend Device 내부로 가져가 불필요한 BoilerPlate Code를 숨깁니다.
 */
-#pragma once
+#include <cstdint>
 
 namespace dy::RHI
 {
+	class ICommandList;
+
 	class IBuffer;
 	class ITexture;
-	class ICommandList;
+	class IPipelineState;
+
+	struct BufferDesc;
+	struct TextureDesc;
+	struct GraphicsPipelineDesc;
 
 	class IDevice
 	{
 	public:
-		static IDevice* Create(const void *windowHandle);
 		virtual ~IDevice() = default;
+		static IDevice* Create(const void *windowHandle);
 
+		// Global synchronization: Acquires the next swapchain image
+		// Must be called once per frame by the "main render thread"
 		virtual void BeginFrame() = 0;
-		virtual void EndFrame() = 0;
 
-		virtual void SubmitCommandList(ICommandList* cmd) = 0;
+		// Returns the current frame index in the ring buffer (e.g., 0, 1, or 2)
+		// Upper layers MUST use this to index into their own multiple-buffered resources.
+		virtual uint32_t GetCurrentFrameIndex() const = 0;
+
+		// Rename from CreateCommandList to AcquireCommandList to enforce pre-allocation semantics
+		// The backend uses GetCurrentFrameIndex() and thread_local internally to return the correct list.
+		virtual ICommandList* AcquireCommandList() = 0;
+		
+		// Submits multiple command lists recorded by various threads simultaneously
+		virtual void Submit(ICommandList** cmdLists, uint32_t count) = 0;
 		virtual void Present() = 0;
 
-		virtual ICommandList* GetCommandList() = 0;
+		virtual IBuffer* CreateBuffer(const BufferDesc& desc) = 0;
+		virtual ITexture* CreateTexture(const TextureDesc& desc) = 0;
+		virtual IPipelineState* CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) = 0;
+		// virtual IPipelineState* CreateComputePipelilne(const ComputePipelineDesc& desc) = 0;
 
-		// 자원 생성
-		//virtual IBuffer* CreateBuffer(uint32_t size, const void* initialData) = 0;
-		//virtual ITexture* CreateTexture(const char* filePath) = 0;
+		virtual void DestroyBuffer(IBuffer* buffer) = 0;
+		virtual void DestroyTexture(ITexture* texture) = 0;
+		virtual void DestroyPipelineState(IPipelineState* pipeline) = 0;
 
-		// 스왑 체인을 생성하는 함수입니다. 스왑 체인은 화면에 렌더링된 이미지를 표시하는 데 사용됩니다.
-		//virtual void CreateSwapChain() = 0;
-		// 명령 리스트를 생성하는 함수입니다. 명령 리스트는 GPU에 렌더링 명령을 기록하는 객체입니다.
-		//virtual void CreateCommandList() = 0;
+		// Warning: In a multi-threaded setup, worker threads should not call this directly
+        // unless they are explicitly assigned the task of writing to the final swapchain image.
+		virtual ITexture* GetBackBuffer() = 0;
 		
 	protected:
 		virtual int Initialize(const void *windowHandle) = 0;

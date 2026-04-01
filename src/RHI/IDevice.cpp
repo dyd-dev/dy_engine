@@ -10,9 +10,7 @@
 #include "Backends/Null/NullDevice.h"
 #endif
 
-using dy::RHI::IDevice;
-
-IDevice* IDevice::Create(const void *windowHandle)
+dy::RHI::IDevice* dy::RHI::IDevice::Create(const void *windowHandle)
 {
 	IDevice *device = nullptr;
 #if defined(ENABLE_D3D12)
