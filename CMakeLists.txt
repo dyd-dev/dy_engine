@@ -7,7 +7,9 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 set(PLATFORM_SOURCES
 	src/Platform/Window.cpp
 )
-set(RENDERER_SOURCES
+set(GRAPHICS_SOURCES
+	src/Graphics/Camera.cpp
+	src/Graphics/Renderer.cpp
 )
 set(UI_SOURCES
 )
@@ -15,8 +17,9 @@ set(UI_SOURCES
 # main target
 add_library(${PROJECT_NAME} STATIC
 	"src/RHI/IDevice.cpp"
+	"src/Math/Math.cpp"
 	${PLATFORM_SOURCES}
-	${RENDERER_SOURCES}
+	${GRAPHICS_SOURCES}
 	${UI_SOURCES}
 )
 
