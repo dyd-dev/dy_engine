@@ -32,6 +32,9 @@ namespace dy::RHI
 		virtual void BindGlobalDescriptorHeap() = 0;
 
 		virtual void BindIndexBuffer(IBuffer* buffer, Format format, uint32_t offset) = 0;
+		virtual void BindVertexBuffer(IBuffer* buffer) = 0;
+		virtual void SetViewport(float width, float height) = 0;
+		virtual void SetConstantBuffer(uint32_t slot, IBuffer* buffer) = 0;
 
 		// Modern DOD Approach: Inject tiny data (e.g., Transform Index, Material Index) directly.
 		// Replaces ALL BindBuffer and BindTexture calls.

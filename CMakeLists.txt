@@ -10,6 +10,7 @@ add_library(${PROJECT_NAME} STATIC
 	"src/Graphics/Renderer.cpp"
 	"src/Platform/Window.cpp"
 	"src/Backends/Null/NullDevice.cpp"
+	"src/Graphics/ObjLoader.cpp"
 )
 
 # global options

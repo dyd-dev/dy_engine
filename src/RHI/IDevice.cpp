@@ -14,7 +14,7 @@ dy::RHI::IDevice* dy::RHI::IDevice::Create(const void *windowHandle)
 {
 	IDevice *device = nullptr;
 #if defined(ENABLE_D3D12)
-	device = new D3D12Device();
+	device = new Backends::D3D12Device();
 #elif defined(ENABLE_METAL)
 	device = new MetalDevice();
 #elif defined(ENABLE_VULKAN)

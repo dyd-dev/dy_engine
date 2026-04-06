@@ -1,298 +1,196 @@
 #include "D3D12Device.h"
-#include <d3dcompiler.h>
+#include "D3D12CommandList.h"
+#include "D3D12Buffer.h"
+#include "RHI/IPipelineState.h"
+#include "D3D12PipelineState.h"
+#include "d3dx12.h"
+#include <iostream>
 
-#define STB_IMAGE_IMPLEMENTATION
-#define STBI_WINDOWS_UTF8
-#include <stb_image.h>
-#include <direct.h>
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <d3d12.h>
+#include <dxgi1_6.h>
+#include <wrl.h>
 
+using Microsoft::WRL::ComPtr;
 
-#pragma comment(lib, "d3d12.lib")
-#pragma comment(lib, "dxgi.lib")
-#pragma comment(lib, "d3dcompiler.lib")
+namespace dy::Backends
+{
+    // 헤더에서 선언만 했던 구조체의 실제 정의
+    struct D3D12InternalState
+    {
+        ComPtr<ID3D12Device> device;
+        ComPtr<ID3D12CommandQueue> commandQueue;
+        ComPtr<IDXGISwapChain3> swapChain;
+        ComPtr<ID3D12DescriptorHeap> rtvHeap;
+        ComPtr<ID3D12Resource> renderTargets[2];
 
-namespace dy::Backends {
-    D3D12Device::~D3D12Device() {
-        WaitForPreviousFrame();
-        if (m_fenceEvent) CloseHandle(m_fenceEvent);
+        ComPtr<ID3D12Fence> fence;
+        uint32_t fenceValue = 0;
+        HANDLE fenceEvent;
+
+        uint32_t frameIndex = 0;
+        uint32_t rtvDescriptorSize = 0;
+    };
+
+    D3D12Device::D3D12Device()
+    {
+        m_internal = new D3D12InternalState();
     }
 
-    int D3D12Device::Initialize(const void* windowHandle) {
-        HWND hWnd = (HWND)windowHandle;
+    D3D12Device::~D3D12Device()
+    {
+        delete m_internal;
+    }
 
-        if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_device)))) return -1;
+    int D3D12Device::Initialize(const void* windowHandle)
+    {
+        HWND hwnd = static_cast<HWND>(const_cast<void*>(windowHandle));
+        
+        // 1. 디바이스 생성
+        ComPtr<IDXGIFactory4> factory;
+        CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+        D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_internal->device));
 
+        // 2. 커맨드 큐 생성
         D3D12_COMMAND_QUEUE_DESC queueDesc = {};
         queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-        if (FAILED(m_device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_commandQueue)))) return -1;
+        m_internal->device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_internal->commandQueue));
 
-        Microsoft::WRL::ComPtr<IDXGIFactory4> factory;
-        CreateDXGIFactory1(IID_PPV_ARGS(&factory));
-        DXGI_SWAP_CHAIN_DESC1 sd = {};
-        sd.BufferCount = 2; sd.Width = 800; sd.Height = 600;
-        sd.Format = DXGI_FORMAT_R8G8B8A8_UNORM; sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD; sd.SampleDesc.Count = 1;
+        // 3. 스왑체인(화면 버퍼 2개) 생성
+        DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
+        swapChainDesc.BufferCount = 2;
+        swapChainDesc.Width = 800;
+        swapChainDesc.Height = 600;
+        swapChainDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        swapChainDesc.SampleDesc.Count = 1;
 
-        Microsoft::WRL::ComPtr<IDXGISwapChain1> sc1;
-        factory->CreateSwapChainForHwnd(m_commandQueue.Get(), hWnd, &sd, nullptr, nullptr, &sc1);
-        sc1.As(&m_swapChain);
+        ComPtr<IDXGISwapChain1> tempSwapChain;
+        factory->CreateSwapChainForHwnd(m_internal->commandQueue.Get(), hwnd, &swapChainDesc, nullptr, nullptr, &tempSwapChain);
+        tempSwapChain.As(&m_internal->swapChain);
+        m_internal->frameIndex = m_internal->swapChain->GetCurrentBackBufferIndex();
 
-        D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = { D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 2, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0 };
-        m_device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&m_rtvHeap));
-        m_rtvDescriptorSize = m_device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        // 4. RTV(렌더 타겟 뷰) 힙 생성
+        D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
+        rtvHeapDesc.NumDescriptors = 2;
+        rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        m_internal->device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&m_internal->rtvHeap));
+        m_internal->rtvDescriptorSize = m_internal->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
-        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
-        for (int i = 0; i < 2; i++) {
-            m_swapChain->GetBuffer(i, IID_PPV_ARGS(&m_renderTargets[i]));
-            m_device->CreateRenderTargetView(m_renderTargets[i].Get(), nullptr, rtvHandle);
-            rtvHandle.ptr += m_rtvDescriptorSize;
+        // 5. 렌더 타겟 뷰(RTV) 연결
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_internal->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+        for (UINT n = 0; n < 2; n++)
+        {
+            m_internal->swapChain->GetBuffer(n, IID_PPV_ARGS(&m_internal->renderTargets[n]));
+            m_internal->device->CreateRenderTargetView(m_internal->renderTargets[n].Get(), nullptr, rtvHandle);
+            rtvHandle.ptr += m_internal->rtvDescriptorSize;
         }
 
-        m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_commandAllocator));
-        m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_commandAllocator.Get(), nullptr, IID_PPV_ARGS(&m_commandList));
-        m_commandList->Close();
+        // 6. 동기화용 펜스(Fence) 생성
+        m_internal->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_internal->fence));
+        m_internal->fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 
-        // 펜스 초기화 (UINT32)
-        m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence));
-        m_fenceValue = 1;
-        m_fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        std::cout << "[D3D12Device] Initialization Complete!" << std::endl;
+        return 0;
+    }
 
-        // 1. 루트 시그니처 (텍스처를 받기 위해 교체된 버전)
-        D3D12_DESCRIPTOR_RANGE range = { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND };
-        D3D12_ROOT_PARAMETER rootParameter = { D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, {1, &range}, D3D12_SHADER_VISIBILITY_PIXEL };
+    void D3D12Device::BeginFrame() { /* TODO */ }
+    uint32_t D3D12Device::GetCurrentFrameIndex() const { return m_internal->frameIndex; }
 
-        D3D12_STATIC_SAMPLER_DESC sampler = {};
-        sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-        sampler.AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        sampler.AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-        sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-        sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
+    RHI::ICommandList* D3D12Device::AcquireCommandList() { 
+        D3D12_CPU_DESCRIPTOR_HANDLE currentRtv = m_internal->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+        currentRtv.ptr += (m_internal->frameIndex * m_internal->rtvDescriptorSize);
 
-        D3D12_ROOT_SIGNATURE_DESC rootSignatureDesc = { 1, &rootParameter, 1, &sampler, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT };
-        Microsoft::WRL::ComPtr<ID3DBlob> signature, error;
-        D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error);
-        m_device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&m_rootSignature));
+        return new D3D12CommandList(m_internal->device.Get(), m_internal->renderTargets[m_internal->frameIndex].Get(), currentRtv.ptr);
+    }
+    void D3D12Device::Submit(RHI::ICommandList** cmdLists, uint32_t count) { 
+        D3D12CommandList* d3d12List = static_cast<D3D12CommandList*>(cmdLists[0]);
+        ID3D12CommandList* ppCommandLists[] = { reinterpret_cast<ID3D12CommandList*>(d3d12List->GetNativeList()) };
+        m_internal->commandQueue->ExecuteCommandLists(1, ppCommandLists);
+        delete d3d12List; // 제출 후 사용 끝난 커맨드리스트 해제
+    }
+    void D3D12Device::Present() { 
+        m_internal->swapChain->Present(1, 0);
 
-        // 2. 셰이더 컴파일
-        Microsoft::WRL::ComPtr<ID3DBlob> vertexShader, pixelShader;
-        UINT compileFlags = D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-        D3DCompileFromFile(L"shaders.hlsl", nullptr, nullptr, "VSMain", "vs_5_0", compileFlags, 0, &vertexShader, nullptr);
-        D3DCompileFromFile(L"shaders.hlsl", nullptr, nullptr, "PSMain", "ps_5_0", compileFlags, 0, &pixelShader, nullptr);
+        const uint64_t fence = m_internal->fenceValue;
+        m_internal->commandQueue->Signal(m_internal->fence.Get(), fence);
+        m_internal->fenceValue++;
 
-        // 3. 입력 레이아웃 (C++ 구조체와 HLSL 변수를 연결)
-        D3D12_INPUT_ELEMENT_DESC inputElementDescs[] = {
-        { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 } 
+        if (m_internal->fence->GetCompletedValue() < fence) {
+            m_internal->fence->SetEventOnCompletion(fence, m_internal->fenceEvent);
+            WaitForSingleObject(m_internal->fenceEvent, INFINITE);
+        }
+        m_internal->frameIndex = m_internal->swapChain->GetCurrentBackBufferIndex();
+    }
+
+    RHI::IBuffer* D3D12Device::CreateBuffer(const RHI::BufferDesc& desc) { 
+        return new D3D12Buffer(m_internal->device.Get(), desc);
+    }
+
+    RHI::IPipelineState* D3D12Device::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc) {
+        // 1. Root Parameter 정의 (b0 레지스터를 쓰겠다고 선언)
+        CD3DX12_ROOT_PARAMETER rootParameters[1];
+        rootParameters[0].InitAsConstantBufferView(0); // register(b0)
+
+        // 2. Root Signature 생성 (d3dx12 헬퍼 사용)
+        CD3DX12_ROOT_SIGNATURE_DESC rootSigDesc;
+        rootSigDesc.Init(1, rootParameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+
+        Microsoft::WRL::ComPtr<ID3DBlob> signature;
+        Microsoft::WRL::ComPtr<ID3DBlob> error;
+
+        // SerializeRootSignature
+        if (FAILED(D3D12SerializeRootSignature(&rootSigDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error))) {
+            return nullptr;
+        }
+
+        Microsoft::WRL::ComPtr<ID3D12RootSignature> pRootSignature;
+        m_internal->device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&pRootSignature));
+
+        // 3. Input Layout (Vertex 구조체: float3 Pos, float2 UV)
+        D3D12_INPUT_ELEMENT_DESC inputLayout[] = {
+            { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
         };
 
-        // 4. 파이프라인 상태 객체(PSO) 생성
+        // 4. PSO 설정 (CD3DX12 헬퍼로 대폭 축소!)
         D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-        psoDesc.InputLayout = { inputElementDescs, _countof(inputElementDescs) };
-        psoDesc.pRootSignature = m_rootSignature.Get();
-        psoDesc.VS = { vertexShader->GetBufferPointer(), vertexShader->GetBufferSize() };
-        psoDesc.PS = { pixelShader->GetBufferPointer(), pixelShader->GetBufferSize() };
-        psoDesc.RasterizerState = { D3D12_FILL_MODE_SOLID, D3D12_CULL_MODE_BACK, FALSE, 0, 0, 0, TRUE, FALSE, FALSE, 0, D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF };
-        psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        psoDesc.InputLayout = { inputLayout, _countof(inputLayout) };
+        psoDesc.pRootSignature = pRootSignature.Get();
+
+        // 셰이더 바이트코드 연결
+        psoDesc.VS = CD3DX12_SHADER_BYTECODE(desc.vertexShader, desc.vertexShaderSize);
+        psoDesc.PS = CD3DX12_SHADER_BYTECODE(desc.pixelShader, desc.pixelShaderSize);
+
+        psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        psoDesc.DepthStencilState.DepthEnable = FALSE; // 일단 깊이 테스트는 끔
+        psoDesc.DepthStencilState.StencilEnable = FALSE;
+
         psoDesc.SampleMask = UINT_MAX;
         psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         psoDesc.NumRenderTargets = 1;
         psoDesc.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
         psoDesc.SampleDesc.Count = 1;
-        m_device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&m_pso));
 
-        // 5. 삼각형 정점 데이터(Vertex Buffer) 만들기
-        struct Vertex { float pos[3]; float uv[2]; };
-        Vertex quadVertices[] = {
-            // 첫 번째 삼각형 (왼쪽 위, 오른쪽 위, 왼쪽 아래)
-            { { -0.5f,  0.5f, 0.0f }, { 0.0f, 0.0f } }, // 좌상단 (UV: 0,0)
-            { {  0.5f,  0.5f, 0.0f }, { 1.0f, 0.0f } }, // 우상단 (UV: 1,0)
-            { { -0.5f, -0.5f, 0.0f }, { 0.0f, 1.0f } }, // 좌하단 (UV: 0,1)
-
-            // 두 번째 삼각형 (오른쪽 위, 오른쪽 아래, 왼쪽 아래)
-            { {  0.5f,  0.5f, 0.0f }, { 1.0f, 0.0f } }, // 우상단 (UV: 1,0)
-            { {  0.5f, -0.5f, 0.0f }, { 1.0f, 1.0f } }, // 우하단 (UV: 1,1)
-            { { -0.5f, -0.5f, 0.0f }, { 0.0f, 1.0f } }  // 좌하단 (UV: 0,1)
-        };
-        const UINT vertexBufferSize = sizeof(quadVertices);
-
-        D3D12_HEAP_PROPERTIES heapProps = { D3D12_HEAP_TYPE_UPLOAD, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 1, 1 };
-        D3D12_RESOURCE_DESC bufferDesc = { D3D12_RESOURCE_DIMENSION_BUFFER, 0, vertexBufferSize, 1, 1, 1, DXGI_FORMAT_UNKNOWN, 1, 0, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE };
-
-        m_device->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &bufferDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_vertexBuffer));
-
-        // 데이터를 GPU 메모리로 복사
-        UINT8* pVertexDataBegin;
-        D3D12_RANGE readRange = { 0, 0 };
-        m_vertexBuffer->Map(0, &readRange, reinterpret_cast<void**>(&pVertexDataBegin));
-        memcpy(pVertexDataBegin, quadVertices, sizeof(quadVertices));
-        m_vertexBuffer->Unmap(0, nullptr);
-
-        // 뷰 생성
-        m_vertexBufferView.BufferLocation = m_vertexBuffer->GetGPUVirtualAddress();
-        m_vertexBufferView.StrideInBytes = sizeof(Vertex);
-        m_vertexBufferView.SizeInBytes = vertexBufferSize;
-
-        //  SRV(서술자 힙) 생성
-        D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-        srvHeapDesc.NumDescriptors = 1;
-        srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        m_device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&m_srvHeap));
-
-        //  stb_image로 사진 파일 읽기 (이름 꼭 맞추기!)
-        int texWidth, texHeight, texChannels;
-        unsigned char* pixels = stbi_load("d3d12.png", &texWidth, &texHeight, &texChannels, 4);
-        if (!pixels) {
-            OutputDebugStringA("Failed to load image!\n");
-            return -1;
+        // 5. PSO 생성
+        Microsoft::WRL::ComPtr<ID3D12PipelineState> pPSO;
+        if (FAILED(m_internal->device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pPSO)))) {
+            return nullptr;
         }
 
-        //  GPU 텍스처 리소스 만들기
-        D3D12_RESOURCE_DESC textureDesc = {};
-        textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        textureDesc.Width = texWidth;
-        textureDesc.Height = texHeight;
-        textureDesc.DepthOrArraySize = 1;
-        textureDesc.MipLevels = 1;
-        textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-        textureDesc.SampleDesc.Count = 1;
-
-        D3D12_HEAP_PROPERTIES defaultHeapProps = { D3D12_HEAP_TYPE_DEFAULT, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 1, 1 };
-        m_device->CreateCommittedResource(&defaultHeapProps, D3D12_HEAP_FLAG_NONE, &textureDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_texture));
-        
-        //  업로드 힙(임시 정거장) 공간 계산 및 만들기
-        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint;
-        UINT numRows;
-        UINT64 rowSizeInBytes, totalBytes;
-        m_device->GetCopyableFootprints(&textureDesc, 0, 1, 0, &footprint, &numRows, &rowSizeInBytes, &totalBytes);
-
-        D3D12_HEAP_PROPERTIES uploadHeapProps = { D3D12_HEAP_TYPE_UPLOAD, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 1, 1 };
-        D3D12_RESOURCE_DESC uploadBufferDesc = { D3D12_RESOURCE_DIMENSION_BUFFER, 0, totalBytes, 1, 1, 1, DXGI_FORMAT_UNKNOWN, 1, 0, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE };
-        m_device->CreateCommittedResource(&uploadHeapProps, D3D12_HEAP_FLAG_NONE, &uploadBufferDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_textureUploadHeap));
-
-        // 픽셀 데이터를 업로드 힙으로 복사 (D3D12 규칙에 맞춰 줄단위 복사)
-        UINT8* pData;
-        m_textureUploadHeap->Map(0, nullptr, reinterpret_cast<void**>(&pData));
-        for (UINT y = 0; y < (UINT)texHeight; ++y) {
-            memcpy(pData + footprint.Offset + y * footprint.Footprint.RowPitch, pixels + y * texWidth * 4, texWidth * 4);
-        }
-        m_textureUploadHeap->Unmap(0, nullptr);
-        stbi_image_free(pixels); // CPU 데이터 삭제
-
-        // 업로드 힙 -> 진짜 텍스처로 복사 명령 내리기
-        m_commandAllocator->Reset();
-        m_commandList->Reset(m_commandAllocator.Get(), nullptr);
-
-        D3D12_TEXTURE_COPY_LOCATION dst = { m_texture.Get(), D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, 0 };
-        D3D12_TEXTURE_COPY_LOCATION src = { m_textureUploadHeap.Get(), D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, footprint };
-        m_commandList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-
-        // 텍스처 상태를 "복사 목적지"에서 "셰이더 읽기 전용"으로 변경
-        D3D12_RESOURCE_BARRIER barrier = {};
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = m_texture.Get();
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        m_commandList->ResourceBarrier(1, &barrier);
-        m_commandList->Close();
-
-        //  명령 큐에 제출하고 끝날 때까지 대기
-        ID3D12CommandList* ppCommandLists[] = { m_commandList.Get() };
-        m_commandQueue->ExecuteCommandLists(1, ppCommandLists);
-        m_fenceValue++;
-        m_commandQueue->Signal(m_fence.Get(), m_fenceValue);
-        if (m_fence->GetCompletedValue() < m_fenceValue) {
-            HANDLE eventHandle = CreateEventEx(nullptr, nullptr, false, EVENT_ALL_ACCESS);
-            m_fence->SetEventOnCompletion(m_fenceValue, eventHandle);
-            WaitForSingleObject(eventHandle, INFINITE);
-            CloseHandle(eventHandle);
-        }
-
-        //  SRV(셰이더 리소스 뷰) 생성
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvDesc.Format = textureDesc.Format;
-        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        srvDesc.Texture2D.MipLevels = 1;
-        m_device->CreateShaderResourceView(m_texture.Get(), &srvDesc, m_srvHeap->GetCPUDescriptorHandleForHeapStart());
-
-        return 0;
+        // 6. 래퍼 객체로 반환
+        return new D3D12PipelineState(pPSO, pRootSignature);
     }
 
-    void D3D12Device::BeginFrame() {
-        m_frameIndex = m_swapChain->GetCurrentBackBufferIndex();
-        m_commandAllocator->Reset();
-        m_commandList->Reset(m_commandAllocator.Get(), nullptr);
+    RHI::ITexture* D3D12Device::CreateTexture(const RHI::TextureDesc& desc) { return nullptr; /* TODO */ }
+    
+    void D3D12Device::DestroyBuffer(RHI::IBuffer* buffer) { /* TODO */ }
+    void D3D12Device::DestroyTexture(RHI::ITexture* texture) { /* TODO */ }
+    void D3D12Device::DestroyPipelineState(RHI::IPipelineState* pipeline) { /* TODO */ }
 
-        D3D12_RESOURCE_BARRIER barrier = {};
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = m_renderTargets[m_frameIndex].Get();
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        m_commandList->ResourceBarrier(1, &barrier);
-
-        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_rtvHeap->GetCPUDescriptorHandleForHeapStart();
-        rtvHandle.ptr += m_frameIndex * m_rtvDescriptorSize;
-
-        // 배경색 설정 (짙은 파란색)
-        const float clearColor[] = { 0.1f, 0.2f, 0.4f, 1.0f };
-        m_commandList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
-        m_commandList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
-
-        m_commandList->SetPipelineState(m_pso.Get());
-        m_commandList->SetGraphicsRootSignature(m_rootSignature.Get());
-
-        D3D12_VIEWPORT viewport = { 0.0f, 0.0f, 800.0f, 600.0f, 0.0f, 1.0f };
-        D3D12_RECT scissorRect = { 0, 0, 800, 600 };
-        m_commandList->RSSetViewports(1, &viewport);
-        m_commandList->RSSetScissorRects(1, &scissorRect);
-
-        m_commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        m_commandList->IASetVertexBuffers(0, 1, &m_vertexBufferView);
-
-        ID3D12DescriptorHeap* descriptorHeaps[] = { m_srvHeap.Get() };
-        m_commandList->SetDescriptorHeaps(1, descriptorHeaps);
-        m_commandList->SetGraphicsRootDescriptorTable(0, m_srvHeap->GetGPUDescriptorHandleForHeapStart());
-
-        m_commandList->DrawInstanced(6, 1, 0, 0); // 삼각형 2개를 그려라
-    }
-
-    void D3D12Device::EndFrame() {
-        D3D12_RESOURCE_BARRIER barrier = {};
-		barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = m_renderTargets[m_frameIndex].Get();
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-        m_commandList->ResourceBarrier(1, &barrier);
-        m_commandList->Close();
-    }
-
-    void D3D12Device::Present() {
-        ID3D12CommandList* lists[] = { m_commandList.Get() };
-        m_commandQueue->ExecuteCommandLists(1, lists);
-        m_swapChain->Present(1, 0);
-        WaitForPreviousFrame();
-    }
-
-    void D3D12Device::WaitForPreviousFrame() {
-        const UINT32 fence = m_fenceValue; // UINT32로 동기화
-        m_commandQueue->Signal(m_fence.Get(), fence);
-        m_fenceValue++;
-        if (m_fence->GetCompletedValue() < fence) {
-            m_fence->SetEventOnCompletion(fence, m_fenceEvent);
-            WaitForSingleObject(m_fenceEvent, INFINITE);
-        }
-    }
-
-    void D3D12Device::SubmitCommandList(RHI::ICommandList* cmd) {
-
-    }
-
-    dy::RHI::ICommandList* D3D12Device::GetCommandList() {
-        return nullptr;
-	}
-
-
+    RHI::ITexture* D3D12Device::GetBackBuffer() { return nullptr; /* TODO */ }
 }
