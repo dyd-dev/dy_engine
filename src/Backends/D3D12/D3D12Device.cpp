@@ -183,7 +183,7 @@ namespace dy::Backends
         }
 
         // 6. 래퍼 객체로 반환
-        return new D3D12PipelineState(pPSO, pRootSignature);
+        return new D3D12PipelineState(pPSO.Get(), pRootSignature.Get());
     }
 
     RHI::ITexture* D3D12Device::CreateTexture(const RHI::TextureDesc& desc) { return nullptr; /* TODO */ }
