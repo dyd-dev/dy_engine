@@ -24,9 +24,13 @@ namespace dy::Backends
         void ClearDepth(RHI::ITexture* depthStencil, float depth) override;
 		void BindVertexBuffer(RHI::IBuffer* buffer) override; // 커맨드리스트에서 버퍼를 바인딩하는 함수
 		void SetViewport(float width, float height) override;
+
         void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
+		void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t startIndex, int32_t baseVertex, uint32_t startInstance) override;
+
         void ResourceBarrier(RHI::IBuffer* buffer, RHI::ResourceState before, RHI::ResourceState after) override;
         void ResourceBarrier(RHI::ITexture* texture, RHI::ResourceState before, RHI::ResourceState after) override;
+
         void Close() override;
 
         void* GetNativeList(); // 디바이스가 가져가기 위한 함수

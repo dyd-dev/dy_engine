@@ -1,6 +1,5 @@
 #include "D3D12CommandList.h"
 #include "D3D12Buffer.h"
-#include "Graphics/ObjLoader.h"
 #include "D3D12PipelineState.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -17,7 +16,7 @@ namespace dy::Backends
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> commandList;
         ComPtr<ID3D12Resource> backBuffer;
-        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle;
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = {};
     };
 
     D3D12CommandList::D3D12CommandList(void* nativeDevice, void* nativeBackBuffer, size_t rtvHandlePtr)
@@ -76,7 +75,7 @@ namespace dy::Backends
 		D3D12_VERTEX_BUFFER_VIEW vbView = {};
         vbView.BufferLocation = ((ID3D12Resource*)d3d12Buffer->GetNativeResource())->GetGPUVirtualAddress();
         vbView.SizeInBytes = d3d12Buffer->GetSize();
-        vbView.StrideInBytes = sizeof(Graphics::Vertex); // 20 bytes (float3 + float2)
+        vbView.StrideInBytes = d3d12Buffer->GetStride(); // 20 bytes (float3 + float2)
 
         // GPU에게 버퍼 위치를 알려줌
         m_internal->commandList->IASetVertexBuffers(0, 1, &vbView);
@@ -111,8 +110,25 @@ namespace dy::Backends
 		m_internal->commandList->SetGraphicsRootConstantBufferView(index, gpuAddress);
 	}
 
-    // 빈 껍데기들
-    void D3D12CommandList::BindIndexBuffer(RHI::IBuffer* buffer, RHI::Format format, uint32_t offset) {}
+    // 인덱스 버퍼 바인딩 구현
+    void D3D12CommandList::BindIndexBuffer(RHI::IBuffer* buffer, RHI::Format format, uint32_t offset) {
+        auto* d3d12Buffer = static_cast<D3D12Buffer*>(buffer);
+
+        D3D12_INDEX_BUFFER_VIEW ibView = {};
+        ibView.BufferLocation = ((ID3D12Resource*)d3d12Buffer->GetNativeResource())->GetGPUVirtualAddress() + offset;
+        ibView.SizeInBytes = d3d12Buffer->GetSize() - offset;
+
+        // ObjLoader가 uint32_t 배열을 쓰므로 R32_UINT 포맷으로 고정합니다.
+        ibView.Format = DXGI_FORMAT_R32_UINT;
+
+        m_internal->commandList->IASetIndexBuffer(&ibView);
+    }
+
+    // 인덱스 그리기 구현
+    void D3D12CommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t startIndex, int32_t baseVertex, uint32_t startInstance) {
+        m_internal->commandList->DrawIndexedInstanced(indexCount, instanceCount, startIndex, baseVertex, startInstance);
+    }
+
     void D3D12CommandList::SetPushConstants(uint32_t size, const void* data) {}
     void D3D12CommandList::SetRenderTargets(uint32_t numRenderTargets, RHI::ITexture** renderTargets, RHI::ITexture* depthStencil) {}
     void D3D12CommandList::ClearDepth(RHI::ITexture* depthStencil, float depth) {}

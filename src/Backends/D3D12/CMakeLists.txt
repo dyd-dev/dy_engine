@@ -9,6 +9,7 @@ add_library(${BACKEND_NAME} STATIC
 	D3D12Buffer.cpp       
 	D3D12CommandList.cpp  
 	D3D12PipelineState.cpp
+	D3D12Texture.cpp
 )
 
 target_link_libraries(${BACKEND_NAME} PRIVATE

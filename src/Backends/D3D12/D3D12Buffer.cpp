@@ -16,7 +16,7 @@ namespace dy::Backends
 
     // 생성자에서 ID3D12Device를 받도록 수정해야 합니다 (Device에서 생성하기 위함)
     D3D12Buffer::D3D12Buffer(void* nativeDevice, const RHI::BufferDesc& desc)
-        : m_size(desc.size)
+		: m_size(desc.size), m_stride(desc.stride)
     {
         m_internal = new D3D12BufferInternal();
         ID3D12Device* device = static_cast<ID3D12Device*>(nativeDevice);

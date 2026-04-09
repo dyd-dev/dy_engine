@@ -37,11 +37,24 @@ int main()
     // 정점 버퍼 생성 및 데이터 복사
     RHI::BufferDesc vbDesc = {};
     vbDesc.size = static_cast<uint32_t>(vertices.size() * sizeof(Graphics::Vertex));
+    vbDesc.stride = sizeof(Graphics::Vertex);
+	vbDesc.usage = RHI::BufferUsage::Vertex;
     RHI::IBuffer* vertexBuffer = device->CreateBuffer(vbDesc);
 
     void* mappedVB = vertexBuffer->Map(0, vbDesc.size);
     memcpy(mappedVB, vertices.data(), vbDesc.size);
     vertexBuffer->Unmap();
+
+    // 인덱스 버퍼 생성 및 데이터 복사
+    RHI::BufferDesc ibDesc = {};
+    ibDesc.size = static_cast<uint32_t>(indices.size() * sizeof(uint32_t));
+    ibDesc.stride = sizeof(uint32_t);
+    ibDesc.usage = RHI::BufferUsage::Index;
+    RHI::IBuffer* indexBuffer = device->CreateBuffer(ibDesc);
+
+    void* mappedIB = indexBuffer->Map(0, ibDesc.size);
+    memcpy(mappedIB, indices.data(), ibDesc.size);
+    indexBuffer->Unmap();
 
     // 상수 버퍼(Constant Buffer) 생성
     // DX12의 상수 버퍼는 반드시 256바이트의 배수 크기로 생성해야 합니다.
@@ -112,17 +125,24 @@ int main()
                 cmdList->BindVertexBuffer(vertexBuffer);
             }
 
-            if (!vertices.empty()) {
-                cmdList->DrawInstanced(static_cast<uint32_t>(vertices.size()), 1, 0, 0);
+            if (indexBuffer) {
+                cmdList->BindIndexBuffer(indexBuffer, dy::RHI::Format::Unknown, 0);
             }
+
+            if(!indices.empty()) {
+                cmdList->DrawIndexedInstanced(static_cast<uint32_t>(indices.size()), 1, 0, 0, 0);
+			}        
         }
     
         cmdList->Close();
 
         device->Submit(&cmdList, 1);
         device->Present();
+
+		delete cmdList;
     }
     
+	delete indexBuffer;
     delete vertexBuffer;
 	delete constantBuffer;
     delete pso;

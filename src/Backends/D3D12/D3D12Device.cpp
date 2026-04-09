@@ -3,13 +3,16 @@
 #include "D3D12Buffer.h"
 #include "RHI/IPipelineState.h"
 #include "D3D12PipelineState.h"
+#include "D3D12Texture.h"
 #include "d3dx12.h"
-#include <iostream>
+
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <d3d12.h>
 #include <dxgi1_6.h>
+#include <iostream>
+#include <vector>
 #include <wrl.h>
 
 using Microsoft::WRL::ComPtr;
@@ -26,8 +29,8 @@ namespace dy::Backends
         ComPtr<ID3D12Resource> renderTargets[2];
 
         ComPtr<ID3D12Fence> fence;
-        uint32_t fenceValue = 0;
-        HANDLE fenceEvent;
+        uint32_t fenceValue = 1;
+        HANDLE fenceEvent = nullptr;
 
         uint32_t frameIndex = 0;
         uint32_t rtvDescriptorSize = 0;
@@ -107,10 +110,18 @@ namespace dy::Backends
         return new D3D12CommandList(m_internal->device.Get(), m_internal->renderTargets[m_internal->frameIndex].Get(), currentRtv.ptr);
     }
     void D3D12Device::Submit(RHI::ICommandList** cmdLists, uint32_t count) { 
-        D3D12CommandList* d3d12List = static_cast<D3D12CommandList*>(cmdLists[0]);
-        ID3D12CommandList* ppCommandLists[] = { reinterpret_cast<ID3D12CommandList*>(d3d12List->GetNativeList()) };
-        m_internal->commandQueue->ExecuteCommandLists(1, ppCommandLists);
-        delete d3d12List; // 제출 후 사용 끝난 커맨드리스트 해제
+		if (count == 0) return;
+        // 1. 실행할 DX12 커맨드 리스트들을 모을 배열
+        std::vector<ID3D12CommandList*> ppCommandLists;
+        ppCommandLists.reserve(count);
+
+        for (uint32_t i = 0; i < count; ++i) {
+            D3D12CommandList* d3d12List = static_cast<D3D12CommandList*>(cmdLists[i]);
+            ppCommandLists.push_back(reinterpret_cast<ID3D12CommandList*>(d3d12List->GetNativeList()));
+        }
+
+        // 2. 한 번에 묶어서 GPU에 제출 (성능 상 훨씬 유리)
+        m_internal->commandQueue->ExecuteCommandLists(count, ppCommandLists.data());
     }
     void D3D12Device::Present() { 
         m_internal->swapChain->Present(1, 0);
@@ -132,7 +143,7 @@ namespace dy::Backends
 
     RHI::IPipelineState* D3D12Device::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc) {
         // 1. Root Parameter 정의 (b0 레지스터를 쓰겠다고 선언)
-        CD3DX12_ROOT_PARAMETER rootParameters[1];
+        CD3DX12_ROOT_PARAMETER rootParameters[1] = {};
         rootParameters[0].InitAsConstantBufferView(0); // register(b0)
 
         // 2. Root Signature 생성 (d3dx12 헬퍼 사용)
@@ -186,10 +197,16 @@ namespace dy::Backends
         return new D3D12PipelineState(pPSO.Get(), pRootSignature.Get());
     }
 
-    RHI::ITexture* D3D12Device::CreateTexture(const RHI::TextureDesc& desc) { return nullptr; /* TODO */ }
+    RHI::ITexture* D3D12Device::CreateTexture(const RHI::TextureDesc& desc) {
+        return new D3D12Texture(m_internal->device.Get(), desc);
+    }
     
     void D3D12Device::DestroyBuffer(RHI::IBuffer* buffer) { /* TODO */ }
-    void D3D12Device::DestroyTexture(RHI::ITexture* texture) { /* TODO */ }
+
+    void D3D12Device::DestroyTexture(RHI::ITexture* texture) {
+        delete texture;
+    }
+
     void D3D12Device::DestroyPipelineState(RHI::IPipelineState* pipeline) { /* TODO */ }
 
     RHI::ITexture* D3D12Device::GetBackBuffer() { return nullptr; /* TODO */ }
