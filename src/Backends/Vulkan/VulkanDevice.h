@@ -1,26 +1,37 @@
-﻿#pragma once
-#include "RHI/RHIDevice.h"
+#pragma once
+#include "RHI/IDevice.h"
 #include "VulkanCommandList.h"
 #include <filesystem>
 #include <vulkan/vulkan.h>
 #include <vector>
 
 struct GLFWwindow;
+struct WindowHandle;
 
-class VulkanDevice : public RHIDevice
+class VulkanDevice : public dy::RHI::IDevice
 {
 public:
 	~VulkanDevice() override;
 
-	bool Initialize(const WindowHandle& windowHandle, uint32_t width, uint32_t height) override;
-
+	// Implementation of IDevice
 	void BeginFrame() override;
-	void EndFrame() override;
-
-	void SubmitCommandList(RHICommandList* cmd) override;
+	uint32_t GetCurrentFrameIndex() const override { return m_currentFrameIndex; }
+	dy::RHI::ICommandList* AcquireCommandList() override { return &m_commandList; }
+	void Submit(dy::RHI::ICommandList** cmdLists, uint32_t count) override;
 	void Present() override;
 
-	RHICommandList* GetCommandList() override { return &m_commandList; }
+	dy::RHI::IBuffer* CreateBuffer(const dy::RHI::BufferDesc& desc) override { return nullptr; }
+	dy::RHI::ITexture* CreateTexture(const dy::RHI::TextureDesc& desc) override { return nullptr; }
+	dy::RHI::IPipelineState* CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) override { return nullptr; }
+
+	void DestroyBuffer(dy::RHI::IBuffer* buffer) override {}
+	void DestroyTexture(dy::RHI::ITexture* texture) override {}
+	void DestroyPipelineState(dy::RHI::IPipelineState* pipeline) override {}
+
+	dy::RHI::ITexture* GetBackBuffer() override { return nullptr; }
+
+protected:
+	int Initialize(const void *windowHandle) override;
 
 private:
 	struct QueueFamilyIndices
@@ -58,6 +69,9 @@ private:
 	bool CreateSyncObjects();
 	bool CreateDescriptorPool();
 	bool CreateDescriptorSets();
+	
+	// Mesh
+	bool CreateMeshBuffers();
 
 	bool CheckShaderHotReload();
 	bool ReloadShaders();
@@ -107,6 +121,14 @@ private:
 	VkRenderPass m_renderPass = VK_NULL_HANDLE;
 	VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
 	VkPipeline m_graphicsPipeline = VK_NULL_HANDLE;
+
+	// Mesh Data
+	VkBuffer m_vertexBuffer = VK_NULL_HANDLE;
+	VkDeviceMemory m_vertexBufferMemory = VK_NULL_HANDLE;
+	VkBuffer m_indexBuffer = VK_NULL_HANDLE;
+	VkDeviceMemory m_indexBufferMemory = VK_NULL_HANDLE;
+	uint32_t m_indexCount = 0;
+
 	VkCommandPool m_commandPool = VK_NULL_HANDLE;
 	std::vector<VkCommandBuffer> m_commandBuffers;
 

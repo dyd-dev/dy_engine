@@ -1,18 +1,23 @@
 #pragma once
-#include "RHI/RHIDevice.h"
+#include <cstdint>
 
 struct GLFWwindow;
+
+struct WindowHandle
+{
+        void* windowPointer;
+};
 
 class Window
 {
 public:
-	bool Initialize(const char* title, uint32_t width, uint32_t height, uint32_t flags = 0);
-	void Release();
+        bool Initialize(const char* title, uint32_t width, uint32_t height, uint32_t flags = 0);
+        void Release();
 
-	bool PollEvents();
+        bool PollEvents();
 
-	WindowHandle GetHandle() { return { m_window }; }
+        WindowHandle GetHandle() { return { m_window }; }
 
 private:
-	GLFWwindow* m_window;
+        GLFWwindow* m_window;
 };

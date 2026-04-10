@@ -5,12 +5,14 @@ set(CMAKE_CXX_STANDARD 20) # Modern C++ standard (C++20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_library(${PROJECT_NAME} STATIC
-	src/App/Window.cpp
-	src/RHI/RHIFactory.cpp
+        src/App/Window.cpp
+        src/RHI/IDevice.cpp
+        src/Graphics/Mesh.cpp
 )
-
 target_include_directories(${PROJECT_NAME} PUBLIC
 	"${CMAKE_SOURCE_DIR}/src"
+	"${CMAKE_SOURCE_DIR}/external/stb"
+	"${CMAKE_SOURCE_DIR}/external/tinyobjloader"
 )
 
 # ===== ===== ===== ===== ===== Compile options ===== ===== ===== ===== =====
