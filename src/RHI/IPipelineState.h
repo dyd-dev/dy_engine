@@ -1,4 +1,6 @@
-﻿#pragma once
+#pragma once
+#include <cstddef>
+#include "Enums.h"
 /* PipelineState.h
 * 
 * PipelineState는 그래픽스 파이프라인의 상태를 정의하는 클래스입니다.
