@@ -1,66 +1,58 @@
-﻿#include "App/Window.h"
-#include "RHI/RHI.h"
+#include "App/Window.h"
+#include "RHI/IDevice.h"
+#include "RHI/ICommandList.h"
 #include <string.h>
 #include <cstdio>
 
 int main()
 {
-	const char* title = "Renderer";
+        const char* title = "Renderer";
 #if defined(ENABLE_D3D12)
-	title = "D3D12 Renderer";
+        title = "D3D12 Renderer";
 #elif defined(ENABLE_VULKAN)
-	title = "Vulkan Renderer";
+        title = "Vulkan Renderer";
 #endif
-	
-	Window window;
-	if(!window.Initialize(title, 800, 600))
-	{
-		printf("Failed to initialize window\n");
-		return -1;
-	}
 
-	RHIDevice* device = CreateRHIDevice();
-	if (!device)
-	{
-		printf("No RHI backend enabled. Please build with -DB_VULKAN=ON or -DB_D3D12=ON\n");
-		window.Release();
-		return -1;
-	}
+        Window window;
+        if(!window.Initialize(title, 800, 600))
+        {
+                printf("Failed to initialize window\n");
+                return -1;
+        }
 
-	if (!device->Initialize(window.GetHandle(), 800, 600))
-	{
-		printf("Failed to initialize RHI device\n");
-		delete device;
-		window.Release();
-		return -1;
-	}
-	
-	bool quit = false;
-	while (!quit)
-	{
-		quit = window.PollEvents();
+        // Initialize is called internally inside Create
+        dy::RHI::IDevice* device = dy::RHI::IDevice::Create(window.GetHandle().windowPointer);
+        if (!device)
+        {
+                printf("No RHI backend enabled or failed to initialize. Please build with -DB_VULKAN=ON or -DB_D3D12=ON\n");
+                window.Release();
+                return -1;
+        }
 
-		device->BeginFrame();
-		
-		RHICommandList* cmd = device->GetCommandList();
-		if (!cmd)
-		{
-			break;
-		}
+        bool quit = false;
+        while (!quit)
+        {
+                quit = window.PollEvents();
 
-		cmd->Begin();
-		cmd->ClearScreen(0.0f, 0.0f, 0.0f, 1.0f);
-		// Render
-		cmd->End();
+                device->BeginFrame();
 
-		device->SubmitCommandList(cmd);
-		
-		device->Present(); // to swapchain
+                dy::RHI::ICommandList* cmd = device->AcquireCommandList();
+                if (!cmd)
+                {
+                        break;
+                }
 
-		device->EndFrame();
-	}
-	delete device;
-	
-	window.Release();
-	return 0;
+                // cmd->Begin(); // Begin is implicitly handled by AcquireCommandList in typical designs, or implemented internally
+                cmd->ClearColor(nullptr, 0.0f, 0.0f, 0.0f, 1.0f);
+                // Render
+                cmd->Close();
+
+                device->Submit(&cmd, 1);
+
+                device->Present(); // to swapchain
+        }
+        delete device;
+
+        window.Release();
+        return 0;
 }
