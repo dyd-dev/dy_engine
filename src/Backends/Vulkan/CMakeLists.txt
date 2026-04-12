@@ -1,6 +1,9 @@
 ﻿add_library(Backend_Vulkan STATIC
 	VulkanDevice.cpp
 	VulkanCommandList.cpp
+	VulkanResources.cpp
+	VulkanSwapchain.cpp
+	VulkanPipeline.cpp
 )
 
 find_package(Vulkan REQUIRED)
