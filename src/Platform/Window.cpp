@@ -44,12 +44,5 @@ void Window::PollEvents() const { glfwPollEvents(); }
 
 void* Window::GetHandle() const
 {
-#if defined(_WIN32)
-	return static_cast<void*>(glfwGetWin32Window(m_window));
-#elif defined(__APPLE__)
-	return static_cast<void*>(glfwGetCocoaWindow(m_window));
-#else
-	// vulkan use GLFW_window
 	return static_cast<void*>(m_window);
-#endif
 }
