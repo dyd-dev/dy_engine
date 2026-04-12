@@ -55,7 +55,7 @@ target_link_libraries(Backend_Vulkan PUBLIC
 
 target_include_directories(Backend_Vulkan PRIVATE
 	${CMAKE_SOURCE_DIR}/src
-	${CMAKE_SOURCE_DIR}/external/stb
+	${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_compile_definitions(Backend_Vulkan PRIVATE

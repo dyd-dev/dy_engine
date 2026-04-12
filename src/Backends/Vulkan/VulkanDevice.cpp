@@ -14,7 +14,7 @@
 #endif
 
 #define STB_IMAGE_IMPLEMENTATION
-#include <stb_image.h>
+#include "stb_image.h"
 
 #define SDL_Log(fmt, ...) { printf(fmt, ##__VA_ARGS__); printf("\n"); }
 
@@ -52,53 +52,41 @@ VulkanDevice::~VulkanDevice()
 int VulkanDevice::Initialize(const void *windowHandle)
 {
 	m_window = static_cast<GLFWwindow*>(const_cast<void*>(windowHandle));
-	if (m_window) {
-		int width, height;
-		glfwGetFramebufferSize(m_window, &width, &height);
-		m_windowWidth = width;
-		m_windowHeight = height;
-	} else {
-		m_windowWidth = 800;
-		m_windowHeight = 600;
+	
+	if (!m_window)
+	{
+		return -1;
 	}
+
+	int width, height;
+	glfwGetFramebufferSize(m_window, &width, &height);
+	m_windowWidth = width;
+	m_windowHeight = height;
+
 	m_shaderSourceDirectory = std::filesystem::path(VULKAN_SHADER_SOURCE_DIR);
 	m_shaderOutputDirectory = std::filesystem::path(VULKAN_SHADER_DIR);
 
-	if (!std::filesystem::exists(m_shaderSourceDirectory / "triangle.vert")) {
-		std::filesystem::path fallbackPath = "src/Backends/Vulkan/Shaders";
-		if (std::filesystem::exists(fallbackPath / "triangle.vert")) {
-			m_shaderSourceDirectory = fallbackPath;
-		}
-	}
-
-	if (!m_window)
-	{
-		SDL_Log("VulkanDevice Initialize failed: invalid window handle.");
-		return false;
-	}
-
-	if (!CreateInstance()) return false;
-	if (!CreateSurface()) return false;
-	if (!PickPhysicalDevice()) return false;
-	if (!CreateLogicalDevice()) return false;
-	if (!CreateSwapchain()) return false;
-	if (!CreateRenderPass()) return false;
-	if (!CreateDescriptorSetLayout()) return false;
-	if (!CreateGraphicsPipeline()) return false;
-	if (!CreateCommandPool()) return false;
-	if (!CreateTextureImage()) return false;
-	if (!CreateTextureImageView()) return false;
-	if (!CreateTextureSampler()) return false;
-	if (!CreateFramebuffers()) return false;
-	if (!CreateCommandBuffer()) return false;
-	if (!CreateSyncObjects()) return false;
-	if (!CreateDescriptorPool()) return false;
-	if (!CreateDescriptorSets()) return false;
+	if (!CreateInstance()) return -1;
+	if (!CreateSurface()) return -1;
+	if (!PickPhysicalDevice()) return -1;
+	if (!CreateLogicalDevice()) return -1;
+	if (!CreateSwapchain()) return -1;
+	if (!CreateRenderPass()) return -1;
+	if (!CreateDescriptorSetLayout()) return -1;
+	if (!CreateGraphicsPipeline()) return -1;
+	if (!CreateCommandPool()) return -1;
+	if (!CreateTextureImage()) return -1;
+	if (!CreateTextureImageView()) return -1;
+	if (!CreateTextureSampler()) return -1;
+	if (!CreateFramebuffers()) return -1;
+	if (!CreateCommandBuffer()) return -1;
+	if (!CreateSyncObjects()) return -1;
+	if (!CreateDescriptorPool()) return -1;
+	if (!CreateDescriptorSets()) return -1;
 	
-	// Load and setup mesh
-	if (!CreateMeshBuffers()) return false;
+	if (!CreateMeshBuffers()) return -1;
 
-	return true;
+	return 0;
 }
 
 void VulkanDevice::BeginFrame()
@@ -425,8 +413,8 @@ bool VulkanDevice::CreateGraphicsPipeline()
 bool VulkanDevice::CreateMeshBuffers()
 {
 	dy::Graphics::MeshData meshData;
-	if (!dy::Graphics::Mesh::LoadFromOBJ("triangle.obj", meshData)) {
-		SDL_Log("Failed to load triangle.obj");
+	if (!dy::Graphics::Mesh::LoadFromOBJ("assets/triangle.obj", meshData)) {
+		SDL_Log("Failed to load assets/triangle.obj");
 		return false;
 	}
 
@@ -824,11 +812,11 @@ bool VulkanDevice::CreateDescriptorSets() {
 bool VulkanDevice::CreateTextureImage()
 {
 	int texWidth, texHeight, texChannels;
-	stbi_uc* pixels = stbi_load("jj.jpeg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
+	stbi_uc* pixels = stbi_load("assets/jj.jpeg", &texWidth, &texHeight, &texChannels, STBI_rgb_alpha);
 	VkDeviceSize imageSize = texWidth * texHeight * 4;
 
 	if (!pixels) {
-		SDL_Log("failed to load texture image!");
+		SDL_Log("failed to load texture image from assets/jj.jpeg!");
 		return false;
 	}
 

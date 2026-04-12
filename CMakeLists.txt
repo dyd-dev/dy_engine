@@ -1,17 +1,17 @@
 ﻿cmake_minimum_required(VERSION 3.20)
-project(SuRengine CXX)
+project(dy_engine CXX)
 
 set(CMAKE_CXX_STANDARD 20) # Modern C++ standard (C++20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_library(${PROJECT_NAME} STATIC
-        src/App/Window.cpp
+        src/Platform/Window.cpp
         src/RHI/IDevice.cpp
         src/Graphics/Mesh.cpp
+        src/Math/Math.cpp
 )
 target_include_directories(${PROJECT_NAME} PUBLIC
 	"${CMAKE_SOURCE_DIR}/src"
-	"${CMAKE_SOURCE_DIR}/external/stb"
 	"${CMAKE_SOURCE_DIR}/external/tinyobjloader"
 )
 
@@ -45,12 +45,28 @@ target_link_libraries(${PROJECT_NAME} PUBLIC glfw)
 if(B_D3D12)
 	set(ENABLE_D3D12 ON CACHE BOOL "Force ON" FORCE)
 	set(ENABLE_VULKAN OFF CACHE BOOL "Force OFF" FORCE)
+	set(ENABLE_METAL OFF CACHE BOOL "Force OFF" FORCE)
+	set(ENABLE_NULL OFF CACHE BOOL "Force OFF" FORCE)
 elseif(B_VULKAN)
 	set(ENABLE_VULKAN ON CACHE BOOL "Force ON" FORCE)
 	set(ENABLE_D3D12 OFF CACHE BOOL "Force OFF" FORCE)
+	set(ENABLE_METAL OFF CACHE BOOL "Force OFF" FORCE)
+	set(ENABLE_NULL OFF CACHE BOOL "Force OFF" FORCE)
+elseif(B_METAL)
+	set(ENABLE_METAL ON CACHE BOOL "Force ON" FORCE)
+	set(ENABLE_D3D12 OFF CACHE BOOL "Force OFF" FORCE)
+	set(ENABLE_VULKAN OFF CACHE BOOL "Force OFF" FORCE)
+	set(ENABLE_NULL OFF CACHE BOOL "Force OFF" FORCE)
+elseif(B_NULL)
+	set(ENABLE_NULL ON CACHE BOOL "Force ON" FORCE)
+	set(ENABLE_D3D12 OFF CACHE BOOL "Force OFF" FORCE)
+	set(ENABLE_VULKAN OFF CACHE BOOL "Force OFF" FORCE)
+	set(ENABLE_METAL OFF CACHE BOOL "Force OFF" FORCE)
 else()
 	set(ENABLE_D3D12 OFF CACHE BOOL "Force OFF" FORCE)
 	set(ENABLE_VULKAN OFF CACHE BOOL "Force OFF" FORCE)
+	set(ENABLE_METAL OFF CACHE BOOL "Force OFF" FORCE)
+	set(ENABLE_NULL OFF CACHE BOOL "Force OFF" FORCE)
 endif()
 
 if(ENABLE_D3D12)
@@ -65,10 +81,22 @@ if(ENABLE_VULKAN)
 	target_link_libraries(${PROJECT_NAME} PRIVATE Backend_Vulkan)
 endif()
 
+if(ENABLE_METAL)
+	target_compile_definitions(${PROJECT_NAME} PUBLIC ENABLE_METAL)
+	add_subdirectory(src/Backends/Metal)
+	target_link_libraries(${PROJECT_NAME} PRIVATE Backend_Metal)
+endif()
+
+if(ENABLE_NULL)
+	target_compile_definitions(${PROJECT_NAME} PUBLIC ENABLE_NULL)
+	add_subdirectory(src/Backends/Null)
+	target_link_libraries(${PROJECT_NAME} PRIVATE Backend_Null)
+endif()
+
 # Only add the executable if this is the main project being built (not when included as a subdirectory in another project)
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 	add_executable("${PROJECT_NAME}_Example"
-		src/Examples/main.cpp
+		examples/main.cpp
 	)
 
 	target_link_libraries("${PROJECT_NAME}_Example" PRIVATE ${PROJECT_NAME})
@@ -88,8 +116,14 @@ elseif(UNIX AND NOT APPLE)
 endif()
 
 if(ENABLE_D3D12)
-	message(STATUS "D3D12를 준비합니다")
+	message(STATUS "D3D12 백엔드를 준비합니다")
 endif()
 if(ENABLE_VULKAN)
-	message(STATUS "Vulkan을 준비합니다")
+	message(STATUS "Vulkan 백엔드를 준비합니다")
+endif()
+if(ENABLE_METAL)
+	message(STATUS "Metal 백엔드를 준비합니다")
+endif()
+if(ENABLE_NULL)
+	message(STATUS "Null 백엔드를 준비합니다")
 endif()
