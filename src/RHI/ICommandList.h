@@ -26,6 +26,11 @@ namespace dy::RHI
 		// 구형 API : SetBlendState, SetDepth, SetShader ...
 		// Bind the global state.
 		virtual void BindGraphicsPipeline(IPipelineState* pipelineState) = 0;
+
+		// Binds the single Global Descriptor Heap containing ALL textures and buffers.
+		// Must be called once per pass before Draw.
+		virtual void BindGlobalDescriptorHeap() = 0;
+
 		virtual void BindIndexBuffer(IBuffer* buffer, Format format, uint32_t offset) = 0;
 
 		// Modern DOD Approach: Inject tiny data (e.g., Transform Index, Material Index) directly.
