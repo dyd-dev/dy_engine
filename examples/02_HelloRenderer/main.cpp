@@ -1,51 +1,56 @@
 ﻿#include <cstdint> // for uint32_t
 #include "Platform/Window.h"
+#include "Graphics/JobSystem.h"
 #include "RHI/IDevice.h"
-#include "Graphics/Renderer.h"
 #include "Graphics/Scene.h"
-#include "Graphics/Camera.h"
+#include "Graphics/Renderer.h"
 
 using namespace dy;
 
 int main()
 {
 	Platform::Window window(800,600,"Hello,Renderer");
+	
 	RHI::IDevice *device = RHI::IDevice::Create(window.GetHandle());
 
-	Graphics::Renderer renderer(device);
-	Graphics::Camera camera;
+	JobSystem jobSystem;
+	jobSystem.Initialize();
 
-	camera.SetLookAt(
-		Math::Vector3(0.0f, 5.0f, -10.0f),
-		Math::Vector3(0.0f, 0.0f, 0.0f),
-		Math::Vector3(0.0f, 1.0f, 0.0f)
-	);
-	camera.SetPerspective(
-		45.0f, 1920.0f / 1080.0f, 0.1f, 1000.0f
-	);
+	Graphics::Renderer renderer;
+	renderer.Initialize(device);
+	
+	Scene scene;
+	const uint32_t ENTITY_COUNT = 50000;
+	for(uint32_t i=0; i<ENTITY_COUNT; i++)
+	{
+		scene.CreateEntity();
+	}
+
+	float deltaTime = 0.016f;
 
 	while(window.IsRunning())
 	{
 		window.PollEvents();
 
-		// [PHASE A] Game Logic & Physics (Pure CPU / Memory Bound)
-
-		camera.UpdateMatrices();
-
-		// [ PHASE B ] RHI Frame Synchronization
-		// -----------------------------------------------------------------
-        // Waits for swapchain, acquires the current frame index.
 		device->BeginFrame();
 
-		// [ PHASE C ] Render Submission (Data -> Execution Bridge)
-		// -----------------------------------------------------------------
-        // The Renderer reads the Scene's arrays, culls invisible objects, 
-        // generates DrawPackets, sorts them, and records to the CommandList.
-		renderer.RenderFrame();
+		jobSystem.ParallelFor(scene.GetActiveCount(), [&scene, deltaTime](uint32_t startIdx, uint32_t endIdx)
+		{
+			for(uint32_t i = startIdx; i < endIdx; i++)
+			{
+				EntityID id = static_cast<EntityID>(i);
+				TransformData& t = scene.GetTransform(id);
+			}
+		});
+		jobSystem.WaitForAll();
 
-		// [ PHASE D ] Present to Display
+		renderer.SubmitFrame(scene, device, &jobSystem);
+		
 		device->Present();
 	}
+	jobSystem.Shutdown();
+	renderer.Shutdown(device);
+
 	delete device;
 	return 0;
 }

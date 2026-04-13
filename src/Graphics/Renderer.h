@@ -3,24 +3,39 @@
 namespace dy::RHI
 {
 	class IDevice;
+
+	class IBuffer;
 	class IPipelineState;
+}
+
+namespace dy
+{
+	class JobSystem;
 }
 
 namespace dy::Graphics
 {
-	class Scene;
-	class Camera;
-
 	class Renderer
 	{
-	public:
-		Renderer(RHI::IDevice *device);
-		~Renderer();
+	private:
+		// GPU Buffers mapped to CPU memory
+		RHI::IBuffer* m_globalTransformBuffer = NULL;
+		RHI::IBuffer* m_globalMaterialBuffer = NULL;
 
-		void RenderFrame();
+		RHI::IPipelineState* m_opaquePSO = NULL;
+
+		static constexpr uint32_t MAX_SUPPORTED_ENTITIES = 100000;
+
+	public:
+		Renderer() = default;
+		~Renderer() = default;
+
+		void Initialize(RHI::IDevice* device);
+		void Shutdown(RHI::IDevice* device);
+
+		void SubmitFrame(const Scene& scene, RHI::IDevice* device, JobSystem* jobSystem);
 
 	private:
-		RHI::IDevice* m_device;
-		RHI::IPipelineState* m_pipeline;
+		void BuildPipelineStates(RHI::IDevice* device);
 	};
 }
