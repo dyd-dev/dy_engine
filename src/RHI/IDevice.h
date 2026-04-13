@@ -20,6 +20,9 @@ namespace dy::RHI
 	struct TextureDesc;
 	struct GraphicsPipelineDesc;
 
+	using DescriptorIndex = uint32_t;
+	constexpr DescriptorIndex INVALID_DESCRIPTOR_INDEX = 0xFFFFFFFF;
+
 	class IDevice
 	{
 	public:
@@ -46,6 +49,12 @@ namespace dy::RHI
 		virtual ITexture* CreateTexture(const TextureDesc& desc) = 0;
 		virtual IPipelineState* CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) = 0;
 		// virtual IPipelineState* CreateComputePipelilne(const ComputePipelineDesc& desc) = 0;
+
+		// Allocates a slot in the GPU's Global Descriptor Heap.
+		[[nodiscard]] virtual DescriptorIndex AllocateDescriptorSlot() = 0;
+
+		// Binds an ITexture (SRV) to the allocated slot in the Global Heap.
+		virtual void UpdateDescriptorSlot(DescriptorIndex index, ITexture* texture) = 0;
 
 		virtual void DestroyBuffer(IBuffer* buffer) = 0;
 		virtual void DestroyTexture(ITexture* texture) = 0;
