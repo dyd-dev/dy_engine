@@ -22,7 +22,7 @@ dy::RHI::IDevice* dy::RHI::IDevice::Create(const void *windowHandle)
 #elif defined(ENABLE_SDL3)
 	device = new SDL3Device();
 #else
-	// device = new Backends::NullDevice();
+	device = new Backends::NullDevice();
 #endif
 	if(device) device->Initialize(windowHandle);
 	return device;
