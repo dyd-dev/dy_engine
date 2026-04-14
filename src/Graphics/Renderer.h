@@ -1,41 +1,67 @@
 #pragma once
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+#include "Core/Types.h"
+#include "RHI/Enums.h"
 
 namespace dy::RHI
 {
 	class IDevice;
-
-	class IBuffer;
+	class ITexture;
 	class IPipelineState;
-}
-
-namespace dy
-{
-	class JobSystem;
 }
 
 namespace dy::Graphics
 {
+	class Scene;
+
+	struct RendererConfig
+	{
+		const char* vertexShaderPath = nullptr;
+		const char* pixelShaderPath = nullptr;
+		RHI::Format renderTargetFormat = RHI::Format::R8G8B8A8_UNORM;
+		RHI::Format depthStencilFormat = RHI::Format::Unknown;
+		Math::float4 clearColor = Math::float4(0.08f, 0.10f, 0.14f, 1.0f);
+	};
+
 	class Renderer
 	{
-	private:
-		// GPU Buffers mapped to CPU memory
-		RHI::IBuffer* m_globalTransformBuffer = NULL;
-		RHI::IBuffer* m_globalMaterialBuffer = NULL;
-
-		RHI::IPipelineState* m_opaquePSO = NULL;
-
-		static constexpr uint32_t MAX_SUPPORTED_ENTITIES = 100000;
-
 	public:
 		Renderer() = default;
 		~Renderer() = default;
 
-		void Initialize(RHI::IDevice* device);
+		bool Initialize(RHI::IDevice* device, const RendererConfig& config = {});
 		void Shutdown(RHI::IDevice* device);
-
-		void SubmitFrame(const Scene& scene, RHI::IDevice* device, JobSystem* jobSystem);
+		void Render(const Scene& scene, RHI::IDevice* device);
 
 	private:
+		static constexpr uint32_t kInvalidDescriptorIndex = 0xFFFFFFFFu;
+
+		struct SceneTextureState
+		{
+			RHI::ITexture* texture = nullptr;
+			uint32_t descriptorIndex = kInvalidDescriptorIndex;
+		};
+
+		struct DrawConstants
+		{
+			Math::float4x4 worldMatrix;
+			Math::float4 baseColor;
+			uint32_t baseColorTextureIndex = kInvalidDescriptorIndex;
+			float padding[3] = {};
+		};
+
 		void BuildPipelineStates(RHI::IDevice* device);
+		void PrepareSceneResources(const Scene& scene, RHI::IDevice* device);
+		void RecordScenePass(const Scene& scene, RHI::IDevice* device);
+		void EnsureTextureStateCapacity(std::size_t textureCount);
+
+		RendererConfig m_config = {};
+		std::vector<char> m_vertexShaderSource;
+		std::vector<char> m_pixelShaderSource;
+		RHI::IPipelineState* m_texturedTrianglePipeline = nullptr;
+		std::vector<SceneTextureState> m_textureStates;
 	};
 }

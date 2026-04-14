@@ -1,41 +1,39 @@
 #pragma once
-#include "RHI/IDevice.h"
 
-using dy::RHI::ICommandList;
-using dy::RHI::IBuffer;
-using dy::RHI::ITexture;
-using dy::RHI::IPipelineState;
-using dy::RHI::BufferDesc;
-using dy::RHI::TextureDesc;
-using dy::RHI::GraphicsPipelineDesc;
+#include "RHI/IDevice.h"
 
 namespace dy::Backends
 {
-	class NullDevice : public RHI::IDevice
+	class NullDevice final : public RHI::IDevice
 	{
 	public:
-		void BeginFrame() override {}
-		
-		uint32_t GetCurrentFrameIndex() const override { return 0; }
-		ICommandList* AcquireCommandList() override { return nullptr; }
+		NullDevice();
+		~NullDevice() override;
 
-		void Submit(ICommandList** cmdLists, uint32_t count) override {}
-		void Present() override {}
+		void BeginFrame() override;
+		uint32_t GetCurrentFrameIndex() const override;
+		RHI::ICommandList* AcquireCommandList() override;
 
-		IBuffer* CreateBuffer(const BufferDesc& desc) override { return nullptr; }
-		ITexture* CreateTexture(const TextureDesc& desc) override { return nullptr; }
-		IPipelineState* CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) override { return nullptr; }
-		// virtual IPipelineState* CreateComputePipelilne(const ComputePipelineDesc& desc) = 0;
+		void Submit(RHI::ICommandList** cmdLists, uint32_t count) override;
+		void Present() override;
 
-		void DestroyBuffer(IBuffer* buffer) override {}
-		void DestroyTexture(ITexture* texture) override {}
-		void DestroyPipelineState(IPipelineState* pipeline) override {}
+		RHI::IBuffer* CreateBuffer(const RHI::BufferDesc& desc) override;
+		RHI::ITexture* CreateTexture(const RHI::TextureDesc& desc) override;
+		RHI::IPipelineState* CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc) override;
 
-		// Warning: In a multi-threaded setup, worker threads should not call this directly
-        // unless they are explicitly assigned the task of writing to the final swapchain image.
-		ITexture* GetBackBuffer() override { return nullptr; }
-		
+		[[nodiscard]] RHI::DescriptorIndex AllocateDescriptorSlot() override;
+		void UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::ITexture* texture) override;
+
+		void DestroyBuffer(RHI::IBuffer* buffer) override;
+		void DestroyTexture(RHI::ITexture* texture) override;
+		void DestroyPipelineState(RHI::IPipelineState* pipeline) override;
+		RHI::ITexture* GetBackBuffer() override;
+
 	protected:
-		int Initialize(const void *windowHandle) override { return 0; }
+		int Initialize(const void* windowHandle) override;
+
+	private:
+		struct Impl;
+		Impl* m_impl = nullptr;
 	};
 }

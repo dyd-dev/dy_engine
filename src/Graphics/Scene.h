@@ -1,85 +1,77 @@
 #pragma once
-#include <vector>
 #include <cstdint>
-#include "Types.h"
+#include <vector>
 
-namespace dy
+#include "Core/Image.h"
+#include "Core/Types.h"
+
+namespace dy::Graphics
 {
-	// SOA (Structure of Arrays)
 	class Scene
 	{
-	private:
-		std::vector<TransformData> m_transforms;
-		std::vector<MaterialData>  m_materials;
-		std::vector<MeshID>        m_meshes;
-
-		// Indirection tables for O(1) Swap-and-Pop deletion
-		std::vector<uint32_t> m_entityToIndex; // Sparse array: EntityID -> Array Index
-		std::vector<EntityID> m_indexToEntity; // Dense array: Array Index -> EntityID
-		
-		uint32_t m_activeCount = 0;
-	
 	public:
-		~Scene() = default;
-
-		[[nodiscard]] EntityID CreateEntity()
+		[[nodiscard]] TextureID CreateTexture(const Core::Image& image)
 		{
-			EntityID newId = static_cast<EntityID>(m_entityToIndex.size());
-			uint32_t index = m_activeCount++;
-
-			m_entityToIndex.push_back(index);
-
-			if(index >= m_indexToEntity.size())
-			{
-				m_indexToEntity.push_back(newId);
-				m_transforms.emplace_back();
-				m_materials.emplace_back();
-				m_meshes.emplace_back(MeshID::Invalid);
-			}
-			else m_indexToEntity[index] = newId;
-			
-			return newId;
+			m_textureImages.push_back(image);
+			return static_cast<TextureID>(m_textureImages.size() - 1u);
 		}
-		void DestroyEntity(EntityID entity)
+		[[nodiscard]] MaterialID CreateMaterial(const Material& material)
 		{
-			uint32_t deletedIndex = m_entityToIndex[static_cast<uint32_t>(entity)];
-			uint32_t lastIndex = m_activeCount - 1;
-
-			if(deletedIndex != lastIndex)
-			{
-				// Swap and Pop: Move the last element to the deleted slot
-				m_transforms[deletedIndex] = m_transforms[lastIndex];
-				m_materials[deletedIndex]  = m_materials[lastIndex];
-				m_meshes[deletedIndex]     = m_meshes[lastIndex];
-
-				EntityID lastEntity = m_indexToEntity[lastIndex];
-				m_entityToIndex[static_cast<uint32_t>(lastEntity)] = deletedIndex;
-				m_indexToEntity[deletedIndex] = lastEntity;
-			}
-
-			m_entityToIndex[static_cast<uint32_t>(entity)] = 0xFFFFFFFF;
-			m_activeCount--;
+			m_materials.push_back(material);
+			return static_cast<MaterialID>(m_materials.size() - 1u);
+		}
+		[[nodiscard]] MeshID CreateMesh(const Mesh& mesh)
+		{
+			m_meshes.push_back(mesh);
+			return static_cast<MeshID>(m_meshes.size() - 1u);
+		}
+		[[nodiscard]] EntityID CreateEntity(MeshID mesh, MaterialID material, const Math::float4x4& worldMatrix = Math::float4x4::Identity())
+		{
+			const EntityID entity = static_cast<EntityID>(m_entityMeshes.size());
+			m_entityMeshes.push_back(mesh);
+			m_entityMaterials.push_back(material);
+			m_entityTransforms.push_back(Transform{ worldMatrix });
+			return entity;
 		}
 
-		inline uint32_t GetActiveCount() const { return m_activeCount; }
+		[[nodiscard]] uint32_t GetTextureCount() const { return static_cast<uint32_t>(m_textureImages.size()); }
+		[[nodiscard]] uint32_t GetEntityCount() const { return static_cast<uint32_t>(m_entityMeshes.size()); }
 
-		[[nodiscard]] const TransformData* GetTransformArray() const { return m_transforms.data(); }
-		[[nodiscard]] TransformData& GetTransform(EntityID entity)
+		[[nodiscard]] const Core::Image& GetTexture(TextureID textureId) const
 		{
-			uint32_t index = m_entityToIndex[static_cast<uint32_t>(entity)];
-			return m_transforms[index];
+			return m_textureImages[ToIndex(textureId)];
 		}
-		[[nodiscard]] const MaterialData* GetMaterialArray() const { return m_materials.data(); }
-		[[nodiscard]] MaterialData& GetMaterial(EntityID entity)
+		[[nodiscard]] const Material& GetMaterial(MaterialID materialId) const
 		{
-			uint32_t index = m_entityToIndex[static_cast<uint32_t>(entity)];
-			return m_materials[index];
+			return m_materials[ToIndex(materialId)];
 		}
-		[[nodiscard]] const MeshID* GetMeshArray() const { return m_meshes.data(); }
-		[[nodiscard]] MeshID& GetMesh(EntityID entity) 
+		[[nodiscard]] const Mesh& GetMesh(MeshID meshId) const
 		{
-			uint32_t index = m_entityToIndex[static_cast<uint32_t>(entity)];
-			return m_meshes[index];
+			return m_meshes[ToIndex(meshId)];
 		}
+		[[nodiscard]] MeshID GetEntityMesh(EntityID entityId) const
+		{
+			return m_entityMeshes[ToIndex(entityId)];
+		}
+		[[nodiscard]] MaterialID GetEntityMaterial(EntityID entityId) const
+		{
+			return m_entityMaterials[ToIndex(entityId)];
+		}
+		[[nodiscard]] const Transform& GetTransform(EntityID entityId) const
+		{
+			return m_entityTransforms[ToIndex(entityId)];
+		}
+		[[nodiscard]] Transform& GetTransform(EntityID entityId)
+		{
+			return m_entityTransforms[ToIndex(entityId)];
+		}
+
+	private:
+		std::vector<Core::Image> m_textureImages;
+		std::vector<Material> m_materials;
+		std::vector<Mesh> m_meshes;
+		std::vector<MeshID> m_entityMeshes;
+		std::vector<MaterialID> m_entityMaterials;
+		std::vector<Transform> m_entityTransforms;
 	};
 }

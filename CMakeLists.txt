@@ -4,23 +4,12 @@ project(dy_engine CXX)
 # add module path
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
-set(PLATFORM_SOURCES
-	src/Platform/Window.cpp
-)
-set(GRAPHICS_SOURCES
-	src/Graphics/Camera.cpp
-	src/Graphics/Renderer.cpp
-)
-set(UI_SOURCES
-)
-
 # main target
 add_library(${PROJECT_NAME} STATIC
 	"src/RHI/IDevice.cpp"
-	"src/Math/Math.cpp"
-	${PLATFORM_SOURCES}
-	${GRAPHICS_SOURCES}
-	${UI_SOURCES}
+	"src/Graphics/Renderer.cpp"
+	"src/Platform/Window.cpp"
+	"src/Backends/Null/NullDevice.cpp"
 )
 
 # global options

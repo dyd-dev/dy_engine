@@ -1,126 +1,187 @@
-#include "Renderer.h"
-#include "RHI/IDevice.h"
-#include "RHI/ICommandList.h"
-#include "RHI/IPipelineState.h"
-#include "RHI/IBuffer.h"
+#include "Graphics/Renderer.h"
+
+#include <array>
+#include <cstring>
+#include <fstream>
+#include <stdexcept>
+
 #include "Graphics/Scene.h"
-#include "Graphics/JobSystem.h"
+#include "RHI/ICommandList.h"
+#include "RHI/IDevice.h"
+#include "RHI/IPipelineState.h"
+#include "RHI/ITexture.h"
 
-namespace dy::Graphics
-{
-	struct PushConstants
-	{
-		uint32_t entityIndex;
-	};
-}
-
+using namespace dy;
 using namespace dy::Graphics;
 
-void Renderer::Initialize(RHI::IDevice* device)
+namespace
 {
-	RHI::BufferDesc transformDesc = {};
-	transformDesc.size = MAX_SUPPORTED_ENTITIES * sizeof(TransformData) * 3;
-	transformDesc.usage = RHI::BufferUsage::None; //dynamic
+	[[nodiscard]] std::string ReadTextFile(const char* filepath)
+	{
+		std::ifstream file(filepath, std::ios::binary);
+		if(!file.is_open())
+		{
+			throw std::runtime_error(std::string("Failed to open shader file: ") + filepath);
+		}
 
-	RHI::BufferDesc materialDesc = {};
-	materialDesc.size = MAX_SUPPORTED_ENTITIES * sizeof(MaterialData) * 3;
-	materialDesc.usage = RHI::BufferUsage::None; // dynamic
+		file.seekg(0, std::ios::end);
+		const std::streamoff size = file.tellg();
+		file.seekg(0, std::ios::beg);
 
-	m_globalTransformBuffer = device->CreateBuffer(transformDesc);
-	m_globalMaterialBuffer = device->CreateBuffer(materialDesc);
+		std::string content(static_cast<size_t>(size), '\0');
+		if(size > 0)
+		{
+			file.read(content.data(), size);
+		}
 
+		return content;
+	}
+}
+
+bool Renderer::Initialize(RHI::IDevice* device, const RendererConfig& config)
+{
+	if(device == nullptr) return false;
+	if(config.vertexShaderPath == nullptr || config.pixelShaderPath == nullptr) return false;
+
+	m_config = config;
+	const std::string vertexShaderSource = ReadTextFile(config.vertexShaderPath);
+	const std::string pixelShaderSource = ReadTextFile(config.pixelShaderPath);
+	m_vertexShaderSource.assign(vertexShaderSource.begin(), vertexShaderSource.end());
+	m_pixelShaderSource.assign(pixelShaderSource.begin(), pixelShaderSource.end());
+	m_vertexShaderSource.push_back('\0');
+	m_pixelShaderSource.push_back('\0');
 	BuildPipelineStates(device);
+	return m_texturedTrianglePipeline != nullptr;
 }
 
 void Renderer::Shutdown(RHI::IDevice* device)
 {
-	device->DestroyBuffer(m_globalTransformBuffer);
-	device->DestroyBuffer(m_globalMaterialBuffer);
-	// pso...
-}
+	if(device == nullptr) return;
 
-void Renderer::SubmitFrame(const Scene& scene, RHI::IDevice* device, JobSystem* jobSystem)
-{
-	uint32_t activeCount = scene.GetActiveCount();
-	if(activeCount == 0) return;
-
-	uint32_t frameIdx = device->GetCurrentFrameIndex(); // 0, 1, or 2
-
-	// 1. Triple-Buffering Memory Mapping (Zero-Copy Upload)
-	// Calculate offsets to avoid overwriting memory currently read by the GPU
-	uint32_t transformOffset = frameIdx * MAX_SUPPORTED_ENTITIES * sizeof(TransformData);
-	uint32_t materialOffset  = frameIdx * MAX_SUPPORTED_ENTITIES * sizeof(MaterialData);
-
-	void* mappedTransforms = m_globalTransformBuffer->Map(transformOffset, activeCount * sizeof(TransformData));
-	std::memcpy(mappedTransforms, scene.GetTransformArray(), activeCount * sizeof(TransformData));
-	m_globalTransformBuffer->Unmap();
-
-	void* mappedMaterials = m_globalMaterialBuffer->Map(materialOffset, activeCount * sizeof(MaterialData));
-	std::memcpy(mappedMaterials, scene.GetMaterialArray(), activeCount * sizeof(MaterialData));
-	m_globalMaterialBuffer->Unmap();
-
-	// 2. Prepare Multithreaded Command Recording
-	const uint32_t numThreads = jobSystem->GetWorkerCount();
-	const uint32_t chunkSize = (activeCount + numThreads - 1) / numThreads;
-
-	std::vector<RHI::ICommandList*> recordedCmdLists(numThreads, nullptr);
-	const MeshID* meshes = scene.GetMeshArray();
-
-	// 3. Dispatch Lock-Free Recording Tasks
-	jobSystem->ParallelDispatch(numThreads, [=, &recordedCmdLists](uint32_t threadIdx) 
+	for(SceneTextureState& textureState : m_textureStates)
 	{
-		uint32_t startIdx = threadIdx * chunkSize;
-		uint32_t endIdx = std::min(startIdx + chunkSize, activeCount);
-
-		if (startIdx >= endIdx) return;
-
-		// Fetch thread-local command list (No Mutex!)
-		RHI::ICommandList* cmd = device->AcquireCommandList();
-
-		cmd->BindGraphicsPipeline(m_opaquePSO);
-		cmd->BindGlobalDescriptorHeap(); 
-
-		// High-performance DOD iteration
-		MeshID currentBoundMesh = MeshID::Invalid;
-
-		for (uint32_t i = startIdx; i < endIdx; ++i) 
+		if(textureState.texture != nullptr)
 		{
-			MeshID meshId = meshes[i];
-			if (meshId == MeshID::Invalid) continue;
-
-			// Bind Index Buffer ONLY if it changes
-			if (meshId != currentBoundMesh) 
-			{
-				// RenderMesh* meshData = AssetManager::GetRenderMesh(meshId);
-				// cmd->BindIndexBuffer(meshData->indexBuffer, FORMAT_R32_UINT, 0);
-				currentBoundMesh = meshId;
-			}
-
-			// Inject 32-bit DOD Index directly into registers
-			PushConstants pc = { i };
-			cmd->SetPushConstants(sizeof(PushConstants), &pc);
-
-			// Draw
-			// cmd->DrawInstanced(meshData->indexCount, 1, 0, 0);
+			device->DestroyTexture(textureState.texture);
+			textureState.texture = nullptr;
 		}
-
-		cmd->Close();
-		recordedCmdLists[threadIdx] = cmd;
-	});
-
-	// 4. Synchronization and Submission
-	jobSystem->WaitForAll();
-
-	std::vector<RHI::ICommandList*> finalCmdLists;
-	finalCmdLists.reserve(numThreads);
-	for (auto* cmd : recordedCmdLists)
-	{
-		if (cmd) finalCmdLists.push_back(cmd);
 	}
 
-	device->Submit(finalCmdLists.data(), static_cast<uint32_t>(finalCmdLists.size()));
+	m_textureStates.clear();
+	m_vertexShaderSource.clear();
+	m_pixelShaderSource.clear();
+
+	if(m_texturedTrianglePipeline != nullptr)
+	{
+		device->DestroyPipelineState(m_texturedTrianglePipeline);
+		m_texturedTrianglePipeline = nullptr;
+	}
+}
+
+void Renderer::Render(const Scene& scene, RHI::IDevice* device)
+{
+	if(device == nullptr) return;
+
+	PrepareSceneResources(scene, device);
+	RecordScenePass(scene, device);
 }
 
 void Renderer::BuildPipelineStates(RHI::IDevice* device)
 {
+	RHI::GraphicsPipelineDesc desc = {};
+	desc.vertexShader = m_vertexShaderSource.data();
+	desc.vertexShaderSize = m_vertexShaderSource.empty() ? 0u : m_vertexShaderSource.size() - 1u;
+	desc.pixelShader = m_pixelShaderSource.data();
+	desc.pixelShaderSize = m_pixelShaderSource.empty() ? 0u : m_pixelShaderSource.size() - 1u;
+	desc.renderTargetFormat = m_config.renderTargetFormat;
+	desc.depthStencilFormat = m_config.depthStencilFormat;
+	desc.depthEnable = false;
+	desc.wireframe = false;
+
+	m_texturedTrianglePipeline = device->CreateGraphicsPipeline(desc);
+}
+
+void Renderer::PrepareSceneResources(const Scene& scene, RHI::IDevice* device)
+{
+	const uint32_t textureCount = scene.GetTextureCount();
+	EnsureTextureStateCapacity(textureCount);
+
+	for(uint32_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
+	{
+		SceneTextureState& textureState = m_textureStates[textureIndex];
+		const Core::Image& image = scene.GetTexture(static_cast<TextureID>(textureIndex));
+
+		if(!image.IsValid()) continue;
+
+		if(textureState.texture == nullptr)
+		{
+			RHI::TextureDesc textureDesc = {};
+			textureDesc.width = image.GetWidth();
+			textureDesc.height = image.GetHeight();
+			textureDesc.depthOrArraySize = 1;
+			textureDesc.mipLevels = 1;
+			textureDesc.format = RHI::Format::R8G8B8A8_UNORM;
+			textureDesc.usage = RHI::TextureUsage::ShaderResource;
+
+			textureState.texture = device->CreateTexture(textureDesc);
+			textureState.descriptorIndex = device->AllocateDescriptorSlot();
+			device->UpdateDescriptorSlot(textureState.descriptorIndex, textureState.texture);
+		}
+	}
+}
+
+void Renderer::RecordScenePass(const Scene& scene, RHI::IDevice* device)
+{
+	RHI::ICommandList* commandList = device->AcquireCommandList();
+	RHI::ITexture* backBuffer = device->GetBackBuffer();
+	if(commandList == nullptr || backBuffer == nullptr || m_texturedTrianglePipeline == nullptr) return;
+
+	commandList->SetRenderTargets(1, &backBuffer, nullptr);
+	commandList->ClearColor(backBuffer, m_config.clearColor.x, m_config.clearColor.y, m_config.clearColor.z, m_config.clearColor.w);
+	commandList->BindGraphicsPipeline(m_texturedTrianglePipeline);
+	commandList->BindGlobalDescriptorHeap();
+
+	const uint32_t entityCount = scene.GetEntityCount();
+	for(uint32_t entityIndex = 0; entityIndex < entityCount; ++entityIndex)
+	{
+		const EntityID entity = static_cast<EntityID>(entityIndex);
+		const MeshID meshId = scene.GetEntityMesh(entity);
+		const MaterialID materialId = scene.GetEntityMaterial(entity);
+		if(!IsValid(meshId) || !IsValid(materialId)) continue;
+
+		const Mesh& mesh = scene.GetMesh(meshId);
+		const uint32_t vertexCount = mesh.indices.empty()
+			? static_cast<uint32_t>(mesh.vertices.size())
+			: static_cast<uint32_t>(mesh.indices.size());
+		if(vertexCount == 0u) continue;
+
+		const Material& material = scene.GetMaterial(materialId);
+		const Transform& transform = scene.GetTransform(entity);
+
+		DrawConstants drawConstants = {};
+		drawConstants.worldMatrix = transform.worldMatrix;
+		drawConstants.baseColor = material.baseColor;
+
+		if(IsValid(material.baseColorTexture))
+		{
+			const SceneTextureState& textureState = m_textureStates[ToIndex(material.baseColorTexture)];
+			drawConstants.baseColorTextureIndex = textureState.descriptorIndex;
+		}
+
+		commandList->SetPushConstants(sizeof(DrawConstants), &drawConstants);
+		commandList->DrawInstanced(vertexCount, 1, 0, 0);
+	}
+
+	commandList->Close();
+
+	std::array<RHI::ICommandList*, 1> commandLists = { commandList };
+	device->Submit(commandLists.data(), static_cast<uint32_t>(commandLists.size()));
+}
+
+void Renderer::EnsureTextureStateCapacity(std::size_t textureCount)
+{
+	if(m_textureStates.size() < textureCount)
+	{
+		m_textureStates.resize(textureCount);
+	}
 }
