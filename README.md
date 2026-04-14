@@ -1,6 +1,5 @@
-﻿# dy engine
+﻿# SuR engine
 
-cmake build options
-- ENABLE_D3D12
-- ENABLE_METAL
-- ENABLE_VULKAN
+{Root}/external/{SDL} <- need SDL git
+
+cmake -S . -B build -D B_[]=OFF   (B_D3D12, B_VULKAN)
