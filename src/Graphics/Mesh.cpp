@@ -45,9 +45,9 @@ namespace dy::Graphics
 		std::ifstream file(path);
 		if (!file.is_open()) return false;
 
-		std::vector<dy::Math::Vector3> positions;
-		std::vector<dy::Math::Vector2> uvs;
-		std::vector<dy::Math::Vector3> normals;
+		std::vector<dy::Math::float3> positions;
+		std::vector<dy::Math::float2> uvs;
+		std::vector<dy::Math::float3> normals;
 		std::map<OBJIndex, uint32_t> uniqueVertices;
 
 		std::string line;
@@ -59,19 +59,20 @@ namespace dy::Graphics
 
 			if (prefix == "v")
 			{
-				dy::Math::Vector3 v;
+				dy::Math::float3 v;
 				ss >> v.x >> v.y >> v.z;
 				positions.push_back(v);
 			}
 			else if (prefix == "vt")
 			{
-				dy::Math::Vector2 vt;
+				dy::Math::float2
+	 vt;
 				ss >> vt.x >> vt.y;
 				uvs.push_back(vt);
 			}
 			else if (prefix == "vn")
 			{
-				dy::Math::Vector3 vn;
+				dy::Math::float3 vn;
 				ss >> vn.x >> vn.y >> vn.z;
 				normals.push_back(vn);
 			}
@@ -100,9 +101,10 @@ namespace dy::Graphics
 					{
 						uniqueVertices[idx] = static_cast<uint32_t>(outData.vertices.size());
 						Vertex v;
-						v.position = (idx.v >= 0 && idx.v < positions.size()) ? positions[idx.v] : dy::Math::Vector3{0,0,0};
-						v.uv = (idx.vt >= 0 && idx.vt < uvs.size()) ? uvs[idx.vt] : dy::Math::Vector2{0,0};
-						v.normal = (idx.vn >= 0 && idx.vn < normals.size()) ? normals[idx.vn] : dy::Math::Vector3{0,0,1};
+						v.position = (idx.v >= 0 && idx.v < positions.size()) ? positions[idx.v] : dy::Math::float3{0,0,0};
+						v.uv = (idx.vt >= 0 && idx.vt < uvs.size()) ? uvs[idx.vt] : dy::Math::float2
+			{0,0};
+						v.normal = (idx.vn >= 0 && idx.vn < normals.size()) ? normals[idx.vn] : dy::Math::float3{0,0,1};
 						outData.vertices.push_back(v);
 					}
 					faceIndices.push_back(uniqueVertices[idx]);

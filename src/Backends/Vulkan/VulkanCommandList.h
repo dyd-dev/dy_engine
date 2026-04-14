@@ -7,10 +7,10 @@ class VulkanDevice; // Forward declaration for friend class
 class VulkanCommandList : public dy::RHI::ICommandList
 {
 public:
-	// Implementation of ICommandList
-	void BindGraphicsPipeline(dy::RHI::IPipelineState* pipelineState) override {}
-	void BindIndexBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset) override {}
-	void SetPushConstants(uint32_t size, const void* data) override {}
+        // Implementation of ICommandList
+        void BindGraphicsPipeline(dy::RHI::IPipelineState* pipelineState) override {}
+        void BindGlobalDescriptorHeap() override {}
+        void BindIndexBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset) override {}	void SetPushConstants(uint32_t size, const void* data) override {}
 	void SetRenderTargets(uint32_t numRenderTargets, dy::RHI::ITexture** renderTargets, dy::RHI::ITexture* depthStencil) override {}
 	void ClearColor(dy::RHI::ITexture* renderTarget, float r, float g, float b, float a) override;
 	void ClearDepth(dy::RHI::ITexture* depthStencil, float depth) override {}

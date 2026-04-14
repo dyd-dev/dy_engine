@@ -7,11 +7,10 @@ namespace dy::Graphics
 {
 	struct Vertex
 	{
-		dy::Math::Vector3 position;
-		dy::Math::Vector3 normal;
-		dy::Math::Vector2 uv;
+		dy::Math::float3 position;
+		dy::Math::float3 normal;
+		dy::Math::float2 uv;
 	};
-
 	struct MeshData
 	{
 		std::vector<Vertex> vertices;

@@ -25,8 +25,10 @@ public:
 	dy::RHI::ITexture* CreateTexture(const dy::RHI::TextureDesc& desc) override { return nullptr; }
 	dy::RHI::IPipelineState* CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) override { return nullptr; }
 
-	void DestroyBuffer(dy::RHI::IBuffer* buffer) override {}
-	void DestroyTexture(dy::RHI::ITexture* texture) override {}
+	[[nodiscard]] dy::RHI::DescriptorIndex AllocateDescriptorSlot() override { return dy::RHI::INVALID_DESCRIPTOR_INDEX; }
+	void UpdateDescriptorSlot(dy::RHI::DescriptorIndex index, dy::RHI::ITexture* texture) override {}
+
+	void DestroyBuffer(dy::RHI::IBuffer* buffer) override {}	void DestroyTexture(dy::RHI::ITexture* texture) override {}
 	void DestroyPipelineState(dy::RHI::IPipelineState* pipeline) override {}
 
 	dy::RHI::ITexture* GetBackBuffer() override { return nullptr; }

@@ -12,17 +12,13 @@ add_library(${PROJECT_NAME} STATIC
         src/Platform/Window.cpp
         src/RHI/IDevice.cpp
         src/Graphics/Mesh.cpp
-        src/Math/Math.cpp
+        src/Graphics/Renderer.cpp
+        src/Backends/Null/NullDevice.cpp
 )
 target_include_directories(${PROJECT_NAME} PUBLIC
-	"${CMAKE_SOURCE_DIR}/src"
-	"${CMAKE_SOURCE_DIR}/external/tinyobjloader"
-	"src/RHI/IDevice.cpp"
-	"src/Graphics/Renderer.cpp"
-	"src/Platform/Window.cpp"
-	"src/Backends/Null/NullDevice.cpp"
+        "${CMAKE_SOURCE_DIR}/src"
+        "${CMAKE_SOURCE_DIR}/external/tinyobjloader"
 )
-
 # ===== ===== ===== ===== ===== Compile options ===== ===== ===== ===== =====
 if(MSVC)
 	# Enable warnings as errors for MSVC
