@@ -1,4 +1,4 @@
-﻿build/
+build/
 out/
 
 .vs/
@@ -6,3 +6,5 @@ out/
 
 *.sln
 *.slnx
+
+*.DS_Store

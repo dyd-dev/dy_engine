@@ -24,7 +24,7 @@ namespace dy::Backends
 
         // CPU에서 쓰고 GPU가 읽는 용도 → Shared
         m_impl->buffer = [mtlDevice newBufferWithLength:desc.size
-                                                options:MTLResourceStorageModeShared];
+                           options:MTLResourceStorageModeShared];
     }
 
     MetalBuffer::~MetalBuffer()
