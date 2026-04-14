@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef> // size_t
 /* Math.h
 	강제 인라인(Force Inline)을 통한 함수 호출 오버헤드 제거를 위해 Header-Only를 유지한다.
 	.cpp로 숨길 경우 LTO(Link Time Optimization)에 의존해야 하며 병목이 심해지며 인라이닝이 실패할 확룔이 높아진다. // .cpp가 없다면 링킹할 일도 없으므로
@@ -13,6 +14,7 @@
 	반환 값을 받지 않거나 사용하지 않을 경우. 인간의 실수 방지
 	비용 : 런타임 오버헤드는 0 (컴파일 단계이기 때문)
 */
+
 #if defined(__x86_64__) || defined(_M_X64)
 	#define DY_SIMD_X64
 	#include <immintrin.h> // SSE/AVX
@@ -103,9 +105,9 @@ namespace dy::Math
 				float32x4_t row = vld1q_f32(&m[i*4]);
 				
 				float32x4_t out = vmulq_laneq_f32(vld1q_f32(&rhs.m[0]), row, 0);
-				out = vfmaq_laneq_f32(out, vldq1_f32(&rhs.m[4]), row, 1);
-				out = vfmaq_laneq_f32(out, vldq1_f32(&rhs.m[8]), row, 2);
-				out = vfmaq_laneq_f32(out, vldq1_f32(&rhs.m[12]), row, 3);
+				out = vfmaq_laneq_f32(out, vld1q_f32(&rhs.m[4]), row, 1);
+				out = vfmaq_laneq_f32(out, vld1q_f32(&rhs.m[8]), row, 2);
+				out = vfmaq_laneq_f32(out, vld1q_f32(&rhs.m[12]), row, 3);
 
 				vst1q_f32(&res.m[i*4], out);
 			}
