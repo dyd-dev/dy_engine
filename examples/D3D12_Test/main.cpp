@@ -68,7 +68,7 @@ int main()
     ID3DBlob* errorBlob = nullptr;
 
     // VS 컴파일
-    if (FAILED(D3DCompileFromFile(L"shaders.hlsl", nullptr, nullptr, "VSMain", "vs_5_0", 0, 0, &vsBlob, &errorBlob))) {
+    if (FAILED(D3DCompileFromFile(L"examples/D3D12_Test/shaders.hlsl", nullptr, nullptr, "VSMain", "vs_5_0", 0, 0, &vsBlob, &errorBlob))) {
 		std::cerr << "Vertex Shader 컴파일 실패!" << std::endl;
         if (errorBlob) std::cerr << (char*)errorBlob->GetBufferPointer() << std::endl;
 		system("pause");    
@@ -76,7 +76,7 @@ int main()
     }
 
     // PS 컴파일
-    if (FAILED(D3DCompileFromFile(L"shaders.hlsl", nullptr, nullptr, "PSMain", "ps_5_0", 0, 0, &psBlob, &errorBlob))) {
+    if (FAILED(D3DCompileFromFile(L"examples/D3D12_Test/shaders.hlsl", nullptr, nullptr, "PSMain", "ps_5_0", 0, 0, &psBlob, &errorBlob))) {
 		std::cerr << "Pixel Shader 컴파일 실패!" << std::endl;
 		if (errorBlob) std::cerr << (char*)errorBlob->GetBufferPointer() << std::endl;
 		system("pause");

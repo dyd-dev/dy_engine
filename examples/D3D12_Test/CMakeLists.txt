@@ -12,12 +12,4 @@ add_custom_command(TARGET ${EXAMPLE_NAME} POST_BUILD
 	COMMAND ${CMAKE_COMMAND} -E copy_if_different
 		$<TARGET_FILE:${PROJECT_NAME}>
 		$<TARGET_FILE_DIR:${EXAMPLE_NAME}>
-
-	COMMAND ${CMAKE_COMMAND} -E copy_if_different
-		"${CMAKE_SOURCE_DIR}/Tree.obj"
-		"$<TARGET_FILE_DIR:${EXAMPLE_NAME}>"
-
-	COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${CMAKE_CURRENT_SOURCE_DIR}/shaders.hlsl"
-    "$<TARGET_FILE_DIR:${EXAMPLE_NAME}>"
 )
