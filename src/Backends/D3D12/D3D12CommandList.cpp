@@ -1,6 +1,7 @@
 #include "D3D12CommandList.h"
 #include "D3D12Buffer.h"
 #include "D3D12PipelineState.h"
+#include "D3D12Texture.h"
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -17,23 +18,31 @@ namespace dy::Backends
         ComPtr<ID3D12GraphicsCommandList> commandList;
         ComPtr<ID3D12Resource> backBuffer;
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = {};
+        ID3D12DescriptorHeap* globalDescriptorHeap = nullptr;
     };
 
-    D3D12CommandList::D3D12CommandList(void* nativeDevice, void* nativeBackBuffer, size_t rtvHandlePtr)
+    D3D12CommandList::D3D12CommandList(void* nativeDevice, void* nativeBackBuffer, size_t rtvHandlePtr, void* globalDescriptorHeap)
     {
         m_internal = new D3D12CommandListInternal();
         ID3D12Device* device = static_cast<ID3D12Device*>(nativeDevice);
 
         m_internal->backBuffer = static_cast<ID3D12Resource*>(nativeBackBuffer);
         m_internal->rtvHandle.ptr = rtvHandlePtr;
+        m_internal->globalDescriptorHeap = static_cast<ID3D12DescriptorHeap*>(globalDescriptorHeap);
 
         device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_internal->allocator));
         device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_internal->allocator.Get(), nullptr, IID_PPV_ARGS(&m_internal->commandList));
+        m_internal->commandList->Close();
     }
 
     D3D12CommandList::~D3D12CommandList() { delete m_internal; }
 
     void* D3D12CommandList::GetNativeList() { return m_internal->commandList.Get(); }
+
+    void D3D12CommandList::Reset() {
+        m_internal->allocator->Reset();
+        m_internal->commandList->Reset(m_internal->allocator.Get(), nullptr);
+    }
 
     void D3D12CommandList::Close() { 
         D3D12_RESOURCE_BARRIER barrier = {};
@@ -69,6 +78,14 @@ namespace dy::Backends
         m_internal->commandList->DrawInstanced(vertexCount, instanceCount, startVertex, startInstance);
     }
 
+    void D3D12CommandList::BindGlobalDescriptorHeap() {
+        if (m_internal->globalDescriptorHeap) {
+            ID3D12DescriptorHeap* heaps[] = { m_internal->globalDescriptorHeap };
+            m_internal->commandList->SetDescriptorHeaps(1, heaps);
+            m_internal->commandList->SetGraphicsRootDescriptorTable(1, m_internal->globalDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
+        }
+    }
+
     void D3D12CommandList::BindVertexBuffer(RHI::IBuffer* buffer) {
         auto* d3d12Buffer = static_cast<D3D12Buffer*>(buffer);
 
@@ -95,21 +112,6 @@ namespace dy::Backends
         m_internal->commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     }
 
-    void D3D12CommandList::SetViewport(float width, float height) {
-		D3D12_VIEWPORT viewport = {0.0f, 0.0f, width, height, 0.0f, 1.0f};
-		D3D12_RECT scissorRect = { 0, 0, (long)width, (long)height };
-
-		m_internal->commandList->RSSetViewports(1, &viewport);
-		m_internal->commandList->RSSetScissorRects(1, &scissorRect);
-	}
-
-    void D3D12CommandList::SetConstantBuffer(uint32_t index, RHI::IBuffer* buffer) {
-        auto* d3d12Buffer = static_cast<D3D12Buffer*>(buffer);
-		auto gpuAddress = ((ID3D12Resource*)d3d12Buffer->GetNativeResource())->GetGPUVirtualAddress();
-
-		m_internal->commandList->SetGraphicsRootConstantBufferView(index, gpuAddress);
-	}
-
     // 인덱스 버퍼 바인딩 구현
     void D3D12CommandList::BindIndexBuffer(RHI::IBuffer* buffer, RHI::Format format, uint32_t offset) {
         auto* d3d12Buffer = static_cast<D3D12Buffer*>(buffer);
@@ -118,8 +120,8 @@ namespace dy::Backends
         ibView.BufferLocation = ((ID3D12Resource*)d3d12Buffer->GetNativeResource())->GetGPUVirtualAddress() + offset;
         ibView.SizeInBytes = d3d12Buffer->GetSize() - offset;
 
-        // ObjLoader가 uint32_t 배열을 쓰므로 R32_UINT 포맷으로 고정합니다.
-        ibView.Format = DXGI_FORMAT_R32_UINT;
+        // RHI의 Format을 DXGI 형식으로 변환하여 사용
+        ibView.Format = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(format));
 
         m_internal->commandList->IASetIndexBuffer(&ibView);
     }
@@ -129,8 +131,23 @@ namespace dy::Backends
         m_internal->commandList->DrawIndexedInstanced(indexCount, instanceCount, startIndex, baseVertex, startInstance);
     }
 
-    void D3D12CommandList::SetPushConstants(uint32_t size, const void* data) {}
-    void D3D12CommandList::SetRenderTargets(uint32_t numRenderTargets, RHI::ITexture** renderTargets, RHI::ITexture* depthStencil) {}
+    void D3D12CommandList::SetPushConstants(uint32_t size, const void* data) {
+        m_internal->commandList->SetGraphicsRoot32BitConstants(0, size / 4, data, 0);
+    }
+    void D3D12CommandList::SetRenderTargets(uint32_t numRenderTargets, RHI::ITexture** renderTargets, RHI::ITexture* depthStencil) {
+        if (numRenderTargets > 0 && renderTargets[0] != nullptr) {
+            m_internal->commandList->OMSetRenderTargets(1, &m_internal->rtvHandle, FALSE, nullptr);
+            
+            // RHI 인터페이스에서 Viewport 설정이 빠졌으므로, 렌더타겟 크기에 맞춰 자동으로 설정합니다.
+            uint32_t width = renderTargets[0]->GetWidth();
+            uint32_t height = renderTargets[0]->GetHeight();
+            D3D12_VIEWPORT viewport = {0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f};
+            D3D12_RECT scissorRect = { 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) };
+            
+            m_internal->commandList->RSSetViewports(1, &viewport);
+            m_internal->commandList->RSSetScissorRects(1, &scissorRect);
+        }
+    }
     void D3D12CommandList::ClearDepth(RHI::ITexture* depthStencil, float depth) {}
     void D3D12CommandList::ResourceBarrier(RHI::IBuffer* buffer, RHI::ResourceState before, RHI::ResourceState after) {}
     void D3D12CommandList::ResourceBarrier(RHI::ITexture* texture, RHI::ResourceState before, RHI::ResourceState after) {}

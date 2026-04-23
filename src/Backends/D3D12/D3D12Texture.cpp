@@ -4,6 +4,7 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <d3d12.h>
+#include "d3dx12.h"
 #include <wrl.h>
 
 using Microsoft::WRL::ComPtr;
@@ -16,7 +17,7 @@ namespace dy::Backends
     };
 
     // 1. RHI 포맷 -> DXGI 포맷 완벽 매핑
-    static DXGI_FORMAT ToDxgiFormat(RHI::Format format)
+    uint32_t D3D12Texture::ToDxgiFormat(RHI::Format format)
     {
         switch (format)
         {
@@ -49,14 +50,12 @@ namespace dy::Backends
         return flags;
     }
 
-    D3D12Texture::D3D12Texture(void* nativeDevice, const RHI::TextureDesc& desc)
+    D3D12Texture::D3D12Texture(ID3D12Device* device, const RHI::TextureDesc& desc)
         : m_desc(desc)
     {
         m_internal = new D3D12TextureInternal();
-        ID3D12Device* device = static_cast<ID3D12Device*>(nativeDevice);
 
-        D3D12_HEAP_PROPERTIES heapProps = {};
-        heapProps.Type = D3D12_HEAP_TYPE_DEFAULT; // 텍스처는 GPU 전용 메모리(Default Heap)에 생성
+        CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_DEFAULT); // 텍스처는 GPU 전용 메모리(Default Heap)에 생성
 
         D3D12_RESOURCE_DESC resourceDesc = {};
         resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -65,14 +64,14 @@ namespace dy::Backends
         resourceDesc.Height = desc.height;
         resourceDesc.DepthOrArraySize = static_cast<UINT16>(desc.depthOrArraySize);
         resourceDesc.MipLevels = static_cast<UINT16>(desc.mipLevels);
-        resourceDesc.Format = ToDxgiFormat(desc.format); // 헬퍼 함수 적용
+        resourceDesc.Format = static_cast<DXGI_FORMAT>(ToDxgiFormat(desc.format)); // 헬퍼 함수 적용
         resourceDesc.SampleDesc.Count = 1;
         resourceDesc.SampleDesc.Quality = 0;
         resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
         resourceDesc.Flags = ToDxgiResourceFlags(desc.usage); // 헬퍼 함수 적용
 
         // GPU 메모리에 할당
-        device->CreateCommittedResource(
+        HRESULT hr = device->CreateCommittedResource(
             &heapProps,
             D3D12_HEAP_FLAG_NONE,
             &resourceDesc,
@@ -80,6 +79,17 @@ namespace dy::Backends
             nullptr,
             IID_PPV_ARGS(&m_internal->resource)
         );
+        
+        if (FAILED(hr)) {
+            // Error handling could be here, but removing stdout print for clean output.
+        }
+    }
+
+    D3D12Texture::D3D12Texture(ID3D12Resource* resource, const RHI::TextureDesc& desc)
+        : m_desc(desc)
+    {
+        m_internal = new D3D12TextureInternal();
+        m_internal->resource = resource;
     }
 
     D3D12Texture::~D3D12Texture()

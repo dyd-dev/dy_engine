@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 /* CommandList.h
 * 
 * 그리기 명령, 파이프라인 배리어를 기록하는 객체입니다.
@@ -33,8 +33,6 @@ namespace dy::RHI
 
 		virtual void BindIndexBuffer(IBuffer* buffer, Format format, uint32_t offset) = 0;
 		virtual void BindVertexBuffer(IBuffer* buffer) = 0;
-		virtual void SetViewport(float width, float height) = 0;
-		virtual void SetConstantBuffer(uint32_t slot, IBuffer* buffer) = 0;
 
 		// Modern DOD Approach: Inject tiny data (e.g., Transform Index, Material Index) directly.
 		// Replaces ALL BindBuffer and BindTexture calls.

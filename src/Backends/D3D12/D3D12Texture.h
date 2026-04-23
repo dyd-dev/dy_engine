@@ -1,6 +1,9 @@
 #pragma once
 #include "RHI/ITexture.h"
 
+struct ID3D12Device;
+struct ID3D12Resource;
+
 namespace dy::Backends
 {
     // DX12의 텍스처 리소스를 숨기기 위한 전방 선언
@@ -9,7 +12,8 @@ namespace dy::Backends
     class D3D12Texture : public RHI::ITexture
     {
     public:
-        D3D12Texture(void* nativeDevice, const RHI::TextureDesc& desc);
+        D3D12Texture(ID3D12Device* device, const RHI::TextureDesc& desc);
+        D3D12Texture(ID3D12Resource* resource, const RHI::TextureDesc& desc);
         ~D3D12Texture() override;
 
         // --- ITexture 오버라이딩 ---
@@ -19,6 +23,7 @@ namespace dy::Backends
 
         // --- D3D12 전용 ---
         void* GetNativeResource() const;
+        static uint32_t ToDxgiFormat(RHI::Format format);
 
     private:
         D3D12TextureInternal* m_internal;

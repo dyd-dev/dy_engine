@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 /* Device.h
 *
 * GPU와 통신하는 최상위 클래스입니다.
@@ -47,6 +47,7 @@ namespace dy::RHI
 
 		virtual IBuffer* CreateBuffer(const BufferDesc& desc) = 0;
 		virtual ITexture* CreateTexture(const TextureDesc& desc) = 0;
+		virtual void UpdateTexture(ITexture* texture, const void* data, uint32_t rowPitch) = 0;
 		virtual IPipelineState* CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) = 0;
 		// virtual IPipelineState* CreateComputePipelilne(const ComputePipelineDesc& desc) = 0;
 

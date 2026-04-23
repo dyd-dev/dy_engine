@@ -54,12 +54,14 @@ namespace dy::Backends
 		public:
 			void BindGraphicsPipeline(RHI::IPipelineState*) override {}
 			void BindGlobalDescriptorHeap() override {}
+			void BindVertexBuffer(RHI::IBuffer*) override {}
 			void BindIndexBuffer(RHI::IBuffer*, RHI::Format, uint32_t) override {}
 			void SetPushConstants(uint32_t, const void*) override {}
 			void SetRenderTargets(uint32_t, RHI::ITexture**, RHI::ITexture*) override {}
 			void ClearColor(RHI::ITexture*, float, float, float, float) override {}
 			void ClearDepth(RHI::ITexture*, float) override {}
 			void DrawInstanced(uint32_t, uint32_t, uint32_t, uint32_t) override {}
+			void DrawIndexedInstanced(uint32_t, uint32_t, uint32_t, int32_t, uint32_t) override {}
 			void ResourceBarrier(RHI::IBuffer*, RHI::ResourceState, RHI::ResourceState) override {}
 			void ResourceBarrier(RHI::ITexture*, RHI::ResourceState, RHI::ResourceState) override {}
 			void Close() override {}
@@ -114,6 +116,10 @@ namespace dy::Backends
 	RHI::ITexture* NullDevice::CreateTexture(const RHI::TextureDesc& desc)
 	{
 		return new NullTexture(desc);
+	}
+
+	void NullDevice::UpdateTexture(RHI::ITexture*, const void*, uint32_t)
+	{
 	}
 
 	RHI::IPipelineState* NullDevice::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc)
