@@ -11,7 +11,7 @@ public:
         std::vector<VkPresentModeKHR> presentModes;
     };
 
-    void Initialize(const VulkanContext& context, GLFWwindow* window);
+    void Initialize(const VulkanContext& context, void* windowHandle);
     void Cleanup(VkDevice device);
 
     VkSwapchainKHR GetHandle() const { return m_swapchain; }
@@ -25,7 +25,7 @@ public:
 private:
     VkSurfaceFormatKHR ChooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats);
     VkPresentModeKHR ChoosePresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes);
-    VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities, GLFWwindow* window);
+    VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities, void* windowHandle);
 
     VkSwapchainKHR m_swapchain = VK_NULL_HANDLE;
     VkFormat m_swapchainImageFormat;

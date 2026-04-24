@@ -1,4 +1,4 @@
-﻿add_library(Backend_Vulkan STATIC
+add_library(Backend_Vulkan STATIC
 	VulkanDevice.cpp
 	VulkanCommandList.cpp
 	VulkanResources.cpp
@@ -54,12 +54,21 @@ add_dependencies(Backend_Vulkan VulkanShaders)
 target_link_libraries(Backend_Vulkan PUBLIC
 	glfw
 	Vulkan::Vulkan
+	Engine_Options
 )
+
+target_link_libraries(${PROJECT_NAME} PUBLIC Backend_Vulkan)
 
 target_include_directories(Backend_Vulkan PRIVATE
 	${CMAKE_SOURCE_DIR}/src
 	${CMAKE_CURRENT_SOURCE_DIR}
 )
+
+target_include_directories(${PROJECT_NAME} PRIVATE
+	${Vulkan_INCLUDE_DIRS}
+)
+
+target_compile_features(Backend_Vulkan PUBLIC cxx_std_20)
 
 target_compile_definitions(Backend_Vulkan PRIVATE
 	VULKAN_SHADER_DIR="${VULKAN_SHADER_OUTPUT_DIR_CMAKE}"
@@ -70,3 +79,4 @@ target_compile_definitions(Backend_Vulkan PRIVATE
 if(MSVC)
 	target_compile_options(Backend_Vulkan PRIVATE /utf-8 /EHsc)
 endif()
+

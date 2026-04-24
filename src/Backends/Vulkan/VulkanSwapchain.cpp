@@ -1,14 +1,21 @@
 #include "VulkanSwapchain.h"
 #include "VulkanResources.h"
 #include <algorithm>
+#include <limits>
 #include <stdexcept>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
-void VulkanSwapchain::Initialize(const VulkanContext& context, GLFWwindow* window) {
+void VulkanSwapchain::Initialize(const VulkanContext& context, void* windowHandle) {
     SwapchainSupportDetails swapchainSupport = QuerySwapchainSupport(context.physicalDevice, context.surface);
 
     VkSurfaceFormatKHR surfaceFormat = ChooseSwapSurfaceFormat(swapchainSupport.formats);
     VkPresentModeKHR presentMode = ChoosePresentMode(swapchainSupport.presentModes);
-    VkExtent2D extent = ChooseSwapExtent(swapchainSupport.capabilities, window);
+    VkExtent2D extent = ChooseSwapExtent(swapchainSupport.capabilities, windowHandle);
 
     uint32_t imageCount = swapchainSupport.capabilities.minImageCount + 1;
     if (swapchainSupport.capabilities.maxImageCount > 0 && imageCount > swapchainSupport.capabilities.maxImageCount) {
@@ -109,12 +116,24 @@ VkPresentModeKHR VulkanSwapchain::ChoosePresentMode(const std::vector<VkPresentM
     return VK_PRESENT_MODE_FIFO_KHR;
 }
 
-VkExtent2D VulkanSwapchain::ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities, GLFWwindow* window) {
+VkExtent2D VulkanSwapchain::ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities, void* windowHandle) {
     if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
         return capabilities.currentExtent;
     } else {
         int width, height;
-        glfwGetFramebufferSize(window, &width, &height);
+#if defined(_WIN32)
+        RECT clientRect = {};
+        const HWND hwnd = static_cast<HWND>(windowHandle);
+        if (hwnd != nullptr && GetClientRect(hwnd, &clientRect)) {
+            width = clientRect.right - clientRect.left;
+            height = clientRect.bottom - clientRect.top;
+        } else {
+            width = 1;
+            height = 1;
+        }
+#else
+        glfwGetFramebufferSize(static_cast<GLFWwindow*>(windowHandle), &width, &height);
+#endif
 
         VkExtent2D actualExtent = {
             static_cast<uint32_t>(width),

@@ -4,35 +4,46 @@
 #include "VulkanContext.h"
 #include "VulkanSwapchain.h"
 #include "VulkanPipeline.h"
-#include <filesystem>
+#include <cstdint>
 #include <vector>
-
-struct GLFWwindow;
 
 class VulkanDevice : public dy::RHI::IDevice
 {
 public:
+	VulkanDevice();
 	~VulkanDevice() override;
 
 	// Implementation of IDevice
 	void BeginFrame() override;
 	uint32_t GetCurrentFrameIndex() const override { return m_currentFrameIndex; }
-	dy::RHI::ICommandList* AcquireCommandList() override { return &m_commandList; }
+	dy::RHI::ICommandList* AcquireCommandList() override { return m_commandList; }
 	void Submit(dy::RHI::ICommandList** cmdLists, uint32_t count) override;
 	void Present() override;
 
-	dy::RHI::IBuffer* CreateBuffer(const dy::RHI::BufferDesc& desc) override { return nullptr; }
-	dy::RHI::ITexture* CreateTexture(const dy::RHI::TextureDesc& desc) override { return nullptr; }
-	dy::RHI::IPipelineState* CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) override { return nullptr; }
+	dy::RHI::IBuffer* CreateBuffer(const dy::RHI::BufferDesc& desc) override
+	{
+		(void)desc;
+		return nullptr;
+	}
+	dy::RHI::ITexture* CreateTexture(const dy::RHI::TextureDesc& desc) override;
+	dy::RHI::IPipelineState* CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) override;
+	[[nodiscard]] dy::RHI::DescriptorIndex AllocateDescriptorSlot() override;
+	void UpdateDescriptorSlot(dy::RHI::DescriptorIndex index, dy::RHI::ITexture* texture) override;
 
-	void DestroyBuffer(dy::RHI::IBuffer* buffer) override {}
-	void DestroyTexture(dy::RHI::ITexture* texture) override {}
-	void DestroyPipelineState(dy::RHI::IPipelineState* pipeline) override {}
+	void DestroyBuffer(dy::RHI::IBuffer* buffer) override
+	{
+		(void)buffer;
+	}
+	void DestroyTexture(dy::RHI::ITexture* texture) override;
+	void DestroyPipelineState(dy::RHI::IPipelineState* pipeline) override;
 
-	dy::RHI::ITexture* GetBackBuffer() override { return nullptr; }
+	dy::RHI::ITexture* GetBackBuffer() override;
 
+public:
+    int InitializeForTest(const void* windowHandle, const std::string& shaderDir);
+    bool UploadTestMesh(const std::vector<float>& vertices, const std::vector<uint32_t>& indices);
 protected:
-	int Initialize(const void *windowHandle) override;
+    int Initialize(const void *windowHandle) override;
 
 private:
 	bool CreateInstance();
@@ -56,17 +67,19 @@ private:
 	void DestroyDeviceResources();
 
 	void RecordCommandBuffer(const VulkanCommandList& commandList);
+	void UpdateBackBufferMetadata();
 
 	// Context and Components
 	VulkanContext m_context;
 	VulkanSwapchain m_swapchain;
 	VulkanPipeline m_pipeline;
 
-	GLFWwindow* m_window = nullptr;
+	void* m_windowHandle = nullptr;
 	std::string m_shaderOutputDirectory;
 
 	// Mesh Data
 	VkBuffer m_vertexBuffer = VK_NULL_HANDLE;
+    bool m_useVertexInput = false;
 	VkDeviceMemory m_vertexBufferMemory = VK_NULL_HANDLE;
 	VkBuffer m_indexBuffer = VK_NULL_HANDLE;
 	VkDeviceMemory m_indexBufferMemory = VK_NULL_HANDLE;
@@ -96,6 +109,13 @@ private:
 	uint32_t m_currentImageIndex = 0;
 	bool m_frameReady = false;
 	bool m_frameSubmitted = false;
+	dy::RHI::DescriptorIndex m_nextDescriptorIndex = 0;
 
-	VulkanCommandList m_commandList;
+	VulkanCommandList* m_commandList = nullptr;
+	dy::RHI::ITexture* m_backBuffer = nullptr;
+	std::vector<dy::RHI::ITexture*> m_ownedTextures;
+	std::vector<dy::RHI::IPipelineState*> m_ownedPipelineStates;
 };
+
+
+
