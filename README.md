@@ -1,6 +1,6 @@
 ﻿# dy engine
 
-cmake build options
-- ENABLE_D3D12
-- ENABLE_METAL
-- ENABLE_VULKAN
+cmake build options (-D =ON)
+- USE_D3D12
+- USE_METAL
+- USE_VULKAN
