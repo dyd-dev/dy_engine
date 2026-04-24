@@ -24,13 +24,6 @@ dy::RHI::IDevice* dy::RHI::IDevice::Create(const void *windowHandle)
 #else
 	device = new Backends::NullDevice();
 #endif
-	if(device)
-	{
-		if (device->Initialize(windowHandle) != 0)
-		{
-			delete device;
-			device = nullptr;
-		}
-	}
+	if(device) device->Initialize(windowHandle);
 	return device;
 }
