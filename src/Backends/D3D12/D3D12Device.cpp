@@ -275,6 +275,7 @@ namespace dy::Backends
         psoDesc.PS = CD3DX12_SHADER_BYTECODE(psBlob.Get());
 
         psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
+        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; // OBJ(CCW)와 기존 삼각형(CW) 모두 표시하기 위함
         psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
         psoDesc.DepthStencilState.DepthEnable = FALSE; // 일단 깊이 테스트는 끔
         psoDesc.DepthStencilState.StencilEnable = FALSE;

@@ -26,6 +26,8 @@ namespace dy::Backends
         case RHI::Format::R32G32B32A32_FLOAT:   return DXGI_FORMAT_R32G32B32A32_FLOAT;
         case RHI::Format::D32_FLOAT:            return DXGI_FORMAT_D32_FLOAT;
         case RHI::Format::D24_UNORM_S8_UINT:    return DXGI_FORMAT_D24_UNORM_S8_UINT;
+        case RHI::Format::R32_UINT:             return DXGI_FORMAT_R32_UINT;
+        case RHI::Format::R16_UINT:             return DXGI_FORMAT_R16_UINT;
         case RHI::Format::Unknown:
         default:                                return DXGI_FORMAT_UNKNOWN;
         }
