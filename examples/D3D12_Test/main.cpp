@@ -40,7 +40,7 @@ int main()
     std::vector<Graphics::Vertex> vertices;
     std::vector<uint32_t> indices;
 
-    if (!Graphics::ObjLoader::Load("Lowpoly_Tree.obj", vertices, indices)) {
+    if (!Graphics::ObjLoader::Load("examples/D3D12_Test/Lowpoly_tree.obj", vertices, indices)) {
         std::cerr << "OBJ 로드 실패!" << std::endl;
 		system("pause");
         return -1;
