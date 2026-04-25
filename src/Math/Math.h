@@ -27,6 +27,20 @@
 
 namespace dy::Math
 {
+	struct alignas(8) float2
+	{
+		union
+		{
+			struct
+			{
+				float x, y;
+			};
+			float data[2];
+		};
+
+		inline float2() = default;
+		inline float2(float _x, float _y) : x(_x), y(_y) {}
+	};
 	struct alignas(16) float3
 	{
 		union {
