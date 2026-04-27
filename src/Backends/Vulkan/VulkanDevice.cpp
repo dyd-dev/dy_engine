@@ -83,7 +83,9 @@ int VulkanDevice::InitializeForTest(const void* windowHandle, const std::string&
         m_swapchain.Initialize(m_context, m_windowHandle);
         if (!CreateTextureSampler()) return -1;
         if (!CreateDescriptorSetLayout()) return -1;
+        if (!CreateLightingVolumeBuffers()) return -1;
         if (!CreateDescriptorPool()) return -1;
+        if (!CreateDescriptorSets()) return -1;
         m_pipeline.Initialize(m_context, m_swapchain.GetImageFormat(), m_swapchain.GetExtent(), m_descriptorSetLayout, m_shaderOutputDirectory, m_useVertexInput);
         if (!CreateFramebuffers()) return -1;
         if (!CreateCommandBuffer()) return -1;
@@ -130,6 +132,10 @@ bool VulkanDevice::UploadTestMesh(const std::vector<float>& vertices, const std:
     return true;
 }
 
+void VulkanDevice::SetLightingVolumeProfile(const VulkanLightingVolumeProfile& profile) {
+	m_lightingVolumeProfile = profile;
+}
+
 int VulkanDevice::Initialize(const void *windowHandle) {
 	m_windowHandle = const_cast<void*>(windowHandle);
 	if (!m_windowHandle) return -1;
@@ -152,6 +158,7 @@ int VulkanDevice::Initialize(const void *windowHandle) {
 		if (!CreateTextureImage()) return -1;
 		if (!CreateTextureImageView()) return -1;
 		if (!CreateTextureSampler()) return -1;
+		if (!CreateLightingVolumeBuffers()) return -1;
 		if (!CreateFramebuffers()) return -1;
 		if (!CreateCommandBuffer()) return -1;
 		if (!CreateSyncObjects()) return -1;
@@ -246,6 +253,7 @@ void VulkanDevice::Submit(dy::RHI::ICommandList** cmdLists, uint32_t count) {
 	if (!m_frameReady || count == 0 || !cmdLists || !cmdLists[0]) return;
 
 	VulkanCommandList* vulkanCmd = static_cast<VulkanCommandList*>(cmdLists[0]);
+	UpdateLightingVolumeBuffer();
 	RecordCommandBuffer(*vulkanCmd);
 
 	const VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
@@ -525,15 +533,44 @@ bool VulkanDevice::CreateTextureSampler() {
 	return vkCreateSampler(m_context.device, &info, nullptr, &m_textureSampler) == VK_SUCCESS;
 }
 
+bool VulkanDevice::CreateLightingVolumeBuffers() {
+	const VkDeviceSize bufferSize = sizeof(VulkanLightingVolumeProfile);
+	m_lightingVolumeBuffers.resize(kMaxFramesInFlight, VK_NULL_HANDLE);
+	m_lightingVolumeBufferMemories.resize(kMaxFramesInFlight, VK_NULL_HANDLE);
+	m_lightingVolumeMappedBuffers.resize(kMaxFramesInFlight, nullptr);
+
+	for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
+		VulkanResources::CreateBuffer(
+			m_context,
+			bufferSize,
+			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			m_lightingVolumeBuffers[i],
+			m_lightingVolumeBufferMemories[i]
+		);
+
+		if (vkMapMemory(m_context.device, m_lightingVolumeBufferMemories[i], 0, bufferSize, 0, &m_lightingVolumeMappedBuffers[i]) != VK_SUCCESS) {
+			return false;
+		}
+		memcpy(m_lightingVolumeMappedBuffers[i], &m_lightingVolumeProfile, sizeof(m_lightingVolumeProfile));
+	}
+
+	return true;
+}
+
 bool VulkanDevice::CreateDescriptorSetLayout() {
-	VkDescriptorSetLayoutBinding b = { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT };
-	VkDescriptorSetLayoutCreateInfo info = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b };
+	std::array<VkDescriptorSetLayoutBinding, 2> bindings = {};
+	bindings[0] = { .binding = 0, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT };
+	bindings[1] = { .binding = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT };
+	VkDescriptorSetLayoutCreateInfo info = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = static_cast<uint32_t>(bindings.size()), .pBindings = bindings.data() };
 	return vkCreateDescriptorSetLayout(m_context.device, &info, nullptr, &m_descriptorSetLayout) == VK_SUCCESS;
 }
 
 bool VulkanDevice::CreateDescriptorPool() {
-	VkDescriptorPoolSize s = { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = kMaxFramesInFlight };
-	VkDescriptorPoolCreateInfo info = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = kMaxFramesInFlight, .poolSizeCount = 1, .pPoolSizes = &s };
+	std::array<VkDescriptorPoolSize, 2> poolSizes = {};
+	poolSizes[0] = { .type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .descriptorCount = kMaxFramesInFlight };
+	poolSizes[1] = { .type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .descriptorCount = kMaxFramesInFlight };
+	VkDescriptorPoolCreateInfo info = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = kMaxFramesInFlight, .poolSizeCount = static_cast<uint32_t>(poolSizes.size()), .pPoolSizes = poolSizes.data() };
 	return vkCreateDescriptorPool(m_context.device, &info, nullptr, &m_descriptorPool) == VK_SUCCESS;
 }
 
@@ -543,11 +580,27 @@ bool VulkanDevice::CreateDescriptorSets() {
 	m_descriptorSets.resize(kMaxFramesInFlight);
 	if (vkAllocateDescriptorSets(m_context.device, &alloc, m_descriptorSets.data()) != VK_SUCCESS) return false;
 	for (size_t i = 0; i < kMaxFramesInFlight; i++) {
+		std::vector<VkWriteDescriptorSet> writes;
+		writes.reserve(2);
+
 		VkDescriptorImageInfo img = { .sampler = m_textureSampler, .imageView = m_textureImageView, .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-		VkWriteDescriptorSet write = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_descriptorSets[i], .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &img };
-		vkUpdateDescriptorSets(m_context.device, 1, &write, 0, nullptr);
+		if (m_textureImageView != VK_NULL_HANDLE) {
+			writes.push_back({ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_descriptorSets[i], .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &img });
+		}
+
+		VkDescriptorBufferInfo lightingBufferInfo = { .buffer = m_lightingVolumeBuffers[i], .offset = 0, .range = sizeof(VulkanLightingVolumeProfile) };
+		writes.push_back({ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = m_descriptorSets[i], .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = &lightingBufferInfo });
+		vkUpdateDescriptorSets(m_context.device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 	}
 	return true;
+}
+
+void VulkanDevice::UpdateLightingVolumeBuffer() {
+	if (m_currentFrameIndex >= m_lightingVolumeMappedBuffers.size() || m_lightingVolumeMappedBuffers[m_currentFrameIndex] == nullptr) {
+		return;
+	}
+
+	memcpy(m_lightingVolumeMappedBuffers[m_currentFrameIndex], &m_lightingVolumeProfile, sizeof(m_lightingVolumeProfile));
 }
 
 void VulkanDevice::RecreateSwapchain() {
@@ -586,6 +639,20 @@ void VulkanDevice::DestroyDeviceResources() {
 		if (m_textureSampler != VK_NULL_HANDLE) vkDestroySampler(m_context.device, m_textureSampler, nullptr);
 		if (m_textureImageView != VK_NULL_HANDLE) vkDestroyImageView(m_context.device, m_textureImageView, nullptr);
 		if (m_textureImage != VK_NULL_HANDLE) { vkDestroyImage(m_context.device, m_textureImage, nullptr); vkFreeMemory(m_context.device, m_textureImageMemory, nullptr); }
+		for (size_t i = 0; i < m_lightingVolumeBuffers.size(); ++i) {
+			if (m_lightingVolumeMappedBuffers[i] != nullptr) {
+				vkUnmapMemory(m_context.device, m_lightingVolumeBufferMemories[i]);
+			}
+			if (m_lightingVolumeBuffers[i] != VK_NULL_HANDLE) {
+				vkDestroyBuffer(m_context.device, m_lightingVolumeBuffers[i], nullptr);
+			}
+			if (m_lightingVolumeBufferMemories[i] != VK_NULL_HANDLE) {
+				vkFreeMemory(m_context.device, m_lightingVolumeBufferMemories[i], nullptr);
+			}
+		}
+		m_lightingVolumeBuffers.clear();
+		m_lightingVolumeBufferMemories.clear();
+		m_lightingVolumeMappedBuffers.clear();
 		if (m_descriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(m_context.device, m_descriptorPool, nullptr);
 		if (m_descriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(m_context.device, m_descriptorSetLayout, nullptr);
 		for (auto s : m_imageAvailableSemaphores) vkDestroySemaphore(m_context.device, s, nullptr);

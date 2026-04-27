@@ -7,6 +7,17 @@
 #include <cstdint>
 #include <vector>
 
+struct VulkanLightingVolumeProfile
+{
+	float globalLightDirection[4] = { -0.45f, -0.8f, -0.35f, 1.0f };
+	float globalLightColor[4] = { 1.0f, 0.96f, 0.86f, 1.0f };
+	float spotLightPosition[4] = { 0.0f, 1.6f, 1.8f, 1.0f };
+	float spotLightDirection[4] = { 0.0f, -0.7f, -1.0f, 1.0f };
+	float spotLightColor[4] = { 0.55f, 0.72f, 1.0f, 4.0f };
+	float volumeParams[4] = { 0.16f, 1.0f, 0.08f, 0.68f };
+	float volumeParams2[4] = { 0.88f, 0.0f, 0.0f, 0.0f };
+};
+
 class VulkanDevice : public dy::RHI::IDevice
 {
 public:
@@ -42,6 +53,7 @@ public:
 public:
     int InitializeForTest(const void* windowHandle, const std::string& shaderDir);
     bool UploadTestMesh(const std::vector<float>& vertices, const std::vector<uint32_t>& indices);
+	void SetLightingVolumeProfile(const VulkanLightingVolumeProfile& profile);
 protected:
     int Initialize(const void *windowHandle) override;
 
@@ -54,6 +66,7 @@ private:
 	bool CreateDescriptorSetLayout();
 	bool CreateDescriptorPool();
 	bool CreateDescriptorSets();
+	bool CreateLightingVolumeBuffers();
 	bool CreateFramebuffers();
 	bool CreateCommandPool();
 	bool CreateCommandBuffer();
@@ -67,6 +80,7 @@ private:
 	void DestroyDeviceResources();
 
 	void RecordCommandBuffer(const VulkanCommandList& commandList);
+	void UpdateLightingVolumeBuffer();
 	void UpdateBackBufferMetadata();
 
 	// Context and Components
@@ -96,6 +110,10 @@ private:
 	VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
 	VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
 	std::vector<VkDescriptorSet> m_descriptorSets;
+	std::vector<VkBuffer> m_lightingVolumeBuffers;
+	std::vector<VkDeviceMemory> m_lightingVolumeBufferMemories;
+	std::vector<void*> m_lightingVolumeMappedBuffers;
+	VulkanLightingVolumeProfile m_lightingVolumeProfile;
 	
 	std::vector<VkSemaphore> m_imageAvailableSemaphores;
 	std::vector<VkSemaphore> m_renderFinishedSemaphores;
