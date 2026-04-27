@@ -1,11 +1,22 @@
+cbuffer TransformDate : register(b0)
+{
+    float4 offset;
+    uint textureIndex;
+};
+
+Texture2D GlobalTextures[] : register(t0, space0);
+SamplerState LinearSampler : register(s0);
+
 struct PixelInput
 {
     float4 Pos : SV_POSITION;
     float2 UV : TEXCOORD;
+    float3 Color : COLOR;
 };
 
 float4 main(PixelInput input) : SV_TARGET
 {
-    // 일단 텍스처 없이 흰색(1, 1, 1, 1)으로 칠해서 모델 형태를 확인합니다.
-    return float4(1.0f, 1.0f, 1.0f, 1.0f);
+    // Bindless texture sampling
+    float4 texColor = GlobalTextures[textureIndex].Sample(LinearSampler, input.UV);
+    return texColor * float4(input.Color, 1.0f);
 }

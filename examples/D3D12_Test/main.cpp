@@ -4,11 +4,16 @@
 #include "RHI/IBuffer.h"
 #include "RHI/IPipelineState.h"
 #include "Graphics/ObjLoader.h"
+#include "RHI/ITexture.h"
 #include <iostream>
 #include <vector>
 #include <cstring>
 #include <fstream>
 #include <string>
+
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
+
 
 using namespace dy;
 
@@ -26,6 +31,8 @@ std::string ReadTextFile(const char* filepath)
 
 struct alignas(16) TransformData {
 	float offsetX, offsetY, offsetZ, offsetW;
+    uint32_t textureIndex;
+    uint32_t pad1, pad2, pad3;
 };
 
 int main()
@@ -40,7 +47,8 @@ int main()
     std::vector<Graphics::Vertex> vertices;
     std::vector<uint32_t> indices;
 
-    if (!Graphics::ObjLoader::Load("examples/D3D12_Test/Lowpoly_tree.obj", vertices, indices)) {
+    std::string texturePath;
+    if (!Graphics::ObjLoader::Load("examples/D3D12_Test/Lowpoly_tree.obj", vertices, indices, &texturePath)) {
         std::cerr << "OBJ 로드 실패!" << std::endl;
 		system("pause");
         return -1;
@@ -101,11 +109,41 @@ int main()
 
 
     
+    // 텍스처 로드 (STB Image)
+    int texWidth = 1, texHeight = 1, texChannels = 4;
+    stbi_set_flip_vertically_on_load(true);
+    if (texturePath.empty()) {
+        texturePath = "examples/D3D12_Test/Lowpoly_tree.png"; // Fallback
+    }
+    unsigned char* pixels = stbi_load(texturePath.c_str(), &texWidth, &texHeight, &texChannels, 4);
+    
+    RHI::ITexture* modelTexture = nullptr;
+    uint32_t texSlot = dy::RHI::INVALID_DESCRIPTOR_INDEX;
+    
+    RHI::TextureDesc texDesc = {};
+    texDesc.width = texWidth;
+    texDesc.height = texHeight;
+    texDesc.format = RHI::Format::R8G8B8A8_UNORM;
+    texDesc.usage = RHI::TextureUsage::ShaderResource;
+    modelTexture = device->CreateTexture(texDesc);
+    
+    if (pixels) {
+        device->UpdateTexture(modelTexture, pixels, texWidth * 4);
+        stbi_image_free(pixels);
+    } else {
+        std::cout << "텍스처 이미지가 지정되지 않았습니다. 기본 흰색(단색) 텍스처를 적용합니다." << std::endl;
+        unsigned char defaultPixels[4] = { 255, 255, 255, 255 }; // 흰색 (1x1)
+        device->UpdateTexture(modelTexture, defaultPixels, 4);
+    }
+    
+    texSlot = device->AllocateDescriptorSlot();
+    device->UpdateDescriptorSlot(texSlot, modelTexture);
+
     while (window.IsRunning())
     {
         window.PollEvents();
 
-        TransformData transform = { 0.0f, -0.8f, 0.5f, 1.0f };
+        TransformData transform = { 0.0f, -0.8f, 0.5f, 1.0f, texSlot, 0, 0, 0 };
 
         device->BeginFrame();
 
@@ -141,6 +179,7 @@ int main()
     
 	delete indexBuffer;
     delete vertexBuffer;
+    delete modelTexture;
     delete pso;
     delete device;
 

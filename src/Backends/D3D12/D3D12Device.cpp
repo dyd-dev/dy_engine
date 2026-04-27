@@ -215,7 +215,7 @@ namespace dy::Backends
         // 2. Root Parameter 정의 (1.1 버전의 Descriptor Range 사용)
         CD3DX12_DESCRIPTOR_RANGE1 srvRange;
         // 이제 1.1 버전이므로 5번째 인자에 당당하게 최적화 플래그를 넣을 수 있습니다!
-        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE);
+        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, (UINT)-1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE);
 
         CD3DX12_ROOT_PARAMETER1 rootParameters[2] = {};
         rootParameters[0].InitAsConstants(24, 0); // register(b0)
@@ -238,10 +238,11 @@ namespace dy::Backends
         Microsoft::WRL::ComPtr<ID3D12RootSignature> pRootSignature;
         m_internal->device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&pRootSignature));
 
-        // 3. Input Layout (Vertex 구조체: float3 Pos, float2 UV)
+        // 3. Input Layout (Vertex 구조체: float3 Pos, float2 UV, float3 Color)
         D3D12_INPUT_ELEMENT_DESC inputLayout[] = {
             { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-            { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
+            { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
+            { "COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 20, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
         };
 
         // 4. PSO 설정 (CD3DX12 헬퍼로 대폭 축소!)

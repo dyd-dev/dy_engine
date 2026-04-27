@@ -26,4 +26,4 @@ FetchContent_MakeAvailable(stb)
 target_link_libraries(${PROJECT_NAME} PRIVATE glfw)
 target_compile_definitions(${PROJECT_NAME} PRIVATE GLFW_INCLUDE_NONE)
 
-target_include_directories(${PROJECT_NAME} PRIVATE ${stb_SOURCE_DIR})
+target_include_directories(${PROJECT_NAME} PUBLIC ${stb_SOURCE_DIR})
