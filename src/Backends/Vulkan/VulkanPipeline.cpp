@@ -1,7 +1,74 @@
 #include <array>
+#include <cstdint>
 #include "VulkanPipeline.h"
 #include <fstream>
 #include <stdexcept>
+
+namespace
+{
+    constexpr uint32_t kMeshVertexBinding = 0;
+    constexpr uint32_t kMeshPositionLocation = 0;
+    constexpr uint32_t kMeshNormalLocation = 1;
+    constexpr uint32_t kMeshUvLocation = 2;
+    constexpr uint32_t kMeshPositionOffset = 0;
+    constexpr uint32_t kMeshNormalOffset = sizeof(float) * 3;
+    constexpr uint32_t kMeshUvOffset = sizeof(float) * 6;
+    constexpr uint32_t kMeshVertexStride = sizeof(float) * 8;
+
+    VkVertexInputBindingDescription CreateMeshVertexBindingDescription()
+    {
+        VkVertexInputBindingDescription bindingDescription{};
+        bindingDescription.binding = kMeshVertexBinding;
+        bindingDescription.stride = kMeshVertexStride;
+        bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        return bindingDescription;
+    }
+
+    std::array<VkVertexInputAttributeDescription, 3> CreateMeshVertexAttributeDescriptions()
+    {
+        std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions{};
+        attributeDescriptions[0].binding = kMeshVertexBinding;
+        attributeDescriptions[0].location = kMeshPositionLocation;
+        attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attributeDescriptions[0].offset = kMeshPositionOffset;
+
+        attributeDescriptions[1].binding = kMeshVertexBinding;
+        attributeDescriptions[1].location = kMeshNormalLocation;
+        attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attributeDescriptions[1].offset = kMeshNormalOffset;
+
+        attributeDescriptions[2].binding = kMeshVertexBinding;
+        attributeDescriptions[2].location = kMeshUvLocation;
+        attributeDescriptions[2].format = VK_FORMAT_R32G32_SFLOAT;
+        attributeDescriptions[2].offset = kMeshUvOffset;
+        return attributeDescriptions;
+    }
+
+    VkPipelineRasterizationStateCreateInfo CreateDefaultRasterizerState()
+    {
+        VkPipelineRasterizationStateCreateInfo rasterizer{};
+        rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+        rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rasterizer.lineWidth = 1.0f;
+        return rasterizer;
+    }
+
+    VkPipelineColorBlendAttachmentState CreateAlphaBlendAttachmentState()
+    {
+        VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+        colorBlendAttachment.blendEnable = VK_TRUE;
+        colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+        colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+        colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        return colorBlendAttachment;
+    }
+}
 
 void VulkanPipeline::Initialize(const VulkanContext& context, VkFormat swapchainFormat, VkExtent2D extent, VkDescriptorSetLayout descriptorSetLayout, const std::string& shaderDir, bool useVertexInput) {
     // 1. Render Pass
@@ -45,26 +112,8 @@ void VulkanPipeline::Initialize(const VulkanContext& context, VkFormat swapchain
         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fragShaderModule, .pName = "main" }
     };
 
-        VkVertexInputBindingDescription bindingDescription{};
-    bindingDescription.binding = 0;
-    bindingDescription.stride = sizeof(float) * 8; // 3 pos + 3 normal + 2 uv = 8 floats = 32 bytes
-    bindingDescription.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
-
-    std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions{};
-    attributeDescriptions[0].binding = 0;
-    attributeDescriptions[0].location = 0;
-    attributeDescriptions[0].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributeDescriptions[0].offset = 0;
-
-    attributeDescriptions[1].binding = 0;
-    attributeDescriptions[1].location = 1;
-    attributeDescriptions[1].format = VK_FORMAT_R32G32B32_SFLOAT;
-    attributeDescriptions[1].offset = sizeof(float) * 3;
-
-    attributeDescriptions[2].binding = 0;
-    attributeDescriptions[2].location = 2;
-    attributeDescriptions[2].format = VK_FORMAT_R32G32_SFLOAT;
-    attributeDescriptions[2].offset = sizeof(float) * 6;
+    VkVertexInputBindingDescription bindingDescription = CreateMeshVertexBindingDescription();
+    std::array<VkVertexInputAttributeDescription, 3> attributeDescriptions = CreateMeshVertexAttributeDescriptions();
 
     VkPipelineVertexInputStateCreateInfo vertexInputInfo = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO
@@ -86,9 +135,9 @@ void VulkanPipeline::Initialize(const VulkanContext& context, VkFormat swapchain
     VkViewport viewport = { .x = 0.0f, .y = 0.0f, .width = (float)extent.width, .height = (float)extent.height, .minDepth = 0.0f, .maxDepth = 1.0f };
     VkRect2D scissor = { .offset = {0, 0}, .extent = extent };
     VkPipelineViewportStateCreateInfo viewportState = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .pViewports = &viewport, .scissorCount = 1, .pScissors = &scissor };
-    VkPipelineRasterizationStateCreateInfo rasterizer = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_BACK_BIT, .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, .lineWidth = 1.0f };
+    VkPipelineRasterizationStateCreateInfo rasterizer = CreateDefaultRasterizerState();
     VkPipelineMultisampleStateCreateInfo multisampling = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
-    VkPipelineColorBlendAttachmentState colorBlendAttachment = { .blendEnable = VK_TRUE, .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA, .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, .colorBlendOp = VK_BLEND_OP_ADD, .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE, .dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO, .alphaBlendOp = VK_BLEND_OP_ADD, .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT };
+    VkPipelineColorBlendAttachmentState colorBlendAttachment = CreateAlphaBlendAttachmentState();
     VkPipelineColorBlendStateCreateInfo colorBlending = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1, .pAttachments = &colorBlendAttachment };
     
     VkPushConstantRange pushConstantRange = { .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, .offset = 0, .size = 128 };
