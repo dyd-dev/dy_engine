@@ -19,7 +19,7 @@ layout(set = 0, binding = 1) uniform LightingVolumeProfile {
 } lighting;
 
 // Shadow Map (Directional Light용 깊이 텍스처).
-// VulkanDevice가 binding=2로 바인드. CLAMP_TO_BORDER + 흰색 border라
+// The selected RHI backend binds this at binding=2.
 // frustum 밖 픽셀은 그림자 없는 것으로 처리됨.
 layout(set = 0, binding = 2) uniform sampler2D shadowMap;
 

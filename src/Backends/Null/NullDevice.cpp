@@ -55,7 +55,9 @@ namespace dy::Backends
 			void BindGraphicsPipeline(RHI::IPipelineState*) override {}
 			void BindGlobalDescriptorHeap() override {}
 			void BindVertexBuffer(RHI::IBuffer*, uint32_t, uint32_t) override {}
+			void BindVertexStorageBuffer(RHI::IBuffer*, uint32_t, uint32_t) override {}
 			void BindIndexBuffer(RHI::IBuffer*, RHI::Format, uint32_t) override {}
+			void BindIndexStorageBuffer(RHI::IBuffer*, RHI::Format, uint32_t) override {}
 			void SetPushConstants(uint32_t, const void*) override {}
 			void SetRenderTargets(uint32_t, RHI::ITexture**, RHI::ITexture*) override {}
 			void SetViewport(const RHI::Viewport&) override {}
@@ -132,6 +134,8 @@ namespace dy::Backends
 
 	void NullDevice::UpdateDescriptorSlot(RHI::DescriptorIndex, RHI::ITexture*) {}
 
+	void NullDevice::UpdateGlobalConstants(uint32_t, const void*, uint32_t) {}
+
 	void NullDevice::DestroyBuffer(RHI::IBuffer* buffer)
 	{
 		delete buffer;
@@ -152,7 +156,7 @@ namespace dy::Backends
 		return &m_impl->backBuffer;
 	}
 
-	int NullDevice::Initialize(const void*)
+	int NullDevice::Initialize(const void*, const RHI::DeviceDesc&)
 	{
 		return 0;
 	}

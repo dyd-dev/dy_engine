@@ -11,6 +11,9 @@
 #include <windows.h>
 #endif
 
+namespace dy::Backends
+{
+
 void VulkanSwapchain::Initialize(const VulkanContext& context, void* windowHandle) {
     SwapchainSupportDetails swapchainSupport = QuerySwapchainSupport(context.physicalDevice, context.surface);
 
@@ -145,4 +148,6 @@ VkExtent2D VulkanSwapchain::ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& cap
 
         return actualExtent;
     }
+}
+
 }

@@ -2,6 +2,9 @@
 #include <algorithm>
 #include <cstring>
 
+namespace dy::Backends
+{
+
 void VulkanCommandList::Begin()
 {
 	m_clearColor = { { 0.4f, 0.7f, 1.0f, 1.0f } };
@@ -10,9 +13,15 @@ void VulkanCommandList::Begin()
 	m_pendingVertexBuffer = nullptr;
 	m_pendingVertexStride = 0;
 	m_pendingVertexOffset = 0;
+	m_pendingVertexStorageBuffer = nullptr;
+	m_pendingVertexStorageStride = 0;
+	m_pendingVertexStorageOffset = 0;
 	m_pendingIndexBuffer = nullptr;
 	m_pendingIndexFormat = dy::RHI::Format::Unknown;
 	m_pendingIndexOffset = 0;
+	m_pendingIndexStorageBuffer = nullptr;
+	m_pendingIndexStorageFormat = dy::RHI::Format::Unknown;
+	m_pendingIndexStorageOffset = 0;
 	m_hasPendingViewport = false;
 	m_hasPendingScissor = false;
 	m_drawCalls.clear();
@@ -42,11 +51,25 @@ void VulkanCommandList::BindVertexBuffer(dy::RHI::IBuffer* buffer, uint32_t stri
 	m_pendingVertexOffset = offset;
 }
 
+void VulkanCommandList::BindVertexStorageBuffer(dy::RHI::IBuffer* buffer, uint32_t stride, uint32_t offset)
+{
+	m_pendingVertexStorageBuffer = buffer;
+	m_pendingVertexStorageStride = stride;
+	m_pendingVertexStorageOffset = offset;
+}
+
 void VulkanCommandList::BindIndexBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset)
 {
 	m_pendingIndexBuffer = buffer;
 	m_pendingIndexFormat = format;
 	m_pendingIndexOffset = offset;
+}
+
+void VulkanCommandList::BindIndexStorageBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset)
+{
+	m_pendingIndexStorageBuffer = buffer;
+	m_pendingIndexStorageFormat = format;
+	m_pendingIndexStorageOffset = offset;
 }
 
 void VulkanCommandList::ClearColor(dy::RHI::ITexture* renderTarget, float r, float g, float b, float a)
@@ -79,9 +102,15 @@ void VulkanCommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCou
 	drawCall.vertexBuffer = m_pendingVertexBuffer;
 	drawCall.vertexStride = m_pendingVertexStride;
 	drawCall.vertexBufferOffset = m_pendingVertexOffset;
+	drawCall.vertexStorageBuffer = m_pendingVertexStorageBuffer;
+	drawCall.vertexStorageStride = m_pendingVertexStorageStride;
+	drawCall.vertexStorageOffset = m_pendingVertexStorageOffset;
 	drawCall.indexBuffer = m_pendingIndexBuffer;
 	drawCall.indexFormat = m_pendingIndexFormat;
 	drawCall.indexOffset = m_pendingIndexOffset;
+	drawCall.indexStorageBuffer = m_pendingIndexStorageBuffer;
+	drawCall.indexStorageFormat = m_pendingIndexStorageFormat;
+	drawCall.indexStorageOffset = m_pendingIndexStorageOffset;
 	drawCall.hasViewport = m_hasPendingViewport;
 	drawCall.hasScissor = m_hasPendingScissor;
 	drawCall.viewport = m_pendingViewport;
@@ -105,9 +134,15 @@ void VulkanCommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t insta
 	drawCall.vertexBuffer = m_pendingVertexBuffer;
 	drawCall.vertexStride = m_pendingVertexStride;
 	drawCall.vertexBufferOffset = m_pendingVertexOffset;
+	drawCall.vertexStorageBuffer = m_pendingVertexStorageBuffer;
+	drawCall.vertexStorageStride = m_pendingVertexStorageStride;
+	drawCall.vertexStorageOffset = m_pendingVertexStorageOffset;
 	drawCall.indexBuffer = m_pendingIndexBuffer;
 	drawCall.indexFormat = m_pendingIndexFormat;
 	drawCall.indexOffset = m_pendingIndexOffset;
+	drawCall.indexStorageBuffer = m_pendingIndexStorageBuffer;
+	drawCall.indexStorageFormat = m_pendingIndexStorageFormat;
+	drawCall.indexStorageOffset = m_pendingIndexStorageOffset;
 	drawCall.hasViewport = m_hasPendingViewport;
 	drawCall.hasScissor = m_hasPendingScissor;
 	drawCall.viewport = m_pendingViewport;
@@ -120,4 +155,6 @@ void VulkanCommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t insta
 
 void VulkanCommandList::End()
 {
+}
+
 }

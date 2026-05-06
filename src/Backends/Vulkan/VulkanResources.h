@@ -2,6 +2,9 @@
 #include "VulkanContext.h"
 #include <vulkan/vulkan.h>
 
+namespace dy::Backends
+{
+
 class VulkanResources {
 public:
     static uint32_t FindMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties);
@@ -27,3 +30,5 @@ public:
     static VkCommandBuffer BeginSingleTimeCommands(const VulkanContext& context, VkCommandPool commandPool);
     static void EndSingleTimeCommands(const VulkanContext& context, VkCommandPool commandPool, VkCommandBuffer commandBuffer);
 };
+
+}

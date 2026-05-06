@@ -2,11 +2,10 @@ add_executable(vulkan_lighting_volume
 	main.cpp
 )
 
-target_link_libraries(vulkan_lighting_volume PRIVATE ${PROJECT_NAME} Backend_Vulkan)
+target_link_libraries(vulkan_lighting_volume PRIVATE ${PROJECT_NAME})
 
 target_include_directories(vulkan_lighting_volume PRIVATE
 	${CMAKE_SOURCE_DIR}/src
-	${CMAKE_SOURCE_DIR}/src/Backends/Vulkan
 )
 
 set_target_properties(vulkan_lighting_volume PROPERTIES FOLDER "Examples")
@@ -21,6 +20,7 @@ set(VULKAN_LIGHTING_VOLUME_SHADER_OUTPUTS
 	${VULKAN_LIGHTING_VOLUME_SHADER_OUTPUT_DIR}/triangle.vert.spv
 	${VULKAN_LIGHTING_VOLUME_SHADER_OUTPUT_DIR}/triangle.frag.spv
 	${VULKAN_LIGHTING_VOLUME_SHADER_OUTPUT_DIR}/shadow.vert.spv
+	${VULKAN_LIGHTING_VOLUME_SHADER_OUTPUT_DIR}/trig.comp.spv
 )
 
 add_custom_command(
@@ -50,9 +50,18 @@ add_custom_command(
 	VERBATIM
 )
 
+add_custom_command(
+	OUTPUT ${VULKAN_LIGHTING_VOLUME_SHADER_OUTPUT_DIR}/trig.comp.spv
+	COMMAND ${CMAKE_COMMAND} -E make_directory ${VULKAN_LIGHTING_VOLUME_SHADER_OUTPUT_DIR}
+	COMMAND ${VULKAN_GLSLANG_VALIDATOR} -V ${VULKAN_LIGHTING_VOLUME_SHADER_SOURCE_DIR}/trig.comp -o ${VULKAN_LIGHTING_VOLUME_SHADER_OUTPUT_DIR}/trig.comp.spv
+	DEPENDS ${VULKAN_LIGHTING_VOLUME_SHADER_SOURCE_DIR}/trig.comp
+	COMMENT "Compiling Vulkan Lighting Volume trigonometry compute shader"
+	VERBATIM
+)
+
 add_custom_target(VulkanLightingVolumeShaders ALL DEPENDS ${VULKAN_LIGHTING_VOLUME_SHADER_OUTPUTS})
 add_dependencies(vulkan_lighting_volume VulkanLightingVolumeShaders)
 
 target_compile_definitions(vulkan_lighting_volume PRIVATE
-	VULKAN_LIGHTING_VOLUME_SHADER_DIR="${VULKAN_LIGHTING_VOLUME_SHADER_OUTPUT_DIR_CMAKE}"
+	DY_SHADER_DIR="${VULKAN_LIGHTING_VOLUME_SHADER_OUTPUT_DIR_CMAKE}"
 )

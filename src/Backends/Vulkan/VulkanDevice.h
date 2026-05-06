@@ -7,6 +7,9 @@
 #include <cstdint>
 #include <vector>
 
+namespace dy::Backends
+{
+
 struct VulkanLightingVolumeProfile
 {
 	float globalLightDirection[4] = { -0.45f, -0.8f, -0.35f, 1.0f };
@@ -38,6 +41,7 @@ public:
 	dy::RHI::IPipelineState* CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) override;
 	[[nodiscard]] dy::RHI::DescriptorIndex AllocateDescriptorSlot() override;
 	void UpdateDescriptorSlot(dy::RHI::DescriptorIndex index, dy::RHI::ITexture* texture) override;
+	void UpdateGlobalConstants(uint32_t binding, const void* data, uint32_t size) override;
 
 	void DestroyBuffer(dy::RHI::IBuffer* buffer) override;
 	void DestroyTexture(dy::RHI::ITexture* texture) override;
@@ -55,7 +59,7 @@ public:
 	// 16개 float (column-major mat4) 포인터.
 	void SetShadowLightMatrix(const float* lightViewProjColumnMajor);
 protected:
-    int Initialize(const void *windowHandle) override;
+    int Initialize(const void* windowHandle, const dy::RHI::DeviceDesc& desc) override;
 
 private:
 	bool CreateInstance();
@@ -92,6 +96,8 @@ private:
 	void RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList);
 	void UpdateLightingVolumeBuffer();
 	void UpdateShadowMatrixBuffer();
+	void UpdateVertexStorageDescriptor(const VulkanCommandList& commandList);
+	void UpdateIndexStorageDescriptor(const VulkanCommandList& commandList);
 	void UpdateBackBufferMetadata();
 	VkFormat FindDepthFormat() const;
 	bool IsDepthFormatSupported(VkFormat format) const;
@@ -103,13 +109,16 @@ private:
 
 	void* m_windowHandle = nullptr;
 	std::string m_shaderOutputDirectory;
+	bool m_shadowMappingEnabled = false;
 
 	// Mesh Data
 	VkBuffer m_vertexBuffer = VK_NULL_HANDLE;
     bool m_useVertexInput = false;
 	VkDeviceMemory m_vertexBufferMemory = VK_NULL_HANDLE;
+	VkDeviceSize m_vertexBufferSize = 0;
 	VkBuffer m_indexBuffer = VK_NULL_HANDLE;
 	VkDeviceMemory m_indexBufferMemory = VK_NULL_HANDLE;
+	VkDeviceSize m_indexBufferSize = 0;
 	uint32_t m_indexCount = 0;
 
 	VkCommandPool m_commandPool = VK_NULL_HANDLE;
@@ -176,5 +185,5 @@ private:
 	std::vector<dy::RHI::IPipelineState*> m_ownedPipelineStates;
 };
 
-
+}
 

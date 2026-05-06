@@ -7,7 +7,6 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include "Backends/Vulkan/VulkanDevice.h"
 #include "Core/Types.h"
 #include "Graphics/Mesh.h"
 #include "Graphics/Shadow.h"
@@ -16,12 +15,30 @@
 #include "Platform/Window.h"
 #include "RHI/IBuffer.h"
 #include "RHI/ICommandList.h"
+#include "RHI/IDevice.h"
 
 using namespace dy;
+
+#ifndef DY_SHADER_DIR
+#define DY_SHADER_DIR nullptr
+#endif
 
 namespace
 {
 	constexpr float kFloorZ = -0.56f;
+
+	struct LightingVolumeProfile
+	{
+		float globalLightDirection[4] = { -0.45f, -0.8f, -0.35f, 1.0f };
+		float globalLightColor[4] = { 1.0f, 0.96f, 0.86f, 1.0f };
+		float spotLightPosition[4] = { 0.0f, 1.6f, 1.8f, 1.0f };
+		float spotLightDirection[4] = { 0.0f, -0.7f, -1.0f, 1.0f };
+		float spotLightColor[4] = { 0.55f, 0.72f, 1.0f, 4.0f };
+		float volumeParams[4] = { 0.16f, 1.0f, 0.08f, 0.68f };
+		float volumeParams2[4] = { 0.88f, 0.0f, 0.0f, 0.0f };
+		float cameraPosition[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+		float materialParams[4] = { 0.34f, 36.0f, 0.0f, 0.0f };
+	};
 
 	float Dot(const Math::float3& a, const Math::float3& b)
 	{
@@ -238,11 +255,13 @@ int main()
 	try
 	{
 		Platform::Window window(1280, 720, "Vulkan Lighting Volume Test");
-		std::unique_ptr<VulkanDevice> device = std::make_unique<VulkanDevice>();
-
-		if (device->InitializeForTest(window.GetHandle(), VULKAN_LIGHTING_VOLUME_SHADER_DIR) != 0)
+		RHI::DeviceDesc deviceDesc = {};
+		deviceDesc.shaderDirectory = DY_SHADER_DIR;
+		deviceDesc.enableShadowMapping = true;
+		std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(window.GetHandle(), deviceDesc));
+		if (!device)
 		{
-			throw std::runtime_error("Failed to initialize VulkanDevice for lighting volume test");
+			throw std::runtime_error("Failed to initialize RHI device for lighting volume test");
 		}
 
 		Graphics::MeshData meshData;
@@ -274,13 +293,15 @@ int main()
 		const uint32_t maxShadowIndexCount = maxShadowVertexCount > 2 ? (maxShadowVertexCount - 2) * 3 : 0;
 		const uint32_t maxVertexBytes = static_cast<uint32_t>(baseVertices.size() * sizeof(float) + maxShadowVertexCount * 8u * sizeof(float));
 		const uint32_t maxIndexBytes = static_cast<uint32_t>((baseIndices.size() + maxShadowIndexCount) * sizeof(uint32_t));
+		const dy::RHI::BufferUsage vertexStorageUsage = dy::RHI::BufferUsage::Vertex | dy::RHI::BufferUsage::Storage;
+		const dy::RHI::BufferUsage indexStorageUsage = dy::RHI::BufferUsage::Index | dy::RHI::BufferUsage::Storage;
 		std::array<RHI::IBuffer*, 2> vertexBuffers = {
-			device->CreateBuffer(RHI::BufferDesc{ maxVertexBytes, 8u * static_cast<uint32_t>(sizeof(float)), RHI::BufferUsage::Vertex }),
-			device->CreateBuffer(RHI::BufferDesc{ maxVertexBytes, 8u * static_cast<uint32_t>(sizeof(float)), RHI::BufferUsage::Vertex })
+			device->CreateBuffer(RHI::BufferDesc{ maxVertexBytes, 8u * static_cast<uint32_t>(sizeof(float)), vertexStorageUsage }),
+			device->CreateBuffer(RHI::BufferDesc{ maxVertexBytes, 8u * static_cast<uint32_t>(sizeof(float)), vertexStorageUsage })
 		};
 		std::array<RHI::IBuffer*, 2> indexBuffers = {
-			device->CreateBuffer(RHI::BufferDesc{ maxIndexBytes, static_cast<uint32_t>(sizeof(uint32_t)), RHI::BufferUsage::Index }),
-			device->CreateBuffer(RHI::BufferDesc{ maxIndexBytes, static_cast<uint32_t>(sizeof(uint32_t)), RHI::BufferUsage::Index })
+			device->CreateBuffer(RHI::BufferDesc{ maxIndexBytes, static_cast<uint32_t>(sizeof(uint32_t)), indexStorageUsage }),
+			device->CreateBuffer(RHI::BufferDesc{ maxIndexBytes, static_cast<uint32_t>(sizeof(uint32_t)), indexStorageUsage })
 		};
 
 		const float scale = 0.1f;
@@ -312,7 +333,7 @@ int main()
 			lightDirZ /= lightDirLength;
 			const float daylight = std::max(lightDirZ, 0.0f);
 
-			VulkanLightingVolumeProfile profile;
+			LightingVolumeProfile profile;
 			profile.globalLightDirection[0] = -lightDirX;
 			profile.globalLightDirection[1] = -lightDirY;
 			profile.globalLightDirection[2] = -lightDirZ;
@@ -350,7 +371,7 @@ int main()
 			profile.materialParams[1] = 42.0f;
 			profile.materialParams[2] = kFloorZ;
 			profile.materialParams[3] = 0.003f;
-			device->SetLightingVolumeProfile(profile);
+			device->UpdateGlobalConstants(1, &profile, sizeof(profile));
 
 			// Shadow Map용 Light-Space ViewProjection 갱신.
 			// Directional Light가 매 프레임 흔들리므로 LightViewProj도 매 프레임 재계산.
@@ -365,7 +386,7 @@ int main()
 			const Math::float4x4 lightViewProj = Graphics::ComputeDirectionalLightViewProj(
 				Math::float3(lightDirX, lightDirY, lightDirZ),
 				shadowMapDesc);
-			device->SetShadowLightMatrix(lightViewProj.m);
+			device->UpdateGlobalConstants(3, lightViewProj.m, sizeof(lightViewProj.m));
 
 			std::vector<float> frameVertices = baseVertices;
 			std::vector<uint32_t> frameIndices = baseIndices;
@@ -402,8 +423,8 @@ int main()
 
 			RHI::ICommandList* cmdList = device->AcquireCommandList();
 			cmdList->ClearColor(device->GetBackBuffer(), 0.025f, 0.035f, 0.052f, 1.0f);
-			cmdList->BindVertexBuffer(vertexBuffer, 8u * static_cast<uint32_t>(sizeof(float)), 0);
-			cmdList->BindIndexBuffer(indexBuffer, RHI::Format::R32_UINT, 0);
+			cmdList->BindVertexStorageBuffer(vertexBuffer, 8u * static_cast<uint32_t>(sizeof(float)), 0);
+			cmdList->BindIndexStorageBuffer(indexBuffer, RHI::Format::R32_UINT, 0);
 
 			struct
 			{

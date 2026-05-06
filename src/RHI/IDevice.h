@@ -23,11 +23,17 @@ namespace dy::RHI
 	using DescriptorIndex = uint32_t;
 	constexpr DescriptorIndex INVALID_DESCRIPTOR_INDEX = 0xFFFFFFFF;
 
+	struct DeviceDesc
+	{
+		const char* shaderDirectory = nullptr;
+		bool enableShadowMapping = false;
+	};
+
 	class IDevice
 	{
 	public:
 		virtual ~IDevice() = default;
-		static IDevice* Create(const void *windowHandle);
+		static IDevice* Create(const void* windowHandle, const DeviceDesc& desc = {});
 
 		// Global synchronization: Acquires the next swapchain image
 		// Must be called once per frame by the "main render thread"
@@ -55,6 +61,7 @@ namespace dy::RHI
 
 		// Binds an ITexture (SRV) to the allocated slot in the Global Heap.
 		virtual void UpdateDescriptorSlot(DescriptorIndex index, ITexture* texture) = 0;
+		virtual void UpdateGlobalConstants(uint32_t binding, const void* data, uint32_t size) = 0;
 
 		virtual void DestroyBuffer(IBuffer* buffer) = 0;
 		virtual void DestroyTexture(ITexture* texture) = 0;
@@ -65,6 +72,6 @@ namespace dy::RHI
 		virtual ITexture* GetBackBuffer() = 0;
 		
 	protected:
-		virtual int Initialize(const void *windowHandle) = 0;
+		virtual int Initialize(const void* windowHandle, const DeviceDesc& desc) = 0;
 	};
 }

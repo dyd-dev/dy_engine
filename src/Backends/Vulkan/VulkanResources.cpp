@@ -1,6 +1,9 @@
 #include "VulkanResources.h"
 #include <stdexcept>
 
+namespace dy::Backends
+{
+
 uint32_t VulkanResources::FindMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties memProps;
     vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
@@ -185,4 +188,6 @@ void VulkanResources::EndSingleTimeCommands(const VulkanContext& context, VkComm
     vkQueueSubmit(context.graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
     vkQueueWaitIdle(context.graphicsQueue);
     vkFreeCommandBuffers(context.device, commandPool, 1, &commandBuffer);
+}
+
 }

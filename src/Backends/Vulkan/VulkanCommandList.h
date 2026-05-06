@@ -5,6 +5,9 @@
 #include <cstdint>
 #include <vector>
 
+namespace dy::Backends
+{
+
 class VulkanDevice;
 
 class VulkanCommandList : public dy::RHI::ICommandList
@@ -13,7 +16,9 @@ public:
 	void BindGraphicsPipeline(dy::RHI::IPipelineState* pipelineState) override;
 	void BindGlobalDescriptorHeap() override {}
 	void BindVertexBuffer(dy::RHI::IBuffer* buffer, uint32_t stride, uint32_t offset) override;
+	void BindVertexStorageBuffer(dy::RHI::IBuffer* buffer, uint32_t stride, uint32_t offset) override;
 	void BindIndexBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset) override;
+	void BindIndexStorageBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset) override;
 	void SetPushConstants(uint32_t size, const void* data) override;
 	void SetRenderTargets(uint32_t, dy::RHI::ITexture**, dy::RHI::ITexture*) override {}
 	void SetViewport(const dy::RHI::Viewport& viewport) override;
@@ -46,9 +51,15 @@ private:
 		dy::RHI::IBuffer* vertexBuffer = nullptr;
 		uint32_t vertexStride = 0;
 		uint32_t vertexBufferOffset = 0;
+		dy::RHI::IBuffer* vertexStorageBuffer = nullptr;
+		uint32_t vertexStorageStride = 0;
+		uint32_t vertexStorageOffset = 0;
 		dy::RHI::IBuffer* indexBuffer = nullptr;
 		dy::RHI::Format indexFormat = dy::RHI::Format::Unknown;
 		uint32_t indexOffset = 0;
+		dy::RHI::IBuffer* indexStorageBuffer = nullptr;
+		dy::RHI::Format indexStorageFormat = dy::RHI::Format::Unknown;
+		uint32_t indexStorageOffset = 0;
 		dy::RHI::Viewport viewport = {};
 		dy::RHI::Rect scissor = {};
 		std::array<uint8_t, 128> pushConstants = {};
@@ -62,9 +73,15 @@ private:
 	dy::RHI::IBuffer* m_pendingVertexBuffer = nullptr;
 	uint32_t m_pendingVertexStride = 0;
 	uint32_t m_pendingVertexOffset = 0;
+	dy::RHI::IBuffer* m_pendingVertexStorageBuffer = nullptr;
+	uint32_t m_pendingVertexStorageStride = 0;
+	uint32_t m_pendingVertexStorageOffset = 0;
 	dy::RHI::IBuffer* m_pendingIndexBuffer = nullptr;
 	dy::RHI::Format m_pendingIndexFormat = dy::RHI::Format::Unknown;
 	uint32_t m_pendingIndexOffset = 0;
+	dy::RHI::IBuffer* m_pendingIndexStorageBuffer = nullptr;
+	dy::RHI::Format m_pendingIndexStorageFormat = dy::RHI::Format::Unknown;
+	uint32_t m_pendingIndexStorageOffset = 0;
 	bool m_hasPendingViewport = false;
 	bool m_hasPendingScissor = false;
 	dy::RHI::Viewport m_pendingViewport = {};
@@ -72,3 +89,5 @@ private:
 	std::vector<DrawCall> m_drawCalls;
 	bool m_isClosed = false;
 };
+
+}

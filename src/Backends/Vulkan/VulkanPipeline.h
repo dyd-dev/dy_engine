@@ -3,6 +3,9 @@
 #include <vector>
 #include <string>
 
+namespace dy::Backends
+{
+
 class VulkanPipeline {
 public:
     void Initialize(const VulkanContext& context, VkFormat swapchainFormat, VkFormat depthFormat, VkExtent2D extent, VkDescriptorSetLayout descriptorSetLayout, const std::string& shaderDir, bool useVertexInput = false);
@@ -20,3 +23,4 @@ private:
     VkPipeline m_graphicsPipeline = VK_NULL_HANDLE;
 };
 
+}

@@ -2,14 +2,19 @@
 #include <memory>
 #include <vector>
 #include <cmath>
+#include <cstring>
 #include "Platform/Window.h"
 #include "RHI/IDevice.h"
+#include "RHI/IBuffer.h"
 #include "RHI/ICommandList.h"
-#include "Backends/Vulkan/VulkanDevice.h"
 #include "Graphics/Mesh.h"
 #include "Math/Math.h"
 
 using namespace dy;
+
+#ifndef DY_SHADER_DIR
+#define DY_SHADER_DIR nullptr
+#endif
 
 int main()
 {
@@ -17,11 +22,12 @@ int main()
     {
         Platform::Window window(1280, 720, "Vulkan OBJ Test");
 
-        std::unique_ptr<VulkanDevice> device = std::make_unique<VulkanDevice>();
-
-        if (device->InitializeForTest(window.GetHandle(), VULKAN_TEST_SHADER_DIR) != 0)
+        RHI::DeviceDesc deviceDesc = {};
+        deviceDesc.shaderDirectory = DY_SHADER_DIR;
+        std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(window.GetHandle(), deviceDesc));
+        if (!device)
         {
-            throw std::runtime_error("Failed to initialize VulkanDevice for test");
+            throw std::runtime_error("Failed to initialize RHI device for Vulkan OBJ test");
         }
 
         // Load the OBJ mesh from the example folder.
@@ -57,7 +63,36 @@ int main()
             flatVertices.push_back(v.uv.y);
         }
 
-        device->UploadTestMesh(flatVertices, meshData.indices);
+        const uint32_t vertexBufferSize = static_cast<uint32_t>(flatVertices.size() * sizeof(float));
+        const uint32_t indexBufferSize = static_cast<uint32_t>(meshData.indices.size() * sizeof(uint32_t));
+        const RHI::BufferUsage vertexStorageUsage = RHI::BufferUsage::Vertex | RHI::BufferUsage::Storage;
+        const RHI::BufferUsage indexStorageUsage = RHI::BufferUsage::Index | RHI::BufferUsage::Storage;
+        auto destroyBuffer = [devicePtr = device.get()](RHI::IBuffer* buffer)
+        {
+            if (buffer != nullptr) devicePtr->DestroyBuffer(buffer);
+        };
+        std::unique_ptr<RHI::IBuffer, decltype(destroyBuffer)> vertexBuffer(
+            device->CreateBuffer(RHI::BufferDesc{ vertexBufferSize, 8u * static_cast<uint32_t>(sizeof(float)), vertexStorageUsage }),
+            destroyBuffer
+        );
+        std::unique_ptr<RHI::IBuffer, decltype(destroyBuffer)> indexBuffer(
+            device->CreateBuffer(RHI::BufferDesc{ indexBufferSize, static_cast<uint32_t>(sizeof(uint32_t)), indexStorageUsage }),
+            destroyBuffer
+        );
+        if (!vertexBuffer || !indexBuffer)
+        {
+            throw std::runtime_error("Failed to create RHI mesh buffers");
+        }
+
+        void* vertexData = vertexBuffer->Map(0, vertexBufferSize);
+        if (vertexData == nullptr) throw std::runtime_error("Failed to map vertex buffer");
+        std::memcpy(vertexData, flatVertices.data(), vertexBufferSize);
+        vertexBuffer->Unmap();
+
+        void* indexData = indexBuffer->Map(0, indexBufferSize);
+        if (indexData == nullptr) throw std::runtime_error("Failed to map index buffer");
+        std::memcpy(indexData, meshData.indices.data(), indexBufferSize);
+        indexBuffer->Unmap();
 
         const float scale = 0.1f;
         const float yRadians = 0.78539816f;
@@ -90,6 +125,9 @@ int main()
 
             device->BeginFrame();
             RHI::ICommandList* cmdList = device->AcquireCommandList();
+            cmdList->ClearColor(device->GetBackBuffer(), 0.05f, 0.07f, 0.10f, 1.0f);
+            cmdList->BindVertexStorageBuffer(vertexBuffer.get(), 8u * static_cast<uint32_t>(sizeof(float)), 0);
+            cmdList->BindIndexStorageBuffer(indexBuffer.get(), RHI::Format::R32_UINT, 0);
 
             struct {
                 Math::float4x4 viewProj;

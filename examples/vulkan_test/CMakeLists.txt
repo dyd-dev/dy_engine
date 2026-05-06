@@ -2,11 +2,10 @@ add_executable(vulkan_test
     main.cpp
 )
 
-target_link_libraries(vulkan_test PRIVATE ${PROJECT_NAME} Backend_Vulkan)
+target_link_libraries(vulkan_test PRIVATE ${PROJECT_NAME})
 
 target_include_directories(vulkan_test PRIVATE
     ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/src/Backends/Vulkan
 )
 
 # Set IDE folder
@@ -46,7 +45,7 @@ add_custom_target(VulkanTestShaders ALL DEPENDS ${VULKAN_TEST_SHADER_OUTPUTS})
 add_dependencies(vulkan_test VulkanTestShaders)
 
 target_compile_definitions(vulkan_test PRIVATE
-    VULKAN_TEST_SHADER_DIR="${VULKAN_TEST_SHADER_OUTPUT_DIR_CMAKE}"
+    DY_SHADER_DIR="${VULKAN_TEST_SHADER_OUTPUT_DIR_CMAKE}"
 )
 
 

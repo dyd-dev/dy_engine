@@ -1,0 +1,17 @@
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer TrigInput {
+    float radians[];
+} trigInput;
+
+layout(std430, set = 0, binding = 1) writeonly buffer TrigOutput {
+    vec2 sinCos[];
+} trigOutput;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    float value = trigInput.radians[index];
+    trigOutput.sinCos[index] = vec2(sin(value), cos(value));
+}

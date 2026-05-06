@@ -50,7 +50,9 @@ namespace dy::RHI
 		virtual void BindGlobalDescriptorHeap() = 0;
 
 		virtual void BindVertexBuffer(IBuffer* buffer, uint32_t stride, uint32_t offset) = 0;
+		virtual void BindVertexStorageBuffer(IBuffer* buffer, uint32_t stride, uint32_t offset) = 0;
 		virtual void BindIndexBuffer(IBuffer* buffer, Format format, uint32_t offset) = 0;
+		virtual void BindIndexStorageBuffer(IBuffer* buffer, Format format, uint32_t offset) = 0;
 
 		// Modern DOD Approach: Inject tiny data (e.g., Transform Index, Material Index) directly.
 		// Replaces ALL BindBuffer and BindTexture calls.

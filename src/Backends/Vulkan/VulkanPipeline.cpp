@@ -4,6 +4,9 @@
 #include <fstream>
 #include <stdexcept>
 
+namespace dy::Backends
+{
+
 namespace
 {
     constexpr uint32_t kMeshVertexBinding = 0;
@@ -277,3 +280,4 @@ VkShaderModule VulkanPipeline::LoadShaderModule(VkDevice device, const std::stri
     return shaderModule;
 }
 
+}

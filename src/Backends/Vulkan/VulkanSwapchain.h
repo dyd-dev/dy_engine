@@ -2,6 +2,9 @@
 #include "VulkanContext.h"
 #include <vector>
 
+namespace dy::Backends
+{
+
 class VulkanSwapchain {
 public:
     struct SwapchainSupportDetails {
@@ -32,3 +35,5 @@ private:
     std::vector<VkImage> m_swapchainImages;
     std::vector<VkImageView> m_swapchainImageViews;
 };
+
+}
