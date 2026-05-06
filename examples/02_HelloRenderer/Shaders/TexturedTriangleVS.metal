@@ -6,7 +6,9 @@ struct DrawConstants
     float4x4 worldMatrix;
     float4 baseColor;
     uint baseColorTextureIndex;
-    float3 padding;
+    float padding0;
+    float padding1;
+    float padding2;
 };
 
 struct VSOutput

@@ -1,10 +1,3 @@
-//
-//  MetalPipeline.mm
-//  
-//
-//  Created by 정준혁 on 4/8/26.
-//
-
 #include "MetalPipeline.h"
 #import <Metal/Metal.h>
 
@@ -31,37 +24,50 @@ namespace dy::Backends
         : m_impl(new Impl())
     {
         id<MTLDevice> mtlDevice = (__bridge id<MTLDevice>)device;
-
-        // 1. 셰이더 로드 (SPIR-V 바이트코드 → Metal은 .metallib or MSL 소스)
-        dispatch_data_t vertData = dispatch_data_create(
-            desc.vertexShader, desc.vertexShaderSize,
-            nullptr, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-        dispatch_data_t fragData = dispatch_data_create(
-            desc.pixelShader, desc.pixelShaderSize,
-            nullptr, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
-
         NSError* error = nil;
-        id<MTLLibrary> vertLib = [mtlDevice newLibraryWithData:vertData error:&error];
-        id<MTLLibrary> fragLib = [mtlDevice newLibraryWithData:fragData error:&error];
 
-        id<MTLFunction> vertFunc = [vertLib newFunctionWithName:@"vertexShader"];
-        id<MTLFunction> fragFunc = [fragLib newFunctionWithName:@"fragmentShader"];
+        // MSL 소스 텍스트로 셰이더 로드
+        const char* vertSrc = static_cast<const char*>(desc.vertexShader);
+        const char* fragSrc = static_cast<const char*>(desc.pixelShader);
 
-        // 2. 파이프라인 디스크립터 설정
+        NSString* vertString = [NSString stringWithUTF8String:vertSrc];
+        NSString* fragString = [NSString stringWithUTF8String:fragSrc];
+
+        id<MTLLibrary> vertLib = [mtlDevice newLibraryWithSource:vertString
+                                                         options:nil
+                                                           error:&error];
+        if(!vertLib) { NSLog(@"Vertex shader 컴파일 실패: %@", error); return; }
+
+        id<MTLLibrary> fragLib = [mtlDevice newLibraryWithSource:fragString
+                                                         options:nil
+                                                           error:&error];
+        if(!fragLib) { NSLog(@"Fragment shader 컴파일 실패: %@", error); return; }
+
+        // Metal 셰이더 진입점은 main0
+        id<MTLFunction> vertFunc = [vertLib newFunctionWithName:@"main0"];
+        id<MTLFunction> fragFunc = [fragLib newFunctionWithName:@"main0"];
+
+        if(!vertFunc) { NSLog(@"vertexShader 함수 못 찾음"); return; }
+        if(!fragFunc) { NSLog(@"fragmentShader 함수 못 찾음"); return; }
+
+        // 파이프라인 디스크립터 설정
         MTLRenderPipelineDescriptor* pipeDesc = [MTLRenderPipelineDescriptor new];
         pipeDesc.vertexFunction   = vertFunc;
         pipeDesc.fragmentFunction = fragFunc;
-        pipeDesc.colorAttachments[0].pixelFormat = ToMTLFormat(desc.renderTargetFormat);
 
-        if(desc.depthEnable)
+        // renderTargetFormat이 Unknown이면 기본값 BGRA8Unorm 사용
+        if(desc.renderTargetFormat == RHI::Format::Unknown)
+            pipeDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
+        else
+            pipeDesc.colorAttachments[0].pixelFormat = ToMTLFormat(desc.renderTargetFormat);
+
+        if(desc.depthEnable && desc.depthStencilFormat != RHI::Format::Unknown)
             pipeDesc.depthAttachmentPixelFormat = ToMTLFormat(desc.depthStencilFormat);
 
-        if(desc.wireframe)
-            ; // Metal은 파이프라인 단계에서 wireframe 설정 없음 → CommandList에서 setTriangleFillMode로 처리
-
         m_impl->pipelineState = [mtlDevice newRenderPipelineStateWithDescriptor:pipeDesc error:&error];
+        if(!m_impl->pipelineState) { NSLog(@"파이프라인 생성 실패: %@", error); return; }
 
-        // 3. DepthStencil 상태 생성
+        // DepthStencil 상태 생성
         if(desc.depthEnable)
         {
             MTLDepthStencilDescriptor* depthDesc = [MTLDepthStencilDescriptor new];

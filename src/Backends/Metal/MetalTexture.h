@@ -21,9 +21,10 @@ namespace dy::Backends
         RHI::Format GetFormat() const override;
 
         void* GetNativeTexture() const;
-
+        void SetNativeTexture(void* texture);
     private:
         struct Impl;
         Impl* m_impl = nullptr;
     };
+
 }

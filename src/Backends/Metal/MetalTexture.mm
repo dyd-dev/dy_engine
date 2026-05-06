@@ -59,6 +59,15 @@ namespace dy::Backends
         texDesc.usage = mtlUsage;
 
         m_impl->texture = [mtlDevice newTextureWithDescriptor:texDesc];
+
+        if(desc.initialData != nullptr && desc.initialDataRowPitch > 0)
+        {
+            MTLRegion region = MTLRegionMake2D(0, 0, desc.width, desc.height);
+            [m_impl->texture replaceRegion:region
+                               mipmapLevel:0
+                                 withBytes:desc.initialData
+                               bytesPerRow:desc.initialDataRowPitch];
+        }
     }
 
     MetalTexture::~MetalTexture()
@@ -74,4 +83,9 @@ namespace dy::Backends
     {
         return (__bridge void*)m_impl->texture;
     }
+void MetalTexture::SetNativeTexture(void* texture)
+    {
+        m_impl->texture = (__bridge id<MTLTexture>)texture;
+    }
 }
+

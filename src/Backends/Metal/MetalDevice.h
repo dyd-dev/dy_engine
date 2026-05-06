@@ -24,6 +24,8 @@ namespace dy::Backends
         void DestroyBuffer(RHI::IBuffer* buffer) override;
         void DestroyTexture(RHI::ITexture* texture) override;
         void DestroyPipelineState(RHI::IPipelineState* pipeline) override;
+        [[nodiscard]] RHI::DescriptorIndex AllocateDescriptorSlot() override;
+        void UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::ITexture* texture) override;
 
         RHI::ITexture* GetBackBuffer() override;
 

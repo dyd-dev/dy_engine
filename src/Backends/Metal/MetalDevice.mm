@@ -3,6 +3,7 @@
 #include "MetalTexture.h"
 #include "MetalPipeline.h"
 #include "MetalCommandList.h"
+#include <vector>
 
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
@@ -19,6 +20,10 @@ namespace dy::Backends
         uint32_t            frameIndex      = 0;
 
         MetalCommandList*   commandList     = nullptr;
+        MetalTexture*       backBufferTex   = nullptr;  // cached; not owned by Renderer
+
+        RHI::DescriptorIndex        nextDescriptorIndex = 0;
+        std::vector<RHI::ITexture*> textures;
     };
 
     MetalDevice::MetalDevice()
@@ -26,6 +31,7 @@ namespace dy::Backends
 
     MetalDevice::~MetalDevice()
     {
+        delete m_impl->backBufferTex;
         delete m_impl->commandList;
         delete m_impl;
     }
@@ -40,7 +46,7 @@ namespace dy::Backends
         NSWindow* window = (__bridge NSWindow*)windowHandle;
         m_impl->metalLayer = [CAMetalLayer layer];
         m_impl->metalLayer.device      = m_impl->device;
-        m_impl->metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+        m_impl->metalLayer.pixelFormat = MTLPixelFormatRGBA8Unorm;
         m_impl->metalLayer.frame       = window.contentView.bounds;
         [window.contentView setWantsLayer:YES];
         [window.contentView setLayer:m_impl->metalLayer];
@@ -60,6 +66,15 @@ namespace dy::Backends
         m_impl->commandList->Begin(
             (__bridge void*)m_impl->currentDrawable
         );
+
+        for(uint32_t i = 0; i < m_impl->textures.size(); i++)
+        {
+            if(m_impl->textures[i] != nullptr)
+            {
+                auto* metalTex = static_cast<MetalTexture*>(m_impl->textures[i]);
+                m_impl->commandList->SetNativeTexture(metalTex->GetNativeTexture(), i);
+            }
+        }
     }
 
     uint32_t MetalDevice::GetCurrentFrameIndex() const
@@ -112,14 +127,37 @@ namespace dy::Backends
     void MetalDevice::DestroyTexture(RHI::ITexture* texture)              { delete texture; }
     void MetalDevice::DestroyPipelineState(RHI::IPipelineState* pipeline) { delete pipeline; }
 
+    RHI::DescriptorIndex MetalDevice::AllocateDescriptorSlot()
+    {
+        return m_impl->nextDescriptorIndex++;
+    }
+
+    void MetalDevice::UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::ITexture* texture)
+    {
+        if(index >= m_impl->textures.size())
+            m_impl->textures.resize(index + 1, nullptr);
+
+        m_impl->textures[index] = texture;
+
+        auto* metalTex = static_cast<MetalTexture*>(texture);
+        m_impl->commandList->SetNativeTexture(metalTex->GetNativeTexture(), index);
+    }
+
     RHI::ITexture* MetalDevice::GetBackBuffer()
     {
-        RHI::TextureDesc desc{};
-        desc.width  = static_cast<uint32_t>(m_impl->metalLayer.drawableSize.width);
-        desc.height = static_cast<uint32_t>(m_impl->metalLayer.drawableSize.height);
-        desc.format = RHI::Format::R8G8B8A8_UNORM;
-        desc.usage  = RHI::TextureUsage::RenderTarget;
+        if(!m_impl->currentDrawable) return nullptr;
 
-        return new MetalTexture(desc, (__bridge void*)m_impl->device);
+        if(!m_impl->backBufferTex)
+        {
+            RHI::TextureDesc desc{};
+            desc.width  = static_cast<uint32_t>(m_impl->metalLayer.drawableSize.width);
+            desc.height = static_cast<uint32_t>(m_impl->metalLayer.drawableSize.height);
+            desc.format = RHI::Format::R8G8B8A8_UNORM;
+            desc.usage  = RHI::TextureUsage::RenderTarget;
+            m_impl->backBufferTex = new MetalTexture(desc, (__bridge void*)m_impl->device);
+        }
+
+        m_impl->backBufferTex->SetNativeTexture((__bridge void*)m_impl->currentDrawable.texture);
+        return m_impl->backBufferTex;
     }
 }
