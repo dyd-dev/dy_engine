@@ -9,6 +9,8 @@ add_library(${PROJECT_NAME} STATIC
 	"src/RHI/IDevice.cpp"
 	"src/Graphics/Renderer.cpp"
     "src/Graphics/Mesh.cpp"
+	"src/Graphics/Shadow.cpp"
+	"src/Graphics/ShadowMap.cpp"
 	"src/Platform/Window.cpp"
 	"src/Backends/Null/NullDevice.cpp"
 )

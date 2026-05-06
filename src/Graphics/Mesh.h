@@ -1,5 +1,6 @@
 #pragma once
 #include "Math/Math.h"
+#include <cstdint>
 #include <vector>
 #include <string>
 

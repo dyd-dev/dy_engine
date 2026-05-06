@@ -16,6 +16,24 @@ namespace dy::RHI
 	class ITexture;
 	class IPipelineState;
 
+	struct Viewport
+	{
+		float x = 0.0f;
+		float y = 0.0f;
+		float width = 0.0f;
+		float height = 0.0f;
+		float minDepth = 0.0f;
+		float maxDepth = 1.0f;
+	};
+
+	struct Rect
+	{
+		int32_t x = 0;
+		int32_t y = 0;
+		uint32_t width = 0;
+		uint32_t height = 0;
+	};
+
 	class ICommandList
 	{
 	public:
@@ -31,6 +49,7 @@ namespace dy::RHI
 		// Must be called once per pass before Draw.
 		virtual void BindGlobalDescriptorHeap() = 0;
 
+		virtual void BindVertexBuffer(IBuffer* buffer, uint32_t stride, uint32_t offset) = 0;
 		virtual void BindIndexBuffer(IBuffer* buffer, Format format, uint32_t offset) = 0;
 
 		// Modern DOD Approach: Inject tiny data (e.g., Transform Index, Material Index) directly.
@@ -39,11 +58,14 @@ namespace dy::RHI
 
 		// Render Targets & Clears
 		virtual void SetRenderTargets(uint32_t numRenderTargets, ITexture** renderTargets, ITexture* depthStencil) = 0;
+		virtual void SetViewport(const Viewport& viewport) = 0;
+		virtual void SetScissor(const Rect& rect) = 0;
 		virtual void ClearColor(ITexture* renderTarget, float r, float g, float b, float a) = 0;
 		virtual void ClearDepth(ITexture* depthStencil, float depth) = 0;
 
 		// Draw Commands
 		virtual void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) = 0;
+		virtual void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) = 0;
 		// virtual void DrawIndexedInstancedIndirect(IBuffer* argumentBuffer, uint32_t alignedByteOffset) = 0;
 
 		// Synchronization

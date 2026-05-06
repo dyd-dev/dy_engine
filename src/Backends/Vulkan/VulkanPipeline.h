@@ -5,7 +5,7 @@
 
 class VulkanPipeline {
 public:
-    void Initialize(const VulkanContext& context, VkFormat swapchainFormat, VkExtent2D extent, VkDescriptorSetLayout descriptorSetLayout, const std::string& shaderDir, bool useVertexInput = false);
+    void Initialize(const VulkanContext& context, VkFormat swapchainFormat, VkFormat depthFormat, VkExtent2D extent, VkDescriptorSetLayout descriptorSetLayout, const std::string& shaderDir, bool useVertexInput = false);
     void Cleanup(VkDevice device);
 
     VkRenderPass GetRenderPass() const { return m_renderPass; }

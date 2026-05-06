@@ -12,12 +12,10 @@
 #endif
 #include <GLFW/glfw3native.h>
 
-using namespace dy::Platform;
-
-Window::Window(unsigned int width, unsigned int height)
+dy::Platform::Window::Window(unsigned int width, unsigned int height)
 	: Window(width, height, "New Window") {}
 
-Window::Window(unsigned int width, unsigned int height, const char* title)
+dy::Platform::Window::Window(unsigned int width, unsigned int height, const char* title)
 {
 	if(!glfwInit()) throw std::runtime_error("Failed to initialize GLFW.");
 	
@@ -32,17 +30,17 @@ Window::Window(unsigned int width, unsigned int height, const char* title)
 	}
 }
 
-Window::~Window()
+dy::Platform::Window::~Window()
 {
 	if(m_window) glfwDestroyWindow(m_window);
 	glfwTerminate();
 }
 
-bool Window::IsRunning() const { return !glfwWindowShouldClose(m_window); }
+bool dy::Platform::Window::IsRunning() const { return !glfwWindowShouldClose(m_window); }
 
-void Window::PollEvents() const { glfwPollEvents(); }
+void dy::Platform::Window::PollEvents() const { glfwPollEvents(); }
 
-void* Window::GetHandle() const
+void* dy::Platform::Window::GetHandle() const
 {
 #if defined(_WIN32)
 	return static_cast<void*>(glfwGetWin32Window(m_window));

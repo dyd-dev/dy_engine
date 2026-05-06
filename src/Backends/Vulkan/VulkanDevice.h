@@ -16,6 +16,8 @@ struct VulkanLightingVolumeProfile
 	float spotLightColor[4] = { 0.55f, 0.72f, 1.0f, 4.0f };
 	float volumeParams[4] = { 0.16f, 1.0f, 0.08f, 0.68f };
 	float volumeParams2[4] = { 0.88f, 0.0f, 0.0f, 0.0f };
+	float cameraPosition[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+	float materialParams[4] = { 0.34f, 36.0f, 0.0f, 0.0f };
 };
 
 class VulkanDevice : public dy::RHI::IDevice
@@ -31,20 +33,13 @@ public:
 	void Submit(dy::RHI::ICommandList** cmdLists, uint32_t count) override;
 	void Present() override;
 
-	dy::RHI::IBuffer* CreateBuffer(const dy::RHI::BufferDesc& desc) override
-	{
-		(void)desc;
-		return nullptr;
-	}
+	dy::RHI::IBuffer* CreateBuffer(const dy::RHI::BufferDesc& desc) override;
 	dy::RHI::ITexture* CreateTexture(const dy::RHI::TextureDesc& desc) override;
 	dy::RHI::IPipelineState* CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) override;
 	[[nodiscard]] dy::RHI::DescriptorIndex AllocateDescriptorSlot() override;
 	void UpdateDescriptorSlot(dy::RHI::DescriptorIndex index, dy::RHI::ITexture* texture) override;
 
-	void DestroyBuffer(dy::RHI::IBuffer* buffer) override
-	{
-		(void)buffer;
-	}
+	void DestroyBuffer(dy::RHI::IBuffer* buffer) override;
 	void DestroyTexture(dy::RHI::ITexture* texture) override;
 	void DestroyPipelineState(dy::RHI::IPipelineState* pipeline) override;
 
@@ -54,6 +49,11 @@ public:
     int InitializeForTest(const void* windowHandle, const std::string& shaderDir);
     bool UploadTestMesh(const std::vector<float>& vertices, const std::vector<uint32_t>& indices);
 	void SetLightingVolumeProfile(const VulkanLightingVolumeProfile& profile);
+
+	// Directional Light용 Shadow Map의 Light-Space ViewProjection 갱신.
+	// Graphics::ComputeDirectionalLightViewProj 결과를 매 프레임 전달.
+	// 16개 float (column-major mat4) 포인터.
+	void SetShadowLightMatrix(const float* lightViewProjColumnMajor);
 protected:
     int Initialize(const void *windowHandle) override;
 
@@ -67,6 +67,7 @@ private:
 	bool CreateDescriptorPool();
 	bool CreateDescriptorSets();
 	bool CreateLightingVolumeBuffers();
+	bool CreateDepthResources();
 	bool CreateFramebuffers();
 	bool CreateCommandPool();
 	bool CreateCommandBuffer();
@@ -75,13 +76,25 @@ private:
 	bool CreateTextureImageView();
 	bool CreateTextureSampler();
 
+	// Shadow Map 인프라 (광원 시점 깊이 텍스처)
+	bool CreateShadowMapResources();        // VkImage + View + Sampler + Framebuffer
+	bool CreateShadowRenderPass();          // depth-only RenderPass
+	bool CreateShadowPipeline();            // depth-only Pipeline (FS 없음)
+	bool CreateShadowMatrixBuffers();       // LightViewProj UBO (frames in flight)
+	void DestroyShadowResources();
+
 	void RecreateSwapchain();
 	void DestroySwapchainResources();
 	void DestroyDeviceResources();
 
 	void RecordCommandBuffer(const VulkanCommandList& commandList);
+	void RecordShadowPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList);
+	void RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList);
 	void UpdateLightingVolumeBuffer();
+	void UpdateShadowMatrixBuffer();
 	void UpdateBackBufferMetadata();
+	VkFormat FindDepthFormat() const;
+	bool IsDepthFormatSupported(VkFormat format) const;
 
 	// Context and Components
 	VulkanContext m_context;
@@ -106,6 +119,10 @@ private:
 	VkDeviceMemory m_textureImageMemory = VK_NULL_HANDLE;
 	VkImageView m_textureImageView = VK_NULL_HANDLE;
 	VkSampler m_textureSampler = VK_NULL_HANDLE;
+	VkImage m_depthImage = VK_NULL_HANDLE;
+	VkDeviceMemory m_depthImageMemory = VK_NULL_HANDLE;
+	VkImageView m_depthImageView = VK_NULL_HANDLE;
+	VkFormat m_depthFormat = VK_FORMAT_UNDEFINED;
 
 	VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
 	VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
@@ -121,6 +138,30 @@ private:
 	std::vector<VkFence> m_imagesInFlight;
 
 	std::vector<VkFramebuffer> m_swapchainFramebuffers;
+	std::vector<dy::RHI::IBuffer*> m_ownedBuffers;
+
+	// ========== Shadow Map 리소스 ==========
+	static constexpr uint32_t kShadowMapResolution = 2048;
+	VkImage         m_shadowMapImage      = VK_NULL_HANDLE;
+	VkDeviceMemory  m_shadowMapMemory     = VK_NULL_HANDLE;
+	VkImageView     m_shadowMapView       = VK_NULL_HANDLE;
+	VkSampler       m_shadowMapSampler    = VK_NULL_HANDLE;
+	VkRenderPass    m_shadowRenderPass    = VK_NULL_HANDLE;
+	VkFramebuffer   m_shadowFramebuffer   = VK_NULL_HANDLE;
+	VkPipelineLayout m_shadowPipelineLayout = VK_NULL_HANDLE;
+	VkPipeline      m_shadowPipeline      = VK_NULL_HANDLE;
+	VkFormat        m_shadowMapFormat     = VK_FORMAT_UNDEFINED;
+
+	// LightViewProj UBO (frames in flight 만큼 다중 버퍼링)
+	std::vector<VkBuffer>       m_shadowMatrixBuffers;
+	std::vector<VkDeviceMemory> m_shadowMatrixMemories;
+	std::vector<void*>          m_shadowMatrixMapped;
+	float                       m_shadowLightViewProj[16] = {
+		1.0f, 0.0f, 0.0f, 0.0f,
+		0.0f, 1.0f, 0.0f, 0.0f,
+		0.0f, 0.0f, 1.0f, 0.0f,
+		0.0f, 0.0f, 0.0f, 1.0f
+	};
 
 	static constexpr uint32_t kMaxFramesInFlight = 2;
 	uint32_t m_currentFrameIndex = 0;

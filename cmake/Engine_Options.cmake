@@ -6,7 +6,7 @@
 add_library(Engine_Options INTERFACE)
 
 # ===== ===== Language ===== =====
-target_compile_features(Engine_Options INTERFACE cxx_std_20)
+target_compile_features(Engine_Options INTERFACE cxx_std_17)
 
 # ===== ===== Include ===== =====
 target_include_directories(Engine_Options INTERFACE

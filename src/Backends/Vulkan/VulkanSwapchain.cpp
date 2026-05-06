@@ -1,5 +1,6 @@
 #include "VulkanSwapchain.h"
 #include "VulkanResources.h"
+#include <GLFW/glfw3.h>
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
@@ -22,16 +23,15 @@ void VulkanSwapchain::Initialize(const VulkanContext& context, void* windowHandl
         imageCount = swapchainSupport.capabilities.maxImageCount;
     }
 
-    VkSwapchainCreateInfoKHR createInfo = {
-        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-        .surface = context.surface,
-        .minImageCount = imageCount,
-        .imageFormat = surfaceFormat.format,
-        .imageColorSpace = surfaceFormat.colorSpace,
-        .imageExtent = extent,
-        .imageArrayLayers = 1,
-        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
-    };
+    VkSwapchainCreateInfoKHR createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    createInfo.surface = context.surface;
+    createInfo.minImageCount = imageCount;
+    createInfo.imageFormat = surfaceFormat.format;
+    createInfo.imageColorSpace = surfaceFormat.colorSpace;
+    createInfo.imageExtent = extent;
+    createInfo.imageArrayLayers = 1;
+    createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
     uint32_t queueFamilyIndices[] = { context.queueIndices.graphicsFamily, context.queueIndices.presentFamily };
 

@@ -100,7 +100,7 @@ int main()
             pushData.model = fixedModel;
 
             cmdList->SetPushConstants(sizeof(pushData), &pushData);
-            cmdList->DrawInstanced(0, 1, 0, 0);
+            cmdList->DrawIndexedInstanced(static_cast<uint32_t>(meshData.indices.size()), 1, 0, 0, 0);
 
             cmdList->Close();
 

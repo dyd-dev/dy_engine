@@ -22,7 +22,7 @@ public:
     static void CopyBufferToImage(const VulkanContext& context, VkCommandPool commandPool, VkBuffer buffer, 
                                 VkImage image, uint32_t width, uint32_t height);
     
-    static VkImageView CreateImageView(VkDevice device, VkImage image, VkFormat format);
+    static VkImageView CreateImageView(VkDevice device, VkImage image, VkFormat format, VkImageAspectFlags aspectMask = VK_IMAGE_ASPECT_COLOR_BIT);
 
     static VkCommandBuffer BeginSingleTimeCommands(const VulkanContext& context, VkCommandPool commandPool);
     static void EndSingleTimeCommands(const VulkanContext& context, VkCommandPool commandPool, VkCommandBuffer commandBuffer);

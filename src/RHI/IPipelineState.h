@@ -5,6 +5,7 @@
 * Shader, BlendState, RasterizerState, DepthStencilState 등과 같은 그래픽스 파이프라인의 다양한 상태를 캡슐화하여 관리합니다.
 */
 #include "Enums.h"
+#include <cstddef>
 
 namespace dy::RHI
 {
