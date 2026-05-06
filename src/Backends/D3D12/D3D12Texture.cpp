@@ -1,8 +1,5 @@
 #include "D3D12Texture.h"
 #include "RHI/Enums.h" // Enums.h 인클루드 추가
-
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
 #include <d3d12.h>
 #include "d3dx12.h"
 #include <wrl.h>
