@@ -1,4 +1,5 @@
-#include "VulkanDevice.h"
+﻿#include "VulkanDevice.h"
+#include "VulkanPipeline.h"
 #include "VulkanResources.h"
 #include "RHI/IBuffer.h"
 #include "RHI/IPipelineState.h"
@@ -27,10 +28,20 @@ namespace {
 	constexpr uint32_t kFallbackTextureWidth = 2;
 	constexpr uint32_t kFallbackTextureHeight = 2;
 	constexpr uint32_t kAcquireTimeoutNanoseconds = 16666667u;
+	constexpr uint32_t kLightingConstantBinding = 1;
+	constexpr uint32_t kShadowSamplerBinding = 2;
+	constexpr uint32_t kShadowMatrixBinding = 3;
 	constexpr uint32_t kVertexStorageBinding = 4;
 	constexpr uint32_t kIndexStorageBinding = 5;
-	constexpr uint32_t kPushConstantModelOffset = sizeof(float) * 16;
-	constexpr uint32_t kPushConstantIndexBaseOffset = kPushConstantModelOffset + sizeof(float) * 3;
+	constexpr uint32_t kDrawMetadataPushConstantOffset = sizeof(float) * 32 + sizeof(float);
+
+	struct DrawMetadataPushConstants
+	{
+		uint32_t firstIndex = 0;
+		int32_t vertexOffset = 0;
+		uint32_t firstVertex = 0;
+		uint32_t padding = 0;
+	};
 
 	enum class VulkanBufferKind
 	{
@@ -112,8 +123,45 @@ namespace {
 	class VulkanPipelineState final : public dy::RHI::IPipelineState
 	{
 	public:
-		explicit VulkanPipelineState(const dy::RHI::GraphicsPipelineDesc&) {}
+		VulkanPipelineState(
+			const VulkanContext& context,
+			VkRenderPass renderPass,
+			VkExtent2D extent,
+			VkDescriptorSetLayout descriptorSetLayout,
+			const dy::RHI::GraphicsPipelineDesc& desc)
+			: m_device(context.device), m_shadowPassEnabled(desc.enableShadowPass)
+		{
+			m_pipeline.Initialize(context, renderPass, extent, descriptorSetLayout, desc);
+		}
+
+		~VulkanPipelineState() override
+		{
+			m_pipeline.Cleanup(m_device);
+		}
+
+		VkPipeline GetPipeline() const { return m_pipeline.GetPipeline(); }
+		VkPipelineLayout GetLayout() const { return m_pipeline.GetLayout(); }
+		bool IsShadowPassEnabled() const { return m_shadowPassEnabled; }
+
+	private:
+		VkDevice m_device = VK_NULL_HANDLE;
+		VulkanPipeline m_pipeline;
+		bool m_shadowPassEnabled = false;
 	};
+
+	VkShaderModule CreateShaderModule(VkDevice device, const void* shaderCode, size_t shaderSize)
+	{
+		VkShaderModuleCreateInfo createInfo{};
+		createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		createInfo.codeSize = shaderSize;
+		createInfo.pCode = reinterpret_cast<const uint32_t*>(shaderCode);
+
+		VkShaderModule shaderModule = VK_NULL_HANDLE;
+		if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create shader module");
+		}
+		return shaderModule;
+	}
 
 	VkBufferUsageFlags ToVkBufferUsage(dy::RHI::BufferUsage usage)
 	{
@@ -187,114 +235,10 @@ VulkanDevice::~VulkanDevice() {
 	DestroyDeviceResources();
 }
 
-int VulkanDevice::InitializeForTest(const void* windowHandle, const std::string& shaderDir) {
-    m_windowHandle = const_cast<void*>(windowHandle);
-    if (!m_windowHandle) return -1;
-    m_shaderOutputDirectory = shaderDir;
-    m_useVertexInput = false;
-    try {
-        if (!CreateInstance()) return -1;
-        if (!CreateSurface()) return -1;
-        if (!PickPhysicalDevice()) return -1;
-        if (!CreateLogicalDevice()) return -1;
-        if (!CreateCommandPool()) return -1;
-        m_swapchain.Initialize(m_context, m_windowHandle);
-        UpdateBackBufferMetadata();
-        if (!CreateTextureSampler()) return -1;
-        // Shadow Map 리소스는 DescriptorSetLayout/Sets에서 참조하므로 그 전에 생성.
-        m_shadowMapFormat = FindDepthFormat();
-        if (!CreateShadowRenderPass()) return -1;
-        if (!CreateShadowMapResources()) return -1;
-        if (!CreateShadowMatrixBuffers()) return -1;
-        if (!CreateDescriptorSetLayout()) return -1;
-        if (!CreateLightingVolumeBuffers()) return -1;
-        if (!CreateDescriptorPool()) return -1;
-        if (!CreateDescriptorSets()) return -1;
-        m_depthFormat = FindDepthFormat();
-        m_pipeline.Initialize(m_context, m_swapchain.GetImageFormat(), m_depthFormat, m_swapchain.GetExtent(), m_descriptorSetLayout, m_shaderOutputDirectory, m_useVertexInput);
-        if (!CreateShadowPipeline()) return -1;
-        if (!CreateDepthResources()) return -1;
-        if (!CreateFramebuffers()) return -1;
-        if (!CreateCommandBuffer()) return -1;
-        if (!CreateSyncObjects()) return -1;
-    } catch (const std::exception& e) {
-        SDL_Log("Vulkan Initialization failed: %s", e.what());
-        return -1;
-    }
-    return 0;
-}
-
-bool VulkanDevice::UploadTestMesh(const std::vector<float>& vertices, const std::vector<uint32_t>& indices) {
-    m_indexCount = static_cast<uint32_t>(indices.size());
-
-    if (m_vertexBuffer != VK_NULL_HANDLE || m_indexBuffer != VK_NULL_HANDLE) {
-        vkDeviceWaitIdle(m_context.device);
-    }
-
-    if (m_vertexBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(m_context.device, m_vertexBuffer, nullptr);
-        vkFreeMemory(m_context.device, m_vertexBufferMemory, nullptr);
-        m_vertexBuffer = VK_NULL_HANDLE;
-        m_vertexBufferMemory = VK_NULL_HANDLE;
-        m_vertexBufferSize = 0;
-    }
-    if (m_indexBuffer != VK_NULL_HANDLE) {
-        vkDestroyBuffer(m_context.device, m_indexBuffer, nullptr);
-        vkFreeMemory(m_context.device, m_indexBufferMemory, nullptr);
-        m_indexBuffer = VK_NULL_HANDLE;
-        m_indexBufferMemory = VK_NULL_HANDLE;
-        m_indexBufferSize = 0;
-    }
-    
-    // Vertex Buffer
-    VkDeviceSize bufferSize = sizeof(vertices[0]) * vertices.size();
-	m_vertexBufferSize = bufferSize;
-    VkBuffer stagingBuffer;
-    VkDeviceMemory stagingBufferMemory;
-    VulkanResources::CreateBuffer(m_context, bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
-    void* data;
-    vkMapMemory(m_context.device, stagingBufferMemory, 0, bufferSize, 0, &data);
-    memcpy(data, vertices.data(), (size_t)bufferSize);
-    vkUnmapMemory(m_context.device, stagingBufferMemory);
-    
-    VulkanResources::CreateBuffer(m_context, bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_vertexBuffer, m_vertexBufferMemory);
-    VulkanResources::CopyBuffer(m_context, m_commandPool, stagingBuffer, m_vertexBuffer, bufferSize);
-    
-    vkDestroyBuffer(m_context.device, stagingBuffer, nullptr);
-    vkFreeMemory(m_context.device, stagingBufferMemory, nullptr);
-    
-    // Index Buffer
-    bufferSize = sizeof(indices[0]) * indices.size();
-	m_indexBufferSize = bufferSize;
-    VulkanResources::CreateBuffer(m_context, bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, stagingBuffer, stagingBufferMemory);
-    vkMapMemory(m_context.device, stagingBufferMemory, 0, bufferSize, 0, &data);
-    memcpy(data, indices.data(), (size_t)bufferSize);
-    vkUnmapMemory(m_context.device, stagingBufferMemory);
-    
-    VulkanResources::CreateBuffer(m_context, bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_indexBuffer, m_indexBufferMemory);
-    VulkanResources::CopyBuffer(m_context, m_commandPool, stagingBuffer, m_indexBuffer, bufferSize);
-    
-    vkDestroyBuffer(m_context.device, stagingBuffer, nullptr);
-    vkFreeMemory(m_context.device, stagingBufferMemory, nullptr);
-    
-    return true;
-}
-
-void VulkanDevice::SetLightingVolumeProfile(const VulkanLightingVolumeProfile& profile) {
-	m_lightingVolumeProfile = profile;
-}
-
-void VulkanDevice::SetShadowLightMatrix(const float* lightViewProjColumnMajor) {
-	if (lightViewProjColumnMajor == nullptr) return;
-	memcpy(m_shadowLightViewProj, lightViewProjColumnMajor, sizeof(m_shadowLightViewProj));
-}
-
 int VulkanDevice::Initialize(const void* windowHandle, const dy::RHI::DeviceDesc& desc) {
+	(void)desc;
 	m_windowHandle = const_cast<void*>(windowHandle);
 	if (!m_windowHandle) return -1;
-
-	m_shaderOutputDirectory = desc.shaderDirectory != nullptr ? desc.shaderDirectory : VULKAN_SHADER_DIR;
-	m_shadowMappingEnabled = desc.enableShadowMapping;
 
 	try {
 		if (!CreateInstance()) return -1;
@@ -310,27 +254,14 @@ int VulkanDevice::Initialize(const void* windowHandle, const dy::RHI::DeviceDesc
 		if (!CreateTextureImage()) return -1;
 		if (!CreateTextureImageView()) return -1;
 		if (!CreateTextureSampler()) return -1;
-
-		if (m_shadowMappingEnabled) {
-			m_shadowMapFormat = m_depthFormat;
-			if (!CreateShadowRenderPass()) return -1;
-			if (!CreateShadowMapResources()) return -1;
-			if (!CreateShadowMatrixBuffers()) return -1;
-		}
-
 		if (!CreateDescriptorSetLayout()) return -1;
-		if (!CreateLightingVolumeBuffers()) return -1;
 		if (!CreateDescriptorPool()) return -1;
 		if (!CreateDescriptorSets()) return -1;
-
-		m_pipeline.Initialize(m_context, m_swapchain.GetImageFormat(), m_depthFormat, m_swapchain.GetExtent(), m_descriptorSetLayout, m_shaderOutputDirectory, m_useVertexInput);
-		if (m_shadowMappingEnabled && !CreateShadowPipeline()) return -1;
+		if (!CreateMainRenderPass()) return -1;
 		if (!CreateDepthResources()) return -1;
 		if (!CreateFramebuffers()) return -1;
 		if (!CreateCommandBuffer()) return -1;
 		if (!CreateSyncObjects()) return -1;
-
-		if (!CreateMeshBuffers()) return -1;
 	} catch (const std::exception& e) {
 		SDL_Log("Vulkan Initialization failed: %s", e.what());
 		return -1;
@@ -346,9 +277,28 @@ dy::RHI::ITexture* VulkanDevice::CreateTexture(const dy::RHI::TextureDesc& desc)
 }
 
 dy::RHI::IPipelineState* VulkanDevice::CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) {
-	VulkanPipelineState* pipelineState = new VulkanPipelineState(desc);
-	m_ownedPipelineStates.push_back(pipelineState);
-	return pipelineState;
+	try {
+		if (desc.enableShadowPass && m_shadowRenderPass == VK_NULL_HANDLE) {
+			m_shadowMapFormat = m_depthFormat;
+			if (!CreateShadowRenderPass()) return nullptr;
+			if (!CreateShadowMapResources()) return nullptr;
+		}
+		if (desc.enableShadowPass && m_shadowPipeline == VK_NULL_HANDLE && !CreateShadowPipeline(desc)) {
+			return nullptr;
+		}
+
+		VulkanPipelineState* pipelineState = new VulkanPipelineState(
+			m_context,
+			m_mainRenderPass,
+			m_swapchain.GetExtent(),
+			m_descriptorSetLayout,
+			desc);
+		m_ownedPipelineStates.push_back(pipelineState);
+		return pipelineState;
+	} catch (const std::exception& e) {
+		SDL_Log("Vulkan pipeline creation failed: %s", e.what());
+		return nullptr;
+	}
 }
 
 dy::RHI::DescriptorIndex VulkanDevice::AllocateDescriptorSlot() {
@@ -356,21 +306,6 @@ dy::RHI::DescriptorIndex VulkanDevice::AllocateDescriptorSlot() {
 }
 
 void VulkanDevice::UpdateDescriptorSlot(dy::RHI::DescriptorIndex, dy::RHI::ITexture*) {
-}
-
-void VulkanDevice::UpdateGlobalConstants(uint32_t binding, const void* data, uint32_t size) {
-	if (data == nullptr || size == 0) return;
-
-	if (binding == 1) {
-		const uint32_t copySize = std::min<uint32_t>(size, static_cast<uint32_t>(sizeof(m_lightingVolumeProfile)));
-		memcpy(&m_lightingVolumeProfile, data, copySize);
-		return;
-	}
-
-	if (binding == 3) {
-		const uint32_t copySize = std::min<uint32_t>(size, static_cast<uint32_t>(sizeof(m_shadowLightViewProj)));
-		memcpy(m_shadowLightViewProj, data, copySize);
-	}
 }
 
 void VulkanDevice::DestroyTexture(dy::RHI::ITexture* texture) {
@@ -456,10 +391,10 @@ void VulkanDevice::Submit(dy::RHI::ICommandList** cmdLists, uint32_t count) {
 	if (!m_frameReady || count == 0 || !cmdLists || !cmdLists[0]) return;
 
 	VulkanCommandList* vulkanCmd = static_cast<VulkanCommandList*>(cmdLists[0]);
-	UpdateLightingVolumeBuffer();
-	UpdateShadowMatrixBuffer();
-	UpdateVertexStorageDescriptor(*vulkanCmd);
-	UpdateIndexStorageDescriptor(*vulkanCmd);
+	if (!UpdateDrawDescriptorSets(*vulkanCmd)) {
+		SDL_Log("Failed to update Vulkan draw descriptor sets.");
+		return;
+	}
 	RecordCommandBuffer(*vulkanCmd);
 
 	const VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
@@ -604,10 +539,6 @@ bool VulkanDevice::CreateLogicalDevice() {
 	return true;
 }
 
-bool VulkanDevice::CreateMeshBuffers() {
-	return true;
-}
-
 void VulkanDevice::RecordCommandBuffer(const VulkanCommandList& commandList) {
 	VkCommandBuffer commandBuffer = m_commandBuffers[m_currentFrameIndex];
 	vkResetCommandBuffer(commandBuffer, 0);
@@ -615,72 +546,57 @@ void VulkanDevice::RecordCommandBuffer(const VulkanCommandList& commandList) {
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	vkBeginCommandBuffer(commandBuffer, &beginInfo);
 
-	// Pass 1: Shadow Pass (광원 시점에서 깊이 텍스처 작성)
+	// Pass 1: Shadow Pass (愿묒썝 ?쒖젏?먯꽌 源딆씠 ?띿뒪泥??묒꽦)
 	if (m_shadowRenderPass != VK_NULL_HANDLE && m_shadowPipeline != VK_NULL_HANDLE) {
 		RecordShadowPass(commandBuffer, commandList);
 	}
 
-	// Pass 2: Main Pass (카메라 시점에서 색 + ShadowMap sample)
+	// Pass 2: Main Pass (移대찓???쒖젏?먯꽌 ??+ ShadowMap sample)
 	RecordMainPass(commandBuffer, commandList);
 
 	vkEndCommandBuffer(commandBuffer);
 }
 
 void VulkanDevice::RecordShadowPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList) {
-	VkClearValue shadowClear = {};
-	shadowClear.depthStencil = { 1.0f, 0 };
+	VkClearValue newShadowClear = {};
+	newShadowClear.depthStencil = { 1.0f, 0 };
 
-	VkRenderPassBeginInfo shadowPassInfo{};
-	shadowPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-	shadowPassInfo.renderPass = m_shadowRenderPass;
-	shadowPassInfo.framebuffer = m_shadowFramebuffer;
-	shadowPassInfo.renderArea.offset = {0, 0};
-	shadowPassInfo.renderArea.extent = { kShadowMapResolution, kShadowMapResolution };
-	shadowPassInfo.clearValueCount = 1;
-	shadowPassInfo.pClearValues = &shadowClear;
+	VkRenderPassBeginInfo newShadowPassInfo{};
+	newShadowPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+	newShadowPassInfo.renderPass = m_shadowRenderPass;
+	newShadowPassInfo.framebuffer = m_shadowFramebuffer;
+	newShadowPassInfo.renderArea.offset = {0, 0};
+	newShadowPassInfo.renderArea.extent = { kShadowMapResolution, kShadowMapResolution };
+	newShadowPassInfo.clearValueCount = 1;
+	newShadowPassInfo.pClearValues = &newShadowClear;
 
-	vkCmdBeginRenderPass(commandBuffer, &shadowPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+	vkCmdBeginRenderPass(commandBuffer, &newShadowPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
-	if (!m_descriptorSets.empty()) {
-		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipelineLayout, 0, 1, &m_descriptorSets[m_currentFrameIndex], 0, nullptr);
-	}
 
-	// Shadow Pass 전체에 ShadowMap 해상도 viewport/scissor 고정.
-	VkViewport shadowViewport{};
-	shadowViewport.x = 0.0f;
-	shadowViewport.y = 0.0f;
-	shadowViewport.width = static_cast<float>(kShadowMapResolution);
-	shadowViewport.height = static_cast<float>(kShadowMapResolution);
-	shadowViewport.minDepth = 0.0f;
-	shadowViewport.maxDepth = 1.0f;
-	VkRect2D shadowScissor{};
-	shadowScissor.offset = {0, 0};
-	shadowScissor.extent = { kShadowMapResolution, kShadowMapResolution };
-	vkCmdSetViewport(commandBuffer, 0, 1, &shadowViewport);
-	vkCmdSetScissor(commandBuffer, 0, 1, &shadowScissor);
+	VkViewport newShadowViewport{};
+	newShadowViewport.x = 0.0f;
+	newShadowViewport.y = 0.0f;
+	newShadowViewport.width = static_cast<float>(kShadowMapResolution);
+	newShadowViewport.height = static_cast<float>(kShadowMapResolution);
+	newShadowViewport.minDepth = 0.0f;
+	newShadowViewport.maxDepth = 1.0f;
+	VkRect2D newShadowScissor{};
+	newShadowScissor.offset = {0, 0};
+	newShadowScissor.extent = { kShadowMapResolution, kShadowMapResolution };
+	vkCmdSetViewport(commandBuffer, 0, 1, &newShadowViewport);
+	vkCmdSetScissor(commandBuffer, 0, 1, &newShadowScissor);
 
-	for (VulkanCommandList::DrawCall drawCall : commandList.m_drawCalls) {
-		const VulkanBuffer* vertexBuffer = dynamic_cast<const VulkanBuffer*>(drawCall.vertexBuffer);
-		const VulkanBuffer* indexBuffer = dynamic_cast<const VulkanBuffer*>(drawCall.indexBuffer);
-		const VulkanBuffer* indexStorageBuffer = dynamic_cast<const VulkanBuffer*>(drawCall.indexStorageBuffer);
-		if (vertexBuffer != nullptr) {
-			VkBuffer vertexBuffers[] = { vertexBuffer->GetHandle() };
-			VkDeviceSize offsets[] = { drawCall.vertexBufferOffset };
-			vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-		} else if (m_useVertexInput && m_vertexBuffer != VK_NULL_HANDLE) {
-			VkBuffer vertexBuffers[] = { m_vertexBuffer };
-			VkDeviceSize offsets[] = { 0 };
-			vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-		}
-		if (indexBuffer != nullptr && indexStorageBuffer == nullptr) {
-			vkCmdBindIndexBuffer(commandBuffer, indexBuffer->GetHandle(), drawCall.indexOffset, VK_INDEX_TYPE_UINT32);
+	for (uint32_t drawIndex = 0; drawIndex < commandList.m_drawCalls.size(); ++drawIndex) {
+		const VulkanCommandList::DrawCall& drawCall = commandList.m_drawCalls[drawIndex];
+		const VulkanPipelineState* pipelineState = dynamic_cast<const VulkanPipelineState*>(drawCall.pipelineState);
+		if (pipelineState == nullptr || !pipelineState->IsShadowPassEnabled()) continue;
+
+		const uint32_t descriptorIndex = m_currentFrameIndex * kMaxDrawsPerFrame + drawIndex;
+		if (descriptorIndex < m_descriptorSets.size()) {
+			VkDescriptorSet descriptorSet = m_descriptorSets[descriptorIndex];
+			vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
 		}
 
-		// Shadow Pass에서는 동일한 push constants를 사용 (shadow.vert가 model 행렬만 읽음)
-		if (drawCall.indexed && drawCall.pushConstantSize >= kPushConstantIndexBaseOffset + sizeof(float)) {
-			const float indexBase = static_cast<float>(drawCall.firstIndex);
-			memcpy(drawCall.pushConstants.data() + kPushConstantIndexBaseOffset, &indexBase, sizeof(indexBase));
-		}
 		if (drawCall.pushConstantSize > 0) {
 			vkCmdPushConstants(
 				commandBuffer,
@@ -691,28 +607,37 @@ void VulkanDevice::RecordShadowPass(VkCommandBuffer commandBuffer, const VulkanC
 				drawCall.pushConstants.data());
 		}
 
+		DrawMetadataPushConstants metadata{};
+		metadata.firstIndex = drawCall.firstIndex;
+		metadata.vertexOffset = drawCall.baseVertex;
+		metadata.firstVertex = drawCall.startVertex;
+		vkCmdPushConstants(
+			commandBuffer,
+			m_shadowPipelineLayout,
+			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+			kDrawMetadataPushConstantOffset,
+			sizeof(metadata),
+			&metadata);
+
 		if (drawCall.indexed) {
-			if (drawCall.indexCount > 0 && (indexStorageBuffer != nullptr || m_indexBuffer != VK_NULL_HANDLE)) {
+			if (drawCall.indexCount > 0) {
 				vkCmdDraw(commandBuffer, drawCall.indexCount, drawCall.instanceCount, 0, drawCall.startInstance);
-			} else if (drawCall.indexCount > 0 && indexBuffer != nullptr) {
-				vkCmdDrawIndexed(commandBuffer, drawCall.indexCount, drawCall.instanceCount, drawCall.firstIndex, drawCall.baseVertex, drawCall.startInstance);
 			}
 		} else {
-			vkCmdDraw(commandBuffer, drawCall.vertexCount, drawCall.instanceCount, drawCall.startVertex, drawCall.startInstance);
+			vkCmdDraw(commandBuffer, drawCall.vertexCount, drawCall.instanceCount, 0, drawCall.startInstance);
 		}
 	}
 
 	vkCmdEndRenderPass(commandBuffer);
-	// finalLayout이 SHADER_READ_ONLY_OPTIMAL이라 자동 전이 — 별도 Barrier 불필요.
+	return;
 }
-
 void VulkanDevice::RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList) {
 	std::array<VkClearValue, 2> clearValues = {};
 	clearValues[0].color = commandList.m_clearColor;
 	clearValues[1].depthStencil = { 1.0f, 0 };
 	VkRenderPassBeginInfo renderPassInfo{};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-	renderPassInfo.renderPass = m_pipeline.GetRenderPass();
+	renderPassInfo.renderPass = m_mainRenderPass;
 	renderPassInfo.framebuffer = m_swapchainFramebuffers[m_currentImageIndex];
 	renderPassInfo.renderArea.offset = {0, 0};
 	renderPassInfo.renderArea.extent = m_swapchain.GetExtent();
@@ -720,88 +645,143 @@ void VulkanDevice::RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCom
 	renderPassInfo.pClearValues = clearValues.data();
 
 	vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline.GetPipeline());
 
-	if (!m_descriptorSets.empty()) {
-		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline.GetLayout(), 0, 1, &m_descriptorSets[m_currentFrameIndex], 0, nullptr);
+	VkPipeline currentPipeline = VK_NULL_HANDLE;
+	for (uint32_t drawIndex = 0; drawIndex < commandList.m_drawCalls.size(); ++drawIndex) {
+		const VulkanCommandList::DrawCall& drawCall = commandList.m_drawCalls[drawIndex];
+		const VulkanPipelineState* pipelineState = dynamic_cast<const VulkanPipelineState*>(drawCall.pipelineState);
+		if (pipelineState == nullptr) continue;
+
+		if (currentPipeline != pipelineState->GetPipeline()) {
+			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineState->GetPipeline());
+			currentPipeline = pipelineState->GetPipeline();
+		}
+
+		const uint32_t descriptorIndex = m_currentFrameIndex * kMaxDrawsPerFrame + drawIndex;
+		if (descriptorIndex < m_descriptorSets.size()) {
+			VkDescriptorSet descriptorSet = m_descriptorSets[descriptorIndex];
+			vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineState->GetLayout(), 0, 1, &descriptorSet, 0, nullptr);
+		}
+
+		VkViewport viewport{};
+		if (drawCall.hasViewport) {
+			viewport.x = drawCall.viewport.x;
+			viewport.y = drawCall.viewport.y;
+			viewport.width = drawCall.viewport.width;
+			viewport.height = drawCall.viewport.height;
+			viewport.minDepth = drawCall.viewport.minDepth;
+			viewport.maxDepth = drawCall.viewport.maxDepth;
+		} else {
+			viewport.x = 0.0f;
+			viewport.y = 0.0f;
+			viewport.width = static_cast<float>(m_swapchain.GetExtent().width);
+			viewport.height = static_cast<float>(m_swapchain.GetExtent().height);
+			viewport.minDepth = 0.0f;
+			viewport.maxDepth = 1.0f;
+		}
+
+		VkRect2D scissor{};
+		if (drawCall.hasScissor) {
+			scissor.offset = { drawCall.scissor.x, drawCall.scissor.y };
+			scissor.extent = { drawCall.scissor.width, drawCall.scissor.height };
+		} else {
+			scissor.offset = { 0, 0 };
+			scissor.extent = m_swapchain.GetExtent();
+		}
+
+		vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+		vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+		if (drawCall.pushConstantSize > 0) {
+			vkCmdPushConstants(
+				commandBuffer,
+				pipelineState->GetLayout(),
+				VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+				0,
+				drawCall.pushConstantSize,
+				drawCall.pushConstants.data()
+			);
+		}
+
+		DrawMetadataPushConstants metadata{};
+		metadata.firstIndex = drawCall.firstIndex;
+		metadata.vertexOffset = drawCall.baseVertex;
+		metadata.firstVertex = drawCall.startVertex;
+		vkCmdPushConstants(
+			commandBuffer,
+			pipelineState->GetLayout(),
+			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+			kDrawMetadataPushConstantOffset,
+			sizeof(metadata),
+			&metadata
+		);
+
+		if (drawCall.indexed) {
+			if (drawCall.indexCount > 0) {
+				vkCmdDraw(commandBuffer, drawCall.indexCount, drawCall.instanceCount, 0, drawCall.startInstance);
+			}
+		} else {
+			vkCmdDraw(commandBuffer, drawCall.vertexCount, drawCall.instanceCount, 0, drawCall.startInstance);
+		}
 	}
-
-        for (VulkanCommandList::DrawCall drawCall : commandList.m_drawCalls) {
-            const VulkanBuffer* vertexBuffer = dynamic_cast<const VulkanBuffer*>(drawCall.vertexBuffer);
-            const VulkanBuffer* indexBuffer = dynamic_cast<const VulkanBuffer*>(drawCall.indexBuffer);
-            const VulkanBuffer* indexStorageBuffer = dynamic_cast<const VulkanBuffer*>(drawCall.indexStorageBuffer);
-            const bool hasBoundVertexBuffer = vertexBuffer != nullptr;
-            const bool hasBoundIndexBuffer = indexBuffer != nullptr;
-            if (hasBoundVertexBuffer) {
-                VkBuffer vertexBuffers[] = { vertexBuffer->GetHandle() };
-                VkDeviceSize offsets[] = { drawCall.vertexBufferOffset };
-                vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-            } else if (m_useVertexInput && m_vertexBuffer != VK_NULL_HANDLE) {
-                VkBuffer vertexBuffers[] = {m_vertexBuffer};
-                VkDeviceSize offsets[] = {0};
-                vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-            }
-
-            if (hasBoundIndexBuffer && indexStorageBuffer == nullptr) {
-                const VkIndexType indexType = drawCall.indexFormat == dy::RHI::Format::R32_UINT ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT32;
-                vkCmdBindIndexBuffer(commandBuffer, indexBuffer->GetHandle(), drawCall.indexOffset, indexType);
-            }
-
-            VkViewport viewport{};
-            if (drawCall.hasViewport) {
-                viewport.x = drawCall.viewport.x;
-                viewport.y = drawCall.viewport.y;
-                viewport.width = drawCall.viewport.width;
-                viewport.height = drawCall.viewport.height;
-                viewport.minDepth = drawCall.viewport.minDepth;
-                viewport.maxDepth = drawCall.viewport.maxDepth;
-            } else {
-                viewport.x = 0.0f;
-                viewport.y = 0.0f;
-                viewport.width = static_cast<float>(m_swapchain.GetExtent().width);
-                viewport.height = static_cast<float>(m_swapchain.GetExtent().height);
-                viewport.minDepth = 0.0f;
-                viewport.maxDepth = 1.0f;
-            }
-
-            VkRect2D scissor{};
-            if (drawCall.hasScissor) {
-                scissor.offset = { drawCall.scissor.x, drawCall.scissor.y };
-                scissor.extent = { drawCall.scissor.width, drawCall.scissor.height };
-            } else {
-                scissor.offset = { 0, 0 };
-                scissor.extent = m_swapchain.GetExtent();
-            }
-
-            vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-            vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-
-            if (drawCall.indexed && drawCall.pushConstantSize >= kPushConstantIndexBaseOffset + sizeof(float)) {
-                const float indexBase = static_cast<float>(drawCall.firstIndex);
-                memcpy(drawCall.pushConstants.data() + kPushConstantIndexBaseOffset, &indexBase, sizeof(indexBase));
-            }
-            if (drawCall.pushConstantSize > 0) {
-                vkCmdPushConstants(
-                    commandBuffer,
-                    m_pipeline.GetLayout(),
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                    0,
-                    drawCall.pushConstantSize,
-                    drawCall.pushConstants.data()
-                );
-            }
-            if (drawCall.indexed) {
-                if (drawCall.indexCount > 0 && (indexStorageBuffer != nullptr || m_indexBuffer != VK_NULL_HANDLE)) {
-                    vkCmdDraw(commandBuffer, drawCall.indexCount, drawCall.instanceCount, 0, drawCall.startInstance);
-                } else if (drawCall.indexCount > 0 && hasBoundIndexBuffer) {
-                    vkCmdDrawIndexed(commandBuffer, drawCall.indexCount, drawCall.instanceCount, drawCall.firstIndex, drawCall.baseVertex, drawCall.startInstance);
-                }
-            } else {
-                vkCmdDraw(commandBuffer, drawCall.vertexCount, drawCall.instanceCount, drawCall.startVertex, drawCall.startInstance);
-            }
-        }
 	
 	vkCmdEndRenderPass(commandBuffer);
+}
+
+bool VulkanDevice::CreateMainRenderPass() {
+	VkAttachmentDescription colorAttachment{};
+	colorAttachment.format = m_swapchain.GetImageFormat();
+	colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+	VkAttachmentDescription depthAttachment{};
+	depthAttachment.format = m_depthFormat;
+	depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+	depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+	VkAttachmentReference colorAttachmentRef{};
+	colorAttachmentRef.attachment = 0;
+	colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+	VkAttachmentReference depthAttachmentRef{};
+	depthAttachmentRef.attachment = 1;
+	depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+	VkSubpassDescription subpass{};
+	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+	subpass.colorAttachmentCount = 1;
+	subpass.pColorAttachments = &colorAttachmentRef;
+	subpass.pDepthStencilAttachment = &depthAttachmentRef;
+
+	VkSubpassDependency dependency{};
+	dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+	dependency.dstSubpass = 0;
+	dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+	dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+	dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+	std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
+
+	VkRenderPassCreateInfo renderPassInfo{};
+	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+	renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+	renderPassInfo.pAttachments = attachments.data();
+	renderPassInfo.subpassCount = 1;
+	renderPassInfo.pSubpasses = &subpass;
+	renderPassInfo.dependencyCount = 1;
+	renderPassInfo.pDependencies = &dependency;
+
+	return vkCreateRenderPass(m_context.device, &renderPassInfo, nullptr, &m_mainRenderPass) == VK_SUCCESS;
 }
 
 bool VulkanDevice::CreateFramebuffers() {
@@ -811,7 +791,7 @@ bool VulkanDevice::CreateFramebuffers() {
 		VkImageView attachments[] = { views[i], m_depthImageView };
 		VkFramebufferCreateInfo fbInfo{};
 		fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-		fbInfo.renderPass = m_pipeline.GetRenderPass();
+		fbInfo.renderPass = m_mainRenderPass;
 		fbInfo.attachmentCount = static_cast<uint32_t>(sizeof(attachments) / sizeof(attachments[0]));
 		fbInfo.pAttachments = attachments;
 		fbInfo.width = m_swapchain.GetExtent().width;
@@ -904,31 +884,6 @@ bool VulkanDevice::CreateTextureSampler() {
 	return vkCreateSampler(m_context.device, &info, nullptr, &m_textureSampler) == VK_SUCCESS;
 }
 
-bool VulkanDevice::CreateLightingVolumeBuffers() {
-	const VkDeviceSize bufferSize = sizeof(VulkanLightingVolumeProfile);
-	m_lightingVolumeBuffers.resize(kMaxFramesInFlight, VK_NULL_HANDLE);
-	m_lightingVolumeBufferMemories.resize(kMaxFramesInFlight, VK_NULL_HANDLE);
-	m_lightingVolumeMappedBuffers.resize(kMaxFramesInFlight, nullptr);
-
-	for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
-		VulkanResources::CreateBuffer(
-			m_context,
-			bufferSize,
-			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			m_lightingVolumeBuffers[i],
-			m_lightingVolumeBufferMemories[i]
-		);
-
-		if (vkMapMemory(m_context.device, m_lightingVolumeBufferMemories[i], 0, bufferSize, 0, &m_lightingVolumeMappedBuffers[i]) != VK_SUCCESS) {
-			return false;
-		}
-		memcpy(m_lightingVolumeMappedBuffers[i], &m_lightingVolumeProfile, sizeof(m_lightingVolumeProfile));
-	}
-
-	return true;
-}
-
 bool VulkanDevice::CreateDepthResources() {
 	const VkExtent2D extent = m_swapchain.GetExtent();
 	if (m_depthFormat == VK_FORMAT_UNDEFINED) {
@@ -952,10 +907,10 @@ bool VulkanDevice::CreateDepthResources() {
 }
 
 bool VulkanDevice::CreateDescriptorSetLayout() {
-	// binding 0: 텍스처 sampler (FS)
+	// binding 0: ?띿뒪泥?sampler (FS)
 	// binding 1: LightingVolumeProfile UBO (VS+FS)
-	// binding 2: Shadow Map sampler (FS)               ← Shadow Map 추가
-	// binding 3: ShadowMatrix UBO (lightViewProj, VS)  ← Shadow Map 추가
+	// binding 2: Shadow Map sampler (FS)               ??Shadow Map 異붽?
+	// binding 3: ShadowMatrix UBO (lightViewProj, VS)  ??Shadow Map 異붽?
 	std::array<VkDescriptorSetLayoutBinding, 6> bindings = {};
 	bindings[0].binding = 0;
 	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -989,200 +944,140 @@ bool VulkanDevice::CreateDescriptorSetLayout() {
 }
 
 bool VulkanDevice::CreateDescriptorPool() {
-	// 셋 하나당: COMBINED_IMAGE_SAMPLER 2개 (텍스처 + 그림자맵), UNIFORM_BUFFER 2개 (라이팅 + 그림자행렬)
-	std::array<VkDescriptorPoolSize, 3> poolSizes = {};
-	poolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	poolSizes[0].descriptorCount = kMaxFramesInFlight * 2;
-	poolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	poolSizes[1].descriptorCount = kMaxFramesInFlight * 2;
-	poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	poolSizes[2].descriptorCount = kMaxFramesInFlight * 2;
-	VkDescriptorPoolCreateInfo info{};
-	info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-	info.maxSets = kMaxFramesInFlight;
-	info.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
-	info.pPoolSizes = poolSizes.data();
-	return vkCreateDescriptorPool(m_context.device, &info, nullptr, &m_descriptorPool) == VK_SUCCESS;
+	const uint32_t descriptorSetCount = kMaxFramesInFlight * kMaxDrawsPerFrame;
+	std::array<VkDescriptorPoolSize, 3> newPoolSizes = {};
+	newPoolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+	newPoolSizes[0].descriptorCount = descriptorSetCount * 2;
+	newPoolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	newPoolSizes[1].descriptorCount = descriptorSetCount * 2;
+	newPoolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	newPoolSizes[2].descriptorCount = descriptorSetCount * 2;
+	VkDescriptorPoolCreateInfo newInfo{};
+	newInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+	newInfo.maxSets = descriptorSetCount;
+	newInfo.poolSizeCount = static_cast<uint32_t>(newPoolSizes.size());
+	newInfo.pPoolSizes = newPoolSizes.data();
+	return vkCreateDescriptorPool(m_context.device, &newInfo, nullptr, &m_descriptorPool) == VK_SUCCESS;
 }
-
 bool VulkanDevice::CreateDescriptorSets() {
-	std::vector<VkDescriptorSetLayout> layouts(kMaxFramesInFlight, m_descriptorSetLayout);
-	VkDescriptorSetAllocateInfo alloc{};
-	alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-	alloc.descriptorPool = m_descriptorPool;
-	alloc.descriptorSetCount = kMaxFramesInFlight;
-	alloc.pSetLayouts = layouts.data();
-	m_descriptorSets.resize(kMaxFramesInFlight);
-	if (vkAllocateDescriptorSets(m_context.device, &alloc, m_descriptorSets.data()) != VK_SUCCESS) return false;
-	for (size_t i = 0; i < kMaxFramesInFlight; i++) {
-		std::vector<VkWriteDescriptorSet> writes;
-		writes.reserve(4);
-
-		VkDescriptorImageInfo img{};
-		img.sampler = m_textureSampler;
-		img.imageView = m_textureImageView;
-		img.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		if (m_textureImageView != VK_NULL_HANDLE) {
-			VkWriteDescriptorSet imageWrite{};
-			imageWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			imageWrite.dstSet = m_descriptorSets[i];
-			imageWrite.dstBinding = 0;
-			imageWrite.descriptorCount = 1;
-			imageWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-			imageWrite.pImageInfo = &img;
-			writes.push_back(imageWrite);
-		}
-
-		VkDescriptorBufferInfo lightingBufferInfo{};
-		lightingBufferInfo.buffer = m_lightingVolumeBuffers[i];
-		lightingBufferInfo.offset = 0;
-		lightingBufferInfo.range = sizeof(VulkanLightingVolumeProfile);
-		VkWriteDescriptorSet lightingWrite{};
-		lightingWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-		lightingWrite.dstSet = m_descriptorSets[i];
-		lightingWrite.dstBinding = 1;
-		lightingWrite.descriptorCount = 1;
-		lightingWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-		lightingWrite.pBufferInfo = &lightingBufferInfo;
-		writes.push_back(lightingWrite);
-
-		// binding 2: ShadowMap sampler. ShadowPass가 매 프레임 기록 후 SHADER_READ_ONLY_OPTIMAL로 전이된다.
-		VkDescriptorImageInfo shadowImg{};
-		shadowImg.sampler = m_shadowMapSampler;
-		shadowImg.imageView = m_shadowMapView;
-		shadowImg.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-		if (m_shadowMapView != VK_NULL_HANDLE && m_shadowMapSampler != VK_NULL_HANDLE) {
-			VkWriteDescriptorSet shadowWrite{};
-			shadowWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			shadowWrite.dstSet = m_descriptorSets[i];
-			shadowWrite.dstBinding = 2;
-			shadowWrite.descriptorCount = 1;
-			shadowWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-			shadowWrite.pImageInfo = &shadowImg;
-			writes.push_back(shadowWrite);
-		}
-
-		// binding 3: ShadowMatrix UBO (LightViewProj). frame당 별도 버퍼.
-		VkDescriptorBufferInfo shadowMatrixInfo{};
-		if (i < m_shadowMatrixBuffers.size() && m_shadowMatrixBuffers[i] != VK_NULL_HANDLE) {
-			shadowMatrixInfo.buffer = m_shadowMatrixBuffers[i];
-			shadowMatrixInfo.offset = 0;
-			shadowMatrixInfo.range = sizeof(m_shadowLightViewProj);
-			VkWriteDescriptorSet shadowMatrixWrite{};
-			shadowMatrixWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-			shadowMatrixWrite.dstSet = m_descriptorSets[i];
-			shadowMatrixWrite.dstBinding = 3;
-			shadowMatrixWrite.descriptorCount = 1;
-			shadowMatrixWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-			shadowMatrixWrite.pBufferInfo = &shadowMatrixInfo;
-			writes.push_back(shadowMatrixWrite);
-		}
-
-		vkUpdateDescriptorSets(m_context.device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+	const uint32_t descriptorSetCount = kMaxFramesInFlight * kMaxDrawsPerFrame;
+	std::vector<VkDescriptorSetLayout> newLayouts(descriptorSetCount, m_descriptorSetLayout);
+	VkDescriptorSetAllocateInfo newAlloc{};
+	newAlloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+	newAlloc.descriptorPool = m_descriptorPool;
+	newAlloc.descriptorSetCount = descriptorSetCount;
+	newAlloc.pSetLayouts = newLayouts.data();
+	m_descriptorSets.resize(descriptorSetCount);
+	return vkAllocateDescriptorSets(m_context.device, &newAlloc, m_descriptorSets.data()) == VK_SUCCESS;
+}
+bool VulkanDevice::UpdateDrawDescriptorSets(const VulkanCommandList& commandList) {
+	if (commandList.m_drawCalls.size() > kMaxDrawsPerFrame) return false;
+	for (uint32_t drawIndex = 0; drawIndex < commandList.m_drawCalls.size(); ++drawIndex) {
+		if (!UpdateDrawDescriptorSet(commandList.m_drawCalls[drawIndex], drawIndex)) return false;
 	}
 	return true;
 }
 
-void VulkanDevice::UpdateLightingVolumeBuffer() {
-	if (m_currentFrameIndex >= m_lightingVolumeMappedBuffers.size() || m_lightingVolumeMappedBuffers[m_currentFrameIndex] == nullptr) {
-		return;
+bool VulkanDevice::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCall& drawCall, uint32_t drawIndex) {
+	const uint32_t descriptorIndex = m_currentFrameIndex * kMaxDrawsPerFrame + drawIndex;
+	if (descriptorIndex >= m_descriptorSets.size()) return false;
+
+	const VulkanBuffer* vertexBuffer = dynamic_cast<const VulkanBuffer*>(drawCall.geometry.vertexBuffer);
+	const VulkanBuffer* indexBuffer = dynamic_cast<const VulkanBuffer*>(drawCall.geometry.indexBuffer);
+	if (vertexBuffer == nullptr || (drawCall.indexed && indexBuffer == nullptr)) return false;
+
+	std::vector<VkWriteDescriptorSet> writes;
+	writes.reserve(6);
+
+	VkDescriptorImageInfo textureInfo{};
+	textureInfo.sampler = m_textureSampler;
+	textureInfo.imageView = m_textureImageView;
+	textureInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	if (m_textureImageView != VK_NULL_HANDLE && m_textureSampler != VK_NULL_HANDLE) {
+		VkWriteDescriptorSet textureWrite{};
+		textureWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		textureWrite.dstSet = m_descriptorSets[descriptorIndex];
+		textureWrite.dstBinding = 0;
+		textureWrite.descriptorCount = 1;
+		textureWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		textureWrite.pImageInfo = &textureInfo;
+		writes.push_back(textureWrite);
 	}
 
-	memcpy(m_lightingVolumeMappedBuffers[m_currentFrameIndex], &m_lightingVolumeProfile, sizeof(m_lightingVolumeProfile));
-}
+	std::array<VkDescriptorBufferInfo, VulkanCommandList::kMaxConstantBufferBindings> constantInfos = {};
+	for (uint32_t binding = 0; binding < drawCall.constantBuffers.size(); ++binding) {
+		const auto& constant = drawCall.constantBuffers[binding];
+		const VulkanBuffer* buffer = dynamic_cast<const VulkanBuffer*>(constant.buffer);
+		if (buffer == nullptr) continue;
 
-void VulkanDevice::UpdateShadowMatrixBuffer() {
-	if (m_currentFrameIndex >= m_shadowMatrixMapped.size() || m_shadowMatrixMapped[m_currentFrameIndex] == nullptr) {
-		return;
-	}
-	memcpy(m_shadowMatrixMapped[m_currentFrameIndex], m_shadowLightViewProj, sizeof(m_shadowLightViewProj));
-}
+		constantInfos[binding].buffer = buffer->GetHandle();
+		constantInfos[binding].offset = constant.offset;
+		constantInfos[binding].range = constant.size > 0 ? constant.size : VK_WHOLE_SIZE;
 
-void VulkanDevice::UpdateVertexStorageDescriptor(const VulkanCommandList& commandList) {
-	if (m_currentFrameIndex >= m_descriptorSets.size()) return;
-
-	const VulkanBuffer* vertexStorageBuffer = nullptr;
-	uint32_t storageOffset = 0;
-	for (const VulkanCommandList::DrawCall& drawCall : commandList.m_drawCalls) {
-		vertexStorageBuffer = dynamic_cast<const VulkanBuffer*>(drawCall.vertexStorageBuffer);
-		if (vertexStorageBuffer != nullptr) {
-			storageOffset = drawCall.vertexStorageOffset;
-			break;
-		}
+		VkWriteDescriptorSet constantWrite{};
+		constantWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		constantWrite.dstSet = m_descriptorSets[descriptorIndex];
+		constantWrite.dstBinding = binding;
+		constantWrite.descriptorCount = 1;
+		constantWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		constantWrite.pBufferInfo = &constantInfos[binding];
+		writes.push_back(constantWrite);
 	}
 
-	VkDescriptorBufferInfo vertexInfo{};
-	if (vertexStorageBuffer != nullptr) {
-		vertexInfo.buffer = vertexStorageBuffer->GetHandle();
-		vertexInfo.offset = storageOffset;
-		vertexInfo.range = VK_WHOLE_SIZE;
-	} else if (m_vertexBuffer != VK_NULL_HANDLE) {
-		vertexInfo.buffer = m_vertexBuffer;
-		vertexInfo.offset = 0;
-		vertexInfo.range = m_vertexBufferSize > 0 ? m_vertexBufferSize : VK_WHOLE_SIZE;
-	} else {
-		return;
+	VkDescriptorImageInfo shadowInfo{};
+	shadowInfo.sampler = m_shadowMapSampler;
+	shadowInfo.imageView = m_shadowMapView;
+	shadowInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	if (m_shadowMapView != VK_NULL_HANDLE && m_shadowMapSampler != VK_NULL_HANDLE) {
+		VkWriteDescriptorSet shadowWrite{};
+		shadowWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		shadowWrite.dstSet = m_descriptorSets[descriptorIndex];
+		shadowWrite.dstBinding = kShadowSamplerBinding;
+		shadowWrite.descriptorCount = 1;
+		shadowWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+		shadowWrite.pImageInfo = &shadowInfo;
+		writes.push_back(shadowWrite);
 	}
+
+	std::array<VkDescriptorBufferInfo, 2> geometryInfos = {};
+	geometryInfos[0].buffer = vertexBuffer->GetHandle();
+	geometryInfos[0].offset = drawCall.geometry.vertexOffset;
+	geometryInfos[0].range = VK_WHOLE_SIZE;
+	geometryInfos[1].buffer = indexBuffer != nullptr ? indexBuffer->GetHandle() : vertexBuffer->GetHandle();
+	geometryInfos[1].offset = indexBuffer != nullptr ? drawCall.geometry.indexOffset : 0;
+	geometryInfos[1].range = VK_WHOLE_SIZE;
 
 	VkWriteDescriptorSet vertexWrite{};
 	vertexWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	vertexWrite.dstSet = m_descriptorSets[m_currentFrameIndex];
+	vertexWrite.dstSet = m_descriptorSets[descriptorIndex];
 	vertexWrite.dstBinding = kVertexStorageBinding;
 	vertexWrite.descriptorCount = 1;
 	vertexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	vertexWrite.pBufferInfo = &vertexInfo;
-	vkUpdateDescriptorSets(m_context.device, 1, &vertexWrite, 0, nullptr);
-}
-
-void VulkanDevice::UpdateIndexStorageDescriptor(const VulkanCommandList& commandList) {
-	if (m_currentFrameIndex >= m_descriptorSets.size()) return;
-
-	const VulkanBuffer* indexStorageBuffer = nullptr;
-	uint32_t storageOffset = 0;
-	for (const VulkanCommandList::DrawCall& drawCall : commandList.m_drawCalls) {
-		indexStorageBuffer = dynamic_cast<const VulkanBuffer*>(drawCall.indexStorageBuffer);
-		if (indexStorageBuffer != nullptr) {
-			storageOffset = drawCall.indexStorageOffset;
-			break;
-		}
-	}
-
-	VkDescriptorBufferInfo indexInfo{};
-	if (indexStorageBuffer != nullptr) {
-		indexInfo.buffer = indexStorageBuffer->GetHandle();
-		indexInfo.offset = storageOffset;
-		indexInfo.range = VK_WHOLE_SIZE;
-	} else if (m_indexBuffer != VK_NULL_HANDLE) {
-		indexInfo.buffer = m_indexBuffer;
-		indexInfo.offset = 0;
-		indexInfo.range = m_indexBufferSize > 0 ? m_indexBufferSize : VK_WHOLE_SIZE;
-	} else {
-		return;
-	}
+	vertexWrite.pBufferInfo = &geometryInfos[0];
+	writes.push_back(vertexWrite);
 
 	VkWriteDescriptorSet indexWrite{};
 	indexWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	indexWrite.dstSet = m_descriptorSets[m_currentFrameIndex];
+	indexWrite.dstSet = m_descriptorSets[descriptorIndex];
 	indexWrite.dstBinding = kIndexStorageBinding;
 	indexWrite.descriptorCount = 1;
 	indexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	indexWrite.pBufferInfo = &indexInfo;
-	vkUpdateDescriptorSets(m_context.device, 1, &indexWrite, 0, nullptr);
-}
+	indexWrite.pBufferInfo = &geometryInfos[1];
+	writes.push_back(indexWrite);
 
-// =====================================================================
-//  Shadow Map 인프라 구현
-// =====================================================================
+	vkUpdateDescriptorSets(m_context.device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+	return true;
+}
 
 bool VulkanDevice::CreateShadowRenderPass() {
 	// Depth-only RenderPass.
-	// Color attachment 없음 (FS에서 픽셀 색을 출력하지 않음).
-	// finalLayout을 SHADER_READ_ONLY_OPTIMAL로 두면 RenderPass 종료 시 자동 전이 → 별도 Barrier 불필요.
+	// Color attachment ?놁쓬 (FS?먯꽌 ?쎌? ?됱쓣 異쒕젰?섏? ?딆쓬).
+	// finalLayout??SHADER_READ_ONLY_OPTIMAL濡??먮㈃ RenderPass 醫낅즺 ???먮룞 ?꾩씠 ??蹂꾨룄 Barrier 遺덊븘??
 	VkAttachmentDescription depthAttachment{};
 	depthAttachment.format = m_shadowMapFormat;
 	depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
 	depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;            // FS에서 sample 해야 하니 STORE
+	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;            // FS?먯꽌 sample ?댁빞 ?섎땲 STORE
 	depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 	depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1197,7 +1092,7 @@ bool VulkanDevice::CreateShadowRenderPass() {
 	subpass.colorAttachmentCount = 0;
 	subpass.pDepthStencilAttachment = &depthAttachmentRef;
 
-	// 두 개의 dependency: 시작 전(이전 Pass의 sample 끝나야 깊이 쓰기 시작), 종료 후(쓰기 끝나야 다음 sample)
+	// ??媛쒖쓽 dependency: ?쒖옉 ???댁쟾 Pass??sample ?앸굹??源딆씠 ?곌린 ?쒖옉), 醫낅즺 ???곌린 ?앸굹???ㅼ쓬 sample)
 	std::array<VkSubpassDependency, 2> dependencies = {};
 	dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
 	dependencies[0].dstSubpass = 0;
@@ -1242,7 +1137,7 @@ bool VulkanDevice::CreateShadowMapResources() {
 	m_shadowMapView = VulkanResources::CreateImageView(
 		m_context.device, m_shadowMapImage, m_shadowMapFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
 
-	// Sampler: CLAMP_TO_BORDER + 흰색 border → frustum 밖 픽셀은 자동으로 그림자 없음
+	// Sampler: CLAMP_TO_BORDER + ?곗깋 border ??frustum 諛??쎌?? ?먮룞?쇰줈 洹몃┝???놁쓬
 	VkSamplerCreateInfo samplerInfo{};
 	samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
 	samplerInfo.magFilter = VK_FILTER_LINEAR;
@@ -1250,8 +1145,8 @@ bool VulkanDevice::CreateShadowMapResources() {
 	samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-	samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;     // 1.0 = 그림자 안 받음
-	samplerInfo.compareEnable = VK_FALSE;                              // PCF는 셰이더 측에서 직접 계산
+	samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;     // 1.0 = 洹몃┝????諛쏆쓬
+	samplerInfo.compareEnable = VK_FALSE;                              // PCF???곗씠??痢≪뿉??吏곸젒 怨꾩궛
 	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
 	if (vkCreateSampler(m_context.device, &samplerInfo, nullptr, &m_shadowMapSampler) != VK_SUCCESS) {
 		return false;
@@ -1269,36 +1164,13 @@ bool VulkanDevice::CreateShadowMapResources() {
 	return vkCreateFramebuffer(m_context.device, &fbInfo, nullptr, &m_shadowFramebuffer) == VK_SUCCESS;
 }
 
-bool VulkanDevice::CreateShadowMatrixBuffers() {
-	const VkDeviceSize bufferSize = sizeof(m_shadowLightViewProj);
-	m_shadowMatrixBuffers.resize(kMaxFramesInFlight, VK_NULL_HANDLE);
-	m_shadowMatrixMemories.resize(kMaxFramesInFlight, VK_NULL_HANDLE);
-	m_shadowMatrixMapped.resize(kMaxFramesInFlight, nullptr);
-
-	for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
-		VulkanResources::CreateBuffer(
-			m_context,
-			bufferSize,
-			VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-			m_shadowMatrixBuffers[i],
-			m_shadowMatrixMemories[i]);
-
-		if (vkMapMemory(m_context.device, m_shadowMatrixMemories[i], 0, bufferSize, 0, &m_shadowMatrixMapped[i]) != VK_SUCCESS) {
-			return false;
-		}
-		memcpy(m_shadowMatrixMapped[i], m_shadowLightViewProj, sizeof(m_shadowLightViewProj));
-	}
-	return true;
-}
-
-bool VulkanDevice::CreateShadowPipeline() {
-	// PipelineLayout은 메인 PSO와 동일한 DescriptorSetLayout + PushConstantRange를 공유.
-	// (셰이더가 같은 binding 3을 읽기 때문에 호환 가능)
+bool VulkanDevice::CreateShadowPipeline(const dy::RHI::GraphicsPipelineDesc& desc) {
+	// PipelineLayout? 硫붿씤 PSO? ?숈씪??DescriptorSetLayout + PushConstantRange瑜?怨듭쑀.
+	// (?곗씠?붽? 媛숈? binding 3???쎄린 ?뚮Ц???명솚 媛??
 	VkPushConstantRange pushConstantRange{};
 	pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 	pushConstantRange.offset = 0;
-	pushConstantRange.size = 128;
+	pushConstantRange.size = 192;
 
 	VkPipelineLayoutCreateInfo layoutInfo{};
 	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -1310,27 +1182,12 @@ bool VulkanDevice::CreateShadowPipeline() {
 		return false;
 	}
 
-	// Shadow Vertex Shader 로드
-	std::ifstream file(m_shaderOutputDirectory + "/shadow.vert.spv", std::ios::ate | std::ios::binary);
-	if (!file.is_open()) {
-		SDL_Log("Failed to open shadow.vert.spv");
+	// Shadow Vertex Shader 濡쒕뱶
+	if (desc.shadowVertexShader == nullptr || desc.shadowVertexShaderSize == 0) {
+		SDL_Log("Shadow pipeline shader bytecode is missing");
 		return false;
 	}
-	const size_t fileSize = static_cast<size_t>(file.tellg());
-	std::vector<char> spirv(fileSize);
-	file.seekg(0);
-	file.read(spirv.data(), fileSize);
-	file.close();
-
-	VkShaderModuleCreateInfo shaderInfo{};
-	shaderInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-	shaderInfo.codeSize = spirv.size();
-	shaderInfo.pCode = reinterpret_cast<const uint32_t*>(spirv.data());
-	VkShaderModule vertModule = VK_NULL_HANDLE;
-	if (vkCreateShaderModule(m_context.device, &shaderInfo, nullptr, &vertModule) != VK_SUCCESS) {
-		return false;
-	}
-
+	VkShaderModule vertModule = CreateShaderModule(m_context.device, desc.shadowVertexShader, desc.shadowVertexShaderSize);
 	VkPipelineShaderStageCreateInfo stage{};
 	stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	stage.stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -1357,10 +1214,10 @@ bool VulkanDevice::CreateShadowPipeline() {
 	VkPipelineRasterizationStateCreateInfo rast{};
 	rast.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
 	rast.polygonMode = VK_POLYGON_MODE_FILL;
-	rast.cullMode = VK_CULL_MODE_NONE;             // 평면 메시도 통과해야 함
+	rast.cullMode = VK_CULL_MODE_NONE;             // ?됰㈃ 硫붿떆???듦낵?댁빞 ??
 	rast.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 	rast.lineWidth = 1.0f;
-	rast.depthBiasEnable = VK_TRUE;                // Slope-scaled bias로 acne 완화
+	rast.depthBiasEnable = VK_TRUE;                // Slope-scaled bias濡?acne ?꾪솕
 	rast.depthBiasConstantFactor = 1.25f;
 	rast.depthBiasSlopeFactor = 1.75f;
 
@@ -1376,7 +1233,7 @@ bool VulkanDevice::CreateShadowPipeline() {
 	ds.depthBoundsTestEnable = VK_FALSE;
 	ds.stencilTestEnable = VK_FALSE;
 
-	// Color blend는 attachment가 0개라도 구조체는 필요하다 (attachmentCount=0)
+	// Color blend??attachment媛 0媛쒕씪??援ъ“泥대뒗 ?꾩슂?섎떎 (attachmentCount=0)
 	VkPipelineColorBlendStateCreateInfo cb{};
 	cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
 	cb.attachmentCount = 0;
@@ -1391,7 +1248,7 @@ bool VulkanDevice::CreateShadowPipeline() {
 	VkGraphicsPipelineCreateInfo pipelineInfo{};
 	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
 	pipelineInfo.stageCount = 1;
-	pipelineInfo.pStages = &stage;                 // FS 없음
+	pipelineInfo.pStages = &stage;                 // FS ?놁쓬
 	pipelineInfo.pVertexInputState = &vertexInput;
 	pipelineInfo.pInputAssemblyState = &ia;
 	pipelineInfo.pViewportState = &viewportState;
@@ -1411,21 +1268,6 @@ bool VulkanDevice::CreateShadowPipeline() {
 
 void VulkanDevice::DestroyShadowResources() {
 	if (m_context.device == VK_NULL_HANDLE) return;
-
-	for (size_t i = 0; i < m_shadowMatrixBuffers.size(); ++i) {
-		if (i < m_shadowMatrixMapped.size() && m_shadowMatrixMapped[i] != nullptr && i < m_shadowMatrixMemories.size()) {
-			vkUnmapMemory(m_context.device, m_shadowMatrixMemories[i]);
-		}
-		if (m_shadowMatrixBuffers[i] != VK_NULL_HANDLE) {
-			vkDestroyBuffer(m_context.device, m_shadowMatrixBuffers[i], nullptr);
-		}
-		if (i < m_shadowMatrixMemories.size() && m_shadowMatrixMemories[i] != VK_NULL_HANDLE) {
-			vkFreeMemory(m_context.device, m_shadowMatrixMemories[i], nullptr);
-		}
-	}
-	m_shadowMatrixBuffers.clear();
-	m_shadowMatrixMemories.clear();
-	m_shadowMatrixMapped.clear();
 
 	if (m_shadowPipeline != VK_NULL_HANDLE) {
 		vkDestroyPipeline(m_context.device, m_shadowPipeline, nullptr);
@@ -1467,7 +1309,7 @@ void VulkanDevice::RecreateSwapchain() {
 	m_swapchain.Initialize(m_context, m_windowHandle);
 	UpdateBackBufferMetadata();
 	m_depthFormat = FindDepthFormat();
-	m_pipeline.Initialize(m_context, m_swapchain.GetImageFormat(), m_depthFormat, m_swapchain.GetExtent(), m_descriptorSetLayout, m_shaderOutputDirectory, m_useVertexInput);
+	CreateMainRenderPass();
 	CreateDepthResources();
 	CreateFramebuffers();
 	m_imagesInFlight.assign(m_swapchain.GetImageCount(), VK_NULL_HANDLE);
@@ -1488,11 +1330,17 @@ void VulkanDevice::DestroySwapchainResources() {
 		vkFreeMemory(m_context.device, m_depthImageMemory, nullptr);
 		m_depthImageMemory = VK_NULL_HANDLE;
 	}
-	m_pipeline.Cleanup(m_context.device);
+	if (m_mainRenderPass != VK_NULL_HANDLE) {
+		vkDestroyRenderPass(m_context.device, m_mainRenderPass, nullptr);
+		m_mainRenderPass = VK_NULL_HANDLE;
+	}
 	m_swapchain.Cleanup(m_context.device);
 }
 
 void VulkanDevice::DestroyDeviceResources() {
+	if (m_context.device != VK_NULL_HANDLE) {
+		vkDeviceWaitIdle(m_context.device);
+	}
 	for (dy::RHI::IPipelineState* pipelineState : m_ownedPipelineStates) delete pipelineState;
 	m_ownedPipelineStates.clear();
 
@@ -1509,25 +1357,9 @@ void VulkanDevice::DestroyDeviceResources() {
 		vkDeviceWaitIdle(m_context.device);
 		for (dy::RHI::IBuffer* buffer : m_ownedBuffers) delete buffer;
 		m_ownedBuffers.clear();
-		if (m_vertexBuffer != VK_NULL_HANDLE) { vkDestroyBuffer(m_context.device, m_vertexBuffer, nullptr); vkFreeMemory(m_context.device, m_vertexBufferMemory, nullptr); }
-		if (m_indexBuffer != VK_NULL_HANDLE) { vkDestroyBuffer(m_context.device, m_indexBuffer, nullptr); vkFreeMemory(m_context.device, m_indexBufferMemory, nullptr); }
 		if (m_textureSampler != VK_NULL_HANDLE) vkDestroySampler(m_context.device, m_textureSampler, nullptr);
 		if (m_textureImageView != VK_NULL_HANDLE) vkDestroyImageView(m_context.device, m_textureImageView, nullptr);
 		if (m_textureImage != VK_NULL_HANDLE) { vkDestroyImage(m_context.device, m_textureImage, nullptr); vkFreeMemory(m_context.device, m_textureImageMemory, nullptr); }
-		for (size_t i = 0; i < m_lightingVolumeBuffers.size(); ++i) {
-			if (m_lightingVolumeMappedBuffers[i] != nullptr) {
-				vkUnmapMemory(m_context.device, m_lightingVolumeBufferMemories[i]);
-			}
-			if (m_lightingVolumeBuffers[i] != VK_NULL_HANDLE) {
-				vkDestroyBuffer(m_context.device, m_lightingVolumeBuffers[i], nullptr);
-			}
-			if (m_lightingVolumeBufferMemories[i] != VK_NULL_HANDLE) {
-				vkFreeMemory(m_context.device, m_lightingVolumeBufferMemories[i], nullptr);
-			}
-		}
-		m_lightingVolumeBuffers.clear();
-		m_lightingVolumeBufferMemories.clear();
-		m_lightingVolumeMappedBuffers.clear();
 		DestroyShadowResources();
 		if (m_descriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(m_context.device, m_descriptorPool, nullptr);
 		if (m_descriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(m_context.device, m_descriptorSetLayout, nullptr);

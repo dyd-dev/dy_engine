@@ -9,6 +9,10 @@ layout(location = 4) out vec4 fragLightSpacePos;
 layout(push_constant) uniform PushConstants {
     mat4 viewProj;
     mat4 model;
+    float drawMode;
+    uint firstIndex;
+    int vertexOffset;
+    uint firstVertex;
 } pushConstants;
 
 // Shadow Map 변환용 Light-Space ViewProjection.
@@ -50,12 +54,10 @@ Vertex LoadVertex(uint vertexIndex) {
 
 void main() {
     mat4 model = pushConstants.model;
-    uint indexBase = uint(model[0][3]);
-    fragDrawMode = model[3][3];
-    model[0][3] = 0.0;
-    model[3][3] = 1.0;
+    fragDrawMode = pushConstants.drawMode;
 
-    uint vertexIndex = indexStorage.indices[indexBase + uint(gl_VertexIndex)];
+    int resolvedVertexIndex = int(indexStorage.indices[pushConstants.firstIndex + uint(gl_VertexIndex)]) + pushConstants.vertexOffset;
+    uint vertexIndex = uint(resolvedVertexIndex);
     Vertex vertex = LoadVertex(vertexIndex);
     vec4 worldPosition = model * vec4(vertex.position, 1.0);
     gl_Position = pushConstants.viewProj * worldPosition;

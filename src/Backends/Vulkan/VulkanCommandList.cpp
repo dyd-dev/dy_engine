@@ -10,18 +10,8 @@ void VulkanCommandList::Begin()
 	m_clearColor = { { 0.4f, 0.7f, 1.0f, 1.0f } };
 	m_boundPipeline = nullptr;
 	m_pendingPushConstantSize = 0;
-	m_pendingVertexBuffer = nullptr;
-	m_pendingVertexStride = 0;
-	m_pendingVertexOffset = 0;
-	m_pendingVertexStorageBuffer = nullptr;
-	m_pendingVertexStorageStride = 0;
-	m_pendingVertexStorageOffset = 0;
-	m_pendingIndexBuffer = nullptr;
-	m_pendingIndexFormat = dy::RHI::Format::Unknown;
-	m_pendingIndexOffset = 0;
-	m_pendingIndexStorageBuffer = nullptr;
-	m_pendingIndexStorageFormat = dy::RHI::Format::Unknown;
-	m_pendingIndexStorageOffset = 0;
+	m_pendingGeometry = {};
+	m_pendingConstantBuffers = {};
 	m_hasPendingViewport = false;
 	m_hasPendingScissor = false;
 	m_drawCalls.clear();
@@ -44,32 +34,18 @@ void VulkanCommandList::SetPushConstants(uint32_t size, const void* data)
 	memcpy(m_pendingPushConstants.data(), data, m_pendingPushConstantSize);
 }
 
-void VulkanCommandList::BindVertexBuffer(dy::RHI::IBuffer* buffer, uint32_t stride, uint32_t offset)
+void VulkanCommandList::BindGeometry(const dy::RHI::GeometryBinding& geometry)
 {
-	m_pendingVertexBuffer = buffer;
-	m_pendingVertexStride = stride;
-	m_pendingVertexOffset = offset;
+	m_pendingGeometry = geometry;
 }
 
-void VulkanCommandList::BindVertexStorageBuffer(dy::RHI::IBuffer* buffer, uint32_t stride, uint32_t offset)
+void VulkanCommandList::BindConstantBuffer(uint32_t binding, dy::RHI::IBuffer* buffer, uint32_t offset, uint32_t size)
 {
-	m_pendingVertexStorageBuffer = buffer;
-	m_pendingVertexStorageStride = stride;
-	m_pendingVertexStorageOffset = offset;
-}
+	if (binding >= m_pendingConstantBuffers.size()) return;
 
-void VulkanCommandList::BindIndexBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset)
-{
-	m_pendingIndexBuffer = buffer;
-	m_pendingIndexFormat = format;
-	m_pendingIndexOffset = offset;
-}
-
-void VulkanCommandList::BindIndexStorageBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset)
-{
-	m_pendingIndexStorageBuffer = buffer;
-	m_pendingIndexStorageFormat = format;
-	m_pendingIndexStorageOffset = offset;
+	m_pendingConstantBuffers[binding].buffer = buffer;
+	m_pendingConstantBuffers[binding].offset = offset;
+	m_pendingConstantBuffers[binding].size = size;
 }
 
 void VulkanCommandList::ClearColor(dy::RHI::ITexture* renderTarget, float r, float g, float b, float a)
@@ -99,18 +75,10 @@ void VulkanCommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCou
 	drawCall.startVertex = startVertex;
 	drawCall.startInstance = startInstance;
 	drawCall.pushConstantSize = m_pendingPushConstantSize;
-	drawCall.vertexBuffer = m_pendingVertexBuffer;
-	drawCall.vertexStride = m_pendingVertexStride;
-	drawCall.vertexBufferOffset = m_pendingVertexOffset;
-	drawCall.vertexStorageBuffer = m_pendingVertexStorageBuffer;
-	drawCall.vertexStorageStride = m_pendingVertexStorageStride;
-	drawCall.vertexStorageOffset = m_pendingVertexStorageOffset;
-	drawCall.indexBuffer = m_pendingIndexBuffer;
-	drawCall.indexFormat = m_pendingIndexFormat;
-	drawCall.indexOffset = m_pendingIndexOffset;
-	drawCall.indexStorageBuffer = m_pendingIndexStorageBuffer;
-	drawCall.indexStorageFormat = m_pendingIndexStorageFormat;
-	drawCall.indexStorageOffset = m_pendingIndexStorageOffset;
+	drawCall.pipelineState = m_boundPipeline;
+	drawCall.vertexStride = m_pendingGeometry.vertexStride;
+	drawCall.geometry = m_pendingGeometry;
+	drawCall.constantBuffers = m_pendingConstantBuffers;
 	drawCall.hasViewport = m_hasPendingViewport;
 	drawCall.hasScissor = m_hasPendingScissor;
 	drawCall.viewport = m_pendingViewport;
@@ -131,18 +99,10 @@ void VulkanCommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t insta
 	drawCall.baseVertex = vertexOffset;
 	drawCall.startInstance = firstInstance;
 	drawCall.pushConstantSize = m_pendingPushConstantSize;
-	drawCall.vertexBuffer = m_pendingVertexBuffer;
-	drawCall.vertexStride = m_pendingVertexStride;
-	drawCall.vertexBufferOffset = m_pendingVertexOffset;
-	drawCall.vertexStorageBuffer = m_pendingVertexStorageBuffer;
-	drawCall.vertexStorageStride = m_pendingVertexStorageStride;
-	drawCall.vertexStorageOffset = m_pendingVertexStorageOffset;
-	drawCall.indexBuffer = m_pendingIndexBuffer;
-	drawCall.indexFormat = m_pendingIndexFormat;
-	drawCall.indexOffset = m_pendingIndexOffset;
-	drawCall.indexStorageBuffer = m_pendingIndexStorageBuffer;
-	drawCall.indexStorageFormat = m_pendingIndexStorageFormat;
-	drawCall.indexStorageOffset = m_pendingIndexStorageOffset;
+	drawCall.pipelineState = m_boundPipeline;
+	drawCall.vertexStride = m_pendingGeometry.vertexStride;
+	drawCall.geometry = m_pendingGeometry;
+	drawCall.constantBuffers = m_pendingConstantBuffers;
 	drawCall.hasViewport = m_hasPendingViewport;
 	drawCall.hasScissor = m_hasPendingScissor;
 	drawCall.viewport = m_pendingViewport;

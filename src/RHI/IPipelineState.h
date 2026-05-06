@@ -10,18 +10,22 @@
 namespace dy::RHI
 {
 	struct GraphicsPipelineDesc {
-		const void* vertexShader;
-		size_t vertexShaderSize;
+		const void* vertexShader = nullptr;
+		size_t vertexShaderSize = 0;
 
-		const void* pixelShader;
-		size_t pixelShaderSize;
+		const void* pixelShader = nullptr;
+		size_t pixelShaderSize = 0;
 
-		Format renderTargetFormat;
-		Format depthStencilFormat;
+		const void* shadowVertexShader = nullptr;
+		size_t shadowVertexShaderSize = 0;
+
+		Format renderTargetFormat = Format::Unknown;
+		Format depthStencilFormat = Format::Unknown;
 
 		// flags like Depth, Blend mode
 		bool depthEnable = true;
 		bool wireframe = false;
+		bool enableShadowPass = false;
 	};
 
 	struct ComputePipelineDesc {

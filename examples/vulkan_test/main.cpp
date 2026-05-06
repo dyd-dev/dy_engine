@@ -3,10 +3,12 @@
 #include <vector>
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include "Platform/Window.h"
 #include "RHI/IDevice.h"
 #include "RHI/IBuffer.h"
 #include "RHI/ICommandList.h"
+#include "RHI/IPipelineState.h"
 #include "Graphics/Mesh.h"
 #include "Math/Math.h"
 
@@ -16,18 +18,48 @@ using namespace dy;
 #define DY_SHADER_DIR nullptr
 #endif
 
+namespace
+{
+    std::vector<char> ReadBinaryFile(const std::string& path)
+    {
+        std::ifstream file(path, std::ios::ate | std::ios::binary);
+        if (!file.is_open()) {
+            throw std::runtime_error("Failed to open shader file: " + path);
+        }
+
+        const size_t fileSize = static_cast<size_t>(file.tellg());
+        std::vector<char> buffer(fileSize);
+        file.seekg(0);
+        file.read(buffer.data(), fileSize);
+        return buffer;
+    }
+}
+
 int main()
 {
     try
     {
         Platform::Window window(1280, 720, "Vulkan OBJ Test");
 
-        RHI::DeviceDesc deviceDesc = {};
-        deviceDesc.shaderDirectory = DY_SHADER_DIR;
-        std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(window.GetHandle(), deviceDesc));
+        std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(window.GetHandle()));
         if (!device)
         {
             throw std::runtime_error("Failed to initialize RHI device for Vulkan OBJ test");
+        }
+
+        const std::string shaderDir = DY_SHADER_DIR != nullptr ? DY_SHADER_DIR : "";
+        const std::vector<char> vertexShader = ReadBinaryFile(shaderDir + "/triangle.vert.spv");
+        const std::vector<char> pixelShader = ReadBinaryFile(shaderDir + "/triangle.frag.spv");
+        RHI::GraphicsPipelineDesc pipelineDesc = {};
+        pipelineDesc.vertexShader = vertexShader.data();
+        pipelineDesc.vertexShaderSize = vertexShader.size();
+        pipelineDesc.pixelShader = pixelShader.data();
+        pipelineDesc.pixelShaderSize = pixelShader.size();
+        pipelineDesc.depthEnable = true;
+        RHI::IPipelineState* pipeline = device->CreateGraphicsPipeline(pipelineDesc);
+        if (!pipeline)
+        {
+            throw std::runtime_error("Failed to create RHI graphics pipeline");
         }
 
         // Load the OBJ mesh from the example folder.
@@ -126,8 +158,15 @@ int main()
             device->BeginFrame();
             RHI::ICommandList* cmdList = device->AcquireCommandList();
             cmdList->ClearColor(device->GetBackBuffer(), 0.05f, 0.07f, 0.10f, 1.0f);
-            cmdList->BindVertexStorageBuffer(vertexBuffer.get(), 8u * static_cast<uint32_t>(sizeof(float)), 0);
-            cmdList->BindIndexStorageBuffer(indexBuffer.get(), RHI::Format::R32_UINT, 0);
+            cmdList->BindGraphicsPipeline(pipeline);
+            RHI::GeometryBinding geometry = {};
+            geometry.vertexBuffer = vertexBuffer.get();
+            geometry.vertexStride = 8u * static_cast<uint32_t>(sizeof(float));
+            geometry.vertexOffset = 0;
+            geometry.indexBuffer = indexBuffer.get();
+            geometry.indexFormat = RHI::Format::R32_UINT;
+            geometry.indexOffset = 0;
+            cmdList->BindGeometry(geometry);
 
             struct {
                 Math::float4x4 viewProj;

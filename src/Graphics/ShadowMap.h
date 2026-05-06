@@ -12,7 +12,7 @@
  *
  * 호출 규약:
  *   Math::float4x4 lvp = ComputeDirectionalLightViewProj(lightDir, desc);
- *   device->UpdateGlobalConstants(3, lvp.m, sizeof(lvp.m));
+ *   commandList->BindConstantBuffer(shadowMatrixBinding, shadowMatrixBuffer, 0, sizeof(lvp.m));
  *
  * 좌표 가정:
  *   - Z-up 월드 좌표계 (본 예제와 동일)

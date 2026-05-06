@@ -15,10 +15,8 @@ class VulkanCommandList : public dy::RHI::ICommandList
 public:
 	void BindGraphicsPipeline(dy::RHI::IPipelineState* pipelineState) override;
 	void BindGlobalDescriptorHeap() override {}
-	void BindVertexBuffer(dy::RHI::IBuffer* buffer, uint32_t stride, uint32_t offset) override;
-	void BindVertexStorageBuffer(dy::RHI::IBuffer* buffer, uint32_t stride, uint32_t offset) override;
-	void BindIndexBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset) override;
-	void BindIndexStorageBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset) override;
+	void BindGeometry(const dy::RHI::GeometryBinding& geometry) override;
+	void BindConstantBuffer(uint32_t binding, dy::RHI::IBuffer* buffer, uint32_t offset, uint32_t size) override;
 	void SetPushConstants(uint32_t size, const void* data) override;
 	void SetRenderTargets(uint32_t, dy::RHI::ITexture**, dy::RHI::ITexture*) override {}
 	void SetViewport(const dy::RHI::Viewport& viewport) override;
@@ -35,6 +33,15 @@ public:
 	void End();
 
 private:
+	static constexpr uint32_t kMaxConstantBufferBindings = 8;
+
+	struct ConstantBufferBinding
+	{
+		dy::RHI::IBuffer* buffer = nullptr;
+		uint32_t offset = 0;
+		uint32_t size = 0;
+	};
+
 	struct DrawCall
 	{
 		bool indexed = false;
@@ -48,40 +55,22 @@ private:
 		uint32_t pushConstantSize = 0;
 		bool hasViewport = false;
 		bool hasScissor = false;
-		dy::RHI::IBuffer* vertexBuffer = nullptr;
+		dy::RHI::IPipelineState* pipelineState = nullptr;
 		uint32_t vertexStride = 0;
-		uint32_t vertexBufferOffset = 0;
-		dy::RHI::IBuffer* vertexStorageBuffer = nullptr;
-		uint32_t vertexStorageStride = 0;
-		uint32_t vertexStorageOffset = 0;
-		dy::RHI::IBuffer* indexBuffer = nullptr;
-		dy::RHI::Format indexFormat = dy::RHI::Format::Unknown;
-		uint32_t indexOffset = 0;
-		dy::RHI::IBuffer* indexStorageBuffer = nullptr;
-		dy::RHI::Format indexStorageFormat = dy::RHI::Format::Unknown;
-		uint32_t indexStorageOffset = 0;
+		dy::RHI::GeometryBinding geometry = {};
+		std::array<ConstantBufferBinding, kMaxConstantBufferBindings> constantBuffers = {};
 		dy::RHI::Viewport viewport = {};
 		dy::RHI::Rect scissor = {};
-		std::array<uint8_t, 128> pushConstants = {};
+		std::array<uint8_t, 192> pushConstants = {};
 	};
 
 	friend class VulkanDevice;
 	VkClearColorValue m_clearColor = { { 0.4f, 0.7f, 1.0f, 1.0f } };
 	dy::RHI::IPipelineState* m_boundPipeline = nullptr;
-	std::array<uint8_t, 128> m_pendingPushConstants = {};
+	std::array<uint8_t, 192> m_pendingPushConstants = {};
 	uint32_t m_pendingPushConstantSize = 0;
-	dy::RHI::IBuffer* m_pendingVertexBuffer = nullptr;
-	uint32_t m_pendingVertexStride = 0;
-	uint32_t m_pendingVertexOffset = 0;
-	dy::RHI::IBuffer* m_pendingVertexStorageBuffer = nullptr;
-	uint32_t m_pendingVertexStorageStride = 0;
-	uint32_t m_pendingVertexStorageOffset = 0;
-	dy::RHI::IBuffer* m_pendingIndexBuffer = nullptr;
-	dy::RHI::Format m_pendingIndexFormat = dy::RHI::Format::Unknown;
-	uint32_t m_pendingIndexOffset = 0;
-	dy::RHI::IBuffer* m_pendingIndexStorageBuffer = nullptr;
-	dy::RHI::Format m_pendingIndexStorageFormat = dy::RHI::Format::Unknown;
-	uint32_t m_pendingIndexStorageOffset = 0;
+	dy::RHI::GeometryBinding m_pendingGeometry = {};
+	std::array<ConstantBufferBinding, kMaxConstantBufferBindings> m_pendingConstantBuffers = {};
 	bool m_hasPendingViewport = false;
 	bool m_hasPendingScissor = false;
 	dy::RHI::Viewport m_pendingViewport = {};

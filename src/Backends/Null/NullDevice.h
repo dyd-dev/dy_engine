@@ -23,7 +23,6 @@ namespace dy::Backends
 
 		[[nodiscard]] RHI::DescriptorIndex AllocateDescriptorSlot() override;
 		void UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::ITexture* texture) override;
-		void UpdateGlobalConstants(uint32_t binding, const void* data, uint32_t size) override;
 
 		void DestroyBuffer(RHI::IBuffer* buffer) override;
 		void DestroyTexture(RHI::ITexture* texture) override;

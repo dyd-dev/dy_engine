@@ -5,6 +5,7 @@
 #include <iostream>
 #include <memory>
 #include <stdexcept>
+#include <fstream>
 #include <string>
 #include <vector>
 #include "Core/Types.h"
@@ -16,6 +17,7 @@
 #include "RHI/IBuffer.h"
 #include "RHI/ICommandList.h"
 #include "RHI/IDevice.h"
+#include "RHI/IPipelineState.h"
 
 using namespace dy;
 
@@ -26,6 +28,8 @@ using namespace dy;
 namespace
 {
 	constexpr float kFloorZ = -0.56f;
+	constexpr uint32_t kLightingProfileBinding = 1;
+	constexpr uint32_t kShadowMatrixBinding = 3;
 
 	struct LightingVolumeProfile
 	{
@@ -39,6 +43,21 @@ namespace
 		float cameraPosition[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
 		float materialParams[4] = { 0.34f, 36.0f, 0.0f, 0.0f };
 	};
+
+	std::vector<char> ReadBinaryFile(const std::string& path)
+	{
+		std::ifstream file(path, std::ios::ate | std::ios::binary);
+		if (!file.is_open())
+		{
+			throw std::runtime_error("Failed to open shader file: " + path);
+		}
+
+		const size_t fileSize = static_cast<size_t>(file.tellg());
+		std::vector<char> buffer(fileSize);
+		file.seekg(0);
+		file.read(buffer.data(), fileSize);
+		return buffer;
+	}
 
 	float Dot(const Math::float3& a, const Math::float3& b)
 	{
@@ -151,7 +170,7 @@ namespace
 		return camera;
 	}
 
-	Math::float4x4 CreateZUpYawModel(const Math::float3& position, float yawRadians, float uniformScale, float drawMode)
+	Math::float4x4 CreateZUpYawModel(const Math::float3& position, float yawRadians, float uniformScale)
 	{
 		const float cosYaw = std::cos(yawRadians);
 		const float sinYaw = std::sin(yawRadians);
@@ -165,7 +184,7 @@ namespace
 		model.m[12] = position.x;
 		model.m[13] = position.y;
 		model.m[14] = position.z;
-		model.m[15] = drawMode;
+		model.m[15] = 1.0f;
 		return model;
 	}
 
@@ -255,13 +274,29 @@ int main()
 	try
 	{
 		Platform::Window window(1280, 720, "Vulkan Lighting Volume Test");
-		RHI::DeviceDesc deviceDesc = {};
-		deviceDesc.shaderDirectory = DY_SHADER_DIR;
-		deviceDesc.enableShadowMapping = true;
-		std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(window.GetHandle(), deviceDesc));
+		std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(window.GetHandle()));
 		if (!device)
 		{
 			throw std::runtime_error("Failed to initialize RHI device for lighting volume test");
+		}
+
+		const std::string shaderDir = DY_SHADER_DIR != nullptr ? DY_SHADER_DIR : "";
+		const std::vector<char> vertexShader = ReadBinaryFile(shaderDir + "/triangle.vert.spv");
+		const std::vector<char> pixelShader = ReadBinaryFile(shaderDir + "/triangle.frag.spv");
+		const std::vector<char> shadowVertexShader = ReadBinaryFile(shaderDir + "/shadow.vert.spv");
+		RHI::GraphicsPipelineDesc pipelineDesc = {};
+		pipelineDesc.vertexShader = vertexShader.data();
+		pipelineDesc.vertexShaderSize = vertexShader.size();
+		pipelineDesc.pixelShader = pixelShader.data();
+		pipelineDesc.pixelShaderSize = pixelShader.size();
+		pipelineDesc.shadowVertexShader = shadowVertexShader.data();
+		pipelineDesc.shadowVertexShaderSize = shadowVertexShader.size();
+		pipelineDesc.depthEnable = true;
+		pipelineDesc.enableShadowPass = true;
+		RHI::IPipelineState* pipeline = device->CreateGraphicsPipeline(pipelineDesc);
+		if (!pipeline)
+		{
+			throw std::runtime_error("Failed to create RHI graphics pipeline for lighting volume test");
 		}
 
 		Graphics::MeshData meshData;
@@ -303,11 +338,19 @@ int main()
 			device->CreateBuffer(RHI::BufferDesc{ maxIndexBytes, static_cast<uint32_t>(sizeof(uint32_t)), indexStorageUsage }),
 			device->CreateBuffer(RHI::BufferDesc{ maxIndexBytes, static_cast<uint32_t>(sizeof(uint32_t)), indexStorageUsage })
 		};
+		std::array<RHI::IBuffer*, 2> lightingBuffers = {
+			device->CreateBuffer(RHI::BufferDesc{ static_cast<uint32_t>(sizeof(LightingVolumeProfile)), static_cast<uint32_t>(sizeof(LightingVolumeProfile)), RHI::BufferUsage::Constant }),
+			device->CreateBuffer(RHI::BufferDesc{ static_cast<uint32_t>(sizeof(LightingVolumeProfile)), static_cast<uint32_t>(sizeof(LightingVolumeProfile)), RHI::BufferUsage::Constant })
+		};
+		std::array<RHI::IBuffer*, 2> shadowMatrixBuffers = {
+			device->CreateBuffer(RHI::BufferDesc{ static_cast<uint32_t>(sizeof(float) * 16), static_cast<uint32_t>(sizeof(float) * 16), RHI::BufferUsage::Constant }),
+			device->CreateBuffer(RHI::BufferDesc{ static_cast<uint32_t>(sizeof(float) * 16), static_cast<uint32_t>(sizeof(float) * 16), RHI::BufferUsage::Constant })
+		};
 
 		const float scale = 0.1f;
 		const float objectYawRadians = 0.78539816f;
 		const Math::float3 objectPosition(0.0f, 0.0f, kFloorZ);
-		const Math::float4x4 fixedModel = CreateZUpYawModel(objectPosition, objectYawRadians, scale, 1.0f);
+		const Math::float4x4 fixedModel = CreateZUpYawModel(objectPosition, objectYawRadians, scale);
 
 		const Camera mainCamera = CreateExampleCamera();
 		const std::array<CameraView, 3> cameraViews = {
@@ -320,6 +363,8 @@ int main()
 		while (window.IsRunning())
 		{
 			window.PollEvents();
+			device->BeginFrame();
+			const uint32_t frameIndex = device->GetCurrentFrameIndex() % static_cast<uint32_t>(vertexBuffers.size());
 
 			const auto now = std::chrono::steady_clock::now();
 			const float seconds = std::chrono::duration<float>(now - startTime).count();
@@ -371,7 +416,10 @@ int main()
 			profile.materialParams[1] = 42.0f;
 			profile.materialParams[2] = kFloorZ;
 			profile.materialParams[3] = 0.003f;
-			device->UpdateGlobalConstants(1, &profile, sizeof(profile));
+			void* lightingData = lightingBuffers[frameIndex]->Map(0, static_cast<uint32_t>(sizeof(profile)));
+			if (lightingData == nullptr) throw std::runtime_error("Failed to map lighting constant buffer");
+			std::memcpy(lightingData, &profile, sizeof(profile));
+			lightingBuffers[frameIndex]->Unmap();
 
 			// Shadow Map용 Light-Space ViewProjection 갱신.
 			// Directional Light가 매 프레임 흔들리므로 LightViewProj도 매 프레임 재계산.
@@ -386,7 +434,10 @@ int main()
 			const Math::float4x4 lightViewProj = Graphics::ComputeDirectionalLightViewProj(
 				Math::float3(lightDirX, lightDirY, lightDirZ),
 				shadowMapDesc);
-			device->UpdateGlobalConstants(3, lightViewProj.m, sizeof(lightViewProj.m));
+			void* shadowMatrixData = shadowMatrixBuffers[frameIndex]->Map(0, static_cast<uint32_t>(sizeof(lightViewProj.m)));
+			if (shadowMatrixData == nullptr) throw std::runtime_error("Failed to map shadow matrix constant buffer");
+			std::memcpy(shadowMatrixData, lightViewProj.m, sizeof(lightViewProj.m));
+			shadowMatrixBuffers[frameIndex]->Unmap();
 
 			std::vector<float> frameVertices = baseVertices;
 			std::vector<uint32_t> frameIndices = baseIndices;
@@ -404,8 +455,6 @@ int main()
 			AppendMeshData(shadowMesh, frameVertices, frameIndices);
 			const uint32_t shadowIndexCount = static_cast<uint32_t>(frameIndices.size()) - shadowFirstIndex;
 
-			device->BeginFrame();
-			const uint32_t frameIndex = device->GetCurrentFrameIndex() % static_cast<uint32_t>(vertexBuffers.size());
 			RHI::IBuffer* vertexBuffer = vertexBuffers[frameIndex];
 			RHI::IBuffer* indexBuffer = indexBuffers[frameIndex];
 			const uint32_t frameVertexBytes = static_cast<uint32_t>(frameVertices.size() * sizeof(float));
@@ -423,13 +472,23 @@ int main()
 
 			RHI::ICommandList* cmdList = device->AcquireCommandList();
 			cmdList->ClearColor(device->GetBackBuffer(), 0.025f, 0.035f, 0.052f, 1.0f);
-			cmdList->BindVertexStorageBuffer(vertexBuffer, 8u * static_cast<uint32_t>(sizeof(float)), 0);
-			cmdList->BindIndexStorageBuffer(indexBuffer, RHI::Format::R32_UINT, 0);
+			cmdList->BindGraphicsPipeline(pipeline);
+			RHI::GeometryBinding geometry = {};
+			geometry.vertexBuffer = vertexBuffer;
+			geometry.vertexStride = 8u * static_cast<uint32_t>(sizeof(float));
+			geometry.vertexOffset = 0;
+			geometry.indexBuffer = indexBuffer;
+			geometry.indexFormat = RHI::Format::R32_UINT;
+			geometry.indexOffset = 0;
+			cmdList->BindGeometry(geometry);
+			cmdList->BindConstantBuffer(kLightingProfileBinding, lightingBuffers[frameIndex], 0, static_cast<uint32_t>(sizeof(profile)));
+			cmdList->BindConstantBuffer(kShadowMatrixBinding, shadowMatrixBuffers[frameIndex], 0, static_cast<uint32_t>(sizeof(lightViewProj.m)));
 
 			struct
 			{
 				Math::float4x4 viewProj;
 				Math::float4x4 model;
+				float drawMode;
 			} pushData;
 
 			for (const CameraView& cameraView : cameraViews)
@@ -439,18 +498,19 @@ int main()
 				pushData.viewProj = cameraView.viewProj;
 
 				Math::float4x4 floorModel = Math::float4x4::Identity();
-				floorModel.m[15] = 2.0f;
 				pushData.model = floorModel;
+				pushData.drawMode = 2.0f;
 				cmdList->SetPushConstants(sizeof(pushData), &pushData);
 				cmdList->DrawIndexedInstanced(floorIndexCount, 1, floorFirstIndex, 0, 0);
 
 				pushData.model = fixedModel;
+				pushData.drawMode = 1.0f;
 				cmdList->SetPushConstants(sizeof(pushData), &pushData);
 				cmdList->DrawIndexedInstanced(objectIndexCount, 1, 0, 0, 0);
 
 				Math::float4x4 shadowModel = Math::float4x4::Identity();
-				shadowModel.m[15] = -2.0f;
 				pushData.model = shadowModel;
+				pushData.drawMode = -2.0f;
 				cmdList->SetPushConstants(sizeof(pushData), &pushData);
 				cmdList->DrawIndexedInstanced(shadowIndexCount, 1, shadowFirstIndex, 0, 0);
 
@@ -461,9 +521,9 @@ int main()
 				sunMarkerModel.m[12] = profile.volumeParams2[1];
 				sunMarkerModel.m[13] = profile.volumeParams2[2];
 				sunMarkerModel.m[14] = profile.volumeParams2[3];
-				sunMarkerModel.m[15] = 1.0f;
 
 				pushData.model = sunMarkerModel;
+				pushData.drawMode = 1.0f;
 				cmdList->SetPushConstants(sizeof(pushData), &pushData);
 				cmdList->DrawIndexedInstanced(objectIndexCount, 1, 0, 0, 0);
 			}

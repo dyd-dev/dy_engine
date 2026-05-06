@@ -6,6 +6,10 @@ layout(location = 1) out vec3 fragNormal;
 layout(push_constant) uniform PushConstants {
     mat4 viewProj;
     mat4 model;
+    float drawMode;
+    uint firstIndex;
+    int vertexOffset;
+    uint firstVertex;
 } pushConstants;
 
 layout(std430, set = 0, binding = 4) readonly buffer VertexStorage {
@@ -41,10 +45,9 @@ Vertex LoadVertex(uint vertexIndex) {
 
 void main() {
     mat4 model = pushConstants.model;
-    uint indexBase = uint(model[0][3]);
-    model[0][3] = 0.0;
 
-    uint vertexIndex = indexStorage.indices[indexBase + uint(gl_VertexIndex)];
+    int resolvedVertexIndex = int(indexStorage.indices[pushConstants.firstIndex + uint(gl_VertexIndex)]) + pushConstants.vertexOffset;
+    uint vertexIndex = uint(resolvedVertexIndex);
     Vertex vertex = LoadVertex(vertexIndex);
     gl_Position = pushConstants.viewProj * model * vec4(vertex.position, 1.0);
     fragUV = vertex.uv;

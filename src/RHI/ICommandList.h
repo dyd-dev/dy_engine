@@ -16,6 +16,16 @@ namespace dy::RHI
 	class ITexture;
 	class IPipelineState;
 
+	struct GeometryBinding
+	{
+		IBuffer* vertexBuffer = nullptr;
+		uint32_t vertexStride = 0;
+		uint32_t vertexOffset = 0;
+		IBuffer* indexBuffer = nullptr;
+		Format indexFormat = Format::Unknown;
+		uint32_t indexOffset = 0;
+	};
+
 	struct Viewport
 	{
 		float x = 0.0f;
@@ -49,10 +59,8 @@ namespace dy::RHI
 		// Must be called once per pass before Draw.
 		virtual void BindGlobalDescriptorHeap() = 0;
 
-		virtual void BindVertexBuffer(IBuffer* buffer, uint32_t stride, uint32_t offset) = 0;
-		virtual void BindVertexStorageBuffer(IBuffer* buffer, uint32_t stride, uint32_t offset) = 0;
-		virtual void BindIndexBuffer(IBuffer* buffer, Format format, uint32_t offset) = 0;
-		virtual void BindIndexStorageBuffer(IBuffer* buffer, Format format, uint32_t offset) = 0;
+		virtual void BindGeometry(const GeometryBinding& geometry) = 0;
+		virtual void BindConstantBuffer(uint32_t binding, IBuffer* buffer, uint32_t offset, uint32_t size) = 0;
 
 		// Modern DOD Approach: Inject tiny data (e.g., Transform Index, Material Index) directly.
 		// Replaces ALL BindBuffer and BindTexture calls.

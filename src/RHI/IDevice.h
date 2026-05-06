@@ -25,8 +25,6 @@ namespace dy::RHI
 
 	struct DeviceDesc
 	{
-		const char* shaderDirectory = nullptr;
-		bool enableShadowMapping = false;
 	};
 
 	class IDevice
@@ -61,8 +59,6 @@ namespace dy::RHI
 
 		// Binds an ITexture (SRV) to the allocated slot in the Global Heap.
 		virtual void UpdateDescriptorSlot(DescriptorIndex index, ITexture* texture) = 0;
-		virtual void UpdateGlobalConstants(uint32_t binding, const void* data, uint32_t size) = 0;
-
 		virtual void DestroyBuffer(IBuffer* buffer) = 0;
 		virtual void DestroyTexture(ITexture* texture) = 0;
 		virtual void DestroyPipelineState(IPipelineState* pipeline) = 0;
