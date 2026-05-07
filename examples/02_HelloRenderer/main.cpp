@@ -40,13 +40,14 @@ int main()
 		if(!renderer.Initialize(device.get(), rendererConfig)) return -1;
 
 		Graphics::Scene scene;
-		const Core::Image checkerboard = CreateCheckerboardImage(
+
+		Core::Image textureImage = CreateCheckerboardImage(
 			256, 256, 32,
 			{ 240, 240, 240, 255 },
 			{ 64, 160, 216, 255 }
 		);
 
-		const TextureID checkerTexture = scene.CreateTexture(checkerboard);
+		const TextureID checkerTexture = scene.CreateTexture(textureImage);
 		const MaterialID triangleMaterial = scene.CreateMaterial(Material{
 			Math::float4(1.0f, 1.0f, 1.0f, 1.0f),
 			checkerTexture
