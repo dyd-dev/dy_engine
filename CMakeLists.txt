@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.20)
 project(dy_engine CXX)
 
 # add module path
@@ -8,8 +8,10 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 add_library(${PROJECT_NAME} STATIC
 	"src/RHI/IDevice.cpp"
 	"src/Graphics/Renderer.cpp"
+    "src/Graphics/Mesh.cpp"
 	"src/Platform/Window.cpp"
 	"src/Backends/Null/NullDevice.cpp"
+	"src/Graphics/ObjLoader.cpp"
 )
 
 # global options

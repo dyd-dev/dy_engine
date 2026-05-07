@@ -19,6 +19,7 @@ namespace dy::Backends
 
 		RHI::IBuffer* CreateBuffer(const RHI::BufferDesc& desc) override;
 		RHI::ITexture* CreateTexture(const RHI::TextureDesc& desc) override;
+		void UpdateTexture(RHI::ITexture* texture, const void* data, uint32_t rowPitch) override;
 		RHI::IPipelineState* CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc) override;
 
 		[[nodiscard]] RHI::DescriptorIndex AllocateDescriptorSlot() override;

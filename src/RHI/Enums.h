@@ -15,7 +15,9 @@ namespace dy::RHI
 		R16G16B16A16_FLOAT,
 		R32G32B32A32_FLOAT,
 		D32_FLOAT,
-		D24_UNORM_S8_UINT
+		D24_UNORM_S8_UINT,
+		R32_UINT,
+		R16_UINT
 	};
 
 	// Buffer binding usages (Bitmask)
