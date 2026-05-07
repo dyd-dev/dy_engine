@@ -17,6 +17,8 @@ namespace dy::RHI
 		uint32_t mipLevels = 1;
 		Format format;
 		TextureUsage usage;
+		const void* initialData         = nullptr;
+		uint32_t    initialDataRowPitch  = 0;
 	};
 
 	class ITexture
