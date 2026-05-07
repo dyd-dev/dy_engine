@@ -126,6 +126,7 @@ void Renderer::PrepareSceneResources(const Scene& scene, RHI::IDevice* device)
 			textureDesc.initialDataRowPitch = image.GetRowPitch();
 
 			textureState.texture = device->CreateTexture(textureDesc);
+			device->UpdateTexture(textureState.texture, image.GetPixels().data(), image.GetRowPitch());
 			textureState.descriptorIndex = device->AllocateDescriptorSlot();
 			device->UpdateDescriptorSlot(textureState.descriptorIndex, textureState.texture);
 		}
