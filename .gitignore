@@ -1,4 +1,4 @@
-﻿build/
+build/
 out/
 
 .vs/
@@ -6,3 +6,4 @@ out/
 
 *.sln
 *.slnx
+
