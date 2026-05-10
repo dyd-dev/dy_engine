@@ -58,6 +58,18 @@ float CalculateDirectionalShadow(vec4 lightSpacePos, vec3 normal, vec3 lightDir)
 }
 
 void main() {
+    if (fragDrawMode > 3.5) {
+        vec3 markerColor = vec3(0.18, 0.58, 1.0) * 2.1;
+        outColor = vec4(markerColor / (markerColor + vec3(0.45)), 1.0);
+        return;
+    }
+
+    if (fragDrawMode > 2.5) {
+        vec3 markerColor = vec3(1.0, 0.58, 0.18) * 2.0;
+        outColor = vec4(markerColor / (markerColor + vec3(0.55)), 1.0);
+        return;
+    }
+
     if (fragDrawMode > 1.5) {
         vec2 grid = abs(fract(fragUV * vec2(10.0, 8.0)) - 0.5);
         float gridLine = 1.0 - smoothstep(0.46, 0.50, min(grid.x, grid.y));
@@ -108,10 +120,7 @@ void main() {
     float globalSpecularMask = pow(max(dot(viewDirection, globalReflectDirection), 0.0), shininess) * step(0.0, rawGlobalNdotL);
     vec3 globalSpecular = lighting.globalLightColor.rgb * lighting.globalLightColor.a * specularStrength * globalSpecularMask;
 
-    // Shadow Map은 Directional Light에만 적용(스폿 라이트는 별도 광원이라 영향 X).
-    float shadowFactor = CalculateDirectionalShadow(fragLightSpacePos, normal, globalDirection);
-    globalDiffuse  *= shadowFactor;
-    globalSpecular *= shadowFactor;
+    // Presentation mode: objects cast shadows, while only the floor receives the shadow map.
 
     vec3 toSpot = lighting.spotLightPosition.xyz - fragWorldPosition;
     float spotDistance = max(length(toSpot), 0.001);

@@ -80,6 +80,23 @@ namespace
 		return Math::float3(value.x / length, value.y / length, value.z / length);
 	}
 
+	Math::float3 ComputeAnimatedDirectionalLight(float randomCycle)
+	{
+		float lightDirX = std::sin(randomCycle * 1.37f + std::cos(randomCycle * 0.61f) * 2.1f);
+		float lightDirY = std::cos(randomCycle * 1.11f + std::sin(randomCycle * 0.49f) * 1.6f) * 0.65f;
+		float lightDirZ = 0.38f + std::abs(std::sin(randomCycle * 0.83f + 1.7f)) * 0.72f;
+		return Normalize(Math::float3(lightDirX, lightDirY, lightDirZ));
+	}
+
+	Math::float3 ComputeDirectionalMarkerPosition(const Math::float3& lightDirection)
+	{
+		return Math::float3(
+			lightDirection.x * 0.92f,
+			lightDirection.y * 0.92f,
+			0.18f + lightDirection.z * 0.92f
+		);
+	}
+
 	Math::float4x4 MultiplyColumnMajor(const Math::float4x4& lhs, const Math::float4x4& rhs)
 	{
 		Math::float4x4 result = {};
@@ -369,13 +386,11 @@ int main()
 			const auto now = std::chrono::steady_clock::now();
 			const float seconds = std::chrono::duration<float>(now - startTime).count();
 			const float randomCycle = seconds * 0.25f;
-			float lightDirX = std::sin(randomCycle * 1.37f + std::cos(randomCycle * 0.61f) * 2.1f);
-			float lightDirY = std::cos(randomCycle * 1.11f + std::sin(randomCycle * 0.49f) * 1.6f) * 0.65f;
-			float lightDirZ = 0.38f + std::abs(std::sin(randomCycle * 0.83f + 1.7f)) * 0.72f;
-			const float lightDirLength = std::sqrt(lightDirX * lightDirX + lightDirY * lightDirY + lightDirZ * lightDirZ);
-			lightDirX /= lightDirLength;
-			lightDirY /= lightDirLength;
-			lightDirZ /= lightDirLength;
+			const Math::float3 directionalLight = ComputeAnimatedDirectionalLight(randomCycle);
+			const float lightDirX = directionalLight.x;
+			const float lightDirY = directionalLight.y;
+			const float lightDirZ = directionalLight.z;
+			const Math::float3 directionalMarkerPosition = ComputeDirectionalMarkerPosition(directionalLight);
 			const float daylight = std::max(lightDirZ, 0.0f);
 
 			LightingVolumeProfile profile;
@@ -385,11 +400,11 @@ int main()
 			profile.globalLightColor[0] = 0.55f;
 			profile.globalLightColor[1] = 0.62f;
 			profile.globalLightColor[2] = 0.72f;
-			profile.globalLightColor[3] = 0.38f;
+			profile.globalLightColor[3] = 0.6f;
 
-			const float spotX = lightDirX * 0.62f;
-			const float spotY = lightDirY * 0.45f - 0.05f;
-			const float spotZ = 0.85f + lightDirZ * 0.18f;
+			const float spotX = 0.65f;
+			const float spotY = -0.25f;
+			const float spotZ = 1.05f;
 			profile.spotLightPosition[0] = spotX;
 			profile.spotLightPosition[1] = spotY;
 			profile.spotLightPosition[2] = spotZ;
@@ -399,12 +414,12 @@ int main()
 			profile.spotLightColor[0] = 1.0f;
 			profile.spotLightColor[1] = 0.78f;
 			profile.spotLightColor[2] = 0.38f;
-			profile.spotLightColor[3] = 8.0f;
+			profile.spotLightColor[3] = 2.0f;
 			profile.volumeParams[0] = 0.1f;
 			profile.volumeParams[1] = 1.05f + daylight * 0.08f;
 			profile.volumeParams[2] = 0.03f;
-			profile.volumeParams[3] = 0.90f;
-			profile.volumeParams2[0] = 0.55f;
+			profile.volumeParams[3] = 0.96f;
+			profile.volumeParams2[0] = 0.90f;
 			profile.volumeParams2[1] = spotX;
 			profile.volumeParams2[2] = spotY;
 			profile.volumeParams2[3] = spotZ;
@@ -514,16 +529,14 @@ int main()
 				cmdList->SetPushConstants(sizeof(pushData), &pushData);
 				cmdList->DrawIndexedInstanced(shadowIndexCount, 1, shadowFirstIndex, 0, 0);
 
-				Math::float4x4 sunMarkerModel = Math::float4x4::Identity();
-				sunMarkerModel.m[0] = 0.018f;
-				sunMarkerModel.m[5] = 0.018f;
-				sunMarkerModel.m[10] = 0.018f;
-				sunMarkerModel.m[12] = profile.volumeParams2[1];
-				sunMarkerModel.m[13] = profile.volumeParams2[2];
-				sunMarkerModel.m[14] = profile.volumeParams2[3];
+				pushData.model = CreateZUpYawModel(directionalMarkerPosition, 0.0f, 0.024f);
+				pushData.drawMode = 4.0f;
+				cmdList->SetPushConstants(sizeof(pushData), &pushData);
+				cmdList->DrawIndexedInstanced(objectIndexCount, 1, 0, 0, 0);
 
-				pushData.model = sunMarkerModel;
-				pushData.drawMode = 1.0f;
+				const Math::float3 spotMarkerPosition(profile.volumeParams2[1], profile.volumeParams2[2], profile.volumeParams2[3]);
+				pushData.model = CreateZUpYawModel(spotMarkerPosition, 0.0f, 0.018f);
+				pushData.drawMode = 3.0f;
 				cmdList->SetPushConstants(sizeof(pushData), &pushData);
 				cmdList->DrawIndexedInstanced(objectIndexCount, 1, 0, 0, 0);
 			}
