@@ -15,7 +15,7 @@
  *   commandList->BindConstantBuffer(shadowMatrixBinding, shadowMatrixBuffer, 0, sizeof(lvp.m));
  *
  * 좌표 가정:
- *   - Z-up 월드 좌표계 (본 예제와 동일)
+ *   - Z-up 월드 좌표계
  *   - Vulkan NDC: x∈[-1,1], y∈[-1,1], z∈[0,1]
  *   - column-major 4x4
  */

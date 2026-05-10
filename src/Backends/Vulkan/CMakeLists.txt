@@ -51,7 +51,7 @@ add_custom_command(
 add_custom_target(VulkanShaders ALL DEPENDS ${VULKAN_SHADER_OUTPUTS})
 add_dependencies(Backend_Vulkan VulkanShaders)
 
-target_link_libraries(Backend_Vulkan PUBLIC
+target_link_libraries(Backend_Vulkan PRIVATE
 	glfw
 	Vulkan::Vulkan
 	Engine_Options

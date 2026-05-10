@@ -50,9 +50,7 @@ private:
 	bool CreateFramebuffers();
 	bool CreateCommandPool();
 	bool CreateCommandBuffer();
-	bool CreateTextureImage();
-	bool CreateTextureImageView();
-	bool CreateTextureSampler();
+	bool CreateFallbackTexture();
 
 	bool CreateShadowMapResources();
 	bool CreateShadowRenderPass();
@@ -66,6 +64,10 @@ private:
 	void RecordCommandBuffer(const VulkanCommandList& commandList);
 	void RecordShadowPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList);
 	void RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList);
+	bool ResolveMainPassTarget(const VulkanCommandList& commandList, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
+	bool GetOrCreateOffscreenFramebuffer(dy::RHI::ITexture* colorTarget, dy::RHI::ITexture* depthTarget, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
+	bool CreateOffscreenRenderPass(VkFormat colorFormat, VkFormat depthFormat, VkImageLayout colorFinalLayout, VkRenderPass& renderPass);
+	void DestroyRenderTargetCache();
 	bool UpdateDrawDescriptorSets(const VulkanCommandList& commandList);
 	bool UpdateDrawDescriptorSet(const VulkanCommandList::DrawCall& drawCall, uint32_t drawIndex);
 	void UpdateBackBufferMetadata();
@@ -81,13 +83,6 @@ private:
 	VkCommandPool m_commandPool = VK_NULL_HANDLE;
 	std::vector<VkCommandBuffer> m_commandBuffers;
 
-	VkImage m_textureImage = VK_NULL_HANDLE;
-	VkDeviceMemory m_textureImageMemory = VK_NULL_HANDLE;
-	VkImageView m_textureImageView = VK_NULL_HANDLE;
-	VkSampler m_textureSampler = VK_NULL_HANDLE;
-	VkImage m_depthImage = VK_NULL_HANDLE;
-	VkDeviceMemory m_depthImageMemory = VK_NULL_HANDLE;
-	VkImageView m_depthImageView = VK_NULL_HANDLE;
 	VkFormat m_depthFormat = VK_FORMAT_UNDEFINED;
 
 	VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
@@ -102,11 +97,19 @@ private:
 	std::vector<VkFramebuffer> m_swapchainFramebuffers;
 	std::vector<dy::RHI::IBuffer*> m_ownedBuffers;
 
+	struct RenderTargetCacheEntry
+	{
+		dy::RHI::ITexture* colorTarget = nullptr;
+		dy::RHI::ITexture* depthTarget = nullptr;
+		dy::RHI::ITexture* ownedDepthTarget = nullptr;
+		VkRenderPass renderPass = VK_NULL_HANDLE;
+		VkFramebuffer framebuffer = VK_NULL_HANDLE;
+		uint32_t width = 0;
+		uint32_t height = 0;
+	};
+	std::vector<RenderTargetCacheEntry> m_renderTargetCache;
+
 	static constexpr uint32_t kShadowMapResolution = 2048;
-	VkImage m_shadowMapImage = VK_NULL_HANDLE;
-	VkDeviceMemory m_shadowMapMemory = VK_NULL_HANDLE;
-	VkImageView m_shadowMapView = VK_NULL_HANDLE;
-	VkSampler m_shadowMapSampler = VK_NULL_HANDLE;
 	VkRenderPass m_shadowRenderPass = VK_NULL_HANDLE;
 	VkFramebuffer m_shadowFramebuffer = VK_NULL_HANDLE;
 	VkPipelineLayout m_shadowPipelineLayout = VK_NULL_HANDLE;
@@ -123,6 +126,9 @@ private:
 
 	VulkanCommandList* m_commandList = nullptr;
 	dy::RHI::ITexture* m_backBuffer = nullptr;
+	dy::RHI::ITexture* m_fallbackTexture = nullptr;
+	dy::RHI::ITexture* m_depthTexture = nullptr;
+	dy::RHI::ITexture* m_shadowMapTexture = nullptr;
 	std::vector<dy::RHI::ITexture*> m_ownedTextures;
 	std::vector<dy::RHI::IPipelineState*> m_ownedPipelineStates;
 };

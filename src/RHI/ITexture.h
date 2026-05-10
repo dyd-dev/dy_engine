@@ -1,9 +1,4 @@
 #pragma once
-/* Texture
-* 
-* 1D/2D/3D Texture, Render Target, Depth Stencil 등을 할당합니다.
-* Texture는 이미지 데이터를 GPU 메모리에 저장하고, 셰이더에서 이를 참조하여 렌더링에 활용할 수 있도록 합니다.
-*/
 #include <cstdint>
 #include "Enums.h"
 

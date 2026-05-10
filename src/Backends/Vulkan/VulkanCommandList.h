@@ -18,11 +18,11 @@ public:
 	void BindGeometry(const dy::RHI::GeometryBinding& geometry) override;
 	void BindConstantBuffer(uint32_t binding, dy::RHI::IBuffer* buffer, uint32_t offset, uint32_t size) override;
 	void SetPushConstants(uint32_t size, const void* data) override;
-	void SetRenderTargets(uint32_t, dy::RHI::ITexture**, dy::RHI::ITexture*) override {}
+	void SetRenderTargets(uint32_t numRenderTargets, dy::RHI::ITexture** renderTargets, dy::RHI::ITexture* depthStencil) override;
 	void SetViewport(const dy::RHI::Viewport& viewport) override;
 	void SetScissor(const dy::RHI::Rect& rect) override;
 	void ClearColor(dy::RHI::ITexture* renderTarget, float r, float g, float b, float a) override;
-	void ClearDepth(dy::RHI::ITexture*, float) override {}
+	void ClearDepth(dy::RHI::ITexture* depthStencil, float depth) override;
 	void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
 	void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
 	void ResourceBarrier(dy::RHI::IBuffer*, dy::RHI::ResourceState, dy::RHI::ResourceState) override {}
@@ -34,6 +34,7 @@ public:
 
 private:
 	static constexpr uint32_t kMaxConstantBufferBindings = 8;
+	static constexpr uint32_t kMaxRenderTargets = 4;
 
 	struct ConstantBufferBinding
 	{
@@ -66,6 +67,10 @@ private:
 
 	friend class VulkanDevice;
 	VkClearColorValue m_clearColor = { { 0.4f, 0.7f, 1.0f, 1.0f } };
+	float m_clearDepth = 1.0f;
+	uint32_t m_renderTargetCount = 0;
+	std::array<dy::RHI::ITexture*, kMaxRenderTargets> m_renderTargets = {};
+	dy::RHI::ITexture* m_depthStencil = nullptr;
 	dy::RHI::IPipelineState* m_boundPipeline = nullptr;
 	std::array<uint8_t, 192> m_pendingPushConstants = {};
 	uint32_t m_pendingPushConstantSize = 0;

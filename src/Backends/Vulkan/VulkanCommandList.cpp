@@ -8,6 +8,10 @@ namespace dy::Backends
 void VulkanCommandList::Begin()
 {
 	m_clearColor = { { 0.4f, 0.7f, 1.0f, 1.0f } };
+	m_clearDepth = 1.0f;
+	m_renderTargetCount = 0;
+	m_renderTargets = {};
+	m_depthStencil = nullptr;
 	m_boundPipeline = nullptr;
 	m_pendingPushConstantSize = 0;
 	m_pendingGeometry = {};
@@ -48,10 +52,26 @@ void VulkanCommandList::BindConstantBuffer(uint32_t binding, dy::RHI::IBuffer* b
 	m_pendingConstantBuffers[binding].size = size;
 }
 
+void VulkanCommandList::SetRenderTargets(uint32_t numRenderTargets, dy::RHI::ITexture** renderTargets, dy::RHI::ITexture* depthStencil)
+{
+	m_renderTargetCount = std::min<uint32_t>(numRenderTargets, kMaxRenderTargets);
+	m_renderTargets = {};
+	for (uint32_t i = 0; i < m_renderTargetCount; ++i) {
+		m_renderTargets[i] = renderTargets != nullptr ? renderTargets[i] : nullptr;
+	}
+	m_depthStencil = depthStencil;
+}
+
 void VulkanCommandList::ClearColor(dy::RHI::ITexture* renderTarget, float r, float g, float b, float a)
 {
 	(void)renderTarget;
 	m_clearColor = { { r, g, b, a } };
+}
+
+void VulkanCommandList::ClearDepth(dy::RHI::ITexture* depthStencil, float depth)
+{
+	(void)depthStencil;
+	m_clearDepth = depth;
 }
 
 void VulkanCommandList::SetViewport(const dy::RHI::Viewport& viewport)

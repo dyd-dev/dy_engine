@@ -10,7 +10,10 @@
 #include <cstring>
 #include <cstdio>
 #include <fstream>
+#include <memory>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 #if defined(_WIN32)
 #include <windows.h>
 #endif
@@ -43,7 +46,7 @@ namespace {
 		uint32_t padding = 0;
 	};
 
-	enum class VulkanBufferKind
+	enum class VulkanBufferKind // 불칸 사용 버퍼 종류
 	{
 		Vertex,
 		Index,
@@ -95,6 +98,71 @@ namespace {
 		}
 	}
 
+	bool HasTextureUsage(dy::RHI::TextureUsage usage, dy::RHI::TextureUsage flag)
+	{
+		return (usage & flag) != dy::RHI::TextureUsage::None;
+	}
+
+	VkFormat ToVkFormat(dy::RHI::Format format)
+	{
+		switch (format)
+		{
+		case dy::RHI::Format::R8G8B8A8_UNORM: return VK_FORMAT_R8G8B8A8_UNORM;
+		case dy::RHI::Format::R16G16B16A16_FLOAT: return VK_FORMAT_R16G16B16A16_SFLOAT;
+		case dy::RHI::Format::R32G32B32A32_FLOAT: return VK_FORMAT_R32G32B32A32_SFLOAT;
+		case dy::RHI::Format::R32_UINT: return VK_FORMAT_R32_UINT;
+		case dy::RHI::Format::D32_FLOAT: return VK_FORMAT_D32_SFLOAT;
+		case dy::RHI::Format::D24_UNORM_S8_UINT: return VK_FORMAT_D24_UNORM_S8_UINT;
+		default: return VK_FORMAT_UNDEFINED;
+		}
+	}
+
+	dy::RHI::Format ToRhiDepthFormat(VkFormat format)
+	{
+		switch (format)
+		{
+		case VK_FORMAT_D24_UNORM_S8_UINT:
+			return dy::RHI::Format::D24_UNORM_S8_UINT;
+		case VK_FORMAT_D32_SFLOAT:
+		case VK_FORMAT_D32_SFLOAT_S8_UINT:
+			return dy::RHI::Format::D32_FLOAT;
+		default:
+			return dy::RHI::Format::Unknown;
+		}
+	}
+
+	VkImageUsageFlags ToVkImageUsage(dy::RHI::TextureUsage usage)
+	{
+		VkImageUsageFlags flags = 0;
+		if (HasTextureUsage(usage, dy::RHI::TextureUsage::ShaderResource)) {
+			flags |= VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+		}
+		if (HasTextureUsage(usage, dy::RHI::TextureUsage::RenderTarget)) {
+			flags |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+		}
+		if (HasTextureUsage(usage, dy::RHI::TextureUsage::DepthStencil)) {
+			flags |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+		}
+		if (HasTextureUsage(usage, dy::RHI::TextureUsage::UnorderedAccess)) {
+			flags |= VK_IMAGE_USAGE_STORAGE_BIT;
+		}
+		if (flags == 0) flags = VK_IMAGE_USAGE_SAMPLED_BIT;
+		return flags;
+	}
+
+	bool IsDepthFormat(dy::RHI::Format format)
+	{
+		return format == dy::RHI::Format::D32_FLOAT || format == dy::RHI::Format::D24_UNORM_S8_UINT;
+	}
+
+	VkImageAspectFlags GetImageAspectMask(dy::RHI::Format format, dy::RHI::TextureUsage usage)
+	{
+		if (HasTextureUsage(usage, dy::RHI::TextureUsage::DepthStencil) || IsDepthFormat(format)) {
+			return VK_IMAGE_ASPECT_DEPTH_BIT;
+		}
+		return VK_IMAGE_ASPECT_COLOR_BIT;
+	}
+
 	class VulkanTexture final : public dy::RHI::ITexture
 	{
 	public:
@@ -103,18 +171,164 @@ namespace {
 		{
 		}
 
+		~VulkanTexture() override
+		{
+			Cleanup();
+		}
+
+		bool Initialize(
+			const VulkanContext& context,
+			const dy::RHI::TextureDesc& desc,
+			VkFormat formatOverride = VK_FORMAT_UNDEFINED,
+			VkImageUsageFlags extraUsage = 0)
+		{
+			Cleanup();
+			m_device = context.device;
+			m_width = desc.width;
+			m_height = desc.height;
+			m_format = desc.format;
+			m_vkFormat = formatOverride != VK_FORMAT_UNDEFINED ? formatOverride : ToVkFormat(desc.format);
+			m_aspectMask = GetImageAspectMask(desc.format, desc.usage);
+			m_imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+			if (m_width == 0 || m_height == 0 || m_vkFormat == VK_FORMAT_UNDEFINED) return false;
+
+			try {
+				VulkanResources::CreateImage(
+					context,
+					m_width,
+					m_height,
+					m_vkFormat,
+					VK_IMAGE_TILING_OPTIMAL,
+					ToVkImageUsage(desc.usage) | extraUsage,
+					VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+					m_image,
+					m_memory);
+
+				m_imageView = VulkanResources::CreateImageView(m_device, m_image, m_vkFormat, m_aspectMask);
+			} catch (const std::exception& e) {
+				SDL_Log("Vulkan texture creation failed: %s", e.what());
+				Cleanup();
+				return false;
+			}
+
+			return true;
+		}
+
 		uint32_t GetWidth() const override { return m_width; }
 		uint32_t GetHeight() const override { return m_height; }
 		dy::RHI::Format GetFormat() const override { return m_format; }
 
-		void Update(uint32_t width, uint32_t height, dy::RHI::Format format)
+		void UpdateMetadata(uint32_t width, uint32_t height, dy::RHI::Format format)
 		{
 			m_width = width;
 			m_height = height;
 			m_format = format;
 		}
 
+		bool CreateDefaultSampler()
+		{
+			VkSamplerCreateInfo info{};
+			info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+			info.magFilter = VK_FILTER_LINEAR;
+			info.minFilter = VK_FILTER_LINEAR;
+			info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+			info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+			info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+			info.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
+			info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+			return CreateSampler(info);
+		}
+
+		bool CreateSampler(const VkSamplerCreateInfo& info)
+		{
+			if (m_device == VK_NULL_HANDLE) return false;
+			if (m_sampler != VK_NULL_HANDLE) {
+				vkDestroySampler(m_device, m_sampler, nullptr);
+				m_sampler = VK_NULL_HANDLE;
+			}
+
+			return vkCreateSampler(m_device, &info, nullptr, &m_sampler) == VK_SUCCESS;
+		}
+
+		bool UploadRGBA8(const VulkanContext& context, VkCommandPool commandPool, const void* pixels, uint32_t width, uint32_t height)
+		{
+			if (m_image == VK_NULL_HANDLE || pixels == nullptr || width == 0 || height == 0) return false;
+
+			VkBuffer staging = VK_NULL_HANDLE;
+			VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+			try {
+				const VkDeviceSize size = static_cast<VkDeviceSize>(width) * static_cast<VkDeviceSize>(height) * 4;
+				VulkanResources::CreateBuffer(
+					context,
+					size,
+					VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+					VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+					staging,
+					stagingMemory);
+
+				void* data = nullptr;
+				vkMapMemory(context.device, stagingMemory, 0, size, 0, &data);
+				memcpy(data, pixels, static_cast<size_t>(size));
+				vkUnmapMemory(context.device, stagingMemory);
+
+				VulkanResources::TransitionImageLayout(context, commandPool, m_image, m_vkFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+				VulkanResources::CopyBufferToImage(context, commandPool, staging, m_image, width, height);
+				VulkanResources::TransitionImageLayout(context, commandPool, m_image, m_vkFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+				m_imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+				vkDestroyBuffer(context.device, staging, nullptr);
+				vkFreeMemory(context.device, stagingMemory, nullptr);
+			} catch (const std::exception& e) {
+				if (staging != VK_NULL_HANDLE) vkDestroyBuffer(context.device, staging, nullptr);
+				if (stagingMemory != VK_NULL_HANDLE) vkFreeMemory(context.device, stagingMemory, nullptr);
+				SDL_Log("Vulkan texture upload failed: %s", e.what());
+				return false;
+			}
+
+			return true;
+		}
+
+		VkImageView GetImageView() const { return m_imageView; }
+		VkSampler GetSampler() const { return m_sampler; }
+		VkImageLayout GetImageLayout() const { return m_imageLayout; }
+		VkFormat GetVkFormat() const { return m_vkFormat; }
+
+		void SetImageLayout(VkImageLayout layout)
+		{
+			m_imageLayout = layout;
+		}
+
 	private:
+		void Cleanup()
+		{
+			if (m_device == VK_NULL_HANDLE) return;
+			if (m_sampler != VK_NULL_HANDLE) {
+				vkDestroySampler(m_device, m_sampler, nullptr);
+				m_sampler = VK_NULL_HANDLE;
+			}
+			if (m_imageView != VK_NULL_HANDLE) {
+				vkDestroyImageView(m_device, m_imageView, nullptr);
+				m_imageView = VK_NULL_HANDLE;
+			}
+			if (m_image != VK_NULL_HANDLE) {
+				vkDestroyImage(m_device, m_image, nullptr);
+				m_image = VK_NULL_HANDLE;
+			}
+			if (m_memory != VK_NULL_HANDLE) {
+				vkFreeMemory(m_device, m_memory, nullptr);
+				m_memory = VK_NULL_HANDLE;
+			}
+		}
+
+		VkDevice m_device = VK_NULL_HANDLE;
+		VkImage m_image = VK_NULL_HANDLE;
+		VkDeviceMemory m_memory = VK_NULL_HANDLE;
+		VkImageView m_imageView = VK_NULL_HANDLE;
+		VkSampler m_sampler = VK_NULL_HANDLE;
+		VkFormat m_vkFormat = VK_FORMAT_UNDEFINED;
+		VkImageAspectFlags m_aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		VkImageLayout m_imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 		uint32_t m_width = 0;
 		uint32_t m_height = 0;
 		dy::RHI::Format m_format = dy::RHI::Format::Unknown;
@@ -131,21 +345,81 @@ namespace {
 			const dy::RHI::GraphicsPipelineDesc& desc)
 			: m_device(context.device), m_shadowPassEnabled(desc.enableShadowPass)
 		{
-			m_pipeline.Initialize(context, renderPass, extent, descriptorSetLayout, desc);
+			CopyPipelineDesc(desc);
+			m_pipelineCache.reserve(4);
+			if (GetPipelineForRenderPass(context, renderPass, extent, descriptorSetLayout) == nullptr) {
+				throw std::runtime_error("failed to create graphics pipeline");
+			}
 		}
 
 		~VulkanPipelineState() override
 		{
-			m_pipeline.Cleanup(m_device);
+			for (PipelineCacheEntry& entry : m_pipelineCache) {
+				entry.pipeline.Cleanup(m_device);
+			}
+			m_pipelineCache.clear();
 		}
 
-		VkPipeline GetPipeline() const { return m_pipeline.GetPipeline(); }
-		VkPipelineLayout GetLayout() const { return m_pipeline.GetLayout(); }
+		const VulkanPipeline* GetPipelineForRenderPass(
+			const VulkanContext& context,
+			VkRenderPass renderPass,
+			VkExtent2D extent,
+			VkDescriptorSetLayout descriptorSetLayout) const
+		{
+			for (const PipelineCacheEntry& entry : m_pipelineCache) {
+				if (entry.renderPass == renderPass) return &entry.pipeline;
+			}
+
+			try {
+				PipelineCacheEntry entry = {};
+				entry.renderPass = renderPass;
+				entry.pipeline.Initialize(context, renderPass, extent, descriptorSetLayout, m_desc);
+				m_pipelineCache.push_back(std::move(entry));
+				return &m_pipelineCache.back().pipeline;
+			} catch (const std::exception& e) {
+				SDL_Log("Vulkan pipeline variant creation failed: %s", e.what());
+				return nullptr;
+			}
+		}
+
 		bool IsShadowPassEnabled() const { return m_shadowPassEnabled; }
 
 	private:
+		struct PipelineCacheEntry
+		{
+			VkRenderPass renderPass = VK_NULL_HANDLE;
+			VulkanPipeline pipeline;
+		};
+
+		static void CopyShaderBytes(const void* source, size_t size, std::vector<uint8_t>& destination)
+		{
+			destination.clear();
+			if (source == nullptr || size == 0) return;
+			const uint8_t* begin = static_cast<const uint8_t*>(source);
+			destination.assign(begin, begin + size);
+		}
+
+		void CopyPipelineDesc(const dy::RHI::GraphicsPipelineDesc& desc)
+		{
+			m_desc = desc;
+			CopyShaderBytes(desc.vertexShader, desc.vertexShaderSize, m_vertexShader);
+			CopyShaderBytes(desc.pixelShader, desc.pixelShaderSize, m_pixelShader);
+			CopyShaderBytes(desc.shadowVertexShader, desc.shadowVertexShaderSize, m_shadowVertexShader);
+
+			m_desc.vertexShader = m_vertexShader.empty() ? nullptr : m_vertexShader.data();
+			m_desc.vertexShaderSize = m_vertexShader.size();
+			m_desc.pixelShader = m_pixelShader.empty() ? nullptr : m_pixelShader.data();
+			m_desc.pixelShaderSize = m_pixelShader.size();
+			m_desc.shadowVertexShader = m_shadowVertexShader.empty() ? nullptr : m_shadowVertexShader.data();
+			m_desc.shadowVertexShaderSize = m_shadowVertexShader.size();
+		}
+
 		VkDevice m_device = VK_NULL_HANDLE;
-		VulkanPipeline m_pipeline;
+		dy::RHI::GraphicsPipelineDesc m_desc = {};
+		std::vector<uint8_t> m_vertexShader;
+		std::vector<uint8_t> m_pixelShader;
+		std::vector<uint8_t> m_shadowVertexShader;
+		mutable std::vector<PipelineCacheEntry> m_pipelineCache;
 		bool m_shadowPassEnabled = false;
 	};
 
@@ -251,9 +525,7 @@ int VulkanDevice::Initialize(const void* windowHandle, const dy::RHI::DeviceDesc
 		UpdateBackBufferMetadata();
 
 		m_depthFormat = FindDepthFormat();
-		if (!CreateTextureImage()) return -1;
-		if (!CreateTextureImageView()) return -1;
-		if (!CreateTextureSampler()) return -1;
+		if (!CreateFallbackTexture()) return -1;
 		if (!CreateDescriptorSetLayout()) return -1;
 		if (!CreateDescriptorPool()) return -1;
 		if (!CreateDescriptorSets()) return -1;
@@ -271,9 +543,16 @@ int VulkanDevice::Initialize(const void* windowHandle, const dy::RHI::DeviceDesc
 }
 
 dy::RHI::ITexture* VulkanDevice::CreateTexture(const dy::RHI::TextureDesc& desc) {
-	VulkanTexture* texture = new VulkanTexture(desc);
-	m_ownedTextures.push_back(texture);
-	return texture;
+	std::unique_ptr<VulkanTexture> texture(new VulkanTexture(desc));
+	if (!texture->Initialize(m_context, desc)) {
+		return nullptr;
+	}
+	if (HasTextureUsage(desc.usage, dy::RHI::TextureUsage::ShaderResource) && !texture->CreateDefaultSampler()) {
+		return nullptr;
+	}
+
+	m_ownedTextures.push_back(texture.get());
+	return texture.release();
 }
 
 dy::RHI::IPipelineState* VulkanDevice::CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) {
@@ -312,6 +591,8 @@ void VulkanDevice::DestroyTexture(dy::RHI::ITexture* texture) {
 	if (!texture || texture == m_backBuffer) return;
 	const auto it = std::find(m_ownedTextures.begin(), m_ownedTextures.end(), texture);
 	if (it != m_ownedTextures.end()) {
+		vkDeviceWaitIdle(m_context.device);
+		DestroyRenderTargetCache();
 		delete *it;
 		m_ownedTextures.erase(it);
 	}
@@ -546,12 +827,12 @@ void VulkanDevice::RecordCommandBuffer(const VulkanCommandList& commandList) {
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	vkBeginCommandBuffer(commandBuffer, &beginInfo);
 
-	// Pass 1: Shadow Pass (愿묒썝 ?쒖젏?먯꽌 源딆씠 ?띿뒪泥??묒꽦)
+	// Pass 1: Shadow Pass 
 	if (m_shadowRenderPass != VK_NULL_HANDLE && m_shadowPipeline != VK_NULL_HANDLE) {
 		RecordShadowPass(commandBuffer, commandList);
 	}
 
-	// Pass 2: Main Pass (移대찓???쒖젏?먯꽌 ??+ ShadowMap sample)
+	// Pass 2: Main Pass
 	RecordMainPass(commandBuffer, commandList);
 
 	vkEndCommandBuffer(commandBuffer);
@@ -632,15 +913,20 @@ void VulkanDevice::RecordShadowPass(VkCommandBuffer commandBuffer, const VulkanC
 	return;
 }
 void VulkanDevice::RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList) {
+	VkRenderPass renderPass = VK_NULL_HANDLE;
+	VkFramebuffer framebuffer = VK_NULL_HANDLE;
+	VkExtent2D renderExtent = {};
+	if (!ResolveMainPassTarget(commandList, renderPass, framebuffer, renderExtent)) return;
+
 	std::array<VkClearValue, 2> clearValues = {};
 	clearValues[0].color = commandList.m_clearColor;
-	clearValues[1].depthStencil = { 1.0f, 0 };
+	clearValues[1].depthStencil = { commandList.m_clearDepth, 0 };
 	VkRenderPassBeginInfo renderPassInfo{};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-	renderPassInfo.renderPass = m_mainRenderPass;
-	renderPassInfo.framebuffer = m_swapchainFramebuffers[m_currentImageIndex];
+	renderPassInfo.renderPass = renderPass;
+	renderPassInfo.framebuffer = framebuffer;
 	renderPassInfo.renderArea.offset = {0, 0};
-	renderPassInfo.renderArea.extent = m_swapchain.GetExtent();
+	renderPassInfo.renderArea.extent = renderExtent;
 	renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
 	renderPassInfo.pClearValues = clearValues.data();
 
@@ -651,16 +937,18 @@ void VulkanDevice::RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCom
 		const VulkanCommandList::DrawCall& drawCall = commandList.m_drawCalls[drawIndex];
 		const VulkanPipelineState* pipelineState = dynamic_cast<const VulkanPipelineState*>(drawCall.pipelineState);
 		if (pipelineState == nullptr) continue;
+		const VulkanPipeline* pipeline = pipelineState->GetPipelineForRenderPass(m_context, renderPass, renderExtent, m_descriptorSetLayout);
+		if (pipeline == nullptr) continue;
 
-		if (currentPipeline != pipelineState->GetPipeline()) {
-			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineState->GetPipeline());
-			currentPipeline = pipelineState->GetPipeline();
+		if (currentPipeline != pipeline->GetPipeline()) {
+			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetPipeline());
+			currentPipeline = pipeline->GetPipeline();
 		}
 
 		const uint32_t descriptorIndex = m_currentFrameIndex * kMaxDrawsPerFrame + drawIndex;
 		if (descriptorIndex < m_descriptorSets.size()) {
 			VkDescriptorSet descriptorSet = m_descriptorSets[descriptorIndex];
-			vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineState->GetLayout(), 0, 1, &descriptorSet, 0, nullptr);
+			vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetLayout(), 0, 1, &descriptorSet, 0, nullptr);
 		}
 
 		VkViewport viewport{};
@@ -674,8 +962,8 @@ void VulkanDevice::RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCom
 		} else {
 			viewport.x = 0.0f;
 			viewport.y = 0.0f;
-			viewport.width = static_cast<float>(m_swapchain.GetExtent().width);
-			viewport.height = static_cast<float>(m_swapchain.GetExtent().height);
+			viewport.width = static_cast<float>(renderExtent.width);
+			viewport.height = static_cast<float>(renderExtent.height);
 			viewport.minDepth = 0.0f;
 			viewport.maxDepth = 1.0f;
 		}
@@ -686,7 +974,7 @@ void VulkanDevice::RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCom
 			scissor.extent = { drawCall.scissor.width, drawCall.scissor.height };
 		} else {
 			scissor.offset = { 0, 0 };
-			scissor.extent = m_swapchain.GetExtent();
+			scissor.extent = renderExtent;
 		}
 
 		vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
@@ -695,7 +983,7 @@ void VulkanDevice::RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCom
 		if (drawCall.pushConstantSize > 0) {
 			vkCmdPushConstants(
 				commandBuffer,
-				pipelineState->GetLayout(),
+				pipeline->GetLayout(),
 				VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
 				0,
 				drawCall.pushConstantSize,
@@ -709,7 +997,7 @@ void VulkanDevice::RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCom
 		metadata.firstVertex = drawCall.startVertex;
 		vkCmdPushConstants(
 			commandBuffer,
-			pipelineState->GetLayout(),
+			pipeline->GetLayout(),
 			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
 			kDrawMetadataPushConstantOffset,
 			sizeof(metadata),
@@ -726,6 +1014,177 @@ void VulkanDevice::RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCom
 	}
 	
 	vkCmdEndRenderPass(commandBuffer);
+}
+
+bool VulkanDevice::ResolveMainPassTarget(const VulkanCommandList& commandList, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent) {
+	if (commandList.m_renderTargetCount > 1) {
+		SDL_Log("Vulkan main pass currently supports one color render target.");
+		return false;
+	}
+
+	dy::RHI::ITexture* colorTarget = m_backBuffer;
+	if (commandList.m_renderTargetCount == 1 && commandList.m_renderTargets[0] != nullptr) {
+		colorTarget = commandList.m_renderTargets[0];
+	}
+
+	if (colorTarget == nullptr || colorTarget == m_backBuffer) {
+		if (commandList.m_depthStencil != nullptr && commandList.m_depthStencil != m_depthTexture) {
+			SDL_Log("Vulkan swapchain pass custom depth targets are not wired yet.");
+			return false;
+		}
+		renderPass = m_mainRenderPass;
+		framebuffer = m_swapchainFramebuffers[m_currentImageIndex];
+		extent = m_swapchain.GetExtent();
+		return renderPass != VK_NULL_HANDLE && framebuffer != VK_NULL_HANDLE;
+	}
+
+	return GetOrCreateOffscreenFramebuffer(colorTarget, commandList.m_depthStencil, renderPass, framebuffer, extent);
+}
+
+bool VulkanDevice::GetOrCreateOffscreenFramebuffer(
+	dy::RHI::ITexture* colorTarget,
+	dy::RHI::ITexture* depthTarget,
+	VkRenderPass& renderPass,
+	VkFramebuffer& framebuffer,
+	VkExtent2D& extent)
+{
+	for (const RenderTargetCacheEntry& entry : m_renderTargetCache) {
+		if (entry.colorTarget == colorTarget && entry.depthTarget == depthTarget) {
+			renderPass = entry.renderPass;
+			framebuffer = entry.framebuffer;
+			extent = { entry.width, entry.height };
+			return renderPass != VK_NULL_HANDLE && framebuffer != VK_NULL_HANDLE;
+		}
+	}
+
+	VulkanTexture* colorTexture = dynamic_cast<VulkanTexture*>(colorTarget);
+	if (colorTexture == nullptr || colorTexture->GetImageView() == VK_NULL_HANDLE) {
+		SDL_Log("Vulkan offscreen color target is not a valid Vulkan texture.");
+		return false;
+	}
+
+	std::unique_ptr<VulkanTexture> ownedDepthTexture;
+	if (depthTarget == nullptr) {
+		dy::RHI::TextureDesc depthDesc{};
+		depthDesc.width = colorTexture->GetWidth();
+		depthDesc.height = colorTexture->GetHeight();
+		depthDesc.depthOrArraySize = 1;
+		depthDesc.mipLevels = 1;
+		depthDesc.format = ToRhiDepthFormat(m_depthFormat);
+		depthDesc.usage = dy::RHI::TextureUsage::DepthStencil;
+		ownedDepthTexture.reset(new VulkanTexture(depthDesc));
+		if (!ownedDepthTexture->Initialize(m_context, depthDesc, m_depthFormat)) return false;
+		depthTarget = ownedDepthTexture.get();
+	}
+
+	VulkanTexture* depthTexture = dynamic_cast<VulkanTexture*>(depthTarget);
+	if (depthTexture == nullptr || depthTexture->GetImageView() == VK_NULL_HANDLE) {
+		SDL_Log("Vulkan offscreen depth target is not a valid Vulkan texture.");
+		return false;
+	}
+	if (depthTexture->GetWidth() != colorTexture->GetWidth() || depthTexture->GetHeight() != colorTexture->GetHeight()) {
+		SDL_Log("Vulkan offscreen color/depth target sizes do not match.");
+		return false;
+	}
+
+	VkRenderPass offscreenRenderPass = VK_NULL_HANDLE;
+	if (!CreateOffscreenRenderPass(
+		colorTexture->GetVkFormat(),
+		depthTexture->GetVkFormat(),
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+		offscreenRenderPass)) {
+		return false;
+	}
+
+	std::array<VkImageView, 2> attachments = { colorTexture->GetImageView(), depthTexture->GetImageView() };
+	VkFramebufferCreateInfo fbInfo{};
+	fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+	fbInfo.renderPass = offscreenRenderPass;
+	fbInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+	fbInfo.pAttachments = attachments.data();
+	fbInfo.width = colorTexture->GetWidth();
+	fbInfo.height = colorTexture->GetHeight();
+	fbInfo.layers = 1;
+
+	VkFramebuffer offscreenFramebuffer = VK_NULL_HANDLE;
+	if (vkCreateFramebuffer(m_context.device, &fbInfo, nullptr, &offscreenFramebuffer) != VK_SUCCESS) {
+		vkDestroyRenderPass(m_context.device, offscreenRenderPass, nullptr);
+		return false;
+	}
+
+	colorTexture->SetImageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+	RenderTargetCacheEntry entry{};
+	entry.colorTarget = colorTarget;
+	entry.depthTarget = depthTarget == ownedDepthTexture.get() ? nullptr : depthTarget;
+	entry.ownedDepthTarget = ownedDepthTexture.release();
+	entry.renderPass = offscreenRenderPass;
+	entry.framebuffer = offscreenFramebuffer;
+	entry.width = colorTexture->GetWidth();
+	entry.height = colorTexture->GetHeight();
+	m_renderTargetCache.push_back(entry);
+
+	renderPass = offscreenRenderPass;
+	framebuffer = offscreenFramebuffer;
+	extent = { entry.width, entry.height };
+	return true;
+}
+
+bool VulkanDevice::CreateOffscreenRenderPass(VkFormat colorFormat, VkFormat depthFormat, VkImageLayout colorFinalLayout, VkRenderPass& renderPass) {
+	VkAttachmentDescription colorAttachment{};
+	colorAttachment.format = colorFormat;
+	colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+	colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	colorAttachment.finalLayout = colorFinalLayout;
+
+	VkAttachmentDescription depthAttachment{};
+	depthAttachment.format = depthFormat;
+	depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+	depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	depthAttachment.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+	VkAttachmentReference colorAttachmentRef{};
+	colorAttachmentRef.attachment = 0;
+	colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+	VkAttachmentReference depthAttachmentRef{};
+	depthAttachmentRef.attachment = 1;
+	depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+	VkSubpassDescription subpass{};
+	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+	subpass.colorAttachmentCount = 1;
+	subpass.pColorAttachments = &colorAttachmentRef;
+	subpass.pDepthStencilAttachment = &depthAttachmentRef;
+
+	VkSubpassDependency dependency{};
+	dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+	dependency.dstSubpass = 0;
+	dependency.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+	dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+	dependency.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	dependency.dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+	std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
+	VkRenderPassCreateInfo renderPassInfo{};
+	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+	renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+	renderPassInfo.pAttachments = attachments.data();
+	renderPassInfo.subpassCount = 1;
+	renderPassInfo.pSubpasses = &subpass;
+	renderPassInfo.dependencyCount = 1;
+	renderPassInfo.pDependencies = &dependency;
+
+	return vkCreateRenderPass(m_context.device, &renderPassInfo, nullptr, &renderPass) == VK_SUCCESS;
 }
 
 bool VulkanDevice::CreateMainRenderPass() {
@@ -785,10 +1244,13 @@ bool VulkanDevice::CreateMainRenderPass() {
 }
 
 bool VulkanDevice::CreateFramebuffers() {
+	const VulkanTexture* depthTexture = static_cast<const VulkanTexture*>(m_depthTexture);
+	if (depthTexture == nullptr || depthTexture->GetImageView() == VK_NULL_HANDLE) return false;
+
 	const auto& views = m_swapchain.GetImageViews();
 	m_swapchainFramebuffers.resize(views.size());
 	for (size_t i = 0; i < views.size(); ++i) {
-		VkImageView attachments[] = { views[i], m_depthImageView };
+		VkImageView attachments[] = { views[i], depthTexture->GetImageView() };
 		VkFramebufferCreateInfo fbInfo{};
 		fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
 		fbInfo.renderPass = m_mainRenderPass;
@@ -842,46 +1304,44 @@ bool VulkanDevice::CreateSyncObjects() {
 	return true;
 }
 
-bool VulkanDevice::CreateTextureImage() {
-	int w, h, c;
-	stbi_uc* pixels = stbi_load("assets/jj.jpeg", &w, &h, &c, STBI_rgb_alpha);
+bool VulkanDevice::CreateFallbackTexture() {
+	int w = 0;
+	int h = 0;
+	stbi_uc* loadedPixels = stbi_load("assets/jj.jpeg", &w, &h, nullptr, STBI_rgb_alpha);
 	std::array<stbi_uc, kFallbackTextureWidth * kFallbackTextureHeight * 4> fallbackPixels = {
 		255, 0, 0, 255,       0, 255, 0, 255,
 		0, 0, 255, 255,       255, 255, 0, 255
 	};
+	const stbi_uc* pixels = loadedPixels;
 	if (!pixels) {
 		w = static_cast<int>(kFallbackTextureWidth);
 		h = static_cast<int>(kFallbackTextureHeight);
-		c = 4;
 		pixels = fallbackPixels.data();
 	}
-	VkDeviceSize size = w * h * 4;
-	VkBuffer staging; VkDeviceMemory stagingMem;
-	VulkanResources::CreateBuffer(m_context, size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, staging, stagingMem);
-	void* data; vkMapMemory(m_context.device, stagingMem, 0, size, 0, &data); memcpy(data, pixels, size); vkUnmapMemory(m_context.device, stagingMem);
-	if (pixels != fallbackPixels.data()) {
-		stbi_image_free(pixels);
+
+	dy::RHI::TextureDesc desc{};
+	desc.width = static_cast<uint32_t>(w);
+	desc.height = static_cast<uint32_t>(h);
+	desc.depthOrArraySize = 1;
+	desc.mipLevels = 1;
+	desc.format = dy::RHI::Format::R8G8B8A8_UNORM;
+	desc.usage = dy::RHI::TextureUsage::ShaderResource;
+
+	std::unique_ptr<VulkanTexture> texture(new VulkanTexture(desc));
+	const bool created =
+		texture->Initialize(m_context, desc, VK_FORMAT_R8G8B8A8_SRGB) &&
+		texture->CreateDefaultSampler() &&
+		texture->UploadRGBA8(m_context, m_commandPool, pixels, desc.width, desc.height);
+
+	if (loadedPixels != nullptr) {
+		stbi_image_free(loadedPixels);
 	}
-	VulkanResources::CreateImage(m_context, w, h, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, m_textureImage, m_textureImageMemory);
-	VulkanResources::TransitionImageLayout(m_context, m_commandPool, m_textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-	VulkanResources::CopyBufferToImage(m_context, m_commandPool, staging, m_textureImage, w, h);
-	VulkanResources::TransitionImageLayout(m_context, m_commandPool, m_textureImage, VK_FORMAT_R8G8B8A8_SRGB, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-	vkDestroyBuffer(m_context.device, staging, nullptr); vkFreeMemory(m_context.device, stagingMem, nullptr);
+
+	if (!created) return false;
+
+	delete m_fallbackTexture;
+	m_fallbackTexture = texture.release();
 	return true;
-}
-
-bool VulkanDevice::CreateTextureImageView() { m_textureImageView = VulkanResources::CreateImageView(m_context.device, m_textureImage, VK_FORMAT_R8G8B8A8_SRGB); return true; }
-
-bool VulkanDevice::CreateTextureSampler() {
-	VkSamplerCreateInfo info{};
-	info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-	info.magFilter = VK_FILTER_LINEAR;
-	info.minFilter = VK_FILTER_LINEAR;
-	info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-	info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-	info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-	info.borderColor = VK_BORDER_COLOR_INT_OPAQUE_BLACK;
-	return vkCreateSampler(m_context.device, &info, nullptr, &m_textureSampler) == VK_SUCCESS;
 }
 
 bool VulkanDevice::CreateDepthResources() {
@@ -890,27 +1350,29 @@ bool VulkanDevice::CreateDepthResources() {
 		m_depthFormat = FindDepthFormat();
 	}
 
-	VulkanResources::CreateImage(
-		m_context,
-		extent.width,
-		extent.height,
-		m_depthFormat,
-		VK_IMAGE_TILING_OPTIMAL,
-		VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
-		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-		m_depthImage,
-		m_depthImageMemory
-	);
+	dy::RHI::TextureDesc desc{};
+	desc.width = extent.width;
+	desc.height = extent.height;
+	desc.depthOrArraySize = 1;
+	desc.mipLevels = 1;
+	desc.format = ToRhiDepthFormat(m_depthFormat);
+	desc.usage = dy::RHI::TextureUsage::DepthStencil;
 
-	m_depthImageView = VulkanResources::CreateImageView(m_context.device, m_depthImage, m_depthFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
+	std::unique_ptr<VulkanTexture> depthTexture(new VulkanTexture(desc));
+	if (!depthTexture->Initialize(m_context, desc, m_depthFormat)) return false;
+
+	delete m_depthTexture;
+	m_depthTexture = depthTexture.release();
 	return true;
 }
 
 bool VulkanDevice::CreateDescriptorSetLayout() {
-	// binding 0: ?띿뒪泥?sampler (FS)
+	// binding 0: 텍스처 sampler (FS)
 	// binding 1: LightingVolumeProfile UBO (VS+FS)
-	// binding 2: Shadow Map sampler (FS)               ??Shadow Map 異붽?
-	// binding 3: ShadowMatrix UBO (lightViewProj, VS)  ??Shadow Map 異붽?
+	// binding 2: Shadow map sampler (FS)
+	// binding 3: ShadowMatrix UBO (lightViewProj, VS)
+	// binding 4: Vertex storage buffer (VS)
+	// binding 5: Index storage buffer (VS)
 	std::array<VkDescriptorSetLayoutBinding, 6> bindings = {};
 	bindings[0].binding = 0;
 	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -989,11 +1451,12 @@ bool VulkanDevice::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCall& dr
 	std::vector<VkWriteDescriptorSet> writes;
 	writes.reserve(6);
 
+	const VulkanTexture* fallbackTexture = static_cast<const VulkanTexture*>(m_fallbackTexture);
 	VkDescriptorImageInfo textureInfo{};
-	textureInfo.sampler = m_textureSampler;
-	textureInfo.imageView = m_textureImageView;
-	textureInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	if (m_textureImageView != VK_NULL_HANDLE && m_textureSampler != VK_NULL_HANDLE) {
+	if (fallbackTexture != nullptr && fallbackTexture->GetImageView() != VK_NULL_HANDLE && fallbackTexture->GetSampler() != VK_NULL_HANDLE) {
+		textureInfo.sampler = fallbackTexture->GetSampler();
+		textureInfo.imageView = fallbackTexture->GetImageView();
+		textureInfo.imageLayout = fallbackTexture->GetImageLayout();
 		VkWriteDescriptorSet textureWrite{};
 		textureWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		textureWrite.dstSet = m_descriptorSets[descriptorIndex];
@@ -1024,11 +1487,12 @@ bool VulkanDevice::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCall& dr
 		writes.push_back(constantWrite);
 	}
 
+	const VulkanTexture* shadowTexture = static_cast<const VulkanTexture*>(m_shadowMapTexture);
 	VkDescriptorImageInfo shadowInfo{};
-	shadowInfo.sampler = m_shadowMapSampler;
-	shadowInfo.imageView = m_shadowMapView;
-	shadowInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-	if (m_shadowMapView != VK_NULL_HANDLE && m_shadowMapSampler != VK_NULL_HANDLE) {
+	if (shadowTexture != nullptr && shadowTexture->GetImageView() != VK_NULL_HANDLE && shadowTexture->GetSampler() != VK_NULL_HANDLE) {
+		shadowInfo.sampler = shadowTexture->GetSampler();
+		shadowInfo.imageView = shadowTexture->GetImageView();
+		shadowInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		VkWriteDescriptorSet shadowWrite{};
 		shadowWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		shadowWrite.dstSet = m_descriptorSets[descriptorIndex];
@@ -1071,13 +1535,13 @@ bool VulkanDevice::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCall& dr
 
 bool VulkanDevice::CreateShadowRenderPass() {
 	// Depth-only RenderPass.
-	// Color attachment ?놁쓬 (FS?먯꽌 ?쎌? ?됱쓣 異쒕젰?섏? ?딆쓬).
-	// finalLayout??SHADER_READ_ONLY_OPTIMAL濡??먮㈃ RenderPass 醫낅즺 ???먮룞 ?꾩씠 ??蹂꾨룄 Barrier 遺덊븘??
+	// Color attachment 없음. Fragment shader에서 색을 출력하지 않는다.
+	// finalLayout을 SHADER_READ_ONLY_OPTIMAL로 두면 render pass 종료 후 shader sample에 바로 사용할 수 있다.
 	VkAttachmentDescription depthAttachment{};
 	depthAttachment.format = m_shadowMapFormat;
 	depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
 	depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;            // FS?먯꽌 sample ?댁빞 ?섎땲 STORE
+	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;            // Fragment shader에서 sample해야 하므로 STORE
 	depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 	depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 	depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1092,7 +1556,7 @@ bool VulkanDevice::CreateShadowRenderPass() {
 	subpass.colorAttachmentCount = 0;
 	subpass.pDepthStencilAttachment = &depthAttachmentRef;
 
-	// ??媛쒖쓽 dependency: ?쒖옉 ???댁쟾 Pass??sample ?앸굹??源딆씠 ?곌린 ?쒖옉), 醫낅즺 ???곌린 ?앸굹???ㅼ쓬 sample)
+	// 두 개의 dependency: 이전 pass의 sample 완료 후 depth 기록 시작, depth 기록 완료 후 다음 sample 허용.
 	std::array<VkSubpassDependency, 2> dependencies = {};
 	dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
 	dependencies[0].dstSubpass = 0;
@@ -1122,22 +1586,18 @@ bool VulkanDevice::CreateShadowRenderPass() {
 }
 
 bool VulkanDevice::CreateShadowMapResources() {
-	// Depth Image
-	VulkanResources::CreateImage(
-		m_context,
-		kShadowMapResolution,
-		kShadowMapResolution,
-		m_shadowMapFormat,
-		VK_IMAGE_TILING_OPTIMAL,
-		VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-		VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-		m_shadowMapImage,
-		m_shadowMapMemory);
+	dy::RHI::TextureDesc desc{};
+	desc.width = kShadowMapResolution;
+	desc.height = kShadowMapResolution;
+	desc.depthOrArraySize = 1;
+	desc.mipLevels = 1;
+	desc.format = ToRhiDepthFormat(m_shadowMapFormat);
+	desc.usage = dy::RHI::TextureUsage::DepthStencil | dy::RHI::TextureUsage::ShaderResource;
 
-	m_shadowMapView = VulkanResources::CreateImageView(
-		m_context.device, m_shadowMapImage, m_shadowMapFormat, VK_IMAGE_ASPECT_DEPTH_BIT);
+	std::unique_ptr<VulkanTexture> shadowTexture(new VulkanTexture(desc));
+	if (!shadowTexture->Initialize(m_context, desc, m_shadowMapFormat)) return false;
 
-	// Sampler: CLAMP_TO_BORDER + ?곗깋 border ??frustum 諛??쎌?? ?먮룞?쇰줈 洹몃┝???놁쓬
+	// Sampler: CLAMP_TO_BORDER + 흰색 border. Shadow frustum 밖 좌표는 그림자가 없는 것으로 처리한다.
 	VkSamplerCreateInfo samplerInfo{};
 	samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
 	samplerInfo.magFilter = VK_FILTER_LINEAR;
@@ -1145,28 +1605,33 @@ bool VulkanDevice::CreateShadowMapResources() {
 	samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-	samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;     // 1.0 = 洹몃┝????諛쏆쓬
-	samplerInfo.compareEnable = VK_FALSE;                              // PCF???곗씠??痢≪뿉??吏곸젒 怨꾩궛
+	samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;     // 1.0 = 그림자를 받지 않음
+	samplerInfo.compareEnable = VK_FALSE;                              // PCF는 shader에서 직접 계산
 	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-	if (vkCreateSampler(m_context.device, &samplerInfo, nullptr, &m_shadowMapSampler) != VK_SUCCESS) {
+	if (!shadowTexture->CreateSampler(samplerInfo)) {
 		return false;
 	}
 
 	// Framebuffer
+	VkImageView shadowView = shadowTexture->GetImageView();
 	VkFramebufferCreateInfo fbInfo{};
 	fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
 	fbInfo.renderPass = m_shadowRenderPass;
 	fbInfo.attachmentCount = 1;
-	fbInfo.pAttachments = &m_shadowMapView;
+	fbInfo.pAttachments = &shadowView;
 	fbInfo.width = kShadowMapResolution;
 	fbInfo.height = kShadowMapResolution;
 	fbInfo.layers = 1;
-	return vkCreateFramebuffer(m_context.device, &fbInfo, nullptr, &m_shadowFramebuffer) == VK_SUCCESS;
+	if (vkCreateFramebuffer(m_context.device, &fbInfo, nullptr, &m_shadowFramebuffer) != VK_SUCCESS) return false;
+
+	delete m_shadowMapTexture;
+	m_shadowMapTexture = shadowTexture.release();
+	return true;
 }
 
 bool VulkanDevice::CreateShadowPipeline(const dy::RHI::GraphicsPipelineDesc& desc) {
-	// PipelineLayout? 硫붿씤 PSO? ?숈씪??DescriptorSetLayout + PushConstantRange瑜?怨듭쑀.
-	// (?곗씠?붽? 媛숈? binding 3???쎄린 ?뚮Ц???명솚 媛??
+	// PipelineLayout은 main PSO와 같은 DescriptorSetLayout + PushConstantRange를 공유한다.
+	// Shadow pass도 같은 binding 3의 lightViewProj UBO를 읽기 때문에 호환 가능하다.
 	VkPushConstantRange pushConstantRange{};
 	pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 	pushConstantRange.offset = 0;
@@ -1182,7 +1647,7 @@ bool VulkanDevice::CreateShadowPipeline(const dy::RHI::GraphicsPipelineDesc& des
 		return false;
 	}
 
-	// Shadow Vertex Shader 濡쒕뱶
+	// Shadow vertex shader 로드
 	if (desc.shadowVertexShader == nullptr || desc.shadowVertexShaderSize == 0) {
 		SDL_Log("Shadow pipeline shader bytecode is missing");
 		return false;
@@ -1214,10 +1679,10 @@ bool VulkanDevice::CreateShadowPipeline(const dy::RHI::GraphicsPipelineDesc& des
 	VkPipelineRasterizationStateCreateInfo rast{};
 	rast.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
 	rast.polygonMode = VK_POLYGON_MODE_FILL;
-	rast.cullMode = VK_CULL_MODE_NONE;             // ?됰㈃ 硫붿떆???듦낵?댁빞 ??
+	rast.cullMode = VK_CULL_MODE_NONE;             // 양면 메시지도 그림자에 기여해야 한다.
 	rast.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 	rast.lineWidth = 1.0f;
-	rast.depthBiasEnable = VK_TRUE;                // Slope-scaled bias濡?acne ?꾪솕
+	rast.depthBiasEnable = VK_TRUE;                // Slope-scaled bias로 shadow acne 완화
 	rast.depthBiasConstantFactor = 1.25f;
 	rast.depthBiasSlopeFactor = 1.75f;
 
@@ -1233,7 +1698,7 @@ bool VulkanDevice::CreateShadowPipeline(const dy::RHI::GraphicsPipelineDesc& des
 	ds.depthBoundsTestEnable = VK_FALSE;
 	ds.stencilTestEnable = VK_FALSE;
 
-	// Color blend??attachment媛 0媛쒕씪??援ъ“泥대뒗 ?꾩슂?섎떎 (attachmentCount=0)
+	// Color attachment가 0개여도 color blend state 구조체는 필요하다.
 	VkPipelineColorBlendStateCreateInfo cb{};
 	cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
 	cb.attachmentCount = 0;
@@ -1248,7 +1713,7 @@ bool VulkanDevice::CreateShadowPipeline(const dy::RHI::GraphicsPipelineDesc& des
 	VkGraphicsPipelineCreateInfo pipelineInfo{};
 	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
 	pipelineInfo.stageCount = 1;
-	pipelineInfo.pStages = &stage;                 // FS ?놁쓬
+	pipelineInfo.pStages = &stage;                 // Fragment shader 없음
 	pipelineInfo.pVertexInputState = &vertexInput;
 	pipelineInfo.pInputAssemblyState = &ia;
 	pipelineInfo.pViewportState = &viewportState;
@@ -1281,26 +1746,30 @@ void VulkanDevice::DestroyShadowResources() {
 		vkDestroyFramebuffer(m_context.device, m_shadowFramebuffer, nullptr);
 		m_shadowFramebuffer = VK_NULL_HANDLE;
 	}
-	if (m_shadowMapSampler != VK_NULL_HANDLE) {
-		vkDestroySampler(m_context.device, m_shadowMapSampler, nullptr);
-		m_shadowMapSampler = VK_NULL_HANDLE;
-	}
-	if (m_shadowMapView != VK_NULL_HANDLE) {
-		vkDestroyImageView(m_context.device, m_shadowMapView, nullptr);
-		m_shadowMapView = VK_NULL_HANDLE;
-	}
-	if (m_shadowMapImage != VK_NULL_HANDLE) {
-		vkDestroyImage(m_context.device, m_shadowMapImage, nullptr);
-		m_shadowMapImage = VK_NULL_HANDLE;
-	}
-	if (m_shadowMapMemory != VK_NULL_HANDLE) {
-		vkFreeMemory(m_context.device, m_shadowMapMemory, nullptr);
-		m_shadowMapMemory = VK_NULL_HANDLE;
-	}
+	delete m_shadowMapTexture;
+	m_shadowMapTexture = nullptr;
 	if (m_shadowRenderPass != VK_NULL_HANDLE) {
 		vkDestroyRenderPass(m_context.device, m_shadowRenderPass, nullptr);
 		m_shadowRenderPass = VK_NULL_HANDLE;
 	}
+}
+
+void VulkanDevice::DestroyRenderTargetCache() {
+	if (m_context.device == VK_NULL_HANDLE) return;
+
+	for (RenderTargetCacheEntry& entry : m_renderTargetCache) {
+		if (entry.framebuffer != VK_NULL_HANDLE) {
+			vkDestroyFramebuffer(m_context.device, entry.framebuffer, nullptr);
+			entry.framebuffer = VK_NULL_HANDLE;
+		}
+		if (entry.renderPass != VK_NULL_HANDLE) {
+			vkDestroyRenderPass(m_context.device, entry.renderPass, nullptr);
+			entry.renderPass = VK_NULL_HANDLE;
+		}
+		delete entry.ownedDepthTarget;
+		entry.ownedDepthTarget = nullptr;
+	}
+	m_renderTargetCache.clear();
 }
 
 void VulkanDevice::RecreateSwapchain() {
@@ -1318,18 +1787,8 @@ void VulkanDevice::RecreateSwapchain() {
 void VulkanDevice::DestroySwapchainResources() {
 	for (auto fb : m_swapchainFramebuffers) vkDestroyFramebuffer(m_context.device, fb, nullptr);
 	m_swapchainFramebuffers.clear();
-	if (m_depthImageView != VK_NULL_HANDLE) {
-		vkDestroyImageView(m_context.device, m_depthImageView, nullptr);
-		m_depthImageView = VK_NULL_HANDLE;
-	}
-	if (m_depthImage != VK_NULL_HANDLE) {
-		vkDestroyImage(m_context.device, m_depthImage, nullptr);
-		m_depthImage = VK_NULL_HANDLE;
-	}
-	if (m_depthImageMemory != VK_NULL_HANDLE) {
-		vkFreeMemory(m_context.device, m_depthImageMemory, nullptr);
-		m_depthImageMemory = VK_NULL_HANDLE;
-	}
+	delete m_depthTexture;
+	m_depthTexture = nullptr;
 	if (m_mainRenderPass != VK_NULL_HANDLE) {
 		vkDestroyRenderPass(m_context.device, m_mainRenderPass, nullptr);
 		m_mainRenderPass = VK_NULL_HANDLE;
@@ -1340,6 +1799,7 @@ void VulkanDevice::DestroySwapchainResources() {
 void VulkanDevice::DestroyDeviceResources() {
 	if (m_context.device != VK_NULL_HANDLE) {
 		vkDeviceWaitIdle(m_context.device);
+		DestroyRenderTargetCache();
 	}
 	for (dy::RHI::IPipelineState* pipelineState : m_ownedPipelineStates) delete pipelineState;
 	m_ownedPipelineStates.clear();
@@ -1350,6 +1810,9 @@ void VulkanDevice::DestroyDeviceResources() {
 	delete m_backBuffer;
 	m_backBuffer = nullptr;
 
+	delete m_fallbackTexture;
+	m_fallbackTexture = nullptr;
+
 	delete m_commandList;
 	m_commandList = nullptr;
 
@@ -1357,9 +1820,6 @@ void VulkanDevice::DestroyDeviceResources() {
 		vkDeviceWaitIdle(m_context.device);
 		for (dy::RHI::IBuffer* buffer : m_ownedBuffers) delete buffer;
 		m_ownedBuffers.clear();
-		if (m_textureSampler != VK_NULL_HANDLE) vkDestroySampler(m_context.device, m_textureSampler, nullptr);
-		if (m_textureImageView != VK_NULL_HANDLE) vkDestroyImageView(m_context.device, m_textureImageView, nullptr);
-		if (m_textureImage != VK_NULL_HANDLE) { vkDestroyImage(m_context.device, m_textureImage, nullptr); vkFreeMemory(m_context.device, m_textureImageMemory, nullptr); }
 		DestroyShadowResources();
 		if (m_descriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(m_context.device, m_descriptorPool, nullptr);
 		if (m_descriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(m_context.device, m_descriptorSetLayout, nullptr);
@@ -1389,7 +1849,7 @@ void VulkanDevice::UpdateBackBufferMetadata() {
 		return;
 	}
 
-	static_cast<VulkanTexture*>(m_backBuffer)->Update(desc.width, desc.height, desc.format);
+	static_cast<VulkanTexture*>(m_backBuffer)->UpdateMetadata(desc.width, desc.height, desc.format);
 }
 
 VkFormat VulkanDevice::FindDepthFormat() const {
@@ -1415,4 +1875,3 @@ bool VulkanDevice::IsDepthFormatSupported(VkFormat format) const {
 }
 
 }
-
