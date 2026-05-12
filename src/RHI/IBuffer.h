@@ -30,5 +30,6 @@ namespace dy::RHI
 		virtual void Unmap() = 0;
 
 		virtual uint32_t GetSize() const = 0;
+		virtual uint32_t GetStride() const = 0;
 	};
 }

@@ -29,6 +29,7 @@ public:
 	dy::RHI::IPipelineState* CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) override;
 	[[nodiscard]] dy::RHI::DescriptorIndex AllocateDescriptorSlot() override;
 	void UpdateDescriptorSlot(dy::RHI::DescriptorIndex index, dy::RHI::ITexture* texture) override;
+	void UpdateDescriptorSlot(dy::RHI::DescriptorIndex index, dy::RHI::IBuffer* buffer) override {}
 
 	void DestroyBuffer(dy::RHI::IBuffer* buffer) override
 	{

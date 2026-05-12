@@ -15,6 +15,8 @@ namespace dy::Backends
         ComPtr<ID3D12GraphicsCommandList> commandList;
         ComPtr<ID3D12Resource> backBuffer;
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = {};
+        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = {}; // DSV 추가
+        bool hasDSV = false;
         ID3D12DescriptorHeap* globalDescriptorHeap = nullptr;
     };
 
@@ -63,12 +65,26 @@ namespace dy::Backends
         barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
         m_internal->commandList->ResourceBarrier(1, &barrier);
 
-        m_internal->commandList->OMSetRenderTargets(1, &m_internal->rtvHandle, FALSE, nullptr);
+        // 깊이 버퍼가 있으면 함께 묶어줍니다.
+        D3D12_CPU_DESCRIPTOR_HANDLE* dsvPtr = m_internal->hasDSV ? &m_internal->dsvHandle : nullptr;
+        m_internal->commandList->OMSetRenderTargets(1, &m_internal->rtvHandle, FALSE, dsvPtr);
 
         // 색상 칠하기
         const float color[] = { r, g, b, a };
         m_internal->commandList->ClearRenderTargetView(m_internal->rtvHandle, color, 0, nullptr);
+    }
 
+    void D3D12CommandList::ClearDepth(RHI::ITexture* depthStencil, float depth)
+    {
+        if (m_internal->hasDSV) {
+            m_internal->commandList->ClearDepthStencilView(m_internal->dsvHandle, D3D12_CLEAR_FLAG_DEPTH, depth, 0, 0, nullptr);
+        }
+    }
+
+    void D3D12CommandList::SetDepthStencilView(size_t dsvHandlePtr)
+    {
+        m_internal->dsvHandle.ptr = dsvHandlePtr;
+        m_internal->hasDSV = true;
     }
 
     void D3D12CommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) {
@@ -81,18 +97,6 @@ namespace dy::Backends
             m_internal->commandList->SetDescriptorHeaps(1, heaps);
             m_internal->commandList->SetGraphicsRootDescriptorTable(1, m_internal->globalDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
         }
-    }
-
-    void D3D12CommandList::BindVertexBuffer(RHI::IBuffer* buffer) {
-        auto* d3d12Buffer = static_cast<D3D12Buffer*>(buffer);
-
-		D3D12_VERTEX_BUFFER_VIEW vbView = {};
-        vbView.BufferLocation = ((ID3D12Resource*)d3d12Buffer->GetNativeResource())->GetGPUVirtualAddress();
-        vbView.SizeInBytes = d3d12Buffer->GetSize();
-        vbView.StrideInBytes = d3d12Buffer->GetStride(); // 20 bytes (float3 + float2)
-
-        // GPU에게 버퍼 위치를 알려줌
-        m_internal->commandList->IASetVertexBuffers(0, 1, &vbView);
     }
 
     void D3D12CommandList::BindGraphicsPipeline(RHI::IPipelineState* pipelineState) {
@@ -109,31 +113,13 @@ namespace dy::Backends
         m_internal->commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     }
 
-    // 인덱스 버퍼 바인딩 구현
-    void D3D12CommandList::BindIndexBuffer(RHI::IBuffer* buffer, RHI::Format format, uint32_t offset) {
-        auto* d3d12Buffer = static_cast<D3D12Buffer*>(buffer);
-
-        D3D12_INDEX_BUFFER_VIEW ibView = {};
-        ibView.BufferLocation = ((ID3D12Resource*)d3d12Buffer->GetNativeResource())->GetGPUVirtualAddress() + offset;
-        ibView.SizeInBytes = d3d12Buffer->GetSize() - offset;
-
-        // RHI의 Format을 DXGI 형식으로 변환하여 사용
-        ibView.Format = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(format));
-
-        m_internal->commandList->IASetIndexBuffer(&ibView);
-    }
-
-    // 인덱스 그리기 구현
-    void D3D12CommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t startIndex, int32_t baseVertex, uint32_t startInstance) {
-        m_internal->commandList->DrawIndexedInstanced(indexCount, instanceCount, startIndex, baseVertex, startInstance);
-    }
-
     void D3D12CommandList::SetPushConstants(uint32_t size, const void* data) {
         m_internal->commandList->SetGraphicsRoot32BitConstants(0, size / 4, data, 0);
     }
     void D3D12CommandList::SetRenderTargets(uint32_t numRenderTargets, RHI::ITexture** renderTargets, RHI::ITexture* depthStencil) {
         if (numRenderTargets > 0 && renderTargets[0] != nullptr) {
-            m_internal->commandList->OMSetRenderTargets(1, &m_internal->rtvHandle, FALSE, nullptr);
+            D3D12_CPU_DESCRIPTOR_HANDLE* dsvPtr = m_internal->hasDSV ? &m_internal->dsvHandle : nullptr;
+            m_internal->commandList->OMSetRenderTargets(1, &m_internal->rtvHandle, FALSE, dsvPtr);
             
             // RHI 인터페이스에서 Viewport 설정이 빠졌으므로, 렌더타겟 크기에 맞춰 자동으로 설정합니다.
             uint32_t width = renderTargets[0]->GetWidth();
@@ -145,7 +131,7 @@ namespace dy::Backends
             m_internal->commandList->RSSetScissorRects(1, &scissorRect);
         }
     }
-    void D3D12CommandList::ClearDepth(RHI::ITexture* depthStencil, float depth) {}
+
     void D3D12CommandList::ResourceBarrier(RHI::IBuffer* buffer, RHI::ResourceState before, RHI::ResourceState after) {}
     void D3D12CommandList::ResourceBarrier(RHI::ITexture* texture, RHI::ResourceState before, RHI::ResourceState after) {}
 }

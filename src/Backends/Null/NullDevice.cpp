@@ -13,16 +13,18 @@ namespace dy::Backends
 		{
 		public:
 			explicit NullBuffer(const RHI::BufferDesc& desc)
-				: m_size(desc.size)
+				: m_size(desc.size), m_stride(desc.stride)
 			{
 			}
 
 			void* Map(uint32_t, uint32_t) override { return nullptr; }
 			void Unmap() override {}
 			uint32_t GetSize() const override { return m_size; }
+			uint32_t GetStride() const override { return m_stride; }
 
 		private:
 			uint32_t m_size = 0;
+			uint32_t m_stride = 0;
 		};
 
 		class NullTexture final : public RHI::ITexture
@@ -54,14 +56,11 @@ namespace dy::Backends
 		public:
 			void BindGraphicsPipeline(RHI::IPipelineState*) override {}
 			void BindGlobalDescriptorHeap() override {}
-			void BindVertexBuffer(RHI::IBuffer*) override {}
-			void BindIndexBuffer(RHI::IBuffer*, RHI::Format, uint32_t) override {}
 			void SetPushConstants(uint32_t, const void*) override {}
 			void SetRenderTargets(uint32_t, RHI::ITexture**, RHI::ITexture*) override {}
 			void ClearColor(RHI::ITexture*, float, float, float, float) override {}
 			void ClearDepth(RHI::ITexture*, float) override {}
 			void DrawInstanced(uint32_t, uint32_t, uint32_t, uint32_t) override {}
-			void DrawIndexedInstanced(uint32_t, uint32_t, uint32_t, int32_t, uint32_t) override {}
 			void ResourceBarrier(RHI::IBuffer*, RHI::ResourceState, RHI::ResourceState) override {}
 			void ResourceBarrier(RHI::ITexture*, RHI::ResourceState, RHI::ResourceState) override {}
 			void Close() override {}
@@ -133,6 +132,7 @@ namespace dy::Backends
 	}
 
 	void NullDevice::UpdateDescriptorSlot(RHI::DescriptorIndex, RHI::ITexture*) {}
+	void NullDevice::UpdateDescriptorSlot(RHI::DescriptorIndex, RHI::IBuffer*) {}
 
 	void NullDevice::DestroyBuffer(RHI::IBuffer* buffer)
 	{

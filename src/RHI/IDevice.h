@@ -56,6 +56,7 @@ namespace dy::RHI
 
 		// Binds an ITexture (SRV) to the allocated slot in the Global Heap.
 		virtual void UpdateDescriptorSlot(DescriptorIndex index, ITexture* texture) = 0;
+		virtual void UpdateDescriptorSlot(DescriptorIndex index, IBuffer* buffer) = 0;
 
 		virtual void DestroyBuffer(IBuffer* buffer) = 0;
 		virtual void DestroyTexture(ITexture* texture) = 0;

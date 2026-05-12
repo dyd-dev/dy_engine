@@ -18,7 +18,6 @@ namespace dy::Backends
 
         void BindGlobalDescriptorHeap() override;
 
-        void BindIndexBuffer(RHI::IBuffer* buffer, RHI::Format format, uint32_t offset) override;
         void SetPushConstants(uint32_t size, const void* data) override;
         void SetRenderTargets(uint32_t numRenderTargets, RHI::ITexture** renderTargets, RHI::ITexture* depthStencil) override;
 
@@ -26,15 +25,14 @@ namespace dy::Backends
         void ClearColor(RHI::ITexture* renderTarget, float r, float g, float b, float a) override;
 
         void ClearDepth(RHI::ITexture* depthStencil, float depth) override;
-		void BindVertexBuffer(RHI::IBuffer* buffer) override;
 
         void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
-		void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t startIndex, int32_t baseVertex, uint32_t startInstance) override;
 
         void ResourceBarrier(RHI::IBuffer* buffer, RHI::ResourceState before, RHI::ResourceState after) override;
         void ResourceBarrier(RHI::ITexture* texture, RHI::ResourceState before, RHI::ResourceState after) override;
 
         void Close() override;
+        void SetDepthStencilView(size_t dsvHandlePtr);
 
         void* GetNativeList(); // 디바이스가 가져가기 위한 함수
 

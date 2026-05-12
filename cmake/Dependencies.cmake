@@ -15,10 +15,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glfw)
 
-target_link_libraries(${PROJECT_NAME} PRIVATE glfw)
-target_compile_definitions(${PROJECT_NAME} PRIVATE GLFW_INCLUDE_NONE)
-
-message(STATUS "Download and Configure stb...")
+# stb_image 자동 다운로드 설정
 FetchContent_Declare(
     stb
     GIT_REPOSITORY "https://github.com/nothings/stb.git"
@@ -26,4 +23,16 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(stb)
 
-target_include_directories(${PROJECT_NAME} PRIVATE ${stb_SOURCE_DIR})
+target_link_libraries(${PROJECT_NAME} PRIVATE glfw)
+target_compile_definitions(${PROJECT_NAME} PRIVATE GLFW_INCLUDE_NONE)
+
+target_include_directories(${PROJECT_NAME} PUBLIC ${stb_SOURCE_DIR})
+
+# fastgltf 자동 다운로드 설정
+FetchContent_Declare(
+    fastgltf
+    GIT_REPOSITORY "https://github.com/spnda/fastgltf.git"
+    GIT_TAG "v0.9.0" # 최신 버전
+)
+FetchContent_MakeAvailable(fastgltf)
+target_link_libraries(${PROJECT_NAME} PUBLIC fastgltf::fastgltf)

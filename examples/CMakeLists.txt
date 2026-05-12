@@ -1,2 +1,4 @@
 add_subdirectory(01_HelloWindow)
 add_subdirectory(02_HelloRenderer)
+add_subdirectory(D3D12_Test)
+add_subdirectory(D3D12_gltf)

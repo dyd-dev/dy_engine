@@ -1,100 +1,121 @@
 #include "OBJLoader.h"
 #include <fstream>
 #include <sstream>
+#include <filesystem>
 #include <map>
 #include <array>
 
 namespace dy::Graphics
 {
-    MeshData OBJLoader::Load(const std::string& filepath)
+    bool OBJLoader::Load(const std::string& filepath, std::vector<Vertex>& outVertices, std::vector<uint32_t>& outIndices, std::string* outTexturePath)
     {
-        MeshData result;
-
         std::ifstream file(filepath);
-        if(!file.is_open()) return result;
+        if (!file.is_open()) return false;
 
-        std::vector<std::array<float, 3>> positions;
-        std::vector<std::array<float, 2>> texCoords;
-        std::vector<std::array<float, 3>> normals;
-
-        std::map<std::string, uint32_t> vertexMap;
-
+        std::vector<float> positions;
+        std::vector<float> texCoords;
         std::string line;
-        while(std::getline(file, line))
+        uint32_t currentIndex = 0;
+
+        std::map<std::string, std::array<float, 3>> materials;
+        std::array<float, 3> currentColor = {1.0f, 1.0f, 1.0f};
+
+        while (std::getline(file, line))
         {
             std::istringstream ss(line);
-            std::string token;
-            ss >> token;
+            std::string type;
+            ss >> type;
 
-            if(token == "v")
+            if (type == "mtllib")
+            {
+                std::string mtllib;
+                ss >> mtllib;
+                
+                std::filesystem::path objPath(filepath);
+                std::filesystem::path mtlPath = objPath.parent_path() / mtllib;
+                
+                std::ifstream mtlFile(mtlPath);
+                if (mtlFile.is_open()) {
+                    std::string mtlLine;
+                    std::string currentMtlName = "";
+                    while (std::getline(mtlFile, mtlLine)) {
+                        std::istringstream mtlSs(mtlLine);
+                        std::string mtlType;
+                        mtlSs >> mtlType;
+                        if (mtlType == "newmtl") {
+                            mtlSs >> currentMtlName;
+                            materials[currentMtlName] = {1.0f, 1.0f, 1.0f};
+                        }
+                        else if (mtlType == "Kd" && !currentMtlName.empty()) {
+                            float r, g, b;
+                            mtlSs >> r >> g >> b;
+                            materials[currentMtlName] = {r, g, b};
+                        }
+                        else if (mtlType == "map_Kd" && outTexturePath) {
+                            std::string textureFile;
+                            mtlSs >> textureFile;
+                            *outTexturePath = (objPath.parent_path() / textureFile).string();
+                        }
+                    }
+                }
+            }
+            else if (type == "usemtl")
+            {
+                std::string mtlName;
+                ss >> mtlName;
+                if (materials.find(mtlName) != materials.end()) {
+                    currentColor = materials[mtlName];
+                }
+            }
+            else if (type == "v")
             {
                 float x, y, z;
                 ss >> x >> y >> z;
-                positions.push_back({x, y, z});
+                positions.push_back(x); positions.push_back(y); positions.push_back(z);
             }
-            else if(token == "vt")
+            else if (type == "vt")
             {
                 float u, v;
                 ss >> u >> v;
-                texCoords.push_back({u, v});
+                texCoords.push_back(u); texCoords.push_back(v);
             }
-            else if(token == "vn")
+            else if (type == "f")
             {
-                float nx, ny, nz;
-                ss >> nx >> ny >> nz;
-                normals.push_back({nx, ny, nz});
-            }
-            else if(token == "f")
-            {
-                std::string faceTokens[3];
-                ss >> faceTokens[0] >> faceTokens[1] >> faceTokens[2];
-
-                for(int i = 0; i < 3; i++)
+                std::string vertexStr;
+                for (int i = 0; i < 3; ++i)
                 {
-                    if(vertexMap.count(faceTokens[i]))
-                    {
-                        result.indices.push_back(vertexMap[faceTokens[i]]);
-                        continue;
+                    ss >> vertexStr;
+                    std::istringstream vs(vertexStr);
+                    std::string posIdxStr, texIdxStr;
+
+                    std::getline(vs, posIdxStr, '/');
+                    std::getline(vs, texIdxStr, '/');
+
+                    int posIdx = std::stoi(posIdxStr) - 1;
+                    int texIdx = (!texIdxStr.empty()) ? std::stoi(texIdxStr) - 1 : 0;
+
+                    Vertex vertex;
+                    vertex.position[0] = positions[posIdx * 3 + 0];
+                    vertex.position[1] = positions[posIdx * 3 + 1];
+                    vertex.position[2] = positions[posIdx * 3 + 2];
+
+                    if (!texCoords.empty()) {
+                        vertex.texCoord[0] = texCoords[texIdx * 2 + 0];
+                        vertex.texCoord[1] = 1.0f - texCoords[texIdx * 2 + 1];
+                    }
+                    else {
+                        vertex.texCoord[0] = 0.0f; vertex.texCoord[1] = 0.0f;
                     }
 
-                    int posIdx = 0, uvIdx = 0, normalIdx = 0;
-                    std::string temp = faceTokens[i];
-                    std::replace(temp.begin(), temp.end(), '/', ' ');
-                    std::istringstream fss(temp);
-                    fss >> posIdx >> uvIdx >> normalIdx;
+                    vertex.color[0] = currentColor[0];
+                    vertex.color[1] = currentColor[1];
+                    vertex.color[2] = currentColor[2];
 
-                    posIdx--;
-                    uvIdx--;
-                    normalIdx--;
-
-                    MeshVertex vert{};
-
-                    if(posIdx >= 0 && posIdx < (int)positions.size())
-                    {
-                        vert.position[0] = positions[posIdx][0];
-                        vert.position[1] = positions[posIdx][1];
-                        vert.position[2] = positions[posIdx][2];
-                    }
-                    if(uvIdx >= 0 && uvIdx < (int)texCoords.size())
-                    {
-                        vert.texCoord[0] = texCoords[uvIdx][0];
-                        vert.texCoord[1] = 1.0f - texCoords[uvIdx][1];
-                    }
-                    if(normalIdx >= 0 && normalIdx < (int)normals.size())
-                    {
-                        vert.normal[0] = normals[normalIdx][0];
-                        vert.normal[1] = normals[normalIdx][1];
-                        vert.normal[2] = normals[normalIdx][2];
-                    }
-
-                    uint32_t newIndex = static_cast<uint32_t>(result.vertices.size());
-                    result.vertices.push_back(vert);
-                    result.indices.push_back(newIndex);
-                    vertexMap[faceTokens[i]] = newIndex;
+                    outVertices.push_back(vertex);
+                    outIndices.push_back(currentIndex++);
                 }
             }
         }
-
-        return result;
+        return true;
     }
 }
