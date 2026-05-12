@@ -36,3 +36,14 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(fastgltf)
 target_link_libraries(${PROJECT_NAME} PUBLIC fastgltf::fastgltf)
+
+# ufbx 자동 다운로드 설정
+FetchContent_Declare(
+    ufbx
+    GIT_REPOSITORY "https://github.com/ufbx/ufbx.git"
+    GIT_TAG "master"
+)
+FetchContent_MakeAvailable(ufbx)
+target_include_directories(${PROJECT_NAME} PUBLIC ${ufbx_SOURCE_DIR})
+set_source_files_properties("${ufbx_SOURCE_DIR}/ufbx.c" PROPERTIES LANGUAGE CXX)
+target_sources(${PROJECT_NAME} PRIVATE "${ufbx_SOURCE_DIR}/ufbx.c")

@@ -13,6 +13,7 @@ add_library(${PROJECT_NAME} STATIC
 	"src/Graphics/OBJLoader.cpp"
 	"src/Core/ImageLoader.cpp"
 	"src/Graphics/GLTFLoader.cpp"
+	"src/Graphics/FBXLoader.cpp"
 )
 
 # global options
