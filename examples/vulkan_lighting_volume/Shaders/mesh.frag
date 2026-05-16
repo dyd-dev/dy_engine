@@ -25,24 +25,18 @@ layout(set = 0, binding = 2) uniform sampler2D shadowMap;
 
 layout(location = 0) out vec4 outColor;
 
-// Light Space 좌표를 ShadowMap에서 sample해 가시성(0=그림자, 1=빛) 반환.
-// 3x3 PCF로 경계를 부드럽게.
 float CalculateDirectionalShadow(vec4 lightSpacePos, vec3 normal, vec3 lightDir) {
-    // perspective divide (Ortho라 w=1이지만 일관성 위해)
     vec3 ndc = lightSpacePos.xyz / lightSpacePos.w;
     vec2 shadowUV = ndc.xy * 0.5 + 0.5;
 
-    // frustum 밖이면 그림자 없음으로 처리
     if (shadowUV.x < 0.0 || shadowUV.x > 1.0 ||
         shadowUV.y < 0.0 || shadowUV.y > 1.0 ||
         ndc.z < 0.0 || ndc.z > 1.0) {
         return 1.0;
     }
 
-    // Slope-scaled bias: 표면이 빛에 평행할수록 acne가 심해지므로 더 큰 bias.
     float NdotL = max(dot(normal, lightDir), 0.0);
     float bias = max(0.005 * (1.0 - NdotL), 0.0008);
-
     float currentDepth = ndc.z;
 
     // 3x3 PCF
@@ -80,14 +74,14 @@ void main() {
         vec3 normal = vec3(0.0, 0.0, 1.0);
         vec3 globalDirection = normalize(-lighting.globalLightDirection.xyz);
         float shadowFactor = CalculateDirectionalShadow(fragLightSpacePos, normal, globalDirection);
-        floorColor *= mix(0.55, 1.0, shadowFactor); // 그림자 안에선 어둡게
+        floorColor *= mix(0.55, 1.0, shadowFactor);
 
         outColor = vec4(floorColor, 1.0);
         return;
     }
 
     if (fragDrawMode < 0.0) {
-        // Planar Projected Shadow (검은 반투명) — 기존 로직 유지
+        // Planar Projected Shadow (검은 반투명) 
         float daylight = clamp(-lighting.globalLightDirection.z, 0.0, 1.0);
         float alpha = mix(0.34, 0.16, daylight);
         outColor = vec4(0.0, 0.0, 0.0, alpha);
@@ -115,10 +109,23 @@ void main() {
     vec3 globalDirection = normalize(-lighting.globalLightDirection.xyz);
     float rawGlobalNdotL = dot(normal, globalDirection);
     float globalMask = max(rawGlobalNdotL, 0.0);
-    vec3 globalDiffuse = baseColor * lighting.globalLightColor.rgb * lighting.globalLightColor.a * globalMask;
+
+    vec3 globalDiffuse = 
+        baseColor * 
+        lighting.globalLightColor.rgb * 
+        lighting.globalLightColor.a * 
+        globalMask;
+
     vec3 globalReflectDirection = reflect(-globalDirection, normal);
-    float globalSpecularMask = pow(max(dot(viewDirection, globalReflectDirection), 0.0), shininess) * step(0.0, rawGlobalNdotL);
-    vec3 globalSpecular = lighting.globalLightColor.rgb * lighting.globalLightColor.a * specularStrength * globalSpecularMask;
+
+    float globalSpecularMask = 
+        pow(max(dot(viewDirection, globalReflectDirection), 0.0), shininess) * 
+        step(0.0, rawGlobalNdotL);
+    vec3 globalSpecular = 
+        lighting.globalLightColor.rgb * 
+        lighting.globalLightColor.a * 
+        specularStrength * 
+        globalSpecularMask;
 
     // Presentation mode: objects cast shadows, while only the floor receives the shadow map.
 

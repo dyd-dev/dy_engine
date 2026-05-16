@@ -34,15 +34,36 @@ namespace dy
 		float pz = 0.0f;
 		float u = 0.0f;
 		float v = 0.0f;
+		float nx = 0.0f;
+		float ny = 0.0f;
+		float nz = 1.0f;
+		float tx = 1.0f;
+		float ty = 0.0f;
+		float tz = 0.0f;
+		float tw = 1.0f;
 	};
 	struct Mesh
 	{
 		std::vector<Vertex> vertices;
 		std::vector<uint32_t> indices;
 	};
+	struct RenderFlags
+	{
+		bool castShadow = true;
+		bool receiveShadow = true;
+	};
 	struct Material
 	{
 		Math::float4 baseColor = Math::float4(1.0f, 1.0f, 1.0f, 1.0f);
 		TextureID baseColorTexture = TextureID::Invalid;
+		Math::float3 emissiveColor = Math::float3(0.0f, 0.0f, 0.0f);
+		float metallicFactor = 0.0f;
+		float roughnessFactor = 0.5f;
+		float normalScale = 1.0f;
+		float occlusionStrength = 1.0f;
+		TextureID metallicRoughnessTexture = TextureID::Invalid;
+		TextureID normalTexture = TextureID::Invalid;
+		TextureID occlusionTexture = TextureID::Invalid;
+		TextureID emissiveTexture = TextureID::Invalid;
 	};
 }

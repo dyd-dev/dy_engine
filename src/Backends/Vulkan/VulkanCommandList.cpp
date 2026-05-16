@@ -16,6 +16,7 @@ void VulkanCommandList::Begin()
 	m_pendingPushConstantSize = 0;
 	m_pendingGeometry = {};
 	m_pendingConstantBuffers = {};
+	m_pendingTextures = {};
 	m_hasPendingViewport = false;
 	m_hasPendingScissor = false;
 	m_drawCalls.clear();
@@ -50,6 +51,12 @@ void VulkanCommandList::BindConstantBuffer(uint32_t binding, dy::RHI::IBuffer* b
 	m_pendingConstantBuffers[binding].buffer = buffer;
 	m_pendingConstantBuffers[binding].offset = offset;
 	m_pendingConstantBuffers[binding].size = size;
+}
+
+void VulkanCommandList::BindTexture(uint32_t binding, dy::RHI::ITexture* texture)
+{
+	if (binding >= m_pendingTextures.size()) return;
+	m_pendingTextures[binding] = texture;
 }
 
 void VulkanCommandList::SetRenderTargets(uint32_t numRenderTargets, dy::RHI::ITexture** renderTargets, dy::RHI::ITexture* depthStencil)
@@ -99,6 +106,7 @@ void VulkanCommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCou
 	drawCall.vertexStride = m_pendingGeometry.vertexStride;
 	drawCall.geometry = m_pendingGeometry;
 	drawCall.constantBuffers = m_pendingConstantBuffers;
+	drawCall.textures = m_pendingTextures;
 	drawCall.hasViewport = m_hasPendingViewport;
 	drawCall.hasScissor = m_hasPendingScissor;
 	drawCall.viewport = m_pendingViewport;
@@ -123,6 +131,7 @@ void VulkanCommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t insta
 	drawCall.vertexStride = m_pendingGeometry.vertexStride;
 	drawCall.geometry = m_pendingGeometry;
 	drawCall.constantBuffers = m_pendingConstantBuffers;
+	drawCall.textures = m_pendingTextures;
 	drawCall.hasViewport = m_hasPendingViewport;
 	drawCall.hasScissor = m_hasPendingScissor;
 	drawCall.viewport = m_pendingViewport;

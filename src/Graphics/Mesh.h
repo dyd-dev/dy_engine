@@ -11,6 +11,7 @@ namespace dy::Graphics
 		dy::Math::float3 position;
 		dy::Math::float3 normal;
 		dy::Math::float2 uv;
+		dy::Math::float4 tangent = dy::Math::float4(1.0f, 0.0f, 0.0f, 1.0f);
 	};
 
 	struct MeshData

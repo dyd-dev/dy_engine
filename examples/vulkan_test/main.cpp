@@ -4,11 +4,14 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <cstddef>
+#include <cstdint>
 #include "Platform/Window.h"
 #include "RHI/IDevice.h"
 #include "RHI/IBuffer.h"
 #include "RHI/ICommandList.h"
 #include "RHI/IPipelineState.h"
+#include "Graphics/Material.h"
 #include "Graphics/Mesh.h"
 #include "Math/Math.h"
 
@@ -80,9 +83,15 @@ int main()
         std::cout << "Loaded OBJ: " << meshData.vertices.size() << " vertices, "
                   << meshData.indices.size() << " indices." << std::endl;
 
-        // Flatten the mesh into the Vulkan test vertex layout.
+        Material pbrMaterial = {};
+        pbrMaterial.baseColor = Math::float4(0.95f, 0.72f, 0.42f, 1.0f);
+        pbrMaterial.metallicFactor = 0.72f;
+        pbrMaterial.roughnessFactor = 0.34f;
+        pbrMaterial.normalScale = 0.18f;
+
+        // Flatten the mesh into the Vulkan PBR vertex layout.
         std::vector<float> flatVertices;
-        flatVertices.reserve(meshData.vertices.size() * 8);
+        flatVertices.reserve(meshData.vertices.size() * 12);
         for (const auto& v : meshData.vertices)
         {
             flatVertices.push_back(v.position.x);
@@ -93,6 +102,10 @@ int main()
             flatVertices.push_back(v.normal.z);
             flatVertices.push_back(v.uv.x);
             flatVertices.push_back(v.uv.y);
+            flatVertices.push_back(v.tangent.x);
+            flatVertices.push_back(v.tangent.y);
+            flatVertices.push_back(v.tangent.z);
+            flatVertices.push_back(v.tangent.w);
         }
 
         const uint32_t vertexBufferSize = static_cast<uint32_t>(flatVertices.size() * sizeof(float));
@@ -104,7 +117,7 @@ int main()
             if (buffer != nullptr) devicePtr->DestroyBuffer(buffer);
         };
         std::unique_ptr<RHI::IBuffer, decltype(destroyBuffer)> vertexBuffer(
-            device->CreateBuffer(RHI::BufferDesc{ vertexBufferSize, 8u * static_cast<uint32_t>(sizeof(float)), vertexStorageUsage }),
+            device->CreateBuffer(RHI::BufferDesc{ vertexBufferSize, 12u * static_cast<uint32_t>(sizeof(float)), vertexStorageUsage }),
             destroyBuffer
         );
         std::unique_ptr<RHI::IBuffer, decltype(destroyBuffer)> indexBuffer(
@@ -161,20 +174,38 @@ int main()
             cmdList->BindGraphicsPipeline(pipeline);
             RHI::GeometryBinding geometry = {};
             geometry.vertexBuffer = vertexBuffer.get();
-            geometry.vertexStride = 8u * static_cast<uint32_t>(sizeof(float));
+            geometry.vertexStride = 12u * static_cast<uint32_t>(sizeof(float));
             geometry.vertexOffset = 0;
             geometry.indexBuffer = indexBuffer.get();
             geometry.indexFormat = RHI::Format::R32_UINT;
             geometry.indexOffset = 0;
             cmdList->BindGeometry(geometry);
 
-            struct {
+            struct PushData {
                 Math::float4x4 viewProj;
                 Math::float4x4 model;
-            } pushData;
+                float drawMode;
+                uint32_t firstIndex;
+                int32_t vertexOffset;
+                uint32_t firstVertex;
+                float padding;
+                Math::float4 baseColorFactor;
+                Math::float4 materialParams;
+            };
+            static_assert(offsetof(PushData, firstIndex) == 132u, "Vulkan backend metadata offset must match shader layout.");
+            static_assert(offsetof(PushData, baseColorFactor) == 160u, "PBR material constants must match shader layout.");
+            static_assert(sizeof(PushData) == 192u, "Vulkan push constant range is 192 bytes.");
+            PushData pushData = {};
 
             pushData.viewProj = fixedViewProj;
             pushData.model = fixedModel;
+            pushData.drawMode = 0.0f;
+            pushData.baseColorFactor = pbrMaterial.baseColor;
+            pushData.materialParams = Math::float4(
+                pbrMaterial.metallicFactor,
+                pbrMaterial.roughnessFactor,
+                pbrMaterial.normalScale,
+                1.0f);
 
             cmdList->SetPushConstants(sizeof(pushData), &pushData);
             cmdList->DrawIndexedInstanced(static_cast<uint32_t>(meshData.indices.size()), 1, 0, 0, 0);

@@ -23,6 +23,7 @@ public:
 
 	dy::RHI::IBuffer* CreateBuffer(const dy::RHI::BufferDesc& desc) override;
 	dy::RHI::ITexture* CreateTexture(const dy::RHI::TextureDesc& desc) override;
+	bool UpdateTexture(dy::RHI::ITexture* texture, const void* rgba8Pixels, uint32_t rowPitch) override;
 	dy::RHI::IPipelineState* CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) override;
 	[[nodiscard]] dy::RHI::DescriptorIndex AllocateDescriptorSlot() override;
 	void UpdateDescriptorSlot(dy::RHI::DescriptorIndex index, dy::RHI::ITexture* texture) override;

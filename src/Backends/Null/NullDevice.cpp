@@ -56,6 +56,7 @@ namespace dy::Backends
 			void BindGlobalDescriptorHeap() override {}
 			void BindGeometry(const RHI::GeometryBinding&) override {}
 			void BindConstantBuffer(uint32_t, RHI::IBuffer*, uint32_t, uint32_t) override {}
+			void BindTexture(uint32_t, RHI::ITexture*) override {}
 			void SetPushConstants(uint32_t, const void*) override {}
 			void SetRenderTargets(uint32_t, RHI::ITexture**, RHI::ITexture*) override {}
 			void SetViewport(const RHI::Viewport&) override {}
@@ -118,6 +119,11 @@ namespace dy::Backends
 	RHI::ITexture* NullDevice::CreateTexture(const RHI::TextureDesc& desc)
 	{
 		return new NullTexture(desc);
+	}
+
+	bool NullDevice::UpdateTexture(RHI::ITexture*, const void*, uint32_t)
+	{
+		return true;
 	}
 
 	RHI::IPipelineState* NullDevice::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc)

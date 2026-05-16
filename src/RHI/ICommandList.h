@@ -61,9 +61,10 @@ namespace dy::RHI
 
 		virtual void BindGeometry(const GeometryBinding& geometry) = 0;
 		virtual void BindConstantBuffer(uint32_t binding, IBuffer* buffer, uint32_t offset, uint32_t size) = 0;
+		virtual void BindTexture(uint32_t binding, ITexture* texture) = 0;
 
 		// Modern DOD Approach: Inject tiny data (e.g., Transform Index, Material Index) directly.
-		// Replaces ALL BindBuffer and BindTexture calls.
+		// Tiny per-draw data stays in push constants; larger resources are bound through RHI slots.
 		virtual void SetPushConstants(uint32_t size, const void* data) = 0;
 
 		// Render Targets & Clears

@@ -323,7 +323,7 @@ int main()
 		}
 
 		std::vector<float> baseVertices;
-		baseVertices.reserve(meshData.vertices.size() * 8);
+		baseVertices.reserve(meshData.vertices.size() * 8); // 사용할 데이터를 미리예약
 		for (const auto& v : meshData.vertices)
 		{
 			baseVertices.push_back(v.position.x);
@@ -382,7 +382,7 @@ int main()
 			window.PollEvents();
 			device->BeginFrame();
 			const uint32_t frameIndex = device->GetCurrentFrameIndex() % static_cast<uint32_t>(vertexBuffers.size());
-
+			
 			const auto now = std::chrono::steady_clock::now();
 			const float seconds = std::chrono::duration<float>(now - startTime).count();
 			const float randomCycle = seconds * 0.25f;
@@ -392,7 +392,7 @@ int main()
 			const float lightDirZ = directionalLight.z;
 			const Math::float3 directionalMarkerPosition = ComputeDirectionalMarkerPosition(directionalLight);
 			const float daylight = std::max(lightDirZ, 0.0f);
-
+			// directional light 의 정보들을 profile에 갱신
 			LightingVolumeProfile profile;
 			profile.globalLightDirection[0] = -lightDirX;
 			profile.globalLightDirection[1] = -lightDirY;
@@ -401,7 +401,7 @@ int main()
 			profile.globalLightColor[1] = 0.62f;
 			profile.globalLightColor[2] = 0.72f;
 			profile.globalLightColor[3] = 0.6f;
-
+			//spot light의 정보들을 porfile에 갱신
 			const float spotX = 0.65f;
 			const float spotY = -0.25f;
 			const float spotZ = 1.05f;
@@ -415,6 +415,7 @@ int main()
 			profile.spotLightColor[1] = 0.78f;
 			profile.spotLightColor[2] = 0.38f;
 			profile.spotLightColor[3] = 2.0f;
+			// 볼륨 효과의 강도, 범위, 그리고 기타 파라미터들을 profile에 갱신
 			profile.volumeParams[0] = 0.1f;
 			profile.volumeParams[1] = 1.05f + daylight * 0.08f;
 			profile.volumeParams[2] = 0.03f;
@@ -468,7 +469,7 @@ int main()
 				shadowDesc
 			);
 			AppendMeshData(shadowMesh, frameVertices, frameIndices);
-			const uint32_t shadowIndexCount = static_cast<uint32_t>(frameIndices.size()) - shadowFirstIndex;
+			[[maybe_unused]] const uint32_t shadowIndexCount = static_cast<uint32_t>(frameIndices.size()) - shadowFirstIndex;
 
 			RHI::IBuffer* vertexBuffer = vertexBuffers[frameIndex];
 			RHI::IBuffer* indexBuffer = indexBuffers[frameIndex];
@@ -523,11 +524,13 @@ int main()
 				cmdList->SetPushConstants(sizeof(pushData), &pushData);
 				cmdList->DrawIndexedInstanced(objectIndexCount, 1, 0, 0, 0);
 
+				/*
 				Math::float4x4 shadowModel = Math::float4x4::Identity();
 				pushData.model = shadowModel;
 				pushData.drawMode = -2.0f;
 				cmdList->SetPushConstants(sizeof(pushData), &pushData);
 				cmdList->DrawIndexedInstanced(shadowIndexCount, 1, shadowFirstIndex, 0, 0);
+				*/
 
 				pushData.model = CreateZUpYawModel(directionalMarkerPosition, 0.0f, 0.024f);
 				pushData.drawMode = 4.0f;

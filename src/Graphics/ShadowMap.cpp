@@ -102,11 +102,11 @@ namespace dy::Graphics
 	{
 		const Math::float3 lightForward = Normalize(lightDirection);
 
-		// 광원 위치 = sceneCenter에서 lightForward 반대 방향으로 lightDistance만큼 후퇴
+		// lightDirection is surface-to-light, so place the light camera on that side.
 		const Math::float3 lightOrigin(
-			desc.sceneCenter.x - lightForward.x * desc.lightDistance,
-			desc.sceneCenter.y - lightForward.y * desc.lightDistance,
-			desc.sceneCenter.z - lightForward.z * desc.lightDistance);
+			desc.sceneCenter.x + lightForward.x * desc.lightDistance,
+			desc.sceneCenter.y + lightForward.y * desc.lightDistance,
+			desc.sceneCenter.z + lightForward.z * desc.lightDistance);
 
 		const Math::float3 up = SelectUpVector(lightForward);
 		const Math::float4x4 view = LookAt(lightOrigin, desc.sceneCenter, up);

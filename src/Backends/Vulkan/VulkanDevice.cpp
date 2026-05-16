@@ -36,7 +36,13 @@ namespace {
 	constexpr uint32_t kShadowMatrixBinding = 3;
 	constexpr uint32_t kVertexStorageBinding = 4;
 	constexpr uint32_t kIndexStorageBinding = 5;
+	constexpr uint32_t kMetallicRoughnessSamplerBinding = 6;
+	constexpr uint32_t kNormalSamplerBinding = 7;
+	constexpr uint32_t kOcclusionSamplerBinding = 8;
+	constexpr uint32_t kEmissiveSamplerBinding = 9;
 	constexpr uint32_t kDrawMetadataPushConstantOffset = sizeof(float) * 32 + sizeof(float);
+
+	const char* VkResultToString(VkResult result);
 
 	struct DrawMetadataPushConstants
 	{
@@ -73,7 +79,30 @@ namespace {
 
 	bool IsValidationEnabled() {
 #if defined(_DEBUG)
-		return true;
+		uint32_t layerCount = 0;
+		VkResult result = vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+		if (result != VK_SUCCESS) {
+			SDL_Log("Failed to enumerate Vulkan instance layers: %s (%d)", VkResultToString(result), static_cast<int>(result));
+			return false;
+		}
+
+		std::vector<VkLayerProperties> availableLayers(layerCount);
+		if (layerCount > 0) {
+			result = vkEnumerateInstanceLayerProperties(&layerCount, availableLayers.data());
+			if (result != VK_SUCCESS) {
+				SDL_Log("Failed to read Vulkan instance layers: %s (%d)", VkResultToString(result), static_cast<int>(result));
+				return false;
+			}
+		}
+
+		for (const VkLayerProperties& layer : availableLayers) {
+			if (std::strcmp(layer.layerName, kValidationLayerName) == 0) {
+				return true;
+			}
+		}
+
+		SDL_Log("Vulkan validation layer '%s' is not available. Continuing without validation.", kValidationLayerName);
+		return false;
 #else
 		return false;
 #endif
@@ -94,6 +123,7 @@ namespace {
 		case VK_ERROR_SURFACE_LOST_KHR: return "VK_ERROR_SURFACE_LOST_KHR";
 		case VK_ERROR_DEVICE_LOST: return "VK_ERROR_DEVICE_LOST";
 		case VK_ERROR_INITIALIZATION_FAILED: return "VK_ERROR_INITIALIZATION_FAILED";
+		case VK_ERROR_LAYER_NOT_PRESENT: return "VK_ERROR_LAYER_NOT_PRESENT";
 		default: return "VK_ERROR_UNKNOWN";
 		}
 	}
@@ -555,6 +585,22 @@ dy::RHI::ITexture* VulkanDevice::CreateTexture(const dy::RHI::TextureDesc& desc)
 	return texture.release();
 }
 
+bool VulkanDevice::UpdateTexture(dy::RHI::ITexture* texture, const void* rgba8Pixels, uint32_t rowPitch) {
+	VulkanTexture* vulkanTexture = dynamic_cast<VulkanTexture*>(texture);
+	if (vulkanTexture == nullptr || rgba8Pixels == nullptr) return false;
+	if (rowPitch != vulkanTexture->GetWidth() * 4u) {
+		SDL_Log("Vulkan texture upload currently expects tightly packed RGBA8 rows.");
+		return false;
+	}
+
+	return vulkanTexture->UploadRGBA8(
+		m_context,
+		m_commandPool,
+		rgba8Pixels,
+		vulkanTexture->GetWidth(),
+		vulkanTexture->GetHeight());
+}
+
 dy::RHI::IPipelineState* VulkanDevice::CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) {
 	try {
 		if (desc.enableShadowPass && m_shadowRenderPass == VK_NULL_HANDLE) {
@@ -745,7 +791,13 @@ bool VulkanDevice::CreateInstance() {
 	createInfo.enabledExtensionCount = static_cast<uint32_t>(enabledExtensions.size());
 	createInfo.ppEnabledExtensionNames = enabledExtensions.data();
 
-	return vkCreateInstance(&createInfo, nullptr, &m_context.instance) == VK_SUCCESS;
+	const VkResult result = vkCreateInstance(&createInfo, nullptr, &m_context.instance);
+	if (result != VK_SUCCESS) {
+		SDL_Log("Failed to create Vulkan instance: %s (%d)", VkResultToString(result), static_cast<int>(result));
+		return false;
+	}
+
+	return true;
 }
 
 bool VulkanDevice::CreateSurface() {
@@ -1367,37 +1419,30 @@ bool VulkanDevice::CreateDepthResources() {
 }
 
 bool VulkanDevice::CreateDescriptorSetLayout() {
-	// binding 0: 텍스처 sampler (FS)
-	// binding 1: LightingVolumeProfile UBO (VS+FS)
+	// binding 0: Base color sampler (FS)
+	// binding 1: Lighting UBO (VS+FS)
 	// binding 2: Shadow map sampler (FS)
 	// binding 3: ShadowMatrix UBO (lightViewProj, VS)
 	// binding 4: Vertex storage buffer (VS)
 	// binding 5: Index storage buffer (VS)
-	std::array<VkDescriptorSetLayoutBinding, 6> bindings = {};
-	bindings[0].binding = 0;
-	bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	bindings[0].descriptorCount = 1;
-	bindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-	bindings[1].binding = 1;
-	bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	bindings[1].descriptorCount = 1;
-	bindings[1].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-	bindings[2].binding = 2;
-	bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	bindings[2].descriptorCount = 1;
-	bindings[2].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-	bindings[3].binding = 3;
-	bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	bindings[3].descriptorCount = 1;
-	bindings[3].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-	bindings[4].binding = kVertexStorageBinding;
-	bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	bindings[4].descriptorCount = 1;
-	bindings[4].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-	bindings[5].binding = kIndexStorageBinding;
-	bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	bindings[5].descriptorCount = 1;
-	bindings[5].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	// binding 6-9: Metallic/Roughness, Normal, Occlusion, Emissive samplers (FS)
+	std::array<VkDescriptorSetLayoutBinding, 10> bindings = {};
+	auto setBinding = [&bindings](uint32_t index, uint32_t binding, VkDescriptorType type, VkShaderStageFlags stageFlags) {
+		bindings[index].binding = binding;
+		bindings[index].descriptorType = type;
+		bindings[index].descriptorCount = 1;
+		bindings[index].stageFlags = stageFlags;
+	};
+	setBinding(0, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
+	setBinding(1, kLightingConstantBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+	setBinding(2, kShadowSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
+	setBinding(3, kShadowMatrixBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
+	setBinding(4, kVertexStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
+	setBinding(5, kIndexStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
+	setBinding(6, kMetallicRoughnessSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
+	setBinding(7, kNormalSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
+	setBinding(8, kOcclusionSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
+	setBinding(9, kEmissiveSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
 	VkDescriptorSetLayoutCreateInfo info{};
 	info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
 	info.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -1409,7 +1454,7 @@ bool VulkanDevice::CreateDescriptorPool() {
 	const uint32_t descriptorSetCount = kMaxFramesInFlight * kMaxDrawsPerFrame;
 	std::array<VkDescriptorPoolSize, 3> newPoolSizes = {};
 	newPoolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	newPoolSizes[0].descriptorCount = descriptorSetCount * 2;
+	newPoolSizes[0].descriptorCount = descriptorSetCount * 6;
 	newPoolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	newPoolSizes[1].descriptorCount = descriptorSetCount * 2;
 	newPoolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -1449,21 +1494,44 @@ bool VulkanDevice::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCall& dr
 	if (vertexBuffer == nullptr || (drawCall.indexed && indexBuffer == nullptr)) return false;
 
 	std::vector<VkWriteDescriptorSet> writes;
-	writes.reserve(6);
+	writes.reserve(10);
 
 	const VulkanTexture* fallbackTexture = static_cast<const VulkanTexture*>(m_fallbackTexture);
-	VkDescriptorImageInfo textureInfo{};
-	if (fallbackTexture != nullptr && fallbackTexture->GetImageView() != VK_NULL_HANDLE && fallbackTexture->GetSampler() != VK_NULL_HANDLE) {
-		textureInfo.sampler = fallbackTexture->GetSampler();
-		textureInfo.imageView = fallbackTexture->GetImageView();
-		textureInfo.imageLayout = fallbackTexture->GetImageLayout();
+	const bool hasFallbackTexture =
+		fallbackTexture != nullptr &&
+		fallbackTexture->GetImageView() != VK_NULL_HANDLE &&
+		fallbackTexture->GetSampler() != VK_NULL_HANDLE;
+
+	const std::array<uint32_t, 5> materialSamplerBindings = {
+		0u,
+		kMetallicRoughnessSamplerBinding,
+		kNormalSamplerBinding,
+		kOcclusionSamplerBinding,
+		kEmissiveSamplerBinding
+	};
+	std::array<VkDescriptorImageInfo, 5> materialTextureInfos = {};
+	for (uint32_t i = 0; i < materialSamplerBindings.size(); ++i) {
+		const uint32_t binding = materialSamplerBindings[i];
+		const VulkanTexture* texture = nullptr;
+		if (binding < drawCall.textures.size()) {
+			texture = dynamic_cast<const VulkanTexture*>(drawCall.textures[binding]);
+		}
+		if (texture == nullptr || texture->GetImageView() == VK_NULL_HANDLE || texture->GetSampler() == VK_NULL_HANDLE) {
+			texture = hasFallbackTexture ? fallbackTexture : nullptr;
+		}
+		if (texture == nullptr) continue;
+
+		materialTextureInfos[i].sampler = texture->GetSampler();
+		materialTextureInfos[i].imageView = texture->GetImageView();
+		materialTextureInfos[i].imageLayout = texture->GetImageLayout();
+
 		VkWriteDescriptorSet textureWrite{};
 		textureWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		textureWrite.dstSet = m_descriptorSets[descriptorIndex];
-		textureWrite.dstBinding = 0;
+		textureWrite.dstBinding = binding;
 		textureWrite.descriptorCount = 1;
 		textureWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-		textureWrite.pImageInfo = &textureInfo;
+		textureWrite.pImageInfo = &materialTextureInfos[i];
 		writes.push_back(textureWrite);
 	}
 
@@ -1488,11 +1556,17 @@ bool VulkanDevice::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCall& dr
 	}
 
 	const VulkanTexture* shadowTexture = static_cast<const VulkanTexture*>(m_shadowMapTexture);
+	const bool usingFallbackShadowTexture = shadowTexture == nullptr;
+	if (usingFallbackShadowTexture && hasFallbackTexture) {
+		shadowTexture = fallbackTexture;
+	}
 	VkDescriptorImageInfo shadowInfo{};
 	if (shadowTexture != nullptr && shadowTexture->GetImageView() != VK_NULL_HANDLE && shadowTexture->GetSampler() != VK_NULL_HANDLE) {
 		shadowInfo.sampler = shadowTexture->GetSampler();
 		shadowInfo.imageView = shadowTexture->GetImageView();
-		shadowInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		shadowInfo.imageLayout = usingFallbackShadowTexture
+			? shadowTexture->GetImageLayout()
+			: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 		VkWriteDescriptorSet shadowWrite{};
 		shadowWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		shadowWrite.dstSet = m_descriptorSets[descriptorIndex];

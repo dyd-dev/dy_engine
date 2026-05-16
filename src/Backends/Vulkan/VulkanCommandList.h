@@ -17,6 +17,7 @@ public:
 	void BindGlobalDescriptorHeap() override {}
 	void BindGeometry(const dy::RHI::GeometryBinding& geometry) override;
 	void BindConstantBuffer(uint32_t binding, dy::RHI::IBuffer* buffer, uint32_t offset, uint32_t size) override;
+	void BindTexture(uint32_t binding, dy::RHI::ITexture* texture) override;
 	void SetPushConstants(uint32_t size, const void* data) override;
 	void SetRenderTargets(uint32_t numRenderTargets, dy::RHI::ITexture** renderTargets, dy::RHI::ITexture* depthStencil) override;
 	void SetViewport(const dy::RHI::Viewport& viewport) override;
@@ -35,6 +36,7 @@ public:
 private:
 	static constexpr uint32_t kMaxConstantBufferBindings = 8;
 	static constexpr uint32_t kMaxRenderTargets = 4;
+	static constexpr uint32_t kMaxTextureBindings = 10;
 
 	struct ConstantBufferBinding
 	{
@@ -60,6 +62,7 @@ private:
 		uint32_t vertexStride = 0;
 		dy::RHI::GeometryBinding geometry = {};
 		std::array<ConstantBufferBinding, kMaxConstantBufferBindings> constantBuffers = {};
+		std::array<dy::RHI::ITexture*, kMaxTextureBindings> textures = {};
 		dy::RHI::Viewport viewport = {};
 		dy::RHI::Rect scissor = {};
 		std::array<uint8_t, 192> pushConstants = {};
@@ -76,6 +79,7 @@ private:
 	uint32_t m_pendingPushConstantSize = 0;
 	dy::RHI::GeometryBinding m_pendingGeometry = {};
 	std::array<ConstantBufferBinding, kMaxConstantBufferBindings> m_pendingConstantBuffers = {};
+	std::array<dy::RHI::ITexture*, kMaxTextureBindings> m_pendingTextures = {};
 	bool m_hasPendingViewport = false;
 	bool m_hasPendingScissor = false;
 	dy::RHI::Viewport m_pendingViewport = {};

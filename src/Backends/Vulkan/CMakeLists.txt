@@ -28,6 +28,7 @@ file(TO_CMAKE_PATH "${VULKAN_GLSLANG_VALIDATOR}" VULKAN_GLSLANG_VALIDATOR_CMAKE)
 set(VULKAN_SHADER_OUTPUTS
 	${VULKAN_SHADER_OUTPUT_DIR}/triangle.vert.spv
 	${VULKAN_SHADER_OUTPUT_DIR}/triangle.frag.spv
+	${VULKAN_SHADER_OUTPUT_DIR}/triangle_shadow.vert.spv
 )
 
 add_custom_command(
@@ -48,6 +49,15 @@ add_custom_command(
 	VERBATIM
 )
 
+add_custom_command(
+	OUTPUT ${VULKAN_SHADER_OUTPUT_DIR}/triangle_shadow.vert.spv
+	COMMAND ${CMAKE_COMMAND} -E make_directory ${VULKAN_SHADER_OUTPUT_DIR}
+	COMMAND ${VULKAN_GLSLANG_VALIDATOR} -V ${VULKAN_SHADER_SOURCE_DIR}/triangle_shadow.vert -o ${VULKAN_SHADER_OUTPUT_DIR}/triangle_shadow.vert.spv
+	DEPENDS ${VULKAN_SHADER_SOURCE_DIR}/triangle_shadow.vert
+	COMMENT "Compiling Vulkan shadow vertex shader"
+	VERBATIM
+)
+
 add_custom_target(VulkanShaders ALL DEPENDS ${VULKAN_SHADER_OUTPUTS})
 add_dependencies(Backend_Vulkan VulkanShaders)
 
@@ -57,7 +67,7 @@ target_link_libraries(Backend_Vulkan PRIVATE
 	Engine_Options
 )
 
-target_link_libraries(${PROJECT_NAME} PUBLIC Backend_Vulkan)
+target_link_libraries(${PROJECT_NAME} PRIVATE Backend_Vulkan)
 
 target_include_directories(Backend_Vulkan PRIVATE
 	${CMAKE_SOURCE_DIR}/src

@@ -2,6 +2,8 @@
 
 layout(location = 0) out vec2 fragUV;
 layout(location = 1) out vec3 fragNormal;
+layout(location = 2) out vec3 fragWorldPosition;
+layout(location = 3) out vec4 fragTangent;
 
 layout(push_constant) uniform PushConstants {
     mat4 viewProj;
@@ -10,6 +12,9 @@ layout(push_constant) uniform PushConstants {
     uint firstIndex;
     int vertexOffset;
     uint firstVertex;
+    float padding;
+    vec4 baseColorFactor;
+    vec4 materialParams;
 } pushConstants;
 
 layout(std430, set = 0, binding = 4) readonly buffer VertexStorage {
@@ -24,10 +29,11 @@ struct Vertex {
     vec3 position;
     vec3 normal;
     vec2 uv;
+    vec4 tangent;
 };
 
 Vertex LoadVertex(uint vertexIndex) {
-    uint base = vertexIndex * 8u;
+    uint base = vertexIndex * 12u;
     Vertex vertex;
     vertex.position = vec3(
         vertexStorage.vertices[base + 0u],
@@ -40,6 +46,11 @@ Vertex LoadVertex(uint vertexIndex) {
     vertex.uv = vec2(
         vertexStorage.vertices[base + 6u],
         vertexStorage.vertices[base + 7u]);
+    vertex.tangent = vec4(
+        vertexStorage.vertices[base + 8u],
+        vertexStorage.vertices[base + 9u],
+        vertexStorage.vertices[base + 10u],
+        vertexStorage.vertices[base + 11u]);
     return vertex;
 }
 
@@ -49,8 +60,10 @@ void main() {
     int resolvedVertexIndex = int(indexStorage.indices[pushConstants.firstIndex + uint(gl_VertexIndex)]) + pushConstants.vertexOffset;
     uint vertexIndex = uint(resolvedVertexIndex);
     Vertex vertex = LoadVertex(vertexIndex);
-    gl_Position = pushConstants.viewProj * model * vec4(vertex.position, 1.0);
+    vec4 worldPosition = model * vec4(vertex.position, 1.0);
+    gl_Position = pushConstants.viewProj * worldPosition;
     fragUV = vertex.uv;
-    // World space normal
+    fragWorldPosition = worldPosition.xyz;
     fragNormal = normalize(mat3(model) * vertex.normal);
+    fragTangent = vec4(normalize(mat3(model) * vertex.tangent.xyz), vertex.tangent.w);
 }

@@ -32,6 +32,7 @@ namespace dy::RHI
 		virtual void Present() = 0;
 		virtual IBuffer* CreateBuffer(const BufferDesc& desc) = 0;
 		virtual ITexture* CreateTexture(const TextureDesc& desc) = 0;
+		virtual bool UpdateTexture(ITexture* texture, const void* rgba8Pixels, uint32_t rowPitch) = 0;
 		virtual IPipelineState* CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) = 0;
 		[[nodiscard]] virtual DescriptorIndex AllocateDescriptorSlot() = 0;
 		virtual void UpdateDescriptorSlot(DescriptorIndex index, ITexture* texture) = 0;
