@@ -1,5 +1,7 @@
 #include <iostream>
+#include <fstream>
 #include <memory>
+#include <stdexcept>
 #include <string>
 
 #include "Platform/Window.h"
@@ -13,6 +15,7 @@
 using namespace dy;
 
 const char* GetShaderExtension();
+std::string ReadTextFile(const char* filepath);
 
 int main()
 {
@@ -24,12 +27,18 @@ int main()
 
 		Graphics::Renderer renderer;
 		Graphics::RendererConfig rendererConfig = {};
-		Graphics::GraphicsPipelineFiles mainPipeline = {};
 		const std::string shaderExtension = GetShaderExtension();
 		const std::string vertexShaderPath = std::string(DY_SHADER_DIR) + "/TexturedTriangleVS" + shaderExtension;
 		const std::string pixelShaderPath = std::string(DY_SHADER_DIR) + "/TexturedTrianglePS" + shaderExtension;
-		mainPipeline.vertexShaderPath = vertexShaderPath.c_str();
-		mainPipeline.pixelShaderPath = pixelShaderPath.c_str();
+		const std::string vertexShader = ReadTextFile(vertexShaderPath.c_str());
+		const std::string pixelShader = ReadTextFile(pixelShaderPath.c_str());
+
+		RHI::GraphicsPipelineDesc mainPipeline = {};
+		mainPipeline.vertexShader = vertexShader.data();
+		mainPipeline.vertexShaderSize = vertexShader.size();
+		mainPipeline.pixelShader = pixelShader.data();
+		mainPipeline.pixelShaderSize = pixelShader.size();
+		mainPipeline.renderTargetFormat = RHI::Format::R8G8B8A8_UNORM;
 		if(!renderer.Initialize(device.get(), mainPipeline, rendererConfig)) return -1;
 
 		Graphics::Scene scene;
@@ -80,4 +89,24 @@ const char* GetShaderExtension()
 #else
 	return ".hlsl";
 #endif
+}
+
+std::string ReadTextFile(const char* filepath)
+{
+	std::ifstream file(filepath, std::ios::binary);
+	if(!file.is_open())
+	{
+		throw std::runtime_error(std::string("Failed to open shader file: ") + filepath);
+	}
+
+	file.seekg(0, std::ios::end);
+	const std::streamoff size = file.tellg();
+	file.seekg(0, std::ios::beg);
+
+	std::string content(static_cast<size_t>(size), '\0');
+	if(size > 0)
+	{
+		file.read(content.data(), size);
+	}
+	return content;
 }
