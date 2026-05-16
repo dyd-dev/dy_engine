@@ -1,13 +1,13 @@
 #define STB_IMAGE_IMPLEMENTATION
-#include "Core/ImageLoader.h"
+#include "Image.h"
 #include <stb_image.h>
 
 namespace dy::Core
 {
-    Image LoadImageFromFile(const std::string& filepath)
+    Image LoadImageFromFile(const const char *filepath)
     {
         int width = 0, height = 0, channels = 0;
-        uint8_t* data = stbi_load(filepath.c_str(), &width, &height, &channels, 4);
+        uint8_t* data = stbi_load(filepath, &width, &height, &channels, 4);
         if(data == nullptr)
             return {};
 
