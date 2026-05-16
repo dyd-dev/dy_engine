@@ -1,37 +1,20 @@
-struct DrawConstants
-{
-    float4x4 worldMatrix;
-    float4 baseColor;
-    uint baseColorTextureIndex;
-    float3 padding;
-};
-
-ConstantBuffer<DrawConstants> gDraw : register(b0);
-
 struct VSOutput
 {
     float4 position : SV_Position;
     float2 uv : TEXCOORD0;
 };
 
-VSOutput main(uint vertexID : SV_VertexID)
+struct VSInput
 {
-    const float2 positions[3] =
-    {
-        float2(0.0f, 0.6f),
-        float2(0.6f, -0.6f),
-        float2(-0.6f, -0.6f)
-    };
+    float3 position : POSITION;
+    float3 normal : NORMAL;
+    float2 uv : TEXCOORD0;
+};
 
-    const float2 uvs[3] =
-    {
-        float2(0.5f, 0.0f),
-        float2(1.0f, 1.0f),
-        float2(0.0f, 1.0f)
-    };
-
+VSOutput main(VSInput input)
+{
     VSOutput output;
-    output.position = mul(gDraw.worldMatrix, float4(positions[vertexID], 0.0f, 1.0f));
-    output.uv = uvs[vertexID];
+    output.position = float4(input.position, 1.0f);
+    output.uv = input.uv;
     return output;
 }

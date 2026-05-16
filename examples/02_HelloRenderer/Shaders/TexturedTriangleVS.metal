@@ -1,40 +1,23 @@
 #include <metal_stdlib>
 using namespace metal;
 
-struct DrawConstants
-{
-    float4x4 worldMatrix;
-    float4 baseColor;
-    uint baseColorTextureIndex;
-    float padding0;
-    float padding1;
-    float padding2;
-};
-
 struct VSOutput
 {
     float4 position [[position]];
     float2 uv;
 };
 
-vertex VSOutput main0(uint vertexID [[vertex_id]], constant DrawConstants& gDraw [[buffer(0)]])
+struct VSInput
 {
-    const float2 positions[3] =
-    {
-        float2(0.0, 0.6),
-        float2(0.6, -0.6),
-        float2(-0.6, -0.6)
-    };
+    float3 position [[attribute(0)]];
+    float3 normal [[attribute(1)]];
+    float2 uv [[attribute(2)]];
+};
 
-    const float2 uvs[3] =
-    {
-        float2(0.5, 0.0),
-        float2(1.0, 1.0),
-        float2(0.0, 1.0)
-    };
-
+vertex VSOutput main0(VSInput input [[stage_in]])
+{
     VSOutput output;
-    output.position = gDraw.worldMatrix * float4(positions[vertexID], 0.0, 1.0);
-    output.uv = uvs[vertexID];
+    output.position = float4(input.position, 1.0);
+    output.uv = input.uv;
     return output;
 }
