@@ -10,6 +10,7 @@
 #include <vector>
 #include "Core/Types.h"
 #include "Graphics/Mesh.h"
+#include "Graphics/OBJLoader.h"
 #include "Graphics/Shadow.h"
 #include "Graphics/ShadowMap.h"
 #include "Math/Math.h"
@@ -205,12 +206,12 @@ namespace
 		return model;
 	}
 
-	bool LoadExampleMesh(Graphics::MeshData& meshData)
+	bool LoadExampleMesh(Graphics::MeshData& meshData, std::string* outTexturePath)
 	{
 		const std::string objPath = "examples/vulkan_test/triangle.obj";
-		if (Graphics::Mesh::LoadFromOBJ(objPath, meshData)) return true;
-		if (Graphics::Mesh::LoadFromOBJ("../" + objPath, meshData)) return true;
-		if (Graphics::Mesh::LoadFromOBJ("../../" + objPath, meshData)) return true;
+		if (Graphics::OBJLoader::Load(objPath, meshData, outTexturePath)) return true;
+		if (Graphics::OBJLoader::Load("../" + objPath, meshData, outTexturePath)) return true;
+		if (Graphics::OBJLoader::Load("../../" + objPath, meshData, outTexturePath)) return true;
 		return false;
 	}
 
@@ -317,9 +318,14 @@ int main()
 		}
 
 		Graphics::MeshData meshData;
-		if (!LoadExampleMesh(meshData))
+		std::string texturePath;
+		if (!LoadExampleMesh(meshData, &texturePath))
 		{
 			throw std::runtime_error("Could not find triangle.obj");
+		}
+		if (!texturePath.empty())
+		{
+			std::cout << "Loaded OBJ texture: " << texturePath << std::endl;
 		}
 
 		std::vector<float> baseVertices;

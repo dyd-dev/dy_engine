@@ -20,7 +20,7 @@ namespace dy::Graphics
 			m_materials.push_back(material);
 			return static_cast<MaterialID>(m_materials.size() - 1u);
 		}
-		[[nodiscard]] MeshID CreateMesh(const Mesh& mesh)
+		[[nodiscard]] MeshID CreateMesh(const dy::Mesh& mesh)
 		{
 			m_meshes.push_back(mesh);
 			return static_cast<MeshID>(m_meshes.size() - 1u);
@@ -51,7 +51,7 @@ namespace dy::Graphics
 		{
 			return m_materials[ToIndex(materialId)];
 		}
-		[[nodiscard]] const Mesh& GetMesh(MeshID meshId) const
+		[[nodiscard]] const dy::Mesh& GetMesh(MeshID meshId) const
 		{
 			return m_meshes[ToIndex(meshId)];
 		}
@@ -83,7 +83,7 @@ namespace dy::Graphics
 	private:
 		std::vector<Core::Image> m_textureImages;
 		std::vector<Material> m_materials;
-		std::vector<Mesh> m_meshes;
+		std::vector<dy::Mesh> m_meshes;
 		std::vector<MeshID> m_entityMeshes;
 		std::vector<MaterialID> m_entityMaterials;
 		std::vector<Transform> m_entityTransforms;

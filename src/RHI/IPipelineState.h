@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "Enums.h"
 #include <cstddef>
+#include <cstdint>
 
 namespace dy::RHI
 {
@@ -21,6 +22,7 @@ namespace dy::RHI
 		bool depthEnable = true;
 		bool wireframe = false;
 		bool enableShadowPass = false;
+		uint32_t shadowMapResolution = 2048;
 	};
 
 	struct ComputePipelineDesc {

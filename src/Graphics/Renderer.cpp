@@ -6,6 +6,7 @@
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "Graphics/Scene.h"
@@ -50,7 +51,7 @@ namespace
 		float tw = 1.0f;
 	};
 
-	[[nodiscard]] std::string ReadTextFile(const char* filepath)
+	[[nodiscard]] std::vector<char> ReadBinaryFile(const char* filepath)
 	{
 		std::ifstream file(filepath, std::ios::binary);
 		if(!file.is_open())
@@ -62,7 +63,7 @@ namespace
 		const std::streamoff size = file.tellg();
 		file.seekg(0, std::ios::beg);
 
-		std::string content(static_cast<size_t>(size), '\0');
+		std::vector<char> content(static_cast<size_t>(size));
 		if(size > 0)
 		{
 			file.read(content.data(), size);
@@ -71,7 +72,45 @@ namespace
 		return content;
 	}
 
-	[[nodiscard]] std::vector<RendererVertex> BuildRendererVertices(const Mesh& mesh)
+	[[nodiscard]] bool ResolveRendererShaderPaths(
+		const RendererConfig& config,
+		const char*& vertexShaderPath,
+		const char*& pixelShaderPath,
+		const char*& shadowVertexShaderPath,
+		std::string& defaultVertexShaderPath,
+		std::string& defaultPixelShaderPath,
+		std::string& defaultShadowVertexShaderPath)
+	{
+		vertexShaderPath = config.vertexShaderPath;
+		pixelShaderPath = config.pixelShaderPath;
+		shadowVertexShaderPath = config.shadowVertexShaderPath;
+
+#if defined(ENABLE_VULKAN) && defined(DY_VULKAN_SHADER_DIR)
+		if(vertexShaderPath == nullptr)
+		{
+			defaultVertexShaderPath = std::string(DY_VULKAN_SHADER_DIR) + "/triangle.vert.spv";
+			vertexShaderPath = defaultVertexShaderPath.c_str();
+		}
+		if(pixelShaderPath == nullptr)
+		{
+			defaultPixelShaderPath = std::string(DY_VULKAN_SHADER_DIR) + "/triangle.frag.spv";
+			pixelShaderPath = defaultPixelShaderPath.c_str();
+		}
+		if(config.enableShadows && shadowVertexShaderPath == nullptr)
+		{
+			defaultShadowVertexShaderPath = std::string(DY_VULKAN_SHADER_DIR) + "/triangle_shadow.vert.spv";
+			shadowVertexShaderPath = defaultShadowVertexShaderPath.c_str();
+		}
+#else
+		(void)defaultVertexShaderPath;
+		(void)defaultPixelShaderPath;
+		(void)defaultShadowVertexShaderPath;
+#endif
+
+		return vertexShaderPath != nullptr && pixelShaderPath != nullptr;
+	}
+
+	[[nodiscard]] std::vector<RendererVertex> BuildRendererVertices(const dy::Mesh& mesh)
 	{
 		std::vector<RendererVertex> vertices;
 		vertices.reserve(mesh.vertices.size());
@@ -95,7 +134,7 @@ namespace
 		return vertices;
 	}
 
-	[[nodiscard]] std::vector<uint32_t> BuildRendererIndices(const Mesh& mesh)
+	[[nodiscard]] std::vector<uint32_t> BuildRendererIndices(const dy::Mesh& mesh)
 	{
 		if(!mesh.indices.empty())
 		{
@@ -119,20 +158,31 @@ bool Renderer::Initialize(RHI::IDevice* device, const RendererConfig& config)
 	static_assert(sizeof(DrawConstants) == 192u, "Renderer draw constants must match Vulkan push constant range.");
 
 	if(device == nullptr) return false;
-	if(config.vertexShaderPath == nullptr || config.pixelShaderPath == nullptr) return false;
+	const char* vertexShaderPath = nullptr;
+	const char* pixelShaderPath = nullptr;
+	const char* shadowVertexShaderPath = nullptr;
+	std::string defaultVertexShaderPath;
+	std::string defaultPixelShaderPath;
+	std::string defaultShadowVertexShaderPath;
+	if(!ResolveRendererShaderPaths(
+		config,
+		vertexShaderPath,
+		pixelShaderPath,
+		shadowVertexShaderPath,
+		defaultVertexShaderPath,
+		defaultPixelShaderPath,
+		defaultShadowVertexShaderPath))
+	{
+		return false;
+	}
 
 	m_config = config;
-	const std::string vertexShaderSource = ReadTextFile(config.vertexShaderPath);
-	const std::string pixelShaderSource = ReadTextFile(config.pixelShaderPath);
-	m_vertexShaderSource.assign(vertexShaderSource.begin(), vertexShaderSource.end());
-	m_pixelShaderSource.assign(pixelShaderSource.begin(), pixelShaderSource.end());
-	m_vertexShaderSource.push_back('\0');
-	m_pixelShaderSource.push_back('\0');
+	m_vertexShaderSource = ReadBinaryFile(vertexShaderPath);
+	m_pixelShaderSource = ReadBinaryFile(pixelShaderPath);
 	m_shadowVertexShaderSource.clear();
-	if(m_config.enableShadows && m_config.shadowVertexShaderPath != nullptr)
+	if(m_config.enableShadows && shadowVertexShaderPath != nullptr)
 	{
-		const std::string shadowVertexShaderSource = ReadTextFile(m_config.shadowVertexShaderPath);
-		m_shadowVertexShaderSource.assign(shadowVertexShaderSource.begin(), shadowVertexShaderSource.end());
+		m_shadowVertexShaderSource = ReadBinaryFile(shadowVertexShaderPath);
 	}
 	BuildPipelineStates(device);
 	return m_texturedTrianglePipeline != nullptr;
@@ -214,14 +264,15 @@ void Renderer::BuildPipelineStates(RHI::IDevice* device)
 {
 	RHI::GraphicsPipelineDesc desc = {};
 	desc.vertexShader = m_vertexShaderSource.data();
-	desc.vertexShaderSize = m_vertexShaderSource.empty() ? 0u : m_vertexShaderSource.size() - 1u;
+	desc.vertexShaderSize = m_vertexShaderSource.size();
 	desc.pixelShader = m_pixelShaderSource.data();
-	desc.pixelShaderSize = m_pixelShaderSource.empty() ? 0u : m_pixelShaderSource.size() - 1u;
+	desc.pixelShaderSize = m_pixelShaderSource.size();
 	desc.renderTargetFormat = m_config.renderTargetFormat;
 	desc.depthStencilFormat = m_config.depthStencilFormat;
-	desc.depthEnable = false;
+	desc.depthEnable = m_config.depthStencilFormat != RHI::Format::Unknown;
 	desc.wireframe = false;
 	desc.enableShadowPass = IsShadowEnabled();
+	desc.shadowMapResolution = m_config.shadowMap.resolution;
 	desc.shadowVertexShader = m_shadowVertexShaderSource.empty() ? nullptr : m_shadowVertexShaderSource.data();
 	desc.shadowVertexShaderSize = m_shadowVertexShaderSource.size();
 
@@ -272,7 +323,7 @@ void Renderer::PrepareSceneResources(const Scene& scene, RHI::IDevice* device)
 
 	for(uint32_t meshIndex = 0; meshIndex < meshCount; ++meshIndex)
 	{
-		const Mesh& mesh = scene.GetMesh(static_cast<MeshID>(meshIndex));
+		const dy::Mesh& mesh = scene.GetMesh(static_cast<MeshID>(meshIndex));
 		if(mesh.vertices.empty()) continue;
 
 		std::vector<RendererVertex> vertices = BuildRendererVertices(mesh);
@@ -345,7 +396,7 @@ void Renderer::RecordScenePass(const Scene& scene, RHI::IDevice* device)
 		const MaterialID materialId = scene.GetEntityMaterial(entity);
 		if(!IsValid(meshId) || !IsValid(materialId)) continue;
 
-		const Mesh& mesh = scene.GetMesh(meshId);
+		const dy::Mesh& mesh = scene.GetMesh(meshId);
 		(void)mesh;
 		const SceneMeshState& meshState = m_meshStates[ToIndex(meshId)];
 		if(meshState.vertexBuffer == nullptr || meshState.indexBuffer == nullptr || meshState.indexCount == 0u) continue;

@@ -224,4 +224,31 @@ namespace dy::Graphics
 		CalculateTangents(outData);
 		return true;
 	}
+
+	dy::Mesh ToRenderMesh(const MeshData& meshData)
+	{
+		dy::Mesh mesh = {};
+		mesh.vertices.reserve(meshData.vertices.size());
+		mesh.indices = meshData.indices;
+
+		for (const Vertex& source : meshData.vertices)
+		{
+			dy::Vertex vertex = {};
+			vertex.px = source.position.x;
+			vertex.py = source.position.y;
+			vertex.pz = source.position.z;
+			vertex.u = source.uv.x;
+			vertex.v = source.uv.y;
+			vertex.nx = source.normal.x;
+			vertex.ny = source.normal.y;
+			vertex.nz = source.normal.z;
+			vertex.tx = source.tangent.x;
+			vertex.ty = source.tangent.y;
+			vertex.tz = source.tangent.z;
+			vertex.tw = source.tangent.w;
+			mesh.vertices.push_back(vertex);
+		}
+
+		return mesh;
+	}
 }

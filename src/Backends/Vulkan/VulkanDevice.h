@@ -110,12 +110,13 @@ private:
 	};
 	std::vector<RenderTargetCacheEntry> m_renderTargetCache;
 
-	static constexpr uint32_t kShadowMapResolution = 2048;
+	static constexpr uint32_t kDefaultShadowMapResolution = 2048;
 	VkRenderPass m_shadowRenderPass = VK_NULL_HANDLE;
 	VkFramebuffer m_shadowFramebuffer = VK_NULL_HANDLE;
 	VkPipelineLayout m_shadowPipelineLayout = VK_NULL_HANDLE;
 	VkPipeline m_shadowPipeline = VK_NULL_HANDLE;
 	VkFormat m_shadowMapFormat = VK_FORMAT_UNDEFINED;
+	uint32_t m_shadowMapResolution = kDefaultShadowMapResolution;
 
 	static constexpr uint32_t kMaxFramesInFlight = 2;
 	static constexpr uint32_t kMaxDrawsPerFrame = 128;

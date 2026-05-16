@@ -1,40 +1,155 @@
 ﻿#include <iostream>
 #include <memory>
-#include <vector>
 #include <cmath>
-#include <cstring>
-#include <fstream>
-#include <cstddef>
-#include <cstdint>
+#include <stdexcept>
+#include <string>
 #include "Platform/Window.h"
 #include "RHI/IDevice.h"
-#include "RHI/IBuffer.h"
-#include "RHI/ICommandList.h"
-#include "RHI/IPipelineState.h"
 #include "Graphics/Material.h"
-#include "Graphics/Mesh.h"
+#include "Graphics/ObjectLoader.h"
+#include "Graphics/Renderer.h"
+#include "Graphics/Scene.h"
 #include "Math/Math.h"
 
 using namespace dy;
 
-#ifndef DY_SHADER_DIR
-#define DY_SHADER_DIR nullptr
-#endif
-
 namespace
 {
-    std::vector<char> ReadBinaryFile(const std::string& path)
+    float Dot(const Math::float3& a, const Math::float3& b)
     {
-        std::ifstream file(path, std::ios::ate | std::ios::binary);
-        if (!file.is_open()) {
-            throw std::runtime_error("Failed to open shader file: " + path);
-        }
+        return a.x * b.x + a.y * b.y + a.z * b.z;
+    }
 
-        const size_t fileSize = static_cast<size_t>(file.tellg());
-        std::vector<char> buffer(fileSize);
-        file.seekg(0);
-        file.read(buffer.data(), fileSize);
-        return buffer;
+    Math::float3 Cross(const Math::float3& a, const Math::float3& b)
+    {
+        return Math::float3(
+            a.y * b.z - a.z * b.y,
+            a.z * b.x - a.x * b.z,
+            a.x * b.y - a.y * b.x);
+    }
+
+    Math::float3 Subtract(const Math::float3& a, const Math::float3& b)
+    {
+        return Math::float3(a.x - b.x, a.y - b.y, a.z - b.z);
+    }
+
+    Math::float3 NormalizeOr(const Math::float3& value, const Math::float3& fallback)
+    {
+        const float lengthSquared = Dot(value, value);
+        if (lengthSquared <= 1.0e-8f) return fallback;
+        const float invLength = 1.0f / std::sqrt(lengthSquared);
+        return Math::float3(value.x * invLength, value.y * invLength, value.z * invLength);
+    }
+
+    Math::float4x4 MultiplyColumnMajor(const Math::float4x4& lhs, const Math::float4x4& rhs)
+    {
+        Math::float4x4 result = {};
+        for (int column = 0; column < 4; ++column)
+        {
+            for (int row = 0; row < 4; ++row)
+            {
+                float value = 0.0f;
+                for (int k = 0; k < 4; ++k)
+                {
+                    value += lhs.m[k * 4 + row] * rhs.m[column * 4 + k];
+                }
+                result.m[column * 4 + row] = value;
+            }
+        }
+        return result;
+    }
+
+    Math::float4x4 CreateLookAt(const Math::float3& eye, const Math::float3& target, const Math::float3& up)
+    {
+        const Math::float3 forward = NormalizeOr(Subtract(target, eye), Math::float3(0.0f, 1.0f, 0.0f));
+        const Math::float3 right = NormalizeOr(Cross(forward, up), Math::float3(1.0f, 0.0f, 0.0f));
+        const Math::float3 cameraUp = Cross(right, forward);
+
+        Math::float4x4 view = Math::float4x4::Identity();
+        view.m[0] = right.x;
+        view.m[4] = right.y;
+        view.m[8] = right.z;
+        view.m[12] = -Dot(right, eye);
+        view.m[1] = cameraUp.x;
+        view.m[5] = cameraUp.y;
+        view.m[9] = cameraUp.z;
+        view.m[13] = -Dot(cameraUp, eye);
+        view.m[2] = -forward.x;
+        view.m[6] = -forward.y;
+        view.m[10] = -forward.z;
+        view.m[14] = Dot(forward, eye);
+        return view;
+    }
+
+    Math::float4x4 CreateOrthographic(float width, float height, float nearPlane, float farPlane)
+    {
+        Math::float4x4 projection = Math::float4x4::Identity();
+        projection.m[0] = 2.0f / width;
+        projection.m[5] = -2.0f / height;
+        projection.m[10] = 1.0f / (nearPlane - farPlane);
+        projection.m[14] = nearPlane / (nearPlane - farPlane);
+        return projection;
+    }
+
+    Math::float4x4 CreateTestModelMatrix()
+    {
+        const float scale = 0.095f;
+        const float yRadians = 0.78539816f;
+        const float cosY = std::cos(yRadians);
+        const float sinY = std::sin(yRadians);
+
+        Math::float4x4 model = Math::float4x4::Identity();
+        model.m[0] = scale * cosY;
+        model.m[1] = scale * sinY;
+        model.m[2] = 0.0f;
+        model.m[4] = 0.0f;
+        model.m[5] = scale;
+        model.m[6] = 0.0f;
+        model.m[8] = scale * -sinY;
+        model.m[9] = 0.0f;
+        model.m[10] = scale * cosY;
+        model.m[14] = 0.02f;
+        return model;
+    }
+
+    Math::float4x4 CreateTestViewProjectionMatrix()
+    {
+        const Math::float3 eye(0.0f, -2.35f, 1.15f);
+        const Math::float3 target(0.0f, 0.0f, 0.28f);
+        const Math::float4x4 view = CreateLookAt(eye, target, Math::float3(0.0f, 0.0f, 1.0f));
+        const Math::float4x4 projection = CreateOrthographic(2.45f, 1.6f, 0.1f, 7.0f);
+        return MultiplyColumnMajor(projection, view);
+    }
+
+    Vertex CreateFloorVertex(float x, float y, float z, float u, float v)
+    {
+        Vertex vertex = {};
+        vertex.px = x;
+        vertex.py = y;
+        vertex.pz = z;
+        vertex.u = u;
+        vertex.v = v;
+        vertex.nx = 0.0f;
+        vertex.ny = 0.0f;
+        vertex.nz = 1.0f;
+        vertex.tx = 1.0f;
+        vertex.ty = 0.0f;
+        vertex.tz = 0.0f;
+        vertex.tw = 1.0f;
+        return vertex;
+    }
+
+    Mesh CreateFloorMesh()
+    {
+        Mesh mesh = {};
+        mesh.vertices = {
+            CreateFloorVertex(-1.25f, -1.05f, -0.015f, 0.0f, 0.0f),
+            CreateFloorVertex( 1.25f, -1.05f, -0.015f, 1.0f, 0.0f),
+            CreateFloorVertex( 1.25f,  1.05f, -0.015f, 1.0f, 1.0f),
+            CreateFloorVertex(-1.25f,  1.05f, -0.015f, 0.0f, 1.0f)
+        };
+        mesh.indices = { 0, 1, 2, 0, 2, 3 };
+        return mesh;
     }
 }
 
@@ -50,173 +165,64 @@ int main()
             throw std::runtime_error("Failed to initialize RHI device for Vulkan OBJ test");
         }
 
-        const std::string shaderDir = DY_SHADER_DIR != nullptr ? DY_SHADER_DIR : "";
-        const std::vector<char> vertexShader = ReadBinaryFile(shaderDir + "/triangle.vert.spv");
-        const std::vector<char> pixelShader = ReadBinaryFile(shaderDir + "/triangle.frag.spv");
-        RHI::GraphicsPipelineDesc pipelineDesc = {};
-        pipelineDesc.vertexShader = vertexShader.data();
-        pipelineDesc.vertexShaderSize = vertexShader.size();
-        pipelineDesc.pixelShader = pixelShader.data();
-        pipelineDesc.pixelShaderSize = pixelShader.size();
-        pipelineDesc.depthEnable = true;
-        RHI::IPipelineState* pipeline = device->CreateGraphicsPipeline(pipelineDesc);
-        if (!pipeline)
-        {
-            throw std::runtime_error("Failed to create RHI graphics pipeline");
-        }
-
-        // Load the OBJ mesh from the example folder.
-        Graphics::MeshData meshData;
-        std::string objPath = "examples/vulkan_test/triangle.obj";
-        if (!Graphics::Mesh::LoadFromOBJ(objPath, meshData))
-        {
-            std::cerr << "Failed to load OBJ file: " << objPath << std::endl;
-            if (!Graphics::Mesh::LoadFromOBJ("../" + objPath, meshData))
-            {
-                if (!Graphics::Mesh::LoadFromOBJ("../../" + objPath, meshData))
-                {
-                    throw std::runtime_error("Could not find triangle.obj");
-                }
-            }
-        }
-
-        std::cout << "Loaded OBJ: " << meshData.vertices.size() << " vertices, "
-                  << meshData.indices.size() << " indices." << std::endl;
-
+        Graphics::Scene scene;
         Material pbrMaterial = {};
         pbrMaterial.baseColor = Math::float4(0.95f, 0.72f, 0.42f, 1.0f);
         pbrMaterial.metallicFactor = 0.72f;
         pbrMaterial.roughnessFactor = 0.34f;
         pbrMaterial.normalScale = 0.18f;
 
-        // Flatten the mesh into the Vulkan PBR vertex layout.
-        std::vector<float> flatVertices;
-        flatVertices.reserve(meshData.vertices.size() * 12);
-        for (const auto& v : meshData.vertices)
+        RenderFlags objectFlags = {};
+        objectFlags.castShadow = true;
+        objectFlags.receiveShadow = true;
+        const Graphics::ObjectLoadResult object = Graphics::ObjectLoader::Load(scene, "examples/vulkan_test/triangle.obj", pbrMaterial, CreateTestModelMatrix(), objectFlags);
+        if (!object)
         {
-            flatVertices.push_back(v.position.x);
-            flatVertices.push_back(v.position.y);
-            flatVertices.push_back(v.position.z);
-            flatVertices.push_back(v.normal.x);
-            flatVertices.push_back(v.normal.y);
-            flatVertices.push_back(v.normal.z);
-            flatVertices.push_back(v.uv.x);
-            flatVertices.push_back(v.uv.y);
-            flatVertices.push_back(v.tangent.x);
-            flatVertices.push_back(v.tangent.y);
-            flatVertices.push_back(v.tangent.z);
-            flatVertices.push_back(v.tangent.w);
+            throw std::runtime_error("Could not load triangle.obj");
         }
 
-        const uint32_t vertexBufferSize = static_cast<uint32_t>(flatVertices.size() * sizeof(float));
-        const uint32_t indexBufferSize = static_cast<uint32_t>(meshData.indices.size() * sizeof(uint32_t));
-        const RHI::BufferUsage vertexStorageUsage = RHI::BufferUsage::Vertex | RHI::BufferUsage::Storage;
-        const RHI::BufferUsage indexStorageUsage = RHI::BufferUsage::Index | RHI::BufferUsage::Storage;
-        auto destroyBuffer = [devicePtr = device.get()](RHI::IBuffer* buffer)
+        Material floorMaterial = {};
+        floorMaterial.baseColor = Math::float4(0.52f, 0.57f, 0.60f, 1.0f);
+        floorMaterial.roughnessFactor = 0.82f;
+        const MeshID floorMesh = scene.CreateMesh(CreateFloorMesh());
+        const MaterialID floorMaterialId = scene.CreateMaterial(floorMaterial);
+        RenderFlags floorFlags = {};
+        floorFlags.castShadow = false;
+        floorFlags.receiveShadow = true;
+        [[maybe_unused]] const EntityID floorEntity = scene.CreateEntity(floorMesh, floorMaterialId, Math::float4x4::Identity(), floorFlags);
+
+        Graphics::Renderer renderer;
+        Graphics::RendererConfig rendererConfig = {};
+        rendererConfig.viewProjectionMatrix = CreateTestViewProjectionMatrix();
+        rendererConfig.cameraPosition = Math::float3(0.0f, -2.35f, 1.15f);
+        rendererConfig.directionalLightDirection = Math::float3(0.36f, -0.54f, 0.76f);
+        rendererConfig.directionalLightColor = Math::float3(1.0f, 0.94f, 0.82f);
+        rendererConfig.directionalLightIntensity = 4.0f;
+        rendererConfig.ambientIntensity = 0.045f;
+        rendererConfig.enableShadows = true;
+        rendererConfig.shadowStrength = 0.58f;
+        rendererConfig.shadowMap.resolution = 2048;
+        rendererConfig.shadowMap.orthoWidth = 2.8f;
+        rendererConfig.shadowMap.orthoHeight = 2.8f;
+        rendererConfig.shadowMap.nearPlane = 0.1f;
+        rendererConfig.shadowMap.farPlane = 7.0f;
+        rendererConfig.shadowMap.sceneCenter = Math::float3(0.0f, 0.0f, 0.32f);
+        rendererConfig.shadowMap.lightDistance = 3.2f;
+        if (!renderer.Initialize(device.get(), rendererConfig))
         {
-            if (buffer != nullptr) devicePtr->DestroyBuffer(buffer);
-        };
-        std::unique_ptr<RHI::IBuffer, decltype(destroyBuffer)> vertexBuffer(
-            device->CreateBuffer(RHI::BufferDesc{ vertexBufferSize, 12u * static_cast<uint32_t>(sizeof(float)), vertexStorageUsage }),
-            destroyBuffer
-        );
-        std::unique_ptr<RHI::IBuffer, decltype(destroyBuffer)> indexBuffer(
-            device->CreateBuffer(RHI::BufferDesc{ indexBufferSize, static_cast<uint32_t>(sizeof(uint32_t)), indexStorageUsage }),
-            destroyBuffer
-        );
-        if (!vertexBuffer || !indexBuffer)
-        {
-            throw std::runtime_error("Failed to create RHI mesh buffers");
+            throw std::runtime_error("Failed to initialize renderer PBR pipeline");
         }
-
-        void* vertexData = vertexBuffer->Map(0, vertexBufferSize);
-        if (vertexData == nullptr) throw std::runtime_error("Failed to map vertex buffer");
-        std::memcpy(vertexData, flatVertices.data(), vertexBufferSize);
-        vertexBuffer->Unmap();
-
-        void* indexData = indexBuffer->Map(0, indexBufferSize);
-        if (indexData == nullptr) throw std::runtime_error("Failed to map index buffer");
-        std::memcpy(indexData, meshData.indices.data(), indexBufferSize);
-        indexBuffer->Unmap();
-
-        const float scale = 0.1f;
-        const float yRadians = 0.78539816f;
-        const float xRadians = -0.61547971f;
-        const float cosY = std::cos(yRadians);
-        const float sinY = std::sin(yRadians);
-        const float cosX = std::cos(xRadians);
-        const float sinX = std::sin(xRadians);
-
-        Math::float4x4 fixedModel = Math::float4x4::Identity();
-        fixedModel.m[0] = scale * cosY;
-        fixedModel.m[1] = scale * sinX * sinY;
-        fixedModel.m[2] = scale * cosX * sinY;
-        fixedModel.m[4] = 0.0f;
-        fixedModel.m[5] = scale * cosX;
-        fixedModel.m[6] = scale * -sinX;
-        fixedModel.m[8] = scale * -sinY;
-        fixedModel.m[9] = scale * sinX * cosY;
-        fixedModel.m[10] = scale * cosX * cosY;
-
-        Math::float4x4 fixedViewProj = Math::float4x4::Identity();
-        fixedViewProj.m[0] = 0.85f;
-        fixedViewProj.m[5] = 0.85f;
-        fixedViewProj.m[10] = 0.5f;
-        fixedViewProj.m[14] = 0.5f;
 
         while (window.IsRunning())
         {
             window.PollEvents();
 
             device->BeginFrame();
-            RHI::ICommandList* cmdList = device->AcquireCommandList();
-            cmdList->ClearColor(device->GetBackBuffer(), 0.05f, 0.07f, 0.10f, 1.0f);
-            cmdList->BindGraphicsPipeline(pipeline);
-            RHI::GeometryBinding geometry = {};
-            geometry.vertexBuffer = vertexBuffer.get();
-            geometry.vertexStride = 12u * static_cast<uint32_t>(sizeof(float));
-            geometry.vertexOffset = 0;
-            geometry.indexBuffer = indexBuffer.get();
-            geometry.indexFormat = RHI::Format::R32_UINT;
-            geometry.indexOffset = 0;
-            cmdList->BindGeometry(geometry);
-
-            struct PushData {
-                Math::float4x4 viewProj;
-                Math::float4x4 model;
-                float drawMode;
-                uint32_t firstIndex;
-                int32_t vertexOffset;
-                uint32_t firstVertex;
-                float padding;
-                Math::float4 baseColorFactor;
-                Math::float4 materialParams;
-            };
-            static_assert(offsetof(PushData, firstIndex) == 132u, "Vulkan backend metadata offset must match shader layout.");
-            static_assert(offsetof(PushData, baseColorFactor) == 160u, "PBR material constants must match shader layout.");
-            static_assert(sizeof(PushData) == 192u, "Vulkan push constant range is 192 bytes.");
-            PushData pushData = {};
-
-            pushData.viewProj = fixedViewProj;
-            pushData.model = fixedModel;
-            pushData.drawMode = 0.0f;
-            pushData.baseColorFactor = pbrMaterial.baseColor;
-            pushData.materialParams = Math::float4(
-                pbrMaterial.metallicFactor,
-                pbrMaterial.roughnessFactor,
-                pbrMaterial.normalScale,
-                1.0f);
-
-            cmdList->SetPushConstants(sizeof(pushData), &pushData);
-            cmdList->DrawIndexedInstanced(static_cast<uint32_t>(meshData.indices.size()), 1, 0, 0, 0);
-
-            cmdList->Close();
-
-            RHI::ICommandList* submitLists[] = { cmdList };
-            device->Submit(submitLists, 1);
-
+            renderer.Render(scene, device.get());
             device->Present();
         }
+
+        renderer.Shutdown(device.get());
     }
     catch (const std::exception& e)
     {

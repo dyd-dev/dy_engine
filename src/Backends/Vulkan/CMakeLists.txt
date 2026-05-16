@@ -78,6 +78,10 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 	${Vulkan_INCLUDE_DIRS}
 )
 
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+	DY_VULKAN_SHADER_DIR="${VULKAN_SHADER_OUTPUT_DIR_CMAKE}"
+)
+
 
 target_compile_definitions(Backend_Vulkan PRIVATE
 	GLFW_INCLUDE_NONE

@@ -1,4 +1,5 @@
 #pragma once
+#include "Core/Types.h"
 #include "Math/Math.h"
 #include <cstdint>
 #include <vector>
@@ -25,4 +26,6 @@ namespace dy::Graphics
 	public:
 		static bool LoadFromOBJ(const std::string& path, MeshData& outData);
 	};
+
+	[[nodiscard]] dy::Mesh ToRenderMesh(const MeshData& meshData);
 }

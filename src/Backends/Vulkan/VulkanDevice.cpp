@@ -18,7 +18,6 @@
 #include <windows.h>
 #endif
 
-#define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
 #define SDL_Log(fmt, ...) { printf(fmt, ##__VA_ARGS__); printf("\n"); }
@@ -40,7 +39,10 @@ namespace {
 	constexpr uint32_t kNormalSamplerBinding = 7;
 	constexpr uint32_t kOcclusionSamplerBinding = 8;
 	constexpr uint32_t kEmissiveSamplerBinding = 9;
-	constexpr uint32_t kDrawMetadataPushConstantOffset = sizeof(float) * 32 + sizeof(float);
+	constexpr uint32_t kDrawModePushConstantOffset = sizeof(float) * 32;
+	constexpr uint32_t kDrawMetadataPushConstantOffset = kDrawModePushConstantOffset + sizeof(float);
+	constexpr uint32_t kRendererDrawConstantsSize = 192;
+	constexpr uint32_t kCastShadowFlag = 1u << 6;
 
 	const char* VkResultToString(VkResult result);
 
@@ -603,6 +605,16 @@ bool VulkanDevice::UpdateTexture(dy::RHI::ITexture* texture, const void* rgba8Pi
 
 dy::RHI::IPipelineState* VulkanDevice::CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) {
 	try {
+		if (desc.enableShadowPass) {
+			const uint32_t requestedShadowMapResolution = desc.shadowMapResolution > 0
+				? desc.shadowMapResolution
+				: kDefaultShadowMapResolution;
+			if (m_shadowRenderPass != VK_NULL_HANDLE && requestedShadowMapResolution != m_shadowMapResolution) {
+				vkDeviceWaitIdle(m_context.device);
+				DestroyShadowResources();
+			}
+			m_shadowMapResolution = requestedShadowMapResolution;
+		}
 		if (desc.enableShadowPass && m_shadowRenderPass == VK_NULL_HANDLE) {
 			m_shadowMapFormat = m_depthFormat;
 			if (!CreateShadowRenderPass()) return nullptr;
@@ -899,7 +911,7 @@ void VulkanDevice::RecordShadowPass(VkCommandBuffer commandBuffer, const VulkanC
 	newShadowPassInfo.renderPass = m_shadowRenderPass;
 	newShadowPassInfo.framebuffer = m_shadowFramebuffer;
 	newShadowPassInfo.renderArea.offset = {0, 0};
-	newShadowPassInfo.renderArea.extent = { kShadowMapResolution, kShadowMapResolution };
+	newShadowPassInfo.renderArea.extent = { m_shadowMapResolution, m_shadowMapResolution };
 	newShadowPassInfo.clearValueCount = 1;
 	newShadowPassInfo.pClearValues = &newShadowClear;
 
@@ -909,13 +921,13 @@ void VulkanDevice::RecordShadowPass(VkCommandBuffer commandBuffer, const VulkanC
 	VkViewport newShadowViewport{};
 	newShadowViewport.x = 0.0f;
 	newShadowViewport.y = 0.0f;
-	newShadowViewport.width = static_cast<float>(kShadowMapResolution);
-	newShadowViewport.height = static_cast<float>(kShadowMapResolution);
+	newShadowViewport.width = static_cast<float>(m_shadowMapResolution);
+	newShadowViewport.height = static_cast<float>(m_shadowMapResolution);
 	newShadowViewport.minDepth = 0.0f;
 	newShadowViewport.maxDepth = 1.0f;
 	VkRect2D newShadowScissor{};
 	newShadowScissor.offset = {0, 0};
-	newShadowScissor.extent = { kShadowMapResolution, kShadowMapResolution };
+	newShadowScissor.extent = { m_shadowMapResolution, m_shadowMapResolution };
 	vkCmdSetViewport(commandBuffer, 0, 1, &newShadowViewport);
 	vkCmdSetScissor(commandBuffer, 0, 1, &newShadowScissor);
 
@@ -923,6 +935,19 @@ void VulkanDevice::RecordShadowPass(VkCommandBuffer commandBuffer, const VulkanC
 		const VulkanCommandList::DrawCall& drawCall = commandList.m_drawCalls[drawIndex];
 		const VulkanPipelineState* pipelineState = dynamic_cast<const VulkanPipelineState*>(drawCall.pipelineState);
 		if (pipelineState == nullptr || !pipelineState->IsShadowPassEnabled()) continue;
+
+		bool shouldCastShadow = true;
+		if (drawCall.pushConstantSize >= kDrawModePushConstantOffset + sizeof(float)) {
+			float drawMode = 0.0f;
+			std::memcpy(&drawMode, drawCall.pushConstants.data() + kDrawModePushConstantOffset, sizeof(drawMode));
+			if (drawCall.pushConstantSize >= kRendererDrawConstantsSize) {
+				const uint32_t drawFlags = static_cast<uint32_t>(drawMode + 0.5f);
+				shouldCastShadow = (drawFlags & kCastShadowFlag) != 0;
+			} else {
+				shouldCastShadow = drawMode >= 0.0f && drawMode <= 1.5f;
+			}
+		}
+		if (!shouldCastShadow) continue;
 
 		const uint32_t descriptorIndex = m_currentFrameIndex * kMaxDrawsPerFrame + drawIndex;
 		if (descriptorIndex < m_descriptorSets.size()) {
@@ -1661,8 +1686,8 @@ bool VulkanDevice::CreateShadowRenderPass() {
 
 bool VulkanDevice::CreateShadowMapResources() {
 	dy::RHI::TextureDesc desc{};
-	desc.width = kShadowMapResolution;
-	desc.height = kShadowMapResolution;
+	desc.width = m_shadowMapResolution;
+	desc.height = m_shadowMapResolution;
 	desc.depthOrArraySize = 1;
 	desc.mipLevels = 1;
 	desc.format = ToRhiDepthFormat(m_shadowMapFormat);
@@ -1693,8 +1718,8 @@ bool VulkanDevice::CreateShadowMapResources() {
 	fbInfo.renderPass = m_shadowRenderPass;
 	fbInfo.attachmentCount = 1;
 	fbInfo.pAttachments = &shadowView;
-	fbInfo.width = kShadowMapResolution;
-	fbInfo.height = kShadowMapResolution;
+	fbInfo.width = m_shadowMapResolution;
+	fbInfo.height = m_shadowMapResolution;
 	fbInfo.layers = 1;
 	if (vkCreateFramebuffer(m_context.device, &fbInfo, nullptr, &m_shadowFramebuffer) != VK_SUCCESS) return false;
 
