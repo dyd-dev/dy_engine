@@ -1,6 +1,8 @@
 ﻿#pragma once
 #include <cstdint>
 
+#include "RHI/RendererDefaults.h"
+
 namespace dy::RHI
 {
 	class ICommandList;
@@ -16,8 +18,23 @@ namespace dy::RHI
 	using DescriptorIndex = uint32_t;
 	constexpr DescriptorIndex INVALID_DESCRIPTOR_INDEX = 0xFFFFFFFF;
 
+	struct RendererShaderPaths
+	{
+		const char* vertexShaderPath = nullptr;
+		const char* pixelShaderPath = nullptr;
+		const char* shadowVertexShaderPath = nullptr;
+	};
+
 	struct DeviceDesc
 	{
+		RendererShaderPaths rendererShaderPaths = {};
+		const char* fallbackTexturePath = nullptr;
+		uint32_t maxFramesInFlight = RendererDefaults::kMaxFramesInFlight;
+		uint32_t maxDrawsPerFrame = RendererDefaults::kMaxDrawsPerFrame;
+		uint32_t defaultShadowMapResolution = RendererDefaults::kShadowMapResolution;
+		uint32_t fallbackTextureWidth = RendererDefaults::kFallbackTextureWidth;
+		uint32_t fallbackTextureHeight = RendererDefaults::kFallbackTextureHeight;
+		uint64_t frameAcquireTimeoutNanoseconds = RendererDefaults::kFrameAcquireTimeoutNanoseconds;
 	};
 
 	class IDevice
@@ -40,6 +57,7 @@ namespace dy::RHI
 		virtual void DestroyTexture(ITexture* texture) = 0;
 		virtual void DestroyPipelineState(IPipelineState* pipeline) = 0;
 		virtual ITexture* GetBackBuffer() = 0;
+		[[nodiscard]] virtual RendererShaderPaths GetDefaultRendererShaderPaths() const { return {}; }
 		
 	protected:
 		virtual int Initialize(const void* windowHandle, const DeviceDesc& desc) = 0;

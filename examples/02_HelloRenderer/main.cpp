@@ -6,6 +6,7 @@
 
 #include "Platform/Window.h"
 #include "RHI/IDevice.h"
+#include "Graphics/Material.h"
 #include "Graphics/Renderer.h"
 #include "Graphics/Scene.h"
 #include "Core/Image.h"
@@ -31,7 +32,7 @@ int main()
 		if(!device) return -1;
 
 		Graphics::Renderer renderer;
-		Graphics::RendererConfig rendererConfig = {};
+		Graphics::RendererDesc rendererConfig = {};
 		const std::string shaderExtension = GetShaderExtension();
 		const std::string vertexShaderPath = std::string(DY_SHADER_DIR) + "/TexturedTriangleVS" + shaderExtension;
 		const std::string pixelShaderPath = std::string(DY_SHADER_DIR) + "/TexturedTrianglePS" + shaderExtension;
@@ -47,10 +48,10 @@ int main()
 		);
 
 		const TextureID checkerTexture = scene.CreateTexture(checkerboard);
-		const MaterialID triangleMaterial = scene.CreateMaterial(Material{
-			Math::float4(1.0f, 1.0f, 1.0f, 1.0f),
-			checkerTexture
-		});
+		Graphics::MaterialDesc triangleMaterialDesc = {};
+		triangleMaterialDesc.baseColor = Math::float4(1.0f, 1.0f, 1.0f, 1.0f);
+		triangleMaterialDesc.baseColorTexture = checkerTexture;
+		const MaterialID triangleMaterial = scene.CreateMaterial(triangleMaterialDesc);
 		Mesh triangleMeshData = {};
 		triangleMeshData.vertices = {
 			Vertex{ 0.0f, 0.6f, 0.0f, 0.5f, 0.0f },

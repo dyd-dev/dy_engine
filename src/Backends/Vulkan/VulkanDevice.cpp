@@ -4,6 +4,7 @@
 #include "RHI/IBuffer.h"
 #include "RHI/IPipelineState.h"
 #include "RHI/ITexture.h"
+#include "RHI/RendererShaderLayout.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <array>
@@ -12,6 +13,7 @@
 #include <fstream>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 #if defined(_WIN32)
@@ -25,24 +27,10 @@
 namespace dy::Backends
 {
 
+namespace Layout = dy::RHI::RendererShaderLayout;
+
 namespace {
 	constexpr const char* kValidationLayerName = "VK_LAYER_KHRONOS_validation";
-	constexpr uint32_t kFallbackTextureWidth = 2;
-	constexpr uint32_t kFallbackTextureHeight = 2;
-	constexpr uint32_t kAcquireTimeoutNanoseconds = 16666667u;
-	constexpr uint32_t kLightingConstantBinding = 1;
-	constexpr uint32_t kShadowSamplerBinding = 2;
-	constexpr uint32_t kShadowMatrixBinding = 3;
-	constexpr uint32_t kVertexStorageBinding = 4;
-	constexpr uint32_t kIndexStorageBinding = 5;
-	constexpr uint32_t kMetallicRoughnessSamplerBinding = 6;
-	constexpr uint32_t kNormalSamplerBinding = 7;
-	constexpr uint32_t kOcclusionSamplerBinding = 8;
-	constexpr uint32_t kEmissiveSamplerBinding = 9;
-	constexpr uint32_t kDrawModePushConstantOffset = sizeof(float) * 32;
-	constexpr uint32_t kDrawMetadataPushConstantOffset = kDrawModePushConstantOffset + sizeof(float);
-	constexpr uint32_t kRendererDrawConstantsSize = 192;
-	constexpr uint32_t kCastShadowFlag = 1u << 6;
 
 	const char* VkResultToString(VkResult result);
 
@@ -542,9 +530,30 @@ VulkanDevice::~VulkanDevice() {
 }
 
 int VulkanDevice::Initialize(const void* windowHandle, const dy::RHI::DeviceDesc& desc) {
-	(void)desc;
 	m_windowHandle = const_cast<void*>(windowHandle);
 	if (!m_windowHandle) return -1;
+	m_maxFramesInFlight = desc.maxFramesInFlight > 0 ? desc.maxFramesInFlight : dy::RHI::RendererDefaults::kMaxFramesInFlight;
+	m_maxDrawsPerFrame = desc.maxDrawsPerFrame > 0 ? desc.maxDrawsPerFrame : dy::RHI::RendererDefaults::kMaxDrawsPerFrame;
+	m_defaultShadowMapResolution = desc.defaultShadowMapResolution > 0 ? desc.defaultShadowMapResolution : dy::RHI::RendererDefaults::kShadowMapResolution;
+	m_shadowMapResolution = m_defaultShadowMapResolution;
+	m_fallbackTextureWidth = desc.fallbackTextureWidth > 0 ? desc.fallbackTextureWidth : dy::RHI::RendererDefaults::kFallbackTextureWidth;
+	m_fallbackTextureHeight = desc.fallbackTextureHeight > 0 ? desc.fallbackTextureHeight : dy::RHI::RendererDefaults::kFallbackTextureHeight;
+	m_frameAcquireTimeoutNanoseconds = desc.frameAcquireTimeoutNanoseconds > 0
+		? desc.frameAcquireTimeoutNanoseconds
+		: dy::RHI::RendererDefaults::kFrameAcquireTimeoutNanoseconds;
+	m_fallbackTexturePath = desc.fallbackTexturePath != nullptr ? desc.fallbackTexturePath : "";
+	m_defaultRendererVertexShaderPath = desc.rendererShaderPaths.vertexShaderPath != nullptr ? desc.rendererShaderPaths.vertexShaderPath : "";
+	m_defaultRendererPixelShaderPath = desc.rendererShaderPaths.pixelShaderPath != nullptr ? desc.rendererShaderPaths.pixelShaderPath : "";
+	m_defaultRendererShadowVertexShaderPath = desc.rendererShaderPaths.shadowVertexShaderPath != nullptr ? desc.rendererShaderPaths.shadowVertexShaderPath : "";
+#if defined(VULKAN_DEFAULT_RENDERER_VERTEX_SHADER_PATH)
+	if (m_defaultRendererVertexShaderPath.empty()) m_defaultRendererVertexShaderPath = VULKAN_DEFAULT_RENDERER_VERTEX_SHADER_PATH;
+#endif
+#if defined(VULKAN_DEFAULT_RENDERER_PIXEL_SHADER_PATH)
+	if (m_defaultRendererPixelShaderPath.empty()) m_defaultRendererPixelShaderPath = VULKAN_DEFAULT_RENDERER_PIXEL_SHADER_PATH;
+#endif
+#if defined(VULKAN_DEFAULT_RENDERER_SHADOW_VERTEX_SHADER_PATH)
+	if (m_defaultRendererShadowVertexShaderPath.empty()) m_defaultRendererShadowVertexShaderPath = VULKAN_DEFAULT_RENDERER_SHADOW_VERTEX_SHADER_PATH;
+#endif
 
 	try {
 		if (!CreateInstance()) return -1;
@@ -608,7 +617,7 @@ dy::RHI::IPipelineState* VulkanDevice::CreateGraphicsPipeline(const dy::RHI::Gra
 		if (desc.enableShadowPass) {
 			const uint32_t requestedShadowMapResolution = desc.shadowMapResolution > 0
 				? desc.shadowMapResolution
-				: kDefaultShadowMapResolution;
+				: m_defaultShadowMapResolution;
 			if (m_shadowRenderPass != VK_NULL_HANDLE && requestedShadowMapResolution != m_shadowMapResolution) {
 				vkDeviceWaitIdle(m_context.device);
 				DestroyShadowResources();
@@ -669,6 +678,15 @@ dy::RHI::ITexture* VulkanDevice::GetBackBuffer() {
 	return m_backBuffer;
 }
 
+dy::RHI::RendererShaderPaths VulkanDevice::GetDefaultRendererShaderPaths() const
+{
+	dy::RHI::RendererShaderPaths paths = {};
+	paths.vertexShaderPath = m_defaultRendererVertexShaderPath.empty() ? nullptr : m_defaultRendererVertexShaderPath.c_str();
+	paths.pixelShaderPath = m_defaultRendererPixelShaderPath.empty() ? nullptr : m_defaultRendererPixelShaderPath.c_str();
+	paths.shadowVertexShaderPath = m_defaultRendererShadowVertexShaderPath.empty() ? nullptr : m_defaultRendererShadowVertexShaderPath.c_str();
+	return paths;
+}
+
 dy::RHI::IBuffer* VulkanDevice::CreateBuffer(const dy::RHI::BufferDesc& desc) {
 	VulkanBuffer* buffer = new VulkanBuffer(m_context, desc);
 	m_ownedBuffers.push_back(buffer);
@@ -696,7 +714,7 @@ void VulkanDevice::BeginFrame() {
 	vkWaitForFences(m_context.device, 1, &m_inFlightFences[m_currentFrameIndex], VK_TRUE, UINT64_MAX);
 
 	const VkResult acquireResult = vkAcquireNextImageKHR(
-		m_context.device, m_swapchain.GetHandle(), kAcquireTimeoutNanoseconds,
+		m_context.device, m_swapchain.GetHandle(), m_frameAcquireTimeoutNanoseconds,
 		m_imageAvailableSemaphores[m_currentFrameIndex],
 		VK_NULL_HANDLE, &m_currentImageIndex
 	);
@@ -774,7 +792,7 @@ void VulkanDevice::Present() {
 		SDL_Log("Failed to present swapchain image: %s (%d)", VkResultToString(presentResult), static_cast<int>(presentResult));
 	}
 
-	m_currentFrameIndex = (m_currentFrameIndex + 1) % kMaxFramesInFlight;
+	m_currentFrameIndex = (m_currentFrameIndex + 1) % m_maxFramesInFlight;
 }
 
 bool VulkanDevice::CreateInstance() {
@@ -937,19 +955,19 @@ void VulkanDevice::RecordShadowPass(VkCommandBuffer commandBuffer, const VulkanC
 		if (pipelineState == nullptr || !pipelineState->IsShadowPassEnabled()) continue;
 
 		bool shouldCastShadow = true;
-		if (drawCall.pushConstantSize >= kDrawModePushConstantOffset + sizeof(float)) {
+		if (drawCall.pushConstantSize >= Layout::kDrawModePushConstantOffset + sizeof(float)) {
 			float drawMode = 0.0f;
-			std::memcpy(&drawMode, drawCall.pushConstants.data() + kDrawModePushConstantOffset, sizeof(drawMode));
-			if (drawCall.pushConstantSize >= kRendererDrawConstantsSize) {
+			std::memcpy(&drawMode, drawCall.pushConstants.data() + Layout::kDrawModePushConstantOffset, sizeof(drawMode));
+			if (drawCall.pushConstantSize >= Layout::kPushConstantRangeSize) {
 				const uint32_t drawFlags = static_cast<uint32_t>(drawMode + 0.5f);
-				shouldCastShadow = (drawFlags & kCastShadowFlag) != 0;
+				shouldCastShadow = (drawFlags & Layout::kCastShadowFlag) != 0;
 			} else {
 				shouldCastShadow = drawMode >= 0.0f && drawMode <= 1.5f;
 			}
 		}
 		if (!shouldCastShadow) continue;
 
-		const uint32_t descriptorIndex = m_currentFrameIndex * kMaxDrawsPerFrame + drawIndex;
+		const uint32_t descriptorIndex = m_currentFrameIndex * m_maxDrawsPerFrame + drawIndex;
 		if (descriptorIndex < m_descriptorSets.size()) {
 			VkDescriptorSet descriptorSet = m_descriptorSets[descriptorIndex];
 			vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
@@ -973,7 +991,7 @@ void VulkanDevice::RecordShadowPass(VkCommandBuffer commandBuffer, const VulkanC
 			commandBuffer,
 			m_shadowPipelineLayout,
 			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-			kDrawMetadataPushConstantOffset,
+			Layout::kDrawMetadataPushConstantOffset,
 			sizeof(metadata),
 			&metadata);
 
@@ -1022,7 +1040,7 @@ void VulkanDevice::RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCom
 			currentPipeline = pipeline->GetPipeline();
 		}
 
-		const uint32_t descriptorIndex = m_currentFrameIndex * kMaxDrawsPerFrame + drawIndex;
+		const uint32_t descriptorIndex = m_currentFrameIndex * m_maxDrawsPerFrame + drawIndex;
 		if (descriptorIndex < m_descriptorSets.size()) {
 			VkDescriptorSet descriptorSet = m_descriptorSets[descriptorIndex];
 			vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetLayout(), 0, 1, &descriptorSet, 0, nullptr);
@@ -1076,7 +1094,7 @@ void VulkanDevice::RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCom
 			commandBuffer,
 			pipeline->GetLayout(),
 			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-			kDrawMetadataPushConstantOffset,
+			Layout::kDrawMetadataPushConstantOffset,
 			sizeof(metadata),
 			&metadata
 		);
@@ -1354,8 +1372,8 @@ bool VulkanDevice::CreateCommandBuffer() {
 	allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
 	allocInfo.commandPool = m_commandPool;
 	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-	allocInfo.commandBufferCount = kMaxFramesInFlight;
-	m_commandBuffers.resize(kMaxFramesInFlight);
+	allocInfo.commandBufferCount = m_maxFramesInFlight;
+	m_commandBuffers.resize(m_maxFramesInFlight);
 	return vkAllocateCommandBuffers(m_context.device, &allocInfo, m_commandBuffers.data()) == VK_SUCCESS;
 }
 
@@ -1366,11 +1384,11 @@ bool VulkanDevice::CreateSyncObjects() {
 	fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 	fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 	
-	m_imageAvailableSemaphores.resize(kMaxFramesInFlight); 
-	m_inFlightFences.resize(kMaxFramesInFlight);
+	m_imageAvailableSemaphores.resize(m_maxFramesInFlight);
+	m_inFlightFences.resize(m_maxFramesInFlight);
 	m_renderFinishedSemaphores.resize(m_swapchain.GetImageCount()); 
 
-	for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
+	for (uint32_t i = 0; i < m_maxFramesInFlight; ++i) {
 		if (vkCreateSemaphore(m_context.device, &semInfo, nullptr, &m_imageAvailableSemaphores[i]) != VK_SUCCESS || 
 			vkCreateFence(m_context.device, &fenceInfo, nullptr, &m_inFlightFences[i]) != VK_SUCCESS) return false;
 	}
@@ -1384,15 +1402,25 @@ bool VulkanDevice::CreateSyncObjects() {
 bool VulkanDevice::CreateFallbackTexture() {
 	int w = 0;
 	int h = 0;
-	stbi_uc* loadedPixels = stbi_load("assets/jj.jpeg", &w, &h, nullptr, STBI_rgb_alpha);
-	std::array<stbi_uc, kFallbackTextureWidth * kFallbackTextureHeight * 4> fallbackPixels = {
-		255, 0, 0, 255,       0, 255, 0, 255,
-		0, 0, 255, 255,       255, 255, 0, 255
-	};
+	stbi_uc* loadedPixels = m_fallbackTexturePath.empty()
+		? nullptr
+		: stbi_load(m_fallbackTexturePath.c_str(), &w, &h, nullptr, STBI_rgb_alpha);
+	std::vector<stbi_uc> fallbackPixels;
 	const stbi_uc* pixels = loadedPixels;
 	if (!pixels) {
-		w = static_cast<int>(kFallbackTextureWidth);
-		h = static_cast<int>(kFallbackTextureHeight);
+		w = static_cast<int>(m_fallbackTextureWidth);
+		h = static_cast<int>(m_fallbackTextureHeight);
+		fallbackPixels.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 4u);
+		for (int y = 0; y < h; ++y) {
+			for (int x = 0; x < w; ++x) {
+				const bool bright = ((x + y) & 1) == 0;
+				const size_t offset = (static_cast<size_t>(y) * static_cast<size_t>(w) + static_cast<size_t>(x)) * 4u;
+				fallbackPixels[offset + 0u] = bright ? 255 : 64;
+				fallbackPixels[offset + 1u] = bright ? 255 : 64;
+				fallbackPixels[offset + 2u] = bright ? 255 : 64;
+				fallbackPixels[offset + 3u] = 255;
+			}
+		}
 		pixels = fallbackPixels.data();
 	}
 
@@ -1451,23 +1479,23 @@ bool VulkanDevice::CreateDescriptorSetLayout() {
 	// binding 4: Vertex storage buffer (VS)
 	// binding 5: Index storage buffer (VS)
 	// binding 6-9: Metallic/Roughness, Normal, Occlusion, Emissive samplers (FS)
-	std::array<VkDescriptorSetLayoutBinding, 10> bindings = {};
+	std::array<VkDescriptorSetLayoutBinding, Layout::kDescriptorBindingCount> bindings = {};
 	auto setBinding = [&bindings](uint32_t index, uint32_t binding, VkDescriptorType type, VkShaderStageFlags stageFlags) {
 		bindings[index].binding = binding;
 		bindings[index].descriptorType = type;
 		bindings[index].descriptorCount = 1;
 		bindings[index].stageFlags = stageFlags;
 	};
-	setBinding(0, 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
-	setBinding(1, kLightingConstantBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
-	setBinding(2, kShadowSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
-	setBinding(3, kShadowMatrixBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
-	setBinding(4, kVertexStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
-	setBinding(5, kIndexStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
-	setBinding(6, kMetallicRoughnessSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
-	setBinding(7, kNormalSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
-	setBinding(8, kOcclusionSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
-	setBinding(9, kEmissiveSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
+	setBinding(Layout::kBaseColorTextureBinding, Layout::kBaseColorTextureBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
+	setBinding(Layout::kLightingConstantBinding, Layout::kLightingConstantBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+	setBinding(Layout::kShadowSamplerBinding, Layout::kShadowSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
+	setBinding(Layout::kShadowMatrixBinding, Layout::kShadowMatrixBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
+	setBinding(Layout::kVertexStorageBinding, Layout::kVertexStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
+	setBinding(Layout::kIndexStorageBinding, Layout::kIndexStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
+	setBinding(Layout::kMetallicRoughnessSamplerBinding, Layout::kMetallicRoughnessSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
+	setBinding(Layout::kNormalSamplerBinding, Layout::kNormalSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
+	setBinding(Layout::kOcclusionSamplerBinding, Layout::kOcclusionSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
+	setBinding(Layout::kEmissiveSamplerBinding, Layout::kEmissiveSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
 	VkDescriptorSetLayoutCreateInfo info{};
 	info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
 	info.bindingCount = static_cast<uint32_t>(bindings.size());
@@ -1476,14 +1504,14 @@ bool VulkanDevice::CreateDescriptorSetLayout() {
 }
 
 bool VulkanDevice::CreateDescriptorPool() {
-	const uint32_t descriptorSetCount = kMaxFramesInFlight * kMaxDrawsPerFrame;
+	const uint32_t descriptorSetCount = m_maxFramesInFlight * m_maxDrawsPerFrame;
 	std::array<VkDescriptorPoolSize, 3> newPoolSizes = {};
 	newPoolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-	newPoolSizes[0].descriptorCount = descriptorSetCount * 6;
+	newPoolSizes[0].descriptorCount = descriptorSetCount * Layout::kSamplerDescriptorCount;
 	newPoolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	newPoolSizes[1].descriptorCount = descriptorSetCount * 2;
+	newPoolSizes[1].descriptorCount = descriptorSetCount * Layout::kConstantBufferDescriptorCount;
 	newPoolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	newPoolSizes[2].descriptorCount = descriptorSetCount * 2;
+	newPoolSizes[2].descriptorCount = descriptorSetCount * Layout::kStorageBufferDescriptorCount;
 	VkDescriptorPoolCreateInfo newInfo{};
 	newInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	newInfo.maxSets = descriptorSetCount;
@@ -1492,7 +1520,7 @@ bool VulkanDevice::CreateDescriptorPool() {
 	return vkCreateDescriptorPool(m_context.device, &newInfo, nullptr, &m_descriptorPool) == VK_SUCCESS;
 }
 bool VulkanDevice::CreateDescriptorSets() {
-	const uint32_t descriptorSetCount = kMaxFramesInFlight * kMaxDrawsPerFrame;
+	const uint32_t descriptorSetCount = m_maxFramesInFlight * m_maxDrawsPerFrame;
 	std::vector<VkDescriptorSetLayout> newLayouts(descriptorSetCount, m_descriptorSetLayout);
 	VkDescriptorSetAllocateInfo newAlloc{};
 	newAlloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -1503,7 +1531,7 @@ bool VulkanDevice::CreateDescriptorSets() {
 	return vkAllocateDescriptorSets(m_context.device, &newAlloc, m_descriptorSets.data()) == VK_SUCCESS;
 }
 bool VulkanDevice::UpdateDrawDescriptorSets(const VulkanCommandList& commandList) {
-	if (commandList.m_drawCalls.size() > kMaxDrawsPerFrame) return false;
+	if (commandList.m_drawCalls.size() > m_maxDrawsPerFrame) return false;
 	for (uint32_t drawIndex = 0; drawIndex < commandList.m_drawCalls.size(); ++drawIndex) {
 		if (!UpdateDrawDescriptorSet(commandList.m_drawCalls[drawIndex], drawIndex)) return false;
 	}
@@ -1511,7 +1539,7 @@ bool VulkanDevice::UpdateDrawDescriptorSets(const VulkanCommandList& commandList
 }
 
 bool VulkanDevice::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCall& drawCall, uint32_t drawIndex) {
-	const uint32_t descriptorIndex = m_currentFrameIndex * kMaxDrawsPerFrame + drawIndex;
+	const uint32_t descriptorIndex = m_currentFrameIndex * m_maxDrawsPerFrame + drawIndex;
 	if (descriptorIndex >= m_descriptorSets.size()) return false;
 
 	const VulkanBuffer* vertexBuffer = dynamic_cast<const VulkanBuffer*>(drawCall.geometry.vertexBuffer);
@@ -1519,7 +1547,7 @@ bool VulkanDevice::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCall& dr
 	if (vertexBuffer == nullptr || (drawCall.indexed && indexBuffer == nullptr)) return false;
 
 	std::vector<VkWriteDescriptorSet> writes;
-	writes.reserve(10);
+	writes.reserve(Layout::kDescriptorBindingCount);
 
 	const VulkanTexture* fallbackTexture = static_cast<const VulkanTexture*>(m_fallbackTexture);
 	const bool hasFallbackTexture =
@@ -1527,14 +1555,14 @@ bool VulkanDevice::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCall& dr
 		fallbackTexture->GetImageView() != VK_NULL_HANDLE &&
 		fallbackTexture->GetSampler() != VK_NULL_HANDLE;
 
-	const std::array<uint32_t, 5> materialSamplerBindings = {
-		0u,
-		kMetallicRoughnessSamplerBinding,
-		kNormalSamplerBinding,
-		kOcclusionSamplerBinding,
-		kEmissiveSamplerBinding
+	const std::array<uint32_t, Layout::kMaterialTextureBindingCount> materialSamplerBindings = {
+		Layout::kBaseColorTextureBinding,
+		Layout::kMetallicRoughnessSamplerBinding,
+		Layout::kNormalSamplerBinding,
+		Layout::kOcclusionSamplerBinding,
+		Layout::kEmissiveSamplerBinding
 	};
-	std::array<VkDescriptorImageInfo, 5> materialTextureInfos = {};
+	std::array<VkDescriptorImageInfo, Layout::kMaterialTextureBindingCount> materialTextureInfos = {};
 	for (uint32_t i = 0; i < materialSamplerBindings.size(); ++i) {
 		const uint32_t binding = materialSamplerBindings[i];
 		const VulkanTexture* texture = nullptr;
@@ -1595,7 +1623,7 @@ bool VulkanDevice::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCall& dr
 		VkWriteDescriptorSet shadowWrite{};
 		shadowWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		shadowWrite.dstSet = m_descriptorSets[descriptorIndex];
-		shadowWrite.dstBinding = kShadowSamplerBinding;
+		shadowWrite.dstBinding = Layout::kShadowSamplerBinding;
 		shadowWrite.descriptorCount = 1;
 		shadowWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 		shadowWrite.pImageInfo = &shadowInfo;
@@ -1613,7 +1641,7 @@ bool VulkanDevice::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCall& dr
 	VkWriteDescriptorSet vertexWrite{};
 	vertexWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	vertexWrite.dstSet = m_descriptorSets[descriptorIndex];
-	vertexWrite.dstBinding = kVertexStorageBinding;
+	vertexWrite.dstBinding = Layout::kVertexStorageBinding;
 	vertexWrite.descriptorCount = 1;
 	vertexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 	vertexWrite.pBufferInfo = &geometryInfos[0];
@@ -1622,7 +1650,7 @@ bool VulkanDevice::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCall& dr
 	VkWriteDescriptorSet indexWrite{};
 	indexWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 	indexWrite.dstSet = m_descriptorSets[descriptorIndex];
-	indexWrite.dstBinding = kIndexStorageBinding;
+	indexWrite.dstBinding = Layout::kIndexStorageBinding;
 	indexWrite.descriptorCount = 1;
 	indexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
 	indexWrite.pBufferInfo = &geometryInfos[1];
@@ -1734,7 +1762,7 @@ bool VulkanDevice::CreateShadowPipeline(const dy::RHI::GraphicsPipelineDesc& des
 	VkPushConstantRange pushConstantRange{};
 	pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 	pushConstantRange.offset = 0;
-	pushConstantRange.size = 192;
+	pushConstantRange.size = Layout::kPushConstantRangeSize;
 
 	VkPipelineLayoutCreateInfo layoutInfo{};
 	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;

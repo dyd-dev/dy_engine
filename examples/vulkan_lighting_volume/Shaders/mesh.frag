@@ -1,4 +1,7 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "RHI/RendererShaderLayout.inc"
 
 layout(location = 0) in vec3 fragWorldPosition;
 layout(location = 1) in vec3 fragNormal;
@@ -6,7 +9,7 @@ layout(location = 2) in vec2 fragUV;
 layout(location = 3) in float fragDrawMode;
 layout(location = 4) in vec4 fragLightSpacePos;
 
-layout(set = 0, binding = 1) uniform LightingVolumeProfile {
+layout(set = 0, binding = DY_RENDERER_BINDING_LIGHTING_CONSTANTS) uniform LightingVolumeProfile {
     vec4 globalLightDirection;
     vec4 globalLightColor;
     vec4 spotLightPosition;
@@ -21,7 +24,7 @@ layout(set = 0, binding = 1) uniform LightingVolumeProfile {
 // Shadow Map (Directional Light용 깊이 텍스처).
 // The selected RHI backend binds this at binding=2.
 // frustum 밖 픽셀은 그림자 없는 것으로 처리됨.
-layout(set = 0, binding = 2) uniform sampler2D shadowMap;
+layout(set = 0, binding = DY_RENDERER_BINDING_SHADOW_MAP) uniform sampler2D shadowMap;
 
 layout(location = 0) out vec4 outColor;
 

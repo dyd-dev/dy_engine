@@ -1,4 +1,5 @@
 #include "VulkanPipeline.h"
+#include "RHI/RendererShaderLayout.h"
 #include <array>
 #include <stdexcept>
 
@@ -7,8 +8,6 @@ namespace dy::Backends
 
 namespace
 {
-	constexpr uint32_t kPushConstantRangeSize = 192;
-
 	VkPipelineRasterizationStateCreateInfo CreateRasterizerState(const dy::RHI::GraphicsPipelineDesc& desc)
 	{
 		VkPipelineRasterizationStateCreateInfo rasterizer{};
@@ -110,7 +109,7 @@ void VulkanPipeline::Initialize(
 	VkPushConstantRange pushConstantRange{};
 	pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 	pushConstantRange.offset = 0;
-	pushConstantRange.size = kPushConstantRangeSize;
+	pushConstantRange.size = dy::RHI::RendererShaderLayout::kPushConstantRangeSize;
 
 	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
 	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;

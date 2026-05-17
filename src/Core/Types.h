@@ -52,7 +52,7 @@ namespace dy
 		bool castShadow = true;
 		bool receiveShadow = true;
 	};
-	struct Material
+	struct MaterialDesc
 	{
 		Math::float4 baseColor = Math::float4(1.0f, 1.0f, 1.0f, 1.0f);
 		TextureID baseColorTexture = TextureID::Invalid;
@@ -65,5 +65,14 @@ namespace dy
 		TextureID normalTexture = TextureID::Invalid;
 		TextureID occlusionTexture = TextureID::Invalid;
 		TextureID emissiveTexture = TextureID::Invalid;
+	};
+
+	struct Material : MaterialDesc
+	{
+		Material() = default;
+		Material(const MaterialDesc& desc)
+			: MaterialDesc(desc)
+		{
+		}
 	};
 }

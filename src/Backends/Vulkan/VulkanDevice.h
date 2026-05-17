@@ -4,6 +4,7 @@
 #include "VulkanContext.h"
 #include "VulkanSwapchain.h"
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace dy::Backends
@@ -33,6 +34,7 @@ public:
 	void DestroyPipelineState(dy::RHI::IPipelineState* pipeline) override;
 
 	dy::RHI::ITexture* GetBackBuffer() override;
+	[[nodiscard]] dy::RHI::RendererShaderPaths GetDefaultRendererShaderPaths() const override;
 
 protected:
 	int Initialize(const void* windowHandle, const dy::RHI::DeviceDesc& desc) override;
@@ -110,21 +112,28 @@ private:
 	};
 	std::vector<RenderTargetCacheEntry> m_renderTargetCache;
 
-	static constexpr uint32_t kDefaultShadowMapResolution = 2048;
 	VkRenderPass m_shadowRenderPass = VK_NULL_HANDLE;
 	VkFramebuffer m_shadowFramebuffer = VK_NULL_HANDLE;
 	VkPipelineLayout m_shadowPipelineLayout = VK_NULL_HANDLE;
 	VkPipeline m_shadowPipeline = VK_NULL_HANDLE;
 	VkFormat m_shadowMapFormat = VK_FORMAT_UNDEFINED;
-	uint32_t m_shadowMapResolution = kDefaultShadowMapResolution;
+	uint32_t m_shadowMapResolution = dy::RHI::RendererDefaults::kShadowMapResolution;
 
-	static constexpr uint32_t kMaxFramesInFlight = 2;
-	static constexpr uint32_t kMaxDrawsPerFrame = 128;
+	uint32_t m_maxFramesInFlight = dy::RHI::RendererDefaults::kMaxFramesInFlight;
+	uint32_t m_maxDrawsPerFrame = dy::RHI::RendererDefaults::kMaxDrawsPerFrame;
+	uint32_t m_defaultShadowMapResolution = dy::RHI::RendererDefaults::kShadowMapResolution;
+	uint32_t m_fallbackTextureWidth = dy::RHI::RendererDefaults::kFallbackTextureWidth;
+	uint32_t m_fallbackTextureHeight = dy::RHI::RendererDefaults::kFallbackTextureHeight;
+	uint64_t m_frameAcquireTimeoutNanoseconds = dy::RHI::RendererDefaults::kFrameAcquireTimeoutNanoseconds;
 	uint32_t m_currentFrameIndex = 0;
 	uint32_t m_currentImageIndex = 0;
 	bool m_frameReady = false;
 	bool m_frameSubmitted = false;
 	dy::RHI::DescriptorIndex m_nextDescriptorIndex = 0;
+	std::string m_fallbackTexturePath;
+	std::string m_defaultRendererVertexShaderPath;
+	std::string m_defaultRendererPixelShaderPath;
+	std::string m_defaultRendererShadowVertexShaderPath;
 
 	VulkanCommandList* m_commandList = nullptr;
 	dy::RHI::ITexture* m_backBuffer = nullptr;

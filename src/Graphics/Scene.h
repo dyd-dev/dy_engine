@@ -7,6 +7,26 @@
 
 namespace dy::Graphics
 {
+	struct DirectionalLight
+	{
+		Math::float3 direction = Math::float3(0.35f, 0.65f, 0.68f);
+		Math::float3 color = Math::float3(1.0f, 0.94f, 0.82f);
+		float intensity = 4.0f;
+		bool castShadow = true;
+		float shadowStrength = 0.45f;
+	};
+
+	struct PointLight
+	{
+		Math::float3 position = Math::float3(0.0f, 0.0f, 2.0f);
+		float range = 6.0f;
+		Math::float3 color = Math::float3(1.0f, 0.94f, 0.82f);
+		float intensity = 6.0f;
+		Math::float3 direction = Math::float3(0.0f, 0.0f, -1.0f);
+		bool castShadow = true;
+		float shadowStrength = 0.5f;
+	};
+
 	class Scene
 	{
 	public:
@@ -18,6 +38,11 @@ namespace dy::Graphics
 		[[nodiscard]] MaterialID CreateMaterial(const Material& material)
 		{
 			m_materials.push_back(material);
+			return static_cast<MaterialID>(m_materials.size() - 1u);
+		}
+		[[nodiscard]] MaterialID CreateMaterial(const MaterialDesc& material)
+		{
+			m_materials.emplace_back(material);
 			return static_cast<MaterialID>(m_materials.size() - 1u);
 		}
 		[[nodiscard]] MeshID CreateMesh(const dy::Mesh& mesh)
@@ -38,10 +63,57 @@ namespace dy::Graphics
 			m_entityRenderFlags.push_back(renderFlags);
 			return entity;
 		}
+		[[nodiscard]] uint32_t CreateDirectionalLight(const DirectionalLight& light)
+		{
+			m_directionalLights.push_back(light);
+			return static_cast<uint32_t>(m_directionalLights.size() - 1u);
+		}
+		[[nodiscard]] uint32_t CreateDirectionalLight(
+			const Math::float3& direction,
+			const Math::float3& color,
+			float intensity,
+			bool castShadow = true,
+			float shadowStrength = 0.45f)
+		{
+			DirectionalLight light = {};
+			light.direction = direction;
+			light.color = color;
+			light.intensity = intensity;
+			light.castShadow = castShadow;
+			light.shadowStrength = shadowStrength;
+			return CreateDirectionalLight(light);
+		}
+		[[nodiscard]] uint32_t CreatePointLight(const PointLight& light)
+		{
+			m_pointLights.push_back(light);
+			return static_cast<uint32_t>(m_pointLights.size() - 1u);
+		}
+		[[nodiscard]] uint32_t CreatePointLight(
+			const Math::float3& position,
+			float range,
+			const Math::float3& color,
+			float intensity,
+			const Math::float3& direction = Math::float3(0.0f, 0.0f, -1.0f),
+			bool castShadow = true,
+			float shadowStrength = 0.5f)
+		{
+			PointLight light = {};
+			light.position = position;
+			light.range = range;
+			light.color = color;
+			light.intensity = intensity;
+			light.direction = direction;
+			light.castShadow = castShadow;
+			light.shadowStrength = shadowStrength;
+			return CreatePointLight(light);
+		}
 
 		[[nodiscard]] uint32_t GetTextureCount() const { return static_cast<uint32_t>(m_textureImages.size()); }
+		[[nodiscard]] uint32_t GetMaterialCount() const { return static_cast<uint32_t>(m_materials.size()); }
 		[[nodiscard]] uint32_t GetMeshCount() const { return static_cast<uint32_t>(m_meshes.size()); }
 		[[nodiscard]] uint32_t GetEntityCount() const { return static_cast<uint32_t>(m_entityMeshes.size()); }
+		[[nodiscard]] uint32_t GetDirectionalLightCount() const { return static_cast<uint32_t>(m_directionalLights.size()); }
+		[[nodiscard]] uint32_t GetPointLightCount() const { return static_cast<uint32_t>(m_pointLights.size()); }
 
 		[[nodiscard]] const Core::Image& GetTexture(TextureID textureId) const
 		{
@@ -50,6 +122,14 @@ namespace dy::Graphics
 		[[nodiscard]] const Material& GetMaterial(MaterialID materialId) const
 		{
 			return m_materials[ToIndex(materialId)];
+		}
+		void SetMaterial(MaterialID materialId, const Material& material)
+		{
+			m_materials[ToIndex(materialId)] = material;
+		}
+		void SetMaterial(MaterialID materialId, const MaterialDesc& material)
+		{
+			m_materials[ToIndex(materialId)] = Material(material);
 		}
 		[[nodiscard]] const dy::Mesh& GetMesh(MeshID meshId) const
 		{
@@ -79,6 +159,22 @@ namespace dy::Graphics
 		{
 			m_entityRenderFlags[ToIndex(entityId)] = renderFlags;
 		}
+		[[nodiscard]] const DirectionalLight& GetDirectionalLight(uint32_t lightIndex) const
+		{
+			return m_directionalLights[lightIndex];
+		}
+		void SetDirectionalLight(uint32_t lightIndex, const DirectionalLight& light)
+		{
+			m_directionalLights[lightIndex] = light;
+		}
+		[[nodiscard]] const PointLight& GetPointLight(uint32_t lightIndex) const
+		{
+			return m_pointLights[lightIndex];
+		}
+		void SetPointLight(uint32_t lightIndex, const PointLight& light)
+		{
+			m_pointLights[lightIndex] = light;
+		}
 
 	private:
 		std::vector<Core::Image> m_textureImages;
@@ -88,5 +184,7 @@ namespace dy::Graphics
 		std::vector<MaterialID> m_entityMaterials;
 		std::vector<Transform> m_entityTransforms;
 		std::vector<RenderFlags> m_entityRenderFlags;
+		std::vector<DirectionalLight> m_directionalLights;
+		std::vector<PointLight> m_pointLights;
 	};
 }

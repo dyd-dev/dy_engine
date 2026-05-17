@@ -8,6 +8,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 add_library(${PROJECT_NAME} STATIC
 	"src/Core/ImageLoader.cpp"
 	"src/RHI/IDevice.cpp"
+	"src/Graphics/AssetManager.cpp"
 	"src/Graphics/Renderer.cpp"
     "src/Graphics/Mesh.cpp"
 	"src/Graphics/OBJLoader.cpp"

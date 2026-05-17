@@ -1,4 +1,7 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "RHI/RendererShaderLayout.inc"
 
 layout(push_constant) uniform DrawConstants {
     mat4 viewProjectionMatrix;
@@ -12,22 +15,20 @@ layout(push_constant) uniform DrawConstants {
     vec4 materialParams;
 } pushConstants;
 
-layout(set = 0, binding = 3) uniform ShadowMatrix {
+layout(set = 0, binding = DY_RENDERER_BINDING_SHADOW_MATRIX) uniform ShadowMatrix {
     mat4 lightViewProjectionMatrix;
 } shadowMatrix;
 
-layout(std430, set = 0, binding = 4) readonly buffer VertexStorage {
+layout(std430, set = 0, binding = DY_RENDERER_BINDING_VERTEX_STORAGE) readonly buffer VertexStorage {
     float vertices[];
 } vertexStorage;
 
-layout(std430, set = 0, binding = 5) readonly buffer IndexStorage {
+layout(std430, set = 0, binding = DY_RENDERER_BINDING_INDEX_STORAGE) readonly buffer IndexStorage {
     uint indices[];
 } indexStorage;
 
-const int CastShadowFlag = 64;
-
 vec3 LoadPosition(uint vertexIndex) {
-    uint base = vertexIndex * 12u;
+    uint base = vertexIndex * DY_RENDERER_VERTEX_FLOAT_COUNT;
     return vec3(
         vertexStorage.vertices[base + 0u],
         vertexStorage.vertices[base + 1u],
@@ -35,7 +36,7 @@ vec3 LoadPosition(uint vertexIndex) {
 }
 
 void main() {
-    if ((int(pushConstants.drawMode + 0.5) & CastShadowFlag) == 0) {
+    if ((int(pushConstants.drawMode + 0.5) & DY_RENDERER_TEXTURE_FLAG_CAST_SHADOW) == 0) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;
     }

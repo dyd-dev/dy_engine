@@ -1,10 +1,13 @@
 #include "Graphics/Renderer.h"
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -19,21 +22,22 @@
 using namespace dy;
 using namespace dy::Graphics;
 
+namespace Layout = dy::RHI::RendererShaderLayout;
+
 namespace
 {
-	constexpr uint32_t kBaseColorTextureBinding = 0;
-	constexpr uint32_t kMetallicRoughnessTextureBinding = 6;
-	constexpr uint32_t kNormalTextureBinding = 7;
-	constexpr uint32_t kOcclusionTextureBinding = 8;
-	constexpr uint32_t kEmissiveTextureBinding = 9;
+	constexpr uint32_t kMaterialBaseColorTextureSlot = 0;
+	constexpr uint32_t kMaterialMetallicRoughnessTextureSlot = 1;
+	constexpr uint32_t kMaterialNormalTextureSlot = 2;
+	constexpr uint32_t kMaterialOcclusionTextureSlot = 3;
+	constexpr uint32_t kMaterialEmissiveTextureSlot = 4;
 
-	constexpr uint32_t kBaseColorTextureFlag = 1u << 0;
-	constexpr uint32_t kMetallicRoughnessTextureFlag = 1u << 1;
-	constexpr uint32_t kNormalTextureFlag = 1u << 2;
-	constexpr uint32_t kOcclusionTextureFlag = 1u << 3;
-	constexpr uint32_t kEmissiveTextureFlag = 1u << 4;
-	constexpr uint32_t kReceiveShadowFlag = 1u << 5;
-	constexpr uint32_t kCastShadowFlag = 1u << 6;
+	struct ShadowBounds
+	{
+		Math::float3 min = Math::float3(0.0f, 0.0f, 0.0f);
+		Math::float3 max = Math::float3(0.0f, 0.0f, 0.0f);
+		bool valid = false;
+	};
 
 	struct RendererVertex
 	{
@@ -73,41 +77,19 @@ namespace
 	}
 
 	[[nodiscard]] bool ResolveRendererShaderPaths(
-		const RendererConfig& config,
+		const RendererDesc& config,
+		const RHI::RendererShaderPaths& defaultShaderPaths,
 		const char*& vertexShaderPath,
 		const char*& pixelShaderPath,
-		const char*& shadowVertexShaderPath,
-		std::string& defaultVertexShaderPath,
-		std::string& defaultPixelShaderPath,
-		std::string& defaultShadowVertexShaderPath)
+		const char*& shadowVertexShaderPath)
 	{
-		vertexShaderPath = config.vertexShaderPath;
-		pixelShaderPath = config.pixelShaderPath;
-		shadowVertexShaderPath = config.shadowVertexShaderPath;
+		vertexShaderPath = config.vertexShaderPath != nullptr ? config.vertexShaderPath : defaultShaderPaths.vertexShaderPath;
+		pixelShaderPath = config.pixelShaderPath != nullptr ? config.pixelShaderPath : defaultShaderPaths.pixelShaderPath;
+		shadowVertexShaderPath = config.shadowVertexShaderPath != nullptr
+			? config.shadowVertexShaderPath
+			: defaultShaderPaths.shadowVertexShaderPath;
 
-#if defined(ENABLE_VULKAN) && defined(DY_VULKAN_SHADER_DIR)
-		if(vertexShaderPath == nullptr)
-		{
-			defaultVertexShaderPath = std::string(DY_VULKAN_SHADER_DIR) + "/triangle.vert.spv";
-			vertexShaderPath = defaultVertexShaderPath.c_str();
-		}
-		if(pixelShaderPath == nullptr)
-		{
-			defaultPixelShaderPath = std::string(DY_VULKAN_SHADER_DIR) + "/triangle.frag.spv";
-			pixelShaderPath = defaultPixelShaderPath.c_str();
-		}
-		if(config.enableShadows && shadowVertexShaderPath == nullptr)
-		{
-			defaultShadowVertexShaderPath = std::string(DY_VULKAN_SHADER_DIR) + "/triangle_shadow.vert.spv";
-			shadowVertexShaderPath = defaultShadowVertexShaderPath.c_str();
-		}
-#else
-		(void)defaultVertexShaderPath;
-		(void)defaultPixelShaderPath;
-		(void)defaultShadowVertexShaderPath;
-#endif
-
-		return vertexShaderPath != nullptr && pixelShaderPath != nullptr;
+		return vertexShaderPath != nullptr && pixelShaderPath != nullptr && (!config.enableShadows || shadowVertexShaderPath != nullptr);
 	}
 
 	[[nodiscard]] std::vector<RendererVertex> BuildRendererVertices(const dy::Mesh& mesh)
@@ -149,29 +131,101 @@ namespace
 		}
 		return indices;
 	}
+
+	[[nodiscard]] const DirectionalLight* GetPrimaryDirectionalLight(const Scene& scene)
+	{
+		return scene.GetDirectionalLightCount() > 0 ? &scene.GetDirectionalLight(0) : nullptr;
+	}
+
+	[[nodiscard]] const PointLight* GetPrimaryPointLight(const Scene& scene)
+	{
+		return scene.GetPointLightCount() > 0 ? &scene.GetPointLight(0) : nullptr;
+	}
+
+	[[nodiscard]] float Dot(const Math::float3& a, const Math::float3& b)
+	{
+		return a.x * b.x + a.y * b.y + a.z * b.z;
+	}
+
+	[[nodiscard]] Math::float3 Subtract(const Math::float3& a, const Math::float3& b)
+	{
+		return Math::float3(a.x - b.x, a.y - b.y, a.z - b.z);
+	}
+
+	[[nodiscard]] Math::float3 NormalizeOr(const Math::float3& value, const Math::float3& fallback)
+	{
+		const float lengthSquared = Dot(value, value);
+		if(lengthSquared <= 1.0e-8f) return fallback;
+		const float invLength = 1.0f / std::sqrt(lengthSquared);
+		return Math::float3(value.x * invLength, value.y * invLength, value.z * invLength);
+	}
+
+	[[nodiscard]] Math::float3 TransformPoint(const Math::float4x4& matrix, const Vertex& vertex)
+	{
+		return Math::float3(
+			matrix.m[0] * vertex.px + matrix.m[4] * vertex.py + matrix.m[8] * vertex.pz + matrix.m[12],
+			matrix.m[1] * vertex.px + matrix.m[5] * vertex.py + matrix.m[9] * vertex.pz + matrix.m[13],
+			matrix.m[2] * vertex.px + matrix.m[6] * vertex.py + matrix.m[10] * vertex.pz + matrix.m[14]);
+	}
+
+	void IncludePoint(ShadowBounds& bounds, const Math::float3& point)
+	{
+		if(!bounds.valid)
+		{
+			bounds.min = point;
+			bounds.max = point;
+			bounds.valid = true;
+			return;
+		}
+
+		bounds.min.x = std::min(bounds.min.x, point.x);
+		bounds.min.y = std::min(bounds.min.y, point.y);
+		bounds.min.z = std::min(bounds.min.z, point.z);
+		bounds.max.x = std::max(bounds.max.x, point.x);
+		bounds.max.y = std::max(bounds.max.y, point.y);
+		bounds.max.z = std::max(bounds.max.z, point.z);
+	}
+
+	[[nodiscard]] ShadowBounds ComputeShadowBounds(const Scene& scene)
+	{
+		ShadowBounds bounds = {};
+		const uint32_t entityCount = scene.GetEntityCount();
+		for(uint32_t entityIndex = 0; entityIndex < entityCount; ++entityIndex)
+		{
+			const EntityID entity = static_cast<EntityID>(entityIndex);
+			const RenderFlags& flags = scene.GetRenderFlags(entity);
+			if(!flags.castShadow && !flags.receiveShadow) continue;
+
+			const MeshID meshId = scene.GetEntityMesh(entity);
+			if(!IsValid(meshId)) continue;
+
+			const dy::Mesh& mesh = scene.GetMesh(meshId);
+			const Transform& transform = scene.GetTransform(entity);
+			for(const Vertex& vertex : mesh.vertices)
+			{
+				IncludePoint(bounds, TransformPoint(transform.worldMatrix, vertex));
+			}
+		}
+		return bounds;
+	}
 }
 
-bool Renderer::Initialize(RHI::IDevice* device, const RendererConfig& config)
+bool Renderer::Initialize(RHI::IDevice* device, const RendererDesc& config)
 {
-	static_assert(offsetof(DrawConstants, firstIndex) == 132u, "Renderer draw metadata must match Vulkan backend metadata offset.");
-	static_assert(offsetof(DrawConstants, baseColor) == 160u, "Renderer material constants must fit after backend metadata.");
-	static_assert(sizeof(DrawConstants) == 192u, "Renderer draw constants must match Vulkan push constant range.");
+	static_assert(Layout::kPushConstantRangeSize == sizeof(Layout::DrawConstants), "Renderer draw constants size mismatch.");
+	static_assert(sizeof(RendererVertex) == sizeof(float) * Layout::kRendererVertexFloatCount, "Renderer vertex layout must match shader layout.");
 
 	if(device == nullptr) return false;
 	const char* vertexShaderPath = nullptr;
 	const char* pixelShaderPath = nullptr;
 	const char* shadowVertexShaderPath = nullptr;
-	std::string defaultVertexShaderPath;
-	std::string defaultPixelShaderPath;
-	std::string defaultShadowVertexShaderPath;
+	const RHI::RendererShaderPaths defaultShaderPaths = device->GetDefaultRendererShaderPaths();
 	if(!ResolveRendererShaderPaths(
 		config,
+		defaultShaderPaths,
 		vertexShaderPath,
 		pixelShaderPath,
-		shadowVertexShaderPath,
-		defaultVertexShaderPath,
-		defaultPixelShaderPath,
-		defaultShadowVertexShaderPath))
+		shadowVertexShaderPath))
 	{
 		return false;
 	}
@@ -184,6 +238,7 @@ bool Renderer::Initialize(RHI::IDevice* device, const RendererConfig& config)
 	{
 		m_shadowVertexShaderSource = ReadBinaryFile(shadowVertexShaderPath);
 	}
+	BuildRenderPassPlan();
 	BuildPipelineStates(device);
 	return m_texturedTrianglePipeline != nullptr;
 }
@@ -211,6 +266,16 @@ void Renderer::SetAmbientLight(const Math::float3& color, float intensity)
 	m_config.ambientIntensity = intensity;
 }
 
+void Renderer::SetPBR(const PBRDesc& pbr)
+{
+	m_config.pbr = pbr;
+}
+
+void Renderer::SetEnvironmentLight(const EnvironmentDesc& environment)
+{
+	m_config.environment = environment;
+}
+
 void Renderer::Shutdown(RHI::IDevice* device)
 {
 	if(device == nullptr) return;
@@ -225,6 +290,7 @@ void Renderer::Shutdown(RHI::IDevice* device)
 	}
 
 	m_textureStates.clear();
+	m_materialStates.clear();
 	for(SceneMeshState& meshState : m_meshStates)
 	{
 		DestroyMeshState(device, meshState);
@@ -233,6 +299,7 @@ void Renderer::Shutdown(RHI::IDevice* device)
 	m_vertexShaderSource.clear();
 	m_pixelShaderSource.clear();
 	m_shadowVertexShaderSource.clear();
+	m_renderPasses.clear();
 
 	if(m_lightingBuffer != nullptr)
 	{
@@ -257,7 +324,7 @@ void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 	if(device == nullptr) return;
 
 	PrepareSceneResources(scene, device);
-	RecordScenePass(scene, device);
+	ExecuteRenderPasses(scene, device);
 }
 
 void Renderer::BuildPipelineStates(RHI::IDevice* device)
@@ -279,11 +346,30 @@ void Renderer::BuildPipelineStates(RHI::IDevice* device)
 	m_texturedTrianglePipeline = device->CreateGraphicsPipeline(desc);
 }
 
+void Renderer::BuildRenderPassPlan()
+{
+	m_renderPasses.clear();
+	m_renderPasses.push_back(RenderPassDesc{
+		RenderPassKind::Shadow,
+		RenderPassWork::PrepareOnly,
+		"Shadow",
+		m_config.enableShadows && !m_shadowVertexShaderSource.empty()
+	});
+	m_renderPasses.push_back(RenderPassDesc{
+		RenderPassKind::MainForward,
+		RenderPassWork::Graphics,
+		"MainForward",
+		m_config.enableMainPass
+	});
+}
+
 void Renderer::PrepareSceneResources(const Scene& scene, RHI::IDevice* device)
 {
 	const uint32_t textureCount = scene.GetTextureCount();
+	const uint32_t materialCount = scene.GetMaterialCount();
 	const uint32_t meshCount = scene.GetMeshCount();
 	EnsureTextureStateCapacity(textureCount);
+	EnsureMaterialStateCapacity(materialCount);
 	EnsureMeshStateCapacity(meshCount);
 
 	for(uint32_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
@@ -320,6 +406,8 @@ void Renderer::PrepareSceneResources(const Scene& scene, RHI::IDevice* device)
 			}
 		}
 	}
+
+	UpdateMaterialStates(scene);
 
 	for(uint32_t meshIndex = 0; meshIndex < meshCount; ++meshIndex)
 	{
@@ -365,11 +453,47 @@ void Renderer::PrepareSceneResources(const Scene& scene, RHI::IDevice* device)
 		meshState.indexCount = static_cast<uint32_t>(indices.size());
 	}
 
-	UpdateLightingBuffer(device);
-	UpdateShadowBuffer(device);
 }
 
-void Renderer::RecordScenePass(const Scene& scene, RHI::IDevice* device)
+void Renderer::ExecuteRenderPasses(const Scene& scene, RHI::IDevice* device)
+{
+	for(const RenderPassDesc& pass : m_renderPasses)
+	{
+		if(!pass.enabled) continue;
+		ExecuteRenderPass(pass, scene, device);
+	}
+}
+
+void Renderer::ExecuteRenderPass(const RenderPassDesc& pass, const Scene& scene, RHI::IDevice* device)
+{
+	switch(pass.kind)
+	{
+	case RenderPassKind::Shadow:
+		PrepareShadowPass(scene, device);
+		break;
+	case RenderPassKind::MainForward:
+		PrepareMainForwardPass(scene, device);
+		if(pass.work == RenderPassWork::Graphics)
+		{
+			RecordMainForwardPass(scene, device);
+		}
+		break;
+	default:
+		break;
+	}
+}
+
+void Renderer::PrepareShadowPass(const Scene& scene, RHI::IDevice* device)
+{
+	UpdateShadowBuffer(scene, device);
+}
+
+void Renderer::PrepareMainForwardPass(const Scene& scene, RHI::IDevice* device)
+{
+	UpdateLightingBuffer(scene, device);
+}
+
+void Renderer::RecordMainForwardPass(const Scene& scene, RHI::IDevice* device)
 {
 	RHI::ICommandList* commandList = device->AcquireCommandList();
 	RHI::ITexture* backBuffer = device->GetBackBuffer();
@@ -381,11 +505,11 @@ void Renderer::RecordScenePass(const Scene& scene, RHI::IDevice* device)
 	commandList->BindGlobalDescriptorHeap();
 	if(m_lightingBuffer != nullptr)
 	{
-		commandList->BindConstantBuffer(1, m_lightingBuffer, 0, static_cast<uint32_t>(sizeof(RendererLightingConstants)));
+		commandList->BindConstantBuffer(Layout::kLightingConstantBinding, m_lightingBuffer, 0, static_cast<uint32_t>(sizeof(Layout::RendererLightingConstants)));
 	}
 	if(m_shadowMatrixBuffer != nullptr)
 	{
-		commandList->BindConstantBuffer(3, m_shadowMatrixBuffer, 0, static_cast<uint32_t>(sizeof(RendererShadowConstants)));
+		commandList->BindConstantBuffer(Layout::kShadowMatrixBinding, m_shadowMatrixBuffer, 0, static_cast<uint32_t>(sizeof(Layout::RendererShadowConstants)));
 	}
 
 	const uint32_t entityCount = scene.GetEntityCount();
@@ -400,32 +524,16 @@ void Renderer::RecordScenePass(const Scene& scene, RHI::IDevice* device)
 		(void)mesh;
 		const SceneMeshState& meshState = m_meshStates[ToIndex(meshId)];
 		if(meshState.vertexBuffer == nullptr || meshState.indexBuffer == nullptr || meshState.indexCount == 0u) continue;
+		const uint32_t materialIndex = ToIndex(materialId);
+		if(materialIndex >= m_materialStates.size()) continue;
 
 		const Material& material = scene.GetMaterial(materialId);
+		const SceneMaterialState& materialState = m_materialStates[materialIndex];
 		const Transform& transform = scene.GetTransform(entity);
 		const RenderFlags& renderFlags = scene.GetRenderFlags(entity);
-		auto resolveTexture = [this](TextureID textureId) -> RHI::ITexture*
-		{
-			if(!IsValid(textureId)) return nullptr;
-			const uint32_t textureIndex = ToIndex(textureId);
-			if(textureIndex >= m_textureStates.size()) return nullptr;
-			return m_textureStates[textureIndex].texture;
-		};
-
-		RHI::ITexture* baseColorTexture = resolveTexture(material.baseColorTexture);
-		RHI::ITexture* metallicRoughnessTexture = resolveTexture(material.metallicRoughnessTexture);
-		RHI::ITexture* normalTexture = resolveTexture(material.normalTexture);
-		RHI::ITexture* occlusionTexture = resolveTexture(material.occlusionTexture);
-		RHI::ITexture* emissiveTexture = resolveTexture(material.emissiveTexture);
-
-		uint32_t textureFlags = 0;
-		if(baseColorTexture != nullptr) textureFlags |= kBaseColorTextureFlag;
-		if(metallicRoughnessTexture != nullptr) textureFlags |= kMetallicRoughnessTextureFlag;
-		if(normalTexture != nullptr) textureFlags |= kNormalTextureFlag;
-		if(occlusionTexture != nullptr) textureFlags |= kOcclusionTextureFlag;
-		if(emissiveTexture != nullptr) textureFlags |= kEmissiveTextureFlag;
-		if(renderFlags.receiveShadow) textureFlags |= kReceiveShadowFlag;
-		if(renderFlags.castShadow) textureFlags |= kCastShadowFlag;
+		uint32_t textureFlags = materialState.textureFlags;
+		if(renderFlags.receiveShadow) textureFlags |= Layout::kReceiveShadowFlag;
+		if(renderFlags.castShadow) textureFlags |= Layout::kCastShadowFlag;
 
 		RHI::GeometryBinding geometry = {};
 		geometry.vertexBuffer = meshState.vertexBuffer;
@@ -435,13 +543,13 @@ void Renderer::RecordScenePass(const Scene& scene, RHI::IDevice* device)
 		geometry.indexFormat = RHI::Format::R32_UINT;
 		geometry.indexOffset = 0;
 		commandList->BindGeometry(geometry);
-		commandList->BindTexture(kBaseColorTextureBinding, baseColorTexture);
-		commandList->BindTexture(kMetallicRoughnessTextureBinding, metallicRoughnessTexture);
-		commandList->BindTexture(kNormalTextureBinding, normalTexture);
-		commandList->BindTexture(kOcclusionTextureBinding, occlusionTexture);
-		commandList->BindTexture(kEmissiveTextureBinding, emissiveTexture);
+		commandList->BindTexture(Layout::kBaseColorTextureBinding, materialState.textures[kMaterialBaseColorTextureSlot]);
+		commandList->BindTexture(Layout::kMetallicRoughnessSamplerBinding, materialState.textures[kMaterialMetallicRoughnessTextureSlot]);
+		commandList->BindTexture(Layout::kNormalSamplerBinding, materialState.textures[kMaterialNormalTextureSlot]);
+		commandList->BindTexture(Layout::kOcclusionSamplerBinding, materialState.textures[kMaterialOcclusionTextureSlot]);
+		commandList->BindTexture(Layout::kEmissiveSamplerBinding, materialState.textures[kMaterialEmissiveTextureSlot]);
 
-		DrawConstants drawConstants = {};
+		Layout::DrawConstants drawConstants = {};
 		drawConstants.viewProjectionMatrix = m_config.viewProjectionMatrix;
 		drawConstants.modelMatrix = transform.worldMatrix;
 		drawConstants.drawMode = static_cast<float>(textureFlags);
@@ -453,7 +561,7 @@ void Renderer::RecordScenePass(const Scene& scene, RHI::IDevice* device)
 			material.normalScale,
 			material.occlusionStrength);
 
-		commandList->SetPushConstants(sizeof(DrawConstants), &drawConstants);
+		commandList->SetPushConstants(sizeof(Layout::DrawConstants), &drawConstants);
 		commandList->DrawIndexedInstanced(meshState.indexCount, 1, 0, 0, 0);
 	}
 
@@ -471,6 +579,14 @@ void Renderer::EnsureTextureStateCapacity(std::size_t textureCount)
 	}
 }
 
+void Renderer::EnsureMaterialStateCapacity(std::size_t materialCount)
+{
+	if(m_materialStates.size() < materialCount)
+	{
+		m_materialStates.resize(materialCount);
+	}
+}
+
 void Renderer::EnsureMeshStateCapacity(std::size_t meshCount)
 {
 	if(m_meshStates.size() < meshCount)
@@ -479,39 +595,107 @@ void Renderer::EnsureMeshStateCapacity(std::size_t meshCount)
 	}
 }
 
-void Renderer::UpdateLightingBuffer(RHI::IDevice* device)
+void Renderer::UpdateMaterialStates(const Scene& scene)
+{
+	const uint32_t materialCount = scene.GetMaterialCount();
+	for(uint32_t materialIndex = 0; materialIndex < materialCount; ++materialIndex)
+	{
+		const Material& material = scene.GetMaterial(static_cast<MaterialID>(materialIndex));
+		SceneMaterialState& materialState = m_materialStates[materialIndex];
+		materialState.textures[kMaterialBaseColorTextureSlot] = ResolveTexture(material.baseColorTexture);
+		materialState.textures[kMaterialMetallicRoughnessTextureSlot] = ResolveTexture(material.metallicRoughnessTexture);
+		materialState.textures[kMaterialNormalTextureSlot] = ResolveTexture(material.normalTexture);
+		materialState.textures[kMaterialOcclusionTextureSlot] = ResolveTexture(material.occlusionTexture);
+		materialState.textures[kMaterialEmissiveTextureSlot] = ResolveTexture(material.emissiveTexture);
+
+		uint32_t textureFlags = 0;
+		if(materialState.textures[kMaterialBaseColorTextureSlot] != nullptr) textureFlags |= Layout::kBaseColorTextureFlag;
+		if(materialState.textures[kMaterialMetallicRoughnessTextureSlot] != nullptr) textureFlags |= Layout::kMetallicRoughnessTextureFlag;
+		if(materialState.textures[kMaterialNormalTextureSlot] != nullptr) textureFlags |= Layout::kNormalTextureFlag;
+		if(materialState.textures[kMaterialOcclusionTextureSlot] != nullptr) textureFlags |= Layout::kOcclusionTextureFlag;
+		if(materialState.textures[kMaterialEmissiveTextureSlot] != nullptr) textureFlags |= Layout::kEmissiveTextureFlag;
+		materialState.textureFlags = textureFlags;
+	}
+}
+
+RHI::ITexture* Renderer::ResolveTexture(TextureID textureId) const
+{
+	if(!IsValid(textureId)) return nullptr;
+	const uint32_t textureIndex = ToIndex(textureId);
+	if(textureIndex >= m_textureStates.size()) return nullptr;
+	return m_textureStates[textureIndex].texture;
+}
+
+void Renderer::UpdateLightingBuffer(const Scene& scene, RHI::IDevice* device)
 {
 	if(m_lightingBuffer == nullptr)
 	{
 		m_lightingBuffer = device->CreateBuffer(RHI::BufferDesc{
-			static_cast<uint32_t>(sizeof(RendererLightingConstants)),
-			static_cast<uint32_t>(sizeof(RendererLightingConstants)),
+			static_cast<uint32_t>(sizeof(Layout::RendererLightingConstants)),
+			static_cast<uint32_t>(sizeof(Layout::RendererLightingConstants)),
 			RHI::BufferUsage::Constant
 		});
 	}
 	if(m_lightingBuffer == nullptr) return;
 
-	RendererLightingConstants lighting = {};
+	const DirectionalLight* light = GetPrimaryDirectionalLight(scene);
+	const PointLight* pointLight = GetPrimaryPointLight(scene);
+	const Math::float3 lightDirection = light != nullptr ? light->direction : m_config.directionalLightDirection;
+	const Math::float3 lightColor = light != nullptr ? light->color : m_config.directionalLightColor;
+	const float lightIntensity = light != nullptr ? light->intensity : m_config.directionalLightIntensity;
+	const bool castsShadow = pointLight != nullptr ? pointLight->castShadow : (light != nullptr ? light->castShadow : true);
+	const float shadowStrength = pointLight != nullptr ? pointLight->shadowStrength : (light != nullptr ? light->shadowStrength : m_config.shadowStrength);
+	const bool shadowsEnabled = IsShadowEnabled() && castsShadow;
+
+	Layout::RendererLightingConstants lighting = {};
 	lighting.cameraPosition = Math::float4(
 		m_config.cameraPosition.x,
 		m_config.cameraPosition.y,
 		m_config.cameraPosition.z,
-		IsShadowEnabled() ? m_config.shadowStrength : 0.0f);
+		shadowsEnabled ? shadowStrength : 0.0f);
 	lighting.directionalLightDirection = Math::float4(
-		m_config.directionalLightDirection.x,
-		m_config.directionalLightDirection.y,
-		m_config.directionalLightDirection.z,
-		IsShadowEnabled() ? 1.0f : 0.0f);
+		lightDirection.x,
+		lightDirection.y,
+		lightDirection.z,
+		shadowsEnabled ? 1.0f : 0.0f);
 	lighting.directionalLightColor = Math::float4(
-		m_config.directionalLightColor.x,
-		m_config.directionalLightColor.y,
-		m_config.directionalLightColor.z,
-		m_config.directionalLightIntensity);
+		lightColor.x,
+		lightColor.y,
+		lightColor.z,
+		lightIntensity);
 	lighting.ambientColor = Math::float4(
-		m_config.ambientColor.x,
-		m_config.ambientColor.y,
-		m_config.ambientColor.z,
-		m_config.ambientIntensity);
+		m_config.ambientColor.x * m_config.environment.diffuseColor.x,
+		m_config.ambientColor.y * m_config.environment.diffuseColor.y,
+		m_config.ambientColor.z * m_config.environment.diffuseColor.z,
+		m_config.ambientIntensity * m_config.environment.diffuseIntensity);
+	lighting.shadowParams = Math::float4(
+		m_config.shadowDepthBias,
+		m_config.shadowSlopeBias,
+		m_config.shadowNormalBias,
+		static_cast<float>(m_config.shadowPcfRadius));
+	lighting.pbrParams = Math::float4(
+		m_config.pbr.minRoughness,
+		m_config.pbr.ambientSpecularStrength,
+		0.0f,
+		0.0f);
+	lighting.environmentColor = Math::float4(
+		m_config.environment.specularColor.x,
+		m_config.environment.specularColor.y,
+		m_config.environment.specularColor.z,
+		m_config.environment.specularIntensity);
+	if(pointLight != nullptr)
+	{
+		lighting.pointLightPositionRange = Math::float4(
+			pointLight->position.x,
+			pointLight->position.y,
+			pointLight->position.z,
+			pointLight->range);
+		lighting.pointLightColorIntensity = Math::float4(
+			pointLight->color.x,
+			pointLight->color.y,
+			pointLight->color.z,
+			pointLight->intensity);
+	}
 
 	void* data = m_lightingBuffer->Map(0, static_cast<uint32_t>(sizeof(lighting)));
 	if(data != nullptr)
@@ -521,22 +705,61 @@ void Renderer::UpdateLightingBuffer(RHI::IDevice* device)
 	}
 }
 
-void Renderer::UpdateShadowBuffer(RHI::IDevice* device)
+void Renderer::UpdateShadowBuffer(const Scene& scene, RHI::IDevice* device)
 {
 	if(m_shadowMatrixBuffer == nullptr)
 	{
 		m_shadowMatrixBuffer = device->CreateBuffer(RHI::BufferDesc{
-			static_cast<uint32_t>(sizeof(RendererShadowConstants)),
-			static_cast<uint32_t>(sizeof(RendererShadowConstants)),
+			static_cast<uint32_t>(sizeof(Layout::RendererShadowConstants)),
+			static_cast<uint32_t>(sizeof(Layout::RendererShadowConstants)),
 			RHI::BufferUsage::Constant
 		});
 	}
 	if(m_shadowMatrixBuffer == nullptr) return;
 
-	RendererShadowConstants shadow = {};
-	shadow.lightViewProjectionMatrix = IsShadowEnabled()
-		? ComputeDirectionalLightViewProj(m_config.directionalLightDirection, m_config.shadowMap)
-		: Math::float4x4::Identity();
+	const DirectionalLight* light = GetPrimaryDirectionalLight(scene);
+	const PointLight* pointLight = GetPrimaryPointLight(scene);
+	Math::float3 lightDirection = light != nullptr ? light->direction : m_config.directionalLightDirection;
+	ShadowMapDesc shadowMap = m_config.shadowMap;
+	const ShadowBounds bounds = IsShadowEnabled() && m_config.autoFitShadowMap ? ComputeShadowBounds(scene) : ShadowBounds{};
+	if(pointLight != nullptr)
+	{
+		shadowMap.farPlane = std::max(shadowMap.farPlane, pointLight->range);
+		lightDirection = NormalizeOr(pointLight->direction, Math::float3(0.0f, 0.0f, -1.0f));
+		if(bounds.valid)
+		{
+			const Math::float3 center(
+				(bounds.min.x + bounds.max.x) * 0.5f,
+				(bounds.min.y + bounds.max.y) * 0.5f,
+				(bounds.min.z + bounds.max.z) * 0.5f);
+			lightDirection = NormalizeOr(Subtract(center, pointLight->position), lightDirection);
+			shadowMap.sceneCenter = center;
+		}
+	}
+	else if(IsShadowEnabled() && m_config.autoFitShadowMap)
+	{
+		if(bounds.valid)
+		{
+			shadowMap = FitDirectionalShadowMapToBounds(
+				lightDirection,
+				m_config.shadowMap,
+				bounds.min,
+				bounds.max,
+				m_config.shadowBoundsPadding);
+		}
+	}
+
+	Layout::RendererShadowConstants shadow = {};
+	if(IsShadowEnabled() && pointLight != nullptr)
+	{
+		shadow.lightViewProjectionMatrix = ComputeSpotLightViewProj(pointLight->position, lightDirection, shadowMap);
+	}
+	else
+	{
+		shadow.lightViewProjectionMatrix = IsShadowEnabled()
+			? ComputeDirectionalLightViewProj(lightDirection, shadowMap)
+			: Math::float4x4::Identity();
+	}
 
 	void* data = m_shadowMatrixBuffer->Map(0, static_cast<uint32_t>(sizeof(shadow)));
 	if(data != nullptr)
@@ -565,5 +788,17 @@ void Renderer::DestroyMeshState(RHI::IDevice* device, SceneMeshState& meshState)
 
 bool Renderer::IsShadowEnabled() const
 {
-	return m_config.enableShadows && !m_shadowVertexShaderSource.empty();
+	return IsRenderPassEnabled(RenderPassKind::Shadow);
+}
+
+bool Renderer::IsRenderPassEnabled(RenderPassKind passKind) const
+{
+	for(const RenderPassDesc& pass : m_renderPasses)
+	{
+		if(pass.kind == passKind)
+		{
+			return pass.enabled;
+		}
+	}
+	return false;
 }

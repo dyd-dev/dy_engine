@@ -1,4 +1,7 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "RHI/RendererShaderLayout.inc"
 
 layout(location = 0) out vec3 fragWorldPosition;
 layout(location = 1) out vec3 fragNormal;
@@ -17,15 +20,15 @@ layout(push_constant) uniform PushConstants {
 
 // Shadow Map 변환용 Light-Space ViewProjection.
 // RHI device updates this from the selected backend each frame.
-layout(set = 0, binding = 3) uniform ShadowMatrix {
+layout(set = 0, binding = DY_RENDERER_BINDING_SHADOW_MATRIX) uniform ShadowMatrix {
     mat4 lightViewProj;
 } shadowMatrix;
 
-layout(std430, set = 0, binding = 4) readonly buffer VertexStorage {
+layout(std430, set = 0, binding = DY_RENDERER_BINDING_VERTEX_STORAGE) readonly buffer VertexStorage {
     float vertices[];
 } vertexStorage;
 
-layout(std430, set = 0, binding = 5) readonly buffer IndexStorage {
+layout(std430, set = 0, binding = DY_RENDERER_BINDING_INDEX_STORAGE) readonly buffer IndexStorage {
     uint indices[];
 } indexStorage;
 

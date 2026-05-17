@@ -1,5 +1,7 @@
 #pragma once
 #include "RHI/ICommandList.h"
+#include "RHI/RendererDefaults.h"
+#include "RHI/RendererShaderLayout.h"
 #include "VulkanContext.h"
 #include <array>
 #include <cstdint>
@@ -34,9 +36,9 @@ public:
 	void End();
 
 private:
-	static constexpr uint32_t kMaxConstantBufferBindings = 8;
-	static constexpr uint32_t kMaxRenderTargets = 4;
-	static constexpr uint32_t kMaxTextureBindings = 10;
+	static constexpr uint32_t kMaxConstantBufferBindings = dy::RHI::RendererShaderLayout::kDescriptorBindingCount;
+	static constexpr uint32_t kMaxRenderTargets = dy::RHI::RendererDefaults::kMaxRenderTargets;
+	static constexpr uint32_t kMaxTextureBindings = dy::RHI::RendererShaderLayout::kDescriptorBindingCount;
 
 	struct ConstantBufferBinding
 	{
@@ -65,7 +67,7 @@ private:
 		std::array<dy::RHI::ITexture*, kMaxTextureBindings> textures = {};
 		dy::RHI::Viewport viewport = {};
 		dy::RHI::Rect scissor = {};
-		std::array<uint8_t, 192> pushConstants = {};
+		std::array<uint8_t, dy::RHI::RendererShaderLayout::kPushConstantRangeSize> pushConstants = {};
 	};
 
 	friend class VulkanDevice;
@@ -75,7 +77,7 @@ private:
 	std::array<dy::RHI::ITexture*, kMaxRenderTargets> m_renderTargets = {};
 	dy::RHI::ITexture* m_depthStencil = nullptr;
 	dy::RHI::IPipelineState* m_boundPipeline = nullptr;
-	std::array<uint8_t, 192> m_pendingPushConstants = {};
+	std::array<uint8_t, dy::RHI::RendererShaderLayout::kPushConstantRangeSize> m_pendingPushConstants = {};
 	uint32_t m_pendingPushConstantSize = 0;
 	dy::RHI::GeometryBinding m_pendingGeometry = {};
 	std::array<ConstantBufferBinding, kMaxConstantBufferBindings> m_pendingConstantBuffers = {};

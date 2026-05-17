@@ -8,6 +8,7 @@
 
 namespace dy::Graphics
 {
+	class AssetManager;
 	class Scene;
 
 	struct ObjectLoadResult
@@ -29,21 +30,42 @@ namespace dy::Graphics
 		static ObjectLoadResult Load(
 			Scene& scene,
 			const std::string& filepath,
-			const Material& material = Material{},
+			const MaterialDesc& material = MaterialDesc{},
+			const Math::float4x4& worldMatrix = Math::float4x4::Identity(),
+			const RenderFlags& renderFlags = {});
+
+		static ObjectLoadResult Load(
+			AssetManager& assets,
+			const std::string& filepath,
+			const MaterialDesc& material = MaterialDesc{},
 			const Math::float4x4& worldMatrix = Math::float4x4::Identity(),
 			const RenderFlags& renderFlags = {});
 
 		static ObjectLoadResult LoadOBJ(
 			Scene& scene,
 			const std::string& filepath,
-			const Material& material = Material{},
+			const MaterialDesc& material = MaterialDesc{},
+			const Math::float4x4& worldMatrix = Math::float4x4::Identity(),
+			const RenderFlags& renderFlags = {});
+
+		static ObjectLoadResult LoadOBJ(
+			AssetManager& assets,
+			const std::string& filepath,
+			const MaterialDesc& material = MaterialDesc{},
 			const Math::float4x4& worldMatrix = Math::float4x4::Identity(),
 			const RenderFlags& renderFlags = {});
 
 		static ObjectLoadResult LoadFBX(
 			Scene& scene,
 			const std::string& filepath,
-			const Material& material = Material{},
+			const MaterialDesc& material = MaterialDesc{},
+			const Math::float4x4& worldMatrix = Math::float4x4::Identity(),
+			const RenderFlags& renderFlags = {});
+
+		static ObjectLoadResult LoadFBX(
+			AssetManager& assets,
+			const std::string& filepath,
+			const MaterialDesc& material = MaterialDesc{},
 			const Math::float4x4& worldMatrix = Math::float4x4::Identity(),
 			const RenderFlags& renderFlags = {});
 	};

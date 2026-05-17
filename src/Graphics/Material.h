@@ -3,5 +3,6 @@
 
 namespace dy::Graphics
 {
+	using MaterialDesc = dy::MaterialDesc;
 	using Material = dy::Material;
 }

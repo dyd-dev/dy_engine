@@ -19,18 +19,21 @@
 #include "RHI/ICommandList.h"
 #include "RHI/IDevice.h"
 #include "RHI/IPipelineState.h"
+#include "RHI/RendererShaderLayout.h"
 
 using namespace dy;
 
 #ifndef DY_SHADER_DIR
-#define DY_SHADER_DIR nullptr
+#define DY_SHADER_DIR ""
 #endif
 
 namespace
 {
+	namespace Layout = dy::RHI::RendererShaderLayout;
+
 	constexpr float kFloorZ = -0.56f;
-	constexpr uint32_t kLightingProfileBinding = 1;
-	constexpr uint32_t kShadowMatrixBinding = 3;
+	constexpr uint32_t kLightingProfileBinding = Layout::kLightingConstantBinding;
+	constexpr uint32_t kShadowMatrixBinding = Layout::kShadowMatrixBinding;
 
 	struct LightingVolumeProfile
 	{
@@ -298,7 +301,7 @@ int main()
 			throw std::runtime_error("Failed to initialize RHI device for lighting volume test");
 		}
 
-		const std::string shaderDir = DY_SHADER_DIR != nullptr ? DY_SHADER_DIR : "";
+		const std::string shaderDir = DY_SHADER_DIR;
 		const std::vector<char> vertexShader = ReadBinaryFile(shaderDir + "/triangle.vert.spv");
 		const std::vector<char> pixelShader = ReadBinaryFile(shaderDir + "/triangle.frag.spv");
 		const std::vector<char> shadowVertexShader = ReadBinaryFile(shaderDir + "/shadow.vert.spv");

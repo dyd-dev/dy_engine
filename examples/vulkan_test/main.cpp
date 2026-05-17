@@ -5,8 +5,8 @@
 #include <string>
 #include "Platform/Window.h"
 #include "RHI/IDevice.h"
+#include "Graphics/AssetManager.h"
 #include "Graphics/Material.h"
-#include "Graphics/ObjectLoader.h"
 #include "Graphics/Renderer.h"
 #include "Graphics/Scene.h"
 #include "Math/Math.h"
@@ -166,7 +166,8 @@ int main()
         }
 
         Graphics::Scene scene;
-        Material pbrMaterial = {};
+        Graphics::AssetManager assets(scene);
+        Graphics::MaterialDesc pbrMaterial = {};
         pbrMaterial.baseColor = Math::float4(0.95f, 0.72f, 0.42f, 1.0f);
         pbrMaterial.metallicFactor = 0.72f;
         pbrMaterial.roughnessFactor = 0.34f;
@@ -175,13 +176,13 @@ int main()
         RenderFlags objectFlags = {};
         objectFlags.castShadow = true;
         objectFlags.receiveShadow = true;
-        const Graphics::ObjectLoadResult object = Graphics::ObjectLoader::Load(scene, "examples/vulkan_test/triangle.obj", pbrMaterial, CreateTestModelMatrix(), objectFlags);
+        const Graphics::ObjectLoadResult object = assets.LoadObject("examples/vulkan_test/triangle.obj", pbrMaterial, CreateTestModelMatrix(), objectFlags);
         if (!object)
         {
             throw std::runtime_error("Could not load triangle.obj");
         }
 
-        Material floorMaterial = {};
+        Graphics::MaterialDesc floorMaterial = {};
         floorMaterial.baseColor = Math::float4(0.52f, 0.57f, 0.60f, 1.0f);
         floorMaterial.roughnessFactor = 0.82f;
         const MeshID floorMesh = scene.CreateMesh(CreateFloorMesh());
@@ -191,23 +192,31 @@ int main()
         floorFlags.receiveShadow = true;
         [[maybe_unused]] const EntityID floorEntity = scene.CreateEntity(floorMesh, floorMaterialId, Math::float4x4::Identity(), floorFlags);
 
+        [[maybe_unused]] const uint32_t sunLight = scene.CreateDirectionalLight(
+            Math::float3(0.36f, -0.54f, 0.76f),
+            Math::float3(1.0f, 0.94f, 0.82f),
+            4.0f,
+            true,
+            0.58f);
+
         Graphics::Renderer renderer;
-        Graphics::RendererConfig rendererConfig = {};
+        Graphics::RendererDesc rendererConfig = {};
         rendererConfig.viewProjectionMatrix = CreateTestViewProjectionMatrix();
         rendererConfig.cameraPosition = Math::float3(0.0f, -2.35f, 1.15f);
-        rendererConfig.directionalLightDirection = Math::float3(0.36f, -0.54f, 0.76f);
-        rendererConfig.directionalLightColor = Math::float3(1.0f, 0.94f, 0.82f);
-        rendererConfig.directionalLightIntensity = 4.0f;
         rendererConfig.ambientIntensity = 0.045f;
+        rendererConfig.pbr.minRoughness = 0.04f;
+        rendererConfig.pbr.ambientSpecularStrength = 0.32f;
+        rendererConfig.environment.specularColor = Math::float3(0.78f, 0.84f, 1.0f);
+        rendererConfig.environment.specularIntensity = 0.85f;
         rendererConfig.enableShadows = true;
-        rendererConfig.shadowStrength = 0.58f;
         rendererConfig.shadowMap.resolution = 2048;
-        rendererConfig.shadowMap.orthoWidth = 2.8f;
-        rendererConfig.shadowMap.orthoHeight = 2.8f;
         rendererConfig.shadowMap.nearPlane = 0.1f;
-        rendererConfig.shadowMap.farPlane = 7.0f;
-        rendererConfig.shadowMap.sceneCenter = Math::float3(0.0f, 0.0f, 0.32f);
-        rendererConfig.shadowMap.lightDistance = 3.2f;
+        rendererConfig.autoFitShadowMap = true;
+        rendererConfig.shadowBoundsPadding = 0.35f;
+        rendererConfig.shadowDepthBias = 0.0007f;
+        rendererConfig.shadowSlopeBias = 0.003f;
+        rendererConfig.shadowNormalBias = 0.0002f;
+        rendererConfig.shadowPcfRadius = 1;
         if (!renderer.Initialize(device.get(), rendererConfig))
         {
             throw std::runtime_error("Failed to initialize renderer PBR pipeline");

@@ -1,4 +1,7 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+
+#include "RHI/RendererShaderLayout.inc"
 
 layout(location = 0) out vec2 fragUv;
 layout(location = 1) out vec3 fragWorldPosition;
@@ -18,15 +21,15 @@ layout(push_constant) uniform DrawConstants {
     vec4 materialParams;
 } pushConstants;
 
-layout(std430, set = 0, binding = 4) readonly buffer VertexStorage {
+layout(std430, set = 0, binding = DY_RENDERER_BINDING_VERTEX_STORAGE) readonly buffer VertexStorage {
     float vertices[];
 } vertexStorage;
 
-layout(std430, set = 0, binding = 5) readonly buffer IndexStorage {
+layout(std430, set = 0, binding = DY_RENDERER_BINDING_INDEX_STORAGE) readonly buffer IndexStorage {
     uint indices[];
 } indexStorage;
 
-layout(set = 0, binding = 3) uniform ShadowMatrix {
+layout(set = 0, binding = DY_RENDERER_BINDING_SHADOW_MATRIX) uniform ShadowMatrix {
     mat4 lightViewProjectionMatrix;
 } shadowMatrix;
 
@@ -38,7 +41,7 @@ struct Vertex {
 };
 
 Vertex LoadVertex(uint vertexIndex) {
-    uint base = vertexIndex * 12u;
+    uint base = vertexIndex * DY_RENDERER_VERTEX_FLOAT_COUNT;
     Vertex vertex;
     vertex.position = vec3(
         vertexStorage.vertices[base + 0u],

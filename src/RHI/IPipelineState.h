@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include "Enums.h"
+#include "RendererDefaults.h"
 #include <cstddef>
 #include <cstdint>
 
@@ -22,7 +23,7 @@ namespace dy::RHI
 		bool depthEnable = true;
 		bool wireframe = false;
 		bool enableShadowPass = false;
-		uint32_t shadowMapResolution = 2048;
+		uint32_t shadowMapResolution = RendererDefaults::kShadowMapResolution;
 	};
 
 	struct ComputePipelineDesc {
