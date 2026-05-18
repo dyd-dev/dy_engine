@@ -92,10 +92,19 @@ namespace dy::Backends
         m_internal->device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_internal->commandQueue));
 
         // 3. 스왑체인(화면 버퍼 2개) 생성
+        RECT rect = {};
+        GetClientRect(hwnd, &rect);
+        uint32_t width = rect.right - rect.left;
+        uint32_t height = rect.bottom - rect.top;
+        if (width == 0 || height == 0) {
+            width = 1280;
+            height = 720;
+        }
+
         DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
         swapChainDesc.BufferCount = 2;
-        swapChainDesc.Width = 800;
-        swapChainDesc.Height = 600;
+        swapChainDesc.Width = width;
+        swapChainDesc.Height = height;
         swapChainDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
         swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
@@ -262,7 +271,7 @@ namespace dy::Backends
         srvRanges[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, (UINT)-1, 0, 2, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE, 0);
 
         CD3DX12_ROOT_PARAMETER1 rootParameters[2] = {};
-        rootParameters[0].InitAsConstants(24, 0); // register(b0)
+        rootParameters[0].InitAsConstants(48, 0); // register(b0)
         rootParameters[1].InitAsDescriptorTable(3, srvRanges, D3D12_SHADER_VISIBILITY_ALL); // register(t0, space0~2)
 
         CD3DX12_STATIC_SAMPLER_DESC samplerDesc(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
@@ -313,8 +322,18 @@ namespace dy::Backends
         psoDesc.PS = CD3DX12_SHADER_BYTECODE(psBlob.Get());
 
         psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK; // 뒷면 컬링 활성화
+        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK; // 뒷면 컬링 기본 활성화 (다른 예제와 표준 정합성 유지)
         psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
+        // 표준 알파 블렌딩 활성화 (반투명 그림자 및 이펙트 지원)
+        psoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
+        psoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
+        psoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+        psoDesc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+        psoDesc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+        psoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+        psoDesc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+
         psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
         psoDesc.DepthStencilState.DepthEnable = TRUE;
         psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;

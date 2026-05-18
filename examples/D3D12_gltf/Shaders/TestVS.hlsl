@@ -12,6 +12,7 @@ struct VertexInput
     float3 Pos;
     float2 UV;
     float3 Color;
+    float3 Normal; // 44바이트 스트라이드 매핑용 추가
 };
 
 struct PixelInput

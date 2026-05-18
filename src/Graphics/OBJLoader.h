@@ -10,6 +10,7 @@ namespace dy::Graphics
         float position[3];
         float texCoord[2];
         float color[3];
+        float normal[3]; // 정점 법선 벡터 추가
     };
 
     class OBJLoader

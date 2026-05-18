@@ -74,7 +74,38 @@ namespace dy::Graphics
                         outVertices[initialVertexCount + idx].color[2] = 1.0f;
                         outVertices[initialVertexCount + idx].texCoord[0] = 0.0f;
                         outVertices[initialVertexCount + idx].texCoord[1] = 0.0f;
+                        
+                        // 법선 기본값 초기화
+                        outVertices[initialVertexCount + idx].normal[0] = 0.0f;
+                        outVertices[initialVertexCount + idx].normal[1] = 1.0f;
+                        outVertices[initialVertexCount + idx].normal[2] = 0.0f;
                     });
+
+                    // 1.1. 법선(Normal) 로드 및 변환 적용
+                    auto* normalAttr = primitive.findAttribute("NORMAL");
+                    if (normalAttr) {
+                        auto& normalAcc = gltf.accessors[normalAttr->accessorIndex];
+                        fastgltf::iterateAccessorWithIndex<fastgltf::math::fvec3>(gltf, normalAcc, [&](fastgltf::math::fvec3 normal, size_t idx) {
+                            // 회전 및 스케일 변환 적용 (w = 0.0f)
+                            fastgltf::math::fvec4 n(normal.x(), normal.y(), normal.z(), 0.0f);
+                            fastgltf::math::fvec4 transformedNormal = globalMatrix * n;
+
+                            float nx = transformedNormal.x();
+                            float ny = transformedNormal.y();
+                            float nz = transformedNormal.z();
+
+                            float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+                            if (len > 0.0001f) {
+                                nx /= len;
+                                ny /= len;
+                                nz /= len;
+                            }
+
+                            outVertices[initialVertexCount + idx].normal[0] = nx;
+                            outVertices[initialVertexCount + idx].normal[1] = ny;
+                            outVertices[initialVertexCount + idx].normal[2] = nz;
+                        });
+                    }
 
                     // 2. UV 로드
                     auto* uvAttr = primitive.findAttribute("TEXCOORD_0");

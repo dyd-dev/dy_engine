@@ -81,10 +81,10 @@ namespace dy::Graphics
             }
             else if (type == "f")
             {
+                std::vector<Vertex> faceVertices;
                 std::string vertexStr;
-                for (int i = 0; i < 3; ++i)
+                while (ss >> vertexStr)
                 {
-                    ss >> vertexStr;
                     std::istringstream vs(vertexStr);
                     std::string posIdxStr, texIdxStr;
 
@@ -99,7 +99,7 @@ namespace dy::Graphics
                     vertex.position[1] = positions[posIdx * 3 + 1];
                     vertex.position[2] = positions[posIdx * 3 + 2];
 
-                    if (!texCoords.empty()) {
+                    if (!texCoords.empty() && texIdx >= 0 && (texIdx * 2 + 1) < texCoords.size()) {
                         vertex.texCoord[0] = texCoords[texIdx * 2 + 0];
                         vertex.texCoord[1] = 1.0f - texCoords[texIdx * 2 + 1];
                     }
@@ -110,9 +110,28 @@ namespace dy::Graphics
                     vertex.color[0] = currentColor[0];
                     vertex.color[1] = currentColor[1];
                     vertex.color[2] = currentColor[2];
+                    
+                    vertex.normal[0] = 0.0f;
+                    vertex.normal[1] = 1.0f;
+                    vertex.normal[2] = 0.0f;
 
-                    outVertices.push_back(vertex);
-                    outIndices.push_back(currentIndex++);
+                    faceVertices.push_back(vertex);
+                }
+
+                // 팬 삼각분할 (Fan Triangulation)로 3개 이상의 다각형(Quads, N-gons) 지원
+                if (faceVertices.size() >= 3)
+                {
+                    for (size_t i = 1; i < faceVertices.size() - 1; ++i)
+                    {
+                        outVertices.push_back(faceVertices[0]);
+                        outIndices.push_back(currentIndex++);
+
+                        outVertices.push_back(faceVertices[i]);
+                        outIndices.push_back(currentIndex++);
+
+                        outVertices.push_back(faceVertices[i + 1]);
+                        outIndices.push_back(currentIndex++);
+                    }
                 }
             }
         }
