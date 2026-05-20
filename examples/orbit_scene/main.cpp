@@ -19,8 +19,11 @@ using namespace dy;
 
 namespace
 {
-	constexpr uint32_t kObjectCount = 100;
-	constexpr float kGoldenAngle = 2.39996323f;
+	constexpr uint32_t kObjectCount = 1000;
+	constexpr float kTwoPi = 6.28318530718f;
+	constexpr float kMinOrbitRadius = 4.0f;
+	constexpr float kMaxOrbitRadius = 65.0f;
+	constexpr float kHalfHeightRange = 65.0f;
 
 	struct OrbitObject
 	{
@@ -57,6 +60,27 @@ namespace
 		if(lengthSquared <= 1.0e-8f) return fallback;
 		const float invLength = 1.0f / std::sqrt(lengthSquared);
 		return Math::float3(value.x * invLength, value.y * invLength, value.z * invLength);
+	}
+
+	uint32_t HashUInt(uint32_t value)
+	{
+		value ^= value >> 16u;
+		value *= 0x7feb352du;
+		value ^= value >> 15u;
+		value *= 0x846ca68bu;
+		value ^= value >> 16u;
+		return value;
+	}
+
+	float Random01(uint32_t index, uint32_t salt)
+	{
+		const uint32_t value = HashUInt(index ^ (salt * 0x9e3779b9u));
+		return static_cast<float>(value & 0x00ffffffu) / static_cast<float>(0x00ffffffu);
+	}
+
+	float Lerp(float a, float b, float t)
+	{
+		return a + (b - a) * t;
 	}
 
 	Math::float4x4 MultiplyColumnMajor(const Math::float4x4& lhs, const Math::float4x4& rhs)
@@ -111,10 +135,10 @@ namespace
 
 	Math::float4x4 CreateViewProjection()
 	{
-		const Math::float3 eye(5.6f, -6.4f, 4.8f);
+		const Math::float3 eye(62.0f, -74.0f, 52.0f);
 		const Math::float3 target(0.0f, 0.0f, 0.0f);
 		const Math::float4x4 view = CreateLookAt(eye, target, Math::float3(0.0f, 0.0f, 1.0f));
-		const Math::float4x4 projection = CreateOrthographic(9.4f, 6.0f, 0.1f, 18.0f);
+		const Math::float4x4 projection = CreateOrthographic(84.0f, 54.0f, 0.1f, 240.0f);
 		return MultiplyColumnMajor(projection, view);
 	}
 
@@ -161,7 +185,7 @@ namespace
 	Mesh CreateLightMarkerMesh()
 	{
 		Mesh mesh = {};
-		const float s = 0.16f;
+		const float s = 1.12f;
 		mesh.vertices = {
 			CreateSimpleVertex(0.0f, 0.0f, s, 0.5f, 1.0f),
 			CreateSimpleVertex(0.0f, 0.0f, -s, 0.5f, 0.0f),
@@ -205,7 +229,9 @@ int main()
 	{
 		Platform::Window window(1280, 720, "Orbit Scene");
 
-		std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(window.GetHandle()));
+		RHI::DeviceDesc deviceDesc = {};
+		deviceDesc.maxDrawsPerFrame = kObjectCount + 1u;
+		std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(window.GetHandle(), deviceDesc));
 		if(!device)
 		{
 			throw std::runtime_error("Failed to initialize RHI device for orbit lit scene");
@@ -217,9 +243,9 @@ int main()
 		const Math::float3 lightPosition(0.0f, 0.0f, 0.0f);
 		[[maybe_unused]] const uint32_t centerLight = scene.CreatePointLight(
 			lightPosition,
-			8.8f,
+			145.0f,
 			Math::float3(1.0f, 0.88f, 0.62f),
-			9.4f,
+			1400.0f,
 			Math::float3(0.0f, 0.0f, -1.0f),
 			true,
 			0.62f);
@@ -243,14 +269,14 @@ int main()
 		for(uint32_t index = 0; index < kObjectCount; ++index)
 		{
 			OrbitObject object = {};
-			const uint32_t ring = index % 5u;
-			const float heightT = static_cast<float>((index * 7u) % 31u) / 30.0f;
-			object.radius = 0.85f + static_cast<float>(ring) * 0.62f + static_cast<float>((index * 17u) % 29u) * 0.012f;
-			object.angle = static_cast<float>(index) * kGoldenAngle;
-			object.speed = 0.16f + static_cast<float>((index * 11u) % 23u) * 0.006f;
-			object.height = -1.45f + heightT * 2.9f;
-			object.scale = 0.045f + static_cast<float>((index * 5u) % 13u) * 0.0025f;
-			object.spin = 0.25f + static_cast<float>((index * 3u) % 19u) * 0.018f;
+			const float radiusT = std::sqrt(Random01(index, 11u));
+			const float spinDirection = Random01(index, 43u) < 0.5f ? -1.0f : 1.0f;
+			object.radius = Lerp(kMinOrbitRadius, kMaxOrbitRadius, radiusT);
+			object.angle = Random01(index, 17u) * kTwoPi;
+			object.speed = spinDirection * Lerp(0.045f, 0.23f, Random01(index, 29u));
+			object.height = Lerp(-kHalfHeightRange, kHalfHeightRange, Random01(index, 37u));
+			object.scale = Lerp(0.26f, 0.58f, Random01(index, 53u));
+			object.spin = Lerp(0.18f, 0.72f, Random01(index, 61u));
 
 			const Graphics::ObjectLoadResult result = assets.LoadObject(
 				"examples/vulkan_test/triangle.obj",
@@ -268,7 +294,7 @@ int main()
 
 		Graphics::RendererDesc rendererConfig = {};
 		rendererConfig.viewProjectionMatrix = CreateViewProjection();
-		rendererConfig.cameraPosition = Math::float3(5.6f, -6.4f, 4.8f);
+		rendererConfig.cameraPosition = Math::float3(62.0f, -74.0f, 52.0f);
 		rendererConfig.clearColor = Math::float4(0.015f, 0.018f, 0.030f, 1.0f);
 		rendererConfig.ambientColor = Math::float3(0.46f, 0.50f, 0.62f);
 		rendererConfig.ambientIntensity = 0.035f;
@@ -280,8 +306,8 @@ int main()
 		rendererConfig.enableShadows = true;
 		rendererConfig.shadowMap.resolution = 2048;
 		rendererConfig.shadowMap.nearPlane = 0.1f;
-		rendererConfig.shadowMap.farPlane = 10.5f;
-		rendererConfig.shadowMap.spotFovYRadians = 2.35f;
+		rendererConfig.shadowMap.farPlane = 220.0f;
+		rendererConfig.shadowMap.spotFovYRadians = 2.85f;
 		rendererConfig.shadowMap.sceneCenter = Math::float3(0.0f, 0.0f, 0.0f);
 		rendererConfig.autoFitShadowMap = false;
 		rendererConfig.shadowDepthBias = 0.0008f;
