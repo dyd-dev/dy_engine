@@ -1,19 +1,6 @@
 #pragma once
 #include <cstddef> // size_t
-/* Math.h
-	강제 인라인(Force Inline)을 통한 함수 호출 오버헤드 제거를 위해 Header-Only를 유지한다.
-	.cpp로 숨길 경우 LTO(Link Time Optimization)에 의존해야 하며 병목이 심해지며 인라이닝이 실패할 확룔이 높아진다. // .cpp가 없다면 링킹할 일도 없으므로
-*/
-
-/* SIMD
-	과거 Intel 기반 Mac에서는 정상적으로 작동했으나
-	현재 Apple Silicon(M1,M2,M3...)은 ARM64 아키텍처를 사용한다.
-	ARM64 환경에서는 NEON이라는 자체 SIMD 명령어 셋을 사용하며 <arm_neon.h> 헤더를 사용한다.
-
-[[nodiscard]]
-	반환 값을 받지 않거나 사용하지 않을 경우. 인간의 실수 방지
-	비용 : 런타임 오버헤드는 0 (컴파일 단계이기 때문)
-*/
+#include <cmath>
 
 #if defined(__x86_64__) || defined(_M_X64)
 	#define DY_SIMD_X64
@@ -40,6 +27,8 @@ namespace dy::Math
 
 		inline float2() = default;
 		inline float2(float _x, float _y) : x(_x), y(_y) {}
+		[[nodiscard]] inline float& operator[](size_t index) { return data[index]; }
+		[[nodiscard]] inline const float& operator[](size_t index) const { return data[index]; }
 	};
 	struct alignas(16) float3
 	{
@@ -49,12 +38,14 @@ namespace dy::Math
 #if defined(DY_SIMD_X64)
 			__m128 simd;
 #elif defined(DY_SIMD_ARM64)
-			float32x4_t simd;			
+			float32x4_t simd;
 #endif
 		};
 
 		inline float3() = default;
 		inline float3(float _x, float _y, float _z) : x(_x), y(_y), z(_z), pad(0.0f) {}
+		[[nodiscard]] inline float& operator[](size_t index) { return data[index]; }
+		[[nodiscard]] inline const float& operator[](size_t index) const { return data[index]; }
 	};
 	struct alignas(16) float4
 	{
@@ -71,6 +62,8 @@ namespace dy::Math
 
 		inline float4() = default;
 		inline float4(float _x, float _y, float _z, float _w) : x(_x), y(_y), z(_z), w(_w) {}
+		[[nodiscard]] inline float& operator[](size_t index) { return data[index]; }
+		[[nodiscard]] inline const float& operator[](size_t index) const { return data[index]; }
 	};
 
 	struct alignas(16) float4x4
@@ -129,6 +122,143 @@ namespace dy::Math
 			return res;
 		}
 	};
+
+	[[nodiscard]] inline float3 operator+(const float3& lhs, const float3& rhs)
+	{
+		return float3(lhs.x + rhs.x, lhs.y + rhs.y, lhs.z + rhs.z);
+	}
+
+	[[nodiscard]] inline float3 operator-(const float3& lhs, const float3& rhs)
+	{
+		return float3(lhs.x - rhs.x, lhs.y - rhs.y, lhs.z - rhs.z);
+	}
+
+	[[nodiscard]] inline float3 operator*(const float3& value, float scale)
+	{
+		return float3(value.x * scale, value.y * scale, value.z * scale);
+	}
+
+	[[nodiscard]] inline float3 operator*(float scale, const float3& value)
+	{
+		return value * scale;
+	}
+
+	[[nodiscard]] inline float Dot(const float3& lhs, const float3& rhs)
+	{
+		return lhs.x * rhs.x + lhs.y * rhs.y + lhs.z * rhs.z;
+	}
+
+	[[nodiscard]] inline float3 Cross(const float3& lhs, const float3& rhs)
+	{
+		return float3(
+			lhs.y * rhs.z - lhs.z * rhs.y,
+			lhs.z * rhs.x - lhs.x * rhs.z,
+			lhs.x * rhs.y - lhs.y * rhs.x);
+	}
+
+	[[nodiscard]] inline float LengthSquared(const float3& value)
+	{
+		return Dot(value, value);
+	}
+
+	[[nodiscard]] inline float Length(const float3& value)
+	{
+		return std::sqrt(LengthSquared(value));
+	}
+
+	[[nodiscard]] inline float3 NormalizeOr(const float3& value, const float3& fallback)
+	{
+		const float lengthSquared = LengthSquared(value);
+		if(lengthSquared <= 1.0e-8f) return fallback;
+		return value * (1.0f / std::sqrt(lengthSquared));
+	}
+
+	[[nodiscard]] inline float3 Normalize(const float3& value)
+	{
+		return NormalizeOr(value, float3(0.0f, 0.0f, 0.0f));
+	}
+
+	[[nodiscard]] inline float4x4 MultiplyColumnMajor(const float4x4& lhs, const float4x4& rhs)
+	{
+		float4x4 result = {};
+		for(int column = 0; column < 4; ++column)
+		{
+			for(int row = 0; row < 4; ++row)
+			{
+				float value = 0.0f;
+				for(int k = 0; k < 4; ++k)
+				{
+					value += lhs.m[k * 4 + row] * rhs.m[column * 4 + k];
+				}
+				result.m[column * 4 + row] = value;
+			}
+		}
+		return result;
+	}
+
+	[[nodiscard]] inline float4x4 LookAtRH(const float3& eye, const float3& target, const float3& up)
+	{
+		const float3 forward = NormalizeOr(target - eye, float3(0.0f, 0.0f, -1.0f));
+		const float3 right = NormalizeOr(Cross(forward, up), float3(1.0f, 0.0f, 0.0f));
+		const float3 cameraUp = Cross(right, forward);
+
+		float4x4 view = float4x4::Identity();
+		view.m[0] = right.x;
+		view.m[4] = right.y;
+		view.m[8] = right.z;
+		view.m[12] = -Dot(right, eye);
+		view.m[1] = cameraUp.x;
+		view.m[5] = cameraUp.y;
+		view.m[9] = cameraUp.z;
+		view.m[13] = -Dot(cameraUp, eye);
+		view.m[2] = -forward.x;
+		view.m[6] = -forward.y;
+		view.m[10] = -forward.z;
+		view.m[14] = Dot(forward, eye);
+		return view;
+	}
+
+	[[nodiscard]] inline float4x4 LookAtLH(const float3& eye, const float3& target, const float3& up)
+	{
+		const float3 forward = NormalizeOr(target - eye, float3(0.0f, 0.0f, 1.0f));
+		const float3 right = NormalizeOr(Cross(up, forward), float3(1.0f, 0.0f, 0.0f));
+		const float3 cameraUp = Cross(forward, right);
+
+		float4x4 view = float4x4::Identity();
+		view.m[0] = right.x;
+		view.m[4] = right.y;
+		view.m[8] = right.z;
+		view.m[12] = -Dot(right, eye);
+		view.m[1] = cameraUp.x;
+		view.m[5] = cameraUp.y;
+		view.m[9] = cameraUp.z;
+		view.m[13] = -Dot(cameraUp, eye);
+		view.m[2] = forward.x;
+		view.m[6] = forward.y;
+		view.m[10] = forward.z;
+		view.m[14] = -Dot(forward, eye);
+		return view;
+	}
+
+	[[nodiscard]] inline float4x4 OrthographicRH_ZO(float width, float height, float nearPlane, float farPlane, bool flipY = true)
+	{
+		float4x4 projection = float4x4::Identity();
+		projection.m[0] = 2.0f / width;
+		projection.m[5] = (flipY ? -2.0f : 2.0f) / height;
+		projection.m[10] = 1.0f / (nearPlane - farPlane);
+		projection.m[14] = nearPlane / (nearPlane - farPlane);
+		return projection;
+	}
+
+	[[nodiscard]] inline float4x4 OrthographicLH_ZO(float width, float height, float nearPlane, float farPlane)
+	{
+		float4x4 projection = float4x4::Identity();
+		projection.m[0] = 2.0f / width;
+		projection.m[5] = 2.0f / height;
+		projection.m[10] = 1.0f / (farPlane - nearPlane);
+		projection.m[14] = -nearPlane / (farPlane - nearPlane);
+		return projection;
+	}
 
 	inline void MultiplyMatricesBatch(const float4x4* lhs, const float4x4* rhs, float4x4* out, size_t count)
 	{

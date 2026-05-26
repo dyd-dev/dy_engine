@@ -2,21 +2,34 @@
 #include <cstdint>
 #include <vector>
 
-#include "RenderTypes.h"
+#include "RenderContext.h"
+#include "RendererResources.h"
+#include "Scene.h"
 #include "RHI/Enums.h"
 #include "RHI/IPipelineState.h"
 
 namespace dy::RHI
 {
 	class IBuffer;
+	class ICommandList;
 	class IDevice;
+	class ITexture;
 }
 
 namespace dy::Graphics
 {
+	enum class GeometrySubmissionMode
+	{
+		// Portable default: bind vertex/index buffers through the graphics pipeline input stage.
+		IndexedInputAssembler,
+		// Reserved for ResourceTable/bindless-capable renderer paths; not implemented by this renderer yet.
+		BindlessManualFetch
+	};
+
 	struct RendererConfig
 	{
 		Math::float4 clearColor = Math::float4(0.08f, 0.10f, 0.14f, 1.0f);
+		GeometrySubmissionMode geometryMode = GeometrySubmissionMode::IndexedInputAssembler;
 	};
 
 	class Renderer
@@ -81,30 +94,24 @@ namespace dy::Graphics
 			bool indexed = false;
 		};
 
-		struct GpuMesh
-		{
-			RHI::IBuffer* vertexBuffer = nullptr;
-			RHI::IBuffer* indexBuffer = nullptr;
-			uint32_t vertexStride = sizeof(Vertex);
-			uint32_t vertexOffset = 0;
-			uint32_t indexOffset = 0;
-			uint32_t vertexByteSize = 0;
-			uint32_t indexByteSize = 0;
-			uint32_t vertexCount = 0;
-			uint32_t indexCount = 0;
-		};
-
 		bool BuildPipelineStates(RHI::IDevice* device, const RHI::GraphicsPipelineDesc& mainPipeline);
 		static bool UploadBuffer(RHI::IBuffer* buffer, const void* data, uint32_t size);
 		void ReleaseGpuMeshes(RHI::IDevice* device);
 		void EnsureGpuMeshes(const Scene& scene, RHI::IDevice* device);
+		void ReleaseGpuTextures(RHI::IDevice* device);
+		void EnsureGpuTextures(const Scene& scene, RHI::IDevice* device);
+		void EnsureGpuMaterials(const Scene& scene);
 		void BuildRenderItems(const Scene& scene);
 		void BuildDrawBatches();
-		void RecordScenePass(RHI::IDevice* device);
+		MaterialDrawConstants BuildMaterialConstants(const Scene& scene, const DrawBatch& batch) const;
+
+		RHI::ICommandList* BeginRenderPass(RHI::IDevice* device);
+		void RecordIAPass(const Scene& scene, RHI::IDevice* device);
+		void RecordBindlessPass(RHI::IDevice* device);
 
 		RendererConfig m_config = {};
 		RHI::IPipelineState* m_mainPipeline = nullptr;
-		std::vector<GpuMesh> m_gpuMeshes;
+		RendererResources m_resources;
 		RenderItemSoA m_renderItems;
 		std::vector<uint32_t> m_renderOrder;
 		std::vector<DrawBatch> m_drawBatches;
