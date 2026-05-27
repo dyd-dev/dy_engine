@@ -1,77 +1,97 @@
 #pragma once
-#include <cstdint>
+#include <string>
+#include <utility>
 #include <vector>
 
-#include "Core/Image.h"
-#include "Core/Types.h"
+#include "Material.h"
+#include "Mesh.h"
+#include "Texture.h"
 
 namespace dy::Graphics
 {
-	class Scene
+	struct alignas(16) Transform
 	{
-	public:
-		[[nodiscard]] TextureID CreateTexture(const Core::Image& image)
+		Math::float4x4 worldMatrix;
+	};
+
+	struct alignas(16) Camera
+	{
+		Math::float4x4 viewMatrix;
+		Math::float4x4 projectionMatrix;
+		Math::float3 worldPosition;
+	};
+
+	struct ModelData
+	{
+		std::vector<MeshData> meshes;
+		std::vector<MaterialData> materials;
+	};
+
+	struct Scene
+	{
+		std::vector<Transform> m_entityTransforms;
+		std::vector<MeshID> m_entityMeshes;
+		std::vector<MaterialID> m_entityMaterials;
+
+		std::vector<MeshData> m_meshes;
+		std::vector<MaterialData> m_materials;
+		std::vector<TextureData> m_textures;
+
+		[[nodiscard]] MeshID AddMesh(const MeshData& mesh)
 		{
-			m_textureImages.push_back(image);
-			return static_cast<TextureID>(m_textureImages.size() - 1u);
-		}
-		[[nodiscard]] MaterialID CreateMaterial(const Material& material)
-		{
-			m_materials.push_back(material);
-			return static_cast<MaterialID>(m_materials.size() - 1u);
-		}
-		[[nodiscard]] MeshID CreateMesh(const Mesh& mesh)
-		{
+			const MeshID id = static_cast<MeshID>(m_meshes.size());
 			m_meshes.push_back(mesh);
-			return static_cast<MeshID>(m_meshes.size() - 1u);
+			return id;
 		}
-		[[nodiscard]] EntityID CreateEntity(MeshID mesh, MaterialID material, const Math::float4x4& worldMatrix = Math::float4x4::Identity())
+
+		[[nodiscard]] MeshID AddMesh(MeshData&& mesh)
 		{
-			const EntityID entity = static_cast<EntityID>(m_entityMeshes.size());
+			const MeshID id = static_cast<MeshID>(m_meshes.size());
+			m_meshes.push_back(std::move(mesh));
+			return id;
+		}
+
+		[[nodiscard]] MaterialID AddMaterial(const MaterialData& material)
+		{
+			const MaterialID id = static_cast<MaterialID>(m_materials.size());
+			m_materials.push_back(material);
+			return id;
+		}
+
+		[[nodiscard]] MaterialID AddMaterial(const Math::float4& baseColor, TextureID baseColorTex = TextureID::Invalid, float metallic = 0.0f, float roughness = 1.0f)
+		{
+			MaterialData material = {};
+			material.baseColor = baseColor;
+			material.baseColorTex = baseColorTex;
+			material.metallic = metallic;
+			material.roughness = roughness;
+			return AddMaterial(material);
+		}
+
+		[[nodiscard]] TextureID AddTexture(const TextureData& texture)
+		{
+			const TextureID id = static_cast<TextureID>(m_textures.size());
+			m_textures.push_back(texture);
+			return id;
+		}
+
+		[[nodiscard]] TextureID AddTexture(std::string sourcePath)
+		{
+			TextureData texture = {};
+			texture.sourcePath = std::move(sourcePath);
+			return AddTexture(texture);
+		}
+
+		EntityID CreateEntity(MeshID mesh, MaterialID material, const Math::float4x4& worldMatrix = Math::float4x4::Identity())
+		{
+			if(!IsValid(mesh) || !IsValid(material)) return EntityID::Invalid;
+			if(ToIndex(mesh) >= m_meshes.size() || ToIndex(material) >= m_materials.size()) return EntityID::Invalid;
+
+			const EntityID id = static_cast<EntityID>(m_entityMeshes.size());
 			m_entityMeshes.push_back(mesh);
 			m_entityMaterials.push_back(material);
 			m_entityTransforms.push_back(Transform{ worldMatrix });
-			return entity;
+			return id;
 		}
-
-		[[nodiscard]] uint32_t GetTextureCount() const { return static_cast<uint32_t>(m_textureImages.size()); }
-		[[nodiscard]] uint32_t GetEntityCount() const { return static_cast<uint32_t>(m_entityMeshes.size()); }
-
-		[[nodiscard]] const Core::Image& GetTexture(TextureID textureId) const
-		{
-			return m_textureImages[ToIndex(textureId)];
-		}
-		[[nodiscard]] const Material& GetMaterial(MaterialID materialId) const
-		{
-			return m_materials[ToIndex(materialId)];
-		}
-		[[nodiscard]] const Mesh& GetMesh(MeshID meshId) const
-		{
-			return m_meshes[ToIndex(meshId)];
-		}
-		[[nodiscard]] MeshID GetEntityMesh(EntityID entityId) const
-		{
-			return m_entityMeshes[ToIndex(entityId)];
-		}
-		[[nodiscard]] MaterialID GetEntityMaterial(EntityID entityId) const
-		{
-			return m_entityMaterials[ToIndex(entityId)];
-		}
-		[[nodiscard]] const Transform& GetTransform(EntityID entityId) const
-		{
-			return m_entityTransforms[ToIndex(entityId)];
-		}
-		[[nodiscard]] Transform& GetTransform(EntityID entityId)
-		{
-			return m_entityTransforms[ToIndex(entityId)];
-		}
-
-	private:
-		std::vector<Core::Image> m_textureImages;
-		std::vector<Material> m_materials;
-		std::vector<Mesh> m_meshes;
-		std::vector<MeshID> m_entityMeshes;
-		std::vector<MaterialID> m_entityMaterials;
-		std::vector<Transform> m_entityTransforms;
 	};
 }

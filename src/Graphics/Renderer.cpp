@@ -1,80 +1,44 @@
-#include "Graphics/Renderer.h"
+#include "Renderer.h"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
-#include <fstream>
-#include <stdexcept>
 
-#include "Graphics/Scene.h"
+#include "RHI/IBuffer.h"
 #include "RHI/ICommandList.h"
 #include "RHI/IDevice.h"
-#include "RHI/IPipelineState.h"
 #include "RHI/ITexture.h"
+
+#define STB_IMAGE_STATIC
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
 
 using namespace dy;
 using namespace dy::Graphics;
 
-namespace
-{
-	[[nodiscard]] std::string ReadTextFile(const char* filepath)
-	{
-		std::ifstream file(filepath, std::ios::binary);
-		if(!file.is_open())
-		{
-			throw std::runtime_error(std::string("Failed to open shader file: ") + filepath);
-		}
-
-		file.seekg(0, std::ios::end);
-		const std::streamoff size = file.tellg();
-		file.seekg(0, std::ios::beg);
-
-		std::string content(static_cast<size_t>(size), '\0');
-		if(size > 0)
-		{
-			file.read(content.data(), size);
-		}
-
-		return content;
-	}
-}
-
-bool Renderer::Initialize(RHI::IDevice* device, const RendererConfig& config)
+bool Renderer::Initialize(RHI::IDevice* device, const RHI::GraphicsPipelineDesc& mainPipeline, const RendererConfig& config)
 {
 	if(device == nullptr) return false;
-	if(config.vertexShaderPath == nullptr || config.pixelShaderPath == nullptr) return false;
 
 	m_config = config;
-	const std::string vertexShaderSource = ReadTextFile(config.vertexShaderPath);
-	const std::string pixelShaderSource = ReadTextFile(config.pixelShaderPath);
-	m_vertexShaderSource.assign(vertexShaderSource.begin(), vertexShaderSource.end());
-	m_pixelShaderSource.assign(pixelShaderSource.begin(), pixelShaderSource.end());
-	m_vertexShaderSource.push_back('\0');
-	m_pixelShaderSource.push_back('\0');
-	BuildPipelineStates(device);
-	return m_texturedTrianglePipeline != nullptr;
+	return BuildPipelineStates(device, mainPipeline);
 }
 
 void Renderer::Shutdown(RHI::IDevice* device)
 {
 	if(device == nullptr) return;
 
-	for(SceneTextureState& textureState : m_textureStates)
-	{
-		if(textureState.texture != nullptr)
-		{
-			device->DestroyTexture(textureState.texture);
-			textureState.texture = nullptr;
-		}
-	}
+	m_drawBatches.clear();
+	m_renderOrder.clear();
+	m_renderItems.Clear();
+	ReleaseGpuMeshes(device);
+	ReleaseGpuTextures(device);
+	m_resources.materials.clear();
 
-	m_textureStates.clear();
-	m_vertexShaderSource.clear();
-	m_pixelShaderSource.clear();
-
-	if(m_texturedTrianglePipeline != nullptr)
+	if(m_mainPipeline != nullptr)
 	{
-		device->DestroyPipelineState(m_texturedTrianglePipeline);
-		m_texturedTrianglePipeline = nullptr;
+		device->DestroyPipelineState(m_mainPipeline);
+		m_mainPipeline = nullptr;
 	}
 }
 
@@ -82,97 +46,379 @@ void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 {
 	if(device == nullptr) return;
 
-	PrepareSceneResources(scene, device);
-	RecordScenePass(scene, device);
-}
+	EnsureGpuMeshes(scene, device);
+	EnsureGpuTextures(scene, device);
+	EnsureGpuMaterials(scene);
+	BuildRenderItems(scene);
+	BuildDrawBatches();
 
-void Renderer::BuildPipelineStates(RHI::IDevice* device)
-{
-	RHI::GraphicsPipelineDesc desc = {};
-	desc.vertexShader = m_vertexShaderSource.data();
-	desc.vertexShaderSize = m_vertexShaderSource.empty() ? 0u : m_vertexShaderSource.size() - 1u;
-	desc.pixelShader = m_pixelShaderSource.data();
-	desc.pixelShaderSize = m_pixelShaderSource.empty() ? 0u : m_pixelShaderSource.size() - 1u;
-	desc.renderTargetFormat = m_config.renderTargetFormat;
-	desc.depthStencilFormat = m_config.depthStencilFormat;
-	desc.depthEnable = false;
-	desc.wireframe = false;
-
-	m_texturedTrianglePipeline = device->CreateGraphicsPipeline(desc);
-}
-
-void Renderer::PrepareSceneResources(const Scene& scene, RHI::IDevice* device)
-{
-	const uint32_t textureCount = scene.GetTextureCount();
-	EnsureTextureStateCapacity(textureCount);
-
-	for(uint32_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
+	switch(m_config.geometryMode)
 	{
-		SceneTextureState& textureState = m_textureStates[textureIndex];
-		const Core::Image& image = scene.GetTexture(static_cast<TextureID>(textureIndex));
+	case GeometrySubmissionMode::IndexedInputAssembler:
+		RecordIAPass(scene, device);
+	break;
+	case GeometrySubmissionMode::BindlessManualFetch:
+		RecordBindlessPass(device);
+	break;
+	}
+}
 
-		if(!image.IsValid()) continue;
+bool Renderer::BuildPipelineStates(RHI::IDevice* device, const RHI::GraphicsPipelineDesc& mainPipeline)
+{
+	if(device == nullptr) return false;
+	if(mainPipeline.vertexShader == nullptr || mainPipeline.vertexShaderSize == 0u) return false;
+	if(mainPipeline.pixelShader == nullptr || mainPipeline.pixelShaderSize == 0u) return false;
 
-		if(textureState.texture == nullptr)
+	m_mainPipeline = device->CreateGraphicsPipeline(mainPipeline);
+	return m_mainPipeline != nullptr;
+}
+
+bool Renderer::UploadBuffer(RHI::IBuffer* buffer, const void* data, uint32_t size)
+{
+	if(buffer == nullptr || data == nullptr || size == 0u) return false;
+
+	void* mapped = buffer->Map(0, size);
+	if(mapped == nullptr) return false;
+
+	std::memcpy(mapped, data, size);
+	buffer->Unmap();
+	return true;
+}
+
+void Renderer::ReleaseGpuMeshes(RHI::IDevice* device)
+{
+	if(device == nullptr) return;
+
+	for(GpuMesh& mesh : m_resources.meshes)
+	{
+		if(mesh.vertexBuffer != nullptr)
 		{
-			RHI::TextureDesc textureDesc = {};
-			textureDesc.width = image.GetWidth();
-			textureDesc.height = image.GetHeight();
-			textureDesc.depthOrArraySize = 1;
-			textureDesc.mipLevels = 1;
-			textureDesc.format = RHI::Format::R8G8B8A8_UNORM;
-			textureDesc.usage = RHI::TextureUsage::ShaderResource;
-			textureDesc.initialData = image.GetPixels().data();
-			textureDesc.initialDataRowPitch = image.GetRowPitch();
+			device->DestroyBuffer(mesh.vertexBuffer);
+			mesh.vertexBuffer = nullptr;
+		}
 
-			textureState.texture = device->CreateTexture(textureDesc);
-			device->UpdateTexture(textureState.texture, image.GetPixels().data(), image.GetRowPitch());
-			textureState.descriptorIndex = device->AllocateDescriptorSlot();
-			device->UpdateDescriptorSlot(textureState.descriptorIndex, textureState.texture);
+		if(mesh.indexBuffer != nullptr)
+		{
+			device->DestroyBuffer(mesh.indexBuffer);
+			mesh.indexBuffer = nullptr;
+		}
+
+		mesh.vertexCount = 0;
+		mesh.indexCount = 0;
+		mesh.vertexByteSize = 0;
+		mesh.indexByteSize = 0;
+		mesh.vertexStride = sizeof(Vertex);
+		mesh.vertexOffset = 0;
+		mesh.indexOffset = 0;
+	}
+
+	m_resources.meshes.clear();
+}
+
+void Renderer::ReleaseGpuTextures(RHI::IDevice* device)
+{
+	if(device == nullptr) return;
+
+	for(GpuTexture& texture : m_resources.textures)
+	{
+		if(texture.texture != nullptr)
+		{
+			device->DestroyTexture(texture.texture);
+			texture.texture = nullptr;
+		}
+
+		texture.width = 0;
+		texture.height = 0;
+	}
+
+	m_resources.textures.clear();
+}
+
+void Renderer::EnsureGpuTextures(const Scene& scene, RHI::IDevice* device)
+{
+	if(device == nullptr) return;
+
+	if(m_resources.textures.size() < scene.m_textures.size())
+	{
+		m_resources.textures.resize(scene.m_textures.size());
+	}
+
+	for(uint32_t textureIndex = 0; textureIndex < static_cast<uint32_t>(scene.m_textures.size()); ++textureIndex)
+	{
+		const TextureData& cpuTexture = scene.m_textures[textureIndex];
+		GpuTexture& gpuTexture = m_resources.textures[textureIndex];
+		if(gpuTexture.texture != nullptr || cpuTexture.sourcePath.empty()) continue;
+
+		int width = 0;
+		int height = 0;
+		int channels = 0;
+		stbi_uc* pixels = stbi_load(cpuTexture.sourcePath.c_str(), &width, &height, &channels, 4);
+		if(pixels == nullptr || width <= 0 || height <= 0)
+		{
+			if(pixels != nullptr) stbi_image_free(pixels);
+			continue;
+		}
+
+		RHI::TextureDesc desc = {};
+		desc.width = static_cast<uint32_t>(width);
+		desc.height = static_cast<uint32_t>(height);
+		desc.format = RHI::Format::R8G8B8A8_UNORM;
+		desc.usage = RHI::TextureUsage::ShaderResource;
+		gpuTexture.texture = device->CreateTexture(desc);
+		if(gpuTexture.texture != nullptr)
+		{
+			device->UpdateTexture(gpuTexture.texture, pixels, static_cast<uint32_t>(width * 4));
+			gpuTexture.width = desc.width;
+			gpuTexture.height = desc.height;
+		}
+
+		stbi_image_free(pixels);
+	}
+}
+
+void Renderer::EnsureGpuMeshes(const Scene& scene, RHI::IDevice* device)
+{
+	if(device == nullptr) return;
+
+	if(m_resources.meshes.size() < scene.m_meshes.size())
+	{
+		m_resources.meshes.resize(scene.m_meshes.size());
+	}
+
+	for(uint32_t meshIndex = 0; meshIndex < static_cast<uint32_t>(scene.m_meshes.size()); ++meshIndex)
+	{
+		const MeshData& cpuMesh = scene.m_meshes[meshIndex];
+		GpuMesh& gpuMesh = m_resources.meshes[meshIndex];
+
+		const uint32_t vertexCount = static_cast<uint32_t>(cpuMesh.vertices.size());
+		const uint32_t indexCount = static_cast<uint32_t>(cpuMesh.indices.size());
+		const uint32_t vertexByteSize = vertexCount * static_cast<uint32_t>(sizeof(Vertex));
+		const uint32_t indexByteSize = indexCount * static_cast<uint32_t>(sizeof(uint32_t));
+		if(vertexCount == 0u) continue;
+
+		if(gpuMesh.vertexBuffer != nullptr && gpuMesh.vertexByteSize != vertexByteSize)
+		{
+			device->DestroyBuffer(gpuMesh.vertexBuffer);
+			gpuMesh.vertexBuffer = nullptr;
+			gpuMesh.vertexCount = 0;
+			gpuMesh.vertexByteSize = 0;
+		}
+
+		if(gpuMesh.vertexBuffer == nullptr)
+		{
+			RHI::BufferDesc vertexDesc = {};
+			vertexDesc.size = vertexByteSize;
+			vertexDesc.stride = static_cast<uint32_t>(sizeof(Vertex));
+			vertexDesc.usage = RHI::BufferUsage::Vertex;
+			gpuMesh.vertexBuffer = device->CreateBuffer(vertexDesc);
+			if(UploadBuffer(gpuMesh.vertexBuffer, cpuMesh.vertices.data(), vertexDesc.size))
+			{
+				gpuMesh.vertexCount = vertexCount;
+				gpuMesh.vertexByteSize = vertexDesc.size;
+				gpuMesh.vertexStride = vertexDesc.stride;
+				gpuMesh.vertexOffset = 0;
+			}
+		}
+
+		if(gpuMesh.indexBuffer != nullptr && gpuMesh.indexByteSize != indexByteSize)
+		{
+			device->DestroyBuffer(gpuMesh.indexBuffer);
+			gpuMesh.indexBuffer = nullptr;
+			gpuMesh.indexCount = 0;
+			gpuMesh.indexByteSize = 0;
+		}
+
+		if(indexCount > 0u && gpuMesh.indexBuffer == nullptr)
+		{
+			RHI::BufferDesc indexDesc = {};
+			indexDesc.size = indexByteSize;
+			indexDesc.stride = static_cast<uint32_t>(sizeof(uint32_t));
+			indexDesc.usage = RHI::BufferUsage::Index;
+			gpuMesh.indexBuffer = device->CreateBuffer(indexDesc);
+			if(UploadBuffer(gpuMesh.indexBuffer, cpuMesh.indices.data(), indexDesc.size))
+			{
+				gpuMesh.indexCount = indexCount;
+				gpuMesh.indexByteSize = indexDesc.size;
+				gpuMesh.indexOffset = 0;
+			}
 		}
 	}
 }
 
-void Renderer::RecordScenePass(const Scene& scene, RHI::IDevice* device)
+void Renderer::EnsureGpuMaterials(const Scene& scene)
+{
+	if(m_resources.materials.size() < scene.m_materials.size())
+	{
+		m_resources.materials.resize(scene.m_materials.size());
+	}
+
+	for(uint32_t materialIndex = 0; materialIndex < static_cast<uint32_t>(scene.m_materials.size()); ++materialIndex)
+	{
+		const MaterialData& cpuMaterial = scene.m_materials[materialIndex];
+		GpuMaterial& gpuMaterial = m_resources.materials[materialIndex];
+		gpuMaterial.constants.baseColor = cpuMaterial.baseColor;
+		gpuMaterial.constants.baseColorTextureIndex = IsValid(cpuMaterial.baseColorTex) ? ToIndex(cpuMaterial.baseColorTex) : ToIndex(TextureID::Invalid);
+		gpuMaterial.constants.metallic = cpuMaterial.metallic;
+		gpuMaterial.constants.roughness = cpuMaterial.roughness;
+		gpuMaterial.constants.materialFlags = IsValid(cpuMaterial.baseColorTex) ? 1u : 0u;
+	}
+}
+
+void Renderer::BuildRenderItems(const Scene& scene)
+{
+	m_renderItems.Clear();
+	m_renderItems.Reserve(static_cast<uint32_t>(scene.m_entityMeshes.size()));
+	m_renderOrder.clear();
+
+	const uint32_t entityCount = static_cast<uint32_t>(scene.m_entityMeshes.size());
+	for(uint32_t entityIndex = 0; entityIndex < entityCount; ++entityIndex)
+	{
+		if(entityIndex >= scene.m_entityMaterials.size() || entityIndex >= scene.m_entityTransforms.size()) continue;
+
+		const MeshID meshId = scene.m_entityMeshes[entityIndex];
+		const MaterialID materialId = scene.m_entityMaterials[entityIndex];
+		if(!IsValid(meshId) || !IsValid(materialId)) continue;
+
+		const uint32_t meshIndex = ToIndex(meshId);
+		const uint32_t materialIndex = ToIndex(materialId);
+		if(meshIndex >= scene.m_meshes.size() || materialIndex >= scene.m_materials.size()) continue;
+
+		const MeshData& mesh = scene.m_meshes[meshIndex];
+		const uint32_t vertexCount = static_cast<uint32_t>(mesh.vertices.size());
+		const uint32_t indexCount = static_cast<uint32_t>(mesh.indices.size());
+		if(vertexCount == 0u) continue;
+
+		m_renderItems.Push(meshIndex, materialIndex, entityIndex, vertexCount, indexCount);
+	}
+
+	const uint32_t itemCount = m_renderItems.Size();
+	m_renderOrder.resize(itemCount);
+	for(uint32_t itemIndex = 0; itemIndex < itemCount; ++itemIndex)
+	{
+		m_renderOrder[itemIndex] = itemIndex;
+	}
+
+	std::sort(m_renderOrder.begin(), m_renderOrder.end(), [this](uint32_t lhs, uint32_t rhs) {
+		const uint32_t lhsMesh = m_renderItems.meshIndices[lhs];
+		const uint32_t rhsMesh = m_renderItems.meshIndices[rhs];
+		if(lhsMesh != rhsMesh) return lhsMesh < rhsMesh;
+
+		const uint32_t lhsMaterial = m_renderItems.materialIndices[lhs];
+		const uint32_t rhsMaterial = m_renderItems.materialIndices[rhs];
+		if(lhsMaterial != rhsMaterial) return lhsMaterial < rhsMaterial;
+
+		const uint8_t lhsIndexed = m_renderItems.indexedFlags[lhs];
+		const uint8_t rhsIndexed = m_renderItems.indexedFlags[rhs];
+		if(lhsIndexed != rhsIndexed) return lhsIndexed > rhsIndexed;
+
+		return m_renderItems.transformIndices[lhs] < m_renderItems.transformIndices[rhs];
+	});
+}
+
+void Renderer::BuildDrawBatches()
+{
+	m_drawBatches.clear();
+	if(m_renderOrder.empty()) return;
+
+	uint32_t firstItem = 0;
+	while(firstItem < static_cast<uint32_t>(m_renderOrder.size()))
+	{
+		const uint32_t firstIndex = m_renderOrder[firstItem];
+		const uint32_t firstMesh = m_renderItems.meshIndices[firstIndex];
+		const uint32_t firstMaterial = m_renderItems.materialIndices[firstIndex];
+		const uint8_t firstIndexed = m_renderItems.indexedFlags[firstIndex];
+		uint32_t itemCount = 1;
+
+		while(firstItem + itemCount < static_cast<uint32_t>(m_renderOrder.size()))
+		{
+			const uint32_t currentIndex = m_renderOrder[firstItem + itemCount];
+			if(m_renderItems.meshIndices[currentIndex] != firstMesh
+				|| m_renderItems.materialIndices[currentIndex] != firstMaterial
+				|| m_renderItems.indexedFlags[currentIndex] != firstIndexed)
+			{
+				break;
+			}
+
+			++itemCount;
+		}
+
+		DrawBatch batch = {};
+		batch.meshIndex = firstMesh;
+		batch.materialIndex = firstMaterial;
+		batch.firstItem = firstItem;
+		batch.itemCount = itemCount;
+		batch.indexed = firstIndexed != 0u;
+		m_drawBatches.push_back(batch);
+
+		firstItem += itemCount;
+	}
+}
+
+MaterialDrawConstants Renderer::BuildMaterialConstants(const Scene& scene, const DrawBatch& batch) const
+{
+	MaterialDrawConstants constants = {};
+	if(batch.materialIndex < m_resources.materials.size())
+	{
+		constants = m_resources.materials[batch.materialIndex].constants;
+	}
+
+	if(batch.firstItem < m_renderOrder.size())
+	{
+		const uint32_t itemIndex = m_renderOrder[batch.firstItem];
+		if(itemIndex < m_renderItems.transformIndices.size())
+		{
+			const uint32_t transformIndex = m_renderItems.transformIndices[itemIndex];
+			if(transformIndex < scene.m_entityTransforms.size())
+			{
+				constants.worldMatrix = scene.m_entityTransforms[transformIndex].worldMatrix;
+			}
+		}
+	}
+
+	return constants;
+}
+
+RHI::ICommandList* Renderer::BeginRenderPass(RHI::IDevice* device)
 {
 	RHI::ICommandList* commandList = device->AcquireCommandList();
 	RHI::ITexture* backBuffer = device->GetBackBuffer();
-	if(commandList == nullptr || backBuffer == nullptr || m_texturedTrianglePipeline == nullptr) return;
+	if(commandList == nullptr || backBuffer == nullptr) return nullptr;
 
 	commandList->SetRenderTargets(1, &backBuffer, nullptr);
 	commandList->ClearColor(backBuffer, m_config.clearColor.x, m_config.clearColor.y, m_config.clearColor.z, m_config.clearColor.w);
-	commandList->BindGraphicsPipeline(m_texturedTrianglePipeline);
-	commandList->BindGlobalDescriptorHeap();
+	commandList->BindGraphicsPipeline(m_mainPipeline);
+	
+	return commandList;
+}
 
-	const uint32_t entityCount = scene.GetEntityCount();
-	for(uint32_t entityIndex = 0; entityIndex < entityCount; ++entityIndex)
+void Renderer::RecordIAPass(const Scene& scene, RHI::IDevice* device)
+{
+	RHI::ICommandList* commandList = BeginRenderPass(device);
+	if(commandList == nullptr) return;
+
+	for(const DrawBatch& batch : m_drawBatches)
 	{
-		const EntityID entity = static_cast<EntityID>(entityIndex);
-		const MeshID meshId = scene.GetEntityMesh(entity);
-		const MaterialID materialId = scene.GetEntityMaterial(entity);
-		if(!IsValid(meshId) || !IsValid(materialId)) continue;
+		if(batch.meshIndex >= m_resources.meshes.size()) continue;
 
-		const Mesh& mesh = scene.GetMesh(meshId);
-		const uint32_t vertexCount = mesh.indices.empty()
-			? static_cast<uint32_t>(mesh.vertices.size())
-			: static_cast<uint32_t>(mesh.indices.size());
-		if(vertexCount == 0u) continue;
+		const GpuMesh& mesh = m_resources.meshes[batch.meshIndex];
+		if(mesh.vertexBuffer == nullptr) continue;
 
-		const Material& material = scene.GetMaterial(materialId);
-		const Transform& transform = scene.GetTransform(entity);
-
-		DrawConstants drawConstants = {};
-		drawConstants.worldMatrix = transform.worldMatrix;
-		drawConstants.baseColor = material.baseColor;
-
-		if(IsValid(material.baseColorTexture))
+		const MaterialDrawConstants constants = BuildMaterialConstants(scene, batch);
+		commandList->BindIAVertexBuffer(mesh.vertexBuffer, mesh.vertexStride, mesh.vertexOffset);
+		commandList->SetPushConstants(static_cast<uint32_t>(sizeof(constants)), &constants);
+		if(batch.indexed && mesh.indexBuffer != nullptr)
 		{
-			const SceneTextureState& textureState = m_textureStates[ToIndex(material.baseColorTexture)];
-			drawConstants.baseColorTextureIndex = textureState.descriptorIndex;
+			commandList->BindIAIndexBuffer(mesh.indexBuffer, RHI::Format::R32_UINT, mesh.indexOffset);
 		}
 
-		commandList->SetPushConstants(sizeof(DrawConstants), &drawConstants);
-		commandList->DrawInstanced(vertexCount, 1, 0, 0);
+		if(batch.indexed && mesh.indexBuffer != nullptr)
+		{
+			commandList->DrawIndexedInstanced(mesh.indexCount, batch.itemCount, 0, 0, 0);
+		}
+		else
+		{
+			commandList->DrawInstanced(mesh.vertexCount, batch.itemCount, 0, 0);
+		}
 	}
 
 	commandList->Close();
@@ -181,10 +427,12 @@ void Renderer::RecordScenePass(const Scene& scene, RHI::IDevice* device)
 	device->Submit(commandLists.data(), static_cast<uint32_t>(commandLists.size()));
 }
 
-void Renderer::EnsureTextureStateCapacity(std::size_t textureCount)
+void Renderer::RecordBindlessPass(RHI::IDevice* device)
 {
-	if(m_textureStates.size() < textureCount)
-	{
-		m_textureStates.resize(textureCount);
-	}
+	RHI::ICommandList* commandList = BeginRenderPass(device);
+	if(commandList == nullptr) return;
+
+	commandList->Close();
+	std::array<RHI::ICommandList*, 1> commandLists = { commandList };
+	device->Submit(commandLists.data(), static_cast<uint32_t>(commandLists.size()));
 }

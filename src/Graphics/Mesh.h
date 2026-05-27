@@ -1,26 +1,32 @@
 #pragma once
-#include "Math/Math.h"
+#include <cstdint>
 #include <vector>
-#include <string>
+
+#include "Math/Math.h"
+#include "Types.h"
 
 namespace dy::Graphics
 {
 	struct Vertex
 	{
-		dy::Math::float3 position;
-		dy::Math::float3 normal;
-		dy::Math::float2 uv;
+		Math::float3 position;
+		Math::float3 normal;
+		Math::float2 uv;
+	};
+
+	struct MeshSubset
+	{
+		uint32_t firstVertex = 0;
+		uint32_t vertexCount = 0;
+		uint32_t firstIndex = 0;
+		uint32_t indexCount = 0;
+		MaterialID material = MaterialID::Invalid;
 	};
 
 	struct MeshData
 	{
 		std::vector<Vertex> vertices;
 		std::vector<uint32_t> indices;
-	};
-
-	class Mesh
-	{
-	public:
-		static bool LoadFromOBJ(const std::string& path, MeshData& outData);
+		std::vector<MeshSubset> subsets;
 	};
 }

@@ -1,14 +1,12 @@
-#include <array>
 #include <iostream>
+#include <fstream>
 #include <memory>
+#include <stdexcept>
 #include <string>
-#include <vector>
 
 #include "Platform/Window.h"
 #include "RHI/IDevice.h"
 #include "Graphics/Renderer.h"
-#include "Graphics/Scene.h"
-#include "Core/Image.h"
 
 #ifndef DY_SHADER_DIR
 #define DY_SHADER_DIR "./Shader"
@@ -16,11 +14,8 @@
 
 using namespace dy;
 
-Core::Image CreateCheckerboardImage(
-	uint32_t width, uint32_t height, uint32_t cellSize,
-	const std::array<uint8_t, 4>& evenColor, const std::array<uint8_t, 4>& oddColor);
-
 const char* GetShaderExtension();
+std::string ReadTextFile(const char* filepath);
 
 int main()
 {
@@ -35,33 +30,36 @@ int main()
 		const std::string shaderExtension = GetShaderExtension();
 		const std::string vertexShaderPath = std::string(DY_SHADER_DIR) + "/TexturedTriangleVS" + shaderExtension;
 		const std::string pixelShaderPath = std::string(DY_SHADER_DIR) + "/TexturedTrianglePS" + shaderExtension;
-		rendererConfig.vertexShaderPath = vertexShaderPath.c_str();
-		rendererConfig.pixelShaderPath = pixelShaderPath.c_str();
-		if(!renderer.Initialize(device.get(), rendererConfig)) return -1;
+		const std::string vertexShader = ReadTextFile(vertexShaderPath.c_str());
+		const std::string pixelShader = ReadTextFile(pixelShaderPath.c_str());
+
+		RHI::GraphicsPipelineDesc mainPipeline = {};
+		mainPipeline.vertexShader = vertexShader.data();
+		mainPipeline.vertexShaderSize = vertexShader.size();
+		mainPipeline.pixelShader = pixelShader.data();
+		mainPipeline.pixelShaderSize = pixelShader.size();
+		mainPipeline.renderTargetFormat = RHI::Format::R8G8B8A8_UNORM;
+		if(!renderer.Initialize(device.get(), mainPipeline, rendererConfig)) return -1;
 
 		Graphics::Scene scene;
 
-		Core::Image textureImage = CreateCheckerboardImage(
-			256, 256, 32,
-			{ 240, 240, 240, 255 },
-			{ 64, 160, 216, 255 }
-		);
-
-		const TextureID checkerTexture = scene.CreateTexture(textureImage);
-		const MaterialID triangleMaterial = scene.CreateMaterial(Material{
-			Math::float4(1.0f, 1.0f, 1.0f, 1.0f),
-			checkerTexture
-		});
-		Mesh triangleMeshData = {};
-		triangleMeshData.vertices = {
-			Vertex{ 0.0f, 0.6f, 0.0f, 0.5f, 0.0f },
-			Vertex{ 0.6f, -0.6f, 0.0f, 1.0f, 1.0f },
-			Vertex{ -0.6f, -0.6f, 0.0f, 0.0f, 1.0f }
+		Graphics::MeshData triangleMesh = {};
+		triangleMesh.vertices = {
+			Graphics::Vertex{ Math::float3(0.0f, 0.6f, 0.0f), Math::float3(0.0f, 0.0f, 1.0f), Math::float2(0.5f, 0.0f) },
+			Graphics::Vertex{ Math::float3(0.6f, -0.6f, 0.0f), Math::float3(0.0f, 0.0f, 1.0f), Math::float2(1.0f, 1.0f) },
+			Graphics::Vertex{ Math::float3(-0.6f, -0.6f, 0.0f), Math::float3(0.0f, 0.0f, 1.0f), Math::float2(0.0f, 1.0f) }
 		};
-		triangleMeshData.indices = { 0u, 1u, 2u };
-		const MeshID triangleMesh = scene.CreateMesh(triangleMeshData);
-		[[maybe_unused]]
-		const EntityID triangleEntity = scene.CreateEntity(triangleMesh, triangleMaterial);
+		triangleMesh.indices = { 0u, 1u, 2u };
+
+		Graphics::MaterialData triangleMaterial = {};
+		triangleMaterial.baseColor = Math::float4(1.0f, 1.0f, 1.0f, 1.0f);
+		triangleMaterial.baseColorTex = static_cast<TextureID>(0u);
+
+		scene.m_meshes.push_back(triangleMesh);
+		scene.m_materials.push_back(triangleMaterial);
+		scene.m_entityMeshes.push_back(static_cast<MeshID>(0u));
+		scene.m_entityMaterials.push_back(static_cast<MaterialID>(0u));
+		scene.m_entityTransforms.push_back(Graphics::Transform{ Math::float4x4::Identity() });
 
 		while(window.IsRunning())
 		{
@@ -82,33 +80,6 @@ int main()
 	}
 }
 
-Core::Image CreateCheckerboardImage(
-	uint32_t width,
-	uint32_t height,
-	uint32_t cellSize,
-	const std::array<uint8_t, 4>& evenColor,
-	const std::array<uint8_t, 4>& oddColor)
-{
-	std::vector<uint8_t> pixels(width * height * 4u, 0u);
-
-	for(uint32_t y = 0; y < height; ++y)
-	{
-		for(uint32_t x = 0; x < width; ++x)
-		{
-			const bool isEvenCell = (((x / cellSize) + (y / cellSize)) & 1u) == 0u;
-			const auto& color = isEvenCell ? evenColor : oddColor;
-			const uint32_t pixelIndex = (y * width + x) * 4u;
-
-			pixels[pixelIndex + 0u] = color[0];
-			pixels[pixelIndex + 1u] = color[1];
-			pixels[pixelIndex + 2u] = color[2];
-			pixels[pixelIndex + 3u] = color[3];
-		}
-	}
-
-	return Core::Image(width, height, std::move(pixels));
-}
-
 const char* GetShaderExtension()
 {
 #if defined(ENABLE_METAL)
@@ -118,4 +89,24 @@ const char* GetShaderExtension()
 #else
 	return ".hlsl";
 #endif
+}
+
+std::string ReadTextFile(const char* filepath)
+{
+	std::ifstream file(filepath, std::ios::binary);
+	if(!file.is_open())
+	{
+		throw std::runtime_error(std::string("Failed to open shader file: ") + filepath);
+	}
+
+	file.seekg(0, std::ios::end);
+	const std::streamoff size = file.tellg();
+	file.seekg(0, std::ios::beg);
+
+	std::string content(static_cast<size_t>(size), '\0');
+	if(size > 0)
+	{
+		file.read(content.data(), size);
+	}
+	return content;
 }

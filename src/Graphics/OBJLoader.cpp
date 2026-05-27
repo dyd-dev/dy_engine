@@ -1,100 +1,119 @@
-#include "OBJLoader.h"
+#include "Loaders.h"
 #include <fstream>
 #include <sstream>
 #include <map>
-#include <array>
+
+/*
+===========================================================================
+[TinyObjLoader Usage Guide]
+If you need to load more complex OBJ files (materials, multi-shapes, etc.)
+in the future, you can replace this custom parser with tinyobjloader.
+
+How to use:
+1. Uncomment the following lines:
+   #define TINYOBJLOADER_IMPLEMENTATION
+   #include <tiny_obj_loader.h>
+
+2. Basic implementation example:
+   tinyobj::attrib_t attrib;
+   std::vector<tinyobj::shape_t> shapes;
+   std::vector<tinyobj::material_t> materials;
+   std::string warn, err;
+
+   bool ret = tinyobj::LoadObj(&attrib, &shapes, &materials, &warn, &err, path.c_str());
+   if (!ret) return false;
+
+   // Loop over shapes and faces to extract vertices/indices...
+===========================================================================
+*/
 
 namespace dy::Graphics
 {
-    MeshData OBJLoader::Load(const std::string& filepath)
-    {
-        MeshData result;
+	struct OBJIndex
+	{
+		int v, vt, vn;
+		bool operator<(const OBJIndex& other) const
+		{
+			if (v != other.v) return v < other.v;
+			if (vt != other.vt) return vt < other.vt;
+			return vn < other.vn;
+		}
+	};
 
-        std::ifstream file(filepath);
-        if(!file.is_open()) return result;
+	bool LoadFromOBJ(const char* path, MeshData& outData)
+	{
+		std::ifstream file(path);
+		if (!file.is_open()) return false;
 
-        std::vector<std::array<float, 3>> positions;
-        std::vector<std::array<float, 2>> texCoords;
-        std::vector<std::array<float, 3>> normals;
+		std::vector<dy::Math::float3> positions;
+		std::vector<dy::Math::float2> uvs;
+		std::vector<dy::Math::float3> normals;
+		std::map<OBJIndex, uint32_t> uniqueVertices;
 
-        std::map<std::string, uint32_t> vertexMap;
+		std::string line;
+		while (std::getline(file, line))
+		{
+			std::stringstream ss(line);
+			std::string prefix;
+			ss >> prefix;
 
-        std::string line;
-        while(std::getline(file, line))
-        {
-            std::istringstream ss(line);
-            std::string token;
-            ss >> token;
+			if (prefix == "v")
+			{
+				dy::Math::float3 v;
+				ss >> v.x >> v.y >> v.z;
+				positions.push_back(v);
+			}
+			else if (prefix == "vt")
+			{
+				dy::Math::float2 vt;
+				ss >> vt.x >> vt.y;
+				uvs.push_back(vt);
+			}
+			else if (prefix == "vn")
+			{
+				dy::Math::float3 vn;
+				ss >> vn.x >> vn.y >> vn.z;
+				normals.push_back(vn);
+			}
+			else if (prefix == "f")
+			{
+				std::string vertexStr;
+				std::vector<uint32_t> faceIndices;
+				while (ss >> vertexStr)
+				{
+					int vIdx = 0, vtIdx = 0, vnIdx = 0;
+					for (char& c : vertexStr) if (c == '/') c = ' ';
+					std::stringstream vss(vertexStr);
+					
+					vss >> vIdx;
+					if (vertexStr.find("  ") != std::string::npos) {
+						vss >> vnIdx;
+					} else {
+						vss >> vtIdx >> vnIdx;
+					}
 
-            if(token == "v")
-            {
-                float x, y, z;
-                ss >> x >> y >> z;
-                positions.push_back({x, y, z});
-            }
-            else if(token == "vt")
-            {
-                float u, v;
-                ss >> u >> v;
-                texCoords.push_back({u, v});
-            }
-            else if(token == "vn")
-            {
-                float nx, ny, nz;
-                ss >> nx >> ny >> nz;
-                normals.push_back({nx, ny, nz});
-            }
-            else if(token == "f")
-            {
-                std::string faceTokens[3];
-                ss >> faceTokens[0] >> faceTokens[1] >> faceTokens[2];
+					OBJIndex idx = { vIdx - 1, vtIdx - 1, vnIdx - 1 };
 
-                for(int i = 0; i < 3; i++)
-                {
-                    if(vertexMap.count(faceTokens[i]))
-                    {
-                        result.indices.push_back(vertexMap[faceTokens[i]]);
-                        continue;
-                    }
+					if (uniqueVertices.count(idx) == 0)
+					{
+						uniqueVertices[idx] = static_cast<uint32_t>(outData.vertices.size());
+						Vertex v;
+						v.position = (idx.v >= 0 && idx.v < positions.size()) ? positions[idx.v] : dy::Math::float3{0,0,0};
+						v.uv = (idx.vt >= 0 && idx.vt < uvs.size()) ? uvs[idx.vt] : dy::Math::float2{0,0};
+						v.normal = (idx.vn >= 0 && idx.vn < normals.size()) ? normals[idx.vn] : dy::Math::float3{0,0,1};
+						outData.vertices.push_back(v);
+					}
+					faceIndices.push_back(uniqueVertices[idx]);
+				}
 
-                    int posIdx = 0, uvIdx = 0, normalIdx = 0;
-                    std::string temp = faceTokens[i];
-                    std::replace(temp.begin(), temp.end(), '/', ' ');
-                    std::istringstream fss(temp);
-                    fss >> posIdx >> uvIdx >> normalIdx;
-
-                    posIdx--;
-                    uvIdx--;
-                    normalIdx--;
-
-                    MeshVertex vert{};
-
-                    if(posIdx >= 0 && posIdx < (int)positions.size())
-                    {
-                        vert.position[0] = positions[posIdx][0];
-                        vert.position[1] = positions[posIdx][1];
-                        vert.position[2] = positions[posIdx][2];
-                    }
-                    if(uvIdx >= 0 && uvIdx < (int)texCoords.size())
-                    {
-                        vert.texCoord[0] = texCoords[uvIdx][0];
-                        vert.texCoord[1] = 1.0f - texCoords[uvIdx][1];
-                    }
-                    if(normalIdx >= 0 && normalIdx < (int)normals.size())
-                    {
-                        vert.normal[0] = normals[normalIdx][0];
-                        vert.normal[1] = normals[normalIdx][1];
-                        vert.normal[2] = normals[normalIdx][2];
-                    }
-
-                    uint32_t newIndex = static_cast<uint32_t>(result.vertices.size());
-                    result.vertices.push_back(vert);
-                    result.indices.push_back(newIndex);
-                    vertexMap[faceTokens[i]] = newIndex;
-                }
-            }
-        }
-
-        return result;
-    }
+				for (size_t i = 1; i < faceIndices.size() - 1; ++i)
+				{
+					outData.indices.push_back(faceIndices[0]);
+					outData.indices.push_back(faceIndices[i]);
+					outData.indices.push_back(faceIndices[i + 1]);
+				}
+			}
+		}
+		return true;
+	}
 }
