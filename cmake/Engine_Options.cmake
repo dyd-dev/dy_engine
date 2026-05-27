@@ -16,6 +16,7 @@ target_include_directories(Engine_Options INTERFACE
 # ===== ===== Compile definition ===== =====
 target_compile_definitions(Engine_Options INTERFACE
 	ENGINE_VERSION="1.0.0"
+	GLFW_INCLUDE_NONE
 )
 
 # ===== ===== Compile options ===== =====
