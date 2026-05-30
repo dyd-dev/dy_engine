@@ -1,8 +1,7 @@
+#include "Loaders.h"
 #include <fstream>
 #include <sstream>
 #include <map>
-#include "Math/Math.h"
-#include "RenderTypes.h"
 
 /*
 ===========================================================================
@@ -83,18 +82,16 @@ namespace dy::Graphics
 				while (ss >> vertexStr)
 				{
 					int vIdx = 0, vtIdx = 0, vnIdx = 0;
-					// Replace / with space for easier parsing
 					for (char& c : vertexStr) if (c == '/') c = ' ';
 					std::stringstream vss(vertexStr);
-					
+
 					vss >> vIdx;
-					if (vertexStr.find("  ") != std::string::npos) { // v//vn case
+					if (vertexStr.find("  ") != std::string::npos) {
 						vss >> vnIdx;
 					} else {
 						vss >> vtIdx >> vnIdx;
 					}
 
-					// Convert to 0-based index
 					OBJIndex idx = { vIdx - 1, vtIdx - 1, vnIdx - 1 };
 
 					if (uniqueVertices.count(idx) == 0)
@@ -109,7 +106,6 @@ namespace dy::Graphics
 					faceIndices.push_back(uniqueVertices[idx]);
 				}
 
-				// Triangulate: Simple fan triangulation for convex polygons
 				for (size_t i = 1; i < faceIndices.size() - 1; ++i)
 				{
 					outData.indices.push_back(faceIndices[0]);

@@ -1,8 +1,13 @@
 #pragma once
-#include "RenderTypes.h"
+#include <string>
+
+#include "Mesh.h"
 
 namespace dy::Graphics
 {
-	//Image LoadImageFromFile(const const char *filepath);
 	bool LoadFromOBJ(const char* path, MeshData& outData);
+	bool LoadFromGLTF(const char* filepath, MeshData& outData);
+	bool LoadFromGLTF(const char* filepath, MeshData& outData, std::string* outTexturePath);
+	bool LoadFromFBX(const char* filepath, MeshData& outData);
+	bool LoadFromFBX(const char* filepath, MeshData& outData, std::string* outTexturePath);
 }

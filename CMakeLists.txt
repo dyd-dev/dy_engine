@@ -7,9 +7,11 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 # main target
 add_library(${PROJECT_NAME} STATIC
 	"src/RHI/IDevice.cpp"
-	"src/Graphics/Renderer.cpp"
-	"src/Graphics/ObjLoader.cpp"
 	"src/Platform/Window.cpp"
+	"src/Graphics/Renderer.cpp"
+	"src/Graphics/OBJLoader.cpp"
+	"src/Graphics/GLTFLoader.cpp"
+	"src/Graphics/FBXLoader.cpp"
 )
 
 # global options
@@ -17,10 +19,11 @@ include(Engine_Options)
 target_link_libraries(${PROJECT_NAME} PUBLIC Engine_Options)
 
 include(Dependencies)
+
 include(BuildOptions)
 
 # Only add the executable if this is the main project being built (not when included as a subdirectory in another project)
-if(CMAKE_PROJECT_NAME  STREQUAL PROJECT_NAME)
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 	add_subdirectory(examples)
 endif()
 
