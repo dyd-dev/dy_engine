@@ -39,6 +39,11 @@ namespace dy::Backends
         uint32_t descriptorSlotOffset = 0;
         uint32_t srvDescriptorSize = 0;
 
+        // Depth Stencil 관련
+        ComPtr<ID3D12DescriptorHeap> dsvHeap;
+        ComPtr<ID3D12Resource> depthStencilBuffer;
+        uint32_t dsvDescriptorSize = 0;
+
         D3D12CommandList* commandLists[2] = { nullptr, nullptr };
         D3D12Texture* backBufferTextures[2] = { nullptr, nullptr };
         
@@ -150,14 +155,54 @@ namespace dy::Backends
         }
         m_internal->srvDescriptorSize = m_internal->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-        // 8. 커맨드 리스트 미리 할당
+        // 8. 깊이 버퍼(Depth Buffer) 생성
+        D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
+        dsvHeapDesc.NumDescriptors = 1;
+        dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+        dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        m_internal->device->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&m_internal->dsvHeap));
+        m_internal->dsvDescriptorSize = m_internal->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+
+        D3D12_RESOURCE_DESC depthDesc = {};
+        depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        depthDesc.Alignment = 0;
+        depthDesc.Width = swapChainDesc.Width;
+        depthDesc.Height = swapChainDesc.Height;
+        depthDesc.DepthOrArraySize = 1;
+        depthDesc.MipLevels = 1;
+        depthDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        depthDesc.SampleDesc.Count = 1;
+        depthDesc.SampleDesc.Quality = 0;
+        depthDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        depthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+
+        D3D12_CLEAR_VALUE depthOptimizedClearValue = {};
+        depthOptimizedClearValue.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+        depthOptimizedClearValue.DepthStencil.Depth = 1.0f;
+        depthOptimizedClearValue.DepthStencil.Stencil = 0;
+
+        CD3DX12_HEAP_PROPERTIES depthHeapProps(D3D12_HEAP_TYPE_DEFAULT);
+        m_internal->device->CreateCommittedResource(
+            &depthHeapProps,
+            D3D12_HEAP_FLAG_NONE,
+            &depthDesc,
+            D3D12_RESOURCE_STATE_DEPTH_WRITE,
+            &depthOptimizedClearValue,
+            IID_PPV_ARGS(&m_internal->depthStencilBuffer)
+        );
+
+        m_internal->device->CreateDepthStencilView(m_internal->depthStencilBuffer.Get(), nullptr, m_internal->dsvHeap->GetCPUDescriptorHandleForHeapStart());
+
+        // 9. 커맨드 리스트 미리 할당
         D3D12_CPU_DESCRIPTOR_HANDLE currentRtv = m_internal->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_internal->dsvHeap->GetCPUDescriptorHandleForHeapStart();
         for (int i = 0; i < 2; i++) {
             m_internal->commandLists[i] = new D3D12CommandList(m_internal->device.Get(), m_internal->renderTargets[i].Get(), currentRtv.ptr, m_internal->globalDescriptorHeap.Get());
+            m_internal->commandLists[i]->SetDepthStencilView(dsvHandle.ptr); // DSV 등록
             currentRtv.ptr += m_internal->rtvDescriptorSize;
         }
 
-        std::cout << "[D3D12Device] Initialization Complete!" << std::endl;
+        std::cout << "[D3D12Device] Initialization Complete (with Depth Buffer)!" << std::endl;
         return 0;
     }
 
@@ -210,13 +255,15 @@ namespace dy::Backends
         }
 
         // 2. Root Parameter 정의 (1.1 버전의 Descriptor Range 사용)
-        CD3DX12_DESCRIPTOR_RANGE1 srvRange;
-        // 이제 1.1 버전이므로 5번째 인자에 당당하게 최적화 플래그를 넣을 수 있습니다!
-        srvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, (UINT)-1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE);
+        CD3DX12_DESCRIPTOR_RANGE1 srvRanges[3];
+        // space0: Textures, space1: Vertex Buffers, space2: Index Buffers. 모두 힙의 처음(Offset 0)부터 시작하도록 겹칩니다.
+        srvRanges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, (UINT)-1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE, 0);
+        srvRanges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, (UINT)-1, 0, 1, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE, 0);
+        srvRanges[2].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, (UINT)-1, 0, 2, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE, 0);
 
         CD3DX12_ROOT_PARAMETER1 rootParameters[2] = {};
         rootParameters[0].InitAsConstants(24, 0); // register(b0)
-        rootParameters[1].InitAsDescriptorTable(1, &srvRange, D3D12_SHADER_VISIBILITY_PIXEL); // register(t0, space0)
+        rootParameters[1].InitAsDescriptorTable(3, srvRanges, D3D12_SHADER_VISIBILITY_ALL); // register(t0, space0~2)
 
         CD3DX12_STATIC_SAMPLER_DESC samplerDesc(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
 
@@ -235,16 +282,9 @@ namespace dy::Backends
         Microsoft::WRL::ComPtr<ID3D12RootSignature> pRootSignature;
         m_internal->device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&pRootSignature));
 
-        // 3. Input Layout (Vertex 구조체: float3 Pos, float2 UV, float3 Color)
-        D3D12_INPUT_ELEMENT_DESC inputLayout[] = {
-            { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-            { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-            { "COLOR", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 20, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 }
-        };
-
         // 4. PSO 설정 (CD3DX12 헬퍼로 대폭 축소!)
         D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-        psoDesc.InputLayout = { inputLayout, _countof(inputLayout) };
+        psoDesc.InputLayout = { nullptr, 0 };
         psoDesc.pRootSignature = pRootSignature.Get();
 
         // 셰이더 컴파일
@@ -273,10 +313,13 @@ namespace dy::Backends
         psoDesc.PS = CD3DX12_SHADER_BYTECODE(psBlob.Get());
 
         psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; // OBJ(CCW)와 기존 삼각형(CW) 모두 표시하기 위함
+        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK; // 뒷면 컬링 활성화
         psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-        psoDesc.DepthStencilState.DepthEnable = FALSE; // 일단 깊이 테스트는 끔
-        psoDesc.DepthStencilState.StencilEnable = FALSE;
+        psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
+        psoDesc.DepthStencilState.DepthEnable = TRUE;
+        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        psoDesc.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
 
         psoDesc.SampleMask = UINT_MAX;
         psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
@@ -296,6 +339,29 @@ namespace dy::Backends
 
     RHI::DescriptorIndex D3D12Device::AllocateDescriptorSlot() {
         return m_internal->descriptorSlotOffset++;
+    }
+
+    void D3D12Device::UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::IBuffer* buffer) {
+        if(index == RHI::INVALID_DESCRIPTOR_INDEX || buffer == nullptr) return;
+        D3D12Buffer* dxBuffer = static_cast<D3D12Buffer*>(buffer);
+
+        CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_internal->globalDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
+        srvHandle.Offset(index, m_internal->srvDescriptorSize);
+
+        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+        srvDesc.Format = DXGI_FORMAT_UNKNOWN;
+        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        srvDesc.Buffer.FirstElement = 0;
+        srvDesc.Buffer.NumElements = dxBuffer->GetSize() / dxBuffer->GetStride();
+        srvDesc.Buffer.StructureByteStride = dxBuffer->GetStride();
+        srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
+
+        m_internal->device->CreateShaderResourceView(
+            static_cast<ID3D12Resource*>(dxBuffer->GetNativeResource()),
+            &srvDesc,
+            srvHandle
+        );
     }
 
     void D3D12Device::UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::ITexture* texture) {
