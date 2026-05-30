@@ -43,7 +43,7 @@ public:
     int InitializeForTest(const void* windowHandle, const std::string& shaderDir);
     bool UploadTestMesh(const std::vector<float>& vertices, const std::vector<uint32_t>& indices);
 protected:
-    int Initialize(const void *windowHandle) override;
+    int Initialize(const void* windowHandle, const dy::RHI::DeviceDesc& desc) override;
 
 private:
 	bool CreateInstance();

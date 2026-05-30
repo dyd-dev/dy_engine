@@ -148,4 +148,26 @@ namespace dy::Backends
     void D3D12CommandList::ClearDepth(RHI::ITexture* depthStencil, float depth) {}
     void D3D12CommandList::ResourceBarrier(RHI::IBuffer* buffer, RHI::ResourceState before, RHI::ResourceState after) {}
     void D3D12CommandList::ResourceBarrier(RHI::ITexture* texture, RHI::ResourceState before, RHI::ResourceState after) {}
+
+    void D3D12CommandList::SetViewport(const RHI::Viewport& viewport)
+    {
+        D3D12_VIEWPORT vp = {};
+        vp.TopLeftX = viewport.x;
+        vp.TopLeftY = viewport.y;
+        vp.Width    = viewport.width;
+        vp.Height   = viewport.height;
+        vp.MinDepth = viewport.minDepth;
+        vp.MaxDepth = viewport.maxDepth;
+        m_internal->commandList->RSSetViewports(1, &vp);
+    }
+
+    void D3D12CommandList::SetScissor(const RHI::Rect& rect)
+    {
+        D3D12_RECT r = {};
+        r.left   = rect.x;
+        r.top    = rect.y;
+        r.right  = static_cast<LONG>(rect.x + rect.width);
+        r.bottom = static_cast<LONG>(rect.y + rect.height);
+        m_internal->commandList->RSSetScissorRects(1, &r);
+    }
 }

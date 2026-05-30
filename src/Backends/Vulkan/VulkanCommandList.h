@@ -13,11 +13,15 @@ public:
 	void BindGraphicsPipeline(dy::RHI::IPipelineState* pipelineState) override;
 	void BindGlobalDescriptorHeap() override {}
 	void BindIndexBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset) override {}
+	void BindVertexBuffer(dy::RHI::IBuffer* buffer) override {}
 	void SetPushConstants(uint32_t size, const void* data) override;
 	void SetRenderTargets(uint32_t numRenderTargets, dy::RHI::ITexture** renderTargets, dy::RHI::ITexture* depthStencil) override {}
+	void SetViewport(const dy::RHI::Viewport& viewport) override {}
+	void SetScissor(const dy::RHI::Rect& rect) override {}
 	void ClearColor(dy::RHI::ITexture* renderTarget, float r, float g, float b, float a) override;
 	void ClearDepth(dy::RHI::ITexture* depthStencil, float depth) override {}
 	void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
+	void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t startIndex, int32_t baseVertex, uint32_t startInstance) override {}
 	void ResourceBarrier(dy::RHI::IBuffer* buffer, dy::RHI::ResourceState before, dy::RHI::ResourceState after) override {}
 	void ResourceBarrier(dy::RHI::ITexture* texture, dy::RHI::ResourceState before, dy::RHI::ResourceState after) override {}
 	void Close() override { m_isClosed = true; }

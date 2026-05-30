@@ -23,11 +23,20 @@ namespace dy::RHI
 	using DescriptorIndex = uint32_t;
 	constexpr DescriptorIndex INVALID_DESCRIPTOR_INDEX = 0xFFFFFFFF;
 
+	// Backend-level configuration. Shader paths are a Renderer-level concern and do not belong here.
+	struct DeviceDesc
+	{
+		uint32_t maxFramesInFlight = 2;
+		uint32_t maxDrawsPerFrame = 4096;
+		uint32_t defaultShadowMapResolution = 2048;
+		uint64_t frameAcquireTimeoutNanoseconds = 2000000000ULL;
+	};
+
 	class IDevice
 	{
 	public:
 		virtual ~IDevice() = default;
-		static IDevice* Create(const void *windowHandle);
+		static IDevice* Create(const void* windowHandle, const DeviceDesc& desc = {});
 
 		// Global synchronization: Acquires the next swapchain image
 		// Must be called once per frame by the "main render thread"
@@ -66,6 +75,6 @@ namespace dy::RHI
 		virtual ITexture* GetBackBuffer() = 0;
 		
 	protected:
-		virtual int Initialize(const void *windowHandle) = 0;
+		virtual int Initialize(const void* windowHandle, const DeviceDesc& desc) = 0;
 	};
 }

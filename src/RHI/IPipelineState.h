@@ -59,6 +59,15 @@ namespace dy::RHI
 		bool alphaBlendEnable = true;
 	};
 
+	// Shadow pass configuration. Kept separate so non-shadow pipelines pay no overhead.
+	struct ShadowPipelineDesc
+	{
+		const void* shadowVertexShader = nullptr;
+		size_t shadowVertexShaderSize = 0;
+		uint32_t shadowMapResolution = 2048;
+		bool enableShadowPass = false;
+	};
+
 	struct GraphicsPipelineDesc {
 		const void* vertexShader = nullptr;
 		size_t vertexShaderSize = 0;
@@ -73,6 +82,7 @@ namespace dy::RHI
 		RasterizerStateDesc rasterizer = {};
 		DepthStencilStateDesc depthStencil = {};
 		BlendStateDesc blend = {};
+		ShadowPipelineDesc shadow = {};
 
 		// Legacy convenience fields. Backends may keep using these while they migrate
 		// to the structured state above.

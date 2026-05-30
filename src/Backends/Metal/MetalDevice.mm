@@ -36,7 +36,7 @@ namespace dy::Backends
         delete m_impl;
     }
 
-    int MetalDevice::Initialize(const void* windowHandle)
+    int MetalDevice::Initialize(const void* windowHandle, const RHI::DeviceDesc& desc)
     {
         m_impl->device = MTLCreateSystemDefaultDevice();
         if(!m_impl->device) return -1;

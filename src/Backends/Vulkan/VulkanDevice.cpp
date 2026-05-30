@@ -130,7 +130,7 @@ bool VulkanDevice::UploadTestMesh(const std::vector<float>& vertices, const std:
     return true;
 }
 
-int VulkanDevice::Initialize(const void *windowHandle) {
+int VulkanDevice::Initialize(const void* windowHandle, const dy::RHI::DeviceDesc& desc) {
 	m_windowHandle = const_cast<void*>(windowHandle);
 	if (!m_windowHandle) return -1;
 

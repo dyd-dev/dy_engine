@@ -61,7 +61,7 @@ namespace dy::Backends
         delete m_internal;
     }
 
-    int D3D12Device::Initialize(const void* windowHandle)
+    int D3D12Device::Initialize(const void* windowHandle, const RHI::DeviceDesc& desc)
     {
         HWND hwnd = static_cast<HWND>(const_cast<void*>(windowHandle));
         

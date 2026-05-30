@@ -154,7 +154,7 @@ namespace dy::Backends
 		return &m_impl->backBuffer;
 	}
 
-	int NullDevice::Initialize(const void*)
+	int NullDevice::Initialize(const void*, const RHI::DeviceDesc&)
 	{
 		return 0;
 	}

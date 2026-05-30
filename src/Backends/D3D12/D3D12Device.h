@@ -35,7 +35,7 @@ public:
   RHI::ITexture *GetBackBuffer() override;
 
 protected:
-  int Initialize(const void *windowHandle) override;
+  int Initialize(const void* windowHandle, const RHI::DeviceDesc& desc) override;
 
 private:
   D3D12InternalState *m_internal; // DX12 관련 모든 변수는 이 안에 들어갑니다.

@@ -10,7 +10,7 @@
 #include "Backends/Null/NullDevice.h"
 #endif
 
-dy::RHI::IDevice* dy::RHI::IDevice::Create(const void *windowHandle)
+dy::RHI::IDevice* dy::RHI::IDevice::Create(const void* windowHandle, const dy::RHI::DeviceDesc& desc)
 {
 	IDevice *device = nullptr;
 #if defined(ENABLE_D3D12)
@@ -24,6 +24,6 @@ dy::RHI::IDevice* dy::RHI::IDevice::Create(const void *windowHandle)
 #else
 	device = new Backends::NullDevice();
 #endif
-	if(device) device->Initialize(windowHandle);
+	if (device) device->Initialize(windowHandle, desc);
 	return device;
 }
