@@ -4,7 +4,7 @@
 # ===== ===== Backend Target ===== =====
 set(BACKEND_NAME "Backend_D3D12")
 
-add_library(${BACKEND_NAME} STATIC
+add_library(${BACKEND_NAME} OBJECT
 	D3D12Device.cpp
 	D3D12Buffer.cpp       
 	D3D12CommandList.cpp  
@@ -17,6 +17,7 @@ target_link_libraries(${BACKEND_NAME} PRIVATE
 	d3d12 dxgi dxguid d3dcompiler
 )
 
-target_include_directories(${BACKEND_NAME} PRIVATE ${stb_SOURCE_DIR})
 target_compile_definitions(${BACKEND_NAME} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+
+target_sources(${PROJECT_NAME} PRIVATE $<TARGET_OBJECTS:${BACKEND_NAME}>)
 message(STATUS "[${PROJECT_NAME}] Ready to Use ${BACKEND_NAME}")
