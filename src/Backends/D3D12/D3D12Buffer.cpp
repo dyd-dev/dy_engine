@@ -13,7 +13,7 @@ namespace dy::Backends
 
     // 생성자에서 ID3D12Device를 받도록 수정해야 합니다 (Device에서 생성하기 위함)
     D3D12Buffer::D3D12Buffer(void* nativeDevice, const RHI::BufferDesc& desc)
-		: m_size(desc.size), m_stride(desc.stride)
+		: RHI::IBuffer(desc)
     {
         m_internal = new D3D12BufferInternal();
         ID3D12Device* device = static_cast<ID3D12Device*>(nativeDevice);
@@ -48,7 +48,7 @@ namespace dy::Backends
 
     D3D12Buffer::~D3D12Buffer() { delete m_internal; }
 
-    void* D3D12Buffer::Map(uint32_t offset, uint32_t size)
+    void* D3D12Buffer::Map(uint32_t offset)
     {
         void* mappedData = nullptr;
         D3D12_RANGE readRange = { 0, 0 }; // CPU에서 읽지는 않음
@@ -62,7 +62,6 @@ namespace dy::Backends
         m_internal->resource->Unmap(0, nullptr);
     }
 
-    uint32_t D3D12Buffer::GetSize() const { return m_size; }
 
     // (선택) 커맨드 리스트가 내부 리소스를 훔쳐볼 수 있도록 하는 함수 추가
     void* D3D12Buffer::GetNativeResource() const { return m_internal->resource.Get(); }

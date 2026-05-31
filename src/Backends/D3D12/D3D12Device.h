@@ -21,12 +21,12 @@ public:
 
   RHI::IBuffer *CreateBuffer(const RHI::BufferDesc &desc) override;
   RHI::ITexture *CreateTexture(const RHI::TextureDesc &desc) override;
-  void UpdateTexture(RHI::ITexture *texture, const void *data, uint32_t rowPitch) override;
-  RHI::IPipelineState *
-  CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc &desc) override;
+  bool UpdateTexture(RHI::ITexture *texture, const void *data, uint32_t rowPitch) override;
+  RHI::IPipelineState *CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc &desc) override;
 
   [[nodiscard]] RHI::DescriptorIndex AllocateDescriptorSlot() override;
   void UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::ITexture *texture) override;
+  void UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::IBuffer *buffer) override;
 
   void DestroyBuffer(RHI::IBuffer *buffer) override;
   void DestroyTexture(RHI::ITexture *texture) override;
@@ -34,8 +34,10 @@ public:
 
   RHI::ITexture *GetBackBuffer() override;
 
+  [[nodiscard]] bool RequiresExplicitShadowPass() const override { return true; }
+
 protected:
-  int Initialize(const void *windowHandle) override;
+  int Initialize(const void *windowHandle, const RHI::DeviceDesc& desc) override;
 
 private:
   D3D12InternalState *m_internal; // DX12 관련 모든 변수는 이 안에 들어갑니다.
