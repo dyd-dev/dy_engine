@@ -58,11 +58,9 @@ if(UNIX AND NOT APPLE)
 endif()
 
 # ===== ===== Fetch ===== =====
-message(STATUS "Fetching dependencies...")
-include(FetchContent)
-
 message(STATUS "Download and Configure glfw...")
 
+include(FetchContent)
 FetchContent_Declare(
 	glfw
 	GIT_REPOSITORY "https://github.com/glfw/glfw.git"
@@ -70,6 +68,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(glfw)
 
+# stb_image 자동 다운로드 설정
 FetchContent_Declare(
     stb
     GIT_REPOSITORY "https://github.com/nothings/stb.git"
@@ -78,9 +77,11 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(stb)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE glfw)
+target_compile_definitions(${PROJECT_NAME} PRIVATE GLFW_INCLUDE_NONE)
 
 target_include_directories(${PROJECT_NAME} PUBLIC ${stb_SOURCE_DIR})
 
+# fastgltf 자동 다운로드 설정
 FetchContent_Declare(
     fastgltf
     GIT_REPOSITORY "https://github.com/spnda/fastgltf.git"
@@ -89,6 +90,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(fastgltf)
 target_link_libraries(${PROJECT_NAME} PUBLIC fastgltf::fastgltf)
 
+# ufbx 자동 다운로드 설정
 FetchContent_Declare(
     ufbx
     GIT_REPOSITORY "https://github.com/ufbx/ufbx.git"
