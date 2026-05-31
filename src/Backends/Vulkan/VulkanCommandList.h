@@ -15,6 +15,8 @@ public:
 	void BindIndexBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset) override {}
 	void SetPushConstants(uint32_t size, const void* data) override;
 	void SetRenderTargets(uint32_t numRenderTargets, dy::RHI::ITexture** renderTargets, dy::RHI::ITexture* depthStencil) override {}
+	void SetViewport(const dy::RHI::Viewport& viewport) override {}
+	void SetScissor(const dy::RHI::Rect& rect) override {}
 	void ClearColor(dy::RHI::ITexture* renderTarget, float r, float g, float b, float a) override;
 	void ClearDepth(dy::RHI::ITexture* depthStencil, float depth) override {}
 	void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;

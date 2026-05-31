@@ -132,6 +132,16 @@ namespace dy::Backends
         }
     }
 
+    void D3D12CommandList::SetViewport(const RHI::Viewport& viewport) {
+        D3D12_VIEWPORT d3dViewport = { viewport.x, viewport.y, viewport.width, viewport.height, viewport.minDepth, viewport.maxDepth };
+        m_internal->commandList->RSSetViewports(1, &d3dViewport);
+    }
+
+    void D3D12CommandList::SetScissor(const RHI::Rect& rect) {
+        D3D12_RECT d3dRect = { rect.x, rect.y, rect.x + static_cast<LONG>(rect.width), rect.y + static_cast<LONG>(rect.height) };
+        m_internal->commandList->RSSetScissorRects(1, &d3dRect);
+    }
+
     void D3D12CommandList::ResourceBarrier(RHI::IBuffer* buffer, RHI::ResourceState before, RHI::ResourceState after) {}
     void D3D12CommandList::ResourceBarrier(RHI::ITexture* texture, RHI::ResourceState before, RHI::ResourceState after) {}
 }

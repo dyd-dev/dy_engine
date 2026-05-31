@@ -83,6 +83,9 @@ namespace dy::Backends
         m_impl->passDescriptor = passDesc;
     }
 
+    void MetalCommandList::SetViewport(const RHI::Viewport&) {}
+    void MetalCommandList::SetScissor(const RHI::Rect&) {}
+
     void MetalCommandList::ClearColor(RHI::ITexture* renderTarget, float r, float g, float b, float a)
     {
         if(m_impl->passDescriptor == nil || m_impl->encoder != nil)

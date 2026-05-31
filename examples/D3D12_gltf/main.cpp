@@ -40,6 +40,7 @@ struct D3DModelVertex {
     float position[3];
     float uv[2];
     float color[3];
+    float normal[3];
 };
 
 std::vector<D3DModelVertex> BuildD3DVertices(const Graphics::MeshData& mesh)
@@ -52,6 +53,7 @@ std::vector<D3DModelVertex> BuildD3DVertices(const Graphics::MeshData& mesh)
             { vertex.position.x, vertex.position.y, vertex.position.z },
             { vertex.uv.x, vertex.uv.y },
             { 1.0f, 1.0f, 1.0f },
+            { vertex.normal.x, vertex.normal.y, vertex.normal.z },
         });
     }
 

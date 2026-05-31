@@ -16,6 +16,24 @@ namespace dy::RHI
 	class ITexture;
 	class IPipelineState;
 
+	struct Viewport
+	{
+		float x = 0.0f;
+		float y = 0.0f;
+		float width = 0.0f;
+		float height = 0.0f;
+		float minDepth = 0.0f;
+		float maxDepth = 1.0f;
+	};
+
+	struct Rect
+	{
+		int32_t x = 0;
+		int32_t y = 0;
+		uint32_t width = 0;
+		uint32_t height = 0;
+	};
+
 	class ICommandList
 	{
 	public:
@@ -37,6 +55,8 @@ namespace dy::RHI
 
 		// Render Targets & Clears
 		virtual void SetRenderTargets(uint32_t numRenderTargets, ITexture** renderTargets, ITexture* depthStencil) = 0;
+		virtual void SetViewport(const Viewport& viewport) = 0;
+		virtual void SetScissor(const Rect& rect) = 0;
 		virtual void ClearColor(ITexture* renderTarget, float r, float g, float b, float a) = 0;
 		virtual void ClearDepth(ITexture* depthStencil, float depth) = 0;
 
