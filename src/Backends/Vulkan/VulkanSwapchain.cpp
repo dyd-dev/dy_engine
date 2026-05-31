@@ -1,5 +1,6 @@
 #include "VulkanSwapchain.h"
 #include "VulkanResources.h"
+#include <GLFW/glfw3.h>
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
@@ -10,10 +11,13 @@
 #include <windows.h>
 #endif
 
-void VulkanSwapchain::Initialize(const VulkanContext& context, void* windowHandle) {
+namespace dy::Backends
+{
+
+void VulkanSwapchain::Initialize(const VulkanContext& context, void* windowHandle, bool preferSrgb) {
     SwapchainSupportDetails swapchainSupport = QuerySwapchainSupport(context.physicalDevice, context.surface);
 
-    VkSurfaceFormatKHR surfaceFormat = ChooseSwapSurfaceFormat(swapchainSupport.formats);
+    VkSurfaceFormatKHR surfaceFormat = ChooseSwapSurfaceFormat(swapchainSupport.formats, preferSrgb);
     VkPresentModeKHR presentMode = ChoosePresentMode(swapchainSupport.presentModes);
     VkExtent2D extent = ChooseSwapExtent(swapchainSupport.capabilities, windowHandle);
 
@@ -22,16 +26,15 @@ void VulkanSwapchain::Initialize(const VulkanContext& context, void* windowHandl
         imageCount = swapchainSupport.capabilities.maxImageCount;
     }
 
-    VkSwapchainCreateInfoKHR createInfo = {
-        .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
-        .surface = context.surface,
-        .minImageCount = imageCount,
-        .imageFormat = surfaceFormat.format,
-        .imageColorSpace = surfaceFormat.colorSpace,
-        .imageExtent = extent,
-        .imageArrayLayers = 1,
-        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
-    };
+    VkSwapchainCreateInfoKHR createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    createInfo.surface = context.surface;
+    createInfo.minImageCount = imageCount;
+    createInfo.imageFormat = surfaceFormat.format;
+    createInfo.imageColorSpace = surfaceFormat.colorSpace;
+    createInfo.imageExtent = extent;
+    createInfo.imageArrayLayers = 1;
+    createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
     uint32_t queueFamilyIndices[] = { context.queueIndices.graphicsFamily, context.queueIndices.presentFamily };
 
@@ -98,9 +101,15 @@ VulkanSwapchain::SwapchainSupportDetails VulkanSwapchain::QuerySwapchainSupport(
     return details;
 }
 
-VkSurfaceFormatKHR VulkanSwapchain::ChooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats) {
+VkSurfaceFormatKHR VulkanSwapchain::ChooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats, bool preferSrgb) {
+    // 채널 순서(BGRA vs RGBA)는 색 정확도와 무관(셰이더 RGBA 출력을 포맷이 매핑)하므로
+    // sRGB 여부만 기준으로 고른다. preferSrgb=false → UNORM(셰이더 수동 감마)을 우선.
+    auto isSrgb = [](VkFormat f) {
+        return f == VK_FORMAT_B8G8R8A8_SRGB || f == VK_FORMAT_R8G8B8A8_SRGB;
+    };
     for (const auto& availableFormat : availableFormats) {
-        if (availableFormat.format == VK_FORMAT_B8G8R8A8_SRGB && availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+        if (availableFormat.colorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) continue;
+        if (isSrgb(availableFormat.format) == preferSrgb) {
             return availableFormat;
         }
     }
@@ -145,4 +154,6 @@ VkExtent2D VulkanSwapchain::ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& cap
 
         return actualExtent;
     }
+}
+
 }
