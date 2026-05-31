@@ -1,7 +1,9 @@
 #pragma once
 #include "VulkanContext.h"
 #include <vector>
-#include <GLFW/glfw3.h>
+
+namespace dy::Backends
+{
 
 class VulkanSwapchain {
 public:
@@ -11,7 +13,8 @@ public:
         std::vector<VkPresentModeKHR> presentModes;
     };
 
-    void Initialize(const VulkanContext& context, void* windowHandle);
+    // preferSrgb: true 면 sRGB 서피스 포맷(하드웨어 감마), false 면 UNORM(셰이더 수동 감마)을 고른다.
+    void Initialize(const VulkanContext& context, void* windowHandle, bool preferSrgb = false);
     void Cleanup(VkDevice device);
 
     VkSwapchainKHR GetHandle() const { return m_swapchain; }
@@ -23,7 +26,7 @@ public:
     static SwapchainSupportDetails QuerySwapchainSupport(VkPhysicalDevice device, VkSurfaceKHR surface);
 
 private:
-    VkSurfaceFormatKHR ChooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats);
+    VkSurfaceFormatKHR ChooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats, bool preferSrgb);
     VkPresentModeKHR ChoosePresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes);
     VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities, void* windowHandle);
 
@@ -33,3 +36,5 @@ private:
     std::vector<VkImage> m_swapchainImages;
     std::vector<VkImageView> m_swapchainImageViews;
 };
+
+}
