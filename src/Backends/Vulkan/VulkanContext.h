@@ -8,6 +8,9 @@
 #include <vulkan/vulkan.h>
 #include <vector>
 
+namespace dy::Backends
+{
+
 struct VulkanContext {
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
@@ -22,3 +25,5 @@ struct VulkanContext {
         bool IsComplete() const { return graphicsFamily != UINT32_MAX && presentFamily != UINT32_MAX; }
     } queueIndices;
 };
+
+}
