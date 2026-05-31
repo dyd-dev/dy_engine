@@ -1,3 +1,5 @@
+#include "FBXLoader.h"
+
 #include "Loaders.h"
 #include <ufbx.h>
 #include <filesystem>
@@ -74,9 +76,11 @@ namespace dy::Graphics
                     ufbx_vec3 localPos = ufbx_get_vertex_vec3(&mesh->vertex_position, index);
                     ufbx_vec3 worldPos = ufbx_transform_position(&node->geometry_to_world, localPos);
 
-                    vertex.position[0] = static_cast<float>(worldPos.x);
-                    vertex.position[1] = static_cast<float>(worldPos.y);
-                    vertex.position[2] = static_cast<float>(worldPos.z);
+                    vertex.position = Math::float3(
+                        static_cast<float>(worldPos.x),
+                        static_cast<float>(worldPos.y),
+                        static_cast<float>(worldPos.z));
+                    vertex.normal = Math::float3(0.0f, 1.0f, 0.0f);
 
                     // UV 가져오기
                     if (mesh->vertex_uv.exists) {
@@ -98,4 +102,8 @@ namespace dy::Graphics
         return true;
     }
 
+    bool FBXLoader::Load(const std::string& filepath, MeshData& outData, std::string* outTexturePath)
+    {
+        return LoadFromFBX(filepath.c_str(), outData, outTexturePath);
+    }
 }
