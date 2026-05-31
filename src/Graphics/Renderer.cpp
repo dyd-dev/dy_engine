@@ -259,8 +259,14 @@ void Renderer::EnsureGpuMaterials(const Scene& scene)
 		gpuMaterial.constants.baseColor = cpuMaterial.baseColor;
 		gpuMaterial.constants.baseColorTextureIndex = IsValid(cpuMaterial.baseColorTex) ? ToIndex(cpuMaterial.baseColorTex) : ToIndex(TextureID::Invalid);
 		gpuMaterial.constants.metallic = cpuMaterial.metallic;
-		gpuMaterial.constants.roughness = cpuMaterial.roughness;
-		gpuMaterial.constants.materialFlags = IsValid(cpuMaterial.baseColorTex) ? 1u : 0u;
+		gpuMaterial.constants.roughness = std::max(cpuMaterial.roughness, m_config.minRoughness);
+		uint32_t materialFlags = 0;
+		if(IsValid(cpuMaterial.baseColorTex)) materialFlags |= MaterialTexture_BaseColor;
+		if(IsValid(cpuMaterial.metallicRoughnessTex)) materialFlags |= MaterialTexture_MetallicRoughness;
+		if(IsValid(cpuMaterial.normalTex)) materialFlags |= MaterialTexture_Normal;
+		if(IsValid(cpuMaterial.occlusionTex)) materialFlags |= MaterialTexture_Occlusion;
+		if(IsValid(cpuMaterial.emissiveTex)) materialFlags |= MaterialTexture_Emissive;
+		gpuMaterial.constants.materialFlags = materialFlags;
 	}
 }
 
@@ -404,11 +410,11 @@ void Renderer::RecordIAPass(const Scene& scene, RHI::IDevice* device)
 		if(mesh.vertexBuffer == nullptr) continue;
 
 		const MaterialDrawConstants constants = BuildMaterialConstants(scene, batch);
-		commandList->BindIAVertexBuffer(mesh.vertexBuffer, mesh.vertexStride, mesh.vertexOffset);
+		commandList->BindVertexBuffer(mesh.vertexBuffer, mesh.vertexStride, mesh.vertexOffset);
 		commandList->SetPushConstants(static_cast<uint32_t>(sizeof(constants)), &constants);
 		if(batch.indexed && mesh.indexBuffer != nullptr)
 		{
-			commandList->BindIAIndexBuffer(mesh.indexBuffer, RHI::Format::R32_UINT, mesh.indexOffset);
+			commandList->BindIndexBuffer(mesh.indexBuffer, RHI::Format::R32_UINT, mesh.indexOffset);
 		}
 
 		if(batch.indexed && mesh.indexBuffer != nullptr)

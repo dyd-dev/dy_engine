@@ -136,6 +136,7 @@ namespace dy::Backends
     }
 
     void MetalCommandList::BindGlobalDescriptorHeap() {}
+    void MetalCommandList::BindVertexBuffer(RHI::IBuffer*, uint32_t, uint32_t) {}
     void MetalCommandList::BindIndexBuffer(RHI::IBuffer*, RHI::Format, uint32_t) {}
 
     void MetalCommandList::SetPushConstants(uint32_t size, const void* data)
@@ -172,6 +173,8 @@ namespace dy::Backends
                           instanceCount:instanceCount
                            baseInstance:startInstance];
     }
+
+    void MetalCommandList::DrawIndexedInstanced(uint32_t, uint32_t, uint32_t, int32_t, uint32_t) {}
 
     void MetalCommandList::ResourceBarrier(RHI::IBuffer*, RHI::ResourceState, RHI::ResourceState) {}
     void MetalCommandList::ResourceBarrier(RHI::ITexture*, RHI::ResourceState, RHI::ResourceState) {}

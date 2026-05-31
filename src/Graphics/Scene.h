@@ -9,6 +9,32 @@
 
 namespace dy::Graphics
 {
+	struct RenderFlags
+	{
+		bool castShadow = true;
+		bool receiveShadow = true;
+	};
+
+	struct DirectionalLight
+	{
+		Math::float3 direction = Math::float3(0.35f, 0.65f, 0.68f);
+		Math::float3 color = Math::float3(1.0f, 0.94f, 0.82f);
+		float intensity = 4.0f;
+		bool castShadow = true;
+		float shadowStrength = 0.45f;
+	};
+
+	struct PointLight
+	{
+		Math::float3 position = Math::float3(0.0f, 0.0f, 2.0f);
+		float range = 6.0f;
+		Math::float3 color = Math::float3(1.0f, 0.94f, 0.82f);
+		float intensity = 6.0f;
+		Math::float3 direction = Math::float3(0.0f, 0.0f, -1.0f);
+		bool castShadow = true;
+		float shadowStrength = 0.5f;
+	};
+
 	struct alignas(16) Transform
 	{
 		Math::float4x4 worldMatrix;
@@ -32,10 +58,13 @@ namespace dy::Graphics
 		std::vector<Transform> m_entityTransforms;
 		std::vector<MeshID> m_entityMeshes;
 		std::vector<MaterialID> m_entityMaterials;
+		std::vector<RenderFlags> m_entityRenderFlags;
 
 		std::vector<MeshData> m_meshes;
 		std::vector<MaterialData> m_materials;
 		std::vector<TextureData> m_textures;
+		std::vector<DirectionalLight> m_directionalLights;
+		std::vector<PointLight> m_pointLights;
 
 		[[nodiscard]] MeshID AddMesh(const MeshData& mesh)
 		{
@@ -82,7 +111,7 @@ namespace dy::Graphics
 			return AddTexture(texture);
 		}
 
-		EntityID CreateEntity(MeshID mesh, MaterialID material, const Math::float4x4& worldMatrix = Math::float4x4::Identity())
+		EntityID CreateEntity(MeshID mesh, MaterialID material, const Math::float4x4& worldMatrix = Math::float4x4::Identity(), const RenderFlags& renderFlags = {})
 		{
 			if(!IsValid(mesh) || !IsValid(material)) return EntityID::Invalid;
 			if(ToIndex(mesh) >= m_meshes.size() || ToIndex(material) >= m_materials.size()) return EntityID::Invalid;
@@ -91,7 +120,36 @@ namespace dy::Graphics
 			m_entityMeshes.push_back(mesh);
 			m_entityMaterials.push_back(material);
 			m_entityTransforms.push_back(Transform{ worldMatrix });
+			m_entityRenderFlags.push_back(renderFlags);
 			return id;
+		}
+
+		[[nodiscard]] uint32_t AddDirectionalLight(const DirectionalLight& light)
+		{
+			m_directionalLights.push_back(light);
+			return static_cast<uint32_t>(m_directionalLights.size() - 1u);
+		}
+
+		[[nodiscard]] uint32_t AddDirectionalLight(
+			const Math::float3& direction,
+			const Math::float3& color,
+			float intensity,
+			bool castShadow = true,
+			float shadowStrength = 0.45f)
+		{
+			DirectionalLight light = {};
+			light.direction = direction;
+			light.color = color;
+			light.intensity = intensity;
+			light.castShadow = castShadow;
+			light.shadowStrength = shadowStrength;
+			return AddDirectionalLight(light);
+		}
+
+		[[nodiscard]] uint32_t AddPointLight(const PointLight& light)
+		{
+			m_pointLights.push_back(light);
+			return static_cast<uint32_t>(m_pointLights.size() - 1u);
 		}
 	};
 }

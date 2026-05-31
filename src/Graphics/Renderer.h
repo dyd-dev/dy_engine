@@ -30,6 +30,22 @@ namespace dy::Graphics
 	{
 		Math::float4 clearColor = Math::float4(0.08f, 0.10f, 0.14f, 1.0f);
 		GeometrySubmissionMode geometryMode = GeometrySubmissionMode::IndexedInputAssembler;
+		Math::float4x4 viewProjectionMatrix = Math::float4x4::Identity();
+		Math::float3 cameraPosition = Math::float3(0.0f, 0.0f, 2.2f);
+		Math::float3 ambientColor = Math::float3(1.0f, 1.0f, 1.0f);
+		float ambientIntensity = 0.035f;
+		float minRoughness = 0.04f;
+		float ambientSpecularStrength = 0.25f;
+		Math::float3 environmentDiffuseColor = Math::float3(1.0f, 1.0f, 1.0f);
+		float environmentDiffuseIntensity = 1.0f;
+		Math::float3 environmentSpecularColor = Math::float3(1.0f, 1.0f, 1.0f);
+		float environmentSpecularIntensity = 1.0f;
+		bool enableShadows = false;
+		float shadowStrength = 0.45f;
+		float shadowDepthBias = 0.0007f;
+		float shadowSlopeBias = 0.003f;
+		float shadowNormalBias = 0.0f;
+		uint32_t shadowPcfRadius = 1;
 	};
 
 	class Renderer

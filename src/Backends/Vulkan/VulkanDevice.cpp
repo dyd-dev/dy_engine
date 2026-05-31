@@ -1,5 +1,6 @@
 #include "VulkanDevice.h"
 #include "VulkanResources.h"
+#include "RHI/IBuffer.h"
 #include "RHI/IPipelineState.h"
 #include "RHI/ITexture.h"
 #include <GLFW/glfw3.h>
@@ -59,6 +60,72 @@ namespace {
 	public:
 		explicit VulkanPipelineState(const dy::RHI::GraphicsPipelineDesc&) {}
 	};
+
+	VkBufferUsageFlags ToVkBufferUsage(dy::RHI::BufferUsage usage)
+	{
+		VkBufferUsageFlags flags = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+		if ((usage & dy::RHI::BufferUsage::Vertex) == dy::RHI::BufferUsage::Vertex) flags |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+		if ((usage & dy::RHI::BufferUsage::Index) == dy::RHI::BufferUsage::Index) flags |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+		if ((usage & dy::RHI::BufferUsage::Constant) == dy::RHI::BufferUsage::Constant) flags |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+		if ((usage & dy::RHI::BufferUsage::Storage) == dy::RHI::BufferUsage::Storage) flags |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+		if ((usage & dy::RHI::BufferUsage::Indirect) == dy::RHI::BufferUsage::Indirect) flags |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+		return flags;
+	}
+
+	class VulkanBuffer final : public dy::RHI::IBuffer
+	{
+	public:
+		VulkanBuffer(const VulkanContext& context, const dy::RHI::BufferDesc& desc)
+			: m_device(context.device), m_size(desc.size), m_stride(desc.stride)
+		{
+			VulkanResources::CreateBuffer(
+				context,
+				desc.size,
+				ToVkBufferUsage(desc.usage),
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+				m_buffer,
+				m_memory);
+		}
+
+		~VulkanBuffer() override
+		{
+			if (m_mapped != nullptr) vkUnmapMemory(m_device, m_memory);
+			if (m_buffer != VK_NULL_HANDLE) vkDestroyBuffer(m_device, m_buffer, nullptr);
+			if (m_memory != VK_NULL_HANDLE) vkFreeMemory(m_device, m_memory, nullptr);
+		}
+
+		void* Map(uint32_t offset, uint32_t size) override
+		{
+			if (m_mapped != nullptr) return static_cast<uint8_t*>(m_mapped) + offset;
+			const VkDeviceSize mapSize = size == 0u ? VK_WHOLE_SIZE : static_cast<VkDeviceSize>(size);
+			if (vkMapMemory(m_device, m_memory, offset, mapSize, 0, &m_mapped) != VK_SUCCESS) return nullptr;
+			return m_mapped;
+		}
+
+		void Unmap() override
+		{
+			if (m_mapped == nullptr) return;
+			vkUnmapMemory(m_device, m_memory);
+			m_mapped = nullptr;
+		}
+
+		uint32_t GetSize() const override { return m_size; }
+		uint32_t GetStride() const override { return m_stride; }
+		VkBuffer GetBuffer() const { return m_buffer; }
+
+	private:
+		VkDevice m_device = VK_NULL_HANDLE;
+		VkBuffer m_buffer = VK_NULL_HANDLE;
+		VkDeviceMemory m_memory = VK_NULL_HANDLE;
+		void* m_mapped = nullptr;
+		uint32_t m_size = 0;
+		uint32_t m_stride = 0;
+	};
+
+	VkIndexType ToVkIndexType(dy::RHI::Format format)
+	{
+		return format == dy::RHI::Format::R16_UINT ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+	}
 }
 
 VulkanDevice::VulkanDevice() {
@@ -179,6 +246,12 @@ dy::RHI::IPipelineState* VulkanDevice::CreateGraphicsPipeline(const dy::RHI::Gra
 	return pipelineState;
 }
 
+dy::RHI::IBuffer* VulkanDevice::CreateBuffer(const dy::RHI::BufferDesc& desc) {
+	VulkanBuffer* buffer = new VulkanBuffer(m_context, desc);
+	m_ownedBuffers.push_back(buffer);
+	return buffer;
+}
+
 dy::RHI::DescriptorIndex VulkanDevice::AllocateDescriptorSlot() {
 	return m_nextDescriptorIndex++;
 }
@@ -192,6 +265,15 @@ void VulkanDevice::DestroyTexture(dy::RHI::ITexture* texture) {
 	if (it != m_ownedTextures.end()) {
 		delete *it;
 		m_ownedTextures.erase(it);
+	}
+}
+
+void VulkanDevice::DestroyBuffer(dy::RHI::IBuffer* buffer) {
+	if (!buffer) return;
+	const auto it = std::find(m_ownedBuffers.begin(), m_ownedBuffers.end(), buffer);
+	if (it != m_ownedBuffers.end()) {
+		delete *it;
+		m_ownedBuffers.erase(it);
 	}
 }
 
@@ -419,13 +501,6 @@ void VulkanDevice::RecordCommandBuffer(const VulkanCommandList& commandList) {
 		vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline.GetLayout(), 0, 1, &m_descriptorSets[m_currentFrameIndex], 0, nullptr);
 	}
 
-	        if (m_useVertexInput && m_vertexBuffer != VK_NULL_HANDLE) {
-            VkBuffer vertexBuffers[] = {m_vertexBuffer};
-            VkDeviceSize offsets[] = {0};
-            vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
-            vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer, 0, VK_INDEX_TYPE_UINT32);
-        }
-
         for (const VulkanCommandList::DrawCall& drawCall : commandList.m_drawCalls) {
             if (drawCall.pushConstantSize > 0) {
                 vkCmdPushConstants(
@@ -437,7 +512,23 @@ void VulkanDevice::RecordCommandBuffer(const VulkanCommandList& commandList) {
                     drawCall.pushConstants.data()
                 );
             }
-            if (m_useVertexInput && m_indexCount > 0) {
+            const VulkanBuffer* vertexBuffer = static_cast<const VulkanBuffer*>(drawCall.vertexBuffer);
+            if (vertexBuffer != nullptr && vertexBuffer->GetBuffer() != VK_NULL_HANDLE) {
+                VkBuffer vertexBuffers[] = { vertexBuffer->GetBuffer() };
+                VkDeviceSize offsets[] = { drawCall.vertexBufferOffset };
+                vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+            } else if (m_useVertexInput && m_vertexBuffer != VK_NULL_HANDLE) {
+                VkBuffer vertexBuffers[] = { m_vertexBuffer };
+                VkDeviceSize offsets[] = { 0 };
+                vkCmdBindVertexBuffers(commandBuffer, 0, 1, vertexBuffers, offsets);
+            }
+
+            const VulkanBuffer* indexBuffer = static_cast<const VulkanBuffer*>(drawCall.indexBuffer);
+            if (drawCall.indexed && indexBuffer != nullptr && indexBuffer->GetBuffer() != VK_NULL_HANDLE) {
+                vkCmdBindIndexBuffer(commandBuffer, indexBuffer->GetBuffer(), drawCall.indexBufferOffset, ToVkIndexType(drawCall.indexFormat));
+                vkCmdDrawIndexed(commandBuffer, drawCall.indexCount, drawCall.instanceCount, drawCall.firstIndex, drawCall.vertexOffset, drawCall.startInstance);
+            } else if (m_useVertexInput && m_indexCount > 0) {
+                vkCmdBindIndexBuffer(commandBuffer, m_indexBuffer, 0, VK_INDEX_TYPE_UINT32);
                 vkCmdDrawIndexed(commandBuffer, m_indexCount, 1, 0, 0, 0);
             } else {
                 vkCmdDraw(commandBuffer, drawCall.vertexCount, drawCall.instanceCount, drawCall.startVertex, drawCall.startInstance);
@@ -569,6 +660,9 @@ void VulkanDevice::DestroySwapchainResources() {
 void VulkanDevice::DestroyDeviceResources() {
 	for (dy::RHI::IPipelineState* pipelineState : m_ownedPipelineStates) delete pipelineState;
 	m_ownedPipelineStates.clear();
+
+	for (dy::RHI::IBuffer* buffer : m_ownedBuffers) delete buffer;
+	m_ownedBuffers.clear();
 
 	for (dy::RHI::ITexture* texture : m_ownedTextures) delete texture;
 	m_ownedTextures.clear();

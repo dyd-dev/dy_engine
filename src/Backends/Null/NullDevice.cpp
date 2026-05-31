@@ -62,7 +62,10 @@ namespace dy::Backends
 			void SetScissor(const RHI::Rect&) override {}
 			void ClearColor(RHI::ITexture*, float, float, float, float) override {}
 			void ClearDepth(RHI::ITexture*, float) override {}
+			void BindVertexBuffer(RHI::IBuffer*, uint32_t, uint32_t) override {}
+			void BindIndexBuffer(RHI::IBuffer*, RHI::Format, uint32_t) override {}
 			void DrawInstanced(uint32_t, uint32_t, uint32_t, uint32_t) override {}
+			void DrawIndexedInstanced(uint32_t, uint32_t, uint32_t, int32_t, uint32_t) override {}
 			void ResourceBarrier(RHI::IBuffer*, RHI::ResourceState, RHI::ResourceState) override {}
 			void ResourceBarrier(RHI::ITexture*, RHI::ResourceState, RHI::ResourceState) override {}
 			void Close() override {}

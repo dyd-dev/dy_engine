@@ -21,10 +21,7 @@ public:
 	void Present() override;
 
 	dy::RHI::IBuffer* CreateBuffer(const dy::RHI::BufferDesc& desc) override
-	{
-		(void)desc;
-		return nullptr;
-	}
+	;
 	dy::RHI::ITexture* CreateTexture(const dy::RHI::TextureDesc& desc) override;
 	dy::RHI::IPipelineState* CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) override;
 	[[nodiscard]] dy::RHI::DescriptorIndex AllocateDescriptorSlot() override;
@@ -32,9 +29,7 @@ public:
 	void UpdateDescriptorSlot(dy::RHI::DescriptorIndex index, dy::RHI::IBuffer* buffer) override {}
 
 	void DestroyBuffer(dy::RHI::IBuffer* buffer) override
-	{
-		(void)buffer;
-	}
+	;
 	void DestroyTexture(dy::RHI::ITexture* texture) override;
 	void DestroyPipelineState(dy::RHI::IPipelineState* pipeline) override;
 
@@ -115,6 +110,7 @@ private:
 	VulkanCommandList* m_commandList = nullptr;
 	dy::RHI::ITexture* m_backBuffer = nullptr;
 	std::vector<dy::RHI::ITexture*> m_ownedTextures;
+	std::vector<dy::RHI::IBuffer*> m_ownedBuffers;
 	std::vector<dy::RHI::IPipelineState*> m_ownedPipelineStates;
 };
 

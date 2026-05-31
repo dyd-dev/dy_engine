@@ -14,6 +14,8 @@ add_library(${PROJECT_NAME} STATIC
 	"src/Core/ImageLoader.cpp"
 	"src/Graphics/GLTFLoader.cpp"
 	"src/Graphics/FBXLoader.cpp"
+	"src/Graphics/Shadow.cpp"
+	"src/Graphics/ShadowMap.cpp"
 )
 
 # global options

@@ -91,6 +91,37 @@ namespace dy::Backends
         m_internal->commandList->DrawInstanced(vertexCount, instanceCount, startVertex, startInstance);
     }
 
+    void D3D12CommandList::BindVertexBuffer(RHI::IBuffer* buffer, uint32_t stride, uint32_t offset) {
+        auto* d3d12Buffer = static_cast<D3D12Buffer*>(buffer);
+        if (d3d12Buffer == nullptr) return;
+
+        D3D12_VERTEX_BUFFER_VIEW view = {};
+        view.BufferLocation = static_cast<ID3D12Resource*>(d3d12Buffer->GetNativeResource())->GetGPUVirtualAddress() + offset;
+        view.SizeInBytes = d3d12Buffer->GetSize() - offset;
+        view.StrideInBytes = stride;
+        m_internal->commandList->IASetVertexBuffers(0, 1, &view);
+    }
+
+    void D3D12CommandList::BindIndexBuffer(RHI::IBuffer* buffer, RHI::Format format, uint32_t offset) {
+        auto* d3d12Buffer = static_cast<D3D12Buffer*>(buffer);
+        if (d3d12Buffer == nullptr) return;
+
+        DXGI_FORMAT dxgiFormat = DXGI_FORMAT_R32_UINT;
+        if (format == RHI::Format::R16_UINT) {
+            dxgiFormat = DXGI_FORMAT_R16_UINT;
+        }
+
+        D3D12_INDEX_BUFFER_VIEW view = {};
+        view.BufferLocation = static_cast<ID3D12Resource*>(d3d12Buffer->GetNativeResource())->GetGPUVirtualAddress() + offset;
+        view.SizeInBytes = d3d12Buffer->GetSize() - offset;
+        view.Format = dxgiFormat;
+        m_internal->commandList->IASetIndexBuffer(&view);
+    }
+
+    void D3D12CommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) {
+        m_internal->commandList->DrawIndexedInstanced(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+    }
+
     void D3D12CommandList::BindGlobalDescriptorHeap() {
         if (m_internal->globalDescriptorHeap) {
             ID3D12DescriptorHeap* heaps[] = { m_internal->globalDescriptorHeap };

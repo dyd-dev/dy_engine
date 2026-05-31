@@ -61,7 +61,10 @@ namespace dy::RHI
 		virtual void ClearDepth(ITexture* depthStencil, float depth) = 0;
 
 		// Draw Commands
+		virtual void BindVertexBuffer(IBuffer* buffer, uint32_t stride, uint32_t offset) = 0;
+		virtual void BindIndexBuffer(IBuffer* buffer, Format format, uint32_t offset) = 0;
 		virtual void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) = 0;
+		virtual void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) = 0;
 
 		// Synchronization
 		// GPU 내 교통 정리 함수. (write 중 read 불가 등
