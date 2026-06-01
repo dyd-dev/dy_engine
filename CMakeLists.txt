@@ -11,7 +11,6 @@ add_library(${PROJECT_NAME} STATIC
         "src/Graphics/Mesh.cpp"
 	"src/Platform/Window.cpp"
 	"src/Backends/Null/NullDevice.cpp"
-	"src/Graphics/ObjLoader.cpp"
 	"src/Core/ImageLoader.cpp"
 )
 

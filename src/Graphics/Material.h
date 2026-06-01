@@ -1,8 +1,8 @@
 #pragma once
+#include "Core/Types.h"
 
 namespace dy::Graphics
 {
-	class Material
-	{
-	};
+	using MaterialDesc = dy::MaterialDesc;
+	using Material = dy::Material;
 }

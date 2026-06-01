@@ -20,21 +20,33 @@ namespace dy::Graphics
 			m_materials.push_back(material);
 			return static_cast<MaterialID>(m_materials.size() - 1u);
 		}
+		[[nodiscard]] MaterialID CreateMaterial(const MaterialDesc& material)
+		{
+			m_materials.emplace_back(material);
+			return static_cast<MaterialID>(m_materials.size() - 1u);
+		}
 		[[nodiscard]] MeshID CreateMesh(const Mesh& mesh)
 		{
 			m_meshes.push_back(mesh);
 			return static_cast<MeshID>(m_meshes.size() - 1u);
 		}
-		[[nodiscard]] EntityID CreateEntity(MeshID mesh, MaterialID material, const Math::float4x4& worldMatrix = Math::float4x4::Identity())
+		[[nodiscard]] EntityID CreateEntity(
+			MeshID mesh,
+			MaterialID material,
+			const Math::float4x4& worldMatrix = Math::float4x4::Identity(),
+			const RenderFlags& renderFlags = {})
 		{
 			const EntityID entity = static_cast<EntityID>(m_entityMeshes.size());
 			m_entityMeshes.push_back(mesh);
 			m_entityMaterials.push_back(material);
 			m_entityTransforms.push_back(Transform{ worldMatrix });
+			m_entityRenderFlags.push_back(renderFlags);
 			return entity;
 		}
 
 		[[nodiscard]] uint32_t GetTextureCount() const { return static_cast<uint32_t>(m_textureImages.size()); }
+		[[nodiscard]] uint32_t GetMaterialCount() const { return static_cast<uint32_t>(m_materials.size()); }
+		[[nodiscard]] uint32_t GetMeshCount() const { return static_cast<uint32_t>(m_meshes.size()); }
 		[[nodiscard]] uint32_t GetEntityCount() const { return static_cast<uint32_t>(m_entityMeshes.size()); }
 
 		[[nodiscard]] const Core::Image& GetTexture(TextureID textureId) const
@@ -44,6 +56,14 @@ namespace dy::Graphics
 		[[nodiscard]] const Material& GetMaterial(MaterialID materialId) const
 		{
 			return m_materials[ToIndex(materialId)];
+		}
+		void SetMaterial(MaterialID materialId, const Material& material)
+		{
+			m_materials[ToIndex(materialId)] = material;
+		}
+		void SetMaterial(MaterialID materialId, const MaterialDesc& material)
+		{
+			m_materials[ToIndex(materialId)] = Material(material);
 		}
 		[[nodiscard]] const Mesh& GetMesh(MeshID meshId) const
 		{
@@ -65,6 +85,14 @@ namespace dy::Graphics
 		{
 			return m_entityTransforms[ToIndex(entityId)];
 		}
+		[[nodiscard]] const RenderFlags& GetRenderFlags(EntityID entityId) const
+		{
+			return m_entityRenderFlags[ToIndex(entityId)];
+		}
+		void SetRenderFlags(EntityID entityId, const RenderFlags& renderFlags)
+		{
+			m_entityRenderFlags[ToIndex(entityId)] = renderFlags;
+		}
 
 	private:
 		std::vector<Core::Image> m_textureImages;
@@ -73,5 +101,6 @@ namespace dy::Graphics
 		std::vector<MeshID> m_entityMeshes;
 		std::vector<MaterialID> m_entityMaterials;
 		std::vector<Transform> m_entityTransforms;
+		std::vector<RenderFlags> m_entityRenderFlags;
 	};
 }
