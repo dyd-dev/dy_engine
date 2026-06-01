@@ -134,6 +134,13 @@ namespace dy::Backends
 
     void MetalCommandList::BindGlobalDescriptorHeap() {}
     void MetalCommandList::BindIndexBuffer(RHI::IBuffer*, RHI::Format, uint32_t) {}
+    void MetalCommandList::BindGeometry(const RHI::GeometryBinding& geometry) {
+        if (geometry.indexBuffer != nullptr) {
+            BindIndexBuffer(geometry.indexBuffer, geometry.indexFormat, geometry.indexOffset);
+        }
+    }
+    void MetalCommandList::BindConstantBuffer(uint32_t, RHI::IBuffer*, uint32_t, uint32_t) {}
+    void MetalCommandList::BindTexture(uint32_t, RHI::ITexture*) {}
 
     void MetalCommandList::SetPushConstants(uint32_t size, const void* data)
     {

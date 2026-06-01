@@ -13,6 +13,13 @@ public:
 	void BindGraphicsPipeline(dy::RHI::IPipelineState* pipelineState) override;
 	void BindGlobalDescriptorHeap() override {}
 	void BindIndexBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset) override {}
+	void BindGeometry(const dy::RHI::GeometryBinding& geometry) override {
+		if (geometry.indexBuffer != nullptr) {
+			BindIndexBuffer(geometry.indexBuffer, geometry.indexFormat, geometry.indexOffset);
+		}
+	}
+	void BindConstantBuffer(uint32_t, dy::RHI::IBuffer*, uint32_t, uint32_t) override {}
+	void BindTexture(uint32_t, dy::RHI::ITexture*) override {}
 	void SetPushConstants(uint32_t size, const void* data) override;
 	void SetRenderTargets(uint32_t numRenderTargets, dy::RHI::ITexture** renderTargets, dy::RHI::ITexture* depthStencil) override {}
 	void ClearColor(dy::RHI::ITexture* renderTarget, float r, float g, float b, float a) override;

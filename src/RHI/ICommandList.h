@@ -16,6 +16,16 @@ namespace dy::RHI
 	class ITexture;
 	class IPipelineState;
 
+	struct GeometryBinding
+	{
+		IBuffer* vertexBuffer = nullptr;
+		uint32_t vertexStride = 0;
+		uint32_t vertexOffset = 0;
+		IBuffer* indexBuffer = nullptr;
+		Format indexFormat = Format::Unknown;
+		uint32_t indexOffset = 0;
+	};
+
 	class ICommandList
 	{
 	public:
@@ -27,15 +37,19 @@ namespace dy::RHI
 		// Bind the global state.
 		virtual void BindGraphicsPipeline(IPipelineState* pipelineState) = 0;
 
-		// Binds the single Global Descriptor Heap containing ALL textures and buffers.
-		// Must be called once per pass before Draw.
-		virtual void BindGlobalDescriptorHeap() = 0;
-
+		// Explicit binding path: resources are bound to this command list directly.
 		virtual void BindIndexBuffer(IBuffer* buffer, Format format, uint32_t offset) = 0;
 		virtual void BindVertexBuffer(IBuffer* buffer) = 0;
+		virtual void BindGeometry(const GeometryBinding& geometry) = 0;
+		virtual void BindConstantBuffer(uint32_t binding, IBuffer* buffer, uint32_t offset, uint32_t size) = 0;
+		virtual void BindTexture(uint32_t binding, ITexture* texture) = 0;
+
+		// Bindless path: binds the global descriptor heap/table containing shared resources.
+		// Must be called once per pass before Draw when shaders access bindless descriptors.
+		virtual void BindGlobalDescriptorHeap() = 0;
 
 		// Modern DOD Approach: Inject tiny data (e.g., Transform Index, Material Index) directly.
-		// Replaces ALL BindBuffer and BindTexture calls.
+		// Tiny per-draw data stays in push constants; larger resources bind through the slots above.
 		virtual void SetPushConstants(uint32_t size, const void* data) = 0;
 
 		// Render Targets & Clears

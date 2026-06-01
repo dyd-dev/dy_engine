@@ -1,6 +1,6 @@
 #pragma once
 #include <cstddef>
-#include "Enums.h"
+#include <cstdint>
 /* PipelineState.h
 * 
 * PipelineState는 그래픽스 파이프라인의 상태를 정의하는 클래스입니다.
@@ -10,19 +10,26 @@
 
 namespace dy::RHI
 {
+	constexpr uint32_t kDefaultShadowMapResolution = 2048;
+
 	struct GraphicsPipelineDesc {
-		const void* vertexShader;
-		size_t vertexShaderSize;
+		const void* vertexShader = nullptr;
+		size_t vertexShaderSize = 0;
 
-		const void* pixelShader;
-		size_t pixelShaderSize;
+		const void* pixelShader = nullptr;
+		size_t pixelShaderSize = 0;
 
-		Format renderTargetFormat;
-		Format depthStencilFormat;
+		const void* shadowVertexShader = nullptr;
+		size_t shadowVertexShaderSize = 0;
+
+		Format renderTargetFormat = Format::Unknown;
+		Format depthStencilFormat = Format::Unknown;
 
 		// flags like Depth, Blend mode
 		bool depthEnable = true;
 		bool wireframe = false;
+		bool enableShadowPass = false;
+		uint32_t shadowMapResolution = kDefaultShadowMapResolution;
 	};
 
 	struct ComputePipelineDesc {

@@ -56,6 +56,9 @@ namespace dy::Backends
 			void BindGlobalDescriptorHeap() override {}
 			void BindVertexBuffer(RHI::IBuffer*) override {}
 			void BindIndexBuffer(RHI::IBuffer*, RHI::Format, uint32_t) override {}
+			void BindGeometry(const RHI::GeometryBinding&) override {}
+			void BindConstantBuffer(uint32_t, RHI::IBuffer*, uint32_t, uint32_t) override {}
+			void BindTexture(uint32_t, RHI::ITexture*) override {}
 			void SetPushConstants(uint32_t, const void*) override {}
 			void SetRenderTargets(uint32_t, RHI::ITexture**, RHI::ITexture*) override {}
 			void ClearColor(RHI::ITexture*, float, float, float, float) override {}

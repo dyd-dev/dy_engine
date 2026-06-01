@@ -123,6 +123,16 @@ namespace dy::Backends
         m_internal->commandList->IASetIndexBuffer(&ibView);
     }
 
+    void D3D12CommandList::BindGeometry(const RHI::GeometryBinding& geometry) {
+        BindVertexBuffer(geometry.vertexBuffer);
+        if (geometry.indexBuffer != nullptr) {
+            BindIndexBuffer(geometry.indexBuffer, geometry.indexFormat, geometry.indexOffset);
+        }
+    }
+
+    void D3D12CommandList::BindConstantBuffer(uint32_t, RHI::IBuffer*, uint32_t, uint32_t) {}
+    void D3D12CommandList::BindTexture(uint32_t, RHI::ITexture*) {}
+
     // 인덱스 그리기 구현
     void D3D12CommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t startIndex, int32_t baseVertex, uint32_t startInstance) {
         m_internal->commandList->DrawIndexedInstanced(indexCount, instanceCount, startIndex, baseVertex, startInstance);
