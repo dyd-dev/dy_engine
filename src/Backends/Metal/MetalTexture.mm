@@ -13,9 +13,6 @@ namespace dy::Backends
     struct MetalTexture::Impl
     {
         id<MTLTexture> texture = nil;
-        uint32_t       width   = 0;
-        uint32_t       height  = 0;
-        RHI::Format    format  = RHI::Format::Unknown;
     };
 
     // RHI Format → MTLPixelFormat 변환
@@ -33,13 +30,10 @@ namespace dy::Backends
     }
 
     MetalTexture::MetalTexture(const RHI::TextureDesc& desc, void* device)
-        : m_impl(new Impl())
+        : RHI::ITexture(desc)
+        , m_impl(new Impl())
     {
         id<MTLDevice> mtlDevice = (__bridge id<MTLDevice>)device;
-
-        m_impl->width  = desc.width;
-        m_impl->height = desc.height;
-        m_impl->format = desc.format;
 
         MTLTextureDescriptor* texDesc = [MTLTextureDescriptor new];
         texDesc.width       = desc.width;
@@ -53,31 +47,21 @@ namespace dy::Backends
             mtlUsage |= MTLTextureUsageShaderRead;
         if((desc.usage & RHI::TextureUsage::RenderTarget) != RHI::TextureUsage::None)
             mtlUsage |= MTLTextureUsageRenderTarget;
-        if((desc.usage & RHI::TextureUsage::UnorderedAccess) != RHI::TextureUsage::None)
+        if((desc.usage & RHI::TextureUsage::DepthStencil) != RHI::TextureUsage::None)
+            mtlUsage |= MTLTextureUsageRenderTarget;
+        if((desc.usage & RHI::TextureUsage::Storage) != RHI::TextureUsage::None)
             mtlUsage |= MTLTextureUsageShaderWrite;
 
         texDesc.usage = mtlUsage;
 
         m_impl->texture = [mtlDevice newTextureWithDescriptor:texDesc];
-
-        if(desc.initialData != nullptr && desc.initialDataRowPitch > 0)
-        {
-            MTLRegion region = MTLRegionMake2D(0, 0, desc.width, desc.height);
-            [m_impl->texture replaceRegion:region
-                               mipmapLevel:0
-                                 withBytes:desc.initialData
-                               bytesPerRow:desc.initialDataRowPitch];
-        }
+        // 텍스처 초기 데이터는 IDevice::UpdateTexture 단일 경로로 업로드한다(생성-시 초기화 경로 폐기).
     }
 
     MetalTexture::~MetalTexture()
     {
         delete m_impl;
     }
-
-    uint32_t    MetalTexture::GetWidth()  const { return m_impl->width;  }
-    uint32_t    MetalTexture::GetHeight() const { return m_impl->height; }
-    RHI::Format MetalTexture::GetFormat() const { return m_impl->format; }
 
     void* MetalTexture::GetNativeTexture() const
     {

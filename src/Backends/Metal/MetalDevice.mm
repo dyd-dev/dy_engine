@@ -36,7 +36,7 @@ namespace dy::Backends
         delete m_impl;
     }
 
-    int MetalDevice::Initialize(const void* windowHandle)
+    int MetalDevice::Initialize(const void* windowHandle, const RHI::DeviceDesc&)
     {
         m_impl->device = MTLCreateSystemDefaultDevice();
         if(!m_impl->device) return -1;
@@ -126,6 +126,24 @@ namespace dy::Backends
     void MetalDevice::DestroyBuffer(RHI::IBuffer* buffer)                 { delete buffer; }
     void MetalDevice::DestroyTexture(RHI::ITexture* texture)              { delete texture; }
     void MetalDevice::DestroyPipelineState(RHI::IPipelineState* pipeline) { delete pipeline; }
+
+    bool MetalDevice::UpdateTexture(RHI::ITexture* texture, const void* data, uint32_t rowPitch)
+    {
+        if(texture == nullptr || data == nullptr || rowPitch == 0)
+            return false;
+
+        auto* metalTexture = static_cast<MetalTexture*>(texture);
+        id<MTLTexture> nativeTexture = (__bridge id<MTLTexture>)metalTexture->GetNativeTexture();
+        if(nativeTexture == nil)
+            return false;
+
+        MTLRegion region = MTLRegionMake2D(0, 0, texture->GetWidth(), texture->GetHeight());
+        [nativeTexture replaceRegion:region
+                          mipmapLevel:0
+                            withBytes:data
+                          bytesPerRow:rowPitch];
+        return true;
+    }
 
     RHI::DescriptorIndex MetalDevice::AllocateDescriptorSlot()
     {
