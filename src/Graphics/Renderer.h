@@ -1,67 +1,90 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "Core/Types.h"
-#include "RHI/Enums.h"
+#include "Graphics/GpuScene.h"
+#include "Graphics/RenderPass.h"
+#include "Graphics/RenderPath.h"
+#include "Graphics/RendererConfig.h"
+#include "Graphics/RendererShaderLayout.h"
 
 namespace dy::RHI
 {
+	class IBuffer;
 	class IDevice;
-	class ITexture;
 	class IPipelineState;
+	class ITexture;
 }
 
 namespace dy::Graphics
 {
 	class Scene;
 
-	struct RendererConfig
+	class ISceneRenderer
 	{
-		const char* vertexShaderPath = nullptr;
-		const char* pixelShaderPath = nullptr;
-		RHI::Format renderTargetFormat = RHI::Format::R8G8B8A8_UNORM;
-		RHI::Format depthStencilFormat = RHI::Format::Unknown;
-		Math::float4 clearColor = Math::float4(0.08f, 0.10f, 0.14f, 1.0f);
+	public:
+		virtual ~ISceneRenderer() = default;
+
+		virtual bool Initialize(RHI::IDevice* device, const RendererDesc& desc = {}) = 0;
+		virtual void Shutdown(RHI::IDevice* device) = 0;
+		virtual void Render(const Scene& scene, RHI::IDevice* device) = 0;
 	};
 
-	class Renderer
+	// 단일 Renderer. 바인딩 전략은 IRenderPath 로 위임하고, 공유 리소스와
+	// 렌더 패스 플랜만 직접 소유한다(전략별 코드는 RenderPath.cpp).
+	class Renderer : public ISceneRenderer
 	{
 	public:
 		Renderer() = default;
+		explicit Renderer(RendererBindingMode bindingMode);
+		explicit Renderer(const RendererDesc& desc);
 		~Renderer() = default;
 
-		bool Initialize(RHI::IDevice* device, const RendererConfig& config = {});
-		void Shutdown(RHI::IDevice* device);
-		void Render(const Scene& scene, RHI::IDevice* device);
+		bool Initialize(RHI::IDevice* device, const RendererDesc& desc = {}) override;
+		void Shutdown(RHI::IDevice* device) override;
+		void Render(const Scene& scene, RHI::IDevice* device) override;
+		
+		void SetCamera(const CameraDesc& camera); // 고수준 카메라 설정: view·proj·cameraPosition 생성 + 백엔드 Y 뒤집기 처리.
+		void SetViewProjection(const Math::float4x4& viewProjection); // 저수준(deep) 우회: 행렬/위치를 직접 지정.
+		void SetCameraPosition(const Math::float3& cameraPosition);
+		void SetDirectionalLight(const Math::float3& direction, const Math::float3& color, float intensity);
+		void SetAmbientLight(const Math::float3& color, float intensity);
+		void SetPBR(const PBRDesc& pbr);
+		void SetEnvironmentLight(const EnvironmentDesc& environment);
 
 	private:
-		static constexpr uint32_t kInvalidDescriptorIndex = 0xFFFFFFFFu;
-
-		struct SceneTextureState
-		{
-			RHI::ITexture* texture = nullptr;
-			uint32_t descriptorIndex = kInvalidDescriptorIndex;
-		};
-
-		struct DrawConstants
-		{
-			Math::float4x4 worldMatrix;
-			Math::float4 baseColor;
-			uint32_t baseColorTextureIndex = kInvalidDescriptorIndex;
-			float padding[3] = {};
-		};
-
 		void BuildPipelineStates(RHI::IDevice* device);
-		void PrepareSceneResources(const Scene& scene, RHI::IDevice* device);
-		void RecordScenePass(const Scene& scene, RHI::IDevice* device);
-		void EnsureTextureStateCapacity(std::size_t textureCount);
+		void BuildRenderPassPlan();
+		void EnsureDepthStencilTarget(RHI::IDevice* device);
+		void EnsureShadowDepthTarget(RHI::IDevice* device);
+		void EnsureMaterialStateCapacity(std::size_t materialCount);
+		void UpdateMaterialStates(const Scene& scene);
+		void UpdateLightingBuffer(const Scene& scene, RHI::IDevice* device);
+		void UpdateShadowBuffer(const Scene& scene, RHI::IDevice* device);
+		[[nodiscard]] bool IsRenderPassEnabled(RenderPassKind passKind) const;
+		[[nodiscard]] bool IsShadowEnabled() const;
 
-		RendererConfig m_config = {};
+		RendererDesc m_config = {};
+		std::vector<RenderPassDesc> m_renderPasses;
 		std::vector<char> m_vertexShaderSource;
 		std::vector<char> m_pixelShaderSource;
-		RHI::IPipelineState* m_texturedTrianglePipeline = nullptr;
-		std::vector<SceneTextureState> m_textureStates;
+		std::vector<char> m_shadowVertexShaderSource;
+		RHI::IPipelineState* m_pipeline = nullptr;
+		RHI::IPipelineState* m_shadowPipeline = nullptr;
+		RHI::ITexture* m_depthStencilTarget = nullptr;
+		RHI::ITexture* m_shadowDepthTarget = nullptr;
+		RHI::IBuffer* m_lightingBuffer = nullptr;
+		RHI::IBuffer* m_shadowMatrixBuffer = nullptr;
+		uint32_t m_shadowDescriptorIndex = 0xFFFFFFFFu;
+		bool m_useExplicitShadowPass = false;
+		GpuScene m_gpuScene;
+		std::vector<SceneMaterialState> m_materialStates;
+		std::unique_ptr<IRenderPath> m_path;
+		RendererBindingMode m_initialBindingMode = RendererBindingMode::PerDrawBind;
+		bool m_hasInitialConfig = false;
+		bool m_clipYFlip = false; // 백엔드 클립공간 Y 뒤집기 필요 여부(Initialize 에서 device 질의)
 	};
 }

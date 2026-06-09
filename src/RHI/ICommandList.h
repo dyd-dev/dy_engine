@@ -1,14 +1,6 @@
 #pragma once
-/* CommandList.h
-* 
-* 그리기 명령, 파이프라인 배리어를 기록하는 객체입니다.
-* CPU에서 명령을 작성하고 GPU가 이를 실행합니다.
-*
-* CommandList Allocator에 접근할 때 thread_local을 사용하십시오.
-* Mutex Lock이 필요 없으며 Thread-Safe Code를 작성할 수 있습니다.
-*/
 #include <cstdint>
-#include "Enums.h"
+#include "Format.h"
 
 namespace dy::RHI
 {
@@ -16,50 +8,74 @@ namespace dy::RHI
 	class ITexture;
 	class IPipelineState;
 
+	struct Viewport
+	{
+		float x = 0.0f;
+		float y = 0.0f;
+		float width = 0.0f;
+		float height = 0.0f;
+		float minDepth = 0.0f;
+		float maxDepth = 1.0f;
+	};
+
+	struct Rect
+	{
+		int32_t x = 0;
+		int32_t y = 0;
+		uint32_t width = 0;
+		uint32_t height = 0;
+	};
+
+	struct GeometryBinding
+	{
+		IBuffer* vertexBuffer = nullptr;
+		uint32_t vertexStride = 0;
+		uint32_t vertexOffset = 0;
+		IBuffer* indexBuffer = nullptr;
+		Format indexFormat = Format::Unknown;
+		uint32_t indexOffset = 0;
+	};
+
 	class ICommandList
 	{
 	public:
 		virtual ~ICommandList() = default;
 
-		// Pipeline and Start Setup
-		// 현대 API : PSO 사용 (Pipeline State Object)
-		// 구형 API : SetBlendState, SetDepth, SetShader ...
-		// Bind the global state.
+		// pipeline
 		virtual void BindGraphicsPipeline(IPipelineState* pipelineState) = 0;
+		virtual void BindGlobalDescriptors() = 0;
 
-		// Binds the single Global Descriptor Heap containing ALL textures and buffers.
-		// Must be called once per pass before Draw.
-		virtual void BindGlobalDescriptorHeap() = 0;
-
+		// geometry binding / Input Assembly
+		virtual void BindGeometry(const GeometryBinding& geometry) = 0;
+		virtual void BindVertexBuffer(IBuffer* buffer, uint32_t stride, uint32_t offset) = 0;
 		virtual void BindIndexBuffer(IBuffer* buffer, Format format, uint32_t offset) = 0;
-		virtual void BindVertexBuffer(IBuffer* buffer) = 0;
 
-		// Modern DOD Approach: Inject tiny data (e.g., Transform Index, Material Index) directly.
-		// Replaces ALL BindBuffer and BindTexture calls.
-		virtual void SetPushConstants(uint32_t size, const void* data) = 0;
+		// descriptor binding
+		virtual void BindConstantBuffer(uint32_t binding, IBuffer* buffer, uint32_t offset, uint32_t size) { (void)binding; (void)buffer; (void)offset; (void)size; }
+		virtual void BindTexture(uint32_t binding, ITexture* texture) { (void)binding; (void)texture; }
+		virtual void BindStorageBuffer(uint32_t binding, IBuffer* buffer, uint32_t offset, uint32_t size)
+		{
+			(void)binding; (void)buffer; (void)offset; (void)size;
+		}
 
-		// Render Targets & Clears
+		// shader constants
+		virtual void SetInlineConstants(uint32_t size, const void* data) = 0;
+
+		// output state
 		virtual void SetRenderTargets(uint32_t numRenderTargets, ITexture** renderTargets, ITexture* depthStencil) = 0;
+		virtual void SetViewport(const Viewport& viewport) = 0;
+		virtual void SetScissor(const Rect& rect) = 0;
 		virtual void ClearColor(ITexture* renderTarget, float r, float g, float b, float a) = 0;
 		virtual void ClearDepth(ITexture* depthStencil, float depth) = 0;
 
-		// Draw Commands
+		// draw
 		virtual void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) = 0;
-		virtual void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t startIndex, int32_t baseVertex, uint32_t startInstance) = 0;
-		// virtual void DrawIndexedInstancedIndirect(IBuffer* argumentBuffer, uint32_t alignedByteOffset) = 0;
+		virtual void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) = 0;
 
-		// Synchronization
-		// GPU 내 교통 정리 함수. (write 중 read 불가 등
-		virtual void ResourceBarrier(IBuffer* buffer, ResourceState before, ResourceState after) = 0;
-		virtual void ResourceBarrier(ITexture* texture, ResourceState before, ResourceState after) = 0;
-
-		// Must be called after all commands are recorded for this thread's workload.
-		// Cannot submit a command list that is not closed.
+		// lifecycle
 		virtual void Close() = 0;
 
 		// Compute Commands
-		// GPGPU Thread Group을 깨우는 명령
-		// Frustum Culling, Physics, Ray Tracing 등등 GPU의 병렬 수학 계산 능력을 활용.
 		// virtual void DispatchCompute(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) = 0;
 	};
 }

@@ -4,26 +4,28 @@
 #include "Backends/Metal/MetalDevice.h"
 #elif defined(ENABLE_VULKAN)
 #include "Backends/Vulkan/VulkanDevice.h"
-#elif defined(ENABLE_SDL3)
-#include "Backends/SDL3/SDL3Device.h"
 #else
 #include "Backends/Null/NullDevice.h"
 #endif
 
-dy::RHI::IDevice* dy::RHI::IDevice::Create(const void *windowHandle)
+using namespace dy::RHI;
+
+IDevice* IDevice::Create(const void* windowHandle, const DeviceDesc& desc)
 {
 	IDevice *device = nullptr;
 #if defined(ENABLE_D3D12)
-	device = new Backends::D3D12Device();
+	device = new dy::Backends::D3D12Device();
 #elif defined(ENABLE_METAL)
     device = new dy::Backends::MetalDevice();
 #elif defined(ENABLE_VULKAN)
-	device = new VulkanDevice();
-#elif defined(ENABLE_SDL3)
-	device = new SDL3Device();
+	device = new dy::Backends::VulkanDevice();
 #else
-	device = new Backends::NullDevice();
+	device = new dy::Backends::NullDevice();
 #endif
-	if(device) device->Initialize(windowHandle);
+	if(device)
+	{
+		device->SetDesc(desc);
+		device->Initialize(windowHandle, device->GetDesc());
+	}
 	return device;
 }
