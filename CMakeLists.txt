@@ -4,6 +4,10 @@ project(dy_engine CXX)
 # add module path
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
+if(USE_METAL AND APPLE)
+	enable_language(OBJCXX)
+endif()
+
 # main target
 add_library(${PROJECT_NAME} STATIC
 	"src/RHI/IDevice.cpp"
