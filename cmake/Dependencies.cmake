@@ -4,6 +4,59 @@ set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
 
+if(UNIX AND NOT APPLE)
+    set(DY_LINUX_WINDOW_SYSTEM "AUTO" CACHE STRING "Linux window system for GLFW: AUTO, X11, WAYLAND")
+    set_property(CACHE DY_LINUX_WINDOW_SYSTEM PROPERTY STRINGS AUTO X11 WAYLAND)
+
+    find_package(X11 QUIET)
+    find_package(PkgConfig QUIET)
+
+    set(DY_HAS_WAYLAND OFF)
+    if(PkgConfig_FOUND)
+        pkg_check_modules(WAYLAND_DEPS QUIET
+            wayland-client
+            wayland-cursor
+            wayland-egl
+            wayland-protocols
+            xkbcommon
+        )
+        find_program(WAYLAND_SCANNER_EXECUTABLE wayland-scanner)
+        if(WAYLAND_DEPS_FOUND AND WAYLAND_SCANNER_EXECUTABLE)
+            set(DY_HAS_WAYLAND ON)
+        endif()
+    endif()
+
+    if(DY_LINUX_WINDOW_SYSTEM STREQUAL "X11")
+        if(NOT X11_FOUND)
+            message(FATAL_ERROR "DY_LINUX_WINDOW_SYSTEM=X11 was requested, but X11 development packages were not found.")
+        endif()
+        message(STATUS "GLFW: using X11")
+        set(GLFW_BUILD_X11 ON CACHE BOOL "" FORCE)
+        set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
+    elseif(DY_LINUX_WINDOW_SYSTEM STREQUAL "WAYLAND")
+        if(NOT DY_HAS_WAYLAND)
+            message(FATAL_ERROR "DY_LINUX_WINDOW_SYSTEM=WAYLAND was requested, but Wayland development packages were not found.")
+        endif()
+        message(STATUS "GLFW: using Wayland")
+        set(GLFW_BUILD_X11 OFF CACHE BOOL "" FORCE)
+        set(GLFW_BUILD_WAYLAND ON CACHE BOOL "" FORCE)
+    elseif(DY_LINUX_WINDOW_SYSTEM STREQUAL "AUTO")
+        if(X11_FOUND)
+            message(STATUS "GLFW: using X11")
+            set(GLFW_BUILD_X11 ON CACHE BOOL "" FORCE)
+            set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
+        elseif(DY_HAS_WAYLAND)
+            message(STATUS "GLFW: using Wayland")
+            set(GLFW_BUILD_X11 OFF CACHE BOOL "" FORCE)
+            set(GLFW_BUILD_WAYLAND ON CACHE BOOL "" FORCE)
+        else()
+            message(FATAL_ERROR "Neither X11 nor Wayland development packages were found for GLFW.")
+        endif()
+    else()
+        message(FATAL_ERROR "DY_LINUX_WINDOW_SYSTEM must be AUTO, X11, or WAYLAND.")
+    endif()
+endif()
+
 # ===== ===== Fetch ===== =====
 message(STATUS "Download and Configure glfw...")
 

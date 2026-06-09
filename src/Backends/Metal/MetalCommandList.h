@@ -11,10 +11,14 @@ namespace dy::Backends
         ~MetalCommandList() override;
 
         void BindGraphicsPipeline(RHI::IPipelineState* pipelineState) override;
-        void BindGlobalDescriptorHeap() override;
+        void BindGlobalDescriptors() override;
         void BindVertexBuffer(RHI::IBuffer* buffer, uint32_t stride, uint32_t offset) override;
         void BindIndexBuffer(RHI::IBuffer* buffer, RHI::Format format, uint32_t offset) override;
-        void SetPushConstants(uint32_t size, const void* data) override;
+        void BindGeometry(const RHI::GeometryBinding& geometry) override;
+        void BindConstantBuffer(uint32_t binding, RHI::IBuffer* buffer, uint32_t offset, uint32_t size) override;
+        void BindStorageBuffer(uint32_t binding, RHI::IBuffer* buffer, uint32_t offset, uint32_t size) override;
+        void BindTexture(uint32_t binding, RHI::ITexture* texture) override;
+        void SetInlineConstants(uint32_t size, const void* data) override;
 
         void SetRenderTargets(uint32_t numRenderTargets, RHI::ITexture** renderTargets, RHI::ITexture* depthStencil) override;
         void SetViewport(const RHI::Viewport& viewport) override;
@@ -24,9 +28,6 @@ namespace dy::Backends
 
         void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
         void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
-
-        void ResourceBarrier(RHI::IBuffer* buffer, RHI::ResourceState before, RHI::ResourceState after) override;
-        void ResourceBarrier(RHI::ITexture* texture, RHI::ResourceState before, RHI::ResourceState after) override;
 
         void Close() override;
 

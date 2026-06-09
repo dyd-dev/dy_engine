@@ -8,14 +8,12 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 add_library(${PROJECT_NAME} STATIC
 	"src/RHI/IDevice.cpp"
 	"src/Graphics/Renderer.cpp"
-    "src/Graphics/Mesh.cpp"
+	"src/Graphics/RenderPath.cpp"
+	"src/Graphics/GpuScene.cpp"
+	"src/Graphics/ImageFile.cpp"
+	"src/Graphics/Mesh.cpp"
+	"src/Graphics/ShadowMath.cpp"
 	"src/Platform/Window.cpp"
-	"src/Graphics/OBJLoader.cpp"
-	"src/Core/ImageLoader.cpp"
-	"src/Graphics/GLTFLoader.cpp"
-	"src/Graphics/FBXLoader.cpp"
-	"src/Graphics/Shadow.cpp"
-	"src/Graphics/ShadowMap.cpp"
 )
 
 # global options

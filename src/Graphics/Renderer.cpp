@@ -1,444 +1,681 @@
-#include "Renderer.h"
+#include "Graphics/Renderer.h"
 
 #include <algorithm>
-#include <array>
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <fstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
 
+#include "Graphics/RenderPath.h"
+#include "Graphics/Scene.h"
+#include "Graphics/ShadowMath.h"
+#include "Math/Math.h"
 #include "RHI/IBuffer.h"
-#include "RHI/ICommandList.h"
 #include "RHI/IDevice.h"
+#include "RHI/IPipelineState.h"
 #include "RHI/ITexture.h"
-
-#define STB_IMAGE_STATIC
-#define STB_IMAGE_IMPLEMENTATION
-#include <stb_image.h>
 
 using namespace dy;
 using namespace dy::Graphics;
 
-bool Renderer::Initialize(RHI::IDevice* device, const RHI::GraphicsPipelineDesc& mainPipeline, const RendererConfig& config)
-{
-	if(device == nullptr) return false;
+namespace Layout = dy::Graphics::RendererShaderLayout;
 
-	m_config = config;
-	return BuildPipelineStates(device, mainPipeline);
+namespace
+{
+	[[nodiscard]] std::vector<char> ReadBinaryFile(const char* filepath)
+	{
+		std::ifstream file(filepath, std::ios::binary);
+		if(!file.is_open())
+		{
+			throw std::runtime_error(std::string("Failed to open shader file: ") + filepath);
+		}
+
+		file.seekg(0, std::ios::end);
+		const std::streamoff size = file.tellg();
+		file.seekg(0, std::ios::beg);
+
+		std::vector<char> content(static_cast<size_t>(size));
+		if(size > 0) file.read(content.data(), size);
+		return content;
+	}
+
+	// bindless 모드는 set=1 텍스처 배열을 인덱싱하는 별도 픽셀 셰이더 변형을 쓴다.
+	// "mesh_ps.spv" -> "mesh_ps_bindless.spv" 처럼 확장자 앞에 _bindless 를 삽입.
+	[[nodiscard]] std::string MakeBindlessVariantPath(const char* path)
+	{
+		std::string result = path;
+		const size_t dot = result.find_last_of('.');
+		if(dot == std::string::npos) return result + "_bindless";
+		return result.substr(0, dot) + "_bindless" + result.substr(dot);
+	}
+
+	[[nodiscard]] bool ResolveRendererShaderPaths(
+		const RendererDesc& config,
+		const char*& vertexShaderPath,
+		const char*& pixelShaderPath,
+		const char*& shadowVertexShaderPath)
+	{
+		// 셰이더 경로는 앱이 RendererDesc로 제공한다(RHI 디바이스는 셰이더를 모른다).
+		vertexShaderPath = config.vertexShaderPath;
+		pixelShaderPath = config.pixelShaderPath;
+		shadowVertexShaderPath = config.shadowVertexShaderPath;
+
+#if defined(VULKAN_DEFAULT_RENDERER_VERTEX_SHADER_PATH)
+		if(vertexShaderPath == nullptr) vertexShaderPath = VULKAN_DEFAULT_RENDERER_VERTEX_SHADER_PATH;
+#endif
+#if defined(VULKAN_DEFAULT_RENDERER_PIXEL_SHADER_PATH)
+		if(pixelShaderPath == nullptr) pixelShaderPath = VULKAN_DEFAULT_RENDERER_PIXEL_SHADER_PATH;
+#endif
+#if defined(VULKAN_DEFAULT_RENDERER_SHADOW_VERTEX_SHADER_PATH)
+		if(shadowVertexShaderPath == nullptr) shadowVertexShaderPath = VULKAN_DEFAULT_RENDERER_SHADOW_VERTEX_SHADER_PATH;
+#endif
+
+		return vertexShaderPath != nullptr && pixelShaderPath != nullptr && (!config.enableShadows || shadowVertexShaderPath != nullptr);
+	}
+
+	[[nodiscard]] const DirectionalLight* GetPrimaryDirectionalLight(const Scene& scene)
+	{
+		return scene.GetDirectionalLightCount() > 0 ? &scene.GetDirectionalLight(0) : nullptr;
+	}
+
+	[[nodiscard]] const PointLight* GetPrimaryPointLight(const Scene& scene)
+	{
+		return scene.GetPointLightCount() > 0 ? &scene.GetPointLight(0) : nullptr;
+	}
+
+	[[nodiscard]] Math::Bounds3 ComputeShadowBounds(const Scene& scene)
+	{
+		Math::Bounds3 bounds = {};
+		const uint32_t entityCount = scene.GetEntityCount();
+		for(uint32_t entityIndex = 0; entityIndex < entityCount; ++entityIndex)
+		{
+			const EntityID entity = static_cast<EntityID>(entityIndex);
+			const RenderFlags& flags = scene.GetRenderFlags(entity);
+			if(!flags.castShadow && !flags.receiveShadow) continue;
+
+			const MeshID meshId = scene.GetEntityMesh(entity);
+			if(!IsValid(meshId)) continue;
+
+			const MeshData& mesh = scene.GetMesh(meshId);
+			const Transform& transform = scene.GetTransform(entity);
+			for(const Vertex& vertex : mesh.vertices)
+			{
+				bounds.Include(Math::TransformPoint(transform.worldMatrix, vertex.position));
+			}
+		}
+		return bounds;
+	}
+}
+
+Renderer::Renderer(RendererBindingMode bindingMode)
+	: m_initialBindingMode(bindingMode)
+{
+	m_config.bindingMode = bindingMode;
+	if(bindingMode == RendererBindingMode::Bindless)
+	{
+		m_config.enableBindlessTextures = true;
+	}
+}
+
+Renderer::Renderer(const RendererDesc& desc)
+	: m_config(desc)
+	, m_initialBindingMode(desc.bindingMode)
+	, m_hasInitialConfig(true)
+{
+	if(desc.bindingMode == RendererBindingMode::Bindless)
+	{
+		m_config.enableBindlessTextures = true;
+	}
+}
+
+bool Renderer::Initialize(RHI::IDevice* device, const RendererDesc& config)
+{
+	static_assert(Layout::kPushConstantRangeSize == sizeof(Layout::DrawConstants), "Renderer draw constants size mismatch.");
+
+	if(device == nullptr) return false;
+	RendererDesc effectiveConfig = config;
+	if(m_hasInitialConfig &&
+		config.bindingMode == RendererBindingMode::PerDrawBind &&
+		config.vertexShaderPath == nullptr &&
+		config.pixelShaderPath == nullptr &&
+		config.shadowVertexShaderPath == nullptr)
+	{
+		effectiveConfig = m_config;
+	}
+
+	const char* vertexShaderPath = nullptr;
+	const char* pixelShaderPath = nullptr;
+	const char* shadowVertexShaderPath = nullptr;
+	if(!ResolveRendererShaderPaths(effectiveConfig, vertexShaderPath, pixelShaderPath, shadowVertexShaderPath))
+	{
+		return false;
+	}
+
+	m_config = effectiveConfig;
+	if(effectiveConfig.bindingMode == RendererBindingMode::PerDrawBind && m_initialBindingMode != RendererBindingMode::PerDrawBind)
+	{
+		m_config.bindingMode = m_initialBindingMode;
+	}
+	if(m_config.bindingMode == RendererBindingMode::Bindless)
+	{
+		m_config.enableBindlessTextures = true;
+	}
+
+	m_vertexShaderSource = ReadBinaryFile(vertexShaderPath);
+	// 풀 PBR 글로벌-힙 인덱싱 픽셀 셰이더 변형(_bindless)이 존재하면 바인딩 모드와 무관하게 그것을 사용하고
+	// 텍스처 샘플링을 힙/배열 인덱싱으로 통일한다. 이렇게 하면 enableBindlessTextures=true 가 되어
+	// per-draw/batched 경로도 머티리얼 텍스처 개별 바인딩(BindMaterialTextures)을 건너뛰고, 5종 텍스처를
+	// push constant 의 디스크립터 인덱스로 직접 샘플한다(= VK 와 동일한 풀 PBR). 변형이 없는 예제(단일
+	// 베이스컬러 셰이더만 제공)는 기존 per-texture 바인딩 경로를 그대로 쓴다.
+	std::string resolvedPixelShaderPath = pixelShaderPath;
+	const std::string indexedPixelShaderPath = MakeBindlessVariantPath(pixelShaderPath);
+	std::ifstream indexedPixelShaderFile(indexedPixelShaderPath, std::ios::binary);
+	if(m_config.bindingMode == RendererBindingMode::Bindless && indexedPixelShaderFile.good())
+	{
+		resolvedPixelShaderPath = indexedPixelShaderPath;
+		m_config.enableBindlessTextures = true;
+	}
+	m_pixelShaderSource = ReadBinaryFile(resolvedPixelShaderPath.c_str());
+	m_shadowVertexShaderSource.clear();
+	if(m_config.enableShadows && shadowVertexShaderPath != nullptr)
+	{
+		m_shadowVertexShaderSource = ReadBinaryFile(shadowVertexShaderPath);
+	}
+
+	m_clipYFlip = device->RequiresClipSpaceYFlip();
+
+	BuildRenderPassPlan();
+	BuildPipelineStates(device);
+	m_path = CreateRenderPath(m_config.bindingMode);
+	return m_pipeline != nullptr && m_path != nullptr;
+}
+
+void Renderer::SetCamera(const CameraDesc& camera)
+{
+	const Math::float4x4 view = Math::LookAtRH(camera.eye, camera.target, camera.up);
+	Math::float4x4 proj = camera.orthographic
+		? Math::OrthographicRH_ZO(camera.orthoWidth, camera.orthoHeight, camera.nearPlane, camera.farPlane)
+		: Math::PerspectiveRH_ZO(camera.fovYRadians, camera.aspect, camera.nearPlane, camera.farPlane);
+
+	if(m_clipYFlip)
+	{
+		proj.m[5] = -proj.m[5];
+	}
+
+	m_config.viewProjectionMatrix = proj * view;
+	m_config.cameraPosition = camera.eye;
+}
+
+void Renderer::SetViewProjection(const Math::float4x4& viewProjection)
+{
+	m_config.viewProjectionMatrix = viewProjection;
+}
+
+void Renderer::SetCameraPosition(const Math::float3& cameraPosition)
+{
+	m_config.cameraPosition = cameraPosition;
+}
+
+void Renderer::SetDirectionalLight(const Math::float3& direction, const Math::float3& color, float intensity)
+{
+	m_config.directionalLightDirection = direction;
+	m_config.directionalLightColor = color;
+	m_config.directionalLightIntensity = intensity;
+}
+
+void Renderer::SetAmbientLight(const Math::float3& color, float intensity)
+{
+	m_config.ambientColor = color;
+	m_config.ambientIntensity = intensity;
+}
+
+void Renderer::SetPBR(const PBRDesc& pbr)
+{
+	m_config.pbr = pbr;
+}
+
+void Renderer::SetEnvironmentLight(const EnvironmentDesc& environment)
+{
+	m_config.environment = environment;
 }
 
 void Renderer::Shutdown(RHI::IDevice* device)
 {
 	if(device == nullptr) return;
 
-	m_drawBatches.clear();
-	m_renderOrder.clear();
-	m_renderItems.Clear();
-	ReleaseGpuMeshes(device);
-	ReleaseGpuTextures(device);
-	m_resources.materials.clear();
+	if(m_path != nullptr) m_path->Shutdown(device);
+	m_path.reset();
 
-	if(m_mainPipeline != nullptr)
+	m_gpuScene.Shutdown(device);
+	m_materialStates.clear();
+	m_vertexShaderSource.clear();
+	m_pixelShaderSource.clear();
+	m_shadowVertexShaderSource.clear();
+	m_renderPasses.clear();
+
+	if(m_lightingBuffer != nullptr)
 	{
-		device->DestroyPipelineState(m_mainPipeline);
-		m_mainPipeline = nullptr;
+		device->DestroyBuffer(m_lightingBuffer);
+		m_lightingBuffer = nullptr;
+	}
+	if(m_depthStencilTarget != nullptr)
+	{
+		device->DestroyTexture(m_depthStencilTarget);
+		m_depthStencilTarget = nullptr;
+	}
+	if(m_shadowDepthTarget != nullptr)
+	{
+		device->DestroyTexture(m_shadowDepthTarget);
+		m_shadowDepthTarget = nullptr;
+		m_shadowDescriptorIndex = 0xFFFFFFFFu;
+	}
+	if(m_shadowMatrixBuffer != nullptr)
+	{
+		device->DestroyBuffer(m_shadowMatrixBuffer);
+		m_shadowMatrixBuffer = nullptr;
+	}
+	if(m_shadowPipeline != nullptr)
+	{
+		device->DestroyPipelineState(m_shadowPipeline);
+		m_shadowPipeline = nullptr;
+	}
+	if(m_pipeline != nullptr)
+	{
+		device->DestroyPipelineState(m_pipeline);
+		m_pipeline = nullptr;
 	}
 }
 
 void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 {
-	if(device == nullptr) return;
+	if(device == nullptr || m_path == nullptr) return;
 
-	EnsureGpuMeshes(scene, device);
-	EnsureGpuTextures(scene, device);
-	EnsureGpuMaterials(scene);
-	BuildRenderItems(scene);
-	BuildDrawBatches();
+	// 공유 준비: 텍스처 GPU 레지던시 + 머티리얼 상태(모든 전략 공통).
+	m_gpuScene.SyncTextures(scene, device);
+	EnsureMaterialStateCapacity(scene.GetMaterialCount());
+	UpdateMaterialStates(scene);
 
-	switch(m_config.geometryMode)
+	// 전략별 지오메트리/드로우 리소스 준비.
+	RenderPathContext context = {};
+	context.config = &m_config;
+	context.pipeline = m_pipeline;
+	context.gpuScene = &m_gpuScene;
+	context.materialStates = &m_materialStates;
+	EnsureDepthStencilTarget(device);
+	context.depthStencil = m_depthStencilTarget;
+	m_path->PrepareResources(scene, device, context);
+
+	// 프레임 상수버퍼는 메인 셰이더가 항상 참조한다(lighting=binding1, shadowMatrix=binding3).
+	// 따라서 그림자 비활성이어도 매 프레임 갱신/바인딩한다(그림자 off면 행렬은 Identity).
+	// 그림자 '깊이 패스'는 백엔드가 파이프라인 enableShadowPass 로 내부 처리한다.
+	UpdateShadowBuffer(scene, device);
+	UpdateLightingBuffer(scene, device);
+	context.lightingBuffer = m_lightingBuffer;
+	context.shadowMatrixBuffer = m_shadowMatrixBuffer;
+
+	// 명시적 그림자 패스가 필요한 백엔드(D3D12)면 깊이타겟/PSO 를 컨텍스트에 넣는다.
+	// RenderPath 가 메인 패스 전에 깊이 전용 패스를 기록한다(Vulkan 은 내부 처리하므로 비워둠).
+	if(m_useExplicitShadowPass)
 	{
-	case GeometrySubmissionMode::IndexedInputAssembler:
-		RecordIAPass(scene, device);
-	break;
-	case GeometrySubmissionMode::BindlessManualFetch:
-		RecordBindlessPass(device);
-	break;
-	}
-}
-
-bool Renderer::BuildPipelineStates(RHI::IDevice* device, const RHI::GraphicsPipelineDesc& mainPipeline)
-{
-	if(device == nullptr) return false;
-	if(mainPipeline.vertexShader == nullptr || mainPipeline.vertexShaderSize == 0u) return false;
-	if(mainPipeline.pixelShader == nullptr || mainPipeline.pixelShaderSize == 0u) return false;
-
-	m_mainPipeline = device->CreateGraphicsPipeline(mainPipeline);
-	return m_mainPipeline != nullptr;
-}
-
-bool Renderer::UploadBuffer(RHI::IBuffer* buffer, const void* data, uint32_t size)
-{
-	if(buffer == nullptr || data == nullptr || size == 0u) return false;
-
-	void* mapped = buffer->Map(0, size);
-	if(mapped == nullptr) return false;
-
-	std::memcpy(mapped, data, size);
-	buffer->Unmap();
-	return true;
-}
-
-void Renderer::ReleaseGpuMeshes(RHI::IDevice* device)
-{
-	if(device == nullptr) return;
-
-	for(GpuMesh& mesh : m_resources.meshes)
-	{
-		if(mesh.vertexBuffer != nullptr)
+		EnsureShadowDepthTarget(device);
+		if(m_shadowDepthTarget != nullptr && m_shadowPipeline != nullptr)
 		{
-			device->DestroyBuffer(mesh.vertexBuffer);
-			mesh.vertexBuffer = nullptr;
+			context.shadowPipeline = m_shadowPipeline;
+			context.shadowDepth = m_shadowDepthTarget;
+			context.shadowMapResolution = m_config.shadowMap.resolution;
 		}
-
-		if(mesh.indexBuffer != nullptr)
-		{
-			device->DestroyBuffer(mesh.indexBuffer);
-			mesh.indexBuffer = nullptr;
-		}
-
-		mesh.vertexCount = 0;
-		mesh.indexCount = 0;
-		mesh.vertexByteSize = 0;
-		mesh.indexByteSize = 0;
-		mesh.vertexStride = sizeof(Vertex);
-		mesh.vertexOffset = 0;
-		mesh.indexOffset = 0;
 	}
 
-	m_resources.meshes.clear();
-}
-
-void Renderer::ReleaseGpuTextures(RHI::IDevice* device)
-{
-	if(device == nullptr) return;
-
-	for(GpuTexture& texture : m_resources.textures)
+	// 정식화된 패스 루프: 모든 전략이 동일 경로를 거친다.
+	for(const RenderPassDesc& pass : m_renderPasses)
 	{
-		if(texture.texture != nullptr)
+		if(!pass.enabled) continue;
+		if(pass.kind == RenderPassKind::MainForward && pass.work == RenderPassWork::Graphics)
 		{
-			device->DestroyTexture(texture.texture);
-			texture.texture = nullptr;
-		}
-
-		texture.width = 0;
-		texture.height = 0;
-	}
-
-	m_resources.textures.clear();
-}
-
-void Renderer::EnsureGpuTextures(const Scene& scene, RHI::IDevice* device)
-{
-	if(device == nullptr) return;
-
-	if(m_resources.textures.size() < scene.m_textures.size())
-	{
-		m_resources.textures.resize(scene.m_textures.size());
-	}
-
-	for(uint32_t textureIndex = 0; textureIndex < static_cast<uint32_t>(scene.m_textures.size()); ++textureIndex)
-	{
-		const TextureData& cpuTexture = scene.m_textures[textureIndex];
-		GpuTexture& gpuTexture = m_resources.textures[textureIndex];
-		if(gpuTexture.texture != nullptr || cpuTexture.sourcePath.empty()) continue;
-
-		int width = 0;
-		int height = 0;
-		int channels = 0;
-		stbi_uc* pixels = stbi_load(cpuTexture.sourcePath.c_str(), &width, &height, &channels, 4);
-		if(pixels == nullptr || width <= 0 || height <= 0)
-		{
-			if(pixels != nullptr) stbi_image_free(pixels);
-			continue;
-		}
-
-		RHI::TextureDesc desc = {};
-		desc.width = static_cast<uint32_t>(width);
-		desc.height = static_cast<uint32_t>(height);
-		desc.format = RHI::Format::R8G8B8A8_UNORM;
-		desc.usage = RHI::TextureUsage::ShaderResource;
-		gpuTexture.texture = device->CreateTexture(desc);
-		if(gpuTexture.texture != nullptr)
-		{
-			device->UpdateTexture(gpuTexture.texture, pixels, static_cast<uint32_t>(width * 4));
-			gpuTexture.width = desc.width;
-			gpuTexture.height = desc.height;
-		}
-
-		stbi_image_free(pixels);
-	}
-}
-
-void Renderer::EnsureGpuMeshes(const Scene& scene, RHI::IDevice* device)
-{
-	if(device == nullptr) return;
-
-	if(m_resources.meshes.size() < scene.m_meshes.size())
-	{
-		m_resources.meshes.resize(scene.m_meshes.size());
-	}
-
-	for(uint32_t meshIndex = 0; meshIndex < static_cast<uint32_t>(scene.m_meshes.size()); ++meshIndex)
-	{
-		const MeshData& cpuMesh = scene.m_meshes[meshIndex];
-		GpuMesh& gpuMesh = m_resources.meshes[meshIndex];
-
-		const uint32_t vertexCount = static_cast<uint32_t>(cpuMesh.vertices.size());
-		const uint32_t indexCount = static_cast<uint32_t>(cpuMesh.indices.size());
-		const uint32_t vertexByteSize = vertexCount * static_cast<uint32_t>(sizeof(Vertex));
-		const uint32_t indexByteSize = indexCount * static_cast<uint32_t>(sizeof(uint32_t));
-		if(vertexCount == 0u) continue;
-
-		if(gpuMesh.vertexBuffer != nullptr && gpuMesh.vertexByteSize != vertexByteSize)
-		{
-			device->DestroyBuffer(gpuMesh.vertexBuffer);
-			gpuMesh.vertexBuffer = nullptr;
-			gpuMesh.vertexCount = 0;
-			gpuMesh.vertexByteSize = 0;
-		}
-
-		if(gpuMesh.vertexBuffer == nullptr)
-		{
-			RHI::BufferDesc vertexDesc = {};
-			vertexDesc.size = vertexByteSize;
-			vertexDesc.stride = static_cast<uint32_t>(sizeof(Vertex));
-			vertexDesc.usage = RHI::BufferUsage::Vertex;
-			gpuMesh.vertexBuffer = device->CreateBuffer(vertexDesc);
-			if(UploadBuffer(gpuMesh.vertexBuffer, cpuMesh.vertices.data(), vertexDesc.size))
-			{
-				gpuMesh.vertexCount = vertexCount;
-				gpuMesh.vertexByteSize = vertexDesc.size;
-				gpuMesh.vertexStride = vertexDesc.stride;
-				gpuMesh.vertexOffset = 0;
-			}
-		}
-
-		if(gpuMesh.indexBuffer != nullptr && gpuMesh.indexByteSize != indexByteSize)
-		{
-			device->DestroyBuffer(gpuMesh.indexBuffer);
-			gpuMesh.indexBuffer = nullptr;
-			gpuMesh.indexCount = 0;
-			gpuMesh.indexByteSize = 0;
-		}
-
-		if(indexCount > 0u && gpuMesh.indexBuffer == nullptr)
-		{
-			RHI::BufferDesc indexDesc = {};
-			indexDesc.size = indexByteSize;
-			indexDesc.stride = static_cast<uint32_t>(sizeof(uint32_t));
-			indexDesc.usage = RHI::BufferUsage::Index;
-			gpuMesh.indexBuffer = device->CreateBuffer(indexDesc);
-			if(UploadBuffer(gpuMesh.indexBuffer, cpuMesh.indices.data(), indexDesc.size))
-			{
-				gpuMesh.indexCount = indexCount;
-				gpuMesh.indexByteSize = indexDesc.size;
-				gpuMesh.indexOffset = 0;
-			}
+			m_path->RecordMainPass(scene, device, context);
 		}
 	}
 }
 
-void Renderer::EnsureGpuMaterials(const Scene& scene)
+void Renderer::BuildPipelineStates(RHI::IDevice* device)
 {
-	if(m_resources.materials.size() < scene.m_materials.size())
+	// 렌더 타깃 포맷은 실제 백버퍼에서 파생한다(단일 진실원). 이래야 PSO 가 실제 타깃과
+	// 항상 일치하고, 백엔드별 스왑체인 포맷 불일치(감마 차이)가 생기지 않는다.
+	if(RHI::ITexture* backBuffer = device->GetBackBuffer())
 	{
-		m_resources.materials.resize(scene.m_materials.size());
+		if(backBuffer->GetFormat() != RHI::Format::Unknown)
+		{
+			m_config.renderTargetFormat = backBuffer->GetFormat();
+		}
 	}
 
-	for(uint32_t materialIndex = 0; materialIndex < static_cast<uint32_t>(scene.m_materials.size()); ++materialIndex)
+	RHI::GraphicsPipelineDesc desc = {};
+	desc.vertexShader = m_vertexShaderSource.data();
+	desc.vertexShaderSize = m_vertexShaderSource.size();
+	desc.pixelShader = m_pixelShaderSource.data();
+	desc.pixelShaderSize = m_pixelShaderSource.size();
+	desc.renderTargetFormat = m_config.renderTargetFormat;
+	desc.depthStencilFormat = m_config.depthStencilFormat;
+	desc.depthEnable = m_config.depthStencilFormat != RHI::Format::Unknown;
+	desc.wireframe = false;
+	desc.enableShadowPass = IsShadowEnabled();
+	desc.enableBindlessTextures = m_config.enableBindlessTextures;
+	desc.shadowMapResolution = m_config.shadowMap.resolution;
+	desc.shadowVertexShader = m_shadowVertexShaderSource.empty() ? nullptr : m_shadowVertexShaderSource.data();
+	desc.shadowVertexShaderSize = m_shadowVertexShaderSource.size();
+	// desc.shaderLayout = m_config.shaderLayout;
+
+	m_pipeline = device->CreateGraphicsPipeline(desc);
+
+	// 백엔드가 그림자 깊이 패스를 내부 처리하지 못하면(D3D12) Graphics 가 명시적으로
+	// 깊이 전용 패스를 기록한다. 이를 위해 별도의 깊이 전용 PSO(픽셀 셰이더 없음)를 만든다.
+	m_useExplicitShadowPass =
+		IsShadowEnabled() &&
+		device->RequiresExplicitShadowPass() &&
+		!m_shadowVertexShaderSource.empty();
+	if(m_useExplicitShadowPass)
 	{
-		const MaterialData& cpuMaterial = scene.m_materials[materialIndex];
-		GpuMaterial& gpuMaterial = m_resources.materials[materialIndex];
-		gpuMaterial.constants.baseColor = cpuMaterial.baseColor;
-		gpuMaterial.constants.baseColorTextureIndex = IsValid(cpuMaterial.baseColorTex) ? ToIndex(cpuMaterial.baseColorTex) : ToIndex(TextureID::Invalid);
-		gpuMaterial.constants.metallic = cpuMaterial.metallic;
-		gpuMaterial.constants.roughness = std::max(cpuMaterial.roughness, m_config.minRoughness);
-		uint32_t materialFlags = 0;
-		if(IsValid(cpuMaterial.baseColorTex)) materialFlags |= MaterialTexture_BaseColor;
-		if(IsValid(cpuMaterial.metallicRoughnessTex)) materialFlags |= MaterialTexture_MetallicRoughness;
-		if(IsValid(cpuMaterial.normalTex)) materialFlags |= MaterialTexture_Normal;
-		if(IsValid(cpuMaterial.occlusionTex)) materialFlags |= MaterialTexture_Occlusion;
-		if(IsValid(cpuMaterial.emissiveTex)) materialFlags |= MaterialTexture_Emissive;
-		gpuMaterial.constants.materialFlags = materialFlags;
+		const RHI::Format shadowFormat = m_config.depthStencilFormat != RHI::Format::Unknown
+			? m_config.depthStencilFormat
+			: RHI::Format::D32_FLOAT;
+
+		RHI::GraphicsPipelineDesc shadowDesc = {};
+		shadowDesc.vertexShader = m_shadowVertexShaderSource.data();
+		shadowDesc.vertexShaderSize = m_shadowVertexShaderSource.size();
+		shadowDesc.pixelShader = nullptr;
+		shadowDesc.pixelShaderSize = 0;
+		shadowDesc.renderTargetFormat = RHI::Format::Unknown; // 컬러 출력 없음(깊이 전용)
+		shadowDesc.depthStencilFormat = shadowFormat;
+		shadowDesc.depthEnable = true;
+		shadowDesc.enableShadowPass = false;
+		shadowDesc.enableBindlessTextures = m_config.enableBindlessTextures;
+		shadowDesc.shadowMapResolution = m_config.shadowMap.resolution;
+		shadowDesc.depthBiasSlope = 1.75f; // Vulkan 그림자 파이프라인과 유사한 슬로프 바이어스
+
+		m_shadowPipeline = device->CreateGraphicsPipeline(shadowDesc);
+		if(m_shadowPipeline == nullptr) m_useExplicitShadowPass = false;
 	}
 }
 
-void Renderer::BuildRenderItems(const Scene& scene)
+void Renderer::BuildRenderPassPlan()
 {
-	m_renderItems.Clear();
-	m_renderItems.Reserve(static_cast<uint32_t>(scene.m_entityMeshes.size()));
-	m_renderOrder.clear();
-
-	const uint32_t entityCount = static_cast<uint32_t>(scene.m_entityMeshes.size());
-	for(uint32_t entityIndex = 0; entityIndex < entityCount; ++entityIndex)
-	{
-		if(entityIndex >= scene.m_entityMaterials.size() || entityIndex >= scene.m_entityTransforms.size()) continue;
-
-		const MeshID meshId = scene.m_entityMeshes[entityIndex];
-		const MaterialID materialId = scene.m_entityMaterials[entityIndex];
-		if(!IsValid(meshId) || !IsValid(materialId)) continue;
-
-		const uint32_t meshIndex = ToIndex(meshId);
-		const uint32_t materialIndex = ToIndex(materialId);
-		if(meshIndex >= scene.m_meshes.size() || materialIndex >= scene.m_materials.size()) continue;
-
-		const MeshData& mesh = scene.m_meshes[meshIndex];
-		const uint32_t vertexCount = static_cast<uint32_t>(mesh.vertices.size());
-		const uint32_t indexCount = static_cast<uint32_t>(mesh.indices.size());
-		if(vertexCount == 0u) continue;
-
-		m_renderItems.Push(meshIndex, materialIndex, entityIndex, vertexCount, indexCount);
-	}
-
-	const uint32_t itemCount = m_renderItems.Size();
-	m_renderOrder.resize(itemCount);
-	for(uint32_t itemIndex = 0; itemIndex < itemCount; ++itemIndex)
-	{
-		m_renderOrder[itemIndex] = itemIndex;
-	}
-
-	std::sort(m_renderOrder.begin(), m_renderOrder.end(), [this](uint32_t lhs, uint32_t rhs) {
-		const uint32_t lhsMesh = m_renderItems.meshIndices[lhs];
-		const uint32_t rhsMesh = m_renderItems.meshIndices[rhs];
-		if(lhsMesh != rhsMesh) return lhsMesh < rhsMesh;
-
-		const uint32_t lhsMaterial = m_renderItems.materialIndices[lhs];
-		const uint32_t rhsMaterial = m_renderItems.materialIndices[rhs];
-		if(lhsMaterial != rhsMaterial) return lhsMaterial < rhsMaterial;
-
-		const uint8_t lhsIndexed = m_renderItems.indexedFlags[lhs];
-		const uint8_t rhsIndexed = m_renderItems.indexedFlags[rhs];
-		if(lhsIndexed != rhsIndexed) return lhsIndexed > rhsIndexed;
-
-		return m_renderItems.transformIndices[lhs] < m_renderItems.transformIndices[rhs];
+	m_renderPasses.clear();
+	m_renderPasses.push_back(RenderPassDesc{
+		RenderPassKind::Shadow,
+		RenderPassWork::PrepareOnly,
+		"Shadow",
+		m_config.enableShadows && !m_shadowVertexShaderSource.empty()
+	});
+	m_renderPasses.push_back(RenderPassDesc{
+		RenderPassKind::MainForward,
+		RenderPassWork::Graphics,
+		"MainForward",
+		m_config.enableMainPass
 	});
 }
 
-void Renderer::BuildDrawBatches()
+void Renderer::EnsureDepthStencilTarget(RHI::IDevice* device)
 {
-	m_drawBatches.clear();
-	if(m_renderOrder.empty()) return;
+	if(device == nullptr) return;
 
-	uint32_t firstItem = 0;
-	while(firstItem < static_cast<uint32_t>(m_renderOrder.size()))
+	if(m_config.depthStencilFormat == RHI::Format::Unknown)
 	{
-		const uint32_t firstIndex = m_renderOrder[firstItem];
-		const uint32_t firstMesh = m_renderItems.meshIndices[firstIndex];
-		const uint32_t firstMaterial = m_renderItems.materialIndices[firstIndex];
-		const uint8_t firstIndexed = m_renderItems.indexedFlags[firstIndex];
-		uint32_t itemCount = 1;
-
-		while(firstItem + itemCount < static_cast<uint32_t>(m_renderOrder.size()))
+		if(m_depthStencilTarget != nullptr)
 		{
-			const uint32_t currentIndex = m_renderOrder[firstItem + itemCount];
-			if(m_renderItems.meshIndices[currentIndex] != firstMesh
-				|| m_renderItems.materialIndices[currentIndex] != firstMaterial
-				|| m_renderItems.indexedFlags[currentIndex] != firstIndexed)
-			{
-				break;
-			}
-
-			++itemCount;
+			device->DestroyTexture(m_depthStencilTarget);
+			m_depthStencilTarget = nullptr;
 		}
-
-		DrawBatch batch = {};
-		batch.meshIndex = firstMesh;
-		batch.materialIndex = firstMaterial;
-		batch.firstItem = firstItem;
-		batch.itemCount = itemCount;
-		batch.indexed = firstIndexed != 0u;
-		m_drawBatches.push_back(batch);
-
-		firstItem += itemCount;
-	}
-}
-
-MaterialDrawConstants Renderer::BuildMaterialConstants(const Scene& scene, const DrawBatch& batch) const
-{
-	MaterialDrawConstants constants = {};
-	if(batch.materialIndex < m_resources.materials.size())
-	{
-		constants = m_resources.materials[batch.materialIndex].constants;
+		return;
 	}
 
-	if(batch.firstItem < m_renderOrder.size())
-	{
-		const uint32_t itemIndex = m_renderOrder[batch.firstItem];
-		if(itemIndex < m_renderItems.transformIndices.size())
-		{
-			const uint32_t transformIndex = m_renderItems.transformIndices[itemIndex];
-			if(transformIndex < scene.m_entityTransforms.size())
-			{
-				constants.worldMatrix = scene.m_entityTransforms[transformIndex].worldMatrix;
-			}
-		}
-	}
-
-	return constants;
-}
-
-RHI::ICommandList* Renderer::BeginRenderPass(RHI::IDevice* device)
-{
-	RHI::ICommandList* commandList = device->AcquireCommandList();
 	RHI::ITexture* backBuffer = device->GetBackBuffer();
-	if(commandList == nullptr || backBuffer == nullptr) return nullptr;
+	if(backBuffer == nullptr || backBuffer->GetWidth() == 0u || backBuffer->GetHeight() == 0u) return;
 
-	commandList->SetRenderTargets(1, &backBuffer, nullptr);
-	commandList->ClearColor(backBuffer, m_config.clearColor.x, m_config.clearColor.y, m_config.clearColor.z, m_config.clearColor.w);
-	commandList->BindGraphicsPipeline(m_mainPipeline);
+	const bool recreate =
+		m_depthStencilTarget == nullptr ||
+		m_depthStencilTarget->GetWidth() != backBuffer->GetWidth() ||
+		m_depthStencilTarget->GetHeight() != backBuffer->GetHeight() ||
+		m_depthStencilTarget->GetFormat() != m_config.depthStencilFormat;
 
-	return commandList;
+	if(!recreate) return;
+
+	if(m_depthStencilTarget != nullptr)
+	{
+		device->DestroyTexture(m_depthStencilTarget);
+		m_depthStencilTarget = nullptr;
+	}
+
+	RHI::TextureDesc depthDesc = {};
+	depthDesc.width = backBuffer->GetWidth();
+	depthDesc.height = backBuffer->GetHeight();
+	depthDesc.depthOrArraySize = 1;
+	depthDesc.mipLevels = 1;
+	depthDesc.format = m_config.depthStencilFormat;
+	depthDesc.usage = RHI::TextureUsage::DepthStencil;
+	m_depthStencilTarget = device->CreateTexture(depthDesc);
 }
 
-void Renderer::RecordIAPass(const Scene& scene, RHI::IDevice* device)
+void Renderer::EnsureShadowDepthTarget(RHI::IDevice* device)
 {
-	RHI::ICommandList* commandList = BeginRenderPass(device);
-	if(commandList == nullptr) return;
+	if(device == nullptr || !m_useExplicitShadowPass) return;
 
-	for(const DrawBatch& batch : m_drawBatches)
+	const uint32_t resolution = m_config.shadowMap.resolution > 0u ? m_config.shadowMap.resolution : 2048u;
+	if(m_shadowDepthTarget != nullptr &&
+		m_shadowDepthTarget->GetWidth() == resolution &&
+		m_shadowDepthTarget->GetHeight() == resolution)
 	{
-		if(batch.meshIndex >= m_resources.meshes.size()) continue;
+		return;
+	}
 
-		const GpuMesh& mesh = m_resources.meshes[batch.meshIndex];
-		if(mesh.vertexBuffer == nullptr) continue;
+	if(m_shadowDepthTarget != nullptr)
+	{
+		device->DestroyTexture(m_shadowDepthTarget);
+		m_shadowDepthTarget = nullptr;
+		m_shadowDescriptorIndex = 0xFFFFFFFFu;
+	}
 
-		const MaterialDrawConstants constants = BuildMaterialConstants(scene, batch);
-		commandList->BindVertexBuffer(mesh.vertexBuffer, mesh.vertexStride, mesh.vertexOffset);
-		commandList->SetPushConstants(static_cast<uint32_t>(sizeof(constants)), &constants);
-		if(batch.indexed && mesh.indexBuffer != nullptr)
+	const RHI::Format shadowFormat = m_config.depthStencilFormat != RHI::Format::Unknown
+		? m_config.depthStencilFormat
+		: RHI::Format::D32_FLOAT;
+
+	RHI::TextureDesc shadowDesc = {};
+	shadowDesc.width = resolution;
+	shadowDesc.height = resolution;
+	shadowDesc.depthOrArraySize = 1;
+	shadowDesc.mipLevels = 1;
+	shadowDesc.format = shadowFormat;
+	shadowDesc.usage = RHI::TextureUsage::DepthStencil | RHI::TextureUsage::ShaderResource;
+	m_shadowDepthTarget = device->CreateTexture(shadowDesc);
+	if(m_shadowDepthTarget == nullptr) return;
+
+	// 그림자 맵 SRV 를 글로벌 디스크립터 힙에 한 번 등록(메인 패스에서 샘플링).
+	m_shadowDescriptorIndex = device->AllocateDescriptorSlot();
+	if(m_shadowDescriptorIndex != RHI::INVALID_DESCRIPTOR_INDEX)
+	{
+		device->UpdateDescriptorSlot(m_shadowDescriptorIndex, m_shadowDepthTarget);
+	}
+}
+
+void Renderer::EnsureMaterialStateCapacity(std::size_t materialCount)
+{
+	if(m_materialStates.size() < materialCount)
+	{
+		m_materialStates.resize(materialCount);
+	}
+}
+
+void Renderer::UpdateMaterialStates(const Scene& scene)
+{
+	const uint32_t materialCount = scene.GetMaterialCount();
+	for(uint32_t materialIndex = 0; materialIndex < materialCount; ++materialIndex)
+	{
+		const MaterialDesc& material = scene.GetMaterial(static_cast<MaterialID>(materialIndex));
+		SceneMaterialState& materialState = m_materialStates[materialIndex];
+		materialState.textures[kMaterialBaseColorTextureSlot] = m_gpuScene.ResolveTexture(material.baseColorTexture);
+		materialState.textures[kMaterialMetallicRoughnessTextureSlot] = m_gpuScene.ResolveTexture(material.metallicRoughnessTexture);
+		materialState.textures[kMaterialNormalTextureSlot] = m_gpuScene.ResolveTexture(material.normalTexture);
+		materialState.textures[kMaterialOcclusionTextureSlot] = m_gpuScene.ResolveTexture(material.occlusionTexture);
+		materialState.textures[kMaterialEmissiveTextureSlot] = m_gpuScene.ResolveTexture(material.emissiveTexture);
+		materialState.textureDescriptorIndices[kMaterialBaseColorTextureSlot] = m_gpuScene.ResolveTextureDescriptorIndex(material.baseColorTexture);
+		materialState.textureDescriptorIndices[kMaterialMetallicRoughnessTextureSlot] = m_gpuScene.ResolveTextureDescriptorIndex(material.metallicRoughnessTexture);
+		materialState.textureDescriptorIndices[kMaterialNormalTextureSlot] = m_gpuScene.ResolveTextureDescriptorIndex(material.normalTexture);
+		materialState.textureDescriptorIndices[kMaterialOcclusionTextureSlot] = m_gpuScene.ResolveTextureDescriptorIndex(material.occlusionTexture);
+		materialState.textureDescriptorIndices[kMaterialEmissiveTextureSlot] = m_gpuScene.ResolveTextureDescriptorIndex(material.emissiveTexture);
+
+		uint32_t textureFlags = 0;
+		const bool useBindless = m_config.enableBindlessTextures;
+		auto hasTexture = [&](uint32_t slot)
 		{
-			commandList->BindIndexBuffer(mesh.indexBuffer, RHI::Format::R32_UINT, mesh.indexOffset);
+			if(materialState.textures[slot] == nullptr) return false;
+			return !useBindless || materialState.textureDescriptorIndices[slot] != kInvalidDescriptorIndex;
+		};
+		if(hasTexture(kMaterialBaseColorTextureSlot)) textureFlags |= Layout::kBaseColorTextureFlag;
+		if(hasTexture(kMaterialMetallicRoughnessTextureSlot)) textureFlags |= Layout::kMetallicRoughnessTextureFlag;
+		if(hasTexture(kMaterialNormalTextureSlot)) textureFlags |= Layout::kNormalTextureFlag;
+		if(hasTexture(kMaterialOcclusionTextureSlot)) textureFlags |= Layout::kOcclusionTextureFlag;
+		if(hasTexture(kMaterialEmissiveTextureSlot)) textureFlags |= Layout::kEmissiveTextureFlag;
+		materialState.textureFlags = textureFlags;
+	}
+}
+
+void Renderer::UpdateLightingBuffer(const Scene& scene, RHI::IDevice* device)
+{
+	if(m_lightingBuffer == nullptr)
+	{
+		m_lightingBuffer = device->CreateBuffer(RHI::BufferDesc{
+			static_cast<uint32_t>(sizeof(Layout::RendererLightingConstants)),
+			static_cast<uint32_t>(sizeof(Layout::RendererLightingConstants)),
+			RHI::BufferUsage::Constant
+		});
+	}
+	if(m_lightingBuffer == nullptr) return;
+
+	const DirectionalLight* light = GetPrimaryDirectionalLight(scene);
+	const PointLight* pointLight = GetPrimaryPointLight(scene);
+	const Math::float3 lightDirection = light != nullptr ? light->direction : m_config.directionalLightDirection;
+	const Math::float3 lightColor = light != nullptr ? light->color : m_config.directionalLightColor;
+	const float lightIntensity = light != nullptr ? light->intensity : m_config.directionalLightIntensity;
+	const bool castsShadow = pointLight != nullptr ? pointLight->castShadow : (light != nullptr ? light->castShadow : true);
+	const float shadowStrength = pointLight != nullptr ? pointLight->shadowStrength : (light != nullptr ? light->shadowStrength : m_config.shadowStrength);
+	const bool shadowsEnabled = IsShadowEnabled() && castsShadow;
+
+	Layout::RendererLightingConstants lighting = {};
+	lighting.cameraPosition = Math::float4(
+		m_config.cameraPosition.x,
+		m_config.cameraPosition.y,
+		m_config.cameraPosition.z,
+		shadowsEnabled ? shadowStrength : 0.0f);
+	lighting.directionalLightDirection = Math::float4(
+		lightDirection.x,
+		lightDirection.y,
+		lightDirection.z,
+		shadowsEnabled ? 1.0f : 0.0f);
+	lighting.directionalLightColor = Math::float4(lightColor.x, lightColor.y, lightColor.z, lightIntensity);
+	lighting.ambientColor = Math::float4(
+		m_config.ambientColor.x * m_config.environment.diffuseColor.x,
+		m_config.ambientColor.y * m_config.environment.diffuseColor.y,
+		m_config.ambientColor.z * m_config.environment.diffuseColor.z,
+		m_config.ambientIntensity * m_config.environment.diffuseIntensity);
+	lighting.shadowParams = Math::float4(
+		m_config.shadowDepthBias,
+		m_config.shadowSlopeBias,
+		m_config.shadowNormalBias,
+		static_cast<float>(m_config.shadowPcfRadius));
+	lighting.pbrParams = Math::float4(m_config.pbr.minRoughness, m_config.pbr.ambientSpecularStrength, 0.0f, 0.0f);
+	lighting.environmentColor = Math::float4(
+		m_config.environment.specularColor.x,
+		m_config.environment.specularColor.y,
+		m_config.environment.specularColor.z,
+		m_config.environment.specularIntensity);
+	if(pointLight != nullptr)
+	{
+		lighting.pointLightPositionRange = Math::float4(
+			pointLight->position.x, pointLight->position.y, pointLight->position.z, pointLight->range);
+		lighting.pointLightColorIntensity = Math::float4(
+			pointLight->color.x, pointLight->color.y, pointLight->color.z, pointLight->intensity);
+	}
+
+	void* data = m_lightingBuffer->Map(0);
+	if(data != nullptr)
+	{
+		std::memcpy(data, &lighting, sizeof(lighting));
+		m_lightingBuffer->Unmap();
+	}
+}
+
+void Renderer::UpdateShadowBuffer(const Scene& scene, RHI::IDevice* device)
+{
+	if(m_shadowMatrixBuffer == nullptr)
+	{
+		m_shadowMatrixBuffer = device->CreateBuffer(RHI::BufferDesc{
+			static_cast<uint32_t>(sizeof(Layout::RendererShadowConstants)),
+			static_cast<uint32_t>(sizeof(Layout::RendererShadowConstants)),
+			RHI::BufferUsage::Constant
+		});
+	}
+	if(m_shadowMatrixBuffer == nullptr) return;
+
+	const DirectionalLight* light = GetPrimaryDirectionalLight(scene);
+	const PointLight* pointLight = GetPrimaryPointLight(scene);
+	Math::float3 lightDirection = light != nullptr ? light->direction : m_config.directionalLightDirection;
+	ShadowMapDesc shadowMap = m_config.shadowMap;
+	const Math::Bounds3 bounds = IsShadowEnabled() && m_config.autoFitShadowMap ? ComputeShadowBounds(scene) : Math::Bounds3{};
+	if(pointLight != nullptr)
+	{
+		shadowMap.farPlane = std::max(shadowMap.farPlane, pointLight->range);
+		lightDirection = NormalizeOr(pointLight->direction, Math::float3(0.0f, 0.0f, -1.0f));
+		if(bounds.valid)
+		{
+			const Math::float3 center = bounds.Center();
+			lightDirection = NormalizeOr(center - pointLight->position, lightDirection);
+			shadowMap.sceneCenter = center;
 		}
-
-		if(batch.indexed && mesh.indexBuffer != nullptr)
+	}
+	else if(IsShadowEnabled() && m_config.autoFitShadowMap)
+	{
+		if(bounds.valid)
 		{
-			commandList->DrawIndexedInstanced(mesh.indexCount, batch.itemCount, 0, 0, 0);
-		}
-		else
-		{
-			commandList->DrawInstanced(mesh.vertexCount, batch.itemCount, 0, 0);
+			shadowMap = FitDirectionalShadowMapToBounds(
+				lightDirection, m_config.shadowMap, bounds.min, bounds.max, m_config.shadowBoundsPadding);
 		}
 	}
 
-	commandList->Close();
+	Layout::RendererShadowConstants shadow = {};
+	if(IsShadowEnabled() && pointLight != nullptr)
+	{
+		shadow.lightViewProjectionMatrix = ComputeSpotLightViewProj(pointLight->position, lightDirection, shadowMap);
+	}
+	else
+	{
+		shadow.lightViewProjectionMatrix = IsShadowEnabled()
+			? ComputeDirectionalLightViewProj(lightDirection, shadowMap)
+			: Math::float4x4::Identity();
+	}
 
-	std::array<RHI::ICommandList*, 1> commandLists = { commandList };
-	device->Submit(commandLists.data(), static_cast<uint32_t>(commandLists.size()));
+	void* data = m_shadowMatrixBuffer->Map(0);
+	if(data != nullptr)
+	{
+		std::memcpy(data, &shadow, sizeof(shadow));
+		m_shadowMatrixBuffer->Unmap();
+	}
 }
 
-void Renderer::RecordBindlessPass(RHI::IDevice* device)
+bool Renderer::IsShadowEnabled() const
 {
-	RHI::ICommandList* commandList = BeginRenderPass(device);
-	if(commandList == nullptr) return;
+	return IsRenderPassEnabled(RenderPassKind::Shadow);
+}
 
-	commandList->Close();
-	std::array<RHI::ICommandList*, 1> commandLists = { commandList };
-	device->Submit(commandLists.data(), static_cast<uint32_t>(commandLists.size()));
+bool Renderer::IsRenderPassEnabled(RenderPassKind passKind) const
+{
+	for(const RenderPassDesc& pass : m_renderPasses)
+	{
+		if(pass.kind == passKind)
+		{
+			return pass.enabled;
+		}
+	}
+	return false;
 }

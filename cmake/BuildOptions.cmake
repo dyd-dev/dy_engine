@@ -5,7 +5,6 @@ if(USE_D3D12)
 
 	target_compile_definitions(Engine_Options INTERFACE ENABLE_D3D12)
 	add_subdirectory(src/Backends/D3D12)
-	target_link_libraries(${PROJECT_NAME} PRIVATE Backend_D3D12)
 elseif(USE_METAL)
 	if(NOT APPLE)
 		message(FATAL_ERROR "[${PROJECT_NAME}] Metal is only supported with Mac OS")

@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include "RHI/ICommandList.h"
 
 namespace dy::Backends
@@ -9,16 +10,20 @@ namespace dy::Backends
     {
     public:
         // 디바이스, 백버퍼 리소스, RTV 핸들 주소를 받습니다.
-        D3D12CommandList(void* nativeDevice, void* nativeBackBuffer, size_t rtvHandlePtr, void* globalDescriptorHeap = nullptr);
+        D3D12CommandList(void* nativeDevice, void* nativeBackBuffer, size_t rtvHandlePtr, void* globalDescriptorHeap = nullptr, uint32_t srvDescriptorSize = 0);
         ~D3D12CommandList() override;
 
         void Reset();
 
         void BindGraphicsPipeline(RHI::IPipelineState* pipelineState) override;
 
-        void BindGlobalDescriptorHeap() override;
+        void BindGlobalDescriptors() override;
 
-        void SetPushConstants(uint32_t size, const void* data) override;
+        void BindGeometry(const RHI::GeometryBinding& geometry) override;
+        void BindConstantBuffer(uint32_t binding, RHI::IBuffer* buffer, uint32_t offset, uint32_t size) override;
+        void BindTexture(uint32_t binding, RHI::ITexture* texture) override;
+        void BindStorageBuffer(uint32_t binding, RHI::IBuffer* buffer, uint32_t offset, uint32_t size) override;
+        void SetInlineConstants(uint32_t size, const void* data) override;
         void SetRenderTargets(uint32_t numRenderTargets, RHI::ITexture** renderTargets, RHI::ITexture* depthStencil) override;
         void SetViewport(const RHI::Viewport& viewport) override;
         void SetScissor(const RHI::Rect& rect) override;
@@ -33,11 +38,9 @@ namespace dy::Backends
         void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
         void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
 
-        void ResourceBarrier(RHI::IBuffer* buffer, RHI::ResourceState before, RHI::ResourceState after) override;
-        void ResourceBarrier(RHI::ITexture* texture, RHI::ResourceState before, RHI::ResourceState after) override;
-
         void Close() override;
         void SetDepthStencilView(size_t dsvHandlePtr);
+        void SetBackBufferTexture(RHI::ITexture* texture); // Close 에서 백버퍼 상태를 추적기로 전이하기 위함
 
         void* GetNativeList(); // 디바이스가 가져가기 위한 함수
 

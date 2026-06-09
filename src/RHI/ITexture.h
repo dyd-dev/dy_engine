@@ -1,24 +1,27 @@
 #pragma once
-/* Texture
-* 
-* 1D/2D/3D Texture, Render Target, Depth Stencil 등을 할당합니다.
-* Texture는 이미지 데이터를 GPU 메모리에 저장하고, 셰이더에서 이를 참조하여 렌더링에 활용할 수 있도록 합니다.
-*/
 #include <cstdint>
-#include "Enums.h"
+#include "Format.h"
 
 namespace dy::RHI
 {
+	// Texture binding usages (Bitmask)
+	enum class TextureUsage : uint32_t {
+		None				= 0,
+		ShaderResource		= 1 << 0,
+		RenderTarget		= 1 << 1,
+		DepthStencil		= 1 << 2,
+		Storage				= 1 << 3,
+	};
+	DY_RHI_ENABLE_ENUM_FLAGS(TextureUsage)
+
 	// Descriptor for creating a texture
 	struct TextureDesc {
-		uint32_t width;
-		uint32_t height;
+		uint32_t width = 0;
+		uint32_t height = 0;
 		uint32_t depthOrArraySize = 1;
 		uint32_t mipLevels = 1;
-		Format format;
-		TextureUsage usage;
-		const void* initialData         = nullptr;
-		uint32_t    initialDataRowPitch  = 0;
+		Format format = Format::Unknown;
+		TextureUsage usage = {};
 	};
 
 	class ITexture
@@ -26,8 +29,19 @@ namespace dy::RHI
 	public:
 		virtual ~ITexture() = default;
 
-		virtual uint32_t GetWidth() const = 0;
-		virtual uint32_t GetHeight() const = 0;
-		virtual Format GetFormat() const = 0;
+		[[nodiscard]] const TextureDesc& GetDesc() const { return m_desc; }
+		[[nodiscard]] uint32_t GetWidth() const { return m_desc.width; }
+		[[nodiscard]] uint32_t GetHeight() const { return m_desc.height; }
+		[[nodiscard]] uint32_t GetDepthOrArraySize() const { return m_desc.depthOrArraySize; }
+		[[nodiscard]] uint32_t GetMipLevels() const { return m_desc.mipLevels; }
+		[[nodiscard]] Format GetFormat() const { return m_desc.format; }
+		[[nodiscard]] TextureUsage GetUsage() const { return m_desc.usage; }
+
+	protected:
+		explicit ITexture(const TextureDesc& desc) : m_desc(desc) {}
+		void SetDesc(const TextureDesc& desc) { m_desc = desc; }
+
+	private:
+		TextureDesc m_desc = {};
 	};
 }

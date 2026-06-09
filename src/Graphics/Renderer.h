@@ -1,135 +1,90 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
-#include "RenderContext.h"
-#include "RendererResources.h"
-#include "Scene.h"
-#include "RHI/Enums.h"
-#include "RHI/IPipelineState.h"
+#include "Core/Types.h"
+#include "Graphics/GpuScene.h"
+#include "Graphics/RenderPass.h"
+#include "Graphics/RenderPath.h"
+#include "Graphics/RendererConfig.h"
+#include "Graphics/RendererShaderLayout.h"
 
 namespace dy::RHI
 {
 	class IBuffer;
-	class ICommandList;
 	class IDevice;
+	class IPipelineState;
 	class ITexture;
 }
 
 namespace dy::Graphics
 {
-	enum class GeometrySubmissionMode
+	class Scene;
+
+	class ISceneRenderer
 	{
-		// Portable default: bind vertex/index buffers through the graphics pipeline input stage.
-		IndexedInputAssembler,
-		// Reserved for ResourceTable/bindless-capable renderer paths; not implemented by this renderer yet.
-		BindlessManualFetch
+	public:
+		virtual ~ISceneRenderer() = default;
+
+		virtual bool Initialize(RHI::IDevice* device, const RendererDesc& desc = {}) = 0;
+		virtual void Shutdown(RHI::IDevice* device) = 0;
+		virtual void Render(const Scene& scene, RHI::IDevice* device) = 0;
 	};
 
-	struct RendererConfig
-	{
-		Math::float4 clearColor = Math::float4(0.08f, 0.10f, 0.14f, 1.0f);
-		GeometrySubmissionMode geometryMode = GeometrySubmissionMode::IndexedInputAssembler;
-		Math::float4x4 viewProjectionMatrix = Math::float4x4::Identity();
-		Math::float3 cameraPosition = Math::float3(0.0f, 0.0f, 2.2f);
-		Math::float3 ambientColor = Math::float3(1.0f, 1.0f, 1.0f);
-		float ambientIntensity = 0.035f;
-		float minRoughness = 0.04f;
-		float ambientSpecularStrength = 0.25f;
-		Math::float3 environmentDiffuseColor = Math::float3(1.0f, 1.0f, 1.0f);
-		float environmentDiffuseIntensity = 1.0f;
-		Math::float3 environmentSpecularColor = Math::float3(1.0f, 1.0f, 1.0f);
-		float environmentSpecularIntensity = 1.0f;
-		bool enableShadows = false;
-		float shadowStrength = 0.45f;
-		float shadowDepthBias = 0.0007f;
-		float shadowSlopeBias = 0.003f;
-		float shadowNormalBias = 0.0f;
-		uint32_t shadowPcfRadius = 1;
-	};
-
-	class Renderer
+	// 단일 Renderer. 바인딩 전략은 IRenderPath 로 위임하고, 공유 리소스와
+	// 렌더 패스 플랜만 직접 소유한다(전략별 코드는 RenderPath.cpp).
+	class Renderer : public ISceneRenderer
 	{
 	public:
 		Renderer() = default;
+		explicit Renderer(RendererBindingMode bindingMode);
+		explicit Renderer(const RendererDesc& desc);
 		~Renderer() = default;
 
-		bool Initialize(RHI::IDevice* device, const RHI::GraphicsPipelineDesc& mainPipeline, const RendererConfig& config = {});
-		void Shutdown(RHI::IDevice* device);
-		void Render(const Scene& scene, RHI::IDevice* device);
+		bool Initialize(RHI::IDevice* device, const RendererDesc& desc = {}) override;
+		void Shutdown(RHI::IDevice* device) override;
+		void Render(const Scene& scene, RHI::IDevice* device) override;
+		
+		void SetCamera(const CameraDesc& camera); // 고수준 카메라 설정: view·proj·cameraPosition 생성 + 백엔드 Y 뒤집기 처리.
+		void SetViewProjection(const Math::float4x4& viewProjection); // 저수준(deep) 우회: 행렬/위치를 직접 지정.
+		void SetCameraPosition(const Math::float3& cameraPosition);
+		void SetDirectionalLight(const Math::float3& direction, const Math::float3& color, float intensity);
+		void SetAmbientLight(const Math::float3& color, float intensity);
+		void SetPBR(const PBRDesc& pbr);
+		void SetEnvironmentLight(const EnvironmentDesc& environment);
 
 	private:
-		struct RenderItemSoA
-		{
-			std::vector<uint32_t> meshIndices;
-			std::vector<uint32_t> materialIndices;
-			std::vector<uint32_t> transformIndices;
-			std::vector<uint32_t> vertexCounts;
-			std::vector<uint32_t> indexCounts;
-			std::vector<uint8_t> indexedFlags;
+		void BuildPipelineStates(RHI::IDevice* device);
+		void BuildRenderPassPlan();
+		void EnsureDepthStencilTarget(RHI::IDevice* device);
+		void EnsureShadowDepthTarget(RHI::IDevice* device);
+		void EnsureMaterialStateCapacity(std::size_t materialCount);
+		void UpdateMaterialStates(const Scene& scene);
+		void UpdateLightingBuffer(const Scene& scene, RHI::IDevice* device);
+		void UpdateShadowBuffer(const Scene& scene, RHI::IDevice* device);
+		[[nodiscard]] bool IsRenderPassEnabled(RenderPassKind passKind) const;
+		[[nodiscard]] bool IsShadowEnabled() const;
 
-			void Clear()
-			{
-				meshIndices.clear();
-				materialIndices.clear();
-				transformIndices.clear();
-				vertexCounts.clear();
-				indexCounts.clear();
-				indexedFlags.clear();
-			}
-
-			void Reserve(uint32_t count)
-			{
-				meshIndices.reserve(count);
-				materialIndices.reserve(count);
-				transformIndices.reserve(count);
-				vertexCounts.reserve(count);
-				indexCounts.reserve(count);
-				indexedFlags.reserve(count);
-			}
-
-			void Push(uint32_t meshIndex, uint32_t materialIndex, uint32_t transformIndex, uint32_t vertexCount, uint32_t indexCount)
-			{
-				meshIndices.push_back(meshIndex);
-				materialIndices.push_back(materialIndex);
-				transformIndices.push_back(transformIndex);
-				vertexCounts.push_back(vertexCount);
-				indexCounts.push_back(indexCount);
-				indexedFlags.push_back(indexCount > 0u ? 1u : 0u);
-			}
-
-			[[nodiscard]] uint32_t Size() const { return static_cast<uint32_t>(meshIndices.size()); }
-		};
-
-		struct DrawBatch
-		{
-			uint32_t meshIndex = 0;
-			uint32_t materialIndex = 0;
-			uint32_t firstItem = 0;
-			uint32_t itemCount = 0;
-			bool indexed = false;
-		};
-
-		bool BuildPipelineStates(RHI::IDevice* device, const RHI::GraphicsPipelineDesc& mainPipeline);
-		static bool UploadBuffer(RHI::IBuffer* buffer, const void* data, uint32_t size);
-		void ReleaseGpuMeshes(RHI::IDevice* device);
-		void EnsureGpuMeshes(const Scene& scene, RHI::IDevice* device);
-		void ReleaseGpuTextures(RHI::IDevice* device);
-		void EnsureGpuTextures(const Scene& scene, RHI::IDevice* device);
-		void EnsureGpuMaterials(const Scene& scene);
-		void BuildRenderItems(const Scene& scene);
-		void BuildDrawBatches();
-		MaterialDrawConstants BuildMaterialConstants(const Scene& scene, const DrawBatch& batch) const;
-
-		RHI::ICommandList* BeginRenderPass(RHI::IDevice* device);
-		void RecordIAPass(const Scene& scene, RHI::IDevice* device);
-		void RecordBindlessPass(RHI::IDevice* device);
-
-		RendererConfig m_config = {};
-		RHI::IPipelineState* m_mainPipeline = nullptr;
-		RendererResources m_resources;
-		RenderItemSoA m_renderItems;
-		std::vector<uint32_t> m_renderOrder;
-		std::vector<DrawBatch> m_drawBatches;
+		RendererDesc m_config = {};
+		std::vector<RenderPassDesc> m_renderPasses;
+		std::vector<char> m_vertexShaderSource;
+		std::vector<char> m_pixelShaderSource;
+		std::vector<char> m_shadowVertexShaderSource;
+		RHI::IPipelineState* m_pipeline = nullptr;
+		RHI::IPipelineState* m_shadowPipeline = nullptr;
+		RHI::ITexture* m_depthStencilTarget = nullptr;
+		RHI::ITexture* m_shadowDepthTarget = nullptr;
+		RHI::IBuffer* m_lightingBuffer = nullptr;
+		RHI::IBuffer* m_shadowMatrixBuffer = nullptr;
+		uint32_t m_shadowDescriptorIndex = 0xFFFFFFFFu;
+		bool m_useExplicitShadowPass = false;
+		GpuScene m_gpuScene;
+		std::vector<SceneMaterialState> m_materialStates;
+		std::unique_ptr<IRenderPath> m_path;
+		RendererBindingMode m_initialBindingMode = RendererBindingMode::PerDrawBind;
+		bool m_hasInitialConfig = false;
+		bool m_clipYFlip = false; // 백엔드 클립공간 Y 뒤집기 필요 여부(Initialize 에서 device 질의)
 	};
 }

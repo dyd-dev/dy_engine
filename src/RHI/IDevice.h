@@ -1,12 +1,8 @@
 #pragma once
-/* Device.h
-*
-* GPU와 통신하는 최상위 클래스입니다.
-* 물리/논리 디바이스 초기화, 메모리 할당자 역할을 합니다.
-*
-* SwapChain은 OS와 1:1 결합되는 객체이므로 Backend Device 내부로 가져가 불필요한 BoilerPlate Code를 숨깁니다.
-*/
 #include <cstdint>
+
+#include "Format.h"
+#include "ShaderLayout.h"
 
 namespace dy::RHI
 {
@@ -20,53 +16,61 @@ namespace dy::RHI
 	struct TextureDesc;
 	struct GraphicsPipelineDesc;
 
-	using DescriptorIndex = uint32_t;
-	constexpr DescriptorIndex INVALID_DESCRIPTOR_INDEX = 0xFFFFFFFF;
+	struct DeviceDesc
+	{
+		// 스왑체인(백버퍼) 포맷. 백엔드는 이 값을 그대로 따르고 GetBackBuffer()->GetFormat() 로 보고한다.
+		// UNORM = 셰이더 수동 감마, *_SRGB = 하드웨어 감마. 두 백엔드가 같은 값을 쓰므로 색이 일치한다.
+		Format swapchainFormat = Format::R8G8B8A8_UNORM;
+		uint32_t maxFramesInFlight = 2;
+		uint32_t maxDrawsPerFrame = 128;
+		uint32_t maxBindlessTextures = 128;
+		uint32_t defaultShadowMapResolution = 2048;
+		uint64_t frameAcquireTimeoutNanoseconds = 16666667ull;
+		ShaderLayoutDesc shaderLayout = {};
+	};
 
 	class IDevice
 	{
 	public:
 		virtual ~IDevice() = default;
-		static IDevice* Create(const void *windowHandle);
+		[[nodiscard]] static IDevice* Create(const void* windowHandle, const DeviceDesc& desc = {});
+		[[nodiscard]] const DeviceDesc& GetDesc() const { return m_desc; }
 
-		// Global synchronization: Acquires the next swapchain image
-		// Must be called once per frame by the "main render thread"
 		virtual void BeginFrame() = 0;
 
-		// Returns the current frame index in the ring buffer (e.g., 0, 1, or 2)
-		// Upper layers MUST use this to index into their own multiple-buffered resources.
-		virtual uint32_t GetCurrentFrameIndex() const = 0;
+		[[nodiscard]] virtual uint32_t GetCurrentFrameIndex() const = 0;
+		[[nodiscard]] virtual RHI::ICommandList* AcquireCommandList()	= 0;
 
-		// Rename from CreateCommandList to AcquireCommandList to enforce pre-allocation semantics
-		// The backend uses GetCurrentFrameIndex() and thread_local internally to return the correct list.
-		virtual ICommandList* AcquireCommandList() = 0;
-		
-		// Submits multiple command lists recorded by various threads simultaneously
 		virtual void Submit(ICommandList** cmdLists, uint32_t count) = 0;
 		virtual void Present() = 0;
 
-		virtual IBuffer* CreateBuffer(const BufferDesc& desc) = 0;
-		virtual ITexture* CreateTexture(const TextureDesc& desc) = 0;
-		virtual void UpdateTexture(ITexture* texture, const void* data, uint32_t rowPitch) = 0;
-		virtual IPipelineState* CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) = 0;
-		// virtual IPipelineState* CreateComputePipelilne(const ComputePipelineDesc& desc) = 0;
+		[[nodiscard]] virtual ITexture* GetBackBuffer() = 0;
 
-		// Allocates a slot in the GPU's Global Descriptor Heap.
-		[[nodiscard]] virtual DescriptorIndex AllocateDescriptorSlot() = 0;
-
-		// Binds an ITexture (SRV) to the allocated slot in the Global Heap.
-		virtual void UpdateDescriptorSlot(DescriptorIndex index, ITexture* texture) = 0;
-		virtual void UpdateDescriptorSlot(DescriptorIndex index, IBuffer* buffer) = 0;
-
+		[[nodiscard]] virtual IBuffer* CreateBuffer(const BufferDesc& desc) = 0;
+		[[nodiscard]] virtual ITexture* CreateTexture(const TextureDesc& desc) = 0;
+		[[nodiscard]] virtual IPipelineState* CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) = 0;
+		
 		virtual void DestroyBuffer(IBuffer* buffer) = 0;
 		virtual void DestroyTexture(ITexture* texture) = 0;
 		virtual void DestroyPipelineState(IPipelineState* pipeline) = 0;
 
-		// Warning: In a multi-threaded setup, worker threads should not call this directly
-        // unless they are explicitly assigned the task of writing to the final swapchain image.
-		virtual ITexture* GetBackBuffer() = 0;
-		
+		virtual bool UpdateTexture(ITexture* texture, const void* data, uint32_t rowPitch) = 0;
+
+		// (Vulkan: 내부 처리 → false. D3D12: 명시 필요 → true. Phase 3에서 통일 예정.)
+		[[nodiscard]] virtual bool RequiresExplicitShadowPass() const { return false; }
+		// (D3D12/Metal: false. Vulkan: true)
+		[[nodiscard]] virtual bool RequiresClipSpaceYFlip() const { return false; }
+
+		[[nodiscard]] virtual DescriptorIndex AllocateDescriptorSlot() { return INVALID_DESCRIPTOR_INDEX; }
+		virtual void UpdateDescriptorSlot(DescriptorIndex index, ITexture* texture) { (void)index; (void)texture; }
+		virtual void UpdateDescriptorSlot(DescriptorIndex index, IBuffer* buffer) { (void)index; (void)buffer; }
+
 	protected:
-		virtual int Initialize(const void *windowHandle) = 0;
+		virtual int Initialize(const void* windowHandle, const DeviceDesc& desc) = 0;
+
+	private:
+		void SetDesc(const DeviceDesc& desc) { m_desc = desc; }
+
+		DeviceDesc m_desc = {};
 	};
 }
