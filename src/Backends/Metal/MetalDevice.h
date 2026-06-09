@@ -24,13 +24,14 @@ namespace dy::Backends
         void DestroyBuffer(RHI::IBuffer* buffer) override;
         void DestroyTexture(RHI::ITexture* texture) override;
         void DestroyPipelineState(RHI::IPipelineState* pipeline) override;
+        bool UpdateTexture(RHI::ITexture* texture, const void* data, uint32_t rowPitch) override;
         [[nodiscard]] RHI::DescriptorIndex AllocateDescriptorSlot() override;
         void UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::ITexture* texture) override;
 
         RHI::ITexture* GetBackBuffer() override;
 
     protected:
-        int Initialize(const void* windowHandle) override;
+        int Initialize(const void* windowHandle, const RHI::DeviceDesc& desc) override;
 
     private:
         struct Impl;

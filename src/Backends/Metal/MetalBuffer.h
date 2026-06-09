@@ -9,9 +9,8 @@ namespace dy::Backends
         MetalBuffer(const RHI::BufferDesc& desc, void* device);
         ~MetalBuffer() override;
 
-        void* Map(uint32_t offset, uint32_t size) override;
+        void* Map(uint32_t offset) override;
         void  Unmap() override;
-        uint32_t GetSize() const override;
 
         // MetalDevice.mm에서 내부적으로 접근할 용도
         void* GetNativeBuffer() const;
