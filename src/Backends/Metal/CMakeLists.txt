@@ -1,6 +1,8 @@
 # ===== ===== Requirements ===== =====
 # message(STATUS "[${PROJECT_NAME}] Find Metal Package...")
 
+enable_language(OBJCXX)
+
 # ===== ===== Backend Target ===== =====
 set(BACKEND_NAME "Backend_Metal")
 

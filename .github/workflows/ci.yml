@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows D3D12
+            os: windows-latest
+            backend_flag: USE_D3D12
+          - name: Ubuntu Vulkan
+            os: ubuntu-latest
+            backend_flag: USE_VULKAN
+          - name: macOS Metal
+            os: macos-latest
+            backend_flag: USE_METAL
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan-dev xorg-dev
+
+      - name: Configure
+        run: cmake -S . -B build -D${{ matrix.backend_flag }}=ON -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build engine library
+        run: cmake --build build --config Release --target dy_engine --parallel
