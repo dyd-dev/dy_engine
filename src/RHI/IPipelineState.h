@@ -1,33 +1,45 @@
 #pragma once
 #include <cstddef>
-#include "Enums.h"
-/* PipelineState.h
-* 
-* PipelineState는 그래픽스 파이프라인의 상태를 정의하는 클래스입니다.
-* Shader, BlendState, RasterizerState, DepthStencilState 등과 같은 그래픽스 파이프라인의 다양한 상태를 캡슐화하여 관리합니다.
-*/
-#include "Enums.h"
+#include <cstdint>
+#include "Format.h"
+#include "ShaderLayout.h"
 
 namespace dy::RHI
 {
-	struct GraphicsPipelineDesc {
-		const void* vertexShader;
-		size_t vertexShaderSize;
+	inline constexpr uint32_t kDefaultShadowMapResolution = 2048u;
 
-		const void* pixelShader;
-		size_t pixelShaderSize;
+	struct GraphicsPipelineDesc
+	{
+		const void* vertexShader = nullptr;
+		size_t vertexShaderSize = 0;
 
-		Format renderTargetFormat;
-		Format depthStencilFormat;
+		const void* pixelShader = nullptr;
+		size_t pixelShaderSize = 0;
+
+		const void* shadowVertexShader = nullptr;
+		size_t shadowVertexShaderSize = 0;
+
+		Format renderTargetFormat = Format::Unknown;
+		Format depthStencilFormat = Format::Unknown;
 
 		// flags like Depth, Blend mode
 		bool depthEnable = true;
 		bool wireframe = false;
+		bool enableShadowPass = false;
+		bool enableBindlessTextures = false;
+		uint32_t shadowMapResolution = kDefaultShadowMapResolution;
+
+		// 깊이 전용(그림자) 파이프라인용 래스터라이저 깊이 바이어스.
+		// pixelShader == nullptr 인 깊이 전용 PSO 에서 그림자 아크네 완화에 사용.
+		int32_t depthBias = 0;
+		float depthBiasSlope = 0.0f;
+		float depthBiasClamp = 0.0f;
 	};
 
-	struct ComputePipelineDesc {
-		const void* computeShader;
-		size_t computeShaderSize;
+	struct ComputePipelineDesc
+	{
+		const void* computeShader = nullptr;
+		size_t computeShaderSize = 0;
 	};
 
 	class IPipelineState
