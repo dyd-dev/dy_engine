@@ -14,6 +14,7 @@
 #include <iostream>
 #include <vector>
 #include <wrl.h>
+#include <thread>
 
 using Microsoft::WRL::ComPtr;
 
@@ -37,6 +38,10 @@ namespace dy::Backends
 
         ComPtr<ID3D12Fence> fence;
         uint32_t fenceValue = 1;
+        uint64_t frameFenceValues[2] = { 0, 0 };
+        std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> frameUploadBuffers[2];
+        std::vector<Microsoft::WRL::ComPtr<ID3D12CommandAllocator>> frameUploadAllocators[2];
+        std::vector<Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList>> frameUploadCommandLists[2];
         HANDLE fenceEvent = nullptr;
 
         uint32_t frameIndex = 0;
@@ -287,17 +292,29 @@ namespace dy::Backends
     }
     void D3D12Device::Present() {
         DumpInfoQueue(m_internal, "Present");
-        m_internal->swapChain->Present(1, 0);
 
-        const uint64_t fence = m_internal->fenceValue;
-        m_internal->commandQueue->Signal(m_internal->fence.Get(), fence);
+        // 1. 현재 프레임이 끝났음을 나타내기 위해 Fence를 Signal
+        const uint64_t currentFenceValue = m_internal->fenceValue;
+        m_internal->commandQueue->Signal(m_internal->fence.Get(), currentFenceValue);
+        m_internal->frameFenceValues[m_internal->frameIndex] = currentFenceValue;
         m_internal->fenceValue++;
 
-        if (m_internal->fence->GetCompletedValue() < fence) {
-            m_internal->fence->SetEventOnCompletion(fence, m_internal->fenceEvent);
-            WaitForSingleObject(m_internal->fenceEvent, INFINITE);
-        }
+        // 2. 화면 표시 (Present)
+        m_internal->swapChain->Present(1, 0);
+
+        // 3. 다음 프레임 버퍼 인덱스 갱신
         m_internal->frameIndex = m_internal->swapChain->GetCurrentBackBufferIndex();
+
+        // 4. 다음 프레임이 사용할 백버퍼의 이전 GPU 작업이 완료되었는지 확인하고 대기 (Busy-wait)
+        const uint64_t waitFenceValue = m_internal->frameFenceValues[m_internal->frameIndex];
+        while (m_internal->fence->GetCompletedValue() < waitFenceValue) {
+            std::this_thread::yield();
+        }
+
+        // 5. 대기가 완료되었으므로, 해당 프레임에 사용했던 임시 업로드 리소스를 지연 해제
+        m_internal->frameUploadBuffers[m_internal->frameIndex].clear();
+        m_internal->frameUploadAllocators[m_internal->frameIndex].clear();
+        m_internal->frameUploadCommandLists[m_internal->frameIndex].clear();
     }
 
     RHI::IBuffer* D3D12Device::CreateBuffer(const RHI::BufferDesc& desc) { 
@@ -591,14 +608,12 @@ namespace dy::Backends
         ID3D12CommandList* lists[] = { cmdList.Get() };
         m_internal->commandQueue->ExecuteCommandLists(1, lists);
 
-        // 업로드 버퍼가 파괴되기 전에 GPU가 복사를 완료하도록 완벽히 대기
-        const uint64_t fenceVal = m_internal->fenceValue;
-        m_internal->commandQueue->Signal(m_internal->fence.Get(), fenceVal);
-        m_internal->fenceValue++;
+        // 임시 업로드 버퍼와 커맨드 리스트/할당자가 즉시 파괴되는 것을 막기 위해 지연 소멸 큐에 등록합니다.
+        // 다음 프레임 버퍼가 다 돌아와 대기가 완료될 때 안전하게 해제됩니다.
+        m_internal->frameUploadBuffers[m_internal->frameIndex].push_back(uploadBuffer);
+        m_internal->frameUploadAllocators[m_internal->frameIndex].push_back(alloc);
+        m_internal->frameUploadCommandLists[m_internal->frameIndex].push_back(cmdList);
         
-        // 무조건 이벤트 설정 및 대기
-        m_internal->fence->SetEventOnCompletion(fenceVal, m_internal->fenceEvent);
-        WaitForSingleObject(m_internal->fenceEvent, INFINITE);
         d3dTexture->SetResourceState(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         return true;
     }
