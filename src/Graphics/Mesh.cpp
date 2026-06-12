@@ -449,10 +449,11 @@ namespace dy::Graphics
 			return !outModel.meshes.empty();
 		}
 
-		[[nodiscard]] bool LoadFbxModel(const std::string& filepath, ModelData& outModel)
+		[[nodiscard]] bool LoadFbxModel(const std::string& filepath, ModelData& outModel, const ModelLoadOptions& options)
 		{
+			(void)options;
 			ufbx_load_opts opts = {};
-			opts.load_external_files = true;
+			opts.load_external_files = false;
 
 			ufbx_error error;
 			ufbx_scene* scene = ufbx_load_file(filepath.c_str(), &opts, &error);
@@ -461,6 +462,8 @@ namespace dy::Graphics
 				std::cerr << "Failed to load FBX file: " << filepath << "\nReason: " << error.info << std::endl;
 				return false;
 			}
+
+
 
 			outModel = {};
 			outModel.materials.reserve(scene->materials.count);
@@ -506,6 +509,73 @@ namespace dy::Graphics
 							SetTexturePath(material, MaterialTextureKind::BaseColor, candidate.string());
 							break;
 						}
+					}
+				}
+				else
+				{
+					// 폴백 로직: 디렉토리 내에서 적절한 이미지 파일을 직접 탐색
+					const std::filesystem::path fbxDir = std::filesystem::path(filepath).parent_path();
+					std::vector<std::filesystem::path> searchDirs = { fbxDir, fbxDir / "textures" };
+					std::vector<std::filesystem::path> imageFiles;
+					std::error_code ec;
+
+					for(const auto& dir : searchDirs)
+					{
+						if(std::filesystem::exists(dir, ec) && std::filesystem::is_directory(dir, ec))
+						{
+							for(const auto& entry : std::filesystem::directory_iterator(dir, ec))
+							{
+								if(entry.is_regular_file(ec))
+								{
+									std::string ext = entry.path().extension().string();
+									std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+									if(ext == ".png" || ext == ".jpg" || ext == ".jpeg")
+									{
+										imageFiles.push_back(entry.path());
+									}
+								}
+							}
+						}
+					}
+
+					std::filesystem::path selectedFallback;
+					std::string matNameLower = material.name;
+					std::transform(matNameLower.begin(), matNameLower.end(), matNameLower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+					for(const auto& imgPath : imageFiles)
+					{
+						std::string filenameLower = imgPath.filename().string();
+						std::transform(filenameLower.begin(), filenameLower.end(), filenameLower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+						if(!matNameLower.empty() && filenameLower.find(matNameLower) != std::string::npos)
+						{
+							selectedFallback = imgPath;
+							break;
+						}
+					}
+
+					if(selectedFallback.empty() && !imageFiles.empty())
+					{
+						for(const auto& imgPath : imageFiles)
+						{
+							std::string filenameLower = imgPath.filename().string();
+							std::transform(filenameLower.begin(), filenameLower.end(), filenameLower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+							if(filenameLower.find("base") != std::string::npos || filenameLower.find("diffuse") != std::string::npos || filenameLower.find("color") != std::string::npos)
+							{
+								selectedFallback = imgPath;
+								break;
+							}
+						}
+						if(selectedFallback.empty())
+						{
+							selectedFallback = imageFiles.front();
+						}
+					}
+
+					if(!selectedFallback.empty())
+					{
+						std::cout << "[FBX Fallback] Found texture fallback: " << selectedFallback.string() << " for material: " << material.name << std::endl;
+						SetTexturePath(material, MaterialTextureKind::BaseColor, selectedFallback.string());
 					}
 				}
 				materialIndices[mat] = static_cast<uint32_t>(outModel.materials.size());
@@ -574,9 +644,10 @@ namespace dy::Graphics
 
 						if(sourceMesh->vertex_normal.exists)
 						{
-							const ufbx_vec3 normal = ufbx_get_vertex_vec3(&sourceMesh->vertex_normal, index);
+							const ufbx_vec3 localNormal = ufbx_get_vertex_vec3(&sourceMesh->vertex_normal, index);
+							const ufbx_vec3 worldNormal = ufbx_transform_direction(&node->geometry_to_world, localNormal);
 							vertex.normal = NormalizeOr(
-								Math::float3(static_cast<float>(normal.x), static_cast<float>(normal.y), static_cast<float>(normal.z)),
+								Math::float3(static_cast<float>(worldNormal.x), static_cast<float>(worldNormal.y), static_cast<float>(worldNormal.z)),
 								Math::float3(0.0f, 1.0f, 0.0f));
 						}
 						else
@@ -587,7 +658,9 @@ namespace dy::Graphics
 						if(sourceMesh->vertex_uv.exists)
 						{
 							const ufbx_vec2 uv = ufbx_get_vertex_vec2(&sourceMesh->vertex_uv, index);
-							vertex.uv = Math::float2(static_cast<float>(uv.x), static_cast<float>(uv.y));
+							// FBX 포맷은 기본적으로 텍스처 좌표계 Y축(V)이 아래에서 위로 향하지만, 
+							// 통합 엔진에서는 텍스처 이미지의 수직 반전을 수행하지 않으므로 UV의 Y축을 반전시켜야 렌더링 시 정상 출력됩니다.
+							vertex.uv = Math::float2(static_cast<float>(uv.x), 1.0f - static_cast<float>(uv.y));
 						}
 
 						mesh.mesh.indices.push_back(static_cast<uint32_t>(mesh.mesh.vertices.size()));
@@ -717,7 +790,7 @@ namespace dy::Graphics
 
 		if(lowerExtension == ".obj") return LoadObjModel(path, outModel, options);
 		if(lowerExtension == ".gltf" || lowerExtension == ".glb") return LoadGltfModel(path, outModel, options);
-		if(lowerExtension == ".fbx") return LoadFbxModel(path, outModel);
+		if(lowerExtension == ".fbx") return LoadFbxModel(path, outModel, options);
 		return false;
 	}
 
