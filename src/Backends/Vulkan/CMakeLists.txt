@@ -15,8 +15,8 @@ target_link_libraries(Backend_Vulkan PRIVATE
 )
 target_compile_definitions(Backend_Vulkan PRIVATE GLFW_INCLUDE_NONE)
 
-# IDevice.cpp 팩토리(dy_engine)가 ENABLE_VULKAN 시 VulkanDevice.h -> vulkan.h 를 직접 포함하므로
-# dy_engine 에도 Vulkan 인클루드를 전파한다.
-target_link_libraries(${PROJECT_NAME} PUBLIC Vulkan::Vulkan)
+# Backend_Vulkan is an object library, so the final engine target still links
+# Vulkan privately without exporting Vulkan headers to users.
+target_link_libraries(${PROJECT_NAME} PRIVATE Vulkan::Vulkan)
 
 target_sources(${PROJECT_NAME} PRIVATE $<TARGET_OBJECTS:Backend_Vulkan>)
