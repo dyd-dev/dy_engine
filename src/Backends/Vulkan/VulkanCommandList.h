@@ -1,6 +1,6 @@
 #pragma once
 #include "RHI/ICommandList.h"
-#include "VulkanContext.h"
+#include "VulkanDevice.h"
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -84,8 +84,8 @@ private:
 		std::array<uint8_t, kMaxPushConstantBytes> pushConstants = {};
 	};
 
-	friend class VulkanDevice;
-	VkClearColorValue m_clearColor = { { 0.4f, 0.7f, 1.0f, 1.0f } };
+	friend struct VulkanDevice::Impl;
+	std::array<float, 4> m_clearColor = { 0.4f, 0.7f, 1.0f, 1.0f };
 	float m_clearDepth = 1.0f;
 	uint32_t m_renderTargetCount = 0;
 	std::array<dy::RHI::ITexture*, kMaxRenderTargets> m_renderTargets = {};
