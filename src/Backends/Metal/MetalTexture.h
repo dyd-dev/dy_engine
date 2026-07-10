@@ -16,10 +16,6 @@ namespace dy::Backends
         MetalTexture(const RHI::TextureDesc& desc, void* device);
         ~MetalTexture() override;
 
-        uint32_t   GetWidth()  const override;
-        uint32_t   GetHeight() const override;
-        RHI::Format GetFormat() const override;
-
         void* GetNativeTexture() const;
         void SetNativeTexture(void* texture);
     private:

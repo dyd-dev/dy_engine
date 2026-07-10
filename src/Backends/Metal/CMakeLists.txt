@@ -4,7 +4,7 @@
 # ===== ===== Backend Target ===== =====
 set(BACKEND_NAME "Backend_Metal")
 
-add_library(${BACKEND_NAME} STATIC
+add_library(${BACKEND_NAME} OBJECT
     MetalDevice.mm
     MetalBuffer.mm
     MetalTexture.mm
@@ -28,4 +28,5 @@ target_link_libraries(${BACKEND_NAME} PRIVATE
     "-framework QuartzCore"
 )
 
+target_sources(${PROJECT_NAME} PRIVATE $<TARGET_OBJECTS:${BACKEND_NAME}>)
 message(STATUS "[${PROJECT_NAME}] Ready to Use ${BACKEND_NAME}")
