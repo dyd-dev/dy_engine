@@ -19,11 +19,12 @@ namespace dy::Backends
 
 		RHI::IBuffer* CreateBuffer(const RHI::BufferDesc& desc) override;
 		RHI::ITexture* CreateTexture(const RHI::TextureDesc& desc) override;
-		void UpdateTexture(RHI::ITexture* texture, const void* data, uint32_t rowPitch) override;
+		bool UpdateTexture(RHI::ITexture* texture, const void* data, uint32_t rowPitch) override;
 		RHI::IPipelineState* CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc) override;
 
 		[[nodiscard]] RHI::DescriptorIndex AllocateDescriptorSlot() override;
 		void UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::ITexture* texture) override;
+		void UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::IBuffer* buffer) override;
 
 		void DestroyBuffer(RHI::IBuffer* buffer) override;
 		void DestroyTexture(RHI::ITexture* texture) override;
@@ -31,7 +32,7 @@ namespace dy::Backends
 		RHI::ITexture* GetBackBuffer() override;
 
 	protected:
-		int Initialize(const void* windowHandle) override;
+		int Initialize(const void* windowHandle, const RHI::DeviceDesc& desc) override;
 
 	private:
 		struct Impl;

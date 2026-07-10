@@ -13,34 +13,21 @@ namespace dy::Backends
 		{
 		public:
 			explicit NullBuffer(const RHI::BufferDesc& desc)
-				: m_size(desc.size)
+				: RHI::IBuffer(desc)
 			{
 			}
 
-			void* Map(uint32_t, uint32_t) override { return nullptr; }
+			void* Map(uint32_t) override { return nullptr; }
 			void Unmap() override {}
-			uint32_t GetSize() const override { return m_size; }
-
-		private:
-			uint32_t m_size = 0;
 		};
 
 		class NullTexture final : public RHI::ITexture
 		{
 		public:
 			explicit NullTexture(const RHI::TextureDesc& desc)
-				: m_width(desc.width), m_height(desc.height), m_format(desc.format)
+				: RHI::ITexture(desc)
 			{
 			}
-
-			uint32_t GetWidth() const override { return m_width; }
-			uint32_t GetHeight() const override { return m_height; }
-			RHI::Format GetFormat() const override { return m_format; }
-
-		private:
-			uint32_t m_width = 0;
-			uint32_t m_height = 0;
-			RHI::Format m_format = RHI::Format::Unknown;
 		};
 
 		class NullPipelineState final : public RHI::IPipelineState
@@ -53,17 +40,20 @@ namespace dy::Backends
 		{
 		public:
 			void BindGraphicsPipeline(RHI::IPipelineState*) override {}
-			void BindGlobalDescriptorHeap() override {}
-			void BindVertexBuffer(RHI::IBuffer*) override {}
-			void BindIndexBuffer(RHI::IBuffer*, RHI::Format, uint32_t) override {}
-			void SetPushConstants(uint32_t, const void*) override {}
+			void BindGlobalDescriptors() override {}
+			void BindGeometry(const RHI::GeometryBinding&) override {}
+			void BindConstantBuffer(uint32_t, RHI::IBuffer*, uint32_t, uint32_t) override {}
+			void BindTexture(uint32_t, RHI::ITexture*) override {}
+			void SetInlineConstants(uint32_t, const void*) override {}
 			void SetRenderTargets(uint32_t, RHI::ITexture**, RHI::ITexture*) override {}
+			void SetViewport(const RHI::Viewport&) override {}
+			void SetScissor(const RHI::Rect&) override {}
 			void ClearColor(RHI::ITexture*, float, float, float, float) override {}
 			void ClearDepth(RHI::ITexture*, float) override {}
+			void BindVertexBuffer(RHI::IBuffer*, uint32_t, uint32_t) override {}
+			void BindIndexBuffer(RHI::IBuffer*, RHI::Format, uint32_t) override {}
 			void DrawInstanced(uint32_t, uint32_t, uint32_t, uint32_t) override {}
 			void DrawIndexedInstanced(uint32_t, uint32_t, uint32_t, int32_t, uint32_t) override {}
-			void ResourceBarrier(RHI::IBuffer*, RHI::ResourceState, RHI::ResourceState) override {}
-			void ResourceBarrier(RHI::ITexture*, RHI::ResourceState, RHI::ResourceState) override {}
 			void Close() override {}
 		};
 	}
@@ -118,8 +108,9 @@ namespace dy::Backends
 		return new NullTexture(desc);
 	}
 
-	void NullDevice::UpdateTexture(RHI::ITexture*, const void*, uint32_t)
+	bool NullDevice::UpdateTexture(RHI::ITexture*, const void*, uint32_t)
 	{
+		return true;
 	}
 
 	RHI::IPipelineState* NullDevice::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc)
@@ -133,6 +124,7 @@ namespace dy::Backends
 	}
 
 	void NullDevice::UpdateDescriptorSlot(RHI::DescriptorIndex, RHI::ITexture*) {}
+	void NullDevice::UpdateDescriptorSlot(RHI::DescriptorIndex, RHI::IBuffer*) {}
 
 	void NullDevice::DestroyBuffer(RHI::IBuffer* buffer)
 	{
@@ -154,7 +146,7 @@ namespace dy::Backends
 		return &m_impl->backBuffer;
 	}
 
-	int NullDevice::Initialize(const void*)
+	int NullDevice::Initialize(const void*, const RHI::DeviceDesc&)
 	{
 		return 0;
 	}
