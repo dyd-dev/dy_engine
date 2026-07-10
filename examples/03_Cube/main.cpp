@@ -1,3 +1,4 @@
+// 03_Cube — CreateCubeMesh + perspective camera + directional light.
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -8,6 +9,7 @@
 #include "Graphics/Renderer.h"
 #include "Graphics/Scene.h"
 #include "Graphics/Mesh.h"
+#include "Math/Math.h"
 
 #ifndef DY_SHADER_DIR
 #define DY_SHADER_DIR "./Shaders"
@@ -32,7 +34,7 @@ int main()
 {
 	try
 	{
-		Platform::Window window(1280, 720, "HelloRenderer");
+		Platform::Window window(1280, 720, "Cube");
 		std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(window.GetHandle()));
 		if(!device) return -1;
 
@@ -41,26 +43,30 @@ int main()
 		const std::string psPath = std::string(DY_SHADER_DIR) + "/mesh_ps" + ext;
 
 		Graphics::Renderer renderer;
-		Graphics::RendererDesc rendererConfig = {};
-		rendererConfig.vertexShaderPath = vsPath.c_str();
-		rendererConfig.pixelShaderPath = psPath.c_str();
-		if(!renderer.Initialize(device.get(), rendererConfig)) return -1;
+		Graphics::RendererDesc cfg = {};
+		cfg.vertexShaderPath = vsPath.c_str();
+		cfg.pixelShaderPath = psPath.c_str();
+		if(!renderer.Initialize(device.get(), cfg)) return -1;
+
+		Graphics::CameraDesc camera = {};
+		camera.eye = Math::float3(2.5f, 2.5f, 2.5f);
+		camera.aspect = 1280.0f / 720.0f;
+		renderer.SetCamera(camera);
 
 		Graphics::Scene scene;
+		const MeshID cube = scene.CreateMesh(Graphics::CreateCubeMesh(1.0f));
+		Graphics::MaterialDesc material = {};
+		material.baseColor = Math::float4(0.85f, 0.35f, 0.25f, 1.0f);
+		material.roughnessFactor = 0.5f;
+		const MaterialID materialId = scene.CreateMaterial(material);
+		[[maybe_unused]] const EntityID entity = scene.CreateEntity(cube, materialId);
 
-		Graphics::MeshData triangleMesh = {};
-		triangleMesh.vertices = {
-			Graphics::Vertex{ Math::float3(0.0f, 0.6f, 0.0f), Math::float3(0.0f, 0.0f, 1.0f), Math::float2(0.5f, 0.0f) },
-			Graphics::Vertex{ Math::float3(0.6f, -0.6f, 0.0f), Math::float3(0.0f, 0.0f, 1.0f), Math::float2(1.0f, 1.0f) },
-			Graphics::Vertex{ Math::float3(-0.6f, -0.6f, 0.0f), Math::float3(0.0f, 0.0f, 1.0f), Math::float2(0.0f, 1.0f) }
-		};
-		triangleMesh.indices = { 0u, 1u, 2u };
-
-		Graphics::MaterialDesc triangleMaterial = {};
-
-		const MeshID meshId = scene.CreateMesh(triangleMesh);
-		const MaterialID materialId = scene.CreateMaterial(triangleMaterial);
-		[[maybe_unused]] const EntityID entity = scene.CreateEntity(meshId, materialId);
+		Graphics::DirectionalLight light = {};
+		light.direction = Math::float3(0.4f, 0.5f, 0.8f);
+		light.color = Math::float3(1.0f, 0.96f, 0.9f);
+		light.intensity = 3.0f;
+		light.castShadow = false;
+		[[maybe_unused]] const DirectionalLightID lightId = scene.CreateDirectionalLight(light);
 
 		while(window.IsRunning())
 		{
