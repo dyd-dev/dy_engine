@@ -1,4 +1,4 @@
-﻿#include "Platform/Window.h"
+#include "Platform/Window.h"
 #include <iostream>
 #include <string.h>
 

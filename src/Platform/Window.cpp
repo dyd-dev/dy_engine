@@ -1,4 +1,4 @@
-﻿#include "Window.h"
+#include "Window.h"
 #include <stdexcept>
 #include <GLFW/glfw3.h>
 // Expose native window handles for RHI Device initialization
