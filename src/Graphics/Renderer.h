@@ -72,14 +72,17 @@ namespace dy::Graphics
 		std::vector<char> m_vertexShaderSource;
 		std::vector<char> m_pixelShaderSource;
 		std::vector<char> m_shadowVertexShaderSource;
+		std::vector<char> m_computeSkinningShaderSource;
 		RHI::IPipelineState* m_pipeline = nullptr;
 		RHI::IPipelineState* m_shadowPipeline = nullptr;
+		RHI::IPipelineState* m_skinningPipeline = nullptr;
 		RHI::ITexture* m_depthStencilTarget = nullptr;
 		RHI::ITexture* m_shadowDepthTarget = nullptr;
 		RHI::IBuffer* m_lightingBuffer = nullptr;
 		RHI::IBuffer* m_shadowMatrixBuffer = nullptr;
 		uint32_t m_shadowDescriptorIndex = 0xFFFFFFFFu;
 		bool m_useExplicitShadowPass = false;
+		SkinningExecutionMode m_activeSkinningExecutionMode = SkinningExecutionMode::VertexShader;
 		GpuScene m_gpuScene;
 		std::vector<SceneMaterialState> m_materialStates;
 		std::unique_ptr<IRenderPath> m_path;

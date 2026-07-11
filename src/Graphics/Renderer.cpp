@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
@@ -12,6 +13,7 @@
 #include "Graphics/RenderPath.h"
 #include "Graphics/Scene.h"
 #include "Graphics/ShadowMath.h"
+#include "Graphics/SkinningPass.h"
 #include "Math/Math.h"
 #include "RHI/IBuffer.h"
 #include "RHI/IDevice.h"
@@ -184,11 +186,39 @@ bool Renderer::Initialize(RHI::IDevice* device, const RendererDesc& config)
 	{
 		m_shadowVertexShaderSource = ReadBinaryFile(shadowVertexShaderPath);
 	}
+	m_computeSkinningShaderSource.clear();
+	const bool computeConfigurationSupported =
+		m_config.bindingMode == RendererBindingMode::PerDrawBind
+		&& device->SupportsComputeSkinning()
+		&& m_config.computeSkinningShaderPath != nullptr;
+	const SkinningExecutionDecision skinningDecision = ResolveSkinningExecutionMode(
+		m_config.skinningExecutionMode,
+		computeConfigurationSupported);
+	m_activeSkinningExecutionMode = skinningDecision.active;
+	if(m_activeSkinningExecutionMode == SkinningExecutionMode::ComputePreSkin)
+	{
+		std::ifstream computeShaderFile(m_config.computeSkinningShaderPath, std::ios::binary);
+		if(computeShaderFile.good())
+		{
+			computeShaderFile.close();
+			m_computeSkinningShaderSource = ReadBinaryFile(m_config.computeSkinningShaderPath);
+		}
+		else
+		{
+			m_activeSkinningExecutionMode = SkinningExecutionMode::VertexShader;
+			std::fprintf(stderr, "Compute skinning shader unavailable; falling back to vertex-shader skinning.\n");
+		}
+	}
+	else if(skinningDecision.fellBack)
+	{
+		std::fprintf(stderr, "Compute skinning unsupported for this renderer configuration; falling back to vertex-shader skinning.\n");
+	}
 
 	m_clipYFlip = device->RequiresClipSpaceYFlip();
 
 	BuildRenderPassPlan();
 	BuildPipelineStates(device);
+	BuildRenderPassPlan();
 	m_path = CreateRenderPath(m_config.bindingMode);
 	return m_pipeline != nullptr && m_path != nullptr;
 }
@@ -254,6 +284,7 @@ void Renderer::Shutdown(RHI::IDevice* device)
 	m_vertexShaderSource.clear();
 	m_pixelShaderSource.clear();
 	m_shadowVertexShaderSource.clear();
+	m_computeSkinningShaderSource.clear();
 	m_renderPasses.clear();
 
 	if(m_lightingBuffer != nullptr)
@@ -282,11 +313,17 @@ void Renderer::Shutdown(RHI::IDevice* device)
 		device->DestroyPipelineState(m_shadowPipeline);
 		m_shadowPipeline = nullptr;
 	}
+	if(m_skinningPipeline != nullptr)
+	{
+		device->DestroyPipelineState(m_skinningPipeline);
+		m_skinningPipeline = nullptr;
+	}
 	if(m_pipeline != nullptr)
 	{
 		device->DestroyPipelineState(m_pipeline);
 		m_pipeline = nullptr;
 	}
+	m_activeSkinningExecutionMode = SkinningExecutionMode::VertexShader;
 }
 
 void Renderer::Render(const Scene& scene, RHI::IDevice* device)
@@ -302,6 +339,8 @@ void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 	RenderPathContext context = {};
 	context.config = &m_config;
 	context.pipeline = m_pipeline;
+	context.skinningPipeline = m_skinningPipeline;
+	context.skinningExecutionMode = m_activeSkinningExecutionMode;
 	context.gpuScene = &m_gpuScene;
 	context.materialStates = &m_materialStates;
 	EnsureDepthStencilTarget(device);
@@ -333,7 +372,11 @@ void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 	for(const RenderPassDesc& pass : m_renderPasses)
 	{
 		if(!pass.enabled) continue;
-		if(pass.kind == RenderPassKind::MainForward && pass.work == RenderPassWork::Graphics)
+		if(pass.kind == RenderPassKind::Skinning && pass.work == RenderPassWork::Compute)
+		{
+			m_path->RecordSkinningPass(scene, device, context);
+		}
+		else if(pass.kind == RenderPassKind::MainForward && pass.work == RenderPassWork::Graphics)
 		{
 			m_path->RecordMainPass(scene, device, context);
 		}
@@ -342,6 +385,19 @@ void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 
 void Renderer::BuildPipelineStates(RHI::IDevice* device)
 {
+	const RHI::GraphicsResourceProfile automaticResourceProfile = [this]()
+	{
+		switch(m_config.bindingMode)
+		{
+		case RendererBindingMode::BatchedBind: return RHI::GraphicsResourceProfile::Batched;
+		case RendererBindingMode::Bindless: return RHI::GraphicsResourceProfile::Bindless;
+		case RendererBindingMode::PerDrawBind: return RHI::GraphicsResourceProfile::PerDrawSkin;
+		}
+		return RHI::GraphicsResourceProfile::PerDrawSkin;
+	}();
+	const RHI::GraphicsResourceProfile resourceProfile = m_config.overrideResourceProfile
+		? m_config.resourceProfile
+		: automaticResourceProfile;
 	// 렌더 타깃 포맷은 실제 백버퍼에서 파생한다(단일 진실원). 이래야 PSO 가 실제 타깃과
 	// 항상 일치하고, 백엔드별 스왑체인 포맷 불일치(감마 차이)가 생기지 않는다.
 	if(RHI::ITexture* backBuffer = device->GetBackBuffer())
@@ -363,12 +419,27 @@ void Renderer::BuildPipelineStates(RHI::IDevice* device)
 	desc.wireframe = false;
 	desc.enableShadowPass = IsShadowEnabled();
 	desc.enableBindlessTextures = m_config.enableBindlessTextures;
+	desc.resourceProfile = resourceProfile;
 	desc.shadowMapResolution = m_config.shadowMap.resolution;
 	desc.shadowVertexShader = m_shadowVertexShaderSource.empty() ? nullptr : m_shadowVertexShaderSource.data();
 	desc.shadowVertexShaderSize = m_shadowVertexShaderSource.size();
 	// desc.shaderLayout = m_config.shaderLayout;
 
 	m_pipeline = device->CreateGraphicsPipeline(desc);
+	if(m_activeSkinningExecutionMode == SkinningExecutionMode::ComputePreSkin)
+	{
+		RHI::ComputePipelineDesc computeDesc = {};
+		computeDesc.computeShader = m_computeSkinningShaderSource.data();
+		computeDesc.computeShaderSize = m_computeSkinningShaderSource.size();
+		computeDesc.storageBufferCount = 4u;
+		computeDesc.inlineConstantSize = 2u * static_cast<uint32_t>(sizeof(uint32_t));
+		m_skinningPipeline = device->CreateComputePipeline(computeDesc);
+		if(m_skinningPipeline == nullptr)
+		{
+			m_activeSkinningExecutionMode = SkinningExecutionMode::VertexShader;
+			std::fprintf(stderr, "Compute skinning pipeline creation failed; falling back to vertex-shader skinning.\n");
+		}
+	}
 
 	// 백엔드가 그림자 깊이 패스를 내부 처리하지 못하면(D3D12) Graphics 가 명시적으로
 	// 깊이 전용 패스를 기록한다. 이를 위해 별도의 깊이 전용 PSO(픽셀 셰이더 없음)를 만든다.
@@ -392,6 +463,7 @@ void Renderer::BuildPipelineStates(RHI::IDevice* device)
 		shadowDesc.depthEnable = true;
 		shadowDesc.enableShadowPass = false;
 		shadowDesc.enableBindlessTextures = m_config.enableBindlessTextures;
+		shadowDesc.resourceProfile = resourceProfile;
 		shadowDesc.shadowMapResolution = m_config.shadowMap.resolution;
 		shadowDesc.depthBiasSlope = 1.75f; // Vulkan 그림자 파이프라인과 유사한 슬로프 바이어스
 
@@ -403,6 +475,12 @@ void Renderer::BuildPipelineStates(RHI::IDevice* device)
 void Renderer::BuildRenderPassPlan()
 {
 	m_renderPasses.clear();
+	m_renderPasses.push_back(RenderPassDesc{
+		RenderPassKind::Skinning,
+		RenderPassWork::Compute,
+		"Skinning",
+		m_activeSkinningExecutionMode == SkinningExecutionMode::ComputePreSkin
+	});
 	m_renderPasses.push_back(RenderPassDesc{
 		RenderPassKind::Shadow,
 		RenderPassWork::PrepareOnly,

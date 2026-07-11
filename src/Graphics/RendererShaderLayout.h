@@ -22,11 +22,17 @@ namespace dy::Graphics::RendererShaderLayout
 	constexpr uint32_t kBindlessMaterialStorageBinding = DY_RENDERER_BINDING_BINDLESS_MATERIAL_STORAGE;
 	constexpr uint32_t kBindlessTransformStorageBinding = DY_RENDERER_BINDING_BINDLESS_TRANSFORM_STORAGE;
 	constexpr uint32_t kBindlessDrawStorageBinding = DY_RENDERER_BINDING_BINDLESS_DRAW_STORAGE;
+	constexpr uint32_t kSkinInfluenceStorageBinding = DY_RENDERER_BINDING_SKIN_INFLUENCE_STORAGE;
+	constexpr uint32_t kSkinPaletteStorageBinding = DY_RENDERER_BINDING_SKIN_PALETTE_STORAGE;
+	constexpr uint32_t kVulkanDrawConstantsBinding = DY_VULKAN_BINDING_DRAW_CONSTANTS;
 	constexpr uint32_t kDescriptorBindingCount = DY_RENDERER_DESCRIPTOR_BINDING_COUNT;
+	constexpr uint32_t kVulkanSkinningDescriptorBindingCount = DY_VULKAN_SKINNING_DESCRIPTOR_BINDING_COUNT;
+	constexpr uint32_t kVulkanDescriptorBindingCount = DY_VULKAN_DESCRIPTOR_BINDING_COUNT;
 	constexpr uint32_t kMaterialTextureBindingCount = DY_RENDERER_MATERIAL_TEXTURE_BINDING_COUNT;
 	constexpr uint32_t kSamplerDescriptorCount = DY_RENDERER_SAMPLER_DESCRIPTOR_COUNT;
 	constexpr uint32_t kConstantBufferDescriptorCount = DY_RENDERER_CONSTANT_BUFFER_DESCRIPTOR_COUNT;
 	constexpr uint32_t kStorageBufferDescriptorCount = DY_RENDERER_STORAGE_BUFFER_DESCRIPTOR_COUNT;
+	constexpr uint32_t kVulkanSkinningStorageBufferDescriptorCount = DY_VULKAN_SKINNING_STORAGE_BUFFER_DESCRIPTOR_COUNT;
 	constexpr uint32_t kBindlessTextureCount = DY_RENDERER_BINDLESS_TEXTURE_COUNT;
 	constexpr uint32_t kRendererVertexFloatCount = DY_RENDERER_VERTEX_FLOAT_COUNT;
 
@@ -37,6 +43,7 @@ namespace dy::Graphics::RendererShaderLayout
 	constexpr uint32_t kEmissiveTextureFlag = DY_RENDERER_TEXTURE_FLAG_EMISSIVE;
 	constexpr uint32_t kReceiveShadowFlag = DY_RENDERER_TEXTURE_FLAG_RECEIVE_SHADOW;
 	constexpr uint32_t kCastShadowFlag = DY_RENDERER_TEXTURE_FLAG_CAST_SHADOW;
+	constexpr uint32_t kSkinnedFlag = DY_RENDERER_TEXTURE_FLAG_SKINNED;
 
 	struct RendererLightingConstants
 	{
@@ -84,6 +91,9 @@ namespace dy::Graphics::RendererShaderLayout
 	static_assert(offsetof(DrawConstants, textureIndices) == 192u, "Renderer bindless texture indices offset must match shader layout.");
 	static_assert(kPushConstantRangeSize == 208u, "Renderer draw constants must match push constant range.");
 	static_assert(kBindlessDrawStorageBinding + 1u == kDescriptorBindingCount, "Renderer descriptor bindings must remain contiguous.");
+	static_assert(kSkinInfluenceStorageBinding == kDescriptorBindingCount, "Vulkan skin influence binding must follow the shared layout.");
+	static_assert(kSkinPaletteStorageBinding + 1u == kVulkanSkinningDescriptorBindingCount, "Vulkan skinning bindings must remain contiguous.");
+	static_assert(kVulkanDrawConstantsBinding + 1u == kVulkanDescriptorBindingCount, "Vulkan draw constants binding must terminate the Vulkan layout.");
 	static_assert(kMaterialTextureBindingCount + 1u == kSamplerDescriptorCount, "Renderer sampler descriptor count must include shadow map.");
 
 	// RHI::ShaderLayoutDesc(데이터) 기본값이 셰이더 공유 .inc 계약과 일치함을 보증한다.

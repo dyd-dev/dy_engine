@@ -29,6 +29,10 @@ namespace dy::Graphics
 	class Scene;
 
 	inline constexpr uint32_t kInvalidDescriptorIndex = 0xFFFFFFFFu;
+	[[nodiscard]] bool TryComputeRendererBufferBytes(
+		uint64_t elementCount,
+		uint32_t elementStride,
+		uint32_t& outBytes);
 
 	// 머티리얼 텍스처 슬롯 인덱스(셰이더 레이아웃의 텍스처 순서와 일치).
 	inline constexpr uint32_t kMaterialBaseColorTextureSlot = 0;
@@ -55,6 +59,8 @@ namespace dy::Graphics
 	{
 		const RendererDesc* config = nullptr;
 		RHI::IPipelineState* pipeline = nullptr;
+		RHI::IPipelineState* skinningPipeline = nullptr;
+		SkinningExecutionMode skinningExecutionMode = SkinningExecutionMode::VertexShader;
 		RHI::ITexture* depthStencil = nullptr;
 		RHI::IBuffer* lightingBuffer = nullptr;
 		RHI::IBuffer* shadowMatrixBuffer = nullptr;
@@ -75,6 +81,10 @@ namespace dy::Graphics
 
 		// 씬 지오메트리/드로우 리소스를 GPU 에 준비한다(전략별 레이아웃).
 		virtual void PrepareResources(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context) = 0;
+		virtual void RecordSkinningPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context)
+		{
+			(void)scene; (void)device; (void)context;
+		}
 		// 메인 포워드 패스의 드로우 명령을 기록/제출한다.
 		virtual void RecordMainPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context) = 0;
 		// 보유한 GPU 리소스를 해제한다.

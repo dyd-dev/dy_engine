@@ -1,9 +1,8 @@
 #include "VulkanSwapchain.h"
-#include "VulkanResources.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <limits>
-#include <stdexcept>
+#include <utility>
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -14,8 +13,11 @@
 namespace dy::Backends
 {
 
-void VulkanSwapchain::Initialize(const VulkanContext& context, void* windowHandle, bool preferSrgb) {
-    SwapchainSupportDetails swapchainSupport = QuerySwapchainSupport(context.physicalDevice, context.surface);
+VkResult VulkanSwapchain::Initialize(const VulkanContext& context, void* windowHandle, bool preferSrgb) {
+	SwapchainSupportDetails swapchainSupport = QuerySwapchainSupport(context.physicalDevice, context.surface);
+	if(!swapchainSupport.querySucceeded || swapchainSupport.formats.empty() || swapchainSupport.presentModes.empty()) {
+		return swapchainSupport.result != VK_SUCCESS ? swapchainSupport.result : VK_ERROR_INITIALIZATION_FAILED;
+	}
 
     VkSurfaceFormatKHR surfaceFormat = ChooseSwapSurfaceFormat(swapchainSupport.formats, preferSrgb);
     VkPresentModeKHR presentMode = ChoosePresentMode(swapchainSupport.presentModes);
@@ -51,21 +53,50 @@ void VulkanSwapchain::Initialize(const VulkanContext& context, void* windowHandl
     createInfo.presentMode = presentMode;
     createInfo.clipped = VK_TRUE;
 
-    if (vkCreateSwapchainKHR(context.device, &createInfo, nullptr, &m_swapchain) != VK_SUCCESS) {
-        throw std::runtime_error("failed to create swapchain!");
+	VkSwapchainKHR newSwapchain = VK_NULL_HANDLE;
+	VkResult result = vkCreateSwapchainKHR(context.device, &createInfo, nullptr, &newSwapchain);
+	if(result != VK_SUCCESS) return result;
+
+	result = vkGetSwapchainImagesKHR(context.device, newSwapchain, &imageCount, nullptr);
+	if(result != VK_SUCCESS || imageCount == 0u) {
+		vkDestroySwapchainKHR(context.device, newSwapchain, nullptr);
+		return result != VK_SUCCESS ? result : VK_ERROR_INITIALIZATION_FAILED;
+	}
+	std::vector<VkImage> newImages(imageCount);
+	result = vkGetSwapchainImagesKHR(context.device, newSwapchain, &imageCount, newImages.data());
+	if(result != VK_SUCCESS) {
+		vkDestroySwapchainKHR(context.device, newSwapchain, nullptr);
+		return result;
+	}
+
+	std::vector<VkImageView> newImageViews(newImages.size(), VK_NULL_HANDLE);
+	for(size_t imageIndex = 0u; imageIndex < newImages.size(); ++imageIndex) {
+		VkImageViewCreateInfo viewInfo{};
+		viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+		viewInfo.image = newImages[imageIndex];
+		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		viewInfo.format = surfaceFormat.format;
+		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		viewInfo.subresourceRange.baseMipLevel = 0u;
+		viewInfo.subresourceRange.levelCount = 1u;
+		viewInfo.subresourceRange.baseArrayLayer = 0u;
+		viewInfo.subresourceRange.layerCount = 1u;
+		result = vkCreateImageView(context.device, &viewInfo, nullptr, &newImageViews[imageIndex]);
+		if(result != VK_SUCCESS) {
+			for(VkImageView imageView : newImageViews)
+				if(imageView != VK_NULL_HANDLE) vkDestroyImageView(context.device, imageView, nullptr);
+			vkDestroySwapchainKHR(context.device, newSwapchain, nullptr);
+			return result;
+		}
     }
 
-    vkGetSwapchainImagesKHR(context.device, m_swapchain, &imageCount, nullptr);
-    m_swapchainImages.resize(imageCount);
-    vkGetSwapchainImagesKHR(context.device, m_swapchain, &imageCount, m_swapchainImages.data());
-
-    m_swapchainImageFormat = surfaceFormat.format;
-    m_swapchainExtent = extent;
-
-    m_swapchainImageViews.resize(m_swapchainImages.size());
-    for (size_t i = 0; i < m_swapchainImages.size(); i++) {
-        m_swapchainImageViews[i] = VulkanResources::CreateImageView(context.device, m_swapchainImages[i], m_swapchainImageFormat);
-    }
+	Cleanup(context.device);
+	m_swapchain = newSwapchain;
+	m_swapchainImages = std::move(newImages);
+	m_swapchainImageViews = std::move(newImageViews);
+	m_swapchainImageFormat = surfaceFormat.format;
+	m_swapchainExtent = extent;
+	return VK_SUCCESS;
 }
 
 void VulkanSwapchain::Cleanup(VkDevice device) {
@@ -78,26 +109,42 @@ void VulkanSwapchain::Cleanup(VkDevice device) {
         vkDestroySwapchainKHR(device, m_swapchain, nullptr);
         m_swapchain = VK_NULL_HANDLE;
     }
+	m_swapchainImages.clear();
+	m_swapchainImageFormat = VK_FORMAT_UNDEFINED;
+	m_swapchainExtent = {};
 }
 
 VulkanSwapchain::SwapchainSupportDetails VulkanSwapchain::QuerySwapchainSupport(VkPhysicalDevice device, VkSurfaceKHR surface) {
     SwapchainSupportDetails details;
-    vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities);
+	details.result = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities);
+	if(details.result != VK_SUCCESS) return details;
 
-    uint32_t formatCount;
-    vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nullptr);
+	uint32_t formatCount = 0u;
+	details.result = vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nullptr);
+	if(details.result != VK_SUCCESS) return details;
     if (formatCount != 0) {
         details.formats.resize(formatCount);
-        vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, details.formats.data());
+		details.result = vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, details.formats.data());
+		if(details.result != VK_SUCCESS) {
+			details.formats.clear();
+			return details;
+		}
     }
 
-    uint32_t presentModeCount;
-    vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, nullptr);
+	uint32_t presentModeCount = 0u;
+	details.result = vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, nullptr);
+	if(details.result != VK_SUCCESS) return details;
     if (presentModeCount != 0) {
         details.presentModes.resize(presentModeCount);
-        vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, details.presentModes.data());
+		details.result = vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, details.presentModes.data());
+		if(details.result != VK_SUCCESS) {
+			details.presentModes.clear();
+			return details;
+		}
     }
 
+	details.querySucceeded = true;
+	details.result = VK_SUCCESS;
     return details;
 }
 

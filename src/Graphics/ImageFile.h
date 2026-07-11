@@ -6,6 +6,7 @@
  * RGBA8 로 강제 디코드한다.
  */
 #include <cstdint>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,11 @@ namespace dy::Graphics
 		[[nodiscard]] const std::vector<uint8_t>& GetPixels() const { return m_pixels; }
 
 		friend ImageFile LoadImageFile(const std::string& path);
+		friend ImageFile LoadImageMemory(
+			const uint8_t* encodedBytes,
+			size_t encodedSize,
+			uint64_t maxDecodedBytes,
+			bool* outLimitExceeded);
 
 	private:
 		uint32_t m_width = 0u;
@@ -30,4 +36,9 @@ namespace dy::Graphics
 
 	// 파일 경로에서 RGBA8 이미지를 디코드한다. 실패 시 IsValid()==false 인 ImageFile 반환.
 	[[nodiscard]] ImageFile LoadImageFile(const std::string& path);
+	[[nodiscard]] ImageFile LoadImageMemory(
+		const uint8_t* encodedBytes,
+		size_t encodedSize,
+		uint64_t maxDecodedBytes,
+		bool* outLimitExceeded = nullptr);
 }

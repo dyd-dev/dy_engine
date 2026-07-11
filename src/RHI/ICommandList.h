@@ -36,6 +36,12 @@ namespace dy::RHI
 		uint32_t indexOffset = 0;
 	};
 
+	enum class BufferAccess : uint8_t
+	{
+		ComputeShaderWrite,
+		VertexShaderRead
+	};
+
 	class ICommandList
 	{
 	public:
@@ -43,6 +49,7 @@ namespace dy::RHI
 
 		// pipeline
 		virtual void BindGraphicsPipeline(IPipelineState* pipelineState) = 0;
+		virtual void BindComputePipeline(IPipelineState* pipelineState) { (void)pipelineState; }
 		virtual void BindGlobalDescriptors() = 0;
 
 		// geometry binding / Input Assembly
@@ -72,10 +79,22 @@ namespace dy::RHI
 		virtual void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) = 0;
 		virtual void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) = 0;
 
+		// compute
+		virtual void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
+		{
+			(void)threadGroupCountX; (void)threadGroupCountY; (void)threadGroupCountZ;
+		}
+		virtual void BufferMemoryBarrier(
+			IBuffer* buffer,
+			BufferAccess sourceAccess,
+			BufferAccess destinationAccess,
+			uint32_t offset,
+			uint32_t size)
+		{
+			(void)buffer; (void)sourceAccess; (void)destinationAccess; (void)offset; (void)size;
+		}
+
 		// lifecycle
 		virtual void Close() = 0;
-
-		// Compute Commands
-		// virtual void DispatchCompute(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) = 0;
 	};
 }

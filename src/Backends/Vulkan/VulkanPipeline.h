@@ -13,7 +13,6 @@ public:
         VkExtent2D extent,
         VkDescriptorSetLayout descriptorSetLayout,
         const dy::RHI::GraphicsPipelineDesc& desc,
-        uint32_t pushConstantSize,
         VkDescriptorSetLayout bindlessDescriptorSetLayout = VK_NULL_HANDLE);
     void Cleanup(VkDevice device);
 

@@ -25,6 +25,9 @@
 #include "Math/Math.h"
 #include "Platform/Window.h"
 #include "RHI/IDevice.h"
+#if defined(ENABLE_VULKAN)
+#include "Backends/Vulkan/VulkanDevice.h"
+#endif
 
 #ifndef DY_SHADER_DIR
 #define DY_SHADER_DIR "./Shaders"
@@ -83,6 +86,21 @@ namespace
 			}
 		}
 		return fallback;
+	}
+
+	float ParseSmokeSeconds(int argc, char** argv)
+	{
+		for(int i = 1; i < argc; ++i)
+		{
+			const std::string arg = argv[i] != nullptr ? argv[i] : "";
+			const std::string key = "--smoke-seconds=";
+			if(arg.rfind(key, 0) == 0)
+			{
+				const float value = std::strtof(arg.c_str() + key.size(), nullptr);
+				if(value > 0.0f) return value;
+			}
+		}
+		return 0.0f;
 	}
 
 	uint32_t HashUInt(uint32_t value)
@@ -150,11 +168,16 @@ int main(int argc, char** argv)
 	{
 		const Graphics::RendererBindingMode bindingMode = SelectBindingMode(argc, argv);
 		const uint32_t targetCount = ParseCount(argc, argv, 2000u);
+		const float smokeSeconds = ParseSmokeSeconds(argc, argv);
 
 		Platform::Window window(1280, 720, "RenderPath");
 
 		RHI::DeviceDesc deviceDesc = {};
+		#if defined(ENABLE_VULKAN)
+		deviceDesc.maxDrawsPerFrame = 128u;                  // Vulkan descriptor page size.
+		#else
 		deviceDesc.maxDrawsPerFrame = targetCount + 16u;     // PerDraw 모드: 드로우당 디스크립터 필요
+		#endif
 		deviceDesc.maxBindlessTextures = 256u;               // 여러 모델의 텍스처 수용
 		std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(window.GetHandle(), deviceDesc));
 		if(!device) throw std::runtime_error("Failed to create RHI device");
@@ -242,6 +265,11 @@ int main(int argc, char** argv)
 
 		Graphics::RendererDesc cfg = {};
 		cfg.bindingMode = bindingMode;
+		if(bindingMode == Graphics::RendererBindingMode::PerDrawBind)
+		{
+			cfg.overrideResourceProfile = true;
+			cfg.resourceProfile = RHI::GraphicsResourceProfile::Batched;
+		}
 		cfg.vertexShaderPath = vsPath.c_str();
 		cfg.pixelShaderPath = psPath.c_str();
 		cfg.clearColor = Math::float4(0.02f, 0.03f, 0.05f, 1.0f);
@@ -320,9 +348,27 @@ int main(int argc, char** argv)
 				framesSinceReport = 0;
 				lastReport = now;
 			}
+			if(smokeSeconds > 0.0f && seconds >= smokeSeconds) break;
 		}
 
 		renderer.Shutdown(device.get());
+		#if defined(ENABLE_VULKAN)
+		const auto* vulkanDevice = dynamic_cast<const Backends::VulkanDevice*>(device.get());
+		const bool validationCaptureEnabled = vulkanDevice != nullptr && vulkanDevice->IsValidationCaptureEnabled();
+		const uint32_t validationErrorCount = vulkanDevice != nullptr ? vulkanDevice->GetValidationErrorCount() : 0u;
+		const uint32_t validationVuidCount = vulkanDevice != nullptr ? vulkanDevice->GetValidationVuidCount() : 0u;
+		const bool deviceLost = vulkanDevice != nullptr && vulkanDevice->IsDeviceLost();
+		std::cout << "VULKAN_VALIDATION_CAPTURE_ENABLED=" << (validationCaptureEnabled ? 1 : 0) << '\n';
+		std::cout << "VULKAN_VALIDATION_ERROR_COUNT=" << validationErrorCount << '\n';
+		std::cout << "VULKAN_VALIDATION_VUID_COUNT=" << validationVuidCount << '\n';
+		std::cout << "VULKAN_DEVICE_LOST=" << (deviceLost ? 1 : 0) << '\n';
+		#if !defined(NDEBUG)
+		if(!validationCaptureEnabled) return -3;
+		#endif
+		if(validationErrorCount != 0u) return -2;
+		if(validationVuidCount != 0u) return -4;
+		if(deviceLost) return -4;
+		#endif
 		return 0;
 	}
 	catch(const std::exception& exception)

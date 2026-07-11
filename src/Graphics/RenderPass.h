@@ -4,6 +4,7 @@ namespace dy::Graphics
 {
 	enum class RenderPassKind
 	{
+		Skinning,
 		Shadow,
 		MainForward
 	};
@@ -11,6 +12,7 @@ namespace dy::Graphics
 	enum class RenderPassWork
 	{
 		PrepareOnly,
+		Compute,
 		Graphics
 	};
 

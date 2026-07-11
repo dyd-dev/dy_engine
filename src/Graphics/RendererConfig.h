@@ -3,6 +3,7 @@
 
 #include "Math/Math.h"
 #include "RHI/Format.h"
+#include "RHI/IPipelineState.h"
 #include "RHI/ShaderLayout.h"
 #include "Graphics/Mesh.h"
 #include "Graphics/ShadowMath.h" // ShadowMapDesc
@@ -14,6 +15,12 @@ namespace dy::Graphics
 		PerDrawBind = 0,
 		BatchedBind = 1,
 		Bindless = 2
+	};
+
+	enum class SkinningExecutionMode : uint8_t
+	{
+		VertexShader,
+		ComputePreSkin
 	};
 
 	struct PBRDesc
@@ -50,9 +57,13 @@ namespace dy::Graphics
 	struct RendererDesc
 	{
 		RendererBindingMode bindingMode = RendererBindingMode::PerDrawBind;
+		SkinningExecutionMode skinningExecutionMode = SkinningExecutionMode::VertexShader;
+		bool overrideResourceProfile = false;
+		RHI::GraphicsResourceProfile resourceProfile = RHI::GraphicsResourceProfile::PerDrawSkin;
 		const char* vertexShaderPath = nullptr;
 		const char* pixelShaderPath = nullptr;
 		const char* shadowVertexShaderPath = nullptr;
+		const char* computeSkinningShaderPath = nullptr;
 		RHI::Format renderTargetFormat = RHI::Format::R8G8B8A8_UNORM;
 		RHI::Format depthStencilFormat = RHI::Format::D32_FLOAT;
 		Math::float4 clearColor = Math::float4(0.08f, 0.10f, 0.14f, 1.0f);

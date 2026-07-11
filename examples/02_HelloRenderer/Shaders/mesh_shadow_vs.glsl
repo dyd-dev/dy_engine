@@ -3,7 +3,7 @@
 
 #include "Graphics/RendererShaderLayout.inc"
 
-layout(push_constant) uniform DrawConstants {
+layout(std140, set = 0, binding = DY_VULKAN_BINDING_DRAW_CONSTANTS) uniform VulkanDrawConstants {
     mat4 viewProjectionMatrix;
     mat4 modelMatrix;
     float drawMode;
@@ -11,9 +11,10 @@ layout(push_constant) uniform DrawConstants {
     int vertexOffset;
     uint firstVertex;
     vec3 emissiveColor;
-    float baseColorTextureIndex;
+    float emissiveTextureIndex;
     vec4 baseColor;
     vec4 materialParams;
+    vec4 textureIndices;
 } pushConstants;
 
 layout(set = 0, binding = DY_RENDERER_BINDING_SHADOW_MATRIX) uniform ShadowMatrix {

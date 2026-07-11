@@ -9,7 +9,7 @@ layout(location = 2) out vec3 fragNormal;
 layout(location = 3) out vec4 fragTangent;
 layout(location = 4) out vec4 fragLightSpacePosition;
 
-layout(push_constant) uniform DrawConstants {
+layout(std140, set = 0, binding = DY_VULKAN_BINDING_DRAW_CONSTANTS) uniform VulkanDrawConstants {
     mat4 viewProjectionMatrix;
     mat4 modelMatrix;
     float drawMode;
@@ -17,9 +17,10 @@ layout(push_constant) uniform DrawConstants {
     int vertexOffset;
     uint firstVertex;
     vec3 emissiveColor;
-    float baseColorTextureIndex;
+    float emissiveTextureIndex;
     vec4 baseColor;
     vec4 materialParams;
+    vec4 textureIndices;
 } pushConstants;
 
 layout(std430, set = 0, binding = DY_RENDERER_BINDING_VERTEX_STORAGE) readonly buffer VertexStorage {

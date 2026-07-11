@@ -32,7 +32,7 @@ layout(set = 0, binding = DY_RENDERER_BINDING_LIGHTING_CONSTANTS) uniform Render
     vec4 pointLightColorIntensity;
 } lighting;
 
-layout(push_constant) uniform DrawConstants {
+layout(std140, set = 0, binding = DY_VULKAN_BINDING_DRAW_CONSTANTS) uniform VulkanDrawConstants {
     mat4 viewProjectionMatrix;
     mat4 modelMatrix;
     float drawMode;
@@ -43,7 +43,7 @@ layout(push_constant) uniform DrawConstants {
     float emissiveTextureIndex;
     vec4 baseColor;
     vec4 materialParams;
-    vec4 textureIndices; // x=baseColor, y=metallicRoughness, z=normal, w=occlusion
+    vec4 textureIndices;
 } pushConstants;
 
 const float PI = 3.14159265359;

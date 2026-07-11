@@ -15,6 +15,7 @@ namespace dy::RHI
 	struct BufferDesc;
 	struct TextureDesc;
 	struct GraphicsPipelineDesc;
+	struct ComputePipelineDesc;
 
 	struct DeviceDesc
 	{
@@ -49,6 +50,11 @@ namespace dy::RHI
 		[[nodiscard]] virtual IBuffer* CreateBuffer(const BufferDesc& desc) = 0;
 		[[nodiscard]] virtual ITexture* CreateTexture(const TextureDesc& desc) = 0;
 		[[nodiscard]] virtual IPipelineState* CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) = 0;
+		[[nodiscard]] virtual IPipelineState* CreateComputePipeline(const ComputePipelineDesc& desc)
+		{
+			(void)desc;
+			return nullptr;
+		}
 		
 		virtual void DestroyBuffer(IBuffer* buffer) = 0;
 		virtual void DestroyTexture(ITexture* texture) = 0;
@@ -60,6 +66,9 @@ namespace dy::RHI
 		[[nodiscard]] virtual bool RequiresExplicitShadowPass() const { return false; }
 		// (D3D12/Metal: false. Vulkan: true)
 		[[nodiscard]] virtual bool RequiresClipSpaceYFlip() const { return false; }
+		// Renderer bindings 13/14 are currently provided by the Vulkan descriptor layout only.
+		[[nodiscard]] virtual bool SupportsSkinningStorageBindings() const { return false; }
+		[[nodiscard]] virtual bool SupportsComputeSkinning() const { return false; }
 
 		[[nodiscard]] virtual DescriptorIndex AllocateDescriptorSlot() { return INVALID_DESCRIPTOR_INDEX; }
 		virtual void UpdateDescriptorSlot(DescriptorIndex index, ITexture* texture) { (void)index; (void)texture; }

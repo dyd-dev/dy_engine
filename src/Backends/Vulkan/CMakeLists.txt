@@ -4,6 +4,7 @@ add_library(Backend_Vulkan OBJECT
 	VulkanResources.cpp
 	VulkanSwapchain.cpp
 	VulkanPipeline.cpp
+	VulkanRuntimePolicy.cpp
 )
 
 find_package(Vulkan REQUIRED)

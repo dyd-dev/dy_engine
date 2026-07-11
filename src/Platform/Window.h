@@ -13,6 +13,7 @@ namespace dy::Platform
 
 		bool IsRunning() const;
 		void PollEvents() const;
+		void Resize(unsigned int width, unsigned int height) const;
 
 		void* GetHandle() const;
 

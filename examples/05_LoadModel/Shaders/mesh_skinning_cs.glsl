@@ -2,6 +2,9 @@
 #extension GL_GOOGLE_include_directive : require
 
 #include "Graphics/RendererShaderLayout.inc"
+
+#define DY_SKINNING_INFLUENCE_BINDING 1
+#define DY_SKINNING_PALETTE_BINDING 2
 #ifndef DY_SKINNING_INFLUENCE_BINDING
 #define DY_SKINNING_INFLUENCE_BINDING DY_RENDERER_BINDING_SKIN_INFLUENCE_STORAGE
 #endif
@@ -118,91 +121,58 @@ mat3 LoadSkinNormalMatrix(uint vertexIndex, uint paletteOffset) {
          + mat3(skinPaletteStorage.joints[paletteOffset + influence.joints.w].normalMatrix) * weights.w;
 }
 
-layout(location = 0) out vec2 fragUv;
-layout(location = 1) out vec3 fragWorldPosition;
-layout(location = 2) out vec3 fragNormal;
-layout(location = 3) out vec4 fragTangent;
-layout(location = 4) out vec4 fragLightSpacePosition;
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-layout(std140, set = 0, binding = DY_VULKAN_BINDING_DRAW_CONSTANTS) uniform VulkanDrawConstants {
-    mat4 viewProjectionMatrix;
-    mat4 modelMatrix;
-    float drawMode;
-    uint firstIndex;
-    int vertexOffset;
-    uint firstVertex;
-    vec3 emissiveColor;
-    float emissiveTextureIndex;
-    vec4 baseColor;
-    vec4 materialParams;
-    vec4 textureIndices;
-} pushConstants;
-
-layout(std430, set = 0, binding = DY_RENDERER_BINDING_VERTEX_STORAGE) readonly buffer VertexStorage {
+layout(std430, set = 0, binding = 0) readonly buffer SourceVertexStorage {
     float vertices[];
-} vertexStorage;
+} sourceVertexStorage;
 
-layout(std430, set = 0, binding = DY_RENDERER_BINDING_INDEX_STORAGE) readonly buffer IndexStorage {
-    uint indices[];
-} indexStorage;
+layout(std430, set = 0, binding = 3) writeonly buffer OutputVertexStorage {
+    float vertices[];
+} outputVertexStorage;
 
-layout(set = 0, binding = DY_RENDERER_BINDING_SHADOW_MATRIX) uniform ShadowMatrix {
-    mat4 lightViewProjectionMatrix;
-} shadowMatrix;
-
-struct Vertex {
-    vec3 position;
-    vec3 normal;
-    vec2 uv;
-    vec4 tangent;
-};
-
-Vertex LoadVertex(uint vertexIndex) {
-    uint base = vertexIndex * DY_RENDERER_VERTEX_FLOAT_COUNT;
-    Vertex vertex;
-    vertex.position = vec3(
-        vertexStorage.vertices[base + 0u],
-        vertexStorage.vertices[base + 1u],
-        vertexStorage.vertices[base + 2u]);
-    vertex.normal = vec3(
-        vertexStorage.vertices[base + 3u],
-        vertexStorage.vertices[base + 4u],
-        vertexStorage.vertices[base + 5u]);
-    vertex.uv = vec2(
-        vertexStorage.vertices[base + 6u],
-        vertexStorage.vertices[base + 7u]);
-    vertex.tangent = vec4(
-        vertexStorage.vertices[base + 8u],
-        vertexStorage.vertices[base + 9u],
-        vertexStorage.vertices[base + 10u],
-        vertexStorage.vertices[base + 11u]);
-    return vertex;
-}
+layout(push_constant) uniform SkinningDispatchConstants {
+    uint vertexCount;
+    uint paletteOffset;
+} dispatchConstants;
 
 void main() {
-    int resolvedVertexIndex = int(indexStorage.indices[pushConstants.firstIndex + uint(gl_VertexIndex)]) + pushConstants.vertexOffset;
-    Vertex vertex = LoadVertex(uint(resolvedVertexIndex));
-    bool skinned = (uint(pushConstants.drawMode + 0.5) & DY_RENDERER_TEXTURE_FLAG_SKINNED) != 0u;
-    if (skinned) {
-        mat4 skinMatrix = LoadSkinMatrix(uint(resolvedVertexIndex), pushConstants.firstVertex);
-        vertex.position = (skinMatrix * vec4(vertex.position, 1.0)).xyz;
-        mat3 skinNormalMatrix = LoadSkinNormalMatrix(uint(resolvedVertexIndex), pushConstants.firstVertex);
-        vertex.normal = normalize(skinNormalMatrix * vertex.normal);
-        vec3 transformedTangent = mat3(skinMatrix) * vertex.tangent.xyz;
-        vertex.tangent.xyz = normalize(
-            transformedTangent - vertex.normal * dot(vertex.normal, transformedTangent));
-        if(determinant(mat3(skinMatrix)) < 0.0) vertex.tangent.w = -vertex.tangent.w;
-    }
-    vec4 worldPosition = pushConstants.modelMatrix * vec4(vertex.position, 1.0);
-    mat3 modelLinear = mat3(pushConstants.modelMatrix);
-    mat3 modelNormalMatrix = transpose(inverse(modelLinear));
-    gl_Position = pushConstants.viewProjectionMatrix * worldPosition;
-    fragUv = vertex.uv;
-    fragWorldPosition = worldPosition.xyz;
-    fragNormal = normalize(modelNormalMatrix * vertex.normal);
-    vec3 worldTangent = modelLinear * vertex.tangent.xyz;
-    fragTangent = vec4(
-        normalize(worldTangent - fragNormal * dot(fragNormal, worldTangent)),
-        determinant(modelLinear) < 0.0 ? -vertex.tangent.w : vertex.tangent.w);
-    fragLightSpacePosition = shadowMatrix.lightViewProjectionMatrix * worldPosition;
+    uint vertexIndex = gl_GlobalInvocationID.x;
+    if(vertexIndex >= dispatchConstants.vertexCount) return;
+
+    uint base = vertexIndex * DY_RENDERER_VERTEX_FLOAT_COUNT;
+    vec3 position = vec3(
+        sourceVertexStorage.vertices[base + 0u],
+        sourceVertexStorage.vertices[base + 1u],
+        sourceVertexStorage.vertices[base + 2u]);
+    vec3 normal = vec3(
+        sourceVertexStorage.vertices[base + 3u],
+        sourceVertexStorage.vertices[base + 4u],
+        sourceVertexStorage.vertices[base + 5u]);
+    vec4 tangent = vec4(
+        sourceVertexStorage.vertices[base + 8u],
+        sourceVertexStorage.vertices[base + 9u],
+        sourceVertexStorage.vertices[base + 10u],
+        sourceVertexStorage.vertices[base + 11u]);
+
+    mat4 skinMatrix = LoadSkinMatrix(vertexIndex, dispatchConstants.paletteOffset);
+    mat3 skinNormalMatrix = LoadSkinNormalMatrix(vertexIndex, dispatchConstants.paletteOffset);
+    position = (skinMatrix * vec4(position, 1.0)).xyz;
+    normal = normalize(skinNormalMatrix * normal);
+    vec3 transformedTangent = mat3(skinMatrix) * tangent.xyz;
+    tangent.xyz = normalize(transformedTangent - normal * dot(normal, transformedTangent));
+    if(determinant(mat3(skinMatrix)) < 0.0) tangent.w = -tangent.w;
+
+    outputVertexStorage.vertices[base + 0u] = position.x;
+    outputVertexStorage.vertices[base + 1u] = position.y;
+    outputVertexStorage.vertices[base + 2u] = position.z;
+    outputVertexStorage.vertices[base + 3u] = normal.x;
+    outputVertexStorage.vertices[base + 4u] = normal.y;
+    outputVertexStorage.vertices[base + 5u] = normal.z;
+    outputVertexStorage.vertices[base + 6u] = sourceVertexStorage.vertices[base + 6u];
+    outputVertexStorage.vertices[base + 7u] = sourceVertexStorage.vertices[base + 7u];
+    outputVertexStorage.vertices[base + 8u] = tangent.x;
+    outputVertexStorage.vertices[base + 9u] = tangent.y;
+    outputVertexStorage.vertices[base + 10u] = tangent.z;
+    outputVertexStorage.vertices[base + 11u] = tangent.w;
 }

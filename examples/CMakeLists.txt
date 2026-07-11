@@ -17,6 +17,9 @@ function(dy_example_shaders target)
 
     if(USE_VULKAN)
         find_program(DY_GLSLC NAMES glslc HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
+        if(NOT DY_GLSLC)
+            message(FATAL_ERROR "Vulkan examples require glslc. Install shaderc/glslc or expose it through VULKAN_SDK.")
+        endif()
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${DY_GLSLC} -fshader-stage=vert -I "${inc}" "${src_dir}/mesh_vs.glsl" -o "${out_dir}/mesh_vs.spv"
             COMMAND ${DY_GLSLC} -fshader-stage=frag -I "${inc}" "${src_dir}/mesh_ps.glsl" -o "${out_dir}/mesh_ps.spv"
@@ -31,6 +34,11 @@ function(dy_example_shaders target)
                 COMMAND ${DY_GLSLC} -fshader-stage=frag -I "${inc}" "${src_dir}/mesh_ps_bindless.glsl" -o "${out_dir}/mesh_ps_bindless.spv"
                 VERBATIM)
         endif()
+		if(EXISTS "${src_dir}/mesh_skinning_cs.glsl")
+			add_custom_command(TARGET ${target} POST_BUILD
+				COMMAND ${DY_GLSLC} -fshader-stage=comp -I "${inc}" "${src_dir}/mesh_skinning_cs.glsl" -o "${out_dir}/mesh_skinning_cs.spv"
+				VERBATIM)
+		endif()
     elseif(USE_D3D12)
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy "${src_dir}/mesh_vs.hlsl" "${out_dir}/mesh_vs.hlsl"

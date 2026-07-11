@@ -11,10 +11,12 @@ public:
         VkSurfaceCapabilitiesKHR capabilities;
         std::vector<VkSurfaceFormatKHR> formats;
         std::vector<VkPresentModeKHR> presentModes;
+        bool querySucceeded = false;
+		VkResult result = VK_ERROR_INITIALIZATION_FAILED;
     };
 
     // preferSrgb: true 면 sRGB 서피스 포맷(하드웨어 감마), false 면 UNORM(셰이더 수동 감마)을 고른다.
-    void Initialize(const VulkanContext& context, void* windowHandle, bool preferSrgb = false);
+	VkResult Initialize(const VulkanContext& context, void* windowHandle, bool preferSrgb = false);
     void Cleanup(VkDevice device);
 
     VkSwapchainKHR GetHandle() const { return m_swapchain; }

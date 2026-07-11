@@ -21,6 +21,7 @@ class VulkanCommandList : public dy::RHI::ICommandList
 {
 public:
 	void BindGraphicsPipeline(dy::RHI::IPipelineState* pipelineState) override;
+	void BindComputePipeline(dy::RHI::IPipelineState* pipelineState) override;
 	void BindGlobalDescriptors() override {}
 	void BindGeometry(const dy::RHI::GeometryBinding& geometry) override;
 	void BindVertexBuffer(dy::RHI::IBuffer* buffer, uint32_t stride, uint32_t offset) override;
@@ -36,6 +37,13 @@ public:
 	void ClearDepth(dy::RHI::ITexture* depthStencil, float depth) override;
 	void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
 	void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
+	void Dispatch(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
+	void BufferMemoryBarrier(
+		dy::RHI::IBuffer* buffer,
+		dy::RHI::BufferAccess sourceAccess,
+		dy::RHI::BufferAccess destinationAccess,
+		uint32_t offset,
+		uint32_t size) override;
 	void Close() override { m_isClosed = true; }
 
 	void Begin();
@@ -84,6 +92,26 @@ private:
 		std::array<uint8_t, kMaxPushConstantBytes> pushConstants = {};
 	};
 
+	struct ComputeDispatch
+	{
+		dy::RHI::IPipelineState* pipelineState = nullptr;
+		uint32_t threadGroupCountX = 0u;
+		uint32_t threadGroupCountY = 0u;
+		uint32_t threadGroupCountZ = 0u;
+		uint32_t inlineConstantSize = 0u;
+		std::array<StorageBufferBinding, kMaxConstantBufferBindings> storageBuffers = {};
+		std::array<uint8_t, kMaxPushConstantBytes> inlineConstants = {};
+	};
+
+	struct BufferBarrier
+	{
+		dy::RHI::IBuffer* buffer = nullptr;
+		dy::RHI::BufferAccess sourceAccess = dy::RHI::BufferAccess::ComputeShaderWrite;
+		dy::RHI::BufferAccess destinationAccess = dy::RHI::BufferAccess::VertexShaderRead;
+		uint32_t offset = 0u;
+		uint32_t size = 0u;
+	};
+
 	friend struct VulkanDevice::Impl;
 	std::array<float, 4> m_clearColor = { 0.4f, 0.7f, 1.0f, 1.0f };
 	float m_clearDepth = 1.0f;
@@ -91,6 +119,7 @@ private:
 	std::array<dy::RHI::ITexture*, kMaxRenderTargets> m_renderTargets = {};
 	dy::RHI::ITexture* m_depthStencil = nullptr;
 	dy::RHI::IPipelineState* m_boundPipeline = nullptr;
+	dy::RHI::IPipelineState* m_boundComputePipeline = nullptr;
 	std::array<uint8_t, kMaxPushConstantBytes> m_pendingPushConstants = {};
 	uint32_t m_pendingPushConstantSize = 0;
 	dy::RHI::GeometryBinding m_pendingGeometry = {};
@@ -102,6 +131,8 @@ private:
 	dy::RHI::Viewport m_pendingViewport = {};
 	dy::RHI::Rect m_pendingScissor = {};
 	std::vector<DrawCall> m_drawCalls;
+	std::vector<ComputeDispatch> m_computeDispatches;
+	std::vector<BufferBarrier> m_bufferBarriers;
 	bool m_isClosed = false;
 };
 

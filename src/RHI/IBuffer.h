@@ -15,11 +15,17 @@ namespace dy::RHI
 	};
 	DY_RHI_ENABLE_ENUM_FLAGS(BufferUsage)
 
+	enum class BufferMemoryUsage : uint8_t {
+		CpuToGpu,
+		GpuOnly
+	};
+
 	// Descriptor for creating a hardware buffer
 	struct BufferDesc {
 		uint32_t size = 0;
 		uint32_t stride = 0;
 		BufferUsage usage = {};
+		BufferMemoryUsage memoryUsage = BufferMemoryUsage::CpuToGpu;
 	};
 
 	class IBuffer
@@ -31,6 +37,7 @@ namespace dy::RHI
 		[[nodiscard]] uint32_t GetSize() const { return m_desc.size; }
 		[[nodiscard]] uint32_t GetStride() const { return m_desc.stride; }
 		[[nodiscard]] BufferUsage GetUsage() const { return m_desc.usage; }
+		[[nodiscard]] BufferMemoryUsage GetMemoryUsage() const { return m_desc.memoryUsage; }
 
 		virtual void* Map(uint32_t offset) = 0;
 		virtual void Unmap() = 0;

@@ -11,6 +11,8 @@ namespace dy
 	enum class TextureID           : uint32_t { Invalid = 0xFFFFFFFF };
 	enum class PointLightID        : uint32_t { Invalid = 0xFFFFFFFF };
 	enum class DirectionalLightID  : uint32_t { Invalid = 0xFFFFFFFF };
+	enum class ModelAssetID        : uint32_t { Invalid = 0xFFFFFFFF };
+	enum class ModelInstanceID     : uint32_t { Invalid = 0xFFFFFFFF };
 
 	template <typename T>
 	[[nodiscard]] constexpr uint32_t ToIndex(T id) { return static_cast<uint32_t>(id); }

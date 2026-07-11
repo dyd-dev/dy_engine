@@ -1,4 +1,5 @@
 #include "VulkanResources.h"
+#include "VulkanRuntimePolicy.h"
 #include <stdexcept>
 
 namespace dy::Backends
@@ -7,16 +8,17 @@ namespace dy::Backends
 uint32_t VulkanResources::FindMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
     VkPhysicalDeviceMemoryProperties memProps;
     vkGetPhysicalDeviceMemoryProperties(physicalDevice, &memProps);
-    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
-        if ((typeFilter & (1 << i)) && (memProps.memoryTypes[i].propertyFlags & properties) == properties) {
-            return i;
-        }
+    uint32_t memoryTypeIndex = 0u;
+    if (!TryFindVulkanMemoryType(memProps, typeFilter, properties, memoryTypeIndex)) {
+        throw std::runtime_error("failed to find compatible Vulkan memory type");
     }
-    return 0;
+    return memoryTypeIndex;
 }
 
 void VulkanResources::CreateBuffer(const VulkanContext& context, VkDeviceSize size, VkBufferUsageFlags usage, 
                                  VkMemoryPropertyFlags properties, VkBuffer& buffer, VkDeviceMemory& bufferMemory) {
+	buffer = VK_NULL_HANDLE;
+	bufferMemory = VK_NULL_HANDLE;
     VkBufferCreateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufferInfo.size = size;
@@ -33,13 +35,27 @@ void VulkanResources::CreateBuffer(const VulkanContext& context, VkDeviceSize si
     VkMemoryAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = FindMemoryType(context.physicalDevice, memReqs.memoryTypeBits, properties);
+	try {
+		allocInfo.memoryTypeIndex = FindMemoryType(context.physicalDevice, memReqs.memoryTypeBits, properties);
+	} catch (...) {
+		vkDestroyBuffer(context.device, buffer, nullptr);
+		buffer = VK_NULL_HANDLE;
+		throw;
+	}
 
     if (vkAllocateMemory(context.device, &allocInfo, nullptr, &bufferMemory) != VK_SUCCESS) {
+        vkDestroyBuffer(context.device, buffer, nullptr);
+        buffer = VK_NULL_HANDLE;
         throw std::runtime_error("failed to allocate buffer memory!");
     }
 
-    vkBindBufferMemory(context.device, buffer, bufferMemory, 0);
+    if (vkBindBufferMemory(context.device, buffer, bufferMemory, 0) != VK_SUCCESS) {
+        vkFreeMemory(context.device, bufferMemory, nullptr);
+        vkDestroyBuffer(context.device, buffer, nullptr);
+        bufferMemory = VK_NULL_HANDLE;
+        buffer = VK_NULL_HANDLE;
+        throw std::runtime_error("failed to bind Vulkan buffer memory");
+    }
 }
 
 void VulkanResources::CopyBuffer(const VulkanContext& context, VkCommandPool commandPool, VkBuffer srcBuffer, 
@@ -54,6 +70,8 @@ void VulkanResources::CopyBuffer(const VulkanContext& context, VkCommandPool com
 void VulkanResources::CreateImage(const VulkanContext& context, uint32_t width, uint32_t height, VkFormat format, 
                                 VkImageTiling tiling, VkImageUsageFlags usage, VkMemoryPropertyFlags properties, 
                                 VkImage& image, VkDeviceMemory& imageMemory) {
+	image = VK_NULL_HANDLE;
+	imageMemory = VK_NULL_HANDLE;
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -79,13 +97,27 @@ void VulkanResources::CreateImage(const VulkanContext& context, uint32_t width, 
     VkMemoryAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
     allocInfo.allocationSize = memReqs.size;
-    allocInfo.memoryTypeIndex = FindMemoryType(context.physicalDevice, memReqs.memoryTypeBits, properties);
+	try {
+		allocInfo.memoryTypeIndex = FindMemoryType(context.physicalDevice, memReqs.memoryTypeBits, properties);
+	} catch (...) {
+		vkDestroyImage(context.device, image, nullptr);
+		image = VK_NULL_HANDLE;
+		throw;
+	}
 
     if (vkAllocateMemory(context.device, &allocInfo, nullptr, &imageMemory) != VK_SUCCESS) {
+        vkDestroyImage(context.device, image, nullptr);
+        image = VK_NULL_HANDLE;
         throw std::runtime_error("failed to allocate image memory!");
     }
 
-    vkBindImageMemory(context.device, image, imageMemory, 0);
+    if (vkBindImageMemory(context.device, image, imageMemory, 0) != VK_SUCCESS) {
+        vkFreeMemory(context.device, imageMemory, nullptr);
+        vkDestroyImage(context.device, image, nullptr);
+        imageMemory = VK_NULL_HANDLE;
+        image = VK_NULL_HANDLE;
+        throw std::runtime_error("failed to bind Vulkan image memory");
+    }
 }
 
 void VulkanResources::TransitionImageLayout(const VulkanContext& context, VkCommandPool commandPool, VkImage image, 
@@ -170,23 +202,39 @@ VkCommandBuffer VulkanResources::BeginSingleTimeCommands(const VulkanContext& co
     allocInfo.commandPool = commandPool;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     allocInfo.commandBufferCount = 1;
-    VkCommandBuffer commandBuffer;
-    vkAllocateCommandBuffers(context.device, &allocInfo, &commandBuffer);
+	VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+	if(vkAllocateCommandBuffers(context.device, &allocInfo, &commandBuffer) != VK_SUCCESS) {
+		throw std::runtime_error("failed to allocate Vulkan one-time command buffer");
+	}
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(commandBuffer, &beginInfo);
+	if(vkBeginCommandBuffer(commandBuffer, &beginInfo) != VK_SUCCESS) {
+		vkFreeCommandBuffers(context.device, commandPool, 1, &commandBuffer);
+		throw std::runtime_error("failed to begin Vulkan one-time command buffer");
+	}
     return commandBuffer;
 }
 
 void VulkanResources::EndSingleTimeCommands(const VulkanContext& context, VkCommandPool commandPool, VkCommandBuffer commandBuffer) {
-    vkEndCommandBuffer(commandBuffer);
+	if(commandBuffer == VK_NULL_HANDLE) throw std::runtime_error("invalid Vulkan one-time command buffer");
+	if(vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
+		vkFreeCommandBuffers(context.device, commandPool, 1, &commandBuffer);
+		throw std::runtime_error("failed to end Vulkan one-time command buffer");
+	}
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer;
-    vkQueueSubmit(context.graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(context.graphicsQueue);
+	const VkResult submitResult = vkQueueSubmit(context.graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+	if(submitResult != VK_SUCCESS) {
+		vkFreeCommandBuffers(context.device, commandPool, 1, &commandBuffer);
+		throw std::runtime_error("failed to submit Vulkan one-time command buffer");
+	}
+	const VkResult waitResult = vkQueueWaitIdle(context.graphicsQueue);
+	if(waitResult != VK_SUCCESS) {
+		throw std::runtime_error("failed to wait for Vulkan one-time command buffer");
+	}
     vkFreeCommandBuffers(context.device, commandPool, 1, &commandBuffer);
 }
 

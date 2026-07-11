@@ -39,6 +39,11 @@ bool Window::IsRunning() const { return !glfwWindowShouldClose(m_window); }
 
 void Window::PollEvents() const { glfwPollEvents(); }
 
+void Window::Resize(unsigned int width, unsigned int height) const
+{
+	glfwSetWindowSize(m_window, static_cast<int>(width), static_cast<int>(height));
+}
+
 void* Window::GetHandle() const
 {
 #if defined(_WIN32)
