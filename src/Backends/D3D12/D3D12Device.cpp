@@ -322,6 +322,10 @@ namespace dy::Backends
     }
 
     RHI::IPipelineState* D3D12Device::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc) {
+        const bool hasColorAttachment = desc.renderTargetFormat != RHI::Format::Unknown;
+        const bool hasDepthAttachment = desc.depthStencilFormat != RHI::Format::Unknown;
+        if ((!hasColorAttachment && !hasDepthAttachment) || (desc.depthEnable && !hasDepthAttachment)) return nullptr;
+
         // 1. Root Signature 1.1 지원 여부 확인
         D3D12_FEATURE_DATA_ROOT_SIGNATURE featureData = {};
         featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
@@ -436,16 +440,12 @@ namespace dy::Backends
         }
 
         psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK; // 뒷면 컬링 활성화
+        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
         psoDesc.RasterizerState.FrontCounterClockwise = TRUE; // 엔진 메시/Vulkan과 동일하게 CCW를 앞면으로
-        if (!hasPixelShader)
-        {
-            // 깊이 전용(그림자) PSO: 양면 모두 캐스트하도록 컬링 해제 + 깊이 바이어스로 아크네 완화.
-            psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-            psoDesc.RasterizerState.DepthBias = desc.depthBias;
-            psoDesc.RasterizerState.SlopeScaledDepthBias = desc.depthBiasSlope;
-            psoDesc.RasterizerState.DepthBiasClamp = desc.depthBiasClamp;
-        }
+        if (!hasColorAttachment) psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        psoDesc.RasterizerState.DepthBias = desc.depthBias;
+        psoDesc.RasterizerState.SlopeScaledDepthBias = desc.depthBiasSlope;
+        psoDesc.RasterizerState.DepthBiasClamp = desc.depthBiasClamp;
         psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
         psoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
         psoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
@@ -459,19 +459,15 @@ namespace dy::Backends
         psoDesc.DepthStencilState.DepthEnable = desc.depthEnable ? TRUE : FALSE;
         psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
         psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-        const RHI::Format dsvFormat = desc.depthStencilFormat == RHI::Format::Unknown
-            ? RHI::Format::D24_UNORM_S8_UINT
-            : desc.depthStencilFormat;
-        psoDesc.DSVFormat = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiDepthStencilFormat(dsvFormat));
+        psoDesc.DSVFormat = hasDepthAttachment
+            ? static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiDepthStencilFormat(desc.depthStencilFormat))
+            : DXGI_FORMAT_UNKNOWN;
 
         psoDesc.SampleMask = UINT_MAX;
         psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        psoDesc.NumRenderTargets = hasPixelShader ? 1u : 0u;
-        if (hasPixelShader) {
-            const RHI::Format rtvFormat = desc.renderTargetFormat == RHI::Format::Unknown
-                ? RHI::Format::R8G8B8A8_UNORM
-                : desc.renderTargetFormat;
-            psoDesc.RTVFormats[0] = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(rtvFormat));
+        psoDesc.NumRenderTargets = hasColorAttachment ? 1u : 0u;
+        if (hasColorAttachment) {
+            psoDesc.RTVFormats[0] = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(desc.renderTargetFormat));
         }
         psoDesc.SampleDesc.Count = 1;
 

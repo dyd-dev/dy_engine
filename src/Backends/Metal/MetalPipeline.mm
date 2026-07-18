@@ -7,6 +7,9 @@ namespace dy::Backends
     {
         id<MTLRenderPipelineState> pipelineState    = nil;
         id<MTLDepthStencilState>   depthStencilState = nil;
+        float depthBias = 0.0f;
+        float depthBiasSlope = 0.0f;
+        float depthBiasClamp = 0.0f;
     };
 
     static MTLPixelFormat ToMTLFormat(RHI::Format format)
@@ -25,43 +28,45 @@ namespace dy::Backends
     {
         id<MTLDevice> mtlDevice = (__bridge id<MTLDevice>)device;
         NSError* error = nil;
+        m_impl->depthBias = static_cast<float>(desc.depthBias);
+        m_impl->depthBiasSlope = desc.depthBiasSlope;
+        m_impl->depthBiasClamp = desc.depthBiasClamp;
 
         // MSL 소스 텍스트로 셰이더 로드
         const char* vertSrc = static_cast<const char*>(desc.vertexShader);
         const char* fragSrc = static_cast<const char*>(desc.pixelShader);
 
+        if(vertSrc == nullptr || desc.vertexShaderSize == 0)
+            return;
+
         NSString* vertString = [NSString stringWithUTF8String:vertSrc];
-        NSString* fragString = [NSString stringWithUTF8String:fragSrc];
 
         id<MTLLibrary> vertLib = [mtlDevice newLibraryWithSource:vertString
                                                          options:nil
                                                            error:&error];
         if(!vertLib) { NSLog(@"Vertex shader 컴파일 실패: %@", error); return; }
 
-        id<MTLLibrary> fragLib = [mtlDevice newLibraryWithSource:fragString
-                                                         options:nil
-                                                           error:&error];
-        if(!fragLib) { NSLog(@"Fragment shader 컴파일 실패: %@", error); return; }
-
-        // Metal 셰이더 진입점은 main0
         id<MTLFunction> vertFunc = [vertLib newFunctionWithName:@"main0"];
-        id<MTLFunction> fragFunc = [fragLib newFunctionWithName:@"main0"];
-
         if(!vertFunc) { NSLog(@"vertexShader 함수 못 찾음"); return; }
-        if(!fragFunc) { NSLog(@"fragmentShader 함수 못 찾음"); return; }
 
-        // 파이프라인 디스크립터 설정
+        id<MTLFunction> fragFunc = nil;
+        if(fragSrc != nullptr && desc.pixelShaderSize > 0)
+        {
+            NSString* fragString = [NSString stringWithUTF8String:fragSrc];
+            id<MTLLibrary> fragLib = [mtlDevice newLibraryWithSource:fragString options:nil error:&error];
+            if(!fragLib) { NSLog(@"Fragment shader 컴파일 실패: %@", error); return; }
+            fragFunc = [fragLib newFunctionWithName:@"main0"];
+            if(!fragFunc) { NSLog(@"fragmentShader 함수 못 찾음"); return; }
+        }
+
         MTLRenderPipelineDescriptor* pipeDesc = [MTLRenderPipelineDescriptor new];
         pipeDesc.vertexFunction   = vertFunc;
         pipeDesc.fragmentFunction = fragFunc;
 
-        // renderTargetFormat이 Unknown이면 기본값 BGRA8Unorm 사용
-        if(desc.renderTargetFormat == RHI::Format::Unknown)
-            pipeDesc.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
-        else
+        if(desc.renderTargetFormat != RHI::Format::Unknown)
             pipeDesc.colorAttachments[0].pixelFormat = ToMTLFormat(desc.renderTargetFormat);
 
-        if(desc.depthEnable && desc.depthStencilFormat != RHI::Format::Unknown)
+        if(desc.depthStencilFormat != RHI::Format::Unknown)
             pipeDesc.depthAttachmentPixelFormat = ToMTLFormat(desc.depthStencilFormat);
 
         m_impl->pipelineState = [mtlDevice newRenderPipelineStateWithDescriptor:pipeDesc error:&error];
@@ -90,5 +95,25 @@ namespace dy::Backends
     void* MetalPipeline::GetNativeDepthStencil() const
     {
         return (__bridge void*)m_impl->depthStencilState;
+    }
+
+    float MetalPipeline::GetDepthBias() const
+    {
+        return m_impl->depthBias;
+    }
+
+    float MetalPipeline::GetDepthBiasSlope() const
+    {
+        return m_impl->depthBiasSlope;
+    }
+
+    float MetalPipeline::GetDepthBiasClamp() const
+    {
+        return m_impl->depthBiasClamp;
+    }
+
+    bool MetalPipeline::IsValid() const
+    {
+        return m_impl->pipelineState != nil;
     }
 }

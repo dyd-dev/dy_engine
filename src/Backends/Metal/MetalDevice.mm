@@ -120,7 +120,18 @@ namespace dy::Backends
 
     RHI::IPipelineState* MetalDevice::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc)
     {
-        return new MetalPipeline(desc, (__bridge void*)m_impl->device);
+        const bool hasColorAttachment = desc.renderTargetFormat != RHI::Format::Unknown;
+        const bool hasDepthAttachment = desc.depthStencilFormat != RHI::Format::Unknown;
+        if((!hasColorAttachment && !hasDepthAttachment) || (desc.depthEnable && !hasDepthAttachment))
+            return nullptr;
+
+        auto* pipeline = new MetalPipeline(desc, (__bridge void*)m_impl->device);
+        if(!pipeline->IsValid())
+        {
+            delete pipeline;
+            return nullptr;
+        }
+        return pipeline;
     }
 
     void MetalDevice::DestroyBuffer(RHI::IBuffer* buffer)                 { delete buffer; }

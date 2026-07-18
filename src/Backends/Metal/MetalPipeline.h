@@ -18,6 +18,10 @@ namespace dy::Backends
 
         void* GetNativePipeline() const;
         void* GetNativeDepthStencil() const;
+        float GetDepthBias() const;
+        float GetDepthBiasSlope() const;
+        float GetDepthBiasClamp() const;
+        bool IsValid() const;
 
     private:
         struct Impl;

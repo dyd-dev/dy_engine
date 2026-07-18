@@ -128,7 +128,10 @@ namespace dy::Backends
             auto* depth = static_cast<MetalTexture*>(depthStencil);
             passDesc.depthAttachment.texture     = (__bridge id<MTLTexture>)depth->GetNativeTexture();
             passDesc.depthAttachment.loadAction  = MTLLoadActionClear;
-            passDesc.depthAttachment.storeAction = MTLStoreActionDontCare;
+            passDesc.depthAttachment.storeAction =
+                (depthStencil->GetUsage() & RHI::TextureUsage::ShaderResource) != RHI::TextureUsage::None
+                    ? MTLStoreActionStore
+                    : MTLStoreActionDontCare;
             passDesc.depthAttachment.clearDepth  = 1.0;
             width = depthStencil->GetWidth();
             height = depthStencil->GetHeight();
@@ -210,6 +213,9 @@ namespace dy::Backends
         auto* depth    = (__bridge id<MTLDepthStencilState>)pipeline->GetNativeDepthStencil();
 
         [m_impl->encoder setRenderPipelineState:native];
+        [m_impl->encoder setDepthBias:pipeline->GetDepthBias()
+                             slopeScale:pipeline->GetDepthBiasSlope()
+                                  clamp:pipeline->GetDepthBiasClamp()];
         if(depth)
             [m_impl->encoder setDepthStencilState:depth];
     }

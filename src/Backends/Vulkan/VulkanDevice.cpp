@@ -373,7 +373,8 @@ namespace {
 		{
 			CopyPipelineDesc(desc);
 			m_pipelineCache.reserve(4);
-			if (GetPipelineForRenderPass(context, renderPass, extent, descriptorSetLayout, bindlessDescriptorSetLayout) == nullptr) {
+			if (desc.renderTargetFormat != dy::RHI::Format::Unknown &&
+				GetPipelineForRenderPass(context, renderPass, extent, descriptorSetLayout, bindlessDescriptorSetLayout) == nullptr) {
 				throw std::runtime_error("failed to create graphics pipeline");
 			}
 		}
@@ -643,6 +644,7 @@ private:
 	uint32_t m_fallbackTextureWidth = kFallbackTextureWidth;
 	uint32_t m_fallbackTextureHeight = kFallbackTextureHeight;
 	uint64_t m_frameAcquireTimeoutNanoseconds = dy::RHI::DeviceDesc{}.frameAcquireTimeoutNanoseconds;
+	bool m_depthBiasClampSupported = false;
 	dy::RHI::ShaderLayoutDesc m_shaderLayout = {};
 	uint32_t m_currentFrameIndex = 0;
 	uint32_t m_currentImageIndex = 0;
@@ -826,6 +828,12 @@ bool VulkanDevice::Impl::UpdateTexture(dy::RHI::ITexture* texture, const void* r
 }
 
 dy::RHI::IPipelineState* VulkanDevice::Impl::CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) {
+	const bool hasColorAttachment = desc.renderTargetFormat != dy::RHI::Format::Unknown;
+	const bool hasDepthAttachment = desc.depthStencilFormat != dy::RHI::Format::Unknown;
+	if ((!hasColorAttachment && !hasDepthAttachment) || (desc.depthEnable && !hasDepthAttachment)) return nullptr;
+	if (desc.vertexShader == nullptr || desc.vertexShaderSize == 0) return nullptr;
+	if (desc.depthBiasClamp != 0.0f && !m_depthBiasClampSupported) return nullptr;
+
 	try {
 		if (desc.enableShadowPass) {
 			if (desc.shadowMapResolution == 0) return nullptr;
@@ -1119,6 +1127,8 @@ bool VulkanDevice::Impl::CreateLogicalDevice() {
 	vkGetPhysicalDeviceFeatures(m_context.physicalDevice, &supportedFeatures);
 	VkPhysicalDeviceFeatures deviceFeatures = {};
 	deviceFeatures.shaderSampledImageArrayDynamicIndexing = supportedFeatures.shaderSampledImageArrayDynamicIndexing;
+	deviceFeatures.depthBiasClamp = supportedFeatures.depthBiasClamp;
+	m_depthBiasClampSupported = supportedFeatures.depthBiasClamp == VK_TRUE;
 	VkDeviceCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 	createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
