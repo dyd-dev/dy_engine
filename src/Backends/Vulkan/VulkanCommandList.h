@@ -79,6 +79,11 @@ private:
 		std::array<ConstantBufferBinding, kMaxConstantBufferBindings> constantBuffers = {};
 		std::array<StorageBufferBinding, kMaxConstantBufferBindings> storageBuffers = {};
 		std::array<dy::RHI::ITexture*, kMaxTextureBindings> textures = {};
+		uint32_t renderTargetCount = 0u;
+		std::array<dy::RHI::ITexture*, kMaxRenderTargets> renderTargets = {};
+		dy::RHI::ITexture* depthStencil = nullptr;
+		std::array<float, 4> clearColor = {};
+		float clearDepth = 1.0f;
 		dy::RHI::Viewport viewport = {};
 		dy::RHI::Rect scissor = {};
 		std::array<uint8_t, kMaxPushConstantBytes> pushConstants = {};

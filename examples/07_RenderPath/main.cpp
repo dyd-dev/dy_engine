@@ -258,7 +258,7 @@ int main(int argc, char** argv)
 
 		Graphics::DirectionalLight light = {};
 		light.direction = Math::float3(0.5f, 0.6f, 0.6f);
-		light.intensity = 3.5f;
+		light.illuminanceLux = 3.5f;
 		light.castShadow = false;
 		const DirectionalLightID lightId = scene.CreateDirectionalLight(light);
 

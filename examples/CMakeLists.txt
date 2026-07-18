@@ -31,6 +31,12 @@ function(dy_example_shaders target)
                 COMMAND ${DY_GLSLC} -fshader-stage=frag -I "${inc}" "${src_dir}/mesh_ps_bindless.glsl" -o "${out_dir}/mesh_ps_bindless.spv"
                 VERBATIM)
         endif()
+        if(EXISTS "${src_dir}/tone_map_vs.glsl" AND EXISTS "${src_dir}/tone_map_ps.glsl")
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${DY_GLSLC} -fshader-stage=vert -I "${inc}" "${src_dir}/tone_map_vs.glsl" -o "${out_dir}/tone_map_vs.spv"
+                COMMAND ${DY_GLSLC} -fshader-stage=frag -I "${inc}" "${src_dir}/tone_map_ps.glsl" -o "${out_dir}/tone_map_ps.spv"
+                VERBATIM)
+        endif()
     elseif(USE_D3D12)
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy "${src_dir}/mesh_vs.hlsl" "${out_dir}/mesh_vs.hlsl"
@@ -80,3 +86,4 @@ add_subdirectory(04_TexturedCube)
 add_subdirectory(05_LoadModel)
 add_subdirectory(06_ShadowCube)
 add_subdirectory(07_RenderPath)
+add_subdirectory(08_LightingLab)

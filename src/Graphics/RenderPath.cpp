@@ -484,7 +484,7 @@ namespace
 	void PerDrawBindPath::RecordMainPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context)
 	{
 		RHI::ICommandList* commandList = device->AcquireCommandList();
-		RHI::ITexture* backBuffer = device->GetBackBuffer();
+		RHI::ITexture* backBuffer = context.mainColorTarget != nullptr ? context.mainColorTarget : device->GetBackBuffer();
 		if(commandList == nullptr || backBuffer == nullptr || context.pipeline == nullptr) return;
 
 		if(ShouldRecordShadow(context))
@@ -540,7 +540,7 @@ namespace
 			commandList->DrawIndexedInstanced(meshState.indexCount, 1, 0, 0, 0);
 		}
 
-		SubmitMainPass(device, commandList);
+		if(!context.deferSubmit) SubmitMainPass(device, commandList);
 	}
 
 	void PerDrawBindPath::DestroyMeshState(RHI::IDevice* device, SceneMeshState& meshState)
@@ -638,7 +638,7 @@ namespace
 		if(m_vertexBuffer == nullptr || m_indexBuffer == nullptr || m_meshRanges.empty()) return;
 
 		RHI::ICommandList* commandList = device->AcquireCommandList();
-		RHI::ITexture* backBuffer = device->GetBackBuffer();
+		RHI::ITexture* backBuffer = context.mainColorTarget != nullptr ? context.mainColorTarget : device->GetBackBuffer();
 		if(commandList == nullptr || backBuffer == nullptr || context.pipeline == nullptr) return;
 
 		if(ShouldRecordShadow(context))
@@ -682,7 +682,7 @@ namespace
 			}
 		}
 
-		SubmitMainPass(device, commandList);
+		if(!context.deferSubmit) SubmitMainPass(device, commandList);
 	}
 
 	void BatchedBindPath::Shutdown(RHI::IDevice* device)
@@ -774,7 +774,7 @@ namespace
 		if(m_vertexBuffer == nullptr || m_indexBuffer == nullptr || m_meshRanges.empty()) return;
 
 		RHI::ICommandList* commandList = device->AcquireCommandList();
-		RHI::ITexture* backBuffer = device->GetBackBuffer();
+		RHI::ITexture* backBuffer = context.mainColorTarget != nullptr ? context.mainColorTarget : device->GetBackBuffer();
 		if(commandList == nullptr || backBuffer == nullptr || context.pipeline == nullptr) return;
 
 		if(ShouldRecordShadow(context))
@@ -813,7 +813,7 @@ namespace
 			}
 		}
 
-		SubmitMainPass(device, commandList);
+		if(!context.deferSubmit) SubmitMainPass(device, commandList);
 	}
 
 	void BindlessPath::Shutdown(RHI::IDevice* device)

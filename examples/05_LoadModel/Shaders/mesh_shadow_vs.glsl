@@ -3,7 +3,7 @@
 
 #include "Graphics/RendererShaderLayout.inc"
 
-layout(push_constant) uniform DrawConstants {
+layout(std140, set = 0, binding = DY_VULKAN_BINDING_DRAW_CONSTANTS) uniform VulkanDrawConstants {
     mat4 viewProjectionMatrix;
     mat4 modelMatrix;
     float drawMode;
@@ -11,13 +11,17 @@ layout(push_constant) uniform DrawConstants {
     int vertexOffset;
     uint firstVertex;
     vec3 emissiveColor;
-    float baseColorTextureIndex;
+    float shadowViewIndex;
     vec4 baseColor;
     vec4 materialParams;
 } pushConstants;
 
-layout(set = 0, binding = DY_RENDERER_BINDING_SHADOW_MATRIX) uniform ShadowMatrix {
-    mat4 lightViewProjectionMatrix;
+layout(std140, set = 0, binding = DY_RENDERER_BINDING_SHADOW_MATRIX) uniform ShadowMatrix {
+    mat4 lightViewProjectionMatrices[6];
+    vec4 cascadeSplits;
+    vec4 shadowInfo;
+    vec4 pcssParams;
+    mat4 cameraViewMatrix;
 } shadowMatrix;
 
 layout(std430, set = 0, binding = DY_RENDERER_BINDING_VERTEX_STORAGE) readonly buffer VertexStorage {
@@ -44,5 +48,6 @@ void main() {
 
     int resolvedVertexIndex = int(indexStorage.indices[pushConstants.firstIndex + uint(gl_VertexIndex)]) + pushConstants.vertexOffset;
     vec4 worldPosition = pushConstants.modelMatrix * vec4(LoadPosition(uint(resolvedVertexIndex)), 1.0);
-    gl_Position = shadowMatrix.lightViewProjectionMatrix * worldPosition;
+    int shadowView = clamp(int(pushConstants.shadowViewIndex + 0.5), 0, 5);
+    gl_Position = shadowMatrix.lightViewProjectionMatrices[shadowView] * worldPosition;
 }

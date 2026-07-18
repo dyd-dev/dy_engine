@@ -750,7 +750,12 @@ namespace dy::Graphics
 		[[nodiscard]] TextureID CreateTextureIfPresent(Scene& scene, const ModelMaterialInfo& material, MaterialTextureKind kind)
 		{
 			const uint32_t slot = static_cast<uint32_t>(kind);
-			return material.hasTexture[slot] ? scene.CreateTexture(material.texturePaths[slot]) : TextureID::Invalid;
+			const bool isColorTexture = kind == MaterialTextureKind::BaseColor || kind == MaterialTextureKind::Emissive;
+			return material.hasTexture[slot]
+				? scene.CreateTexture(
+					material.texturePaths[slot],
+					isColorTexture ? TextureColorSpace::SRGB : TextureColorSpace::Linear)
+				: TextureID::Invalid;
 		}
 
 		[[nodiscard]] MaterialID CreateSceneMaterial(Scene& scene, const ModelMaterialInfo& source)

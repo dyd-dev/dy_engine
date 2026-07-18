@@ -79,7 +79,7 @@ int main()
 		Graphics::DirectionalLight light = {};
 		light.direction = Math::float3(0.5f, 0.4f, 0.75f);
 		light.color = Math::float3(1.0f, 0.96f, 0.9f);
-		light.intensity = 4.0f;
+		light.illuminanceLux = 4.0f;
 		[[maybe_unused]] const DirectionalLightID lightId = scene.CreateDirectionalLight(light);
 
 		const auto startTime = std::chrono::steady_clock::now();

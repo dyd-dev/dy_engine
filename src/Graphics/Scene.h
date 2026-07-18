@@ -5,30 +5,11 @@
 #include <vector>
 
 #include "Core/Types.h"
+#include "Graphics/Lighting.h"
 #include "Graphics/Mesh.h"
 
 namespace dy::Graphics
 {
-	struct DirectionalLight
-	{
-		Math::float3 direction = Math::float3(0.35f, 0.65f, 0.68f);
-		Math::float3 color = Math::float3(1.0f, 0.94f, 0.82f);
-		float intensity = 4.0f;
-		bool castShadow = true;
-		float shadowStrength = 0.45f;
-	};
-
-	struct PointLight
-	{
-		Math::float3 position = Math::float3(0.0f, 0.0f, 2.0f);
-		float range = 6.0f;
-		Math::float3 color = Math::float3(1.0f, 0.94f, 0.82f);
-		float intensity = 6.0f;
-		Math::float3 direction = Math::float3(0.0f, 0.0f, -1.0f);
-		bool castShadow = true;
-		float shadowStrength = 0.5f;
-	};
-
 	class Scene
 	{
 	public:
@@ -37,9 +18,14 @@ namespace dy::Graphics
 			m_textures.push_back(texture);
 			return static_cast<TextureID>(m_textures.size() - 1u);
 		}
-		[[nodiscard]] TextureID CreateTexture(std::string sourcePath)
+		[[nodiscard]] TextureID CreateTexture(
+			std::string sourcePath,
+			TextureColorSpace colorSpace = TextureColorSpace::SRGB)
 		{
-			return CreateTexture(TextureAsset{ std::move(sourcePath) });
+			TextureAsset texture;
+			texture.sourcePath = std::move(sourcePath);
+			texture.colorSpace = colorSpace;
+			return CreateTexture(texture);
 		}
 		[[nodiscard]] MaterialID CreateMaterial(const MaterialDesc& material)
 		{
@@ -75,6 +61,21 @@ namespace dy::Graphics
 			m_pointLights.push_back(light);
 			return static_cast<PointLightID>(m_pointLights.size() - 1u);
 		}
+		[[nodiscard]] SpotLightID CreateSpotLight(const SpotLight& light)
+		{
+			m_spotLights.push_back(light);
+			return static_cast<SpotLightID>(m_spotLights.size() - 1u);
+		}
+		[[nodiscard]] RectAreaLightID CreateRectAreaLight(const RectAreaLight& light)
+		{
+			m_rectAreaLights.push_back(light);
+			return static_cast<RectAreaLightID>(m_rectAreaLights.size() - 1u);
+		}
+		[[nodiscard]] DiscAreaLightID CreateDiscAreaLight(const DiscAreaLight& light)
+		{
+			m_discAreaLights.push_back(light);
+			return static_cast<DiscAreaLightID>(m_discAreaLights.size() - 1u);
+		}
 
 		[[nodiscard]] uint32_t GetTextureCount() const { return static_cast<uint32_t>(m_textures.size()); }
 		[[nodiscard]] uint32_t GetMaterialCount() const { return static_cast<uint32_t>(m_materials.size()); }
@@ -82,6 +83,9 @@ namespace dy::Graphics
 		[[nodiscard]] uint32_t GetEntityCount() const { return static_cast<uint32_t>(m_entityMeshes.size()); }
 		[[nodiscard]] uint32_t GetDirectionalLightCount() const { return static_cast<uint32_t>(m_directionalLights.size()); }
 		[[nodiscard]] uint32_t GetPointLightCount() const { return static_cast<uint32_t>(m_pointLights.size()); }
+		[[nodiscard]] uint32_t GetSpotLightCount() const { return static_cast<uint32_t>(m_spotLights.size()); }
+		[[nodiscard]] uint32_t GetRectAreaLightCount() const { return static_cast<uint32_t>(m_rectAreaLights.size()); }
+		[[nodiscard]] uint32_t GetDiscAreaLightCount() const { return static_cast<uint32_t>(m_discAreaLights.size()); }
 
 		[[nodiscard]] const TextureAsset& GetTexture(TextureID textureId) const
 		{
@@ -139,6 +143,30 @@ namespace dy::Graphics
 		{
 			m_pointLights[lightIndex] = light;
 		}
+		[[nodiscard]] const SpotLight& GetSpotLight(uint32_t lightIndex) const
+		{
+			return m_spotLights[lightIndex];
+		}
+		void SetSpotLight(uint32_t lightIndex, const SpotLight& light)
+		{
+			m_spotLights[lightIndex] = light;
+		}
+		[[nodiscard]] const RectAreaLight& GetRectAreaLight(uint32_t lightIndex) const
+		{
+			return m_rectAreaLights[lightIndex];
+		}
+		void SetRectAreaLight(uint32_t lightIndex, const RectAreaLight& light)
+		{
+			m_rectAreaLights[lightIndex] = light;
+		}
+		[[nodiscard]] const DiscAreaLight& GetDiscAreaLight(uint32_t lightIndex) const
+		{
+			return m_discAreaLights[lightIndex];
+		}
+		void SetDiscAreaLight(uint32_t lightIndex, const DiscAreaLight& light)
+		{
+			m_discAreaLights[lightIndex] = light;
+		}
 
 		// ---- 연속 메모리 뷰 (DOD/SIMD 일괄 처리용) ----------------------------------
 		[[nodiscard]] const std::vector<MeshID>& EntityMeshes() const { return m_entityMeshes; }
@@ -151,6 +179,9 @@ namespace dy::Graphics
 		[[nodiscard]] const std::vector<TextureAsset>& Textures() const { return m_textures; }
 		[[nodiscard]] const std::vector<DirectionalLight>& DirectionalLights() const { return m_directionalLights; }
 		[[nodiscard]] const std::vector<PointLight>& PointLights() const { return m_pointLights; }
+		[[nodiscard]] const std::vector<SpotLight>& SpotLights() const { return m_spotLights; }
+		[[nodiscard]] const std::vector<RectAreaLight>& RectAreaLights() const { return m_rectAreaLights; }
+		[[nodiscard]] const std::vector<DiscAreaLight>& DiscAreaLights() const { return m_discAreaLights; }
 
 	private:
 		std::vector<TextureAsset> m_textures;
@@ -162,5 +193,8 @@ namespace dy::Graphics
 		std::vector<RenderFlags> m_entityRenderFlags;
 		std::vector<DirectionalLight> m_directionalLights;
 		std::vector<PointLight> m_pointLights;
+		std::vector<SpotLight> m_spotLights;
+		std::vector<RectAreaLight> m_rectAreaLights;
+		std::vector<DiscAreaLight> m_discAreaLights;
 	};
 }

@@ -100,12 +100,19 @@ namespace dy::Graphics
 	// 그림자/광원 시점 수학(ShadowDesc, ShadowMapDesc, Compute*LightViewProj, Fit*, BuildShadowMesh)은
 	// Graphics/ShadowMath.h 로 분리됨(메시와 별개 관심사).
 
+	enum class TextureColorSpace : uint8_t
+	{
+		Linear,
+		SRGB
+	};
+
 	struct TextureAsset
 	{
 		std::string sourcePath;
 		uint32_t width = 0;
 		uint32_t height = 0;
 		std::vector<uint8_t> rgba8 = {};
+		TextureColorSpace colorSpace = TextureColorSpace::SRGB;
 	};
 
 	class ModelLoader

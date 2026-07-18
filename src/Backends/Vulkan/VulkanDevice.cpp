@@ -1,6 +1,7 @@
 #include "VulkanDevice.h"
 #include "VulkanCommandList.h"
 #include "VulkanContext.h"
+#include "VulkanDrawConstantLayout.h"
 #include "VulkanPipeline.h"
 #include "VulkanResources.h"
 #include "VulkanSwapchain.h"
@@ -11,6 +12,7 @@
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <cstdio>
 #include <fstream>
@@ -32,14 +34,6 @@ namespace {
 	constexpr const char* kValidationLayerName = "VK_LAYER_KHRONOS_validation";
 	constexpr const uint32_t kFallbackTextureWidth = 2;
 	constexpr const uint32_t kFallbackTextureHeight = 2;
-
-	struct DrawMetadataPushConstants
-	{
-		uint32_t firstIndex = 0;
-		int32_t vertexOffset = 0;
-		uint32_t firstVertex = 0;
-		uint32_t padding = 0;
-	};
 
 	enum class VulkanBufferKind // 불칸 사용 버퍼 종류
 	{
@@ -127,6 +121,9 @@ namespace {
 		switch (format)
 		{
 		case dy::RHI::Format::R8G8B8A8_UNORM: return VK_FORMAT_R8G8B8A8_UNORM;
+		case dy::RHI::Format::B8G8R8A8_UNORM: return VK_FORMAT_B8G8R8A8_UNORM;
+		case dy::RHI::Format::R8G8B8A8_UNORM_SRGB: return VK_FORMAT_R8G8B8A8_SRGB;
+		case dy::RHI::Format::B8G8R8A8_UNORM_SRGB: return VK_FORMAT_B8G8R8A8_SRGB;
 		case dy::RHI::Format::R16G16B16A16_FLOAT: return VK_FORMAT_R16G16B16A16_SFLOAT;
 		case dy::RHI::Format::R32G32B32A32_FLOAT: return VK_FORMAT_R32G32B32A32_SFLOAT;
 		case dy::RHI::Format::R32_UINT: return VK_FORMAT_R32_UINT;
@@ -516,6 +513,21 @@ namespace {
 
 		VkBuffer GetHandle() const { return m_buffer; }
 
+		[[nodiscard]] bool Read(uint32_t offset, void* destination, size_t size) const
+		{
+			if (destination == nullptr || size == 0u || offset > GetSize() || size > GetSize() - offset) return false;
+			if (m_mapped != nullptr)
+			{
+				std::memcpy(destination, static_cast<const uint8_t*>(m_mapped) + offset, size);
+				return true;
+			}
+			void* mapped = nullptr;
+			if (vkMapMemory(m_device, m_memory, offset, size, 0u, &mapped) != VK_SUCCESS || mapped == nullptr) return false;
+			std::memcpy(destination, mapped, size);
+			vkUnmapMemory(m_device, m_memory);
+			return true;
+		}
+
 	private:
 		VkDevice m_device = VK_NULL_HANDLE;
 		VkBuffer m_buffer = VK_NULL_HANDLE;
@@ -566,6 +578,10 @@ private:
 	bool CreateCommandPool();
 	bool CreateCommandBuffer();
 	bool CreateFallbackTexture();
+	bool CreateDrawConstantBuffers();
+	void ResolveShadowAtlasConfig(const VulkanCommandList& commandList);
+	bool UploadDrawConstants(const VulkanCommandList& commandList);
+	void DestroyDrawConstantBuffers();
 
 	bool CreateShadowMapResources();
 	bool CreateShadowRenderPass();
@@ -578,8 +594,8 @@ private:
 
 	void RecordCommandBuffer(const VulkanCommandList& commandList);
 	void RecordShadowPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList);
-	void RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList);
-	bool ResolveMainPassTarget(const VulkanCommandList& commandList, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
+	void RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList, uint32_t firstDraw, uint32_t drawCount);
+	bool ResolveMainPassTarget(const VulkanCommandList::DrawCall& drawCall, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
 	bool GetOrCreateOffscreenFramebuffer(dy::RHI::ITexture* colorTarget, dy::RHI::ITexture* depthTarget, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
 	bool CreateOffscreenRenderPass(VkFormat colorFormat, VkFormat depthFormat, VkImageLayout colorFinalLayout, VkRenderPass& renderPass);
 	void DestroyRenderTargetCache();
@@ -615,6 +631,17 @@ private:
 
 	std::vector<VkFramebuffer> m_swapchainFramebuffers;
 	std::vector<dy::RHI::IBuffer*> m_ownedBuffers;
+	struct DrawConstantFrame
+	{
+		VkBuffer buffer = VK_NULL_HANDLE;
+		VkDeviceMemory memory = VK_NULL_HANDLE;
+		uint8_t* mapped = nullptr;
+	};
+	std::vector<DrawConstantFrame> m_drawConstantFrames;
+	VulkanDrawConstantLayout m_drawConstantLayout = {};
+	uint32_t m_activeShadowViewCount = 0u;
+	uint32_t m_shadowAtlasColumns = 1u;
+	uint32_t m_shadowAtlasRows = 1u;
 
 	struct RenderTargetCacheEntry
 	{
@@ -781,6 +808,7 @@ int VulkanDevice::Impl::Initialize(const void* windowHandle, const dy::RHI::Devi
 
 		m_depthFormat = FindDepthFormat();
 		if (!CreateFallbackTexture()) return -1;
+		if (!CreateDrawConstantBuffers()) return -1;
 		if (!CreateDescriptorSetLayout()) return -1;
 		if (!CreateBindlessDescriptorSetLayout()) return -1;
 		if (!CreateDescriptorPool()) return -1;
@@ -973,7 +1001,6 @@ void VulkanDevice::Impl::BeginFrame() {
 	}
 	m_imagesInFlight[m_currentImageIndex] = m_inFlightFences[m_currentFrameIndex];
 
-	vkResetFences(m_context.device, 1, &m_inFlightFences[m_currentFrameIndex]);
 	m_frameReady = true;
 }
 
@@ -981,6 +1008,10 @@ void VulkanDevice::Impl::Submit(dy::RHI::ICommandList** cmdLists, uint32_t count
 	if (!m_frameReady || count == 0 || !cmdLists || !cmdLists[0]) return;
 
 	VulkanCommandList* vulkanCmd = static_cast<VulkanCommandList*>(cmdLists[0]);
+	if (!UploadDrawConstants(*vulkanCmd)) {
+		SDL_Log("Failed to upload Vulkan draw constants.");
+		return;
+	}
 	if (!UpdateDrawDescriptorSets(*vulkanCmd)) {
 		SDL_Log("Failed to update Vulkan draw descriptor sets.");
 		return;
@@ -998,6 +1029,7 @@ void VulkanDevice::Impl::Submit(dy::RHI::ICommandList** cmdLists, uint32_t count
 	submitInfo.signalSemaphoreCount = 1;
 	submitInfo.pSignalSemaphores = &m_renderFinishedSemaphores[m_currentImageIndex];
 
+	vkResetFences(m_context.device, 1, &m_inFlightFences[m_currentFrameIndex]);
 	if (vkQueueSubmit(m_context.graphicsQueue, 1, &submitInfo, m_inFlightFences[m_currentFrameIndex]) != VK_SUCCESS) {
 		SDL_Log("failed to submit draw command buffer!");
 		return;
@@ -1146,12 +1178,30 @@ void VulkanDevice::Impl::RecordCommandBuffer(const VulkanCommandList& commandLis
 	vkBeginCommandBuffer(commandBuffer, &beginInfo);
 
 	// Pass 1: Shadow Pass 
-	if (m_shadowRenderPass != VK_NULL_HANDLE && m_shadowPipeline != VK_NULL_HANDLE) {
+	if (m_shadowRenderPass != VK_NULL_HANDLE && m_shadowPipeline != VK_NULL_HANDLE && m_activeShadowViewCount > 0u) {
 		RecordShadowPass(commandBuffer, commandList);
 	}
 
-	// Pass 2: Main Pass
-	RecordMainPass(commandBuffer, commandList);
+
+	// Main/post-process passes are segmented by the render-target snapshot stored on each draw.
+	uint32_t firstDraw = 0u;
+	while (firstDraw < commandList.m_drawCalls.size()) {
+		const VulkanCommandList::DrawCall& first = commandList.m_drawCalls[firstDraw];
+		uint32_t endDraw = firstDraw + 1u;
+		while (endDraw < commandList.m_drawCalls.size()) {
+			const VulkanCommandList::DrawCall& next = commandList.m_drawCalls[endDraw];
+			bool sameTargets =
+				next.renderTargetCount == first.renderTargetCount &&
+				next.depthStencil == first.depthStencil;
+			for (uint32_t targetIndex = 0u; sameTargets && targetIndex < first.renderTargetCount; ++targetIndex) {
+				sameTargets = next.renderTargets[targetIndex] == first.renderTargets[targetIndex];
+			}
+			if (!sameTargets) break;
+			++endDraw;
+		}
+		RecordMainPass(commandBuffer, commandList, firstDraw, endDraw - firstDraw);
+		firstDraw = endDraw;
+	}
 
 	vkEndCommandBuffer(commandBuffer);
 }
@@ -1172,100 +1222,112 @@ void VulkanDevice::Impl::RecordShadowPass(VkCommandBuffer commandBuffer, const V
 	vkCmdBeginRenderPass(commandBuffer, &newShadowPassInfo, VK_SUBPASS_CONTENTS_INLINE);
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
 
-	VkViewport newShadowViewport{};
-	newShadowViewport.x = 0.0f;
-	newShadowViewport.y = 0.0f;
-	newShadowViewport.width = static_cast<float>(m_shadowMapResolution);
-	newShadowViewport.height = static_cast<float>(m_shadowMapResolution);
-	newShadowViewport.minDepth = 0.0f;
-	newShadowViewport.maxDepth = 1.0f;
-	VkRect2D newShadowScissor{};
-	newShadowScissor.offset = {0, 0};
-	newShadowScissor.extent = { m_shadowMapResolution, m_shadowMapResolution };
-	vkCmdSetViewport(commandBuffer, 0, 1, &newShadowViewport);
-	vkCmdSetScissor(commandBuffer, 0, 1, &newShadowScissor);
+	const uint32_t tileWidth = std::max(m_shadowMapResolution / m_shadowAtlasColumns, 1u);
+	const uint32_t tileHeight = std::max(m_shadowMapResolution / m_shadowAtlasRows, 1u);
+	for (uint32_t shadowView = 0u; shadowView < m_activeShadowViewCount; ++shadowView)
+	{
+		const uint32_t tileX = shadowView % m_shadowAtlasColumns;
+		const uint32_t tileY = shadowView / m_shadowAtlasColumns;
+		VkViewport shadowViewport{};
+		shadowViewport.x = static_cast<float>(tileX * tileWidth);
+		shadowViewport.y = static_cast<float>(tileY * tileHeight);
+		shadowViewport.width = static_cast<float>(tileWidth);
+		shadowViewport.height = static_cast<float>(tileHeight);
+		shadowViewport.minDepth = 0.0f;
+		shadowViewport.maxDepth = 1.0f;
+		VkRect2D shadowScissor{};
+		shadowScissor.offset = {
+			static_cast<int32_t>(tileX * tileWidth),
+			static_cast<int32_t>(tileY * tileHeight)
+		};
+		shadowScissor.extent = { tileWidth, tileHeight };
+		vkCmdSetViewport(commandBuffer, 0, 1, &shadowViewport);
+		vkCmdSetScissor(commandBuffer, 0, 1, &shadowScissor);
 
-	VkDescriptorSet currentDescriptorSet = VK_NULL_HANDLE;
-	for (uint32_t drawIndex = 0; drawIndex < commandList.m_drawCalls.size(); ++drawIndex) {
-		const VulkanCommandList::DrawCall& drawCall = commandList.m_drawCalls[drawIndex];
-		const VulkanPipelineState* pipelineState = dynamic_cast<const VulkanPipelineState*>(drawCall.pipelineState);
-		if (pipelineState == nullptr || !pipelineState->IsShadowPassEnabled()) continue;
-		const bool usesBindlessTextures = pipelineState->UsesBindlessTextures();
+		for (uint32_t drawIndex = 0; drawIndex < commandList.m_drawCalls.size(); ++drawIndex)
+		{
+			const VulkanCommandList::DrawCall& drawCall = commandList.m_drawCalls[drawIndex];
+			const VulkanPipelineState* pipelineState = dynamic_cast<const VulkanPipelineState*>(drawCall.pipelineState);
+			if (pipelineState == nullptr || !pipelineState->IsShadowPassEnabled()) continue;
+			const bool usesBindlessTextures = pipelineState->UsesBindlessTextures();
 
-		bool shouldCastShadow = true;
-		if (drawCall.pushConstantSize >= m_shaderLayout.drawModePushConstantOffset + sizeof(float)) {
-			float drawMode = 0.0f;
-			std::memcpy(&drawMode, drawCall.pushConstants.data() + m_shaderLayout.drawModePushConstantOffset, sizeof(drawMode));
-			if (drawCall.pushConstantSize >= m_shaderLayout.pushConstantRangeSize) {
-				const uint32_t drawFlags = static_cast<uint32_t>(drawMode + 0.5f);
-				shouldCastShadow = (drawFlags & m_shaderLayout.castShadowFlag) != 0;
-			} else {
-				shouldCastShadow = drawMode >= 0.0f && drawMode <= 1.5f;
+			bool shouldCastShadow = true;
+			if (drawCall.pushConstantSize >= m_shaderLayout.drawModePushConstantOffset + sizeof(float))
+			{
+				float drawMode = 0.0f;
+				std::memcpy(&drawMode, drawCall.pushConstants.data() + m_shaderLayout.drawModePushConstantOffset, sizeof(drawMode));
+				if (drawCall.pushConstantSize >= m_shaderLayout.pushConstantRangeSize)
+				{
+					const uint32_t drawFlags = static_cast<uint32_t>(drawMode + 0.5f);
+					shouldCastShadow = (drawFlags & m_shaderLayout.castShadowFlag) != 0;
+				}
+				else
+				{
+					shouldCastShadow = drawMode >= 0.0f && drawMode <= 1.5f;
+				}
 			}
-		}
-		if (!shouldCastShadow) continue;
+			if (!shouldCastShadow) continue;
 
-		const uint32_t descriptorSlot = usesBindlessTextures ? 0u : drawIndex;
-		const uint32_t descriptorIndex = m_currentFrameIndex * m_maxDrawsPerFrame + descriptorSlot;
-		if (descriptorIndex < m_descriptorSets.size()) {
-			VkDescriptorSet descriptorSet = m_descriptorSets[descriptorIndex];
-			if (descriptorSet != currentDescriptorSet) {
-				vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
-				currentDescriptorSet = descriptorSet;
-			}
-		}
-
-		if (drawCall.pushConstantSize > 0) {
-			vkCmdPushConstants(
+			const uint32_t descriptorSlot = usesBindlessTextures ? 0u : drawIndex;
+			const uint32_t descriptorIndex = m_currentFrameIndex * m_maxDrawsPerFrame + descriptorSlot;
+			if (descriptorIndex >= m_descriptorSets.size()) continue;
+			uint32_t shadowSlot = 0u;
+			if (!TryGetVulkanShadowDrawSlot(
+				drawIndex,
+				m_maxDrawsPerFrame,
+				shadowView,
+				Graphics::RendererShaderLayout::kMaxShadowViews,
+				shadowSlot)) continue;
+			uint32_t dynamicOffset = 0u;
+			if (!m_drawConstantLayout.TryGetDynamicOffset(shadowSlot, dynamicOffset)) continue;
+			const VkDescriptorSet descriptorSet = m_descriptorSets[descriptorIndex];
+			vkCmdBindDescriptorSets(
 				commandBuffer,
+				VK_PIPELINE_BIND_POINT_GRAPHICS,
 				m_shadowPipelineLayout,
-				VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
 				0,
-				drawCall.pushConstantSize,
-				drawCall.pushConstants.data());
-		}
+				1,
+				&descriptorSet,
+				1,
+				&dynamicOffset);
 
-		DrawMetadataPushConstants metadata{};
-		if (drawCall.pushConstantSize >= m_shaderLayout.drawMetadataPushConstantOffset + sizeof(metadata)) {
-			std::memcpy(&metadata, drawCall.pushConstants.data() + m_shaderLayout.drawMetadataPushConstantOffset, sizeof(metadata));
-		}
-		metadata.firstIndex = drawCall.firstIndex;
-		metadata.vertexOffset = drawCall.baseVertex;
-		if (!drawCall.indexed) metadata.firstVertex = drawCall.startVertex;
-		vkCmdPushConstants(
-			commandBuffer,
-			m_shadowPipelineLayout,
-			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-			m_shaderLayout.drawMetadataPushConstantOffset,
-			sizeof(metadata),
-			&metadata);
-
-		if (drawCall.indexed) {
-			if (drawCall.indexCount > 0) {
-				vkCmdDraw(commandBuffer, drawCall.indexCount, drawCall.instanceCount, 0, drawCall.startInstance);
+			if (drawCall.indexed)
+			{
+				if (drawCall.indexCount > 0)
+				{
+					vkCmdDraw(commandBuffer, drawCall.indexCount, drawCall.instanceCount, 0, drawCall.startInstance);
+				}
 			}
-		} else {
-			vkCmdDraw(commandBuffer, drawCall.vertexCount, drawCall.instanceCount, 0, drawCall.startInstance);
+			else
+			{
+				vkCmdDraw(commandBuffer, drawCall.vertexCount, drawCall.instanceCount, 0, drawCall.startInstance);
+			}
 		}
 	}
 
 	vkCmdEndRenderPass(commandBuffer);
 	return;
 }
-void VulkanDevice::Impl::RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList) {
+void VulkanDevice::Impl::RecordMainPass(
+	VkCommandBuffer commandBuffer,
+	const VulkanCommandList& commandList,
+	uint32_t firstDraw,
+	uint32_t drawCount) {
+	if (drawCount == 0u || firstDraw >= commandList.m_drawCalls.size()) return;
+	const VulkanCommandList::DrawCall& passDraw = commandList.m_drawCalls[firstDraw];
 	VkRenderPass renderPass = VK_NULL_HANDLE;
 	VkFramebuffer framebuffer = VK_NULL_HANDLE;
 	VkExtent2D renderExtent = {};
-	if (!ResolveMainPassTarget(commandList, renderPass, framebuffer, renderExtent)) return;
+	if (!ResolveMainPassTarget(passDraw, renderPass, framebuffer, renderExtent)) return;
 
 	std::array<VkClearValue, 2> clearValues = {};
 	clearValues[0].color = { {
-		commandList.m_clearColor[0],
-		commandList.m_clearColor[1],
-		commandList.m_clearColor[2],
-		commandList.m_clearColor[3]
+		passDraw.clearColor[0],
+		passDraw.clearColor[1],
+		passDraw.clearColor[2],
+		passDraw.clearColor[3]
 	} };
-	clearValues[1].depthStencil = { commandList.m_clearDepth, 0 };
+	clearValues[1].depthStencil = { passDraw.clearDepth, 0 };
 	VkRenderPassBeginInfo renderPassInfo{};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 	renderPassInfo.renderPass = renderPass;
@@ -1279,9 +1341,9 @@ void VulkanDevice::Impl::RecordMainPass(VkCommandBuffer commandBuffer, const Vul
 
 	VkPipeline currentPipeline = VK_NULL_HANDLE;
 	VkPipelineLayout currentPipelineLayout = VK_NULL_HANDLE;
-	VkDescriptorSet currentDescriptorSet = VK_NULL_HANDLE;
 	VkDescriptorSet currentBindlessDescriptorSet = VK_NULL_HANDLE;
-	for (uint32_t drawIndex = 0; drawIndex < commandList.m_drawCalls.size(); ++drawIndex) {
+	const uint32_t endDraw = std::min<uint32_t>(firstDraw + drawCount, static_cast<uint32_t>(commandList.m_drawCalls.size()));
+	for (uint32_t drawIndex = firstDraw; drawIndex < endDraw; ++drawIndex) {
 		const VulkanCommandList::DrawCall& drawCall = commandList.m_drawCalls[drawIndex];
 		const VulkanPipelineState* pipelineState = dynamic_cast<const VulkanPipelineState*>(drawCall.pipelineState);
 		if (pipelineState == nullptr) continue;
@@ -1298,19 +1360,24 @@ void VulkanDevice::Impl::RecordMainPass(VkCommandBuffer commandBuffer, const Vul
 			vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetPipeline());
 			currentPipeline = pipeline->GetPipeline();
 			currentPipelineLayout = pipeline->GetLayout();
-			currentDescriptorSet = VK_NULL_HANDLE;
 			currentBindlessDescriptorSet = VK_NULL_HANDLE;
 		}
 
 		const uint32_t descriptorSlot = usesBindlessTextures ? 0u : drawIndex;
 		const uint32_t descriptorIndex = m_currentFrameIndex * m_maxDrawsPerFrame + descriptorSlot;
-		if (descriptorIndex < m_descriptorSets.size()) {
-			VkDescriptorSet descriptorSet = m_descriptorSets[descriptorIndex];
-			if (descriptorSet != currentDescriptorSet || pipeline->GetLayout() != currentPipelineLayout) {
-				vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetLayout(), 0, 1, &descriptorSet, 0, nullptr);
-				currentDescriptorSet = descriptorSet;
-			}
-		}
+		if (descriptorIndex >= m_descriptorSets.size()) continue;
+		uint32_t dynamicOffset = 0u;
+		if (!m_drawConstantLayout.TryGetDynamicOffset(drawIndex, dynamicOffset)) continue;
+		const VkDescriptorSet descriptorSet = m_descriptorSets[descriptorIndex];
+		vkCmdBindDescriptorSets(
+			commandBuffer,
+			VK_PIPELINE_BIND_POINT_GRAPHICS,
+			pipeline->GetLayout(),
+			0,
+			1,
+			&descriptorSet,
+			1,
+			&dynamicOffset);
 		if (usesBindlessTextures && m_bindlessDescriptorSet != VK_NULL_HANDLE) {
 			if (m_bindlessDescriptorSet != currentBindlessDescriptorSet || pipeline->GetLayout() != currentPipelineLayout) {
 				vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetLayout(), 1, 1, &m_bindlessDescriptorSet, 0, nullptr);
@@ -1347,33 +1414,6 @@ void VulkanDevice::Impl::RecordMainPass(VkCommandBuffer commandBuffer, const Vul
 		vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
 		vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
 
-		if (drawCall.pushConstantSize > 0) {
-			vkCmdPushConstants(
-				commandBuffer,
-				pipeline->GetLayout(),
-				VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-				0,
-				drawCall.pushConstantSize,
-				drawCall.pushConstants.data()
-			);
-		}
-
-		DrawMetadataPushConstants metadata{};
-		if (drawCall.pushConstantSize >= m_shaderLayout.drawMetadataPushConstantOffset + sizeof(metadata)) {
-			std::memcpy(&metadata, drawCall.pushConstants.data() + m_shaderLayout.drawMetadataPushConstantOffset, sizeof(metadata));
-		}
-		metadata.firstIndex = drawCall.firstIndex;
-		metadata.vertexOffset = drawCall.baseVertex;
-		if (!drawCall.indexed) metadata.firstVertex = drawCall.startVertex;
-		vkCmdPushConstants(
-			commandBuffer,
-			pipeline->GetLayout(),
-			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-			m_shaderLayout.drawMetadataPushConstantOffset,
-			sizeof(metadata),
-			&metadata
-		);
-
 		// 메인 셰이더는 정점/인덱스를 storage 버퍼에서 수동 fetch한다(gl_VertexIndex 선형 →
 		// indexStorage[firstIndex+id] → vertexStorage). 따라서 IA 인덱스버퍼 없이 vkCmdDraw 로
 		// indexCount 개의 정점을 그린다(섀도우 패스와 동일 모델).
@@ -1386,22 +1426,22 @@ void VulkanDevice::Impl::RecordMainPass(VkCommandBuffer commandBuffer, const Vul
 	vkCmdEndRenderPass(commandBuffer);
 }
 
-bool VulkanDevice::Impl::ResolveMainPassTarget(const VulkanCommandList& commandList, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent) {
-	if (commandList.m_renderTargetCount > 1) {
+bool VulkanDevice::Impl::ResolveMainPassTarget(const VulkanCommandList::DrawCall& drawCall, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent) {
+	if (drawCall.renderTargetCount > 1) {
 		SDL_Log("Vulkan main pass currently supports one color render target.");
 		return false;
 	}
 
 	dy::RHI::ITexture* colorTarget = m_backBuffer;
-	if (commandList.m_renderTargetCount == 1 && commandList.m_renderTargets[0] != nullptr) {
-		colorTarget = commandList.m_renderTargets[0];
+	if (drawCall.renderTargetCount == 1 && drawCall.renderTargets[0] != nullptr) {
+		colorTarget = drawCall.renderTargets[0];
 	}
 
 	if (colorTarget == nullptr || colorTarget == m_backBuffer) {
-		if (commandList.m_depthStencil != nullptr && commandList.m_depthStencil != m_depthTexture) {
+		if (drawCall.depthStencil != nullptr && drawCall.depthStencil != m_depthTexture) {
 			for (const RenderTargetCacheEntry& entry : m_renderTargetCache) {
 				if (entry.colorTarget == m_backBuffer &&
-					entry.depthTarget == commandList.m_depthStencil &&
+					entry.depthTarget == drawCall.depthStencil &&
 					entry.imageIndex == m_currentImageIndex) {
 					renderPass = entry.renderPass;
 					framebuffer = entry.framebuffer;
@@ -1410,7 +1450,7 @@ bool VulkanDevice::Impl::ResolveMainPassTarget(const VulkanCommandList& commandL
 				}
 			}
 
-			const VulkanTexture* depthTexture = dynamic_cast<const VulkanTexture*>(commandList.m_depthStencil);
+			const VulkanTexture* depthTexture = dynamic_cast<const VulkanTexture*>(drawCall.depthStencil);
 			if (depthTexture == nullptr || depthTexture->GetImageView() == VK_NULL_HANDLE) {
 				SDL_Log("Vulkan swapchain pass depth target is not a valid Vulkan texture.");
 				return false;
@@ -1438,7 +1478,7 @@ bool VulkanDevice::Impl::ResolveMainPassTarget(const VulkanCommandList& commandL
 
 			RenderTargetCacheEntry entry{};
 			entry.colorTarget = m_backBuffer;
-			entry.depthTarget = commandList.m_depthStencil;
+			entry.depthTarget = drawCall.depthStencil;
 			entry.renderPass = m_mainRenderPass;
 			entry.framebuffer = swapchainFramebuffer;
 			entry.imageIndex = m_currentImageIndex;
@@ -1458,7 +1498,7 @@ bool VulkanDevice::Impl::ResolveMainPassTarget(const VulkanCommandList& commandL
 		return renderPass != VK_NULL_HANDLE && framebuffer != VK_NULL_HANDLE;
 	}
 
-	return GetOrCreateOffscreenFramebuffer(colorTarget, commandList.m_depthStencil, renderPass, framebuffer, extent);
+	return GetOrCreateOffscreenFramebuffer(colorTarget, drawCall.depthStencil, renderPass, framebuffer, extent);
 }
 
 bool VulkanDevice::Impl::GetOrCreateOffscreenFramebuffer(
@@ -1586,14 +1626,21 @@ bool VulkanDevice::Impl::CreateOffscreenRenderPass(VkFormat colorFormat, VkForma
 	subpass.pColorAttachments = &colorAttachmentRef;
 	subpass.pDepthStencilAttachment = &depthAttachmentRef;
 
-	VkSubpassDependency dependency{};
-	dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-	dependency.dstSubpass = 0;
-	dependency.srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-	dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-	dependency.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-	dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-	dependency.dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+	std::array<VkSubpassDependency, 2> dependencies = {};
+	dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+	dependencies[0].dstSubpass = 0;
+	dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+	dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+	dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+	dependencies[1].srcSubpass = 0;
+	dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+	dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+	dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+	dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 
 	std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
 	VkRenderPassCreateInfo renderPassInfo{};
@@ -1602,8 +1649,8 @@ bool VulkanDevice::Impl::CreateOffscreenRenderPass(VkFormat colorFormat, VkForma
 	renderPassInfo.pAttachments = attachments.data();
 	renderPassInfo.subpassCount = 1;
 	renderPassInfo.pSubpasses = &subpass;
-	renderPassInfo.dependencyCount = 1;
-	renderPassInfo.pDependencies = &dependency;
+	renderPassInfo.dependencyCount = static_cast<uint32_t>(dependencies.size());
+	renderPassInfo.pDependencies = dependencies.data();
 
 	return vkCreateRenderPass(m_context.device, &renderPassInfo, nullptr, &renderPass) == VK_SUCCESS;
 }
@@ -1784,6 +1831,153 @@ bool VulkanDevice::Impl::CreateDepthResources() {
 	return true;
 }
 
+bool VulkanDevice::Impl::CreateDrawConstantBuffers()
+{
+	uint32_t drawConstantCapacity = 0u;
+	if (!TryComputeVulkanDrawConstantCapacity(
+		m_maxDrawsPerFrame,
+		Graphics::RendererShaderLayout::kMaxShadowViews,
+		drawConstantCapacity)) return false;
+	VkPhysicalDeviceProperties properties{};
+	vkGetPhysicalDeviceProperties(m_context.physicalDevice, &properties);
+	if (!VulkanDrawConstantLayout::TryCreate(
+		sizeof(Graphics::RendererShaderLayout::DrawConstants),
+		std::max<VkDeviceSize>(properties.limits.minUniformBufferOffsetAlignment, 1u),
+		drawConstantCapacity,
+		m_drawConstantLayout))
+	{
+		SDL_Log("Failed to create a valid Vulkan draw constant layout.");
+		return false;
+	}
+
+	m_drawConstantFrames.resize(m_maxFramesInFlight);
+	try
+	{
+		for (DrawConstantFrame& frame : m_drawConstantFrames)
+		{
+			VulkanResources::CreateBuffer(
+				m_context,
+				static_cast<VkDeviceSize>(m_drawConstantLayout.totalSize),
+				VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+				VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+				frame.buffer,
+				frame.memory);
+			void* mapped = nullptr;
+			if (vkMapMemory(
+				m_context.device,
+				frame.memory,
+				0u,
+				static_cast<VkDeviceSize>(m_drawConstantLayout.totalSize),
+				0u,
+				&mapped) != VK_SUCCESS || mapped == nullptr)
+			{
+				throw std::runtime_error("failed to persistently map Vulkan draw constant UBO");
+			}
+			frame.mapped = static_cast<uint8_t*>(mapped);
+			std::memset(frame.mapped, 0, static_cast<size_t>(m_drawConstantLayout.totalSize));
+		}
+	}
+	catch (const std::exception& error)
+	{
+		SDL_Log("Vulkan draw constant UBO creation failed: %s", error.what());
+		DestroyDrawConstantBuffers();
+		return false;
+	}
+	return true;
+}
+
+void VulkanDevice::Impl::ResolveShadowAtlasConfig(const VulkanCommandList& commandList)
+{
+	m_activeShadowViewCount = 0u;
+	m_shadowAtlasColumns = 1u;
+	m_shadowAtlasRows = 1u;
+	if (commandList.m_drawCalls.empty()) return;
+	const VulkanCommandList::DrawCall& drawCall = commandList.m_drawCalls.front();
+	const uint32_t binding = m_shaderLayout.shadowMatrixBinding;
+	if (binding >= drawCall.constantBuffers.size()) return;
+	const auto& shadowBinding = drawCall.constantBuffers[binding];
+	const VulkanBuffer* shadowBuffer = dynamic_cast<const VulkanBuffer*>(shadowBinding.buffer);
+	if (shadowBuffer == nullptr) return;
+	Graphics::RendererShaderLayout::RendererShadowConstants shadow = {};
+	if (!shadowBuffer->Read(shadowBinding.offset, &shadow, sizeof(shadow))) return;
+	if (!std::isfinite(shadow.shadowInfo.y) || !std::isfinite(shadow.shadowInfo.z) || !std::isfinite(shadow.shadowInfo.w)) return;
+	m_activeShadowViewCount = std::clamp(
+		static_cast<uint32_t>(std::max(shadow.shadowInfo.y, 0.0f) + 0.5f),
+		0u,
+		Graphics::RendererShaderLayout::kMaxShadowViews);
+	m_shadowAtlasColumns = std::clamp(
+		static_cast<uint32_t>(std::max(shadow.shadowInfo.z, 1.0f) + 0.5f),
+		1u,
+		Graphics::RendererShaderLayout::kMaxShadowViews);
+	m_shadowAtlasRows = std::clamp(
+		static_cast<uint32_t>(std::max(shadow.shadowInfo.w, 1.0f) + 0.5f),
+		1u,
+		Graphics::RendererShaderLayout::kMaxShadowViews);
+	const uint64_t atlasCapacity = static_cast<uint64_t>(m_shadowAtlasColumns) * m_shadowAtlasRows;
+	if (m_activeShadowViewCount > atlasCapacity) m_activeShadowViewCount = static_cast<uint32_t>(atlasCapacity);
+}
+
+bool VulkanDevice::Impl::UploadDrawConstants(const VulkanCommandList& commandList)
+{
+	using DrawConstants = Graphics::RendererShaderLayout::DrawConstants;
+	ResolveShadowAtlasConfig(commandList);
+	if (commandList.m_drawCalls.size() > m_maxDrawsPerFrame) return false;
+	if (m_currentFrameIndex >= m_drawConstantFrames.size()) return false;
+	DrawConstantFrame& frame = m_drawConstantFrames[m_currentFrameIndex];
+	if (frame.mapped == nullptr) return false;
+
+	for (uint32_t drawIndex = 0u; drawIndex < commandList.m_drawCalls.size(); ++drawIndex)
+	{
+		const VulkanCommandList::DrawCall& drawCall = commandList.m_drawCalls[drawIndex];
+		DrawConstants constants{};
+		const size_t copySize = std::min<size_t>(drawCall.pushConstantSize, sizeof(constants));
+		if (copySize > 0u) std::memcpy(&constants, drawCall.pushConstants.data(), copySize);
+		constants.firstIndex = drawCall.firstIndex;
+		constants.vertexOffset = drawCall.baseVertex;
+		if (!drawCall.indexed) constants.firstVertex = drawCall.startVertex;
+
+		uint32_t dynamicOffset = 0u;
+		if (!m_drawConstantLayout.TryGetDynamicOffset(drawIndex, dynamicOffset)) return false;
+		std::memcpy(frame.mapped + dynamicOffset, &constants, sizeof(constants));
+
+		for (uint32_t shadowView = 0u; shadowView < m_activeShadowViewCount; ++shadowView)
+		{
+			DrawConstants shadowConstants = constants;
+			shadowConstants.emissiveColor.w = static_cast<float>(shadowView);
+			uint32_t shadowSlot = 0u;
+			if (!TryGetVulkanShadowDrawSlot(
+				drawIndex,
+				m_maxDrawsPerFrame,
+				shadowView,
+				Graphics::RendererShaderLayout::kMaxShadowViews,
+				shadowSlot)) return false;
+			uint32_t shadowOffset = 0u;
+			if (!m_drawConstantLayout.TryGetDynamicOffset(shadowSlot, shadowOffset)) return false;
+			std::memcpy(frame.mapped + shadowOffset, &shadowConstants, sizeof(shadowConstants));
+		}
+	}
+	return true;
+}
+
+void VulkanDevice::Impl::DestroyDrawConstantBuffers()
+{
+	if (m_context.device == VK_NULL_HANDLE)
+	{
+		m_drawConstantFrames.clear();
+		m_drawConstantLayout = {};
+		return;
+	}
+	for (DrawConstantFrame& frame : m_drawConstantFrames)
+	{
+		if (frame.mapped != nullptr && frame.memory != VK_NULL_HANDLE) vkUnmapMemory(m_context.device, frame.memory);
+		if (frame.buffer != VK_NULL_HANDLE) vkDestroyBuffer(m_context.device, frame.buffer, nullptr);
+		if (frame.memory != VK_NULL_HANDLE) vkFreeMemory(m_context.device, frame.memory, nullptr);
+		frame = {};
+	}
+	m_drawConstantFrames.clear();
+	m_drawConstantLayout = {};
+}
+
 bool VulkanDevice::Impl::CreateDescriptorSetLayout() {
 	// binding 0: Base color sampler (FS)
 	// binding 1: Lighting UBO (VS+FS)
@@ -1793,6 +1987,8 @@ bool VulkanDevice::Impl::CreateDescriptorSetLayout() {
 	// binding 5: Index storage buffer (VS)
 	// binding 6-9: Metallic/Roughness, Normal, Occlusion, Emissive samplers (FS)
 	// binding 10-12: Bindless material/transform/draw storage buffers (VS+FS)
+	// binding 13-14: Model skin influence/palette storage buffers (reserved)
+	// binding 15: Per-draw constants dynamic UBO (VS+FS)
 	std::array<VkDescriptorSetLayoutBinding, kMaxDescriptorBindings> bindings = {};
 	auto setBinding = [&bindings](uint32_t index, uint32_t binding, VkDescriptorType type, VkShaderStageFlags stageFlags) {
 		bindings[index].binding = binding;
@@ -1803,7 +1999,7 @@ bool VulkanDevice::Impl::CreateDescriptorSetLayout() {
 	setBinding(m_shaderLayout.baseColorTextureBinding, m_shaderLayout.baseColorTextureBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
 	setBinding(m_shaderLayout.lightingConstantBinding, m_shaderLayout.lightingConstantBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
 	setBinding(m_shaderLayout.shadowSamplerBinding, m_shaderLayout.shadowSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
-	setBinding(m_shaderLayout.shadowMatrixBinding, m_shaderLayout.shadowMatrixBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
+	setBinding(m_shaderLayout.shadowMatrixBinding, m_shaderLayout.shadowMatrixBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
 	setBinding(m_shaderLayout.vertexStorageBinding, m_shaderLayout.vertexStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
 	setBinding(m_shaderLayout.indexStorageBinding, m_shaderLayout.indexStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
 	setBinding(m_shaderLayout.metallicRoughnessTextureBinding, m_shaderLayout.metallicRoughnessTextureBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -1813,9 +2009,12 @@ bool VulkanDevice::Impl::CreateDescriptorSetLayout() {
 	setBinding(m_shaderLayout.bindlessMaterialStorageBinding, m_shaderLayout.bindlessMaterialStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
 	setBinding(m_shaderLayout.bindlessTransformStorageBinding, m_shaderLayout.bindlessTransformStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
 	setBinding(m_shaderLayout.bindlessDrawStorageBinding, m_shaderLayout.bindlessDrawStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
+	setBinding(Graphics::RendererShaderLayout::kSkinInfluenceStorageBinding, Graphics::RendererShaderLayout::kSkinInfluenceStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
+	setBinding(Graphics::RendererShaderLayout::kSkinPaletteStorageBinding, Graphics::RendererShaderLayout::kSkinPaletteStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
+	setBinding(Graphics::RendererShaderLayout::kVulkanDrawConstantsBinding, Graphics::RendererShaderLayout::kVulkanDrawConstantsBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
 	VkDescriptorSetLayoutCreateInfo info{};
 	info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	info.bindingCount = m_shaderLayout.descriptorBindingCount;
+	info.bindingCount = Graphics::RendererShaderLayout::kVulkanDescriptorBindingCount;
 	info.pBindings = bindings.data();
 	return vkCreateDescriptorSetLayout(m_context.device, &info, nullptr, &m_descriptorSetLayout) == VK_SUCCESS;
 }
@@ -1846,13 +2045,15 @@ bool VulkanDevice::Impl::CreateBindlessDescriptorSetLayout() {
 
 bool VulkanDevice::Impl::CreateDescriptorPool() {
 	const uint32_t descriptorSetCount = m_maxFramesInFlight * m_maxDrawsPerFrame;
-	std::array<VkDescriptorPoolSize, 3> newPoolSizes = {};
+	std::array<VkDescriptorPoolSize, 4> newPoolSizes = {};
 	newPoolSizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
 	newPoolSizes[0].descriptorCount = descriptorSetCount * m_shaderLayout.samplerDescriptorCount + m_maxBindlessTextures;
 	newPoolSizes[1].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	newPoolSizes[1].descriptorCount = descriptorSetCount * m_shaderLayout.constantBufferDescriptorCount;
-	newPoolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	newPoolSizes[2].descriptorCount = descriptorSetCount * m_shaderLayout.storageBufferDescriptorCount;
+	newPoolSizes[2].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+	newPoolSizes[2].descriptorCount = descriptorSetCount;
+	newPoolSizes[3].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+	newPoolSizes[3].descriptorCount = descriptorSetCount * Graphics::RendererShaderLayout::kVulkanSkinningStorageBufferDescriptorCount;
 	VkDescriptorPoolCreateInfo newInfo{};
 	newInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 	newInfo.maxSets = descriptorSetCount + 1u;
@@ -1911,15 +2112,12 @@ bool VulkanDevice::Impl::InitializeBindlessDescriptorSet() {
 
 bool VulkanDevice::Impl::UpdateDrawDescriptorSets(const VulkanCommandList& commandList) {
 	if (commandList.m_drawCalls.size() > m_maxDrawsPerFrame) return false;
-	if (!commandList.m_drawCalls.empty()) {
-		const VulkanCommandList::DrawCall& firstDraw = commandList.m_drawCalls.front();
-		const VulkanPipelineState* pipelineState = dynamic_cast<const VulkanPipelineState*>(firstDraw.pipelineState);
-		if (pipelineState != nullptr && pipelineState->UsesBindlessTextures()) {
-			return UpdateDrawDescriptorSet(firstDraw, 0);
-		}
-	}
 	for (uint32_t drawIndex = 0; drawIndex < commandList.m_drawCalls.size(); ++drawIndex) {
-		if (!UpdateDrawDescriptorSet(commandList.m_drawCalls[drawIndex], drawIndex)) return false;
+		const VulkanCommandList::DrawCall& drawCall = commandList.m_drawCalls[drawIndex];
+		const VulkanPipelineState* pipelineState = dynamic_cast<const VulkanPipelineState*>(drawCall.pipelineState);
+		const bool usesBindlessTextures = pipelineState != nullptr && pipelineState->UsesBindlessTextures();
+		if (usesBindlessTextures && drawIndex > 0u) continue;
+		if (!UpdateDrawDescriptorSet(drawCall, usesBindlessTextures ? 0u : drawIndex)) return false;
 	}
 	return true;
 }
@@ -1932,10 +2130,10 @@ bool VulkanDevice::Impl::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCa
 	const bool usesBindlessTextures = pipelineState != nullptr && pipelineState->UsesBindlessTextures();
 	const VulkanBuffer* vertexBuffer = dynamic_cast<const VulkanBuffer*>(drawCall.geometry.vertexBuffer);
 	const VulkanBuffer* indexBuffer = dynamic_cast<const VulkanBuffer*>(drawCall.geometry.indexBuffer);
-	if (vertexBuffer == nullptr || (drawCall.indexed && indexBuffer == nullptr)) return false;
+	if (drawCall.indexed && (vertexBuffer == nullptr || indexBuffer == nullptr)) return false;
 
 	std::vector<VkWriteDescriptorSet> writes;
-	writes.reserve(m_shaderLayout.descriptorBindingCount);
+	writes.reserve(Graphics::RendererShaderLayout::kVulkanDescriptorBindingCount);
 
 	const VulkanTexture* fallbackTexture = static_cast<const VulkanTexture*>(m_fallbackTexture);
 	const bool hasFallbackTexture =
@@ -1965,7 +2163,10 @@ bool VulkanDevice::Impl::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCa
 
 			materialTextureInfos[i].sampler = texture->GetSampler();
 			materialTextureInfos[i].imageView = texture->GetImageView();
-			materialTextureInfos[i].imageLayout = texture->GetImageLayout();
+			materialTextureInfos[i].imageLayout =
+				HasTextureUsage(texture->GetUsage(), dy::RHI::TextureUsage::RenderTarget)
+					? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+					: texture->GetImageLayout();
 
 			VkWriteDescriptorSet textureWrite{};
 			textureWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -2041,30 +2242,48 @@ bool VulkanDevice::Impl::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCa
 	}
 
 	std::array<VkDescriptorBufferInfo, 2> geometryInfos = {};
-	geometryInfos[0].buffer = vertexBuffer->GetHandle();
-	geometryInfos[0].offset = drawCall.geometry.vertexOffset;
-	geometryInfos[0].range = VK_WHOLE_SIZE;
-	geometryInfos[1].buffer = indexBuffer != nullptr ? indexBuffer->GetHandle() : vertexBuffer->GetHandle();
-	geometryInfos[1].offset = indexBuffer != nullptr ? drawCall.geometry.indexOffset : 0;
-	geometryInfos[1].range = VK_WHOLE_SIZE;
+	if (vertexBuffer != nullptr) {
+		geometryInfos[0].buffer = vertexBuffer->GetHandle();
+		geometryInfos[0].offset = drawCall.geometry.vertexOffset;
+		geometryInfos[0].range = VK_WHOLE_SIZE;
+		geometryInfos[1].buffer = indexBuffer != nullptr ? indexBuffer->GetHandle() : vertexBuffer->GetHandle();
+		geometryInfos[1].offset = indexBuffer != nullptr ? drawCall.geometry.indexOffset : 0;
+		geometryInfos[1].range = VK_WHOLE_SIZE;
 
-	VkWriteDescriptorSet vertexWrite{};
-	vertexWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	vertexWrite.dstSet = m_descriptorSets[descriptorIndex];
-	vertexWrite.dstBinding = m_shaderLayout.vertexStorageBinding;
-	vertexWrite.descriptorCount = 1;
-	vertexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	vertexWrite.pBufferInfo = &geometryInfos[0];
-	writes.push_back(vertexWrite);
+		VkWriteDescriptorSet vertexWrite{};
+		vertexWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		vertexWrite.dstSet = m_descriptorSets[descriptorIndex];
+		vertexWrite.dstBinding = m_shaderLayout.vertexStorageBinding;
+		vertexWrite.descriptorCount = 1;
+		vertexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		vertexWrite.pBufferInfo = &geometryInfos[0];
+		writes.push_back(vertexWrite);
 
-	VkWriteDescriptorSet indexWrite{};
-	indexWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	indexWrite.dstSet = m_descriptorSets[descriptorIndex];
-	indexWrite.dstBinding = m_shaderLayout.indexStorageBinding;
-	indexWrite.descriptorCount = 1;
-	indexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	indexWrite.pBufferInfo = &geometryInfos[1];
-	writes.push_back(indexWrite);
+		VkWriteDescriptorSet indexWrite{};
+		indexWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+		indexWrite.dstSet = m_descriptorSets[descriptorIndex];
+		indexWrite.dstBinding = m_shaderLayout.indexStorageBinding;
+		indexWrite.descriptorCount = 1;
+		indexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		indexWrite.pBufferInfo = &geometryInfos[1];
+		writes.push_back(indexWrite);
+	}
+
+	if (m_currentFrameIndex >= m_drawConstantFrames.size()) return false;
+	const DrawConstantFrame& drawConstantFrame = m_drawConstantFrames[m_currentFrameIndex];
+	if (drawConstantFrame.buffer == VK_NULL_HANDLE) return false;
+	VkDescriptorBufferInfo drawConstantInfo{};
+	drawConstantInfo.buffer = drawConstantFrame.buffer;
+	drawConstantInfo.offset = 0u;
+	drawConstantInfo.range = sizeof(Graphics::RendererShaderLayout::DrawConstants);
+	VkWriteDescriptorSet drawConstantWrite{};
+	drawConstantWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+	drawConstantWrite.dstSet = m_descriptorSets[descriptorIndex];
+	drawConstantWrite.dstBinding = Graphics::RendererShaderLayout::kVulkanDrawConstantsBinding;
+	drawConstantWrite.descriptorCount = 1u;
+	drawConstantWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+	drawConstantWrite.pBufferInfo = &drawConstantInfo;
+	writes.push_back(drawConstantWrite);
 
 	vkUpdateDescriptorSets(m_context.device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 	return true;
@@ -2169,17 +2388,12 @@ bool VulkanDevice::Impl::CreateShadowMapResources() {
 bool VulkanDevice::Impl::CreateShadowPipeline(const dy::RHI::GraphicsPipelineDesc& desc) {
 	// PipelineLayout은 main PSO와 같은 DescriptorSetLayout + PushConstantRange를 공유한다.
 	// Shadow pass도 같은 binding 3의 lightViewProj UBO를 읽기 때문에 호환 가능하다.
-	VkPushConstantRange pushConstantRange{};
-	pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-	pushConstantRange.offset = 0;
-	pushConstantRange.size = m_shaderLayout.pushConstantRangeSize;
-
 	VkPipelineLayoutCreateInfo layoutInfo{};
 	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 	layoutInfo.setLayoutCount = 1;
 	layoutInfo.pSetLayouts = &m_descriptorSetLayout;
-	layoutInfo.pushConstantRangeCount = 1;
-	layoutInfo.pPushConstantRanges = &pushConstantRange;
+	layoutInfo.pushConstantRangeCount = 0;
+	layoutInfo.pPushConstantRanges = nullptr;
 	if (vkCreatePipelineLayout(m_context.device, &layoutInfo, nullptr, &m_shadowPipelineLayout) != VK_SUCCESS) {
 		return false;
 	}
@@ -2356,6 +2570,7 @@ void VulkanDevice::Impl::DestroyDeviceResources() {
 
 	if (m_context.device != VK_NULL_HANDLE) {
 		vkDeviceWaitIdle(m_context.device);
+		DestroyDrawConstantBuffers();
 		for (dy::RHI::IBuffer* buffer : m_ownedBuffers) delete buffer;
 		m_ownedBuffers.clear();
 		DestroyShadowResources();

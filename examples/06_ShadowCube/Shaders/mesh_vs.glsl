@@ -9,7 +9,7 @@ layout(location = 2) out vec3 fragNormal;
 layout(location = 3) out vec4 fragTangent;
 layout(location = 4) out vec4 fragLightSpacePosition;
 
-layout(push_constant) uniform DrawConstants {
+layout(std140, set = 0, binding = DY_VULKAN_BINDING_DRAW_CONSTANTS) uniform VulkanDrawConstants {
     mat4 viewProjectionMatrix;
     mat4 modelMatrix;
     float drawMode;
@@ -30,8 +30,12 @@ layout(std430, set = 0, binding = DY_RENDERER_BINDING_INDEX_STORAGE) readonly bu
     uint indices[];
 } indexStorage;
 
-layout(set = 0, binding = DY_RENDERER_BINDING_SHADOW_MATRIX) uniform ShadowMatrix {
-    mat4 lightViewProjectionMatrix;
+layout(std140, set = 0, binding = DY_RENDERER_BINDING_SHADOW_MATRIX) uniform ShadowMatrix {
+    mat4 lightViewProjectionMatrices[6];
+    vec4 cascadeSplits;
+    vec4 shadowInfo;
+    vec4 pcssParams;
+    mat4 cameraViewMatrix;
 } shadowMatrix;
 
 struct Vertex {
@@ -70,7 +74,13 @@ void main() {
     gl_Position = pushConstants.viewProjectionMatrix * worldPosition;
     fragUv = vertex.uv;
     fragWorldPosition = worldPosition.xyz;
-    fragNormal = normalize(mat3(pushConstants.modelMatrix) * vertex.normal);
-    fragTangent = vec4(normalize(mat3(pushConstants.modelMatrix) * vertex.tangent.xyz), vertex.tangent.w);
-    fragLightSpacePosition = shadowMatrix.lightViewProjectionMatrix * worldPosition;
+    mat3 model3x3 = mat3(pushConstants.modelMatrix);
+    float modelDeterminant = determinant(model3x3);
+    mat3 normalMatrix = abs(modelDeterminant) > 0.000001
+        ? transpose(inverse(mat3(pushConstants.modelMatrix)))
+        : mat3(1.0);
+    fragNormal = normalize(normalMatrix * vertex.normal);
+    float tangentHandedness = modelDeterminant < 0.0 ? -vertex.tangent.w : vertex.tangent.w;
+    fragTangent = vec4(normalize(model3x3 * vertex.tangent.xyz), tangentHandedness);
+    fragLightSpacePosition = shadowMatrix.lightViewProjectionMatrices[0] * worldPosition;
 }

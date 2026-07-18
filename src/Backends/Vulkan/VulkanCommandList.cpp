@@ -132,6 +132,11 @@ void VulkanCommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCou
 	drawCall.constantBuffers = m_pendingConstantBuffers;
 	drawCall.storageBuffers = m_pendingStorageBuffers;
 	drawCall.textures = m_pendingTextures;
+	drawCall.renderTargetCount = m_renderTargetCount;
+	drawCall.renderTargets = m_renderTargets;
+	drawCall.depthStencil = m_depthStencil;
+	drawCall.clearColor = m_clearColor;
+	drawCall.clearDepth = m_clearDepth;
 	drawCall.hasViewport = m_hasPendingViewport;
 	drawCall.hasScissor = m_hasPendingScissor;
 	drawCall.viewport = m_pendingViewport;
@@ -158,6 +163,11 @@ void VulkanCommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t insta
 	drawCall.constantBuffers = m_pendingConstantBuffers;
 	drawCall.storageBuffers = m_pendingStorageBuffers;
 	drawCall.textures = m_pendingTextures;
+	drawCall.renderTargetCount = m_renderTargetCount;
+	drawCall.renderTargets = m_renderTargets;
+	drawCall.depthStencil = m_depthStencil;
+	drawCall.clearColor = m_clearColor;
+	drawCall.clearDepth = m_clearDepth;
 	drawCall.hasViewport = m_hasPendingViewport;
 	drawCall.hasScissor = m_hasPendingScissor;
 	drawCall.viewport = m_pendingViewport;

@@ -39,7 +39,7 @@ void VulkanPipeline::Initialize(
 	VkExtent2D,
 	VkDescriptorSetLayout descriptorSetLayout,
 	const dy::RHI::GraphicsPipelineDesc& desc,
-	uint32_t pushConstantSize,
+	uint32_t,
 	VkDescriptorSetLayout bindlessDescriptorSetLayout)
 {
 	if (desc.vertexShader == nullptr || desc.vertexShaderSize == 0 || desc.pixelShader == nullptr || desc.pixelShaderSize == 0) {
@@ -107,11 +107,6 @@ void VulkanPipeline::Initialize(
 	depthStencil.depthBoundsTestEnable = VK_FALSE;
 	depthStencil.stencilTestEnable = VK_FALSE;
 
-	VkPushConstantRange pushConstantRange{};
-	pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-	pushConstantRange.offset = 0;
-	pushConstantRange.size = pushConstantSize;
-
 	std::array<VkDescriptorSetLayout, 2> descriptorSetLayouts = {
 		descriptorSetLayout,
 		bindlessDescriptorSetLayout
@@ -120,8 +115,8 @@ void VulkanPipeline::Initialize(
 	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
 	pipelineLayoutInfo.setLayoutCount = desc.enableBindlessTextures && bindlessDescriptorSetLayout != VK_NULL_HANDLE ? 2u : 1u;
 	pipelineLayoutInfo.pSetLayouts = descriptorSetLayouts.data();
-	pipelineLayoutInfo.pushConstantRangeCount = 1;
-	pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+	pipelineLayoutInfo.pushConstantRangeCount = 0;
+	pipelineLayoutInfo.pPushConstantRanges = nullptr;
 
 	if (vkCreatePipelineLayout(context.device, &pipelineLayoutInfo, nullptr, &m_pipelineLayout) != VK_SUCCESS) {
 		vkDestroyShaderModule(context.device, fragShaderModule, nullptr);

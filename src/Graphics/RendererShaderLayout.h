@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 
@@ -22,13 +23,25 @@ namespace dy::Graphics::RendererShaderLayout
 	constexpr uint32_t kBindlessMaterialStorageBinding = DY_RENDERER_BINDING_BINDLESS_MATERIAL_STORAGE;
 	constexpr uint32_t kBindlessTransformStorageBinding = DY_RENDERER_BINDING_BINDLESS_TRANSFORM_STORAGE;
 	constexpr uint32_t kBindlessDrawStorageBinding = DY_RENDERER_BINDING_BINDLESS_DRAW_STORAGE;
+	constexpr uint32_t kSkinInfluenceStorageBinding = DY_RENDERER_BINDING_SKIN_INFLUENCE_STORAGE;
+	constexpr uint32_t kSkinPaletteStorageBinding = DY_RENDERER_BINDING_SKIN_PALETTE_STORAGE;
+	constexpr uint32_t kVulkanDrawConstantsBinding = DY_VULKAN_BINDING_DRAW_CONSTANTS;
 	constexpr uint32_t kDescriptorBindingCount = DY_RENDERER_DESCRIPTOR_BINDING_COUNT;
+	constexpr uint32_t kVulkanSkinningDescriptorBindingCount = DY_VULKAN_SKINNING_DESCRIPTOR_BINDING_COUNT;
+	constexpr uint32_t kVulkanDescriptorBindingCount = DY_VULKAN_DESCRIPTOR_BINDING_COUNT;
 	constexpr uint32_t kMaterialTextureBindingCount = DY_RENDERER_MATERIAL_TEXTURE_BINDING_COUNT;
 	constexpr uint32_t kSamplerDescriptorCount = DY_RENDERER_SAMPLER_DESCRIPTOR_COUNT;
 	constexpr uint32_t kConstantBufferDescriptorCount = DY_RENDERER_CONSTANT_BUFFER_DESCRIPTOR_COUNT;
 	constexpr uint32_t kStorageBufferDescriptorCount = DY_RENDERER_STORAGE_BUFFER_DESCRIPTOR_COUNT;
+	constexpr uint32_t kVulkanSkinningStorageBufferDescriptorCount = DY_VULKAN_SKINNING_STORAGE_BUFFER_DESCRIPTOR_COUNT;
 	constexpr uint32_t kBindlessTextureCount = DY_RENDERER_BINDLESS_TEXTURE_COUNT;
 	constexpr uint32_t kRendererVertexFloatCount = DY_RENDERER_VERTEX_FLOAT_COUNT;
+	constexpr uint32_t kMaxDirectionalLights = DY_RENDERER_MAX_DIRECTIONAL_LIGHTS;
+	constexpr uint32_t kMaxPointLights = DY_RENDERER_MAX_POINT_LIGHTS;
+	constexpr uint32_t kMaxSpotLights = DY_RENDERER_MAX_SPOT_LIGHTS;
+	constexpr uint32_t kMaxRectAreaLights = DY_RENDERER_MAX_RECT_AREA_LIGHTS;
+	constexpr uint32_t kMaxDiscAreaLights = DY_RENDERER_MAX_DISC_AREA_LIGHTS;
+	constexpr uint32_t kMaxShadowViews = 6u;
 
 	constexpr uint32_t kBaseColorTextureFlag = DY_RENDERER_TEXTURE_FLAG_BASE_COLOR;
 	constexpr uint32_t kMetallicRoughnessTextureFlag = DY_RENDERER_TEXTURE_FLAG_METALLIC_ROUGHNESS;
@@ -37,23 +50,68 @@ namespace dy::Graphics::RendererShaderLayout
 	constexpr uint32_t kEmissiveTextureFlag = DY_RENDERER_TEXTURE_FLAG_EMISSIVE;
 	constexpr uint32_t kReceiveShadowFlag = DY_RENDERER_TEXTURE_FLAG_RECEIVE_SHADOW;
 	constexpr uint32_t kCastShadowFlag = DY_RENDERER_TEXTURE_FLAG_CAST_SHADOW;
+	constexpr uint32_t kSkinnedFlag = DY_RENDERER_TEXTURE_FLAG_SKINNED;
+
+	struct RendererDirectionalLight
+	{
+		Math::float4 directionIlluminance;
+		Math::float4 color;
+	};
+
+	struct RendererPointLight
+	{
+		Math::float4 positionRange;
+		Math::float4 colorIntensity;
+	};
+
+	struct RendererSpotLight
+	{
+		Math::float4 positionRange;
+		Math::float4 directionOuterCos;
+		Math::float4 colorIntensity;
+		Math::float4 coneParams;
+	};
+
+	struct RendererRectAreaLight
+	{
+		Math::float4 positionLuminance;
+		Math::float4 directionWidth;
+		Math::float4 upHeight;
+		Math::float4 color;
+	};
+
+	struct RendererDiscAreaLight
+	{
+		Math::float4 positionLuminance;
+		Math::float4 directionRadius;
+		Math::float4 up;
+		Math::float4 color;
+	};
 
 	struct RendererLightingConstants
 	{
 		Math::float4 cameraPosition;
-		Math::float4 directionalLightDirection;
-		Math::float4 directionalLightColor;
 		Math::float4 ambientColor;
 		Math::float4 shadowParams;
 		Math::float4 pbrParams;
 		Math::float4 environmentColor;
-		Math::float4 pointLightPositionRange;
-		Math::float4 pointLightColorIntensity;
+		Math::float4 lightCounts;
+		Math::float4 shadowLight;
+		Math::float4 areaLightCounts;
+		std::array<RendererDirectionalLight, kMaxDirectionalLights> directionalLights;
+		std::array<RendererPointLight, kMaxPointLights> pointLights;
+		std::array<RendererSpotLight, kMaxSpotLights> spotLights;
+		std::array<RendererRectAreaLight, kMaxRectAreaLights> rectAreaLights;
+		std::array<RendererDiscAreaLight, kMaxDiscAreaLights> discAreaLights;
 	};
 
 	struct RendererShadowConstants
 	{
-		Math::float4x4 lightViewProjectionMatrix;
+		std::array<Math::float4x4, kMaxShadowViews> lightViewProjectionMatrices;
+		Math::float4 cascadeSplits;
+		Math::float4 shadowInfo;
+		Math::float4 pcssParams;
+		Math::float4x4 cameraViewMatrix;
 	};
 
 	struct DrawConstants
@@ -84,7 +142,26 @@ namespace dy::Graphics::RendererShaderLayout
 	static_assert(offsetof(DrawConstants, textureIndices) == 192u, "Renderer bindless texture indices offset must match shader layout.");
 	static_assert(kPushConstantRangeSize == 208u, "Renderer draw constants must match push constant range.");
 	static_assert(kBindlessDrawStorageBinding + 1u == kDescriptorBindingCount, "Renderer descriptor bindings must remain contiguous.");
+	static_assert(kSkinInfluenceStorageBinding == kDescriptorBindingCount, "Model skin influence binding must extend the common layout.");
+	static_assert(kSkinPaletteStorageBinding + 1u == kVulkanSkinningDescriptorBindingCount, "Model skinning bindings must remain contiguous.");
+	static_assert(kVulkanDrawConstantsBinding + 1u == kVulkanDescriptorBindingCount, "Vulkan draw constants must terminate the Vulkan layout.");
 	static_assert(kMaterialTextureBindingCount + 1u == kSamplerDescriptorCount, "Renderer sampler descriptor count must include shadow map.");
+	static_assert(sizeof(RendererDirectionalLight) == 32u, "Directional light must match two GLSL vec4 values.");
+	static_assert(sizeof(RendererPointLight) == 32u, "Point light must match two GLSL vec4 values.");
+	static_assert(sizeof(RendererSpotLight) == 64u, "Spot light must match four GLSL vec4 values.");
+	static_assert(sizeof(RendererRectAreaLight) == 64u, "Rect area light must match four GLSL vec4 values.");
+	static_assert(sizeof(RendererDiscAreaLight) == 64u, "Disc area light must match four GLSL vec4 values.");
+	static_assert(offsetof(RendererLightingConstants, directionalLights) == 128u, "Directional light array offset must match GLSL std140.");
+	static_assert(offsetof(RendererLightingConstants, pointLights) == 256u, "Point light array offset must match GLSL std140.");
+	static_assert(offsetof(RendererLightingConstants, spotLights) == 768u, "Spot light array offset must match GLSL std140.");
+	static_assert(offsetof(RendererLightingConstants, rectAreaLights) == 1792u, "Rect area light array offset must match GLSL std140.");
+	static_assert(offsetof(RendererLightingConstants, discAreaLights) == 2048u, "Disc area light array offset must match GLSL std140.");
+	static_assert(sizeof(RendererLightingConstants) == 2304u, "Lighting constants must match GLSL std140 layout.");
+	static_assert(offsetof(RendererShadowConstants, cascadeSplits) == 384u, "Cascade splits must follow six shadow matrices.");
+	static_assert(offsetof(RendererShadowConstants, shadowInfo) == 400u, "Shadow info offset must match GLSL std140.");
+	static_assert(offsetof(RendererShadowConstants, pcssParams) == 416u, "PCSS params offset must match GLSL std140.");
+	static_assert(offsetof(RendererShadowConstants, cameraViewMatrix) == 432u, "Camera view offset must match GLSL std140.");
+	static_assert(sizeof(RendererShadowConstants) == 496u, "Shadow constants must match GLSL std140 layout.");
 
 	// RHI::ShaderLayoutDesc(데이터) 기본값이 셰이더 공유 .inc 계약과 일치함을 보증한다.
 	// (둘 중 하나만 바뀌면 컴파일 실패 → 드리프트 방지)
