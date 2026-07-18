@@ -135,7 +135,17 @@ namespace dy::Backends
     }
 
     void MetalDevice::DestroyBuffer(RHI::IBuffer* buffer)                 { delete buffer; }
-    void MetalDevice::DestroyTexture(RHI::ITexture* texture)              { delete texture; }
+    void MetalDevice::DestroyTexture(RHI::ITexture* texture)
+    {
+        if(texture == nullptr) return;
+        for(uint32_t i = 0; i < m_impl->textures.size(); ++i)
+        {
+            if(m_impl->textures[i] != texture) continue;
+            m_impl->textures[i] = nullptr;
+            m_impl->commandList->SetNativeTexture(nullptr, i);
+        }
+        delete texture;
+    }
     void MetalDevice::DestroyPipelineState(RHI::IPipelineState* pipeline) { delete pipeline; }
 
     bool MetalDevice::UpdateTexture(RHI::ITexture* texture, const void* data, uint32_t rowPitch)

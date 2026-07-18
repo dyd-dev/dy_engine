@@ -79,7 +79,6 @@ namespace dy::Graphics
 		RHI::IBuffer* m_lightingBuffer = nullptr;
 		RHI::IBuffer* m_shadowMatrixBuffer = nullptr;
 		uint32_t m_shadowDescriptorIndex = 0xFFFFFFFFu;
-		bool m_useExplicitShadowPass = false;
 		GpuScene m_gpuScene;
 		std::vector<SceneMaterialState> m_materialStates;
 		std::unique_ptr<IRenderPath> m_path;

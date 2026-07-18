@@ -61,11 +61,9 @@ namespace dy::Graphics
 		GpuScene* gpuScene = nullptr;
 		const std::vector<SceneMaterialState>* materialStates = nullptr;
 
-		// 명시적 그림자 깊이 패스(백엔드가 RequiresExplicitShadowPass()=true 일 때만 채워짐).
 		// 둘 다 non-null 이면 RenderPath 가 메인 패스 전에 깊이 전용 패스를 기록한다.
 		RHI::IPipelineState* shadowPipeline = nullptr;
 		RHI::ITexture* shadowDepth = nullptr;
-		uint32_t shadowMapResolution = 0;
 	};
 
 	class IRenderPath

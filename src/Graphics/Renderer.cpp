@@ -308,25 +308,19 @@ void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 	context.depthStencil = m_depthStencilTarget;
 	m_path->PrepareResources(scene, device, context);
 
-	// 프레임 상수버퍼는 메인 셰이더가 항상 참조한다(lighting=binding1, shadowMatrix=binding3).
-	// 따라서 그림자 비활성이어도 매 프레임 갱신/바인딩한다(그림자 off면 행렬은 Identity).
-	// 그림자 '깊이 패스'는 백엔드가 파이프라인 enableShadowPass 로 내부 처리한다.
 	UpdateShadowBuffer(scene, device);
+	if(m_shadowPipeline != nullptr)
+	{
+		EnsureShadowDepthTarget(device);
+	}
 	UpdateLightingBuffer(scene, device);
 	context.lightingBuffer = m_lightingBuffer;
 	context.shadowMatrixBuffer = m_shadowMatrixBuffer;
 
-	// 명시적 그림자 패스가 필요한 백엔드(D3D12)면 깊이타겟/PSO 를 컨텍스트에 넣는다.
-	// RenderPath 가 메인 패스 전에 깊이 전용 패스를 기록한다(Vulkan 은 내부 처리하므로 비워둠).
-	if(m_useExplicitShadowPass)
+	if(m_shadowDepthTarget != nullptr && m_shadowPipeline != nullptr)
 	{
-		EnsureShadowDepthTarget(device);
-		if(m_shadowDepthTarget != nullptr && m_shadowPipeline != nullptr)
-		{
-			context.shadowPipeline = m_shadowPipeline;
-			context.shadowDepth = m_shadowDepthTarget;
-			context.shadowMapResolution = m_config.shadowMap.resolution;
-		}
+		context.shadowPipeline = m_shadowPipeline;
+		context.shadowDepth = m_shadowDepthTarget;
 	}
 
 	// 정식화된 패스 루프: 모든 전략이 동일 경로를 거친다.
@@ -361,22 +355,11 @@ void Renderer::BuildPipelineStates(RHI::IDevice* device)
 	desc.depthStencilFormat = m_config.depthStencilFormat;
 	desc.depthEnable = m_config.depthStencilFormat != RHI::Format::Unknown;
 	desc.wireframe = false;
-	desc.enableShadowPass = IsShadowEnabled();
 	desc.enableBindlessTextures = m_config.enableBindlessTextures;
-	desc.shadowMapResolution = m_config.shadowMap.resolution;
-	desc.shadowVertexShader = m_shadowVertexShaderSource.empty() ? nullptr : m_shadowVertexShaderSource.data();
-	desc.shadowVertexShaderSize = m_shadowVertexShaderSource.size();
-	// desc.shaderLayout = m_config.shaderLayout;
 
 	m_pipeline = device->CreateGraphicsPipeline(desc);
 
-	// 백엔드가 그림자 깊이 패스를 내부 처리하지 못하면(D3D12) Graphics 가 명시적으로
-	// 깊이 전용 패스를 기록한다. 이를 위해 별도의 깊이 전용 PSO(픽셀 셰이더 없음)를 만든다.
-	m_useExplicitShadowPass =
-		IsShadowEnabled() &&
-		device->RequiresExplicitShadowPass() &&
-		!m_shadowVertexShaderSource.empty();
-	if(m_useExplicitShadowPass)
+	if(IsShadowEnabled() && !m_shadowVertexShaderSource.empty())
 	{
 		const RHI::Format shadowFormat = m_config.depthStencilFormat != RHI::Format::Unknown
 			? m_config.depthStencilFormat
@@ -387,16 +370,13 @@ void Renderer::BuildPipelineStates(RHI::IDevice* device)
 		shadowDesc.vertexShaderSize = m_shadowVertexShaderSource.size();
 		shadowDesc.pixelShader = nullptr;
 		shadowDesc.pixelShaderSize = 0;
-		shadowDesc.renderTargetFormat = RHI::Format::Unknown; // 컬러 출력 없음(깊이 전용)
+		shadowDesc.renderTargetFormat = RHI::Format::Unknown;
 		shadowDesc.depthStencilFormat = shadowFormat;
 		shadowDesc.depthEnable = true;
-		shadowDesc.enableShadowPass = false;
 		shadowDesc.enableBindlessTextures = m_config.enableBindlessTextures;
-		shadowDesc.shadowMapResolution = m_config.shadowMap.resolution;
-		shadowDesc.depthBiasSlope = 1.75f; // Vulkan 그림자 파이프라인과 유사한 슬로프 바이어스
+		shadowDesc.depthBiasSlope = 1.75f;
 
 		m_shadowPipeline = device->CreateGraphicsPipeline(shadowDesc);
-		if(m_shadowPipeline == nullptr) m_useExplicitShadowPass = false;
 	}
 }
 
@@ -460,9 +440,10 @@ void Renderer::EnsureDepthStencilTarget(RHI::IDevice* device)
 
 void Renderer::EnsureShadowDepthTarget(RHI::IDevice* device)
 {
-	if(device == nullptr || !m_useExplicitShadowPass) return;
+	if(device == nullptr || m_shadowPipeline == nullptr) return;
 
-	const uint32_t resolution = m_config.shadowMap.resolution > 0u ? m_config.shadowMap.resolution : 2048u;
+	const uint32_t resolution = m_config.shadowMap.resolution;
+	if(resolution == 0u) return;
 	if(m_shadowDepthTarget != nullptr &&
 		m_shadowDepthTarget->GetWidth() == resolution &&
 		m_shadowDepthTarget->GetHeight() == resolution)
@@ -493,10 +474,13 @@ void Renderer::EnsureShadowDepthTarget(RHI::IDevice* device)
 
 	// 그림자 맵 SRV 를 글로벌 디스크립터 힙에 한 번 등록(메인 패스에서 샘플링).
 	m_shadowDescriptorIndex = device->AllocateDescriptorSlot();
-	if(m_shadowDescriptorIndex != RHI::INVALID_DESCRIPTOR_INDEX)
+	if(m_shadowDescriptorIndex == RHI::INVALID_DESCRIPTOR_INDEX)
 	{
-		device->UpdateDescriptorSlot(m_shadowDescriptorIndex, m_shadowDepthTarget);
+		device->DestroyTexture(m_shadowDepthTarget);
+		m_shadowDepthTarget = nullptr;
+		return;
 	}
+	device->UpdateDescriptorSlot(m_shadowDescriptorIndex, m_shadowDepthTarget);
 }
 
 void Renderer::EnsureMaterialStateCapacity(std::size_t materialCount)
@@ -560,7 +544,11 @@ void Renderer::UpdateLightingBuffer(const Scene& scene, RHI::IDevice* device)
 	const float lightIntensity = light != nullptr ? light->intensity : m_config.directionalLightIntensity;
 	const bool castsShadow = pointLight != nullptr ? pointLight->castShadow : (light != nullptr ? light->castShadow : true);
 	const float shadowStrength = pointLight != nullptr ? pointLight->shadowStrength : (light != nullptr ? light->shadowStrength : m_config.shadowStrength);
-	const bool shadowsEnabled = IsShadowEnabled() && castsShadow;
+	const bool shadowsEnabled =
+		IsShadowEnabled() &&
+		m_shadowPipeline != nullptr &&
+		m_shadowDepthTarget != nullptr &&
+		castsShadow;
 
 	Layout::RendererLightingConstants lighting = {};
 	lighting.cameraPosition = Math::float4(

@@ -889,7 +889,7 @@ void VulkanDevice::Impl::UpdateDescriptorSlot(dy::RHI::DescriptorIndex index, dy
 	VkDescriptorImageInfo imageInfo{};
 	imageInfo.sampler = vulkanTexture->GetSampler();
 	imageInfo.imageView = vulkanTexture->GetImageView();
-	imageInfo.imageLayout = vulkanTexture->GetImageLayout();
+	imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 
 	VkWriteDescriptorSet write{};
 	write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -2067,14 +2067,22 @@ bool VulkanDevice::Impl::InitializeBindlessDescriptorSet() {
 }
 
 bool VulkanDevice::Impl::UpdateDrawDescriptorSets(const VulkanCommandList& commandList) {
-	if (commandList.m_drawCalls.size() > m_maxDrawsPerFrame) return false;
 	if (!commandList.m_drawCalls.empty()) {
 		const VulkanCommandList::DrawCall& firstDraw = commandList.m_drawCalls.front();
 		const VulkanPipelineState* pipelineState = dynamic_cast<const VulkanPipelineState*>(firstDraw.pipelineState);
 		if (pipelineState != nullptr && pipelineState->UsesBindlessTextures()) {
-			return UpdateDrawDescriptorSet(firstDraw, 0);
+			const VulkanCommandList::DrawCall* descriptorDraw = &firstDraw;
+			for (auto drawIt = commandList.m_drawCalls.rbegin(); drawIt != commandList.m_drawCalls.rend(); ++drawIt) {
+				if (m_shaderLayout.shadowSamplerBinding < drawIt->textures.size() &&
+					drawIt->textures[m_shaderLayout.shadowSamplerBinding] != nullptr) {
+					descriptorDraw = &*drawIt;
+					break;
+				}
+			}
+			return UpdateDrawDescriptorSet(*descriptorDraw, 0);
 		}
 	}
+	if (commandList.m_drawCalls.size() > m_maxDrawsPerFrame) return false;
 	for (uint32_t drawIndex = 0; drawIndex < commandList.m_drawCalls.size(); ++drawIndex) {
 		if (!UpdateDrawDescriptorSet(commandList.m_drawCalls[drawIndex], drawIndex)) return false;
 	}
@@ -2175,18 +2183,25 @@ bool VulkanDevice::Impl::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCa
 		writes.push_back(storageWrite);
 	}
 
-	const VulkanTexture* shadowTexture = static_cast<const VulkanTexture*>(m_shadowMapTexture);
-	const bool usingFallbackShadowTexture = shadowTexture == nullptr;
-	if (usingFallbackShadowTexture && hasFallbackTexture) {
+	const VulkanTexture* shadowTexture = nullptr;
+	if (m_shaderLayout.shadowSamplerBinding < drawCall.textures.size()) {
+		shadowTexture = dynamic_cast<const VulkanTexture*>(drawCall.textures[m_shaderLayout.shadowSamplerBinding]);
+	}
+	bool usingInternalShadowTexture = false;
+	if (shadowTexture == nullptr) {
+		shadowTexture = static_cast<const VulkanTexture*>(m_shadowMapTexture);
+		usingInternalShadowTexture = shadowTexture != nullptr;
+	}
+	if (shadowTexture == nullptr && hasFallbackTexture) {
 		shadowTexture = fallbackTexture;
 	}
 	VkDescriptorImageInfo shadowInfo{};
 	if (shadowTexture != nullptr && shadowTexture->GetImageView() != VK_NULL_HANDLE && shadowTexture->GetSampler() != VK_NULL_HANDLE) {
 		shadowInfo.sampler = shadowTexture->GetSampler();
 		shadowInfo.imageView = shadowTexture->GetImageView();
-		shadowInfo.imageLayout = usingFallbackShadowTexture
-			? shadowTexture->GetImageLayout()
-			: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		shadowInfo.imageLayout = usingInternalShadowTexture
+			? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+			: shadowTexture->GetImageLayout();
 		VkWriteDescriptorSet shadowWrite{};
 		shadowWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		shadowWrite.dstSet = m_descriptorSets[descriptorIndex];

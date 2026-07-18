@@ -317,10 +317,9 @@ namespace
 	// 뷰포트는 백엔드 SetRenderTargets 가 깊이타겟 해상도로 맞춘다.
 	void BeginShadowPass(RHI::ICommandList* commandList, const RenderPathContext& ctx)
 	{
-		commandList->BindGraphicsPipeline(ctx.shadowPipeline);
 		commandList->SetRenderTargets(0, nullptr, ctx.shadowDepth);
 		commandList->ClearDepth(ctx.shadowDepth, 1.0f);
-		commandList->BindGlobalDescriptors();
+		commandList->BindGraphicsPipeline(ctx.shadowPipeline);
 		if(ctx.shadowMatrixBuffer != nullptr)
 		{
 			commandList->BindConstantBuffer(Layout::kShadowMatrixBinding, ctx.shadowMatrixBuffer, 0, static_cast<uint32_t>(sizeof(Layout::RendererShadowConstants)));
