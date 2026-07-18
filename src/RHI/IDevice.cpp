@@ -22,10 +22,14 @@ IDevice* IDevice::Create(const void* windowHandle, const DeviceDesc& desc)
 #else
 	device = new dy::Backends::NullDevice();
 #endif
-	if(device)
+	if(device == nullptr) return nullptr;
+
+	device->SetDesc(desc);
+	if(device->Initialize(windowHandle, device->GetDesc()) != 0)
 	{
-		device->SetDesc(desc);
-		device->Initialize(windowHandle, device->GetDesc());
+		delete device;
+		return nullptr;
 	}
+
 	return device;
 }
