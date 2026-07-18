@@ -579,10 +579,12 @@ private:
 
 	void RecordCommandBuffer(const VulkanCommandList& commandList);
 	void RecordShadowPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList);
-	void RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList);
-	bool ResolveMainPassTarget(const VulkanCommandList& commandList, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
+	void RecordPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList, const VulkanCommandList::PassRecord& passRecord, uint32_t firstDraw, uint32_t drawCount);
+	bool ResolvePassTarget(const VulkanCommandList::PassRecord& passRecord, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
 	bool GetOrCreateOffscreenFramebuffer(dy::RHI::ITexture* colorTarget, dy::RHI::ITexture* depthTarget, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
+	bool GetOrCreateDepthOnlyFramebuffer(dy::RHI::ITexture* depthTarget, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
 	bool CreateOffscreenRenderPass(VkFormat colorFormat, VkFormat depthFormat, VkImageLayout colorFinalLayout, VkRenderPass& renderPass);
+	bool CreateDepthOnlyRenderPass(VkFormat depthFormat, bool shaderReadable, VkRenderPass& renderPass);
 	void DestroyRenderTargetCache();
 	bool UpdateDrawDescriptorSets(const VulkanCommandList& commandList);
 	bool UpdateDrawDescriptorSet(const VulkanCommandList::DrawCall& drawCall, uint32_t drawIndex);
@@ -985,11 +987,11 @@ void VulkanDevice::Impl::Submit(dy::RHI::ICommandList** cmdLists, uint32_t count
 	if (!m_frameReady || count == 0 || !cmdLists || !cmdLists[0]) return;
 
 	VulkanCommandList* vulkanCmd = static_cast<VulkanCommandList*>(cmdLists[0]);
+	RecordCommandBuffer(*vulkanCmd);
 	if (!UpdateDrawDescriptorSets(*vulkanCmd)) {
 		SDL_Log("Failed to update Vulkan draw descriptor sets.");
 		return;
 	}
-	RecordCommandBuffer(*vulkanCmd);
 
 	const VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
 	VkSubmitInfo submitInfo{};
@@ -1151,13 +1153,20 @@ void VulkanDevice::Impl::RecordCommandBuffer(const VulkanCommandList& commandLis
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	vkBeginCommandBuffer(commandBuffer, &beginInfo);
 
-	// Pass 1: Shadow Pass 
 	if (m_shadowRenderPass != VK_NULL_HANDLE && m_shadowPipeline != VK_NULL_HANDLE) {
 		RecordShadowPass(commandBuffer, commandList);
 	}
 
-	// Pass 2: Main Pass
-	RecordMainPass(commandBuffer, commandList);
+	const uint32_t passCount = static_cast<uint32_t>(commandList.m_passRecords.size());
+	const uint32_t totalDrawCount = static_cast<uint32_t>(commandList.m_drawCalls.size());
+	for (uint32_t passIndex = 0; passIndex < passCount; ++passIndex) {
+		const VulkanCommandList::PassRecord& passRecord = commandList.m_passRecords[passIndex];
+		const uint32_t firstDraw = std::min(passRecord.firstDraw, totalDrawCount);
+		const uint32_t nextDraw = passIndex + 1 < passCount
+			? std::min(commandList.m_passRecords[passIndex + 1].firstDraw, totalDrawCount)
+			: totalDrawCount;
+		RecordPass(commandBuffer, commandList, passRecord, firstDraw, nextDraw - firstDraw);
+	}
 
 	vkEndCommandBuffer(commandBuffer);
 }
@@ -1258,27 +1267,40 @@ void VulkanDevice::Impl::RecordShadowPass(VkCommandBuffer commandBuffer, const V
 	vkCmdEndRenderPass(commandBuffer);
 	return;
 }
-void VulkanDevice::Impl::RecordMainPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList) {
+void VulkanDevice::Impl::RecordPass(
+	VkCommandBuffer commandBuffer,
+	const VulkanCommandList& commandList,
+	const VulkanCommandList::PassRecord& passRecord,
+	uint32_t firstDraw,
+	uint32_t drawCount)
+{
 	VkRenderPass renderPass = VK_NULL_HANDLE;
 	VkFramebuffer framebuffer = VK_NULL_HANDLE;
 	VkExtent2D renderExtent = {};
-	if (!ResolveMainPassTarget(commandList, renderPass, framebuffer, renderExtent)) return;
+	if (!ResolvePassTarget(passRecord, renderPass, framebuffer, renderExtent)) return;
 
 	std::array<VkClearValue, 2> clearValues = {};
-	clearValues[0].color = { {
-		commandList.m_clearColor[0],
-		commandList.m_clearColor[1],
-		commandList.m_clearColor[2],
-		commandList.m_clearColor[3]
-	} };
-	clearValues[1].depthStencil = { commandList.m_clearDepth, 0 };
+	uint32_t clearValueCount = 0;
+	if (passRecord.renderTargetCount == 0 && passRecord.depthStencil != nullptr) {
+		clearValues[0].depthStencil = { passRecord.clearDepth, 0 };
+		clearValueCount = 1;
+	} else {
+		clearValues[0].color = { {
+			passRecord.clearColor[0],
+			passRecord.clearColor[1],
+			passRecord.clearColor[2],
+			passRecord.clearColor[3]
+		} };
+		clearValues[1].depthStencil = { passRecord.clearDepth, 0 };
+		clearValueCount = 2;
+	}
 	VkRenderPassBeginInfo renderPassInfo{};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
 	renderPassInfo.renderPass = renderPass;
 	renderPassInfo.framebuffer = framebuffer;
 	renderPassInfo.renderArea.offset = {0, 0};
 	renderPassInfo.renderArea.extent = renderExtent;
-	renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
+	renderPassInfo.clearValueCount = clearValueCount;
 	renderPassInfo.pClearValues = clearValues.data();
 
 	vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
@@ -1287,7 +1309,8 @@ void VulkanDevice::Impl::RecordMainPass(VkCommandBuffer commandBuffer, const Vul
 	VkPipelineLayout currentPipelineLayout = VK_NULL_HANDLE;
 	VkDescriptorSet currentDescriptorSet = VK_NULL_HANDLE;
 	VkDescriptorSet currentBindlessDescriptorSet = VK_NULL_HANDLE;
-	for (uint32_t drawIndex = 0; drawIndex < commandList.m_drawCalls.size(); ++drawIndex) {
+	const uint32_t drawEnd = firstDraw + drawCount;
+	for (uint32_t drawIndex = firstDraw; drawIndex < drawEnd; ++drawIndex) {
 		const VulkanCommandList::DrawCall& drawCall = commandList.m_drawCalls[drawIndex];
 		const VulkanPipelineState* pipelineState = dynamic_cast<const VulkanPipelineState*>(drawCall.pipelineState);
 		if (pipelineState == nullptr) continue;
@@ -1392,22 +1415,25 @@ void VulkanDevice::Impl::RecordMainPass(VkCommandBuffer commandBuffer, const Vul
 	vkCmdEndRenderPass(commandBuffer);
 }
 
-bool VulkanDevice::Impl::ResolveMainPassTarget(const VulkanCommandList& commandList, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent) {
-	if (commandList.m_renderTargetCount > 1) {
+bool VulkanDevice::Impl::ResolvePassTarget(const VulkanCommandList::PassRecord& passRecord, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent) {
+	if (passRecord.renderTargetCount > 1) {
 		SDL_Log("Vulkan main pass currently supports one color render target.");
 		return false;
 	}
+	if (passRecord.renderTargetCount == 0 && passRecord.depthStencil != nullptr) {
+		return GetOrCreateDepthOnlyFramebuffer(passRecord.depthStencil, renderPass, framebuffer, extent);
+	}
 
 	dy::RHI::ITexture* colorTarget = m_backBuffer;
-	if (commandList.m_renderTargetCount == 1 && commandList.m_renderTargets[0] != nullptr) {
-		colorTarget = commandList.m_renderTargets[0];
+	if (passRecord.renderTargetCount == 1 && passRecord.renderTargets[0] != nullptr) {
+		colorTarget = passRecord.renderTargets[0];
 	}
 
 	if (colorTarget == nullptr || colorTarget == m_backBuffer) {
-		if (commandList.m_depthStencil != nullptr && commandList.m_depthStencil != m_depthTexture) {
+		if (passRecord.depthStencil != nullptr && passRecord.depthStencil != m_depthTexture) {
 			for (const RenderTargetCacheEntry& entry : m_renderTargetCache) {
 				if (entry.colorTarget == m_backBuffer &&
-					entry.depthTarget == commandList.m_depthStencil &&
+					entry.depthTarget == passRecord.depthStencil &&
 					entry.imageIndex == m_currentImageIndex) {
 					renderPass = entry.renderPass;
 					framebuffer = entry.framebuffer;
@@ -1416,7 +1442,7 @@ bool VulkanDevice::Impl::ResolveMainPassTarget(const VulkanCommandList& commandL
 				}
 			}
 
-			const VulkanTexture* depthTexture = dynamic_cast<const VulkanTexture*>(commandList.m_depthStencil);
+			const VulkanTexture* depthTexture = dynamic_cast<const VulkanTexture*>(passRecord.depthStencil);
 			if (depthTexture == nullptr || depthTexture->GetImageView() == VK_NULL_HANDLE) {
 				SDL_Log("Vulkan swapchain pass depth target is not a valid Vulkan texture.");
 				return false;
@@ -1444,7 +1470,7 @@ bool VulkanDevice::Impl::ResolveMainPassTarget(const VulkanCommandList& commandL
 
 			RenderTargetCacheEntry entry{};
 			entry.colorTarget = m_backBuffer;
-			entry.depthTarget = commandList.m_depthStencil;
+			entry.depthTarget = passRecord.depthStencil;
 			entry.renderPass = m_mainRenderPass;
 			entry.framebuffer = swapchainFramebuffer;
 			entry.imageIndex = m_currentImageIndex;
@@ -1464,7 +1490,74 @@ bool VulkanDevice::Impl::ResolveMainPassTarget(const VulkanCommandList& commandL
 		return renderPass != VK_NULL_HANDLE && framebuffer != VK_NULL_HANDLE;
 	}
 
-	return GetOrCreateOffscreenFramebuffer(colorTarget, commandList.m_depthStencil, renderPass, framebuffer, extent);
+	return GetOrCreateOffscreenFramebuffer(colorTarget, passRecord.depthStencil, renderPass, framebuffer, extent);
+}
+
+bool VulkanDevice::Impl::GetOrCreateDepthOnlyFramebuffer(
+	dy::RHI::ITexture* depthTarget,
+	VkRenderPass& renderPass,
+	VkFramebuffer& framebuffer,
+	VkExtent2D& extent)
+{
+	for (const RenderTargetCacheEntry& entry : m_renderTargetCache) {
+		if (entry.colorTarget == nullptr && entry.depthTarget == depthTarget) {
+			renderPass = entry.renderPass;
+			framebuffer = entry.framebuffer;
+			extent = { entry.width, entry.height };
+			return renderPass != VK_NULL_HANDLE && framebuffer != VK_NULL_HANDLE;
+		}
+	}
+
+	VulkanTexture* depthTexture = dynamic_cast<VulkanTexture*>(depthTarget);
+	if (depthTexture == nullptr || depthTexture->GetImageView() == VK_NULL_HANDLE) {
+		SDL_Log("Vulkan depth-only target is not a valid Vulkan texture.");
+		return false;
+	}
+	if (!HasTextureUsage(depthTarget->GetUsage(), dy::RHI::TextureUsage::DepthStencil)) {
+		SDL_Log("Vulkan depth-only target is missing DepthStencil usage.");
+		return false;
+	}
+
+	const bool shaderReadable = HasTextureUsage(depthTarget->GetUsage(), dy::RHI::TextureUsage::ShaderResource);
+	VkRenderPass depthOnlyRenderPass = VK_NULL_HANDLE;
+	if (!CreateDepthOnlyRenderPass(depthTexture->GetVkFormat(), shaderReadable, depthOnlyRenderPass)) {
+		return false;
+	}
+
+	VkImageView attachment = depthTexture->GetImageView();
+	VkFramebufferCreateInfo fbInfo{};
+	fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+	fbInfo.renderPass = depthOnlyRenderPass;
+	fbInfo.attachmentCount = 1;
+	fbInfo.pAttachments = &attachment;
+	fbInfo.width = depthTexture->GetWidth();
+	fbInfo.height = depthTexture->GetHeight();
+	fbInfo.layers = 1;
+
+	VkFramebuffer depthOnlyFramebuffer = VK_NULL_HANDLE;
+	if (vkCreateFramebuffer(m_context.device, &fbInfo, nullptr, &depthOnlyFramebuffer) != VK_SUCCESS) {
+		vkDestroyRenderPass(m_context.device, depthOnlyRenderPass, nullptr);
+		return false;
+	}
+
+	const VkImageLayout finalLayout = shaderReadable
+		? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+		: VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	depthTexture->SetImageLayout(finalLayout);
+
+	RenderTargetCacheEntry entry{};
+	entry.depthTarget = depthTarget;
+	entry.renderPass = depthOnlyRenderPass;
+	entry.framebuffer = depthOnlyFramebuffer;
+	entry.width = depthTexture->GetWidth();
+	entry.height = depthTexture->GetHeight();
+	entry.ownsRenderPass = true;
+	m_renderTargetCache.push_back(entry);
+
+	renderPass = depthOnlyRenderPass;
+	framebuffer = depthOnlyFramebuffer;
+	extent = { entry.width, entry.height };
+	return true;
 }
 
 bool VulkanDevice::Impl::GetOrCreateOffscreenFramebuffer(
@@ -1610,6 +1703,64 @@ bool VulkanDevice::Impl::CreateOffscreenRenderPass(VkFormat colorFormat, VkForma
 	renderPassInfo.pSubpasses = &subpass;
 	renderPassInfo.dependencyCount = 1;
 	renderPassInfo.pDependencies = &dependency;
+
+	return vkCreateRenderPass(m_context.device, &renderPassInfo, nullptr, &renderPass) == VK_SUCCESS;
+}
+
+bool VulkanDevice::Impl::CreateDepthOnlyRenderPass(VkFormat depthFormat, bool shaderReadable, VkRenderPass& renderPass) {
+	VkAttachmentDescription depthAttachment{};
+	depthAttachment.format = depthFormat;
+	depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+	depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	depthAttachment.storeOp = shaderReadable ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+	depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	depthAttachment.finalLayout = shaderReadable
+		? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+		: VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+	VkAttachmentReference depthAttachmentRef{};
+	depthAttachmentRef.attachment = 0;
+	depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+	VkSubpassDescription subpass{};
+	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+	subpass.colorAttachmentCount = 0;
+	subpass.pColorAttachments = nullptr;
+	subpass.pDepthStencilAttachment = &depthAttachmentRef;
+
+	std::array<VkSubpassDependency, 2> dependencies = {};
+	dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+	dependencies[0].dstSubpass = 0;
+	dependencies[0].srcStageMask = shaderReadable
+		? VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+		: VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+	dependencies[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+	dependencies[0].srcAccessMask = shaderReadable ? VK_ACCESS_SHADER_READ_BIT : 0;
+	dependencies[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+	dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+
+	uint32_t dependencyCount = 1;
+	if (shaderReadable) {
+		dependencies[1].srcSubpass = 0;
+		dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+		dependencies[1].srcStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+		dependencies[1].dstStageMask = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+		dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+		dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+		dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
+		dependencyCount = 2;
+	}
+
+	VkRenderPassCreateInfo renderPassInfo{};
+	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+	renderPassInfo.attachmentCount = 1;
+	renderPassInfo.pAttachments = &depthAttachment;
+	renderPassInfo.subpassCount = 1;
+	renderPassInfo.pSubpasses = &subpass;
+	renderPassInfo.dependencyCount = dependencyCount;
+	renderPassInfo.pDependencies = dependencies.data();
 
 	return vkCreateRenderPass(m_context.device, &renderPassInfo, nullptr, &renderPass) == VK_SUCCESS;
 }

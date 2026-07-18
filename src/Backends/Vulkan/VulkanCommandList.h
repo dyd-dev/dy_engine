@@ -60,6 +60,16 @@ private:
 		uint32_t size = 0;
 	};
 
+	struct PassRecord
+	{
+		uint32_t firstDraw = 0;
+		uint32_t renderTargetCount = 0;
+		std::array<dy::RHI::ITexture*, kMaxRenderTargets> renderTargets = {};
+		dy::RHI::ITexture* depthStencil = nullptr;
+		std::array<float, 4> clearColor = { 0.4f, 0.7f, 1.0f, 1.0f };
+		float clearDepth = 1.0f;
+	};
+
 	struct DrawCall
 	{
 		bool indexed = false;
@@ -84,12 +94,11 @@ private:
 		std::array<uint8_t, kMaxPushConstantBytes> pushConstants = {};
 	};
 
+	void EnsurePassRecord();
+
 	friend struct VulkanDevice::Impl;
 	std::array<float, 4> m_clearColor = { 0.4f, 0.7f, 1.0f, 1.0f };
 	float m_clearDepth = 1.0f;
-	uint32_t m_renderTargetCount = 0;
-	std::array<dy::RHI::ITexture*, kMaxRenderTargets> m_renderTargets = {};
-	dy::RHI::ITexture* m_depthStencil = nullptr;
 	dy::RHI::IPipelineState* m_boundPipeline = nullptr;
 	std::array<uint8_t, kMaxPushConstantBytes> m_pendingPushConstants = {};
 	uint32_t m_pendingPushConstantSize = 0;
@@ -101,6 +110,7 @@ private:
 	bool m_hasPendingScissor = false;
 	dy::RHI::Viewport m_pendingViewport = {};
 	dy::RHI::Rect m_pendingScissor = {};
+	std::vector<PassRecord> m_passRecords;
 	std::vector<DrawCall> m_drawCalls;
 	bool m_isClosed = false;
 };

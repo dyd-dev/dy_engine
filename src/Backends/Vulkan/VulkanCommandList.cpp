@@ -9,9 +9,6 @@ void VulkanCommandList::Begin()
 {
 	m_clearColor = { { 0.4f, 0.7f, 1.0f, 1.0f } };
 	m_clearDepth = 1.0f;
-	m_renderTargetCount = 0;
-	m_renderTargets = {};
-	m_depthStencil = nullptr;
 	m_boundPipeline = nullptr;
 	m_pendingPushConstantSize = 0;
 	m_pendingGeometry = {};
@@ -20,6 +17,7 @@ void VulkanCommandList::Begin()
 	m_pendingTextures = {};
 	m_hasPendingViewport = false;
 	m_hasPendingScissor = false;
+	m_passRecords.clear();
 	m_drawCalls.clear();
 	m_isClosed = false;
 }
@@ -85,24 +83,32 @@ void VulkanCommandList::BindTexture(uint32_t binding, dy::RHI::ITexture* texture
 
 void VulkanCommandList::SetRenderTargets(uint32_t numRenderTargets, dy::RHI::ITexture** renderTargets, dy::RHI::ITexture* depthStencil)
 {
-	m_renderTargetCount = std::min<uint32_t>(numRenderTargets, kMaxRenderTargets);
-	m_renderTargets = {};
-	for (uint32_t i = 0; i < m_renderTargetCount; ++i) {
-		m_renderTargets[i] = renderTargets != nullptr ? renderTargets[i] : nullptr;
+	PassRecord passRecord = {};
+	passRecord.firstDraw = static_cast<uint32_t>(m_drawCalls.size());
+	passRecord.renderTargetCount = std::min<uint32_t>(numRenderTargets, kMaxRenderTargets);
+	for (uint32_t i = 0; i < passRecord.renderTargetCount; ++i) {
+		passRecord.renderTargets[i] = renderTargets != nullptr ? renderTargets[i] : nullptr;
 	}
-	m_depthStencil = depthStencil;
+	passRecord.depthStencil = depthStencil;
+	passRecord.clearColor = m_clearColor;
+	passRecord.clearDepth = m_clearDepth;
+	m_passRecords.push_back(passRecord);
 }
 
 void VulkanCommandList::ClearColor(dy::RHI::ITexture* renderTarget, float r, float g, float b, float a)
 {
 	(void)renderTarget;
 	m_clearColor = { { r, g, b, a } };
+	EnsurePassRecord();
+	m_passRecords.back().clearColor = m_clearColor;
 }
 
 void VulkanCommandList::ClearDepth(dy::RHI::ITexture* depthStencil, float depth)
 {
 	(void)depthStencil;
 	m_clearDepth = depth;
+	EnsurePassRecord();
+	m_passRecords.back().clearDepth = depth;
 }
 
 void VulkanCommandList::SetViewport(const dy::RHI::Viewport& viewport)
@@ -119,6 +125,7 @@ void VulkanCommandList::SetScissor(const dy::RHI::Rect& rect)
 
 void VulkanCommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance)
 {
+	EnsurePassRecord();
 	DrawCall drawCall = {};
 	drawCall.indexed = false;
 	drawCall.vertexCount = vertexCount;
@@ -144,6 +151,7 @@ void VulkanCommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCou
 
 void VulkanCommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance)
 {
+	EnsurePassRecord();
 	DrawCall drawCall = {};
 	drawCall.indexed = true;
 	drawCall.indexCount = indexCount;
@@ -170,6 +178,17 @@ void VulkanCommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t insta
 
 void VulkanCommandList::End()
 {
+}
+
+void VulkanCommandList::EnsurePassRecord()
+{
+	if (!m_passRecords.empty()) return;
+
+	PassRecord passRecord = {};
+	passRecord.firstDraw = static_cast<uint32_t>(m_drawCalls.size());
+	passRecord.clearColor = m_clearColor;
+	passRecord.clearDepth = m_clearDepth;
+	m_passRecords.push_back(passRecord);
 }
 
 }
