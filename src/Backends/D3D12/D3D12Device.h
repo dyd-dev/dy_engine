@@ -34,8 +34,6 @@ public:
 
   RHI::ITexture *GetBackBuffer() override;
 
-  [[nodiscard]] bool RequiresExplicitShadowPass() const override { return true; }
-
 protected:
   int Initialize(const void *windowHandle, const RHI::DeviceDesc& desc) override;
 

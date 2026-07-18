@@ -55,7 +55,6 @@ namespace dy::RHI
 
 		virtual bool UpdateTexture(ITexture* texture, const void* data, uint32_t rowPitch) = 0;
 
-		[[nodiscard]] virtual bool RequiresExplicitShadowPass() const { return false; }
 		// (D3D12/Metal: false. Vulkan: true)
 		[[nodiscard]] virtual bool RequiresClipSpaceYFlip() const { return false; }
 

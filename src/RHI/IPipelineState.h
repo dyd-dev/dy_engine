@@ -14,17 +14,12 @@ namespace dy::RHI
 		const void* pixelShader = nullptr;
 		size_t pixelShaderSize = 0;
 
-		const void* shadowVertexShader = nullptr;
-		size_t shadowVertexShaderSize = 0;
-
 		Format renderTargetFormat = Format::Unknown;
 		Format depthStencilFormat = Format::Unknown;
 
 		bool depthEnable = false;
 		bool wireframe = false;
-		bool enableShadowPass = false;
 		bool enableBindlessTextures = false;
-		uint32_t shadowMapResolution = 0;
 
 		int32_t depthBias = 0;
 		float depthBiasSlope = 0.0f;

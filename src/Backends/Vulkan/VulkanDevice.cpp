@@ -7,7 +7,6 @@
 #include "RHI/IBuffer.h"
 #include "RHI/IPipelineState.h"
 #include "RHI/ITexture.h"
-#include "Graphics/RendererShaderLayout.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <array>
@@ -367,7 +366,6 @@ namespace {
 			const dy::RHI::GraphicsPipelineDesc& desc,
 			uint32_t pushConstantSize)
 			: m_device(context.device),
-			m_shadowPassEnabled(desc.enableShadowPass),
 			m_bindlessTexturesEnabled(desc.enableBindlessTextures),
 			m_pushConstantSize(pushConstantSize)
 		{
@@ -410,7 +408,6 @@ namespace {
 			}
 		}
 
-		bool IsShadowPassEnabled() const { return m_shadowPassEnabled; }
 		bool UsesBindlessTextures() const { return m_bindlessTexturesEnabled; }
 
 	private:
@@ -433,14 +430,11 @@ namespace {
 			m_desc = desc;
 			CopyShaderBytes(desc.vertexShader, desc.vertexShaderSize, m_vertexShader);
 			CopyShaderBytes(desc.pixelShader, desc.pixelShaderSize, m_pixelShader);
-			CopyShaderBytes(desc.shadowVertexShader, desc.shadowVertexShaderSize, m_shadowVertexShader);
 
 			m_desc.vertexShader = m_vertexShader.empty() ? nullptr : m_vertexShader.data();
 			m_desc.vertexShaderSize = m_vertexShader.size();
 			m_desc.pixelShader = m_pixelShader.empty() ? nullptr : m_pixelShader.data();
 			m_desc.pixelShaderSize = m_pixelShader.size();
-			m_desc.shadowVertexShader = m_shadowVertexShader.empty() ? nullptr : m_shadowVertexShader.data();
-			m_desc.shadowVertexShaderSize = m_shadowVertexShader.size();
 		}
 
 		VkDevice m_device = VK_NULL_HANDLE;
@@ -448,25 +442,9 @@ namespace {
 		uint32_t m_pushConstantSize = 0;
 		std::vector<uint8_t> m_vertexShader;
 		std::vector<uint8_t> m_pixelShader;
-		std::vector<uint8_t> m_shadowVertexShader;
 		mutable std::vector<PipelineCacheEntry> m_pipelineCache;
-		bool m_shadowPassEnabled = false;
 		bool m_bindlessTexturesEnabled = false;
 	};
-
-	VkShaderModule CreateShaderModule(VkDevice device, const void* shaderCode, size_t shaderSize)
-	{
-		VkShaderModuleCreateInfo createInfo{};
-		createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-		createInfo.codeSize = shaderSize;
-		createInfo.pCode = reinterpret_cast<const uint32_t*>(shaderCode);
-
-		VkShaderModule shaderModule = VK_NULL_HANDLE;
-		if (vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule) != VK_SUCCESS) {
-			throw std::runtime_error("failed to create shader module");
-		}
-		return shaderModule;
-	}
 
 	VkBufferUsageFlags ToVkBufferUsage(dy::RHI::BufferUsage usage)
 	{
@@ -568,17 +546,11 @@ private:
 	bool CreateCommandBuffer();
 	bool CreateFallbackTexture();
 
-	bool CreateShadowMapResources();
-	bool CreateShadowRenderPass();
-	bool CreateShadowPipeline(const dy::RHI::GraphicsPipelineDesc& desc);
-	void DestroyShadowResources();
-
 	void RecreateSwapchain();
 	void DestroySwapchainResources();
 	void DestroyDeviceResources();
 
 	void RecordCommandBuffer(const VulkanCommandList& commandList);
-	void RecordShadowPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList);
 	void RecordPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList, const VulkanCommandList::PassRecord& passRecord, uint32_t firstDraw, uint32_t drawCount);
 	bool ResolvePassTarget(const VulkanCommandList::PassRecord& passRecord, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
 	bool GetOrCreateOffscreenFramebuffer(dy::RHI::ITexture* colorTarget, dy::RHI::ITexture* depthTarget, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
@@ -633,13 +605,6 @@ private:
 	};
 	std::vector<RenderTargetCacheEntry> m_renderTargetCache;
 
-	VkRenderPass m_shadowRenderPass = VK_NULL_HANDLE;
-	VkFramebuffer m_shadowFramebuffer = VK_NULL_HANDLE;
-	VkPipelineLayout m_shadowPipelineLayout = VK_NULL_HANDLE;
-	VkPipeline m_shadowPipeline = VK_NULL_HANDLE;
-	VkFormat m_shadowMapFormat = VK_FORMAT_UNDEFINED;
-	uint32_t m_shadowMapResolution = 0;
-
 	uint32_t m_maxFramesInFlight = dy::RHI::DeviceDesc{}.maxFramesInFlight;
 	uint32_t m_maxDrawsPerFrame = dy::RHI::DeviceDesc{}.maxDrawsPerFrame;
 	uint32_t m_maxBindlessTextures = dy::RHI::DeviceDesc{}.maxBindlessTextures;
@@ -657,7 +622,6 @@ private:
 	dy::RHI::ITexture* m_backBuffer = nullptr;
 	dy::RHI::ITexture* m_fallbackTexture = nullptr;
 	dy::RHI::ITexture* m_depthTexture = nullptr;
-	dy::RHI::ITexture* m_shadowMapTexture = nullptr;
 	std::vector<dy::RHI::ITexture*> m_ownedTextures;
 	std::vector<dy::RHI::IPipelineState*> m_ownedPipelineStates;
 };
@@ -837,24 +801,6 @@ dy::RHI::IPipelineState* VulkanDevice::Impl::CreateGraphicsPipeline(const dy::RH
 	if (desc.depthBiasClamp != 0.0f && !m_depthBiasClampSupported) return nullptr;
 
 	try {
-		if (desc.enableShadowPass) {
-			if (desc.shadowMapResolution == 0) return nullptr;
-			const uint32_t requestedShadowMapResolution = desc.shadowMapResolution;
-			if (m_shadowRenderPass != VK_NULL_HANDLE && requestedShadowMapResolution != m_shadowMapResolution) {
-				vkDeviceWaitIdle(m_context.device);
-				DestroyShadowResources();
-			}
-			m_shadowMapResolution = requestedShadowMapResolution;
-		}
-		if (desc.enableShadowPass && m_shadowRenderPass == VK_NULL_HANDLE) {
-			m_shadowMapFormat = m_depthFormat;
-			if (!CreateShadowRenderPass()) return nullptr;
-			if (!CreateShadowMapResources()) return nullptr;
-		}
-		if (desc.enableShadowPass && m_shadowPipeline == VK_NULL_HANDLE && !CreateShadowPipeline(desc)) {
-			return nullptr;
-		}
-
 		VulkanPipelineState* pipelineState = new VulkanPipelineState(
 			m_context,
 			m_mainRenderPass,
@@ -1153,10 +1099,6 @@ void VulkanDevice::Impl::RecordCommandBuffer(const VulkanCommandList& commandLis
 	beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
 	vkBeginCommandBuffer(commandBuffer, &beginInfo);
 
-	if (m_shadowRenderPass != VK_NULL_HANDLE && m_shadowPipeline != VK_NULL_HANDLE) {
-		RecordShadowPass(commandBuffer, commandList);
-	}
-
 	const uint32_t passCount = static_cast<uint32_t>(commandList.m_passRecords.size());
 	const uint32_t totalDrawCount = static_cast<uint32_t>(commandList.m_drawCalls.size());
 	for (uint32_t passIndex = 0; passIndex < passCount; ++passIndex) {
@@ -1171,102 +1113,6 @@ void VulkanDevice::Impl::RecordCommandBuffer(const VulkanCommandList& commandLis
 	vkEndCommandBuffer(commandBuffer);
 }
 
-void VulkanDevice::Impl::RecordShadowPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList) {
-	VkClearValue newShadowClear = {};
-	newShadowClear.depthStencil = { 1.0f, 0 };
-
-	VkRenderPassBeginInfo newShadowPassInfo{};
-	newShadowPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-	newShadowPassInfo.renderPass = m_shadowRenderPass;
-	newShadowPassInfo.framebuffer = m_shadowFramebuffer;
-	newShadowPassInfo.renderArea.offset = {0, 0};
-	newShadowPassInfo.renderArea.extent = { m_shadowMapResolution, m_shadowMapResolution };
-	newShadowPassInfo.clearValueCount = 1;
-	newShadowPassInfo.pClearValues = &newShadowClear;
-
-	vkCmdBeginRenderPass(commandBuffer, &newShadowPassInfo, VK_SUBPASS_CONTENTS_INLINE);
-	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipeline);
-
-	VkViewport newShadowViewport{};
-	newShadowViewport.x = 0.0f;
-	newShadowViewport.y = 0.0f;
-	newShadowViewport.width = static_cast<float>(m_shadowMapResolution);
-	newShadowViewport.height = static_cast<float>(m_shadowMapResolution);
-	newShadowViewport.minDepth = 0.0f;
-	newShadowViewport.maxDepth = 1.0f;
-	VkRect2D newShadowScissor{};
-	newShadowScissor.offset = {0, 0};
-	newShadowScissor.extent = { m_shadowMapResolution, m_shadowMapResolution };
-	vkCmdSetViewport(commandBuffer, 0, 1, &newShadowViewport);
-	vkCmdSetScissor(commandBuffer, 0, 1, &newShadowScissor);
-
-	VkDescriptorSet currentDescriptorSet = VK_NULL_HANDLE;
-	for (uint32_t drawIndex = 0; drawIndex < commandList.m_drawCalls.size(); ++drawIndex) {
-		const VulkanCommandList::DrawCall& drawCall = commandList.m_drawCalls[drawIndex];
-		const VulkanPipelineState* pipelineState = dynamic_cast<const VulkanPipelineState*>(drawCall.pipelineState);
-		if (pipelineState == nullptr || !pipelineState->IsShadowPassEnabled()) continue;
-		const bool usesBindlessTextures = pipelineState->UsesBindlessTextures();
-
-		bool shouldCastShadow = true;
-		if (drawCall.pushConstantSize >= m_shaderLayout.drawModePushConstantOffset + sizeof(float)) {
-			float drawMode = 0.0f;
-			std::memcpy(&drawMode, drawCall.pushConstants.data() + m_shaderLayout.drawModePushConstantOffset, sizeof(drawMode));
-			if (drawCall.pushConstantSize >= m_shaderLayout.pushConstantRangeSize) {
-				const uint32_t drawFlags = static_cast<uint32_t>(drawMode + 0.5f);
-				shouldCastShadow = (drawFlags & m_shaderLayout.castShadowFlag) != 0;
-			} else {
-				shouldCastShadow = drawMode >= 0.0f && drawMode <= 1.5f;
-			}
-		}
-		if (!shouldCastShadow) continue;
-
-		const uint32_t descriptorSlot = usesBindlessTextures ? 0u : drawIndex;
-		const uint32_t descriptorIndex = m_currentFrameIndex * m_maxDrawsPerFrame + descriptorSlot;
-		if (descriptorIndex < m_descriptorSets.size()) {
-			VkDescriptorSet descriptorSet = m_descriptorSets[descriptorIndex];
-			if (descriptorSet != currentDescriptorSet) {
-				vkCmdBindDescriptorSets(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_shadowPipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
-				currentDescriptorSet = descriptorSet;
-			}
-		}
-
-		if (drawCall.pushConstantSize > 0) {
-			vkCmdPushConstants(
-				commandBuffer,
-				m_shadowPipelineLayout,
-				VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-				0,
-				drawCall.pushConstantSize,
-				drawCall.pushConstants.data());
-		}
-
-		DrawMetadataPushConstants metadata{};
-		if (drawCall.pushConstantSize >= m_shaderLayout.drawMetadataPushConstantOffset + sizeof(metadata)) {
-			std::memcpy(&metadata, drawCall.pushConstants.data() + m_shaderLayout.drawMetadataPushConstantOffset, sizeof(metadata));
-		}
-		metadata.firstIndex = drawCall.firstIndex;
-		metadata.vertexOffset = drawCall.baseVertex;
-		if (!drawCall.indexed) metadata.firstVertex = drawCall.startVertex;
-		vkCmdPushConstants(
-			commandBuffer,
-			m_shadowPipelineLayout,
-			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-			m_shaderLayout.drawMetadataPushConstantOffset,
-			sizeof(metadata),
-			&metadata);
-
-		if (drawCall.indexed) {
-			if (drawCall.indexCount > 0) {
-				vkCmdDraw(commandBuffer, drawCall.indexCount, drawCall.instanceCount, 0, drawCall.startInstance);
-			}
-		} else {
-			vkCmdDraw(commandBuffer, drawCall.vertexCount, drawCall.instanceCount, 0, drawCall.startInstance);
-		}
-	}
-
-	vkCmdEndRenderPass(commandBuffer);
-	return;
-}
 void VulkanDevice::Impl::RecordPass(
 	VkCommandBuffer commandBuffer,
 	const VulkanCommandList& commandList,
@@ -2187,11 +2033,6 @@ bool VulkanDevice::Impl::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCa
 	if (m_shaderLayout.shadowSamplerBinding < drawCall.textures.size()) {
 		shadowTexture = dynamic_cast<const VulkanTexture*>(drawCall.textures[m_shaderLayout.shadowSamplerBinding]);
 	}
-	bool usingInternalShadowTexture = false;
-	if (shadowTexture == nullptr) {
-		shadowTexture = static_cast<const VulkanTexture*>(m_shadowMapTexture);
-		usingInternalShadowTexture = shadowTexture != nullptr;
-	}
 	if (shadowTexture == nullptr && hasFallbackTexture) {
 		shadowTexture = fallbackTexture;
 	}
@@ -2199,9 +2040,7 @@ bool VulkanDevice::Impl::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCa
 	if (shadowTexture != nullptr && shadowTexture->GetImageView() != VK_NULL_HANDLE && shadowTexture->GetSampler() != VK_NULL_HANDLE) {
 		shadowInfo.sampler = shadowTexture->GetSampler();
 		shadowInfo.imageView = shadowTexture->GetImageView();
-		shadowInfo.imageLayout = usingInternalShadowTexture
-			? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-			: shadowTexture->GetImageLayout();
+		shadowInfo.imageLayout = shadowTexture->GetImageLayout();
 		VkWriteDescriptorSet shadowWrite{};
 		shadowWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
 		shadowWrite.dstSet = m_descriptorSets[descriptorIndex];
@@ -2240,227 +2079,6 @@ bool VulkanDevice::Impl::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCa
 
 	vkUpdateDescriptorSets(m_context.device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 	return true;
-}
-
-bool VulkanDevice::Impl::CreateShadowRenderPass() {
-	// Depth-only RenderPass.
-	// Color attachment 없음. Fragment shader에서 색을 출력하지 않는다.
-	// finalLayout을 SHADER_READ_ONLY_OPTIMAL로 두면 render pass 종료 후 shader sample에 바로 사용할 수 있다.
-	VkAttachmentDescription depthAttachment{};
-	depthAttachment.format = m_shadowMapFormat;
-	depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-	depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;            // Fragment shader에서 sample해야 하므로 STORE
-	depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	depthAttachment.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-
-	VkAttachmentReference depthAttachmentRef{};
-	depthAttachmentRef.attachment = 0;
-	depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-
-	VkSubpassDescription subpass{};
-	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-	subpass.colorAttachmentCount = 0;
-	subpass.pDepthStencilAttachment = &depthAttachmentRef;
-
-	// 두 개의 dependency: 이전 pass의 sample 완료 후 depth 기록 시작, depth 기록 완료 후 다음 sample 허용.
-	std::array<VkSubpassDependency, 2> dependencies = {};
-	dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
-	dependencies[0].dstSubpass = 0;
-	dependencies[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-	dependencies[0].dstStageMask = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-	dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-	dependencies[0].dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-	dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
-
-	dependencies[1].srcSubpass = 0;
-	dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
-	dependencies[1].srcStageMask = VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
-	dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-	dependencies[1].srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-	dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-	dependencies[1].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
-
-	VkRenderPassCreateInfo info{};
-	info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-	info.attachmentCount = 1;
-	info.pAttachments = &depthAttachment;
-	info.subpassCount = 1;
-	info.pSubpasses = &subpass;
-	info.dependencyCount = static_cast<uint32_t>(dependencies.size());
-	info.pDependencies = dependencies.data();
-	return vkCreateRenderPass(m_context.device, &info, nullptr, &m_shadowRenderPass) == VK_SUCCESS;
-}
-
-bool VulkanDevice::Impl::CreateShadowMapResources() {
-	dy::RHI::TextureDesc desc{};
-	desc.width = m_shadowMapResolution;
-	desc.height = m_shadowMapResolution;
-	desc.depthOrArraySize = 1;
-	desc.mipLevels = 1;
-	desc.format = ToRhiDepthFormat(m_shadowMapFormat);
-	desc.usage = dy::RHI::TextureUsage::DepthStencil | dy::RHI::TextureUsage::ShaderResource;
-
-	std::unique_ptr<VulkanTexture> shadowTexture(new VulkanTexture(desc));
-	if (!shadowTexture->Initialize(m_context, desc, m_shadowMapFormat)) return false;
-
-	// Sampler: CLAMP_TO_BORDER + 흰색 border. Shadow frustum 밖 좌표는 그림자가 없는 것으로 처리한다.
-	VkSamplerCreateInfo samplerInfo{};
-	samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-	samplerInfo.magFilter = VK_FILTER_LINEAR;
-	samplerInfo.minFilter = VK_FILTER_LINEAR;
-	samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-	samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-	samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-	samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;     // 1.0 = 그림자를 받지 않음
-	samplerInfo.compareEnable = VK_FALSE;                              // PCF는 shader에서 직접 계산
-	samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-	if (!shadowTexture->CreateSampler(samplerInfo)) {
-		return false;
-	}
-
-	// Framebuffer
-	VkImageView shadowView = shadowTexture->GetImageView();
-	VkFramebufferCreateInfo fbInfo{};
-	fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-	fbInfo.renderPass = m_shadowRenderPass;
-	fbInfo.attachmentCount = 1;
-	fbInfo.pAttachments = &shadowView;
-	fbInfo.width = m_shadowMapResolution;
-	fbInfo.height = m_shadowMapResolution;
-	fbInfo.layers = 1;
-	if (vkCreateFramebuffer(m_context.device, &fbInfo, nullptr, &m_shadowFramebuffer) != VK_SUCCESS) return false;
-
-	delete m_shadowMapTexture;
-	m_shadowMapTexture = shadowTexture.release();
-	return true;
-}
-
-bool VulkanDevice::Impl::CreateShadowPipeline(const dy::RHI::GraphicsPipelineDesc& desc) {
-	// PipelineLayout은 main PSO와 같은 DescriptorSetLayout + PushConstantRange를 공유한다.
-	// Shadow pass도 같은 binding 3의 lightViewProj UBO를 읽기 때문에 호환 가능하다.
-	VkPushConstantRange pushConstantRange{};
-	pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-	pushConstantRange.offset = 0;
-	pushConstantRange.size = m_shaderLayout.pushConstantRangeSize;
-
-	VkPipelineLayoutCreateInfo layoutInfo{};
-	layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	layoutInfo.setLayoutCount = 1;
-	layoutInfo.pSetLayouts = &m_descriptorSetLayout;
-	layoutInfo.pushConstantRangeCount = 1;
-	layoutInfo.pPushConstantRanges = &pushConstantRange;
-	if (vkCreatePipelineLayout(m_context.device, &layoutInfo, nullptr, &m_shadowPipelineLayout) != VK_SUCCESS) {
-		return false;
-	}
-
-	// Shadow vertex shader 로드
-	if (desc.shadowVertexShader == nullptr || desc.shadowVertexShaderSize == 0) {
-		SDL_Log("Shadow pipeline shader bytecode is missing");
-		return false;
-	}
-	VkShaderModule vertModule = CreateShaderModule(m_context.device, desc.shadowVertexShader, desc.shadowVertexShaderSize);
-	VkPipelineShaderStageCreateInfo stage{};
-	stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-	stage.stage = VK_SHADER_STAGE_VERTEX_BIT;
-	stage.module = vertModule;
-	stage.pName = "main";
-
-	// Vertex data is pulled from the storage buffer in the shader.
-	VkPipelineVertexInputStateCreateInfo vertexInput{};
-	vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-	vertexInput.vertexBindingDescriptionCount = 0;
-	vertexInput.pVertexBindingDescriptions = nullptr;
-	vertexInput.vertexAttributeDescriptionCount = 0;
-	vertexInput.pVertexAttributeDescriptions = nullptr;
-
-	VkPipelineInputAssemblyStateCreateInfo ia{};
-	ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-	ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-
-	VkPipelineViewportStateCreateInfo viewportState{};
-	viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-	viewportState.viewportCount = 1;
-	viewportState.scissorCount = 1;
-
-	VkPipelineRasterizationStateCreateInfo rast{};
-	rast.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-	rast.polygonMode = VK_POLYGON_MODE_FILL;
-	rast.cullMode = VK_CULL_MODE_NONE;             // 양면 메시지도 그림자에 기여해야 한다.
-	rast.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-	rast.lineWidth = 1.0f;
-	rast.depthBiasEnable = VK_TRUE;                // Slope-scaled bias로 shadow acne 완화
-	rast.depthBiasConstantFactor = 1.25f;
-	rast.depthBiasSlopeFactor = 1.75f;
-
-	VkPipelineMultisampleStateCreateInfo ms{};
-	ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-	ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-	VkPipelineDepthStencilStateCreateInfo ds{};
-	ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-	ds.depthTestEnable = VK_TRUE;
-	ds.depthWriteEnable = VK_TRUE;
-	ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-	ds.depthBoundsTestEnable = VK_FALSE;
-	ds.stencilTestEnable = VK_FALSE;
-
-	// Color attachment가 0개여도 color blend state 구조체는 필요하다.
-	VkPipelineColorBlendStateCreateInfo cb{};
-	cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-	cb.attachmentCount = 0;
-	cb.pAttachments = nullptr;
-
-	const VkDynamicState dynamicStates[] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
-	VkPipelineDynamicStateCreateInfo dyn{};
-	dyn.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-	dyn.dynamicStateCount = 2;
-	dyn.pDynamicStates = dynamicStates;
-
-	VkGraphicsPipelineCreateInfo pipelineInfo{};
-	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-	pipelineInfo.stageCount = 1;
-	pipelineInfo.pStages = &stage;                 // Fragment shader 없음
-	pipelineInfo.pVertexInputState = &vertexInput;
-	pipelineInfo.pInputAssemblyState = &ia;
-	pipelineInfo.pViewportState = &viewportState;
-	pipelineInfo.pRasterizationState = &rast;
-	pipelineInfo.pMultisampleState = &ms;
-	pipelineInfo.pDepthStencilState = &ds;
-	pipelineInfo.pColorBlendState = &cb;
-	pipelineInfo.pDynamicState = &dyn;
-	pipelineInfo.layout = m_shadowPipelineLayout;
-	pipelineInfo.renderPass = m_shadowRenderPass;
-	pipelineInfo.subpass = 0;
-
-	const VkResult result = vkCreateGraphicsPipelines(m_context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_shadowPipeline);
-	vkDestroyShaderModule(m_context.device, vertModule, nullptr);
-	return result == VK_SUCCESS;
-}
-
-void VulkanDevice::Impl::DestroyShadowResources() {
-	if (m_context.device == VK_NULL_HANDLE) return;
-
-	if (m_shadowPipeline != VK_NULL_HANDLE) {
-		vkDestroyPipeline(m_context.device, m_shadowPipeline, nullptr);
-		m_shadowPipeline = VK_NULL_HANDLE;
-	}
-	if (m_shadowPipelineLayout != VK_NULL_HANDLE) {
-		vkDestroyPipelineLayout(m_context.device, m_shadowPipelineLayout, nullptr);
-		m_shadowPipelineLayout = VK_NULL_HANDLE;
-	}
-	if (m_shadowFramebuffer != VK_NULL_HANDLE) {
-		vkDestroyFramebuffer(m_context.device, m_shadowFramebuffer, nullptr);
-		m_shadowFramebuffer = VK_NULL_HANDLE;
-	}
-	delete m_shadowMapTexture;
-	m_shadowMapTexture = nullptr;
-	if (m_shadowRenderPass != VK_NULL_HANDLE) {
-		vkDestroyRenderPass(m_context.device, m_shadowRenderPass, nullptr);
-		m_shadowRenderPass = VK_NULL_HANDLE;
-	}
 }
 
 void VulkanDevice::Impl::DestroyRenderTargetCache() {
@@ -2530,7 +2148,6 @@ void VulkanDevice::Impl::DestroyDeviceResources() {
 		vkDeviceWaitIdle(m_context.device);
 		for (dy::RHI::IBuffer* buffer : m_ownedBuffers) delete buffer;
 		m_ownedBuffers.clear();
-		DestroyShadowResources();
 		if (m_descriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(m_context.device, m_descriptorPool, nullptr);
 		if (m_descriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(m_context.device, m_descriptorSetLayout, nullptr);
 		if (m_bindlessDescriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(m_context.device, m_bindlessDescriptorSetLayout, nullptr);
