@@ -75,6 +75,7 @@ namespace dy::Graphics
 		float shadowDepthBias = 0.0007f;
 		float shadowSlopeBias = 0.003f;
 		float shadowNormalBias = 0.0f;
+		float shadowRasterSlopeBias = 1.75f;
 		uint32_t shadowPcfRadius = 1;
 
 		// 셰이더 바인딩 ABI(데이터). 미지정 시 엔진 표준 계약. 사용자 셰이더 제공 시 함께 지정.

@@ -374,7 +374,7 @@ void Renderer::BuildPipelineStates(RHI::IDevice* device)
 		shadowDesc.depthStencilFormat = shadowFormat;
 		shadowDesc.depthEnable = true;
 		shadowDesc.enableBindlessTextures = m_config.enableBindlessTextures;
-		shadowDesc.depthBiasSlope = 1.75f;
+		shadowDesc.depthBiasSlope = m_config.shadowRasterSlopeBias;
 
 		m_shadowPipeline = device->CreateGraphicsPipeline(shadowDesc);
 	}
