@@ -115,6 +115,13 @@ namespace dy::Backends
 
 	RHI::IPipelineState* NullDevice::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc)
 	{
+		const bool hasColorAttachment = desc.renderTargetFormat != RHI::Format::Unknown;
+		const bool hasDepthAttachment = desc.depthStencilFormat != RHI::Format::Unknown;
+		if((!hasColorAttachment && !hasDepthAttachment) || (desc.depthEnable && !hasDepthAttachment))
+		{
+			return nullptr;
+		}
+
 		return new NullPipelineState(desc);
 	}
 

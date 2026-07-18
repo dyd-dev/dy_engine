@@ -635,12 +635,11 @@ private:
 	VkPipelineLayout m_shadowPipelineLayout = VK_NULL_HANDLE;
 	VkPipeline m_shadowPipeline = VK_NULL_HANDLE;
 	VkFormat m_shadowMapFormat = VK_FORMAT_UNDEFINED;
-	uint32_t m_shadowMapResolution = dy::RHI::DeviceDesc{}.defaultShadowMapResolution;
+	uint32_t m_shadowMapResolution = 0;
 
 	uint32_t m_maxFramesInFlight = dy::RHI::DeviceDesc{}.maxFramesInFlight;
 	uint32_t m_maxDrawsPerFrame = dy::RHI::DeviceDesc{}.maxDrawsPerFrame;
 	uint32_t m_maxBindlessTextures = dy::RHI::DeviceDesc{}.maxBindlessTextures;
-	uint32_t m_defaultShadowMapResolution = dy::RHI::DeviceDesc{}.defaultShadowMapResolution;
 	uint32_t m_fallbackTextureWidth = kFallbackTextureWidth;
 	uint32_t m_fallbackTextureHeight = kFallbackTextureHeight;
 	uint64_t m_frameAcquireTimeoutNanoseconds = dy::RHI::DeviceDesc{}.frameAcquireTimeoutNanoseconds;
@@ -762,8 +761,6 @@ int VulkanDevice::Impl::Initialize(const void* windowHandle, const dy::RHI::Devi
 	m_maxFramesInFlight = desc.maxFramesInFlight;
 	m_maxDrawsPerFrame = desc.maxDrawsPerFrame;
 	m_maxBindlessTextures = desc.maxBindlessTextures;
-	m_defaultShadowMapResolution = desc.defaultShadowMapResolution;
-	m_shadowMapResolution = m_defaultShadowMapResolution;
 	m_fallbackTextureWidth = kFallbackTextureWidth;
 	m_fallbackTextureHeight = kFallbackTextureHeight;
 	m_frameAcquireTimeoutNanoseconds = desc.frameAcquireTimeoutNanoseconds;
@@ -831,9 +828,8 @@ bool VulkanDevice::Impl::UpdateTexture(dy::RHI::ITexture* texture, const void* r
 dy::RHI::IPipelineState* VulkanDevice::Impl::CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) {
 	try {
 		if (desc.enableShadowPass) {
-			const uint32_t requestedShadowMapResolution = desc.shadowMapResolution > 0
-				? desc.shadowMapResolution
-				: m_defaultShadowMapResolution;
+			if (desc.shadowMapResolution == 0) return nullptr;
+			const uint32_t requestedShadowMapResolution = desc.shadowMapResolution;
 			if (m_shadowRenderPass != VK_NULL_HANDLE && requestedShadowMapResolution != m_shadowMapResolution) {
 				vkDeviceWaitIdle(m_context.device);
 				DestroyShadowResources();

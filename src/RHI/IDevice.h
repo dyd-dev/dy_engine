@@ -24,7 +24,6 @@ namespace dy::RHI
 		uint32_t maxFramesInFlight = 2;
 		uint32_t maxDrawsPerFrame = 128;
 		uint32_t maxBindlessTextures = 128;
-		uint32_t defaultShadowMapResolution = 2048;
 		uint64_t frameAcquireTimeoutNanoseconds = 16666667ull;
 		ShaderLayoutDesc shaderLayout = {};
 	};
@@ -56,7 +55,6 @@ namespace dy::RHI
 
 		virtual bool UpdateTexture(ITexture* texture, const void* data, uint32_t rowPitch) = 0;
 
-		// (Vulkan: 내부 처리 → false. D3D12: 명시 필요 → true. Phase 3에서 통일 예정.)
 		[[nodiscard]] virtual bool RequiresExplicitShadowPass() const { return false; }
 		// (D3D12/Metal: false. Vulkan: true)
 		[[nodiscard]] virtual bool RequiresClipSpaceYFlip() const { return false; }

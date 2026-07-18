@@ -6,8 +6,6 @@
 
 namespace dy::RHI
 {
-	inline constexpr uint32_t kDefaultShadowMapResolution = 2048u;
-
 	struct GraphicsPipelineDesc
 	{
 		const void* vertexShader = nullptr;
@@ -22,15 +20,12 @@ namespace dy::RHI
 		Format renderTargetFormat = Format::Unknown;
 		Format depthStencilFormat = Format::Unknown;
 
-		// flags like Depth, Blend mode
-		bool depthEnable = true;
+		bool depthEnable = false;
 		bool wireframe = false;
 		bool enableShadowPass = false;
 		bool enableBindlessTextures = false;
-		uint32_t shadowMapResolution = kDefaultShadowMapResolution;
+		uint32_t shadowMapResolution = 0;
 
-		// 깊이 전용(그림자) 파이프라인용 래스터라이저 깊이 바이어스.
-		// pixelShader == nullptr 인 깊이 전용 PSO 에서 그림자 아크네 완화에 사용.
 		int32_t depthBias = 0;
 		float depthBiasSlope = 0.0f;
 		float depthBiasClamp = 0.0f;
