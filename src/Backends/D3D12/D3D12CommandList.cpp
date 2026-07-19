@@ -107,15 +107,16 @@ namespace dy::Backends
         return m_internal->commandList.Get();
     }
 
-    void D3D12CommandList::Reset()
+    bool D3D12CommandList::Reset()
     {
-        m_internal->allocator->Reset();
-        m_internal->commandList->Reset(m_internal->allocator.Get(), nullptr);
+        if(FAILED(m_internal->allocator->Reset())) return false;
+        if(FAILED(m_internal->commandList->Reset(m_internal->allocator.Get(), nullptr))) return false;
         m_internal->activeColorTarget = nullptr;
         m_internal->activeDepthTarget = nullptr;
         m_internal->activeRtvHandle = {};
         m_internal->activeDsvHandle = {};
         m_internal->hasActivePass = false;
+        return true;
     }
 
     void D3D12CommandList::Close()

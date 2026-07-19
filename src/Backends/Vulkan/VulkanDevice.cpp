@@ -496,7 +496,7 @@ struct VulkanDevice::Impl
 	~Impl();
 
 	int Initialize(const void* windowHandle, const dy::RHI::DeviceDesc& desc);
-	void BeginFrame();
+	bool BeginFrame();
 	uint32_t GetCurrentFrameIndex() const { return m_currentFrameIndex; }
 	dy::RHI::ICommandList* AcquireCommandList() { return m_commandList; }
 	void Submit(dy::RHI::ICommandList** cmdLists, uint32_t count);
@@ -614,9 +614,9 @@ VulkanDevice::VulkanDevice()
 
 VulkanDevice::~VulkanDevice() = default;
 
-void VulkanDevice::BeginFrame()
+bool VulkanDevice::BeginFrame()
 {
-	m_impl->BeginFrame();
+	return m_impl->BeginFrame();
 }
 
 uint32_t VulkanDevice::GetCurrentFrameIndex() const
@@ -871,16 +871,15 @@ void VulkanDevice::Impl::DestroyBuffer(dy::RHI::IBuffer* buffer) {
 	m_ownedBuffers.erase(it);
 }
 
-void VulkanDevice::Impl::BeginFrame() {
+bool VulkanDevice::Impl::BeginFrame() {
 	m_frameReady = false;
 	m_frameSubmitted = false;
-	if (m_commandList != nullptr) {
-		m_commandList->Begin();
+
+	if (!m_context.device || m_swapchain.GetHandle() == VK_NULL_HANDLE || m_commandList == nullptr) return false;
+
+	if (vkWaitForFences(m_context.device, 1, &m_inFlightFences[m_currentFrameIndex], VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+		return false;
 	}
-
-	if (!m_context.device || m_swapchain.GetHandle() == VK_NULL_HANDLE) return;
-
-	vkWaitForFences(m_context.device, 1, &m_inFlightFences[m_currentFrameIndex], VK_TRUE, UINT64_MAX);
 
 	const VkResult acquireResult = vkAcquireNextImageKHR(
 		m_context.device, m_swapchain.GetHandle(), m_frameAcquireTimeoutNanoseconds,
@@ -890,27 +889,33 @@ void VulkanDevice::Impl::BeginFrame() {
 
 	if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
 		RecreateSwapchain();
-		return;
+		return false;
 	} else if (acquireResult == VK_NOT_READY || acquireResult == VK_TIMEOUT) {
-		return;
+		return false;
 	} else if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR) {
 		SDL_Log("Failed to acquire swapchain image: %s (%d)", VkResultToString(acquireResult), static_cast<int>(acquireResult));
-		return;
+		return false;
 	}
 
 	if (m_currentImageIndex >= m_imagesInFlight.size()) {
 		SDL_Log("Swapchain image index %u is out of tracked range %zu. Recreating swapchain.", m_currentImageIndex, m_imagesInFlight.size());
 		RecreateSwapchain();
-		return;
+		return false;
 	}
 
 	if (m_imagesInFlight[m_currentImageIndex] != VK_NULL_HANDLE) {
-		vkWaitForFences(m_context.device, 1, &m_imagesInFlight[m_currentImageIndex], VK_TRUE, UINT64_MAX);
+		if (vkWaitForFences(m_context.device, 1, &m_imagesInFlight[m_currentImageIndex], VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+			return false;
+		}
 	}
 	m_imagesInFlight[m_currentImageIndex] = m_inFlightFences[m_currentFrameIndex];
 
-	vkResetFences(m_context.device, 1, &m_inFlightFences[m_currentFrameIndex]);
+	if (vkResetFences(m_context.device, 1, &m_inFlightFences[m_currentFrameIndex]) != VK_SUCCESS) {
+		return false;
+	}
+	m_commandList->Begin();
 	m_frameReady = true;
+	return true;
 }
 
 void VulkanDevice::Impl::Submit(dy::RHI::ICommandList** cmdLists, uint32_t count) {

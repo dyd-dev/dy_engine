@@ -10,7 +10,7 @@ namespace dy::Backends
         MetalDevice();
         ~MetalDevice() override;
 
-        void BeginFrame() override;
+        bool BeginFrame() override;
         uint32_t GetCurrentFrameIndex() const override;
 
         RHI::ICommandList* AcquireCommandList() override;

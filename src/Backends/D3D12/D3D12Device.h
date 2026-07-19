@@ -12,7 +12,7 @@ public:
   ~D3D12Device() override;
 
   // --- IDevice Interface Overrides ---
-  void BeginFrame() override;
+  bool BeginFrame() override;
   uint32_t GetCurrentFrameIndex() const override;
 
   RHI::ICommandList *AcquireCommandList() override;

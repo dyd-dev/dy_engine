@@ -71,7 +71,7 @@ namespace dy::Backends
         return 0;
     }
 
-    void MetalDevice::BeginFrame()
+    bool MetalDevice::BeginFrame()
     {
         id previousCompletion = [m_impl->frameCompletionCommandBuffers objectAtIndex:m_impl->frameIndex];
         if(previousCompletion != [NSNull null])
@@ -81,6 +81,8 @@ namespace dy::Backends
         }
 
         m_impl->currentDrawable = [m_impl->metalLayer nextDrawable];
+        if(m_impl->currentDrawable == nil)
+            return false;
 
         m_impl->commandList->Begin();
 
@@ -92,6 +94,8 @@ namespace dy::Backends
                 m_impl->commandList->SetNativeTexture(metalTex->GetNativeTexture(), i);
             }
         }
+
+        return true;
     }
 
     uint32_t MetalDevice::GetCurrentFrameIndex() const

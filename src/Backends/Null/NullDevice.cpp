@@ -83,7 +83,7 @@ namespace dy::Backends
 		delete m_impl;
 	}
 
-	void NullDevice::BeginFrame() {}
+	bool NullDevice::BeginFrame() { return true; }
 
 	uint32_t NullDevice::GetCurrentFrameIndex() const
 	{

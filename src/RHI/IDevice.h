@@ -37,7 +37,8 @@ namespace dy::RHI
 		[[nodiscard]] static IDevice* Create(const void* windowHandle, const DeviceDesc& desc = {});
 		[[nodiscard]] const DeviceDesc& GetDesc() const { return m_desc; }
 
-		virtual void BeginFrame() = 0;
+		// frame context와 presentable image를 획득했을 때만 true를 반환한다.
+		[[nodiscard]] virtual bool BeginFrame() = 0;
 
 		// [0, GetDesc().maxFramesInFlight) 범위의 frame context index. swapchain image index가 아니다.
 		[[nodiscard]] virtual uint32_t GetCurrentFrameIndex() const = 0;

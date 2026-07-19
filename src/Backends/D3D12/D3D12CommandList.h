@@ -12,7 +12,7 @@ namespace dy::Backends
         D3D12CommandList(void* nativeDevice, size_t rtvHandlePtr, void* globalDescriptorHeap = nullptr, uint32_t srvDescriptorSize = 0);
         ~D3D12CommandList() override;
 
-        void Reset();
+        bool Reset();
 
         void BindGraphicsPipeline(RHI::IPipelineState* pipelineState) override;
 

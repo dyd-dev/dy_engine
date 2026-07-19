@@ -13,7 +13,7 @@ public:
 	VulkanDevice();
 	~VulkanDevice() override;
 
-	void BeginFrame() override;
+	bool BeginFrame() override;
 	uint32_t GetCurrentFrameIndex() const override;
 	dy::RHI::ICommandList* AcquireCommandList() override;
 	void Submit(dy::RHI::ICommandList** cmdLists, uint32_t count) override;

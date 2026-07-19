@@ -225,13 +225,13 @@ namespace dy::Backends
         return 0;
     }
 
-    void D3D12Device::BeginFrame() {
+    bool D3D12Device::BeginFrame() {
         D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_internal->rtvHeap->GetCPUDescriptorHandleForHeapStart();
         rtv.ptr += static_cast<SIZE_T>(m_internal->backBufferIndex) * m_internal->rtvDescriptorSize;
 
         D3D12CommandList* commandList = m_internal->commandLists[m_internal->frameIndex];
         commandList->SetBackBuffer(m_internal->backBufferTextures[m_internal->backBufferIndex], rtv.ptr);
-        commandList->Reset();
+        return commandList->Reset();
     }
     uint32_t D3D12Device::GetCurrentFrameIndex() const { return m_internal->frameIndex; }
 
