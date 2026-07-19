@@ -7,6 +7,8 @@ add_executable(${EXAMPLE_NAME}
     Shaders/mesh_shadow_vs.glsl
     Shaders/mesh_vs.hlsl
     Shaders/mesh_ps.hlsl
+    Shaders/mesh_vs.metal
+    Shaders/mesh_ps.metal
 )
 
 set_source_files_properties(
@@ -15,6 +17,8 @@ set_source_files_properties(
     Shaders/mesh_shadow_vs.glsl
     Shaders/mesh_vs.hlsl
     Shaders/mesh_ps.hlsl
+    Shaders/mesh_vs.metal
+    Shaders/mesh_ps.metal
     PROPERTIES HEADER_FILE_ONLY TRUE
 )
 
