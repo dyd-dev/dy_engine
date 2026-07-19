@@ -21,6 +21,8 @@ namespace dy::RHI
 		// 스왑체인(백버퍼) 포맷. 백엔드는 이 값을 그대로 따르고 GetBackBuffer()->GetFormat() 로 보고한다.
 		// UNORM = 셰이더 수동 감마, *_SRGB = 하드웨어 감마. 두 백엔드가 같은 값을 쓰므로 색이 일치한다.
 		Format swapchainFormat = Format::R8G8B8A8_UNORM;
+		// 동시에 완료되지 않을 수 있는 제출의 상한이자 순환 재사용할 frame context 수. 0은 유효하지 않다.
+		// swapchain image 수와는 독립적이며 GetCurrentFrameIndex()는 이 범위의 context index를 반환한다.
 		uint32_t maxFramesInFlight = 2;
 		uint32_t maxDrawsPerFrame = 128;
 		uint32_t maxBindlessTextures = 128;
@@ -37,6 +39,7 @@ namespace dy::RHI
 
 		virtual void BeginFrame() = 0;
 
+		// [0, GetDesc().maxFramesInFlight) 범위의 frame context index. swapchain image index가 아니다.
 		[[nodiscard]] virtual uint32_t GetCurrentFrameIndex() const = 0;
 		[[nodiscard]] virtual RHI::ICommandList* AcquireCommandList()	= 0;
 

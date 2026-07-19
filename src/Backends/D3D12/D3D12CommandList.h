@@ -38,7 +38,8 @@ namespace dy::Backends
         void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
 
         void Close() override;
-        void SetBackBufferTexture(RHI::ITexture* texture); // Close 에서 백버퍼 상태를 추적기로 전이하기 위함
+        // frame context와 swapchain image가 독립적이므로 매 frame 획득한 백버퍼를 연결한다.
+        void SetBackBuffer(RHI::ITexture* texture, size_t rtvHandlePtr);
 
         void* GetNativeList(); // 디바이스가 가져가기 위한 함수
 

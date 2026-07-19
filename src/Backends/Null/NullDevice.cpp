@@ -70,6 +70,7 @@ namespace dy::Backends
 			RHI::TextureUsage::RenderTarget
 		});
 		RHI::DescriptorIndex nextDescriptorIndex = 0;
+		uint32_t frameIndex = 0;
 	};
 
 	NullDevice::NullDevice()
@@ -86,7 +87,7 @@ namespace dy::Backends
 
 	uint32_t NullDevice::GetCurrentFrameIndex() const
 	{
-		return 0;
+		return m_impl->frameIndex;
 	}
 
 	RHI::ICommandList* NullDevice::AcquireCommandList()
@@ -96,7 +97,10 @@ namespace dy::Backends
 
 	void NullDevice::Submit(RHI::ICommandList**, uint32_t) {}
 
-	void NullDevice::Present() {}
+	void NullDevice::Present()
+	{
+		m_impl->frameIndex = (m_impl->frameIndex + 1) % GetDesc().maxFramesInFlight;
+	}
 
 	RHI::IBuffer* NullDevice::CreateBuffer(const RHI::BufferDesc& desc)
 	{

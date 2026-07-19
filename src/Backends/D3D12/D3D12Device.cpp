@@ -34,27 +34,28 @@ namespace dy::Backends
         ComPtr<ID3D12CommandQueue> commandQueue;
         ComPtr<IDXGISwapChain3> swapChain;
         ComPtr<ID3D12DescriptorHeap> rtvHeap;
-        ComPtr<ID3D12Resource> renderTargets[2];
+        std::vector<ComPtr<ID3D12Resource>> renderTargets;
 
         ComPtr<ID3D12Fence> fence;
         uint32_t fenceValue = 1;
-        uint64_t frameFenceValues[2] = { 0, 0 };
-        std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> frameUploadBuffers[2];
-        std::vector<Microsoft::WRL::ComPtr<ID3D12CommandAllocator>> frameUploadAllocators[2];
-        std::vector<Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList>> frameUploadCommandLists[2];
+        std::vector<uint64_t> frameFenceValues;
+        std::vector<std::vector<ComPtr<ID3D12Resource>>> frameUploadBuffers;
+        std::vector<std::vector<ComPtr<ID3D12CommandAllocator>>> frameUploadAllocators;
+        std::vector<std::vector<ComPtr<ID3D12GraphicsCommandList>>> frameUploadCommandLists;
         HANDLE fenceEvent = nullptr;
 
+        uint32_t maxFramesInFlight = 0;
         uint32_t frameIndex = 0;
+        uint32_t backBufferIndex = 0;
         uint32_t rtvDescriptorSize = 0;
 
         ComPtr<ID3D12DescriptorHeap> globalDescriptorHeap;
         uint32_t descriptorSlotOffset = 0;
         uint32_t srvDescriptorSize = 0;
 
-        D3D12CommandList* commandLists[2] = { nullptr, nullptr };
-        D3D12Texture* backBufferTextures[2] = { nullptr, nullptr };
-        
-        ComPtr<ID3D12CommandAllocator> commandAllocators[2];
+        std::vector<D3D12CommandList*> commandLists;
+        std::vector<D3D12Texture*> backBufferTextures;
+
         ComPtr<ID3D12RootSignature> deviceRootSignature;
         ComPtr<ID3D12PipelineState> texturedTrianglePipeline;
     };
@@ -89,16 +90,22 @@ namespace dy::Backends
 
     D3D12Device::~D3D12Device()
     {
-        for (int i = 0; i < 2; ++i) {
-            delete m_internal->commandLists[i];
-            delete m_internal->backBufferTextures[i];
-        }
+        for (D3D12CommandList* commandList : m_internal->commandLists) delete commandList;
+        for (D3D12Texture* backBufferTexture : m_internal->backBufferTextures) delete backBufferTexture;
         delete m_internal;
     }
 
     int D3D12Device::Initialize(const void* windowHandle, const RHI::DeviceDesc& desc)
     {
         HWND hwnd = static_cast<HWND>(const_cast<void*>(windowHandle));
+        m_internal->maxFramesInFlight = desc.maxFramesInFlight;
+        m_internal->frameFenceValues.assign(desc.maxFramesInFlight, 0);
+        m_internal->frameUploadBuffers.resize(desc.maxFramesInFlight);
+        m_internal->frameUploadAllocators.resize(desc.maxFramesInFlight);
+        m_internal->frameUploadCommandLists.resize(desc.maxFramesInFlight);
+        m_internal->commandLists.resize(desc.maxFramesInFlight, nullptr);
+        m_internal->renderTargets.resize(2);
+        m_internal->backBufferTextures.resize(m_internal->renderTargets.size(), nullptr);
 
 #if defined(_DEBUG)
         // 디버그 레이어 활성화(디바이스 생성 전 필수). 이래야 InfoQueue 에 검증 메시지가 쌓인다.
@@ -132,7 +139,7 @@ namespace dy::Backends
         queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
         m_internal->device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_internal->commandQueue));
 
-        // 3. 스왑체인(화면 버퍼 2개) 생성
+        // 3. 스왑체인 image 수는 frame context 수와 독립적으로 유지한다.
         RECT rect = {};
         GetClientRect(hwnd, &rect);
         uint32_t width = rect.right - rect.left;
@@ -148,7 +155,7 @@ namespace dy::Backends
         const DXGI_FORMAT swapchainDxgiFormat = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(desc.swapchainFormat));
 
         DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
-        swapChainDesc.BufferCount = 2;
+        swapChainDesc.BufferCount = static_cast<UINT>(m_internal->renderTargets.size());
         swapChainDesc.Width = width;
         swapChainDesc.Height = height;
         swapChainDesc.Format = swapchainDxgiFormat;
@@ -159,20 +166,15 @@ namespace dy::Backends
         ComPtr<IDXGISwapChain1> tempSwapChain;
         factory->CreateSwapChainForHwnd(m_internal->commandQueue.Get(), hwnd, &swapChainDesc, nullptr, nullptr, &tempSwapChain);
         tempSwapChain.As(&m_internal->swapChain);
-        m_internal->frameIndex = m_internal->swapChain->GetCurrentBackBufferIndex();
+        m_internal->backBufferIndex = m_internal->swapChain->GetCurrentBackBufferIndex();
 
         // 4. RTV(렌더 타겟 뷰) 힙 생성
         D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
-        rtvHeapDesc.NumDescriptors = 2;
+        rtvHeapDesc.NumDescriptors = swapChainDesc.BufferCount;
         rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
         m_internal->device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&m_internal->rtvHeap));
         m_internal->rtvDescriptorSize = m_internal->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-
-        // 4-1. 커맨드 할당자(Command Allocator) 생성
-        for (int i = 0; i < 2; i++) {
-            m_internal->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_internal->commandAllocators[i]));
-        }
 
         // 5. 렌더 타겟 뷰(RTV) 연결
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_internal->rtvHeap->GetCPUDescriptorHandleForHeapStart();
@@ -183,7 +185,7 @@ namespace dy::Backends
         bbDesc.format = desc.swapchainFormat;
         bbDesc.usage = RHI::TextureUsage::RenderTarget;
 
-        for (UINT n = 0; n < 2; n++)
+        for (UINT n = 0; n < swapChainDesc.BufferCount; n++)
         {
             m_internal->swapChain->GetBuffer(n, IID_PPV_ARGS(&m_internal->renderTargets[n]));
             m_internal->device->CreateRenderTargetView(m_internal->renderTargets[n].Get(), nullptr, rtvHandle);
@@ -211,19 +213,25 @@ namespace dy::Backends
         m_internal->srvDescriptorSize = m_internal->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
         // 8. 커맨드 리스트 미리 할당
-        D3D12_CPU_DESCRIPTOR_HANDLE currentRtv = m_internal->rtvHeap->GetCPUDescriptorHandleForHeapStart();
-        for (int i = 0; i < 2; i++) {
-            m_internal->commandLists[i] = new D3D12CommandList(m_internal->device.Get(), currentRtv.ptr, m_internal->globalDescriptorHeap.Get(), m_internal->srvDescriptorSize);
-            m_internal->commandLists[i]->SetBackBufferTexture(m_internal->backBufferTextures[i]); // 백버퍼 상태 추적기 연결
-            currentRtv.ptr += m_internal->rtvDescriptorSize;
+        for (uint32_t i = 0; i < m_internal->maxFramesInFlight; i++) {
+            m_internal->commandLists[i] = new D3D12CommandList(
+                m_internal->device.Get(),
+                0,
+                m_internal->globalDescriptorHeap.Get(),
+                m_internal->srvDescriptorSize);
         }
 
         std::cout << "[D3D12Device] Initialization Complete!" << std::endl;
         return 0;
     }
 
-    void D3D12Device::BeginFrame() { 
-        m_internal->commandLists[m_internal->frameIndex]->Reset();
+    void D3D12Device::BeginFrame() {
+        D3D12_CPU_DESCRIPTOR_HANDLE rtv = m_internal->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+        rtv.ptr += static_cast<SIZE_T>(m_internal->backBufferIndex) * m_internal->rtvDescriptorSize;
+
+        D3D12CommandList* commandList = m_internal->commandLists[m_internal->frameIndex];
+        commandList->SetBackBuffer(m_internal->backBufferTextures[m_internal->backBufferIndex], rtv.ptr);
+        commandList->Reset();
     }
     uint32_t D3D12Device::GetCurrentFrameIndex() const { return m_internal->frameIndex; }
 
@@ -257,16 +265,17 @@ namespace dy::Backends
         // 2. 화면 표시 (Present)
         m_internal->swapChain->Present(1, 0);
 
-        // 3. 다음 프레임 버퍼 인덱스 갱신
-        m_internal->frameIndex = m_internal->swapChain->GetCurrentBackBufferIndex();
+        // 3. 다음 swapchain image와 frame context를 서로 독립적으로 갱신한다.
+        m_internal->backBufferIndex = m_internal->swapChain->GetCurrentBackBufferIndex();
+        m_internal->frameIndex = (m_internal->frameIndex + 1) % m_internal->maxFramesInFlight;
 
-        // 4. 다음 프레임이 사용할 백버퍼의 이전 GPU 작업이 완료되었는지 확인하고 대기 (Busy-wait)
+        // 4. 다음 frame context를 재사용하기 전에 그 context의 이전 제출 완료를 기다린다.
         const uint64_t waitFenceValue = m_internal->frameFenceValues[m_internal->frameIndex];
         while (m_internal->fence->GetCompletedValue() < waitFenceValue) {
             std::this_thread::yield();
         }
 
-        // 5. 대기가 완료되었으므로, 해당 프레임에 사용했던 임시 업로드 리소스를 지연 해제
+        // 5. 재사용할 context에 속한 임시 업로드 리소스를 지연 해제한다.
         m_internal->frameUploadBuffers[m_internal->frameIndex].clear();
         m_internal->frameUploadAllocators[m_internal->frameIndex].clear();
         m_internal->frameUploadCommandLists[m_internal->frameIndex].clear();
@@ -577,7 +586,7 @@ namespace dy::Backends
 
     void D3D12Device::DestroyPipelineState(RHI::IPipelineState* pipeline) { delete pipeline; }
 
-    RHI::ITexture* D3D12Device::GetBackBuffer() { 
-        return m_internal->backBufferTextures[m_internal->frameIndex]; 
+    RHI::ITexture* D3D12Device::GetBackBuffer() {
+        return m_internal->backBufferTextures[m_internal->backBufferIndex];
     }
 }

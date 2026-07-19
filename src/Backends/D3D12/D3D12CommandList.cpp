@@ -132,9 +132,10 @@ namespace dy::Backends
         m_internal->hasActivePass = false;
     }
 
-    void D3D12CommandList::SetBackBufferTexture(RHI::ITexture* texture)
+    void D3D12CommandList::SetBackBuffer(RHI::ITexture* texture, size_t rtvHandlePtr)
     {
         m_internal->backBufferTexture = dynamic_cast<D3D12Texture*>(texture);
+        m_internal->rtvHandle.ptr = rtvHandlePtr;
     }
 
     void D3D12CommandList::ClearColor(RHI::ITexture* renderTarget, float r, float g, float b, float a)

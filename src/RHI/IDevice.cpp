@@ -12,6 +12,8 @@ using namespace dy::RHI;
 
 IDevice* IDevice::Create(const void* windowHandle, const DeviceDesc& desc)
 {
+	if(desc.maxFramesInFlight == 0) return nullptr;
+
 	IDevice *device = nullptr;
 #if defined(ENABLE_D3D12)
 	device = new dy::Backends::D3D12Device();

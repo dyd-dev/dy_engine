@@ -17,6 +17,8 @@ namespace dy::Backends
         id<MTLCommandQueue> commandQueue    = nil;
         CAMetalLayer*       metalLayer      = nil;
         id<CAMetalDrawable> currentDrawable = nil;
+        NSMutableArray*     frameCompletionCommandBuffers = nil;
+        uint32_t            maxFramesInFlight = 0;
         uint32_t            frameIndex      = 0;
 
         MetalCommandList*   commandList     = nullptr;
@@ -31,13 +33,24 @@ namespace dy::Backends
 
     MetalDevice::~MetalDevice()
     {
+        for(id completion in m_impl->frameCompletionCommandBuffers)
+        {
+            if(completion != [NSNull null])
+                [completion waitUntilCompleted];
+        }
+        [m_impl->frameCompletionCommandBuffers release];
         delete m_impl->backBufferTex;
         delete m_impl->commandList;
         delete m_impl;
     }
 
-    int MetalDevice::Initialize(const void* windowHandle, const RHI::DeviceDesc&)
+    int MetalDevice::Initialize(const void* windowHandle, const RHI::DeviceDesc& desc)
     {
+        m_impl->maxFramesInFlight = desc.maxFramesInFlight;
+        m_impl->frameCompletionCommandBuffers = [[NSMutableArray alloc] initWithCapacity:desc.maxFramesInFlight];
+        for(uint32_t i = 0; i < desc.maxFramesInFlight; ++i)
+            [m_impl->frameCompletionCommandBuffers addObject:[NSNull null]];
+
         m_impl->device = MTLCreateSystemDefaultDevice();
         if(!m_impl->device) return -1;
 
@@ -60,8 +73,14 @@ namespace dy::Backends
 
     void MetalDevice::BeginFrame()
     {
+        id previousCompletion = [m_impl->frameCompletionCommandBuffers objectAtIndex:m_impl->frameIndex];
+        if(previousCompletion != [NSNull null])
+        {
+            [previousCompletion waitUntilCompleted];
+            [m_impl->frameCompletionCommandBuffers replaceObjectAtIndex:m_impl->frameIndex withObject:[NSNull null]];
+        }
+
         m_impl->currentDrawable = [m_impl->metalLayer nextDrawable];
-        m_impl->frameIndex      = (m_impl->frameIndex + 1) % 2;
 
         m_impl->commandList->Begin();
 
@@ -98,12 +117,20 @@ namespace dy::Backends
 
     void MetalDevice::Present()
     {
-        if(m_impl->currentDrawable)
+        // 같은 queue의 마지막 marker가 완료되면 이 frame의 모든 제출과 present도 완료된 것이다.
+        id<MTLCommandBuffer> cmdBuffer = [m_impl->commandQueue commandBuffer];
+        if(cmdBuffer != nil)
         {
-            id<MTLCommandBuffer> cmdBuffer = [m_impl->commandQueue commandBuffer];
-            [cmdBuffer presentDrawable:m_impl->currentDrawable];
+            if(m_impl->currentDrawable)
+            {
+                [cmdBuffer presentDrawable:m_impl->currentDrawable];
+            }
+            [m_impl->frameCompletionCommandBuffers replaceObjectAtIndex:m_impl->frameIndex withObject:cmdBuffer];
             [cmdBuffer commit];
         }
+
+        m_impl->currentDrawable = nil;
+        m_impl->frameIndex = (m_impl->frameIndex + 1) % m_impl->maxFramesInFlight;
     }
 
     RHI::IBuffer* MetalDevice::CreateBuffer(const RHI::BufferDesc& desc)
