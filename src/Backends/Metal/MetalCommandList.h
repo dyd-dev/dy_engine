@@ -31,7 +31,7 @@ namespace dy::Backends
 
         void Close() override;
 
-        void Begin(void* drawable);
+        void Begin();
         void* GetNativeCommandBuffer() const;
 
         void SetNativePipelineState(void* pipelineState);
@@ -41,6 +41,7 @@ namespace dy::Backends
 
     private:
         void EnsureRenderEncoder();
+        void EndActivePass();
 
         struct Impl;
         Impl* m_impl = nullptr;

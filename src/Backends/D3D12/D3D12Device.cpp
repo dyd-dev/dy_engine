@@ -51,11 +51,6 @@ namespace dy::Backends
         uint32_t descriptorSlotOffset = 0;
         uint32_t srvDescriptorSize = 0;
 
-        // Depth Stencil 관련
-        ComPtr<ID3D12DescriptorHeap> dsvHeap;
-        ComPtr<ID3D12Resource> depthStencilBuffer;
-        uint32_t dsvDescriptorSize = 0;
-
         D3D12CommandList* commandLists[2] = { nullptr, nullptr };
         D3D12Texture* backBufferTextures[2] = { nullptr, nullptr };
         
@@ -215,55 +210,15 @@ namespace dy::Backends
         }
         m_internal->srvDescriptorSize = m_internal->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
-        // 8. 깊이 버퍼(Depth Buffer) 생성
-        D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
-        dsvHeapDesc.NumDescriptors = 1;
-        dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-        dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-        m_internal->device->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&m_internal->dsvHeap));
-        m_internal->dsvDescriptorSize = m_internal->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
-
-        D3D12_RESOURCE_DESC depthDesc = {};
-        depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        depthDesc.Alignment = 0;
-        depthDesc.Width = swapChainDesc.Width;
-        depthDesc.Height = swapChainDesc.Height;
-        depthDesc.DepthOrArraySize = 1;
-        depthDesc.MipLevels = 1;
-        depthDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-        depthDesc.SampleDesc.Count = 1;
-        depthDesc.SampleDesc.Quality = 0;
-        depthDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-        depthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-
-        D3D12_CLEAR_VALUE depthOptimizedClearValue = {};
-        depthOptimizedClearValue.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-        depthOptimizedClearValue.DepthStencil.Depth = 1.0f;
-        depthOptimizedClearValue.DepthStencil.Stencil = 0;
-
-        CD3DX12_HEAP_PROPERTIES depthHeapProps(D3D12_HEAP_TYPE_DEFAULT);
-        m_internal->device->CreateCommittedResource(
-            &depthHeapProps,
-            D3D12_HEAP_FLAG_NONE,
-            &depthDesc,
-            D3D12_RESOURCE_STATE_DEPTH_WRITE,
-            &depthOptimizedClearValue,
-            IID_PPV_ARGS(&m_internal->depthStencilBuffer)
-        );
-
-        m_internal->device->CreateDepthStencilView(m_internal->depthStencilBuffer.Get(), nullptr, m_internal->dsvHeap->GetCPUDescriptorHandleForHeapStart());
-
-        // 9. 커맨드 리스트 미리 할당
+        // 8. 커맨드 리스트 미리 할당
         D3D12_CPU_DESCRIPTOR_HANDLE currentRtv = m_internal->rtvHeap->GetCPUDescriptorHandleForHeapStart();
-        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_internal->dsvHeap->GetCPUDescriptorHandleForHeapStart();
         for (int i = 0; i < 2; i++) {
-            m_internal->commandLists[i] = new D3D12CommandList(m_internal->device.Get(), m_internal->renderTargets[i].Get(), currentRtv.ptr, m_internal->globalDescriptorHeap.Get(), m_internal->srvDescriptorSize);
-            m_internal->commandLists[i]->SetDepthStencilView(dsvHandle.ptr); // DSV 등록
+            m_internal->commandLists[i] = new D3D12CommandList(m_internal->device.Get(), currentRtv.ptr, m_internal->globalDescriptorHeap.Get(), m_internal->srvDescriptorSize);
             m_internal->commandLists[i]->SetBackBufferTexture(m_internal->backBufferTextures[i]); // 백버퍼 상태 추적기 연결
             currentRtv.ptr += m_internal->rtvDescriptorSize;
         }
 
-        std::cout << "[D3D12Device] Initialization Complete (with Depth Buffer)!" << std::endl;
+        std::cout << "[D3D12Device] Initialization Complete!" << std::endl;
         return 0;
     }
 

@@ -67,9 +67,16 @@ namespace dy::Backends
     {
         return (__bridge void*)m_impl->texture;
     }
-void MetalTexture::SetNativeTexture(void* texture)
+    void MetalTexture::SetNativeTexture(void* texture)
     {
         m_impl->texture = (__bridge id<MTLTexture>)texture;
+        if(m_impl->texture != nil)
+        {
+            RHI::TextureDesc desc = GetDesc();
+            desc.width = static_cast<uint32_t>(m_impl->texture.width);
+            desc.height = static_cast<uint32_t>(m_impl->texture.height);
+            SetDesc(desc);
+        }
     }
 }
 

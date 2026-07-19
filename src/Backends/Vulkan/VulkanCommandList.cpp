@@ -97,18 +97,20 @@ void VulkanCommandList::SetRenderTargets(uint32_t numRenderTargets, dy::RHI::ITe
 
 void VulkanCommandList::ClearColor(dy::RHI::ITexture* renderTarget, float r, float g, float b, float a)
 {
-	(void)renderTarget;
+	if (m_passRecords.empty()) return;
+	PassRecord& passRecord = m_passRecords.back();
+	if (passRecord.renderTargetCount != 1 || renderTarget == nullptr || passRecord.renderTargets[0] != renderTarget) return;
 	m_clearColor = { { r, g, b, a } };
-	EnsurePassRecord();
-	m_passRecords.back().clearColor = m_clearColor;
+	passRecord.clearColor = m_clearColor;
 }
 
 void VulkanCommandList::ClearDepth(dy::RHI::ITexture* depthStencil, float depth)
 {
-	(void)depthStencil;
+	if (m_passRecords.empty()) return;
+	PassRecord& passRecord = m_passRecords.back();
+	if (depthStencil == nullptr || passRecord.depthStencil != depthStencil) return;
 	m_clearDepth = depth;
-	EnsurePassRecord();
-	m_passRecords.back().clearDepth = depth;
+	passRecord.clearDepth = depth;
 }
 
 void VulkanCommandList::SetViewport(const dy::RHI::Viewport& viewport)
@@ -125,7 +127,7 @@ void VulkanCommandList::SetScissor(const dy::RHI::Rect& rect)
 
 void VulkanCommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance)
 {
-	EnsurePassRecord();
+	if (m_passRecords.empty()) return;
 	DrawCall drawCall = {};
 	drawCall.indexed = false;
 	drawCall.vertexCount = vertexCount;
@@ -151,7 +153,7 @@ void VulkanCommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCou
 
 void VulkanCommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance)
 {
-	EnsurePassRecord();
+	if (m_passRecords.empty()) return;
 	DrawCall drawCall = {};
 	drawCall.indexed = true;
 	drawCall.indexCount = indexCount;
@@ -178,17 +180,6 @@ void VulkanCommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t insta
 
 void VulkanCommandList::End()
 {
-}
-
-void VulkanCommandList::EnsurePassRecord()
-{
-	if (!m_passRecords.empty()) return;
-
-	PassRecord passRecord = {};
-	passRecord.firstDraw = static_cast<uint32_t>(m_drawCalls.size());
-	passRecord.clearColor = m_clearColor;
-	passRecord.clearDepth = m_clearDepth;
-	m_passRecords.push_back(passRecord);
 }
 
 }

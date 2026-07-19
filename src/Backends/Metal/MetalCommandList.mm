@@ -8,7 +8,6 @@
 #include <cstring>
 #include <vector>
 #import <Metal/Metal.h>
-#import <QuartzCore/CAMetalLayer.h>
 
 namespace dy::Backends
 {
@@ -33,7 +32,9 @@ namespace dy::Backends
             if(texture == nullptr)
                 return nil;
 
-            auto* metalTexture = static_cast<MetalTexture*>(texture);
+            auto* metalTexture = dynamic_cast<MetalTexture*>(texture);
+            if(metalTexture == nullptr)
+                return nil;
             return (__bridge id<MTLTexture>)metalTexture->GetNativeTexture();
         }
     }
@@ -44,13 +45,14 @@ namespace dy::Backends
         id<MTLCommandBuffer>         commandBuffer  = nil;
         id<MTLRenderCommandEncoder>  encoder        = nil;
         MTLRenderPassDescriptor*     passDescriptor = nil;
-        id<CAMetalDrawable>          drawable       = nil;
         std::vector<id<MTLTexture>>  textures;
         RHI::GeometryBinding         geometry       = {};
         std::array<uint8_t, kMaxPushConstantBytes> inlineConstants = {};
         uint32_t                     inlineConstantSize = 0;
         uint32_t                     renderWidth = 1;
         uint32_t                     renderHeight = 1;
+        RHI::ITexture*               activeColorTarget = nullptr;
+        RHI::ITexture*               activeDepthTarget = nullptr;
     };
 
     MetalCommandList::MetalCommandList(void* commandQueue)
@@ -64,9 +66,8 @@ namespace dy::Backends
         delete m_impl;
     }
 
-    void MetalCommandList::Begin(void* drawable)
+    void MetalCommandList::Begin()
     {
-        m_impl->drawable      = (__bridge id<CAMetalDrawable>)drawable;
         m_impl->commandBuffer = [m_impl->commandQueue commandBuffer];
         m_impl->encoder       = nil;
         m_impl->passDescriptor = nil;
@@ -75,71 +76,101 @@ namespace dy::Backends
         m_impl->inlineConstantSize = 0;
         m_impl->renderWidth = 1;
         m_impl->renderHeight = 1;
+        m_impl->activeColorTarget = nullptr;
+        m_impl->activeDepthTarget = nullptr;
     }
 
     void MetalCommandList::SetRenderTargets(uint32_t numRenderTargets, RHI::ITexture** renderTargets, RHI::ITexture* depthStencil)
     {
-        if(m_impl->encoder)
+        EndActivePass();
+
+        if(numRenderTargets > 1)
+            return;
+        if(numRenderTargets == 0 && depthStencil == nullptr)
+            return;
+
+        RHI::ITexture* colorTarget = nullptr;
+        id<MTLTexture> colorTexture = nil;
+        uint32_t width = 0;
+        uint32_t height = 0;
+
+        if(numRenderTargets == 1)
         {
-            [m_impl->encoder endEncoding];
-            m_impl->encoder = nil;
+            if(renderTargets == nullptr || renderTargets[0] == nullptr)
+                return;
+
+            colorTarget = renderTargets[0];
+            if((colorTarget->GetUsage() & RHI::TextureUsage::RenderTarget) == RHI::TextureUsage::None ||
+               colorTarget->GetWidth() == 0 || colorTarget->GetHeight() == 0)
+            {
+                return;
+            }
+
+            colorTexture = GetMetalTexture(colorTarget);
+            if(colorTexture == nil ||
+               colorTexture.width != colorTarget->GetWidth() ||
+               colorTexture.height != colorTarget->GetHeight())
+            {
+                return;
+            }
+
+            width = colorTarget->GetWidth();
+            height = colorTarget->GetHeight();
+        }
+
+        id<MTLTexture> depthTexture = nil;
+        if(depthStencil != nullptr)
+        {
+            if((depthStencil->GetUsage() & RHI::TextureUsage::DepthStencil) == RHI::TextureUsage::None ||
+               depthStencil->GetWidth() == 0 || depthStencil->GetHeight() == 0)
+            {
+                return;
+            }
+
+            depthTexture = GetMetalTexture(depthStencil);
+            if(depthTexture == nil ||
+               depthTexture.width != depthStencil->GetWidth() ||
+               depthTexture.height != depthStencil->GetHeight())
+            {
+                return;
+            }
+
+            if(colorTarget != nullptr &&
+               (depthStencil->GetWidth() != width || depthStencil->GetHeight() != height))
+            {
+                return;
+            }
+
+            if(colorTarget == nullptr)
+            {
+                width = depthStencil->GetWidth();
+                height = depthStencil->GetHeight();
+            }
         }
 
         MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor new];
-        uint32_t width = 1;
-        uint32_t height = 1;
-
-        if(numRenderTargets == 0 || renderTargets == nullptr)
+        if(colorTarget != nullptr)
         {
-            if(depthStencil == nullptr && m_impl->drawable != nil)
-            {
-                passDesc.colorAttachments[0].texture     = m_impl->drawable.texture;
-                passDesc.colorAttachments[0].loadAction  = MTLLoadActionClear;
-                passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
-                passDesc.colorAttachments[0].clearColor  = MTLClearColorMake(0.08, 0.10, 0.14, 1.0);
-                width = static_cast<uint32_t>(m_impl->drawable.texture.width);
-                height = static_cast<uint32_t>(m_impl->drawable.texture.height);
-            }
-        }
-        else
-        {
-            for(uint32_t i = 0; i < numRenderTargets; i++)
-            {
-                auto* tex = static_cast<MetalTexture*>(renderTargets[i]);
-                id<MTLTexture> mtlTex = (__bridge id<MTLTexture>)tex->GetNativeTexture();
-
-                if(mtlTex == nil)
-                    mtlTex = m_impl->drawable.texture;
-
-                passDesc.colorAttachments[i].texture     = mtlTex;
-                passDesc.colorAttachments[i].loadAction  = MTLLoadActionClear;
-                passDesc.colorAttachments[i].storeAction = MTLStoreActionStore;
-                passDesc.colorAttachments[i].clearColor  = MTLClearColorMake(0.08, 0.10, 0.14, 1.0);
-                if(i == 0 && mtlTex != nil)
-                {
-                    width = static_cast<uint32_t>(mtlTex.width);
-                    height = static_cast<uint32_t>(mtlTex.height);
-                }
-            }
+            passDesc.colorAttachments[0].texture = colorTexture;
+            passDesc.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
         }
 
-        if(depthStencil)
+        if(depthStencil != nullptr)
         {
-            auto* depth = static_cast<MetalTexture*>(depthStencil);
-            passDesc.depthAttachment.texture     = (__bridge id<MTLTexture>)depth->GetNativeTexture();
-            passDesc.depthAttachment.loadAction  = MTLLoadActionClear;
+            passDesc.depthAttachment.texture = depthTexture;
+            passDesc.depthAttachment.loadAction = MTLLoadActionLoad;
             passDesc.depthAttachment.storeAction =
                 (depthStencil->GetUsage() & RHI::TextureUsage::ShaderResource) != RHI::TextureUsage::None
                     ? MTLStoreActionStore
                     : MTLStoreActionDontCare;
-            passDesc.depthAttachment.clearDepth  = 1.0;
-            width = depthStencil->GetWidth();
-            height = depthStencil->GetHeight();
         }
 
         m_impl->passDescriptor = passDesc;
         m_impl->renderWidth = width;
         m_impl->renderHeight = height;
+        m_impl->activeColorTarget = colorTarget;
+        m_impl->activeDepthTarget = depthStencil;
     }
 
     void MetalCommandList::SetViewport(const RHI::Viewport& viewport)
@@ -170,38 +201,29 @@ namespace dy::Backends
 
     void MetalCommandList::ClearColor(RHI::ITexture* renderTarget, float r, float g, float b, float a)
     {
-        if(m_impl->passDescriptor == nil || m_impl->encoder != nil)
+        if(m_impl->passDescriptor == nil || m_impl->encoder != nil ||
+           renderTarget == nullptr || renderTarget != m_impl->activeColorTarget)
             return;
 
-        id<MTLTexture> targetTexture = nil;
-        if(renderTarget != nullptr)
-        {
-            auto* metalTexture = static_cast<MetalTexture*>(renderTarget);
-            targetTexture = (__bridge id<MTLTexture>)metalTexture->GetNativeTexture();
-        }
+        MTLRenderPassColorAttachmentDescriptor* attachment = m_impl->passDescriptor.colorAttachments[0];
+        if(attachment.texture == nil)
+            return;
 
-        for(uint32_t i = 0; i < 8; ++i)
-        {
-            MTLRenderPassColorAttachmentDescriptor* attachment = m_impl->passDescriptor.colorAttachments[i];
-            if(attachment.texture == nil)
-                continue;
-
-            if(targetTexture == nil || attachment.texture == targetTexture)
-            {
-                attachment.clearColor = MTLClearColorMake(r, g, b, a);
-                if(targetTexture != nil)
-                    break;
-            }
-        }
+        attachment.loadAction = MTLLoadActionClear;
+        attachment.clearColor = MTLClearColorMake(r, g, b, a);
     }
 
-    void MetalCommandList::ClearDepth(RHI::ITexture*, float depth)
+    void MetalCommandList::ClearDepth(RHI::ITexture* depthStencil, float depth)
     {
-        if(m_impl->passDescriptor == nil || m_impl->encoder != nil)
+        if(m_impl->passDescriptor == nil || m_impl->encoder != nil ||
+           depthStencil == nullptr || depthStencil != m_impl->activeDepthTarget)
             return;
 
         if(m_impl->passDescriptor.depthAttachment.texture != nil)
+        {
+            m_impl->passDescriptor.depthAttachment.loadAction = MTLLoadActionClear;
             m_impl->passDescriptor.depthAttachment.clearDepth = depth;
+        }
     }
 
     void MetalCommandList::BindGraphicsPipeline(RHI::IPipelineState* pipelineState)
@@ -330,11 +352,7 @@ namespace dy::Backends
 
     void MetalCommandList::Close()
     {
-        if(m_impl->encoder)
-        {
-            [m_impl->encoder endEncoding];
-            m_impl->encoder = nil;
-        }
+        EndActivePass();
     }
 
     void MetalCommandList::SetNativePipelineState(void* pipelineState)
@@ -381,26 +399,44 @@ namespace dy::Backends
         if(m_impl->encoder != nil)
             return;
 
-        if(m_impl->passDescriptor == nil)
-        {
-            MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor new];
-            passDesc.colorAttachments[0].texture     = m_impl->drawable.texture;
-            passDesc.colorAttachments[0].loadAction  = MTLLoadActionClear;
-            passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
-            passDesc.colorAttachments[0].clearColor  = MTLClearColorMake(0.08, 0.10, 0.14, 1.0);
-            m_impl->passDescriptor = passDesc;
-            if(m_impl->drawable != nil)
-            {
-                m_impl->renderWidth = static_cast<uint32_t>(m_impl->drawable.texture.width);
-                m_impl->renderHeight = static_cast<uint32_t>(m_impl->drawable.texture.height);
-            }
-        }
+        if(m_impl->passDescriptor == nil || m_impl->commandBuffer == nil)
+            return;
 
         m_impl->encoder = [m_impl->commandBuffer renderCommandEncoderWithDescriptor:m_impl->passDescriptor];
+        if(m_impl->encoder == nil)
+            return;
+
         MTLViewport viewport = { 0.0, 0.0, static_cast<double>(m_impl->renderWidth), static_cast<double>(m_impl->renderHeight), 0.0, 1.0 };
         MTLScissorRect scissor = { 0, 0, m_impl->renderWidth, m_impl->renderHeight };
         [m_impl->encoder setViewport:viewport];
         [m_impl->encoder setScissorRect:scissor];
+    }
+
+    void MetalCommandList::EndActivePass()
+    {
+        if(m_impl->passDescriptor != nil && m_impl->encoder == nil)
+        {
+            const bool clearsColor =
+                m_impl->passDescriptor.colorAttachments[0].texture != nil &&
+                m_impl->passDescriptor.colorAttachments[0].loadAction == MTLLoadActionClear;
+            const bool clearsDepth =
+                m_impl->passDescriptor.depthAttachment.texture != nil &&
+                m_impl->passDescriptor.depthAttachment.loadAction == MTLLoadActionClear;
+            if(clearsColor || clearsDepth)
+                EnsureRenderEncoder();
+        }
+
+        if(m_impl->encoder != nil)
+        {
+            [m_impl->encoder endEncoding];
+            m_impl->encoder = nil;
+        }
+
+        m_impl->passDescriptor = nil;
+        m_impl->activeColorTarget = nullptr;
+        m_impl->activeDepthTarget = nullptr;
+        m_impl->renderWidth = 1;
+        m_impl->renderHeight = 1;
     }
 
     void* MetalCommandList::GetNativeCommandBuffer() const

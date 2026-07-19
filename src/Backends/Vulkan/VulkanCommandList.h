@@ -94,8 +94,6 @@ private:
 		std::array<uint8_t, kMaxPushConstantBytes> pushConstants = {};
 	};
 
-	void EnsurePassRecord();
-
 	friend struct VulkanDevice::Impl;
 	std::array<float, 4> m_clearColor = { 0.4f, 0.7f, 1.0f, 1.0f };
 	float m_clearDepth = 1.0f;

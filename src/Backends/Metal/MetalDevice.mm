@@ -63,9 +63,7 @@ namespace dy::Backends
         m_impl->currentDrawable = [m_impl->metalLayer nextDrawable];
         m_impl->frameIndex      = (m_impl->frameIndex + 1) % 2;
 
-        m_impl->commandList->Begin(
-            (__bridge void*)m_impl->currentDrawable
-        );
+        m_impl->commandList->Begin();
 
         for(uint32_t i = 0; i < m_impl->textures.size(); i++)
         {

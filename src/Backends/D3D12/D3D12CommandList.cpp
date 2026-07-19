@@ -72,24 +72,23 @@ namespace dy::Backends
     {
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> commandList;
-        ComPtr<ID3D12Resource> backBuffer;
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = {};
-        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = {};
-        bool hasDSV = false;
-        ID3D12Device* device = nullptr;
         ID3D12DescriptorHeap* globalDescriptorHeap = nullptr;
         uint32_t srvDescriptorSize = 0;
         D3D12Texture* backBufferTexture = nullptr; // 상태 추적기(GetBackBuffer 가 돌려주는 래퍼와 동일 리소스)
+        RHI::ITexture* activeColorTarget = nullptr;
+        RHI::ITexture* activeDepthTarget = nullptr;
+        D3D12_CPU_DESCRIPTOR_HANDLE activeRtvHandle = {};
+        D3D12_CPU_DESCRIPTOR_HANDLE activeDsvHandle = {};
+        bool hasActivePass = false;
     };
 
-    D3D12CommandList::D3D12CommandList(void* nativeDevice, void* nativeBackBuffer, size_t rtvHandlePtr, void* globalDescriptorHeap, uint32_t srvDescriptorSize)
+    D3D12CommandList::D3D12CommandList(void* nativeDevice, size_t rtvHandlePtr, void* globalDescriptorHeap, uint32_t srvDescriptorSize)
     {
         m_internal = new D3D12CommandListInternal();
         ID3D12Device* device = static_cast<ID3D12Device*>(nativeDevice);
 
-        m_internal->backBuffer = static_cast<ID3D12Resource*>(nativeBackBuffer);
         m_internal->rtvHandle.ptr = rtvHandlePtr;
-        m_internal->device = device;
         m_internal->globalDescriptorHeap = static_cast<ID3D12DescriptorHeap*>(globalDescriptorHeap);
         m_internal->srvDescriptorSize = srvDescriptorSize;
 
@@ -112,6 +111,11 @@ namespace dy::Backends
     {
         m_internal->allocator->Reset();
         m_internal->commandList->Reset(m_internal->allocator.Get(), nullptr);
+        m_internal->activeColorTarget = nullptr;
+        m_internal->activeDepthTarget = nullptr;
+        m_internal->activeRtvHandle = {};
+        m_internal->activeDsvHandle = {};
+        m_internal->hasActivePass = false;
     }
 
     void D3D12CommandList::Close()
@@ -122,71 +126,51 @@ namespace dy::Backends
         {
             TransitionTexture(m_internal->commandList.Get(), m_internal->backBufferTexture, D3D12_RESOURCE_STATE_PRESENT);
         }
-        else
-        {
-            D3D12_RESOURCE_BARRIER barrier = {};
-            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            barrier.Transition.pResource = m_internal->backBuffer.Get();
-            barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-            barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            m_internal->commandList->ResourceBarrier(1, &barrier);
-        }
         m_internal->commandList->Close();
+        m_internal->activeColorTarget = nullptr;
+        m_internal->activeDepthTarget = nullptr;
+        m_internal->hasActivePass = false;
     }
 
     void D3D12CommandList::SetBackBufferTexture(RHI::ITexture* texture)
     {
-        m_internal->backBufferTexture = static_cast<D3D12Texture*>(texture);
+        m_internal->backBufferTexture = dynamic_cast<D3D12Texture*>(texture);
     }
 
     void D3D12CommandList::ClearColor(RHI::ITexture* renderTarget, float r, float g, float b, float a)
     {
-        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_internal->rtvHandle;
-        if (renderTarget != nullptr)
+        if (!m_internal->hasActivePass ||
+            renderTarget == nullptr ||
+            renderTarget != m_internal->activeColorTarget)
         {
-            auto* d3dTarget = static_cast<D3D12Texture*>(renderTarget);
-            TransitionTexture(m_internal->commandList.Get(), d3dTarget, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            if (d3dTarget->HasRenderTargetView())
-            {
-                rtvHandle.ptr = d3dTarget->GetRenderTargetViewHandlePtr();
-            }
+            return;
         }
 
         const float color[] = { r, g, b, a };
-        m_internal->commandList->ClearRenderTargetView(rtvHandle, color, 0, nullptr);
+        m_internal->commandList->ClearRenderTargetView(m_internal->activeRtvHandle, color, 0, nullptr);
     }
 
     void D3D12CommandList::ClearDepth(RHI::ITexture* depthStencil, float depth)
     {
-        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_internal->dsvHandle;
-        bool hasDSV = m_internal->hasDSV;
-
-        if (depthStencil != nullptr)
+        if (!m_internal->hasActivePass ||
+            depthStencil == nullptr ||
+            depthStencil != m_internal->activeDepthTarget)
         {
-            auto* d3dDepth = static_cast<D3D12Texture*>(depthStencil);
-            TransitionTexture(m_internal->commandList.Get(), d3dDepth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-            if (d3dDepth->HasDepthStencilView())
-            {
-                dsvHandle.ptr = d3dDepth->GetDepthStencilViewHandlePtr();
-                hasDSV = true;
-            }
+            return;
         }
 
-        if (hasDSV)
-        {
-            m_internal->commandList->ClearDepthStencilView(dsvHandle, D3D12_CLEAR_FLAG_DEPTH, depth, 0, 0, nullptr);
-        }
-    }
-
-    void D3D12CommandList::SetDepthStencilView(size_t dsvHandlePtr)
-    {
-        m_internal->dsvHandle.ptr = dsvHandlePtr;
-        m_internal->hasDSV = true;
+        m_internal->commandList->ClearDepthStencilView(
+            m_internal->activeDsvHandle,
+            D3D12_CLEAR_FLAG_DEPTH,
+            depth,
+            0,
+            0,
+            nullptr);
     }
 
     void D3D12CommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance)
     {
+        if (!m_internal->hasActivePass) return;
         m_internal->commandList->DrawInstanced(vertexCount, instanceCount, startVertex, startInstance);
     }
 
@@ -216,6 +200,7 @@ namespace dy::Backends
 
     void D3D12CommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance)
     {
+        if (!m_internal->hasActivePass) return;
         m_internal->commandList->DrawIndexedInstanced(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
     }
 
@@ -375,40 +360,117 @@ namespace dy::Backends
 
     void D3D12CommandList::SetRenderTargets(uint32_t numRenderTargets, RHI::ITexture** renderTargets, RHI::ITexture* depthStencil)
     {
-        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_internal->rtvHandle;
+        m_internal->activeColorTarget = nullptr;
+        m_internal->activeDepthTarget = nullptr;
+        m_internal->activeRtvHandle = {};
+        m_internal->activeDsvHandle = {};
+        m_internal->hasActivePass = false;
+
+        const auto invalidatePass = [this]()
+        {
+            m_internal->commandList->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+        };
+
+        if (numRenderTargets > 1 ||
+            (numRenderTargets == 1 && (renderTargets == nullptr || renderTargets[0] == nullptr)) ||
+            (numRenderTargets == 0 && depthStencil == nullptr))
+        {
+            invalidatePass();
+            return;
+        }
+
+        D3D12Texture* colorTexture = nullptr;
+        D3D12Texture* depthTexture = nullptr;
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = {};
         D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = {};
         D3D12_CPU_DESCRIPTOR_HANDLE* rtvPtr = nullptr;
         D3D12_CPU_DESCRIPTOR_HANDLE* dsvPtr = nullptr;
-        uint32_t width = 1;
-        uint32_t height = 1;
+        uint32_t width = 0;
+        uint32_t height = 0;
 
-        if (numRenderTargets > 0 && renderTargets != nullptr && renderTargets[0] != nullptr)
+        if (numRenderTargets == 1)
         {
-            width = renderTargets[0]->GetWidth();
-            height = renderTargets[0]->GetHeight();
-            auto* d3dTarget = static_cast<D3D12Texture*>(renderTargets[0]);
-            TransitionTexture(m_internal->commandList.Get(), d3dTarget, D3D12_RESOURCE_STATE_RENDER_TARGET);
-            if (d3dTarget->HasRenderTargetView())
+            RHI::ITexture* colorTarget = renderTargets[0];
+            colorTexture = dynamic_cast<D3D12Texture*>(colorTarget);
+            const bool isBackBuffer = colorTexture != nullptr && colorTexture == m_internal->backBufferTexture;
+            const bool hasRenderTargetUsage =
+                (colorTarget->GetUsage() & RHI::TextureUsage::RenderTarget) != RHI::TextureUsage::None;
+
+            if (colorTexture == nullptr ||
+                colorTexture->GetNativeResource() == nullptr ||
+                colorTarget->GetWidth() == 0 ||
+                colorTarget->GetHeight() == 0 ||
+                !hasRenderTargetUsage ||
+                (!isBackBuffer && !colorTexture->HasRenderTargetView()))
             {
-                rtvHandle.ptr = d3dTarget->GetRenderTargetViewHandlePtr();
+                invalidatePass();
+                return;
+            }
+
+            width = colorTarget->GetWidth();
+            height = colorTarget->GetHeight();
+            rtvHandle.ptr = isBackBuffer
+                ? m_internal->rtvHandle.ptr
+                : colorTexture->GetRenderTargetViewHandlePtr();
+            if (rtvHandle.ptr == 0)
+            {
+                invalidatePass();
+                return;
             }
             rtvPtr = &rtvHandle;
         }
 
         if (depthStencil != nullptr)
         {
+            depthTexture = dynamic_cast<D3D12Texture*>(depthStencil);
+            const bool hasDepthStencilUsage =
+                (depthStencil->GetUsage() & RHI::TextureUsage::DepthStencil) != RHI::TextureUsage::None;
+
+            if (depthTexture == nullptr ||
+                depthTexture->GetNativeResource() == nullptr ||
+                depthStencil->GetWidth() == 0 ||
+                depthStencil->GetHeight() == 0 ||
+                !hasDepthStencilUsage ||
+                !depthTexture->HasDepthStencilView())
+            {
+                invalidatePass();
+                return;
+            }
+
+            if (colorTexture != nullptr &&
+                (width != depthStencil->GetWidth() || height != depthStencil->GetHeight()))
+            {
+                invalidatePass();
+                return;
+            }
+
             width = depthStencil->GetWidth();
             height = depthStencil->GetHeight();
-            auto* d3dDepth = static_cast<D3D12Texture*>(depthStencil);
-            TransitionTexture(m_internal->commandList.Get(), d3dDepth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-            if (d3dDepth->HasDepthStencilView())
+            dsvHandle.ptr = depthTexture->GetDepthStencilViewHandlePtr();
+            if (dsvHandle.ptr == 0)
             {
-                dsvHandle.ptr = d3dDepth->GetDepthStencilViewHandlePtr();
-                dsvPtr = &dsvHandle;
+                invalidatePass();
+                return;
             }
+            dsvPtr = &dsvHandle;
+        }
+
+        if (colorTexture != nullptr)
+        {
+            TransitionTexture(m_internal->commandList.Get(), colorTexture, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        }
+        if (depthTexture != nullptr)
+        {
+            TransitionTexture(m_internal->commandList.Get(), depthTexture, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         }
 
         m_internal->commandList->OMSetRenderTargets(rtvPtr != nullptr ? 1u : 0u, rtvPtr, FALSE, dsvPtr);
+
+        m_internal->activeColorTarget = numRenderTargets == 1 ? renderTargets[0] : nullptr;
+        m_internal->activeDepthTarget = depthStencil;
+        m_internal->activeRtvHandle = rtvHandle;
+        m_internal->activeDsvHandle = dsvHandle;
+        m_internal->hasActivePass = true;
 
         D3D12_VIEWPORT viewport = { 0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f };
         D3D12_RECT scissorRect = { 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) };
