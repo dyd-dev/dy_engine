@@ -16,6 +16,7 @@
 #include "RHI/IBuffer.h"
 #include "RHI/IDevice.h"
 #include "RHI/IPipelineState.h"
+#include "RHI/IShader.h"
 #include "RHI/ITexture.h"
 
 using namespace dy;
@@ -25,7 +26,7 @@ namespace Layout = dy::Graphics::RendererShaderLayout;
 
 namespace
 {
-	[[nodiscard]] std::vector<char> ReadBinaryFile(const char* filepath)
+	[[nodiscard]] std::vector<char> ReadShaderCode(const char* filepath)
 	{
 		std::ifstream file(filepath, std::ios::binary);
 		if(!file.is_open())
@@ -42,7 +43,7 @@ namespace
 		return content;
 	}
 
-	// bindless 모드는 set=1 텍스처 배열을 인덱싱하는 별도 픽셀 셰이더 변형을 쓴다.
+	// bindless 모드는 set=1 텍스처 배열을 인덱싱하는 별도 fragment shader 변형을 쓴다.
 	// "mesh_ps.spv" -> "mesh_ps_bindless.spv" 처럼 확장자 앞에 _bindless 를 삽입.
 	[[nodiscard]] std::string MakeBindlessVariantPath(const char* path)
 	{
@@ -55,25 +56,25 @@ namespace
 	[[nodiscard]] bool ResolveRendererShaderPaths(
 		const RendererDesc& config,
 		const char*& vertexShaderPath,
-		const char*& pixelShaderPath,
+		const char*& fragmentShaderPath,
 		const char*& shadowVertexShaderPath)
 	{
 		// 셰이더 경로는 앱이 RendererDesc로 제공한다(RHI 디바이스는 셰이더를 모른다).
 		vertexShaderPath = config.vertexShaderPath;
-		pixelShaderPath = config.pixelShaderPath;
+		fragmentShaderPath = config.fragmentShaderPath;
 		shadowVertexShaderPath = config.shadowVertexShaderPath;
 
 #if defined(VULKAN_DEFAULT_RENDERER_VERTEX_SHADER_PATH)
 		if(vertexShaderPath == nullptr) vertexShaderPath = VULKAN_DEFAULT_RENDERER_VERTEX_SHADER_PATH;
 #endif
-#if defined(VULKAN_DEFAULT_RENDERER_PIXEL_SHADER_PATH)
-		if(pixelShaderPath == nullptr) pixelShaderPath = VULKAN_DEFAULT_RENDERER_PIXEL_SHADER_PATH;
+#if defined(VULKAN_DEFAULT_RENDERER_FRAGMENT_SHADER_PATH)
+		if(fragmentShaderPath == nullptr) fragmentShaderPath = VULKAN_DEFAULT_RENDERER_FRAGMENT_SHADER_PATH;
 #endif
 #if defined(VULKAN_DEFAULT_RENDERER_SHADOW_VERTEX_SHADER_PATH)
 		if(shadowVertexShaderPath == nullptr) shadowVertexShaderPath = VULKAN_DEFAULT_RENDERER_SHADOW_VERTEX_SHADER_PATH;
 #endif
 
-		return vertexShaderPath != nullptr && pixelShaderPath != nullptr && (!config.enableShadows || shadowVertexShaderPath != nullptr);
+		return vertexShaderPath != nullptr && fragmentShaderPath != nullptr && (!config.enableShadows || shadowVertexShaderPath != nullptr);
 	}
 
 	[[nodiscard]] const DirectionalLight* GetPrimaryDirectionalLight(const Scene& scene)
@@ -140,16 +141,16 @@ bool Renderer::Initialize(RHI::IDevice* device, const RendererDesc& config)
 	if(m_hasInitialConfig &&
 		config.bindingMode == RendererBindingMode::PerDrawBind &&
 		config.vertexShaderPath == nullptr &&
-		config.pixelShaderPath == nullptr &&
+		config.fragmentShaderPath == nullptr &&
 		config.shadowVertexShaderPath == nullptr)
 	{
 		effectiveConfig = m_config;
 	}
 
 	const char* vertexShaderPath = nullptr;
-	const char* pixelShaderPath = nullptr;
+	const char* fragmentShaderPath = nullptr;
 	const char* shadowVertexShaderPath = nullptr;
-	if(!ResolveRendererShaderPaths(effectiveConfig, vertexShaderPath, pixelShaderPath, shadowVertexShaderPath))
+	if(!ResolveRendererShaderPaths(effectiveConfig, vertexShaderPath, fragmentShaderPath, shadowVertexShaderPath))
 	{
 		return false;
 	}
@@ -164,31 +165,43 @@ bool Renderer::Initialize(RHI::IDevice* device, const RendererDesc& config)
 		m_config.enableBindlessTextures = true;
 	}
 
-	m_vertexShaderSource = ReadBinaryFile(vertexShaderPath);
-	// 풀 PBR 글로벌-힙 인덱싱 픽셀 셰이더 변형(_bindless)이 존재하면 바인딩 모드와 무관하게 그것을 사용하고
+	m_vertexShaderCode = ReadShaderCode(vertexShaderPath);
+	// 풀 PBR 글로벌-힙 인덱싱 fragment shader 변형(_bindless)이 존재하면 바인딩 모드와 무관하게 그것을 사용하고
 	// 텍스처 샘플링을 힙/배열 인덱싱으로 통일한다. 이렇게 하면 enableBindlessTextures=true 가 되어
 	// per-draw/batched 경로도 머티리얼 텍스처 개별 바인딩(BindMaterialTextures)을 건너뛰고, 5종 텍스처를
 	// push constant 의 디스크립터 인덱스로 직접 샘플한다(= VK 와 동일한 풀 PBR). 변형이 없는 예제(단일
 	// 베이스컬러 셰이더만 제공)는 기존 per-texture 바인딩 경로를 그대로 쓴다.
-	std::string resolvedPixelShaderPath = pixelShaderPath;
-	const std::string indexedPixelShaderPath = MakeBindlessVariantPath(pixelShaderPath);
-	std::ifstream indexedPixelShaderFile(indexedPixelShaderPath, std::ios::binary);
-	if(m_config.bindingMode == RendererBindingMode::Bindless && indexedPixelShaderFile.good())
+	std::string resolvedFragmentShaderPath = fragmentShaderPath;
+	const std::string bindlessFragmentShaderPath = MakeBindlessVariantPath(fragmentShaderPath);
+	std::ifstream bindlessFragmentShaderFile(bindlessFragmentShaderPath, std::ios::binary);
+	if(m_config.bindingMode == RendererBindingMode::Bindless && bindlessFragmentShaderFile.good())
 	{
-		resolvedPixelShaderPath = indexedPixelShaderPath;
+		resolvedFragmentShaderPath = bindlessFragmentShaderPath;
 		m_config.enableBindlessTextures = true;
 	}
-	m_pixelShaderSource = ReadBinaryFile(resolvedPixelShaderPath.c_str());
-	m_shadowVertexShaderSource.clear();
+	m_fragmentShaderCode = ReadShaderCode(resolvedFragmentShaderPath.c_str());
+	m_shadowVertexShaderCode.clear();
 	if(m_config.enableShadows && shadowVertexShaderPath != nullptr)
 	{
-		m_shadowVertexShaderSource = ReadBinaryFile(shadowVertexShaderPath);
+		m_shadowVertexShaderCode = ReadShaderCode(shadowVertexShaderPath);
 	}
 
 	BuildRenderPassPlan();
-	BuildPipelineStates(device);
+	if(!BuildPipelineStates(device))
+	{
+		Shutdown(device);
+		return false;
+	}
+	m_vertexShaderCode.clear();
+	m_fragmentShaderCode.clear();
+	m_shadowVertexShaderCode.clear();
 	m_path = CreateRenderPath(m_config.bindingMode);
-	return m_pipeline != nullptr && m_path != nullptr;
+	if(m_path == nullptr)
+	{
+		Shutdown(device);
+		return false;
+	}
+	return true;
 }
 
 void Renderer::SetCamera(const CameraDesc& camera)
@@ -244,9 +257,9 @@ void Renderer::Shutdown(RHI::IDevice* device)
 
 	m_gpuScene.Shutdown(device);
 	m_materialStates.clear();
-	m_vertexShaderSource.clear();
-	m_pixelShaderSource.clear();
-	m_shadowVertexShaderSource.clear();
+	m_vertexShaderCode.clear();
+	m_fragmentShaderCode.clear();
+	m_shadowVertexShaderCode.clear();
 	m_renderPasses.clear();
 
 	if(m_lightingBuffer != nullptr)
@@ -279,6 +292,21 @@ void Renderer::Shutdown(RHI::IDevice* device)
 	{
 		device->DestroyPipelineState(m_pipeline);
 		m_pipeline = nullptr;
+	}
+	if(m_shadowVertexShader != nullptr)
+	{
+		device->DestroyShader(m_shadowVertexShader);
+		m_shadowVertexShader = nullptr;
+	}
+	if(m_fragmentShader != nullptr)
+	{
+		device->DestroyShader(m_fragmentShader);
+		m_fragmentShader = nullptr;
+	}
+	if(m_vertexShader != nullptr)
+	{
+		device->DestroyShader(m_vertexShader);
+		m_vertexShader = nullptr;
 	}
 }
 
@@ -327,7 +355,7 @@ void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 	}
 }
 
-void Renderer::BuildPipelineStates(RHI::IDevice* device)
+bool Renderer::BuildPipelineStates(RHI::IDevice* device)
 {
 	// 렌더 타깃 포맷은 실제 백버퍼에서 파생한다(단일 진실원). 이래야 PSO 가 실제 타깃과
 	// 항상 일치하고, 백엔드별 스왑체인 포맷 불일치(감마 차이)가 생기지 않는다.
@@ -339,11 +367,31 @@ void Renderer::BuildPipelineStates(RHI::IDevice* device)
 		}
 	}
 
+#if defined(ENABLE_METAL)
+	const char* shaderEntryPoint = "main0";
+#else
+	const char* shaderEntryPoint = "main";
+#endif
+
+	m_vertexShader = device->CreateShader(RHI::ShaderDesc{
+		RHI::ShaderStage::Vertex,
+		m_vertexShaderCode.data(),
+		m_vertexShaderCode.size(),
+		shaderEntryPoint
+	});
+	if(m_vertexShader == nullptr) return false;
+
+	m_fragmentShader = device->CreateShader(RHI::ShaderDesc{
+		RHI::ShaderStage::Fragment,
+		m_fragmentShaderCode.data(),
+		m_fragmentShaderCode.size(),
+		shaderEntryPoint
+	});
+	if(m_fragmentShader == nullptr) return false;
+
 	RHI::GraphicsPipelineDesc desc = {};
-	desc.vertexShader = m_vertexShaderSource.data();
-	desc.vertexShaderSize = m_vertexShaderSource.size();
-	desc.pixelShader = m_pixelShaderSource.data();
-	desc.pixelShaderSize = m_pixelShaderSource.size();
+	desc.vertexShader = m_vertexShader;
+	desc.fragmentShader = m_fragmentShader;
 	desc.renderTargetFormat = m_config.renderTargetFormat;
 	desc.depthStencilFormat = m_config.depthStencilFormat;
 	desc.depthEnable = m_config.depthStencilFormat != RHI::Format::Unknown;
@@ -351,18 +399,24 @@ void Renderer::BuildPipelineStates(RHI::IDevice* device)
 	desc.enableBindlessTextures = m_config.enableBindlessTextures;
 
 	m_pipeline = device->CreateGraphicsPipeline(desc);
+	if(m_pipeline == nullptr) return false;
 
-	if(IsShadowEnabled() && !m_shadowVertexShaderSource.empty())
+	if(IsShadowEnabled() && !m_shadowVertexShaderCode.empty())
 	{
 		const RHI::Format shadowFormat = m_config.depthStencilFormat != RHI::Format::Unknown
 			? m_config.depthStencilFormat
 			: RHI::Format::D32_FLOAT;
 
+		m_shadowVertexShader = device->CreateShader(RHI::ShaderDesc{
+			RHI::ShaderStage::Vertex,
+			m_shadowVertexShaderCode.data(),
+			m_shadowVertexShaderCode.size(),
+			shaderEntryPoint
+		});
+		if(m_shadowVertexShader == nullptr) return false;
+
 		RHI::GraphicsPipelineDesc shadowDesc = {};
-		shadowDesc.vertexShader = m_shadowVertexShaderSource.data();
-		shadowDesc.vertexShaderSize = m_shadowVertexShaderSource.size();
-		shadowDesc.pixelShader = nullptr;
-		shadowDesc.pixelShaderSize = 0;
+		shadowDesc.vertexShader = m_shadowVertexShader;
 		shadowDesc.renderTargetFormat = RHI::Format::Unknown;
 		shadowDesc.depthStencilFormat = shadowFormat;
 		shadowDesc.depthEnable = true;
@@ -370,7 +424,10 @@ void Renderer::BuildPipelineStates(RHI::IDevice* device)
 		shadowDesc.depthBiasSlope = m_config.shadowRasterSlopeBias;
 
 		m_shadowPipeline = device->CreateGraphicsPipeline(shadowDesc);
+		if(m_shadowPipeline == nullptr) return false;
 	}
+
+	return true;
 }
 
 void Renderer::BuildRenderPassPlan()
@@ -380,7 +437,7 @@ void Renderer::BuildRenderPassPlan()
 		RenderPassKind::Shadow,
 		RenderPassWork::PrepareOnly,
 		"Shadow",
-		m_config.enableShadows && !m_shadowVertexShaderSource.empty()
+		m_config.enableShadows && !m_shadowVertexShaderCode.empty()
 	});
 	m_renderPasses.push_back(RenderPassDesc{
 		RenderPassKind::MainForward,

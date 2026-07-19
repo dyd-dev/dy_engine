@@ -18,11 +18,11 @@ using namespace dy;
 static const char* ShaderExt()
 {
 #if defined(ENABLE_METAL)
-	return ".metal";
+	return ".metallib";
 #elif defined(ENABLE_VULKAN)
 	return ".spv";
 #elif defined(ENABLE_D3D12)
-	return ".hlsl";
+	return ".dxil";
 #else
 	return ".glsl";
 #endif
@@ -38,12 +38,12 @@ int main()
 
 		const std::string ext = ShaderExt();
 		const std::string vsPath = std::string(DY_SHADER_DIR) + "/mesh_vs" + ext;
-		const std::string psPath = std::string(DY_SHADER_DIR) + "/mesh_ps" + ext;
+		const std::string fragmentShaderPath = std::string(DY_SHADER_DIR) + "/mesh_ps" + ext;
 
 		Graphics::Renderer renderer;
 		Graphics::RendererDesc rendererConfig = {};
 		rendererConfig.vertexShaderPath = vsPath.c_str();
-		rendererConfig.pixelShaderPath = psPath.c_str();
+		rendererConfig.fragmentShaderPath = fragmentShaderPath.c_str();
 		if(!renderer.Initialize(device.get(), rendererConfig)) return -1;
 
 		Graphics::Scene scene;

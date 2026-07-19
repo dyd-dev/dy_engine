@@ -5,9 +5,6 @@
 #include "D3D12PipelineState.h"
 #include "D3D12Texture.h"
 #include "d3dx12.h"
-#include <d3dcompiler.h>
-
-#pragma comment(lib, "d3dcompiler.lib")
 
 #include <d3d12.h>
 #include <dxgi1_6.h>
@@ -24,6 +21,26 @@ namespace dy::Backends
     {
         constexpr uint32_t kGlobalDescriptorHeapSize = 1024;
         constexpr uint32_t kTransientDescriptorSlotCount = 1;
+
+		class D3D12Shader final : public RHI::IShader
+		{
+		public:
+			explicit D3D12Shader(const RHI::ShaderDesc& desc)
+				: m_stage(desc.stage)
+				, m_binary(
+					static_cast<const uint8_t*>(desc.binary),
+					static_cast<const uint8_t*>(desc.binary) + desc.binarySize)
+			{
+			}
+
+			[[nodiscard]] RHI::ShaderStage GetStage() const { return m_stage; }
+			[[nodiscard]] const void* GetBinary() const { return m_binary.data(); }
+			[[nodiscard]] size_t GetBinarySize() const { return m_binary.size(); }
+
+		private:
+			RHI::ShaderStage m_stage = RHI::ShaderStage::Unknown;
+			std::vector<uint8_t> m_binary;
+		};
     }
 
     // 헤더에서 선언만 했던 구조체의 실제 정의
@@ -333,10 +350,23 @@ namespace dy::Backends
         return new D3D12Buffer(m_internal->device.Get(), desc);
     }
 
+    RHI::IShader* D3D12Device::CreateShader(const RHI::ShaderDesc& desc) {
+        if (desc.stage == RHI::ShaderStage::Unknown ||
+            desc.binary == nullptr || desc.binarySize == 0 ||
+            desc.entryPoint == nullptr || desc.entryPoint[0] == '\0') return nullptr;
+        return new D3D12Shader(desc);
+    }
+
     RHI::IPipelineState* D3D12Device::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc) {
         const bool hasColorAttachment = desc.renderTargetFormat != RHI::Format::Unknown;
         const bool hasDepthAttachment = desc.depthStencilFormat != RHI::Format::Unknown;
+        const bool hasFragmentShader = desc.fragmentShader != nullptr;
+        const auto* vertexShader = dynamic_cast<const D3D12Shader*>(desc.vertexShader);
+        const auto* fragmentShader = dynamic_cast<const D3D12Shader*>(desc.fragmentShader);
         if ((!hasColorAttachment && !hasDepthAttachment) || (desc.depthEnable && !hasDepthAttachment)) return nullptr;
+        if (vertexShader == nullptr || vertexShader->GetStage() != RHI::ShaderStage::Vertex) return nullptr;
+        if (hasFragmentShader &&
+            (fragmentShader == nullptr || fragmentShader->GetStage() != RHI::ShaderStage::Fragment)) return nullptr;
 
         // 1. Root Signature 1.1 지원 여부 확인
         D3D12_FEATURE_DATA_ROOT_SIGNATURE featureData = {};
@@ -420,35 +450,9 @@ namespace dy::Backends
         psoDesc.InputLayout = { kInputLayout, static_cast<UINT>(sizeof(kInputLayout) / sizeof(kInputLayout[0])) };
         psoDesc.pRootSignature = pRootSignature.Get();
 
-        // 셰이더 컴파일
-        ComPtr<ID3DBlob> vsBlob;
-        ComPtr<ID3DBlob> psBlob;
-        ComPtr<ID3DBlob> errorBlob;
-
-        UINT compileFlags = D3DCOMPILE_ENABLE_UNBOUNDED_DESCRIPTOR_TABLES;
-#if defined(_DEBUG) || defined(DEBUG)
-        compileFlags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#endif
-
-        const bool hasPixelShader = desc.pixelShader != nullptr && desc.pixelShaderSize > 0u;
-
-        HRESULT hr = D3DCompile(desc.vertexShader, desc.vertexShaderSize, nullptr, nullptr, nullptr, "main", "vs_5_1", compileFlags, 0, &vsBlob, &errorBlob);
-        if (FAILED(hr)) {
-            if (errorBlob) std::cout << "VS Compile Error: " << (char*)errorBlob->GetBufferPointer() << std::endl;
-            return nullptr;
-        }
-
-        if (hasPixelShader) {
-            hr = D3DCompile(desc.pixelShader, desc.pixelShaderSize, nullptr, nullptr, nullptr, "main", "ps_5_1", compileFlags, 0, &psBlob, &errorBlob);
-            if (FAILED(hr)) {
-                if (errorBlob) std::cout << "PS Compile Error: " << (char*)errorBlob->GetBufferPointer() << std::endl;
-                return nullptr;
-            }
-        }
-
-        psoDesc.VS = CD3DX12_SHADER_BYTECODE(vsBlob.Get());
-        if (hasPixelShader) {
-            psoDesc.PS = CD3DX12_SHADER_BYTECODE(psBlob.Get());
+        psoDesc.VS = { vertexShader->GetBinary(), vertexShader->GetBinarySize() };
+        if (hasFragmentShader) {
+            psoDesc.PS = { fragmentShader->GetBinary(), fragmentShader->GetBinarySize() };
         }
 
         psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
@@ -486,7 +490,7 @@ namespace dy::Backends
         // 5. PSO 생성
         Microsoft::WRL::ComPtr<ID3D12PipelineState> pPSO;
         if (FAILED(m_internal->device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pPSO)))) {
-            std::cout << "[D3D12] CreateGraphicsPipelineState FAILED (hasPixelShader=" << hasPixelShader << ")" << std::endl;
+            std::cout << "[D3D12] CreateGraphicsPipelineState FAILED (hasFragmentShader=" << hasFragmentShader << ")" << std::endl;
             DumpInfoQueue(m_internal, "CreateGraphicsPipelineState");
             return nullptr;
         }
@@ -633,6 +637,7 @@ namespace dy::Backends
     }
 
     void D3D12Device::DestroyPipelineState(RHI::IPipelineState* pipeline) { delete pipeline; }
+    void D3D12Device::DestroyShader(RHI::IShader* shader) { delete shader; }
 
     RHI::ITexture* D3D12Device::GetBackBuffer() {
         return m_internal->backBufferTextures[m_internal->backBufferIndex];

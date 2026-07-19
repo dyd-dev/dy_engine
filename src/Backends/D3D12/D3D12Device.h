@@ -20,6 +20,7 @@ public:
   void Present() override;
 
   RHI::IBuffer *CreateBuffer(const RHI::BufferDesc &desc) override;
+  RHI::IShader *CreateShader(const RHI::ShaderDesc &desc) override;
   RHI::ITexture *CreateTexture(const RHI::TextureDesc &desc) override;
   bool UpdateTexture(RHI::ITexture *texture, const void *data, uint32_t rowPitch) override;
   RHI::IPipelineState *CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc &desc) override;
@@ -29,6 +30,7 @@ public:
   void UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::IBuffer *buffer) override;
 
   void DestroyBuffer(RHI::IBuffer *buffer) override;
+  void DestroyShader(RHI::IShader *shader) override;
   void DestroyTexture(RHI::ITexture *texture) override;
   void DestroyPipelineState(RHI::IPipelineState *pipeline) override;
 

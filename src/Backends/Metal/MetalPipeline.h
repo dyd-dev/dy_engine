@@ -10,6 +10,21 @@
 
 namespace dy::Backends
 {
+    class MetalShader final : public RHI::IShader
+    {
+    public:
+        MetalShader(const RHI::ShaderDesc& desc, void* device);
+        ~MetalShader() override;
+
+        [[nodiscard]] RHI::ShaderStage GetStage() const;
+        void* GetNativeFunction() const;
+        bool IsValid() const;
+
+    private:
+        struct Impl;
+        Impl* m_impl = nullptr;
+    };
+
     class MetalPipeline : public RHI::IPipelineState
     {
     public:

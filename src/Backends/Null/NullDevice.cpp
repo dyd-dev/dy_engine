@@ -3,6 +3,7 @@
 #include "RHI/IBuffer.h"
 #include "RHI/ICommandList.h"
 #include "RHI/IPipelineState.h"
+#include "RHI/IShader.h"
 #include "RHI/ITexture.h"
 
 #include <memory>
@@ -36,6 +37,20 @@ namespace dy::Backends
 		{
 		public:
 			explicit NullPipelineState(const RHI::GraphicsPipelineDesc&) {}
+		};
+
+		class NullShader final : public RHI::IShader
+		{
+		public:
+			explicit NullShader(const RHI::ShaderDesc& desc)
+				: m_stage(desc.stage)
+			{
+			}
+
+			[[nodiscard]] RHI::ShaderStage GetStage() const { return m_stage; }
+
+		private:
+			RHI::ShaderStage m_stage = RHI::ShaderStage::Unknown;
 		};
 
 		class NullCommandList final : public RHI::ICommandList
@@ -107,6 +122,14 @@ namespace dy::Backends
 		return new NullTexture(desc);
 	}
 
+	RHI::IShader* NullDevice::CreateShader(const RHI::ShaderDesc& desc)
+	{
+		if(desc.stage == RHI::ShaderStage::Unknown ||
+			desc.binary == nullptr || desc.binarySize == 0 ||
+			desc.entryPoint == nullptr || desc.entryPoint[0] == '\0') return nullptr;
+		return new NullShader(desc);
+	}
+
 	bool NullDevice::UpdateTexture(RHI::ITexture*, const void*, uint32_t)
 	{
 		return true;
@@ -116,10 +139,16 @@ namespace dy::Backends
 	{
 		const bool hasColorAttachment = desc.renderTargetFormat != RHI::Format::Unknown;
 		const bool hasDepthAttachment = desc.depthStencilFormat != RHI::Format::Unknown;
+		const bool hasFragmentShader = desc.fragmentShader != nullptr;
 		if((!hasColorAttachment && !hasDepthAttachment) || (desc.depthEnable && !hasDepthAttachment))
 		{
 			return nullptr;
 		}
+		const auto* vertexShader = dynamic_cast<const NullShader*>(desc.vertexShader);
+		const auto* fragmentShader = dynamic_cast<const NullShader*>(desc.fragmentShader);
+		if(vertexShader == nullptr || vertexShader->GetStage() != RHI::ShaderStage::Vertex) return nullptr;
+		if(hasFragmentShader &&
+			(fragmentShader == nullptr || fragmentShader->GetStage() != RHI::ShaderStage::Fragment)) return nullptr;
 
 		return new NullPipelineState(desc);
 	}
@@ -135,6 +164,11 @@ namespace dy::Backends
 	void NullDevice::DestroyBuffer(RHI::IBuffer* buffer)
 	{
 		delete buffer;
+	}
+
+	void NullDevice::DestroyShader(RHI::IShader* shader)
+	{
+		delete shader;
 	}
 
 	void NullDevice::DestroyTexture(RHI::ITexture* texture)

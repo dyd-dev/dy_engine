@@ -16,6 +16,7 @@ namespace dy::RHI
 	class IBuffer;
 	class IDevice;
 	class IPipelineState;
+	class IShader;
 	class ITexture;
 }
 
@@ -56,7 +57,7 @@ namespace dy::Graphics
 		void SetEnvironmentLight(const EnvironmentDesc& environment);
 
 	private:
-		void BuildPipelineStates(RHI::IDevice* device);
+		[[nodiscard]] bool BuildPipelineStates(RHI::IDevice* device);
 		void BuildRenderPassPlan();
 		void EnsureDepthStencilTarget(RHI::IDevice* device);
 		void EnsureShadowDepthTarget(RHI::IDevice* device);
@@ -69,11 +70,14 @@ namespace dy::Graphics
 
 		RendererDesc m_config = {};
 		std::vector<RenderPassDesc> m_renderPasses;
-		std::vector<char> m_vertexShaderSource;
-		std::vector<char> m_pixelShaderSource;
-		std::vector<char> m_shadowVertexShaderSource;
+		std::vector<char> m_vertexShaderCode;
+		std::vector<char> m_fragmentShaderCode;
+		std::vector<char> m_shadowVertexShaderCode;
 		RHI::IPipelineState* m_pipeline = nullptr;
 		RHI::IPipelineState* m_shadowPipeline = nullptr;
+		RHI::IShader* m_vertexShader = nullptr;
+		RHI::IShader* m_fragmentShader = nullptr;
+		RHI::IShader* m_shadowVertexShader = nullptr;
 		RHI::ITexture* m_depthStencilTarget = nullptr;
 		RHI::ITexture* m_shadowDepthTarget = nullptr;
 		RHI::IBuffer* m_lightingBuffer = nullptr;

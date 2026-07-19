@@ -1,7 +1,7 @@
 # 예제 공통 셋업 + 셰이더 처리. (cmake/ 모듈이나 메인 CMakeLists 가 아니라 여기서 정의)
 # add_subdirectory 이전에 정의해야 하위 예제 스코프에서 보인다.
 
-# native shader binary를 빌드하고 현재 runtime이 읽는 source도 예제 작업 폴더로 배치한다.
+# native shader binary를 빌드하고 예제 작업 폴더로 배치한다.
 #  - Vulkan : glslc 로 .glsl -> .spv
 #  - D3D12  : dxc 로 .hlsl -> .dxil
 #  - Metal  : xcrun metal/metallib 로 .metal -> .metallib
@@ -40,19 +40,15 @@ function(dy_example_shaders target)
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND "${DY_DXC}" -T vs_6_0 -E main -I "${inc}" "${src_dir}/mesh_vs.hlsl" -Fo "${out_dir}/mesh_vs.dxil"
             COMMAND "${DY_DXC}" -T ps_6_0 -E main -I "${inc}" "${src_dir}/mesh_ps.hlsl" -Fo "${out_dir}/mesh_ps.dxil"
-            COMMAND ${CMAKE_COMMAND} -E copy "${src_dir}/mesh_vs.hlsl" "${out_dir}/mesh_vs.hlsl"
-            COMMAND ${CMAKE_COMMAND} -E copy "${src_dir}/mesh_ps.hlsl" "${out_dir}/mesh_ps.hlsl"
             VERBATIM)
         if(EXISTS "${src_dir}/mesh_ps_bindless.hlsl")
             add_custom_command(TARGET ${target} POST_BUILD
                 COMMAND "${DY_DXC}" -T ps_6_0 -E main -I "${inc}" "${src_dir}/mesh_ps_bindless.hlsl" -Fo "${out_dir}/mesh_ps_bindless.dxil"
-                COMMAND ${CMAKE_COMMAND} -E copy "${src_dir}/mesh_ps_bindless.hlsl" "${out_dir}/mesh_ps_bindless.hlsl"
                 VERBATIM)
         endif()
         if(EXISTS "${src_dir}/mesh_shadow_vs.hlsl")
             add_custom_command(TARGET ${target} POST_BUILD
                 COMMAND "${DY_DXC}" -T vs_6_0 -E main -I "${inc}" "${src_dir}/mesh_shadow_vs.hlsl" -Fo "${out_dir}/mesh_shadow_vs.dxil"
-                COMMAND ${CMAKE_COMMAND} -E copy "${src_dir}/mesh_shadow_vs.hlsl" "${out_dir}/mesh_shadow_vs.hlsl"
                 VERBATIM)
         endif()
     elseif(USE_METAL)
@@ -62,14 +58,11 @@ function(dy_example_shaders target)
             COMMAND "${DY_XCRUN}" -sdk macosx metallib "${out_dir}/mesh_vs.air" -o "${out_dir}/mesh_vs.metallib"
             COMMAND "${DY_XCRUN}" -sdk macosx metal -c "${src_dir}/mesh_ps.metal" -o "${out_dir}/mesh_ps.air"
             COMMAND "${DY_XCRUN}" -sdk macosx metallib "${out_dir}/mesh_ps.air" -o "${out_dir}/mesh_ps.metallib"
-            COMMAND ${CMAKE_COMMAND} -E copy "${src_dir}/mesh_vs.metal" "${out_dir}/mesh_vs.metal"
-            COMMAND ${CMAKE_COMMAND} -E copy "${src_dir}/mesh_ps.metal" "${out_dir}/mesh_ps.metal"
             VERBATIM)
         if(EXISTS "${src_dir}/mesh_shadow_vs.metal")
             add_custom_command(TARGET ${target} POST_BUILD
                 COMMAND "${DY_XCRUN}" -sdk macosx metal -c "${src_dir}/mesh_shadow_vs.metal" -o "${out_dir}/mesh_shadow_vs.air"
                 COMMAND "${DY_XCRUN}" -sdk macosx metallib "${out_dir}/mesh_shadow_vs.air" -o "${out_dir}/mesh_shadow_vs.metallib"
-                COMMAND ${CMAKE_COMMAND} -E copy "${src_dir}/mesh_shadow_vs.metal" "${out_dir}/mesh_shadow_vs.metal"
                 VERBATIM)
         endif()
     else()

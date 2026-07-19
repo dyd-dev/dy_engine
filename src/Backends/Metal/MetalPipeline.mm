@@ -3,6 +3,66 @@
 
 namespace dy::Backends
 {
+    struct MetalShader::Impl
+    {
+        id<MTLLibrary> library = nil;
+        id<MTLFunction> function = nil;
+        RHI::ShaderStage stage = RHI::ShaderStage::Unknown;
+    };
+
+    MetalShader::MetalShader(const RHI::ShaderDesc& desc, void* device)
+        : m_impl(new Impl())
+    {
+        m_impl->stage = desc.stage;
+
+        dispatch_data_t libraryData = dispatch_data_create(
+            desc.binary,
+            desc.binarySize,
+            dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0),
+            DISPATCH_DATA_DESTRUCTOR_NONE);
+        if(libraryData == nullptr) return;
+
+        NSError* error = nil;
+        id<MTLDevice> mtlDevice = (__bridge id<MTLDevice>)device;
+        m_impl->library = [mtlDevice newLibraryWithData:libraryData error:&error];
+#if !OS_OBJECT_USE_OBJC
+        dispatch_release(libraryData);
+#endif
+        if(m_impl->library == nil)
+        {
+            NSLog(@"Metal library load failed: %@", error);
+            return;
+        }
+
+        NSString* entryPoint = [NSString stringWithUTF8String:desc.entryPoint];
+        m_impl->function = [m_impl->library newFunctionWithName:entryPoint];
+        if(m_impl->function == nil) NSLog(@"Metal shader entry point not found: %@", entryPoint);
+    }
+
+    RHI::ShaderStage MetalShader::GetStage() const
+    {
+        return m_impl->stage;
+    }
+
+    MetalShader::~MetalShader()
+    {
+#if !__has_feature(objc_arc)
+        [m_impl->function release];
+        [m_impl->library release];
+#endif
+        delete m_impl;
+    }
+
+    void* MetalShader::GetNativeFunction() const
+    {
+        return (__bridge void*)m_impl->function;
+    }
+
+    bool MetalShader::IsValid() const
+    {
+        return m_impl->function != nil;
+    }
+
     struct MetalPipeline::Impl
     {
         id<MTLRenderPipelineState> pipelineState    = nil;
@@ -37,32 +97,17 @@ namespace dy::Backends
         m_impl->depthBiasSlope = desc.depthBiasSlope;
         m_impl->depthBiasClamp = desc.depthBiasClamp;
 
-        // MSL 소스 텍스트로 셰이더 로드
-        const char* vertSrc = static_cast<const char*>(desc.vertexShader);
-        const char* fragSrc = static_cast<const char*>(desc.pixelShader);
+        const auto* vertexShader = dynamic_cast<const MetalShader*>(desc.vertexShader);
+        const auto* fragmentShader = dynamic_cast<const MetalShader*>(desc.fragmentShader);
+        if(vertexShader == nullptr || vertexShader->GetStage() != RHI::ShaderStage::Vertex) return;
+        const bool hasFragmentShader = desc.fragmentShader != nullptr;
+        if(hasFragmentShader &&
+           (fragmentShader == nullptr || fragmentShader->GetStage() != RHI::ShaderStage::Fragment)) return;
 
-        if(vertSrc == nullptr || desc.vertexShaderSize == 0)
-            return;
-
-        NSString* vertString = [NSString stringWithUTF8String:vertSrc];
-
-        id<MTLLibrary> vertLib = [mtlDevice newLibraryWithSource:vertString
-                                                         options:nil
-                                                           error:&error];
-        if(!vertLib) { NSLog(@"Vertex shader 컴파일 실패: %@", error); return; }
-
-        id<MTLFunction> vertFunc = [vertLib newFunctionWithName:@"main0"];
-        if(!vertFunc) { NSLog(@"vertexShader 함수 못 찾음"); return; }
-
-        id<MTLFunction> fragFunc = nil;
-        if(fragSrc != nullptr && desc.pixelShaderSize > 0)
-        {
-            NSString* fragString = [NSString stringWithUTF8String:fragSrc];
-            id<MTLLibrary> fragLib = [mtlDevice newLibraryWithSource:fragString options:nil error:&error];
-            if(!fragLib) { NSLog(@"Fragment shader 컴파일 실패: %@", error); return; }
-            fragFunc = [fragLib newFunctionWithName:@"main0"];
-            if(!fragFunc) { NSLog(@"fragmentShader 함수 못 찾음"); return; }
-        }
+        id<MTLFunction> vertFunc = (__bridge id<MTLFunction>)vertexShader->GetNativeFunction();
+        id<MTLFunction> fragFunc = hasFragmentShader
+            ? (__bridge id<MTLFunction>)fragmentShader->GetNativeFunction()
+            : nil;
 
         MTLRenderPipelineDescriptor* pipeDesc = [MTLRenderPipelineDescriptor new];
         pipeDesc.vertexFunction   = vertFunc;

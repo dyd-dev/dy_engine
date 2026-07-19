@@ -50,7 +50,7 @@ namespace dy::Graphics
 	{
 		RendererBindingMode bindingMode = RendererBindingMode::PerDrawBind;
 		const char* vertexShaderPath = nullptr;
-		const char* pixelShaderPath = nullptr;
+		const char* fragmentShaderPath = nullptr;
 		const char* shadowVertexShaderPath = nullptr;
 		RHI::Format renderTargetFormat = RHI::Format::R8G8B8A8_UNORM;
 		RHI::Format depthStencilFormat = RHI::Format::D32_FLOAT;

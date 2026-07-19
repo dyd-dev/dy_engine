@@ -188,6 +188,21 @@ namespace dy::Backends
         return new MetalTexture(desc, (__bridge void*)m_impl->device);
     }
 
+    RHI::IShader* MetalDevice::CreateShader(const RHI::ShaderDesc& desc)
+    {
+        if(desc.stage == RHI::ShaderStage::Unknown ||
+           desc.binary == nullptr || desc.binarySize == 0 ||
+           desc.entryPoint == nullptr || desc.entryPoint[0] == '\0') return nullptr;
+
+        auto* shader = new MetalShader(desc, (__bridge void*)m_impl->device);
+        if(!shader->IsValid())
+        {
+            delete shader;
+            return nullptr;
+        }
+        return shader;
+    }
+
     RHI::IPipelineState* MetalDevice::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc)
     {
         const bool hasColorAttachment = desc.renderTargetFormat != RHI::Format::Unknown;
@@ -205,6 +220,7 @@ namespace dy::Backends
     }
 
     void MetalDevice::DestroyBuffer(RHI::IBuffer* buffer)                 { delete buffer; }
+    void MetalDevice::DestroyShader(RHI::IShader* shader)                 { delete shader; }
     void MetalDevice::DestroyTexture(RHI::ITexture* texture)
     {
         if(texture == nullptr) return;

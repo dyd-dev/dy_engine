@@ -351,7 +351,7 @@ namespace {
 			m_pushConstantSize(pushConstantSize),
 			m_bindlessTexturesEnabled(desc.enableBindlessTextures)
 		{
-			CopyPipelineDesc(desc);
+			m_desc = desc;
 			m_pipelineCache.reserve(4);
 		}
 
@@ -404,31 +404,9 @@ namespace {
 			VulkanPipeline pipeline;
 		};
 
-		static void CopyShaderBytes(const void* source, size_t size, std::vector<uint8_t>& destination)
-		{
-			destination.clear();
-			if (source == nullptr || size == 0) return;
-			const uint8_t* begin = static_cast<const uint8_t*>(source);
-			destination.assign(begin, begin + size);
-		}
-
-		void CopyPipelineDesc(const dy::RHI::GraphicsPipelineDesc& desc)
-		{
-			m_desc = desc;
-			CopyShaderBytes(desc.vertexShader, desc.vertexShaderSize, m_vertexShader);
-			CopyShaderBytes(desc.pixelShader, desc.pixelShaderSize, m_pixelShader);
-
-			m_desc.vertexShader = m_vertexShader.empty() ? nullptr : m_vertexShader.data();
-			m_desc.vertexShaderSize = m_vertexShader.size();
-			m_desc.pixelShader = m_pixelShader.empty() ? nullptr : m_pixelShader.data();
-			m_desc.pixelShaderSize = m_pixelShader.size();
-		}
-
 		VkDevice m_device = VK_NULL_HANDLE;
 		dy::RHI::GraphicsPipelineDesc m_desc = {};
 		uint32_t m_pushConstantSize = 0;
-		std::vector<uint8_t> m_vertexShader;
-		std::vector<uint8_t> m_pixelShader;
 		mutable std::vector<PipelineCacheEntry> m_pipelineCache;
 		bool m_bindlessTexturesEnabled = false;
 	};
@@ -503,12 +481,14 @@ struct VulkanDevice::Impl
 	void Present();
 
 	dy::RHI::IBuffer* CreateBuffer(const dy::RHI::BufferDesc& desc);
+	dy::RHI::IShader* CreateShader(const dy::RHI::ShaderDesc& desc);
 	dy::RHI::ITexture* CreateTexture(const dy::RHI::TextureDesc& desc);
 	bool UpdateTexture(dy::RHI::ITexture* texture, const void* rgba8Pixels, uint32_t rowPitch);
 	dy::RHI::IPipelineState* CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc);
 	[[nodiscard]] dy::RHI::DescriptorIndex AllocateDescriptorSlot();
 	void UpdateDescriptorSlot(dy::RHI::DescriptorIndex index, dy::RHI::ITexture* texture);
 	void DestroyBuffer(dy::RHI::IBuffer* buffer);
+	void DestroyShader(dy::RHI::IShader* shader);
 	void DestroyTexture(dy::RHI::ITexture* texture);
 	void DestroyPipelineState(dy::RHI::IPipelineState* pipeline);
 	[[nodiscard]] dy::RHI::ITexture* GetBackBuffer();
@@ -604,6 +584,7 @@ private:
 	dy::RHI::ITexture* m_backBuffer = nullptr;
 	dy::RHI::ITexture* m_fallbackTexture = nullptr;
 	std::vector<dy::RHI::ITexture*> m_ownedTextures;
+	std::vector<dy::RHI::IShader*> m_ownedShaders;
 	std::vector<dy::RHI::IPipelineState*> m_ownedPipelineStates;
 };
 
@@ -649,6 +630,11 @@ dy::RHI::ITexture* VulkanDevice::CreateTexture(const dy::RHI::TextureDesc& desc)
 	return m_impl->CreateTexture(desc);
 }
 
+dy::RHI::IShader* VulkanDevice::CreateShader(const dy::RHI::ShaderDesc& desc)
+{
+	return m_impl->CreateShader(desc);
+}
+
 bool VulkanDevice::UpdateTexture(dy::RHI::ITexture* texture, const void* rgba8Pixels, uint32_t rowPitch)
 {
 	return m_impl->UpdateTexture(texture, rgba8Pixels, rowPitch);
@@ -672,6 +658,11 @@ void VulkanDevice::UpdateDescriptorSlot(dy::RHI::DescriptorIndex index, dy::RHI:
 void VulkanDevice::DestroyBuffer(dy::RHI::IBuffer* buffer)
 {
 	m_impl->DestroyBuffer(buffer);
+}
+
+void VulkanDevice::DestroyShader(dy::RHI::IShader* shader)
+{
+	m_impl->DestroyShader(shader);
 }
 
 void VulkanDevice::DestroyTexture(dy::RHI::ITexture* texture)
@@ -756,6 +747,22 @@ dy::RHI::ITexture* VulkanDevice::Impl::CreateTexture(const dy::RHI::TextureDesc&
 	return texture.release();
 }
 
+dy::RHI::IShader* VulkanDevice::Impl::CreateShader(const dy::RHI::ShaderDesc& desc) {
+	if(desc.stage == dy::RHI::ShaderStage::Unknown ||
+		desc.binary == nullptr || desc.binarySize == 0 ||
+		desc.binarySize % sizeof(uint32_t) != 0 ||
+		desc.entryPoint == nullptr || desc.entryPoint[0] == '\0') return nullptr;
+
+	try {
+		VulkanShader* shader = new VulkanShader(m_context.device, desc);
+		m_ownedShaders.push_back(shader);
+		return shader;
+	} catch(const std::exception& e) {
+		SDL_Log("Vulkan shader creation failed: %s", e.what());
+		return nullptr;
+	}
+}
+
 bool VulkanDevice::Impl::UpdateTexture(dy::RHI::ITexture* texture, const void* rgba8Pixels, uint32_t rowPitch) {
 	VulkanTexture* vulkanTexture = dynamic_cast<VulkanTexture*>(texture);
 	if (vulkanTexture == nullptr || rgba8Pixels == nullptr) return false;
@@ -775,8 +782,13 @@ bool VulkanDevice::Impl::UpdateTexture(dy::RHI::ITexture* texture, const void* r
 dy::RHI::IPipelineState* VulkanDevice::Impl::CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) {
 	const bool hasColorAttachment = desc.renderTargetFormat != dy::RHI::Format::Unknown;
 	const bool hasDepthAttachment = desc.depthStencilFormat != dy::RHI::Format::Unknown;
+	const bool hasFragmentShader = desc.fragmentShader != nullptr;
 	if ((!hasColorAttachment && !hasDepthAttachment) || (desc.depthEnable && !hasDepthAttachment)) return nullptr;
-	if (desc.vertexShader == nullptr || desc.vertexShaderSize == 0) return nullptr;
+	const VulkanShader* vertexShader = dynamic_cast<const VulkanShader*>(desc.vertexShader);
+	const VulkanShader* fragmentShader = dynamic_cast<const VulkanShader*>(desc.fragmentShader);
+	if (vertexShader == nullptr || vertexShader->GetStage() != dy::RHI::ShaderStage::Vertex) return nullptr;
+	if (hasFragmentShader &&
+		(fragmentShader == nullptr || fragmentShader->GetStage() != dy::RHI::ShaderStage::Fragment)) return nullptr;
 	if (desc.depthBiasClamp != 0.0f && !m_depthBiasClampSupported) return nullptr;
 
 	try {
@@ -849,6 +861,15 @@ void VulkanDevice::Impl::DestroyPipelineState(dy::RHI::IPipelineState* pipeline)
 	if (it != m_ownedPipelineStates.end()) {
 		delete *it;
 		m_ownedPipelineStates.erase(it);
+	}
+}
+
+void VulkanDevice::Impl::DestroyShader(dy::RHI::IShader* shader) {
+	if(!shader) return;
+	const auto it = std::find(m_ownedShaders.begin(), m_ownedShaders.end(), shader);
+	if(it != m_ownedShaders.end()) {
+		delete *it;
+		m_ownedShaders.erase(it);
 	}
 }
 
@@ -2081,6 +2102,8 @@ void VulkanDevice::Impl::DestroyDeviceResources() {
 	}
 	for (dy::RHI::IPipelineState* pipelineState : m_ownedPipelineStates) delete pipelineState;
 	m_ownedPipelineStates.clear();
+	for (dy::RHI::IShader* shader : m_ownedShaders) delete shader;
+	m_ownedShaders.clear();
 
 	for (dy::RHI::ITexture* texture : m_ownedTextures) delete texture;
 	m_ownedTextures.clear();

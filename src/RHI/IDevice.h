@@ -9,10 +9,12 @@ namespace dy::RHI
 	class ICommandList;
 
 	class IBuffer;
+	class IShader;
 	class ITexture;
 	class IPipelineState;
 
 	struct BufferDesc;
+	struct ShaderDesc;
 	struct TextureDesc;
 	struct GraphicsPipelineDesc;
 
@@ -52,10 +54,12 @@ namespace dy::RHI
 		[[nodiscard]] virtual ITexture* GetBackBuffer() = 0;
 
 		[[nodiscard]] virtual IBuffer* CreateBuffer(const BufferDesc& desc) = 0;
+		[[nodiscard]] virtual IShader* CreateShader(const ShaderDesc& desc) = 0;
 		[[nodiscard]] virtual ITexture* CreateTexture(const TextureDesc& desc) = 0;
 		[[nodiscard]] virtual IPipelineState* CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) = 0;
 		
 		virtual void DestroyBuffer(IBuffer* buffer) = 0;
+		virtual void DestroyShader(IShader* shader) = 0;
 		virtual void DestroyTexture(ITexture* texture) = 0;
 		virtual void DestroyPipelineState(IPipelineState* pipeline) = 0;
 
