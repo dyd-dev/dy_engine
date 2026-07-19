@@ -985,7 +985,7 @@ bool VulkanDevice::Impl::CreateInstance() {
 	appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
 	appInfo.pEngineName = "dy_engine";
 	appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-	appInfo.apiVersion = VK_API_VERSION_1_0;
+	appInfo.apiVersion = VK_API_VERSION_1_1;
 
 	VkInstanceCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -1023,6 +1023,10 @@ bool VulkanDevice::Impl::PickPhysicalDevice() {
 	vkEnumeratePhysicalDevices(m_context.instance, &deviceCount, devices.data());
 
 	for (VkPhysicalDevice device : devices) {
+		VkPhysicalDeviceProperties properties{};
+		vkGetPhysicalDeviceProperties(device, &properties);
+		if (properties.apiVersion < VK_API_VERSION_1_1) continue;
+
 		uint32_t count = 0; vkGetPhysicalDeviceQueueFamilyProperties(device, &count, nullptr);
 		std::vector<VkQueueFamilyProperties> families(count); vkGetPhysicalDeviceQueueFamilyProperties(device, &count, families.data());
 		
@@ -1188,16 +1192,16 @@ void VulkanDevice::Impl::RecordPass(
 		VkViewport viewport{};
 		if (drawCall.hasViewport) {
 			viewport.x = drawCall.viewport.x;
-			viewport.y = drawCall.viewport.y;
+			viewport.y = drawCall.viewport.y + drawCall.viewport.height;
 			viewport.width = drawCall.viewport.width;
-			viewport.height = drawCall.viewport.height;
+			viewport.height = -drawCall.viewport.height;
 			viewport.minDepth = drawCall.viewport.minDepth;
 			viewport.maxDepth = drawCall.viewport.maxDepth;
 		} else {
 			viewport.x = 0.0f;
-			viewport.y = 0.0f;
+			viewport.y = static_cast<float>(renderExtent.height);
 			viewport.width = static_cast<float>(renderExtent.width);
-			viewport.height = static_cast<float>(renderExtent.height);
+			viewport.height = -static_cast<float>(renderExtent.height);
 			viewport.minDepth = 0.0f;
 			viewport.maxDepth = 1.0f;
 		}

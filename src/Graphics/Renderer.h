@@ -47,7 +47,7 @@ namespace dy::Graphics
 		void Shutdown(RHI::IDevice* device) override;
 		void Render(const Scene& scene, RHI::IDevice* device) override;
 		
-		void SetCamera(const CameraDesc& camera); // 고수준 카메라 설정: view·proj·cameraPosition 생성 + 백엔드 Y 뒤집기 처리.
+		void SetCamera(const CameraDesc& camera); // 고수준 카메라 설정: RHI 공통 clip-space의 view·proj와 cameraPosition 생성.
 		void SetViewProjection(const Math::float4x4& viewProjection); // 저수준(deep) 우회: 행렬/위치를 직접 지정.
 		void SetCameraPosition(const Math::float3& cameraPosition);
 		void SetDirectionalLight(const Math::float3& direction, const Math::float3& color, float intensity);
@@ -84,6 +84,5 @@ namespace dy::Graphics
 		std::unique_ptr<IRenderPath> m_path;
 		RendererBindingMode m_initialBindingMode = RendererBindingMode::PerDrawBind;
 		bool m_hasInitialConfig = false;
-		bool m_clipYFlip = false; // 백엔드 클립공간 Y 뒤집기 필요 여부(Initialize 에서 device 질의)
 	};
 }

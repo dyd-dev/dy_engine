@@ -33,8 +33,6 @@ public:
 
 	[[nodiscard]] dy::RHI::ITexture* GetBackBuffer() override;
 	
-	[[nodiscard]] bool RequiresClipSpaceYFlip() const override { return true; }
-
 protected:
 	int Initialize(const void* windowHandle, const dy::RHI::DeviceDesc& desc) override;
 

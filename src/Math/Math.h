@@ -358,7 +358,7 @@ namespace dy::Math
 		return view;
 	}
 
-	// 캐노니컬 클립공간 = Y-up(D3D12/Metal 네이티브); 백엔드 Y 뒤집기는 상위 레이어가 처리.
+	// RHI 클립공간은 Y-up, Z [0, 1]이다. Backend가 native 좌표계로 번역하며 투영 함수는 Backend를 모른다.
 	[[nodiscard]] inline float4x4 OrthographicRH_ZO(float width, float height, float nearPlane, float farPlane)
 	{
 		float4x4 projection = float4x4::Identity();
@@ -379,8 +379,6 @@ namespace dy::Math
 		return projection;
 	}
 
-	// 캐노니컬 클립공간 = Y-up(D3D12/Metal 네이티브). 백엔드별 Y 뒤집기는 상위 레이어가
-	// device 능력(RequiresClipSpaceYFlip)으로 처리한다(Vulkan=true). 투영 함수는 백엔드를 모른다.
 	[[nodiscard]] inline float4x4 PerspectiveRH_ZO(float fovYRadians, float aspect, float nearPlane, float farPlane)
 	{
 		const float safeFov = std::max(std::min(fovYRadians, 3.0f), 0.1f);

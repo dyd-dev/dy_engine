@@ -89,11 +89,7 @@ namespace dy::Graphics
 
 		const Math::float3 up = SelectUpVector(lightForward);
 		const Math::float4x4 view = Math::LookAtRH(lightOrigin, desc.sceneCenter, up);
-		// 그림자 깊이 패스/샘플링은 Y-down 광원 투영 기준으로 튜닝돼 있다(카메라 캐노니컬과 무관).
-		Math::float4x4 proj = Math::OrthographicRH_ZO(desc.orthoWidth, desc.orthoHeight, desc.nearPlane, desc.farPlane);
-		proj.m[5] = -proj.m[5];
-
-		return proj * view;
+		return Math::OrthographicRH_ZO(desc.orthoWidth, desc.orthoHeight, desc.nearPlane, desc.farPlane) * view;
 	}
 
 	Math::float4x4 ComputeSpotLightViewProj(
@@ -107,10 +103,7 @@ namespace dy::Graphics
 			lightPosition.y + lightForward.y,
 			lightPosition.z + lightForward.z);
 		const Math::float4x4 view = Math::LookAtRH(lightPosition, target, SelectUpVector(lightForward));
-		// 그림자 깊이 패스/샘플링은 Y-down 광원 투영 기준으로 튜닝돼 있다(카메라 캐노니컬과 무관).
-		Math::float4x4 proj = Math::PerspectiveRH_ZO(desc.spotFovYRadians, 1.0f, desc.nearPlane, desc.farPlane);
-		proj.m[5] = -proj.m[5];
-		return proj * view;
+		return Math::PerspectiveRH_ZO(desc.spotFovYRadians, 1.0f, desc.nearPlane, desc.farPlane) * view;
 	}
 
 	ShadowMapDesc FitDirectionalShadowMapToBounds(

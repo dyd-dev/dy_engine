@@ -114,9 +114,8 @@ float3 GetNormal(PSInput input, uint textureFlags)
     return normalize(mul(tangentNormal, tbn));
 }
 
-// Manual-compare PCF, matching mesh_ps.glsl. The shadow map stores light-space
-// depth (R channel). D3D12 NDC is y-up while the texture is v-down, so the
-// sampling UV gets a vertical flip (the GLSL/Vulkan path bakes this into proj).
+// Manual-compare PCF, matching mesh_ps.glsl. RHI clip-space is y-up while
+// texture coordinates are v-down, so shadow sampling flips the y coordinate.
 float CalculateShadowVisibility(float4 lightSpacePosition, float3 normal, float3 lightDir)
 {
     if (directionalLightDirection.w < 0.5)
@@ -126,8 +125,7 @@ float CalculateShadowVisibility(float4 lightSpacePosition, float3 normal, float3
         return 1.0;
 
     float3 ndc = lightSpacePosition.xyz / lightSpacePosition.w;
-    float2 shadowUV = ndc.xy * 0.5 + 0.5;
-    shadowUV.y = 1.0 - shadowUV.y;
+    float2 shadowUV = ndc.xy * float2(0.5, -0.5) + 0.5;
     if (shadowUV.x < 0.0 || shadowUV.x > 1.0 ||
         shadowUV.y < 0.0 || shadowUV.y > 1.0 ||
         ndc.z < 0.0 || ndc.z > 1.0)

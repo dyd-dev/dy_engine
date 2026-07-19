@@ -111,7 +111,7 @@ float CalculateShadowVisibility(vec4 lightSpacePosition, vec3 normal, vec3 light
     }
 
     vec3 ndc = lightSpacePosition.xyz / lightSpacePosition.w;
-    vec2 shadowUV = ndc.xy * 0.5 + 0.5;
+    vec2 shadowUV = ndc.xy * vec2(0.5, -0.5) + 0.5;
     if (shadowUV.x < 0.0 || shadowUV.x > 1.0 ||
         shadowUV.y < 0.0 || shadowUV.y > 1.0 ||
         ndc.z < 0.0 || ndc.z > 1.0) {

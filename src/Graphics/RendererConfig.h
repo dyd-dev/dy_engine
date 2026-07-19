@@ -30,9 +30,8 @@ namespace dy::Graphics
 		float specularIntensity = 1.0f;
 	};
 
-	// 고수준 카메라 명세. Renderer::SetCamera 가 view·proj·cameraPosition 을 만들고
-	// 백엔드 클립공간 Y 뒤집기까지 처리한다. 사용자는 백엔드 NDC 관례를 몰라도 된다.
-	// (직접 행렬을 다루려는 deep 유저는 SetViewProjection/SetCameraPosition 으로 우회.)
+	// 고수준 카메라 명세. Renderer::SetCamera 가 RHI 공통 clip-space의 view·proj·cameraPosition 을 만든다.
+	// Backend native 좌표계 변환은 RHI가 담당한다. 직접 행렬을 넣을 때도 같은 규약을 사용한다.
 	struct CameraDesc
 	{
 		Math::float3 eye = Math::float3(0.0f, 0.0f, 3.0f);

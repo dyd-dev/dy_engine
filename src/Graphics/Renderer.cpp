@@ -185,8 +185,6 @@ bool Renderer::Initialize(RHI::IDevice* device, const RendererDesc& config)
 		m_shadowVertexShaderSource = ReadBinaryFile(shadowVertexShaderPath);
 	}
 
-	m_clipYFlip = device->RequiresClipSpaceYFlip();
-
 	BuildRenderPassPlan();
 	BuildPipelineStates(device);
 	m_path = CreateRenderPath(m_config.bindingMode);
@@ -199,11 +197,6 @@ void Renderer::SetCamera(const CameraDesc& camera)
 	Math::float4x4 proj = camera.orthographic
 		? Math::OrthographicRH_ZO(camera.orthoWidth, camera.orthoHeight, camera.nearPlane, camera.farPlane)
 		: Math::PerspectiveRH_ZO(camera.fovYRadians, camera.aspect, camera.nearPlane, camera.farPlane);
-
-	if(m_clipYFlip)
-	{
-		proj.m[5] = -proj.m[5];
-	}
 
 	m_config.viewProjectionMatrix = proj * view;
 	m_config.cameraPosition = camera.eye;

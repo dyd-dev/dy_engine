@@ -61,9 +61,6 @@ namespace dy::RHI
 
 		virtual bool UpdateTexture(ITexture* texture, const void* data, uint32_t rowPitch) = 0;
 
-		// (D3D12/Metal: false. Vulkan: true)
-		[[nodiscard]] virtual bool RequiresClipSpaceYFlip() const { return false; }
-
 		[[nodiscard]] virtual DescriptorIndex AllocateDescriptorSlot() { return INVALID_DESCRIPTOR_INDEX; }
 		virtual void UpdateDescriptorSlot(DescriptorIndex index, ITexture* texture) { (void)index; (void)texture; }
 		virtual void UpdateDescriptorSlot(DescriptorIndex index, IBuffer* buffer) { (void)index; (void)buffer; }
