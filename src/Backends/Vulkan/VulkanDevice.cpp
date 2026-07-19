@@ -722,7 +722,7 @@ int VulkanDevice::Impl::Initialize(const void* windowHandle, const dy::RHI::Devi
 		if (!CreateLogicalDevice()) return -1;
 		if (!CreateCommandPool()) return -1;
 
-		m_swapchain.Initialize(m_context, m_windowHandle, dy::RHI::IsSrgbFormat(GetDesc().swapchainFormat));
+		if (!m_swapchain.Initialize(m_context, m_windowHandle, GetDesc().swapchainFormat)) return -1;
 		UpdateBackBufferMetadata();
 
 		if (!CreateFallbackTexture()) return -1;
@@ -2046,10 +2046,15 @@ void VulkanDevice::Impl::DestroyRenderTargetCache() {
 void VulkanDevice::Impl::RecreateSwapchain() {
 	vkDeviceWaitIdle(m_context.device);
 	DestroySwapchainResources();
-	m_swapchain.Initialize(m_context, m_windowHandle, dy::RHI::IsSrgbFormat(GetDesc().swapchainFormat));
+	if (!m_swapchain.Initialize(m_context, m_windowHandle, GetDesc().swapchainFormat)) {
+		SDL_Log("Failed to recreate Vulkan swapchain with the requested format.");
+		return;
+	}
 	UpdateBackBufferMetadata();
-	CreateMainRenderPass();
-	CreateFramebuffers();
+	if (!CreateMainRenderPass() || !CreateFramebuffers()) {
+		SDL_Log("Failed to recreate Vulkan swapchain render targets.");
+		return;
+	}
 	m_imagesInFlight.assign(m_swapchain.GetImageCount(), VK_NULL_HANDLE);
 }
 
@@ -2110,8 +2115,7 @@ void VulkanDevice::Impl::UpdateBackBufferMetadata() {
 	desc.height = extent.height;
 	desc.depthOrArraySize = 1;
 	desc.mipLevels = 1;
-	// 실제 스왑체인 포맷을 정직하게 보고한다(요청한 DeviceDesc 포맷과 동일하게 선택됨).
-	desc.format = GetDesc().swapchainFormat;
+	desc.format = m_swapchain.GetFormat();
 	desc.usage = dy::RHI::TextureUsage::RenderTarget;
 
 	if (m_backBuffer == nullptr) {

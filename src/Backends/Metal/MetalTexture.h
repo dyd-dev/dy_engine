@@ -13,6 +13,7 @@ namespace dy::Backends
     class MetalTexture : public RHI::ITexture
     {
     public:
+        explicit MetalTexture(const RHI::TextureDesc& desc);
         MetalTexture(const RHI::TextureDesc& desc, void* device);
         ~MetalTexture() override;
 

@@ -97,6 +97,45 @@ namespace dy::Backends
 
     int D3D12Device::Initialize(const void* windowHandle, const RHI::DeviceDesc& desc)
     {
+        RHI::Format actualSwapchainFormat = desc.swapchainFormat;
+        DXGI_FORMAT swapchainResourceFormat = DXGI_FORMAT_UNKNOWN;
+        DXGI_FORMAT swapchainRtvFormat = DXGI_FORMAT_UNKNOWN;
+        switch(desc.swapchainFormat)
+        {
+        case RHI::Format::Unknown:
+            actualSwapchainFormat = RHI::Format::R8G8B8A8_UNORM;
+            swapchainResourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+            swapchainRtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+            break;
+        case RHI::Format::R8G8B8A8_UNORM:
+            swapchainResourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+            swapchainRtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+            break;
+        case RHI::Format::B8G8R8A8_UNORM:
+            swapchainResourceFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+            swapchainRtvFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+            break;
+        case RHI::Format::R8G8B8A8_UNORM_SRGB:
+            swapchainResourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+            swapchainRtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            break;
+        case RHI::Format::B8G8R8A8_UNORM_SRGB:
+            swapchainResourceFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+            swapchainRtvFormat = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+            break;
+        case RHI::Format::R16G16B16A16_FLOAT:
+            swapchainResourceFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            swapchainRtvFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            break;
+        case RHI::Format::R32G32B32A32_FLOAT:
+        case RHI::Format::D32_FLOAT:
+        case RHI::Format::D24_UNORM_S8_UINT:
+        case RHI::Format::R32_UINT:
+        case RHI::Format::R16_UINT:
+        default:
+            return -1;
+        }
+
         HWND hwnd = static_cast<HWND>(const_cast<void*>(windowHandle));
         m_internal->maxFramesInFlight = desc.maxFramesInFlight;
         m_internal->frameFenceValues.assign(desc.maxFramesInFlight, 0);
@@ -120,8 +159,17 @@ namespace dy::Backends
 
         // 1. 디바이스 생성
         ComPtr<IDXGIFactory4> factory;
-        CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+        if(FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return -1;
         if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_internal->device)))) {
+            return -1;
+        }
+
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT rtvFormatSupport = {};
+        rtvFormatSupport.Format = swapchainRtvFormat;
+        if(FAILED(m_internal->device->CheckFeatureSupport(
+            D3D12_FEATURE_FORMAT_SUPPORT, &rtvFormatSupport, sizeof(rtvFormatSupport))) ||
+            (rtvFormatSupport.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET) == 0)
+        {
             return -1;
         }
         
@@ -137,7 +185,7 @@ namespace dy::Backends
         // 2. 커맨드 큐 생성
         D3D12_COMMAND_QUEUE_DESC queueDesc = {};
         queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-        m_internal->device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_internal->commandQueue));
+        if(FAILED(m_internal->device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_internal->commandQueue)))) return -1;
 
         // 3. 스왑체인 image 수는 frame context 수와 독립적으로 유지한다.
         RECT rect = {};
@@ -149,23 +197,19 @@ namespace dy::Backends
             height = 720;
         }
 
-        // DeviceDesc 의 포맷을 그대로 따른다(기본 R8G8B8A8_UNORM).
-        // 주의: FLIP 스왑체인은 sRGB 버퍼 포맷을 직접 허용하지 않으므로, sRGB 가 필요하면
-        // 버퍼는 UNORM 으로 만들고 RTV 만 sRGB 로 두는 분리가 필요(현재 기본 UNORM 이라 무관).
-        const DXGI_FORMAT swapchainDxgiFormat = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(desc.swapchainFormat));
-
         DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
         swapChainDesc.BufferCount = static_cast<UINT>(m_internal->renderTargets.size());
         swapChainDesc.Width = width;
         swapChainDesc.Height = height;
-        swapChainDesc.Format = swapchainDxgiFormat;
+        swapChainDesc.Format = swapchainResourceFormat;
         swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
         swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
         swapChainDesc.SampleDesc.Count = 1;
 
         ComPtr<IDXGISwapChain1> tempSwapChain;
-        factory->CreateSwapChainForHwnd(m_internal->commandQueue.Get(), hwnd, &swapChainDesc, nullptr, nullptr, &tempSwapChain);
-        tempSwapChain.As(&m_internal->swapChain);
+        if(FAILED(factory->CreateSwapChainForHwnd(
+            m_internal->commandQueue.Get(), hwnd, &swapChainDesc, nullptr, nullptr, &tempSwapChain))) return -1;
+        if(FAILED(tempSwapChain.As(&m_internal->swapChain))) return -1;
         m_internal->backBufferIndex = m_internal->swapChain->GetCurrentBackBufferIndex();
 
         // 4. RTV(렌더 타겟 뷰) 힙 생성
@@ -173,7 +217,7 @@ namespace dy::Backends
         rtvHeapDesc.NumDescriptors = swapChainDesc.BufferCount;
         rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
         rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-        m_internal->device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&m_internal->rtvHeap));
+        if(FAILED(m_internal->device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&m_internal->rtvHeap)))) return -1;
         m_internal->rtvDescriptorSize = m_internal->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
         // 5. 렌더 타겟 뷰(RTV) 연결
@@ -182,13 +226,17 @@ namespace dy::Backends
         RHI::TextureDesc bbDesc = {};
         bbDesc.width = swapChainDesc.Width;
         bbDesc.height = swapChainDesc.Height;
-        bbDesc.format = desc.swapchainFormat;
+        bbDesc.format = actualSwapchainFormat;
         bbDesc.usage = RHI::TextureUsage::RenderTarget;
+
+        D3D12_RENDER_TARGET_VIEW_DESC swapchainRtvDesc = {};
+        swapchainRtvDesc.Format = swapchainRtvFormat;
+        swapchainRtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
 
         for (UINT n = 0; n < swapChainDesc.BufferCount; n++)
         {
-            m_internal->swapChain->GetBuffer(n, IID_PPV_ARGS(&m_internal->renderTargets[n]));
-            m_internal->device->CreateRenderTargetView(m_internal->renderTargets[n].Get(), nullptr, rtvHandle);
+            if(FAILED(m_internal->swapChain->GetBuffer(n, IID_PPV_ARGS(&m_internal->renderTargets[n])))) return -1;
+            m_internal->device->CreateRenderTargetView(m_internal->renderTargets[n].Get(), &swapchainRtvDesc, rtvHandle);
             
             m_internal->backBufferTextures[n] = new D3D12Texture(m_internal->renderTargets[n].Get(), bbDesc);
             

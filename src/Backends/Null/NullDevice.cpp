@@ -5,6 +5,8 @@
 #include "RHI/IPipelineState.h"
 #include "RHI/ITexture.h"
 
+#include <memory>
+
 namespace dy::Backends
 {
 	namespace
@@ -61,14 +63,7 @@ namespace dy::Backends
 	struct NullDevice::Impl
 	{
 		NullCommandList commandList;
-		NullTexture backBuffer = NullTexture({
-			1,
-			1,
-			1,
-			1,
-			RHI::Format::R8G8B8A8_UNORM,
-			RHI::TextureUsage::RenderTarget
-		});
+		std::unique_ptr<NullTexture> backBuffer;
 		RHI::DescriptorIndex nextDescriptorIndex = 0;
 		uint32_t frameIndex = 0;
 	};
@@ -154,11 +149,40 @@ namespace dy::Backends
 
 	RHI::ITexture* NullDevice::GetBackBuffer()
 	{
-		return &m_impl->backBuffer;
+		return m_impl->backBuffer.get();
 	}
 
-	int NullDevice::Initialize(const void*, const RHI::DeviceDesc&)
+	int NullDevice::Initialize(const void*, const RHI::DeviceDesc& desc)
 	{
+		const RHI::Format actualFormat = desc.swapchainFormat == RHI::Format::Unknown
+			? RHI::Format::R8G8B8A8_UNORM
+			: desc.swapchainFormat;
+		switch(actualFormat)
+		{
+		case RHI::Format::R8G8B8A8_UNORM:
+		case RHI::Format::B8G8R8A8_UNORM:
+		case RHI::Format::R8G8B8A8_UNORM_SRGB:
+		case RHI::Format::B8G8R8A8_UNORM_SRGB:
+		case RHI::Format::R16G16B16A16_FLOAT:
+		case RHI::Format::R32G32B32A32_FLOAT:
+			break;
+		case RHI::Format::Unknown:
+		case RHI::Format::D32_FLOAT:
+		case RHI::Format::D24_UNORM_S8_UINT:
+		case RHI::Format::R32_UINT:
+		case RHI::Format::R16_UINT:
+		default:
+			return -1;
+		}
+
+		m_impl->backBuffer = std::make_unique<NullTexture>(RHI::TextureDesc{
+			1,
+			1,
+			1,
+			1,
+			actualFormat,
+			RHI::TextureUsage::RenderTarget
+		});
 		return 0;
 	}
 }

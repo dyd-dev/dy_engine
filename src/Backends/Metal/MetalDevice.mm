@@ -20,6 +20,7 @@ namespace dy::Backends
         NSMutableArray*     frameCompletionCommandBuffers = nil;
         uint32_t            maxFramesInFlight = 0;
         uint32_t            frameIndex      = 0;
+        RHI::Format         swapchainFormat = RHI::Format::Unknown;
 
         MetalCommandList*   commandList     = nullptr;
         MetalTexture*       backBufferTex   = nullptr;  // cached; not owned by Renderer
@@ -46,6 +47,36 @@ namespace dy::Backends
 
     int MetalDevice::Initialize(const void* windowHandle, const RHI::DeviceDesc& desc)
     {
+        MTLPixelFormat layerPixelFormat = MTLPixelFormatInvalid;
+        switch(desc.swapchainFormat)
+        {
+        case RHI::Format::Unknown:
+            m_impl->swapchainFormat = RHI::Format::B8G8R8A8_UNORM;
+            layerPixelFormat = MTLPixelFormatBGRA8Unorm;
+            break;
+        case RHI::Format::B8G8R8A8_UNORM:
+            m_impl->swapchainFormat = desc.swapchainFormat;
+            layerPixelFormat = MTLPixelFormatBGRA8Unorm;
+            break;
+        case RHI::Format::B8G8R8A8_UNORM_SRGB:
+            m_impl->swapchainFormat = desc.swapchainFormat;
+            layerPixelFormat = MTLPixelFormatBGRA8Unorm_sRGB;
+            break;
+        case RHI::Format::R16G16B16A16_FLOAT:
+            m_impl->swapchainFormat = desc.swapchainFormat;
+            layerPixelFormat = MTLPixelFormatRGBA16Float;
+            break;
+        case RHI::Format::R8G8B8A8_UNORM:
+        case RHI::Format::R8G8B8A8_UNORM_SRGB:
+        case RHI::Format::R32G32B32A32_FLOAT:
+        case RHI::Format::D32_FLOAT:
+        case RHI::Format::D24_UNORM_S8_UINT:
+        case RHI::Format::R32_UINT:
+        case RHI::Format::R16_UINT:
+        default:
+            return -1;
+        }
+
         m_impl->maxFramesInFlight = desc.maxFramesInFlight;
         m_impl->frameCompletionCommandBuffers = [[NSMutableArray alloc] initWithCapacity:desc.maxFramesInFlight];
         for(uint32_t i = 0; i < desc.maxFramesInFlight; ++i)
@@ -59,10 +90,17 @@ namespace dy::Backends
         NSWindow* window = (__bridge NSWindow*)windowHandle;
         m_impl->metalLayer = [CAMetalLayer layer];
         m_impl->metalLayer.device      = m_impl->device;
-        m_impl->metalLayer.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        m_impl->metalLayer.pixelFormat = layerPixelFormat;
         m_impl->metalLayer.frame       = window.contentView.bounds;
         [window.contentView setWantsLayer:YES];
         [window.contentView setLayer:m_impl->metalLayer];
+
+        RHI::TextureDesc backBufferDesc{};
+        backBufferDesc.width = static_cast<uint32_t>(m_impl->metalLayer.drawableSize.width);
+        backBufferDesc.height = static_cast<uint32_t>(m_impl->metalLayer.drawableSize.height);
+        backBufferDesc.format = m_impl->swapchainFormat;
+        backBufferDesc.usage = RHI::TextureUsage::RenderTarget;
+        m_impl->backBufferTex = new MetalTexture(backBufferDesc);
 
         m_impl->commandList = new MetalCommandList(
             (__bridge void*)m_impl->commandQueue
@@ -83,6 +121,8 @@ namespace dy::Backends
         m_impl->currentDrawable = [m_impl->metalLayer nextDrawable];
         if(m_impl->currentDrawable == nil)
             return false;
+
+        m_impl->backBufferTex->SetNativeTexture((__bridge void*)m_impl->currentDrawable.texture);
 
         m_impl->commandList->Begin();
 
@@ -134,6 +174,7 @@ namespace dy::Backends
         }
 
         m_impl->currentDrawable = nil;
+        m_impl->backBufferTex->SetNativeTexture(nullptr);
         m_impl->frameIndex = (m_impl->frameIndex + 1) % m_impl->maxFramesInFlight;
     }
 
@@ -213,19 +254,6 @@ namespace dy::Backends
 
     RHI::ITexture* MetalDevice::GetBackBuffer()
     {
-        if(!m_impl->currentDrawable) return nullptr;
-
-        if(!m_impl->backBufferTex)
-        {
-            RHI::TextureDesc desc{};
-            desc.width  = static_cast<uint32_t>(m_impl->metalLayer.drawableSize.width);
-            desc.height = static_cast<uint32_t>(m_impl->metalLayer.drawableSize.height);
-            desc.format = RHI::Format::R8G8B8A8_UNORM;
-            desc.usage  = RHI::TextureUsage::RenderTarget;
-            m_impl->backBufferTex = new MetalTexture(desc, (__bridge void*)m_impl->device);
-        }
-
-        m_impl->backBufferTex->SetNativeTexture((__bridge void*)m_impl->currentDrawable.texture);
         return m_impl->backBufferTex;
     }
 }

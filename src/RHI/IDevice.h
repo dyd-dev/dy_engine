@@ -18,9 +18,11 @@ namespace dy::RHI
 
 	struct DeviceDesc
 	{
-		// 스왑체인(백버퍼) 포맷. 백엔드는 이 값을 그대로 따르고 GetBackBuffer()->GetFormat() 로 보고한다.
-		// UNORM = 셰이더 수동 감마, *_SRGB = 하드웨어 감마. 두 백엔드가 같은 값을 쓰므로 색이 일치한다.
-		Format swapchainFormat = Format::R8G8B8A8_UNORM;
+		// 스왑체인(백버퍼) 포맷. Unknown이면 backend가 native 포맷을 선택한다.
+		// 구체 포맷은 정확히 지원되어야 하며, 지원할 수 없으면 Device 생성이 실패한다.
+		// 실제 선택값은 GetBackBuffer()->GetFormat()으로 확인한다.
+		// UNORM = 셰이더 수동 감마, *_SRGB = 하드웨어 감마.
+		Format swapchainFormat = Format::Unknown;
 		// 동시에 완료되지 않을 수 있는 제출의 상한이자 순환 재사용할 frame context 수. 0은 유효하지 않다.
 		// swapchain image 수와는 독립적이며 GetCurrentFrameIndex()는 이 범위의 context index를 반환한다.
 		uint32_t maxFramesInFlight = 2;

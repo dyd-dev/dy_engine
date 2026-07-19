@@ -21,6 +21,9 @@ namespace dy::Backends
         switch(format)
         {
             case RHI::Format::R8G8B8A8_UNORM:        return MTLPixelFormatRGBA8Unorm;
+            case RHI::Format::B8G8R8A8_UNORM:        return MTLPixelFormatBGRA8Unorm;
+            case RHI::Format::R8G8B8A8_UNORM_SRGB:   return MTLPixelFormatRGBA8Unorm_sRGB;
+            case RHI::Format::B8G8R8A8_UNORM_SRGB:   return MTLPixelFormatBGRA8Unorm_sRGB;
             case RHI::Format::R16G16B16A16_FLOAT:    return MTLPixelFormatRGBA16Float;
             case RHI::Format::R32G32B32A32_FLOAT:    return MTLPixelFormatRGBA32Float;
             case RHI::Format::D32_FLOAT:             return MTLPixelFormatDepth32Float;
@@ -29,9 +32,14 @@ namespace dy::Backends
         }
     }
 
-    MetalTexture::MetalTexture(const RHI::TextureDesc& desc, void* device)
+    MetalTexture::MetalTexture(const RHI::TextureDesc& desc)
         : RHI::ITexture(desc)
         , m_impl(new Impl())
+    {
+    }
+
+    MetalTexture::MetalTexture(const RHI::TextureDesc& desc, void* device)
+        : MetalTexture(desc)
     {
         id<MTLDevice> mtlDevice = (__bridge id<MTLDevice>)device;
 
