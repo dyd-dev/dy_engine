@@ -2,7 +2,7 @@
 
 #include "RHI/IBuffer.h"
 #include "RHI/ICommandList.h"
-#include "RHI/IPipelineState.h"
+#include "RHI/GraphicsPipeline.h"
 #include "RHI/IShader.h"
 #include "RHI/ITexture.h"
 
@@ -58,7 +58,6 @@ namespace dy::Backends
 		public:
 			void BindGraphicsPipeline(RHI::IPipelineState*) override {}
 			void BindGlobalDescriptors() override {}
-			void BindGeometry(const RHI::GeometryBinding&) override {}
 			void BindConstantBuffer(uint32_t, RHI::IBuffer*, uint32_t, uint32_t) override {}
 			void BindTexture(uint32_t, RHI::ITexture*) override {}
 			void SetInlineConstants(uint32_t, const void*) override {}
@@ -67,7 +66,7 @@ namespace dy::Backends
 			void SetScissor(const RHI::Rect&) override {}
 			void ClearColor(RHI::ITexture*, float, float, float, float) override {}
 			void ClearDepth(RHI::ITexture*, float) override {}
-			void BindVertexBuffer(RHI::IBuffer*, uint32_t, uint32_t) override {}
+			void BindVertexBuffer(uint32_t, RHI::IBuffer*, uint32_t) override {}
 			void BindIndexBuffer(RHI::IBuffer*, RHI::Format, uint32_t) override {}
 			void DrawInstanced(uint32_t, uint32_t, uint32_t, uint32_t) override {}
 			void DrawIndexedInstanced(uint32_t, uint32_t, uint32_t, int32_t, uint32_t) override {}
@@ -149,6 +148,43 @@ namespace dy::Backends
 		if(vertexShader == nullptr || vertexShader->GetStage() != RHI::ShaderStage::Vertex) return nullptr;
 		if(hasFragmentShader &&
 			(fragmentShader == nullptr || fragmentShader->GetStage() != RHI::ShaderStage::Fragment)) return nullptr;
+		if((desc.inputAssembly.vertexBindingCount > 0 && desc.inputAssembly.vertexBindings == nullptr) ||
+			(desc.inputAssembly.vertexAttributeCount > 0 && desc.inputAssembly.vertexAttributes == nullptr)) return nullptr;
+		for(uint32_t bindingIndex = 0; bindingIndex < desc.inputAssembly.vertexBindingCount; ++bindingIndex)
+		{
+			const RHI::VertexBindingDesc& binding = desc.inputAssembly.vertexBindings[bindingIndex];
+			if(binding.stride == 0) return nullptr;
+			for(uint32_t previous = 0; previous < bindingIndex; ++previous)
+			{
+				if(desc.inputAssembly.vertexBindings[previous].slot == binding.slot) return nullptr;
+			}
+		}
+		for(uint32_t attributeIndex = 0; attributeIndex < desc.inputAssembly.vertexAttributeCount; ++attributeIndex)
+		{
+			const RHI::VertexAttributeDesc& attribute = desc.inputAssembly.vertexAttributes[attributeIndex];
+			if(attribute.semanticName == nullptr || attribute.semanticName[0] == '\0') return nullptr;
+			bool hasBinding = false;
+			for(uint32_t bindingIndex = 0; bindingIndex < desc.inputAssembly.vertexBindingCount; ++bindingIndex)
+			{
+				if(desc.inputAssembly.vertexBindings[bindingIndex].slot == attribute.binding)
+				{
+					hasBinding = true;
+					break;
+				}
+			}
+			if(!hasBinding) return nullptr;
+			switch(attribute.format)
+			{
+			case RHI::Format::R32_FLOAT:
+			case RHI::Format::R32G32_FLOAT:
+			case RHI::Format::R32G32B32_FLOAT:
+			case RHI::Format::R32G32B32A32_FLOAT:
+			case RHI::Format::R8G8B8A8_UNORM:
+				break;
+			default:
+				return nullptr;
+			}
+		}
 
 		return new NullPipelineState(desc);
 	}

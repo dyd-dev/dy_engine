@@ -7,9 +7,7 @@ struct DrawConstants
     float4x4 viewProjectionMatrix;
     float4x4 modelMatrix;
     float drawMode;
-    uint firstIndex;
-    int vertexOffset;
-    uint firstVertex;
+    uint instanceTransformOffset;
     float4 emissiveColor;
     float4 baseColor;
     float4 materialParams;

@@ -11,7 +11,10 @@ void VulkanCommandList::Begin()
 	m_clearDepth = 1.0f;
 	m_boundPipeline = nullptr;
 	m_pendingPushConstantSize = 0;
-	m_pendingGeometry = {};
+	m_pendingVertexBuffers.clear();
+	m_pendingIndexBuffer = nullptr;
+	m_pendingIndexFormat = dy::RHI::Format::Unknown;
+	m_pendingIndexOffset = 0;
 	m_pendingConstantBuffers = {};
 	m_pendingStorageBuffers = {};
 	m_pendingTextures = {};
@@ -38,23 +41,23 @@ void VulkanCommandList::SetInlineConstants(uint32_t size, const void* data)
 	memcpy(m_pendingPushConstants.data(), data, m_pendingPushConstantSize);
 }
 
-void VulkanCommandList::BindGeometry(const dy::RHI::GeometryBinding& geometry)
+void VulkanCommandList::BindVertexBuffer(uint32_t slot, dy::RHI::IBuffer* buffer, uint32_t offset)
 {
-	m_pendingGeometry = geometry;
-}
-
-void VulkanCommandList::BindVertexBuffer(dy::RHI::IBuffer* buffer, uint32_t stride, uint32_t offset)
-{
-	m_pendingGeometry.vertexBuffer = buffer;
-	m_pendingGeometry.vertexStride = stride;
-	m_pendingGeometry.vertexOffset = offset;
+	for(VertexBufferBinding& binding : m_pendingVertexBuffers)
+	{
+		if(binding.slot != slot) continue;
+		binding.buffer = buffer;
+		binding.offset = offset;
+		return;
+	}
+	m_pendingVertexBuffers.push_back(VertexBufferBinding{ slot, buffer, offset });
 }
 
 void VulkanCommandList::BindIndexBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset)
 {
-	m_pendingGeometry.indexBuffer = buffer;
-	m_pendingGeometry.indexFormat = format;
-	m_pendingGeometry.indexOffset = offset;
+	m_pendingIndexBuffer = buffer;
+	m_pendingIndexFormat = format;
+	m_pendingIndexOffset = offset;
 }
 
 void VulkanCommandList::BindConstantBuffer(uint32_t binding, dy::RHI::IBuffer* buffer, uint32_t offset, uint32_t size)
@@ -136,8 +139,10 @@ void VulkanCommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCou
 	drawCall.startInstance = startInstance;
 	drawCall.pushConstantSize = m_pendingPushConstantSize;
 	drawCall.pipelineState = m_boundPipeline;
-	drawCall.vertexStride = m_pendingGeometry.vertexStride;
-	drawCall.geometry = m_pendingGeometry;
+	drawCall.vertexBuffers = m_pendingVertexBuffers;
+	drawCall.indexBuffer = m_pendingIndexBuffer;
+	drawCall.indexFormat = m_pendingIndexFormat;
+	drawCall.indexOffset = m_pendingIndexOffset;
 	drawCall.constantBuffers = m_pendingConstantBuffers;
 	drawCall.storageBuffers = m_pendingStorageBuffers;
 	drawCall.textures = m_pendingTextures;
@@ -163,8 +168,10 @@ void VulkanCommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t insta
 	drawCall.startInstance = firstInstance;
 	drawCall.pushConstantSize = m_pendingPushConstantSize;
 	drawCall.pipelineState = m_boundPipeline;
-	drawCall.vertexStride = m_pendingGeometry.vertexStride;
-	drawCall.geometry = m_pendingGeometry;
+	drawCall.vertexBuffers = m_pendingVertexBuffers;
+	drawCall.indexBuffer = m_pendingIndexBuffer;
+	drawCall.indexFormat = m_pendingIndexFormat;
+	drawCall.indexOffset = m_pendingIndexOffset;
 	drawCall.constantBuffers = m_pendingConstantBuffers;
 	drawCall.storageBuffers = m_pendingStorageBuffers;
 	drawCall.textures = m_pendingTextures;

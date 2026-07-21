@@ -15,8 +15,6 @@ namespace dy::Backends
     {
         constexpr uint32_t kMaxDescriptorBindings = 16u;
         constexpr uint32_t kMaxPushConstantBytes = 256u;
-        constexpr uint32_t kVertexStorageBinding = RHI::ShaderLayoutDesc{}.vertexStorageBinding;
-        constexpr uint32_t kIndexStorageBinding = RHI::ShaderLayoutDesc{}.indexStorageBinding;
 
         id<MTLBuffer> GetMetalBuffer(RHI::IBuffer* buffer)
         {
@@ -46,7 +44,10 @@ namespace dy::Backends
         id<MTLRenderCommandEncoder>  encoder        = nil;
         MTLRenderPassDescriptor*     passDescriptor = nil;
         std::vector<id<MTLTexture>>  textures;
-        RHI::GeometryBinding         geometry       = {};
+        RHI::IBuffer*               indexBuffer    = nullptr;
+        RHI::Format                 indexFormat    = RHI::Format::Unknown;
+        uint32_t                    indexOffset    = 0;
+        MTLPrimitiveType            primitiveType  = MTLPrimitiveTypeTriangle;
         std::array<uint8_t, kMaxPushConstantBytes> inlineConstants = {};
         uint32_t                     inlineConstantSize = 0;
         uint32_t                     renderWidth = 1;
@@ -71,7 +72,10 @@ namespace dy::Backends
         m_impl->commandBuffer = [m_impl->commandQueue commandBuffer];
         m_impl->encoder       = nil;
         m_impl->passDescriptor = nil;
-        m_impl->geometry = {};
+        m_impl->indexBuffer = nullptr;
+        m_impl->indexFormat = RHI::Format::Unknown;
+        m_impl->indexOffset = 0;
+        m_impl->primitiveType = MTLPrimitiveTypeTriangle;
         m_impl->inlineConstants = {};
         m_impl->inlineConstantSize = 0;
         m_impl->renderWidth = 1;
@@ -235,6 +239,14 @@ namespace dy::Backends
         auto* depth    = (__bridge id<MTLDepthStencilState>)pipeline->GetNativeDepthStencil();
 
         [m_impl->encoder setRenderPipelineState:native];
+        switch(pipeline->GetPrimitiveTopology())
+        {
+        case RHI::PrimitiveTopology::PointList: m_impl->primitiveType = MTLPrimitiveTypePoint; break;
+        case RHI::PrimitiveTopology::LineList: m_impl->primitiveType = MTLPrimitiveTypeLine; break;
+        case RHI::PrimitiveTopology::LineStrip: m_impl->primitiveType = MTLPrimitiveTypeLineStrip; break;
+        case RHI::PrimitiveTopology::TriangleStrip: m_impl->primitiveType = MTLPrimitiveTypeTriangleStrip; break;
+        case RHI::PrimitiveTopology::TriangleList: m_impl->primitiveType = MTLPrimitiveTypeTriangle; break;
+        }
         [m_impl->encoder setDepthBias:pipeline->GetDepthBias()
                              slopeScale:pipeline->GetDepthBiasSlope()
                                   clamp:pipeline->GetDepthBiasClamp()];
@@ -252,31 +264,19 @@ namespace dy::Backends
         }
     }
 
-    void MetalCommandList::BindVertexBuffer(RHI::IBuffer* buffer, uint32_t stride, uint32_t offset)
+    void MetalCommandList::BindVertexBuffer(uint32_t slot, RHI::IBuffer* buffer, uint32_t offset)
     {
-        m_impl->geometry.vertexBuffer = buffer;
-        m_impl->geometry.vertexStride = stride;
-        m_impl->geometry.vertexOffset = offset;
-
         EnsureRenderEncoder();
-        [m_impl->encoder setVertexBuffer:GetMetalBuffer(buffer) offset:offset atIndex:kVertexStorageBinding];
+        const uint32_t bufferIndex = MetalPipeline::GetNativeVertexBufferIndex(slot);
+        if(bufferIndex < 31u)
+            [m_impl->encoder setVertexBuffer:GetMetalBuffer(buffer) offset:offset atIndex:bufferIndex];
     }
 
     void MetalCommandList::BindIndexBuffer(RHI::IBuffer* buffer, RHI::Format format, uint32_t offset)
     {
-        m_impl->geometry.indexBuffer = buffer;
-        m_impl->geometry.indexFormat = format;
-        m_impl->geometry.indexOffset = offset;
-
-        EnsureRenderEncoder();
-        [m_impl->encoder setVertexBuffer:GetMetalBuffer(buffer) offset:offset atIndex:kIndexStorageBinding];
-    }
-
-    void MetalCommandList::BindGeometry(const RHI::GeometryBinding& geometry) {
-        BindVertexBuffer(geometry.vertexBuffer, geometry.vertexStride, geometry.vertexOffset);
-        if (geometry.indexBuffer != nullptr) {
-            BindIndexBuffer(geometry.indexBuffer, geometry.indexFormat, geometry.indexOffset);
-        }
+        m_impl->indexBuffer = buffer;
+        m_impl->indexFormat = format;
+        m_impl->indexOffset = offset;
     }
 
     void MetalCommandList::BindConstantBuffer(uint32_t binding, RHI::IBuffer* buffer, uint32_t offset, uint32_t size)
@@ -330,7 +330,7 @@ namespace dy::Backends
     {
         EnsureRenderEncoder();
 
-        [m_impl->encoder drawPrimitives:MTLPrimitiveTypeTriangle
+        [m_impl->encoder drawPrimitives:m_impl->primitiveType
                             vertexStart:startVertex
                             vertexCount:vertexCount
                           instanceCount:instanceCount
@@ -339,15 +339,22 @@ namespace dy::Backends
 
     void MetalCommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance)
     {
-        (void)firstIndex;
-        (void)vertexOffset;
         EnsureRenderEncoder();
+        if(m_impl->indexBuffer == nullptr ||
+           (m_impl->indexFormat != RHI::Format::R16_UINT && m_impl->indexFormat != RHI::Format::R32_UINT)) return;
 
-        [m_impl->encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                            vertexStart:0
-                            vertexCount:indexCount
-                          instanceCount:instanceCount
-                           baseInstance:firstInstance];
+        const MTLIndexType indexType = m_impl->indexFormat == RHI::Format::R16_UINT
+            ? MTLIndexTypeUInt16
+            : MTLIndexTypeUInt32;
+        const uint32_t indexSize = indexType == MTLIndexTypeUInt16 ? 2u : 4u;
+        [m_impl->encoder drawIndexedPrimitives:m_impl->primitiveType
+                                    indexCount:indexCount
+                                     indexType:indexType
+                                   indexBuffer:GetMetalBuffer(m_impl->indexBuffer)
+                             indexBufferOffset:m_impl->indexOffset + firstIndex * indexSize
+                                  instanceCount:instanceCount
+                                     baseVertex:vertexOffset
+                                   baseInstance:firstInstance];
     }
 
     void MetalCommandList::Close()

@@ -22,8 +22,7 @@ class VulkanCommandList : public dy::RHI::ICommandList
 public:
 	void BindGraphicsPipeline(dy::RHI::IPipelineState* pipelineState) override;
 	void BindGlobalDescriptors() override {}
-	void BindGeometry(const dy::RHI::GeometryBinding& geometry) override;
-	void BindVertexBuffer(dy::RHI::IBuffer* buffer, uint32_t stride, uint32_t offset) override;
+	void BindVertexBuffer(uint32_t slot, dy::RHI::IBuffer* buffer, uint32_t offset) override;
 	void BindIndexBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset) override;
 	void BindConstantBuffer(uint32_t binding, dy::RHI::IBuffer* buffer, uint32_t offset, uint32_t size) override;
 	void BindStorageBuffer(uint32_t binding, dy::RHI::IBuffer* buffer, uint32_t offset, uint32_t size) override;
@@ -60,6 +59,13 @@ private:
 		uint32_t size = 0;
 	};
 
+	struct VertexBufferBinding
+	{
+		uint32_t slot = 0;
+		dy::RHI::IBuffer* buffer = nullptr;
+		uint32_t offset = 0;
+	};
+
 	struct PassRecord
 	{
 		uint32_t firstDraw = 0;
@@ -84,8 +90,10 @@ private:
 		bool hasViewport = false;
 		bool hasScissor = false;
 		dy::RHI::IPipelineState* pipelineState = nullptr;
-		uint32_t vertexStride = 0;
-		dy::RHI::GeometryBinding geometry = {};
+		std::vector<VertexBufferBinding> vertexBuffers;
+		dy::RHI::IBuffer* indexBuffer = nullptr;
+		dy::RHI::Format indexFormat = dy::RHI::Format::Unknown;
+		uint32_t indexOffset = 0;
 		std::array<ConstantBufferBinding, kMaxConstantBufferBindings> constantBuffers = {};
 		std::array<StorageBufferBinding, kMaxConstantBufferBindings> storageBuffers = {};
 		std::array<dy::RHI::ITexture*, kMaxTextureBindings> textures = {};
@@ -100,7 +108,10 @@ private:
 	dy::RHI::IPipelineState* m_boundPipeline = nullptr;
 	std::array<uint8_t, kMaxPushConstantBytes> m_pendingPushConstants = {};
 	uint32_t m_pendingPushConstantSize = 0;
-	dy::RHI::GeometryBinding m_pendingGeometry = {};
+	std::vector<VertexBufferBinding> m_pendingVertexBuffers;
+	dy::RHI::IBuffer* m_pendingIndexBuffer = nullptr;
+	dy::RHI::Format m_pendingIndexFormat = dy::RHI::Format::Unknown;
+	uint32_t m_pendingIndexOffset = 0;
 	std::array<ConstantBufferBinding, kMaxConstantBufferBindings> m_pendingConstantBuffers = {};
 	std::array<StorageBufferBinding, kMaxConstantBufferBindings> m_pendingStorageBuffers = {};
 	std::array<dy::RHI::ITexture*, kMaxTextureBindings> m_pendingTextures = {};

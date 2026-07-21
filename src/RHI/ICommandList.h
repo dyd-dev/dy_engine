@@ -26,16 +26,6 @@ namespace dy::RHI
 		uint32_t height = 0;
 	};
 
-	struct GeometryBinding
-	{
-		IBuffer* vertexBuffer = nullptr;
-		uint32_t vertexStride = 0;
-		uint32_t vertexOffset = 0;
-		IBuffer* indexBuffer = nullptr;
-		Format indexFormat = Format::Unknown;
-		uint32_t indexOffset = 0;
-	};
-
 	class ICommandList
 	{
 	public:
@@ -45,9 +35,8 @@ namespace dy::RHI
 		virtual void BindGraphicsPipeline(IPipelineState* pipelineState) = 0;
 		virtual void BindGlobalDescriptors() = 0;
 
-		// geometry binding / Input Assembly
-		virtual void BindGeometry(const GeometryBinding& geometry) = 0;
-		virtual void BindVertexBuffer(IBuffer* buffer, uint32_t stride, uint32_t offset) = 0;
+		// Input Assembly
+		virtual void BindVertexBuffer(uint32_t slot, IBuffer* buffer, uint32_t offset) = 0;
 		virtual void BindIndexBuffer(IBuffer* buffer, Format format, uint32_t offset) = 0;
 
 		// descriptor binding

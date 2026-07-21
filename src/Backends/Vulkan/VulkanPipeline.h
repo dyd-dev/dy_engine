@@ -2,7 +2,7 @@
 #include <string>
 
 #include "VulkanContext.h"
-#include "RHI/IPipelineState.h"
+#include "RHI/GraphicsPipeline.h"
 
 namespace dy::Backends
 {

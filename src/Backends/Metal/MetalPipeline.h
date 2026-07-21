@@ -6,7 +6,8 @@
 //
 
 #pragma once
-#include "RHI/IPipelineState.h"
+#include "RHI/GraphicsPipeline.h"
+#include <cstdint>
 
 namespace dy::Backends
 {
@@ -36,6 +37,8 @@ namespace dy::Backends
         float GetDepthBias() const;
         float GetDepthBiasSlope() const;
         float GetDepthBiasClamp() const;
+        RHI::PrimitiveTopology GetPrimitiveTopology() const;
+        static uint32_t GetNativeVertexBufferIndex(uint32_t slot);
         bool IsValid() const;
 
     private:

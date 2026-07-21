@@ -5,9 +5,7 @@ cbuffer DrawConstants : register(b0)
     column_major float4x4 viewProjectionMatrix;
     column_major float4x4 modelMatrix;
     float drawMode;
-    uint  firstIndex;
-    int   vertexOffset;
-    uint  firstVertex;
+    uint  instanceTransformOffset;
     float3 emissiveColor;
     float  baseColorTextureIndex;
     float4 baseColor;
@@ -47,7 +45,7 @@ struct VSOutput
 VSOutput main(VSInput input, uint instanceId : SV_InstanceID)
 {
     VSOutput output;
-    uint instanceBase = firstVertex;
+    uint instanceBase = instanceTransformOffset;
     float4x4 resolvedModelMatrix = modelMatrix;
     if (instanceBase != 0u)
     {

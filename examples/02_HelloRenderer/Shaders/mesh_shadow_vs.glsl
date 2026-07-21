@@ -3,13 +3,13 @@
 
 #include "Graphics/RendererShaderLayout.inc"
 
+layout(location = 0) in vec3 inPosition;
+
 layout(push_constant) uniform DrawConstants {
     mat4 viewProjectionMatrix;
     mat4 modelMatrix;
     float drawMode;
-    uint firstIndex;
-    int vertexOffset;
-    uint firstVertex;
+    uint instanceTransformOffset;
     vec3 emissiveColor;
     float baseColorTextureIndex;
     vec4 baseColor;
@@ -20,29 +20,12 @@ layout(set = 0, binding = DY_RENDERER_BINDING_SHADOW_MATRIX) uniform ShadowMatri
     mat4 lightViewProjectionMatrix;
 } shadowMatrix;
 
-layout(std430, set = 0, binding = DY_RENDERER_BINDING_VERTEX_STORAGE) readonly buffer VertexStorage {
-    float vertices[];
-} vertexStorage;
-
-layout(std430, set = 0, binding = DY_RENDERER_BINDING_INDEX_STORAGE) readonly buffer IndexStorage {
-    uint indices[];
-} indexStorage;
-
-vec3 LoadPosition(uint vertexIndex) {
-    uint base = vertexIndex * DY_RENDERER_VERTEX_FLOAT_COUNT;
-    return vec3(
-        vertexStorage.vertices[base + 0u],
-        vertexStorage.vertices[base + 1u],
-        vertexStorage.vertices[base + 2u]);
-}
-
 void main() {
     if ((int(pushConstants.drawMode + 0.5) & DY_RENDERER_TEXTURE_FLAG_CAST_SHADOW) == 0) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;
     }
 
-    int resolvedVertexIndex = int(indexStorage.indices[pushConstants.firstIndex + uint(gl_VertexIndex)]) + pushConstants.vertexOffset;
-    vec4 worldPosition = pushConstants.modelMatrix * vec4(LoadPosition(uint(resolvedVertexIndex)), 1.0);
+    vec4 worldPosition = pushConstants.modelMatrix * vec4(inPosition, 1.0);
     gl_Position = shadowMatrix.lightViewProjectionMatrix * worldPosition;
 }

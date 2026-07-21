@@ -7,9 +7,7 @@ struct DrawConstants
     float4x4 viewProjectionMatrix;
     float4x4 modelMatrix;
     float drawMode;
-    uint firstIndex;
-    int vertexOffset;
-    uint firstVertex;
+    uint instanceTransformOffset;
     float4 emissiveColor;
     float4 baseColor;
     float4 materialParams;
@@ -33,47 +31,24 @@ struct RasterData
 
 struct MeshVertex
 {
-    float3 position;
-    float3 normal;
-    float2 uv;
-    float4 tangent;
+    float3 position [[attribute(0)]];
+    float3 normal [[attribute(1)]];
+    float2 uv [[attribute(2)]];
+    float4 tangent [[attribute(3)]];
 };
 
-constant uint kRendererVertexFloatCount = 12u;
-
-inline MeshVertex LoadVertex(device const float* vertices, uint vertexIndex)
-{
-    const uint base = vertexIndex * kRendererVertexFloatCount;
-    MeshVertex vertex;
-    vertex.position = float3(vertices[base + 0u], vertices[base + 1u], vertices[base + 2u]);
-    vertex.normal = float3(vertices[base + 3u], vertices[base + 4u], vertices[base + 5u]);
-    vertex.uv = float2(vertices[base + 6u], vertices[base + 7u]);
-    vertex.tangent = float4(
-        vertices[base + 8u],
-        vertices[base + 9u],
-        vertices[base + 10u],
-        vertices[base + 11u]);
-    return vertex;
-}
-
 inline RasterData RunVertexShader(
+    MeshVertex vertex,
     constant DrawConstants& drawConstants,
     constant ShadowMatrix& shadowMatrix,
-    device const float* vertices,
-    device const uint* indices,
     device const float4x4* instanceTransforms,
-    uint vertexId,
     uint instanceId)
 {
-    const int resolvedVertexIndex =
-        int(indices[drawConstants.firstIndex + vertexId]) + drawConstants.vertexOffset;
-    const MeshVertex vertex = LoadVertex(vertices, uint(resolvedVertexIndex));
-
     float4x4 resolvedModelMatrix = drawConstants.modelMatrix;
-    if (drawConstants.firstVertex != 0u)
+    if (drawConstants.instanceTransformOffset != 0u)
     {
         resolvedModelMatrix =
-            instanceTransforms[drawConstants.firstVertex - 1u + instanceId];
+            instanceTransforms[drawConstants.instanceTransformOffset - 1u + instanceId];
     }
 
     const float4 worldPosition = resolvedModelMatrix * float4(vertex.position, 1.0f);
@@ -95,40 +70,32 @@ inline RasterData RunVertexShader(
 }
 
 vertex RasterData vertexShader(
+    MeshVertex vertex [[stage_in]],
     constant DrawConstants& drawConstants [[buffer(0)]],
     constant ShadowMatrix& shadowMatrix [[buffer(3)]],
-    device const float* vertices [[buffer(4)]],
-    device const uint* indices [[buffer(5)]],
     device const float4x4* instanceTransforms [[buffer(11)]],
-    uint vertexId [[vertex_id]],
     uint instanceId [[instance_id]])
 {
     return RunVertexShader(
+        vertex,
         drawConstants,
         shadowMatrix,
-        vertices,
-        indices,
         instanceTransforms,
-        vertexId,
         instanceId);
 }
 
 // Stock Renderer가 ShaderDesc에서 명시적으로 선택하는 entry point.
 vertex RasterData main0(
+    MeshVertex vertex [[stage_in]],
     constant DrawConstants& drawConstants [[buffer(0)]],
     constant ShadowMatrix& shadowMatrix [[buffer(3)]],
-    device const float* vertices [[buffer(4)]],
-    device const uint* indices [[buffer(5)]],
     device const float4x4* instanceTransforms [[buffer(11)]],
-    uint vertexId [[vertex_id]],
     uint instanceId [[instance_id]])
 {
     return RunVertexShader(
+        vertex,
         drawConstants,
         shadowMatrix,
-        vertices,
-        indices,
         instanceTransforms,
-        vertexId,
         instanceId);
 }

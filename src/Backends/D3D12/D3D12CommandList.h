@@ -18,7 +18,6 @@ namespace dy::Backends
 
         void BindGlobalDescriptors() override;
 
-        void BindGeometry(const RHI::GeometryBinding& geometry) override;
         void BindConstantBuffer(uint32_t binding, RHI::IBuffer* buffer, uint32_t offset, uint32_t size) override;
         void BindTexture(uint32_t binding, RHI::ITexture* texture) override;
         void BindStorageBuffer(uint32_t binding, RHI::IBuffer* buffer, uint32_t offset, uint32_t size) override;
@@ -32,7 +31,7 @@ namespace dy::Backends
 
         void ClearDepth(RHI::ITexture* depthStencil, float depth) override;
 
-        void BindVertexBuffer(RHI::IBuffer* buffer, uint32_t stride, uint32_t offset) override;
+        void BindVertexBuffer(uint32_t slot, RHI::IBuffer* buffer, uint32_t offset) override;
         void BindIndexBuffer(RHI::IBuffer* buffer, RHI::Format format, uint32_t offset) override;
         void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
         void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;

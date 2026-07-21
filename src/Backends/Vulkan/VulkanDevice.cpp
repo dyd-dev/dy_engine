@@ -5,7 +5,7 @@
 #include "VulkanResources.h"
 #include "VulkanSwapchain.h"
 #include "RHI/IBuffer.h"
-#include "RHI/IPipelineState.h"
+#include "RHI/GraphicsPipeline.h"
 #include "RHI/ITexture.h"
 #include <GLFW/glfw3.h>
 #include <algorithm>
@@ -31,14 +31,6 @@ namespace {
 	constexpr const char* kValidationLayerName = "VK_LAYER_KHRONOS_validation";
 	constexpr const uint32_t kFallbackTextureWidth = 2;
 	constexpr const uint32_t kFallbackTextureHeight = 2;
-
-	struct DrawMetadataPushConstants
-	{
-		uint32_t firstIndex = 0;
-		int32_t vertexOffset = 0;
-		uint32_t firstVertex = 0;
-		uint32_t padding = 0;
-	};
 
 	enum class VulkanBufferKind // 불칸 사용 버퍼 종류
 	{
@@ -352,6 +344,20 @@ namespace {
 			m_bindlessTexturesEnabled(desc.enableBindlessTextures)
 		{
 			m_desc = desc;
+			if(desc.inputAssembly.vertexBindingCount > 0)
+			{
+				m_vertexBindings.assign(
+					desc.inputAssembly.vertexBindings,
+					desc.inputAssembly.vertexBindings + desc.inputAssembly.vertexBindingCount);
+			}
+			if(desc.inputAssembly.vertexAttributeCount > 0)
+			{
+				m_vertexAttributes.assign(
+					desc.inputAssembly.vertexAttributes,
+					desc.inputAssembly.vertexAttributes + desc.inputAssembly.vertexAttributeCount);
+			}
+			m_desc.inputAssembly.vertexBindings = m_vertexBindings.empty() ? nullptr : m_vertexBindings.data();
+			m_desc.inputAssembly.vertexAttributes = m_vertexAttributes.empty() ? nullptr : m_vertexAttributes.data();
 			m_pipelineCache.reserve(4);
 		}
 
@@ -387,6 +393,7 @@ namespace {
 		}
 
 		bool UsesBindlessTextures() const { return m_bindlessTexturesEnabled; }
+		const std::vector<dy::RHI::VertexBindingDesc>& GetVertexBindings() const { return m_vertexBindings; }
 		void RemovePipelineForRenderPass(VkRenderPass renderPass)
 		{
 			for (auto entry = m_pipelineCache.begin(); entry != m_pipelineCache.end(); ++entry) {
@@ -406,6 +413,8 @@ namespace {
 
 		VkDevice m_device = VK_NULL_HANDLE;
 		dy::RHI::GraphicsPipelineDesc m_desc = {};
+		std::vector<dy::RHI::VertexBindingDesc> m_vertexBindings;
+		std::vector<dy::RHI::VertexAttributeDesc> m_vertexAttributes;
 		uint32_t m_pushConstantSize = 0;
 		mutable std::vector<PipelineCacheEntry> m_pipelineCache;
 		bool m_bindlessTexturesEnabled = false;
@@ -789,6 +798,8 @@ dy::RHI::IPipelineState* VulkanDevice::Impl::CreateGraphicsPipeline(const dy::RH
 	if (vertexShader == nullptr || vertexShader->GetStage() != dy::RHI::ShaderStage::Vertex) return nullptr;
 	if (hasFragmentShader &&
 		(fragmentShader == nullptr || fragmentShader->GetStage() != dy::RHI::ShaderStage::Fragment)) return nullptr;
+	if ((desc.inputAssembly.vertexBindingCount > 0 && desc.inputAssembly.vertexBindings == nullptr) ||
+		(desc.inputAssembly.vertexAttributeCount > 0 && desc.inputAssembly.vertexAttributes == nullptr)) return nullptr;
 	if (desc.depthBiasClamp != 0.0f && !m_depthBiasClampSupported) return nullptr;
 
 	try {
@@ -1250,28 +1261,56 @@ void VulkanDevice::Impl::RecordPass(
 			);
 		}
 
-		DrawMetadataPushConstants metadata{};
-		if (drawCall.pushConstantSize >= m_shaderLayout.drawMetadataPushConstantOffset + sizeof(metadata)) {
-			std::memcpy(&metadata, drawCall.pushConstants.data() + m_shaderLayout.drawMetadataPushConstantOffset, sizeof(metadata));
-		}
-		metadata.firstIndex = drawCall.firstIndex;
-		metadata.vertexOffset = drawCall.baseVertex;
-		if (!drawCall.indexed) metadata.firstVertex = drawCall.startVertex;
-		vkCmdPushConstants(
-			commandBuffer,
-			pipeline->GetLayout(),
-			VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-			m_shaderLayout.drawMetadataPushConstantOffset,
-			sizeof(metadata),
-			&metadata
-		);
 
-		// 메인 셰이더는 정점/인덱스를 storage 버퍼에서 수동 fetch한다(gl_VertexIndex 선형 →
-		// indexStorage[firstIndex+id] → vertexStorage). 따라서 IA 인덱스버퍼 없이 vkCmdDraw 로
-		// indexCount 개의 정점을 그린다(섀도우 패스와 동일 모델).
-		const uint32_t drawVertexCount = drawCall.indexed ? drawCall.indexCount : drawCall.vertexCount;
-		if (drawVertexCount > 0) {
-			vkCmdDraw(commandBuffer, drawVertexCount, drawCall.instanceCount, 0, drawCall.startInstance);
+		bool hasAllVertexBuffers = true;
+		for(const dy::RHI::VertexBindingDesc& requiredBinding : pipelineState->GetVertexBindings())
+		{
+			const VulkanCommandList::VertexBufferBinding* recordedBinding = nullptr;
+			for(const VulkanCommandList::VertexBufferBinding& candidate : drawCall.vertexBuffers)
+			{
+				if(candidate.slot != requiredBinding.slot) continue;
+				recordedBinding = &candidate;
+				break;
+			}
+			const VulkanBuffer* vertexBuffer = recordedBinding != nullptr
+				? dynamic_cast<const VulkanBuffer*>(recordedBinding->buffer)
+				: nullptr;
+			if(vertexBuffer == nullptr)
+			{
+				hasAllVertexBuffers = false;
+				break;
+			}
+			const VkBuffer nativeBuffer = vertexBuffer->GetHandle();
+			const VkDeviceSize nativeOffset = recordedBinding->offset;
+			vkCmdBindVertexBuffers(commandBuffer, requiredBinding.slot, 1, &nativeBuffer, &nativeOffset);
+		}
+		if(!hasAllVertexBuffers) continue;
+
+		if(drawCall.indexed)
+		{
+			const VulkanBuffer* indexBuffer = dynamic_cast<const VulkanBuffer*>(drawCall.indexBuffer);
+			if(indexBuffer == nullptr ||
+				(drawCall.indexFormat != dy::RHI::Format::R16_UINT && drawCall.indexFormat != dy::RHI::Format::R32_UINT)) continue;
+			const VkIndexType indexType = drawCall.indexFormat == dy::RHI::Format::R16_UINT
+				? VK_INDEX_TYPE_UINT16
+				: VK_INDEX_TYPE_UINT32;
+			vkCmdBindIndexBuffer(commandBuffer, indexBuffer->GetHandle(), drawCall.indexOffset, indexType);
+			vkCmdDrawIndexed(
+				commandBuffer,
+				drawCall.indexCount,
+				drawCall.instanceCount,
+				drawCall.firstIndex,
+				drawCall.baseVertex,
+				drawCall.startInstance);
+		}
+		else if(drawCall.vertexCount > 0)
+		{
+			vkCmdDraw(
+				commandBuffer,
+				drawCall.vertexCount,
+				drawCall.instanceCount,
+				drawCall.startVertex,
+				drawCall.startInstance);
 		}
 	}
 
@@ -1752,33 +1791,24 @@ bool VulkanDevice::Impl::CreateDescriptorSetLayout() {
 	// binding 1: Lighting UBO (VS+FS)
 	// binding 2: Shadow map sampler (FS)
 	// binding 3: ShadowMatrix UBO (lightViewProj, VS)
-	// binding 4: Vertex storage buffer (VS)
-	// binding 5: Index storage buffer (VS)
 	// binding 6-9: Metallic/Roughness, Normal, Occlusion, Emissive samplers (FS)
 	// binding 10-12: Bindless material/transform/draw storage buffers (VS+FS)
-	std::array<VkDescriptorSetLayoutBinding, kMaxDescriptorBindings> bindings = {};
-	auto setBinding = [&bindings](uint32_t index, uint32_t binding, VkDescriptorType type, VkShaderStageFlags stageFlags) {
-		bindings[index].binding = binding;
-		bindings[index].descriptorType = type;
-		bindings[index].descriptorCount = 1;
-		bindings[index].stageFlags = stageFlags;
+	const std::vector<VkDescriptorSetLayoutBinding> bindings = {
+		{ m_shaderLayout.baseColorTextureBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+		{ m_shaderLayout.lightingConstantBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+		{ m_shaderLayout.shadowSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+		{ m_shaderLayout.shadowMatrixBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, nullptr },
+		{ m_shaderLayout.metallicRoughnessTextureBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+		{ m_shaderLayout.normalTextureBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+		{ m_shaderLayout.occlusionTextureBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+		{ m_shaderLayout.emissiveTextureBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+		{ m_shaderLayout.bindlessMaterialStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+		{ m_shaderLayout.bindlessTransformStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr },
+		{ m_shaderLayout.bindlessDrawStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr }
 	};
-	setBinding(m_shaderLayout.baseColorTextureBinding, m_shaderLayout.baseColorTextureBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
-	setBinding(m_shaderLayout.lightingConstantBinding, m_shaderLayout.lightingConstantBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
-	setBinding(m_shaderLayout.shadowSamplerBinding, m_shaderLayout.shadowSamplerBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
-	setBinding(m_shaderLayout.shadowMatrixBinding, m_shaderLayout.shadowMatrixBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
-	setBinding(m_shaderLayout.vertexStorageBinding, m_shaderLayout.vertexStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
-	setBinding(m_shaderLayout.indexStorageBinding, m_shaderLayout.indexStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT);
-	setBinding(m_shaderLayout.metallicRoughnessTextureBinding, m_shaderLayout.metallicRoughnessTextureBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
-	setBinding(m_shaderLayout.normalTextureBinding, m_shaderLayout.normalTextureBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
-	setBinding(m_shaderLayout.occlusionTextureBinding, m_shaderLayout.occlusionTextureBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
-	setBinding(m_shaderLayout.emissiveTextureBinding, m_shaderLayout.emissiveTextureBinding, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_SHADER_STAGE_FRAGMENT_BIT);
-	setBinding(m_shaderLayout.bindlessMaterialStorageBinding, m_shaderLayout.bindlessMaterialStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
-	setBinding(m_shaderLayout.bindlessTransformStorageBinding, m_shaderLayout.bindlessTransformStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
-	setBinding(m_shaderLayout.bindlessDrawStorageBinding, m_shaderLayout.bindlessDrawStorageBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT);
 	VkDescriptorSetLayoutCreateInfo info{};
 	info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-	info.bindingCount = m_shaderLayout.descriptorBindingCount;
+	info.bindingCount = static_cast<uint32_t>(bindings.size());
 	info.pBindings = bindings.data();
 	return vkCreateDescriptorSetLayout(m_context.device, &info, nullptr, &m_descriptorSetLayout) == VK_SUCCESS;
 }
@@ -1900,10 +1930,8 @@ bool VulkanDevice::Impl::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCa
 	if (descriptorIndex >= m_descriptorSets.size()) return false;
 
 	const VulkanPipelineState* pipelineState = dynamic_cast<const VulkanPipelineState*>(drawCall.pipelineState);
-	const bool usesBindlessTextures = pipelineState != nullptr && pipelineState->UsesBindlessTextures();
-	const VulkanBuffer* vertexBuffer = dynamic_cast<const VulkanBuffer*>(drawCall.geometry.vertexBuffer);
-	const VulkanBuffer* indexBuffer = dynamic_cast<const VulkanBuffer*>(drawCall.geometry.indexBuffer);
-	if (vertexBuffer == nullptr || (drawCall.indexed && indexBuffer == nullptr)) return false;
+	if(pipelineState == nullptr) return false;
+	const bool usesBindlessTextures = pipelineState->UsesBindlessTextures();
 
 	std::vector<VkWriteDescriptorSet> writes;
 	writes.reserve(m_shaderLayout.descriptorBindingCount);
@@ -2010,32 +2038,6 @@ bool VulkanDevice::Impl::UpdateDrawDescriptorSet(const VulkanCommandList::DrawCa
 		shadowWrite.pImageInfo = &shadowInfo;
 		writes.push_back(shadowWrite);
 	}
-
-	std::array<VkDescriptorBufferInfo, 2> geometryInfos = {};
-	geometryInfos[0].buffer = vertexBuffer->GetHandle();
-	geometryInfos[0].offset = drawCall.geometry.vertexOffset;
-	geometryInfos[0].range = VK_WHOLE_SIZE;
-	geometryInfos[1].buffer = indexBuffer != nullptr ? indexBuffer->GetHandle() : vertexBuffer->GetHandle();
-	geometryInfos[1].offset = indexBuffer != nullptr ? drawCall.geometry.indexOffset : 0;
-	geometryInfos[1].range = VK_WHOLE_SIZE;
-
-	VkWriteDescriptorSet vertexWrite{};
-	vertexWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	vertexWrite.dstSet = m_descriptorSets[descriptorIndex];
-	vertexWrite.dstBinding = m_shaderLayout.vertexStorageBinding;
-	vertexWrite.descriptorCount = 1;
-	vertexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	vertexWrite.pBufferInfo = &geometryInfos[0];
-	writes.push_back(vertexWrite);
-
-	VkWriteDescriptorSet indexWrite{};
-	indexWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-	indexWrite.dstSet = m_descriptorSets[descriptorIndex];
-	indexWrite.dstBinding = m_shaderLayout.indexStorageBinding;
-	indexWrite.descriptorCount = 1;
-	indexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-	indexWrite.pBufferInfo = &geometryInfos[1];
-	writes.push_back(indexWrite);
 
 	vkUpdateDescriptorSets(m_context.device, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
 	return true;

@@ -78,6 +78,7 @@ namespace dy::Backends
         D3D12Texture* backBufferTexture = nullptr; // 상태 추적기(GetBackBuffer 가 돌려주는 래퍼와 동일 리소스)
         RHI::ITexture* activeColorTarget = nullptr;
         RHI::ITexture* activeDepthTarget = nullptr;
+        D3D12PipelineState* activeGraphicsPipeline = nullptr;
         D3D12_CPU_DESCRIPTOR_HANDLE activeRtvHandle = {};
         D3D12_CPU_DESCRIPTOR_HANDLE activeDsvHandle = {};
         bool hasActivePass = false;
@@ -113,6 +114,7 @@ namespace dy::Backends
         if(FAILED(m_internal->commandList->Reset(m_internal->allocator.Get(), nullptr))) return false;
         m_internal->activeColorTarget = nullptr;
         m_internal->activeDepthTarget = nullptr;
+        m_internal->activeGraphicsPipeline = nullptr;
         m_internal->activeRtvHandle = {};
         m_internal->activeDsvHandle = {};
         m_internal->hasActivePass = false;
@@ -130,6 +132,7 @@ namespace dy::Backends
         m_internal->commandList->Close();
         m_internal->activeColorTarget = nullptr;
         m_internal->activeDepthTarget = nullptr;
+        m_internal->activeGraphicsPipeline = nullptr;
         m_internal->hasActivePass = false;
     }
 
@@ -176,22 +179,26 @@ namespace dy::Backends
         m_internal->commandList->DrawInstanced(vertexCount, instanceCount, startVertex, startInstance);
     }
 
-    void D3D12CommandList::BindVertexBuffer(RHI::IBuffer* buffer, uint32_t stride, uint32_t offset)
+    void D3D12CommandList::BindVertexBuffer(uint32_t slot, RHI::IBuffer* buffer, uint32_t offset)
     {
         auto* d3d12Buffer = static_cast<D3D12Buffer*>(buffer);
-        if (d3d12Buffer == nullptr) return;
+        uint32_t stride = 0;
+        if (d3d12Buffer == nullptr || offset >= d3d12Buffer->GetSize() ||
+            m_internal->activeGraphicsPipeline == nullptr ||
+            !m_internal->activeGraphicsPipeline->GetVertexStride(slot, stride)) return;
 
         D3D12_VERTEX_BUFFER_VIEW view = {};
         view.BufferLocation = static_cast<ID3D12Resource*>(d3d12Buffer->GetNativeResource())->GetGPUVirtualAddress() + offset;
         view.SizeInBytes = d3d12Buffer->GetSize() - offset;
         view.StrideInBytes = stride;
-        m_internal->commandList->IASetVertexBuffers(0, 1, &view);
+        m_internal->commandList->IASetVertexBuffers(slot, 1, &view);
     }
 
     void D3D12CommandList::BindIndexBuffer(RHI::IBuffer* buffer, RHI::Format format, uint32_t offset)
     {
         auto* d3d12Buffer = static_cast<D3D12Buffer*>(buffer);
-        if (d3d12Buffer == nullptr) return;
+        if (d3d12Buffer == nullptr || offset >= d3d12Buffer->GetSize() ||
+            (format != RHI::Format::R16_UINT && format != RHI::Format::R32_UINT)) return;
 
         D3D12_INDEX_BUFFER_VIEW view = {};
         view.BufferLocation = static_cast<ID3D12Resource*>(d3d12Buffer->GetNativeResource())->GetGPUVirtualAddress() + offset;
@@ -221,16 +228,17 @@ namespace dy::Backends
 
         m_internal->commandList->SetPipelineState(d3d12PSO->GetNativePSO());
         m_internal->commandList->SetGraphicsRootSignature(d3d12PSO->GetNativeRootSignature());
-        m_internal->commandList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    }
-
-    void D3D12CommandList::BindGeometry(const RHI::GeometryBinding& geometry)
-    {
-        BindVertexBuffer(geometry.vertexBuffer, geometry.vertexStride, geometry.vertexOffset);
-        if (geometry.indexBuffer != nullptr)
+        m_internal->activeGraphicsPipeline = d3d12PSO;
+        D3D_PRIMITIVE_TOPOLOGY topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+        switch(d3d12PSO->GetPrimitiveTopology())
         {
-            BindIndexBuffer(geometry.indexBuffer, geometry.indexFormat, geometry.indexOffset);
+        case RHI::PrimitiveTopology::PointList: topology = D3D_PRIMITIVE_TOPOLOGY_POINTLIST; break;
+        case RHI::PrimitiveTopology::LineList: topology = D3D_PRIMITIVE_TOPOLOGY_LINELIST; break;
+        case RHI::PrimitiveTopology::LineStrip: topology = D3D_PRIMITIVE_TOPOLOGY_LINESTRIP; break;
+        case RHI::PrimitiveTopology::TriangleStrip: topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP; break;
+        case RHI::PrimitiveTopology::TriangleList: break;
         }
+        m_internal->commandList->IASetPrimitiveTopology(topology);
     }
 
     void D3D12CommandList::BindConstantBuffer(uint32_t binding, RHI::IBuffer* buffer, uint32_t offset, uint32_t size)

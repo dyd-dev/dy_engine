@@ -33,9 +33,7 @@ layout(push_constant) uniform DrawConstants {
     mat4 viewProjectionMatrix;
     mat4 modelMatrix;
     float drawMode;
-    uint firstIndex;
-    int vertexOffset;
-    uint firstVertex;
+    uint instanceTransformOffset;
     vec3 emissiveColor;
     float baseColorTextureIndex;
     vec4 baseColor;

@@ -209,6 +209,9 @@ namespace dy::Backends
         const bool hasDepthAttachment = desc.depthStencilFormat != RHI::Format::Unknown;
         if((!hasColorAttachment && !hasDepthAttachment) || (desc.depthEnable && !hasDepthAttachment))
             return nullptr;
+        if((desc.inputAssembly.vertexBindingCount > 0 && desc.inputAssembly.vertexBindings == nullptr) ||
+           (desc.inputAssembly.vertexAttributeCount > 0 && desc.inputAssembly.vertexAttributes == nullptr))
+            return nullptr;
 
         auto* pipeline = new MetalPipeline(desc, (__bridge void*)m_impl->device);
         if(!pipeline->IsValid())

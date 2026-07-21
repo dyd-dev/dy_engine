@@ -9,7 +9,7 @@
 
 namespace dy::RHI
 {
-	// Pixel formats for textures and render targets
+	// Texture, attachment, index, vertex attribute에 쓰는 데이터 포맷
 	enum class Format : uint32_t {
 		Unknown = 0,
 		R8G8B8A8_UNORM,
@@ -17,6 +17,9 @@ namespace dy::RHI
 		R8G8B8A8_UNORM_SRGB,   // 하드웨어가 선형→sRGB 인코딩(셰이더에서 수동 감마 금지)
 		B8G8R8A8_UNORM_SRGB,
 		R16G16B16A16_FLOAT,
+		R32_FLOAT,
+		R32G32_FLOAT,
+		R32G32B32_FLOAT,
 		R32G32B32A32_FLOAT,
 		D32_FLOAT,
 		D24_UNORM_S8_UINT,

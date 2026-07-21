@@ -12,9 +12,8 @@ namespace dy::Backends
 
         void BindGraphicsPipeline(RHI::IPipelineState* pipelineState) override;
         void BindGlobalDescriptors() override;
-        void BindVertexBuffer(RHI::IBuffer* buffer, uint32_t stride, uint32_t offset) override;
+        void BindVertexBuffer(uint32_t slot, RHI::IBuffer* buffer, uint32_t offset) override;
         void BindIndexBuffer(RHI::IBuffer* buffer, RHI::Format format, uint32_t offset) override;
-        void BindGeometry(const RHI::GeometryBinding& geometry) override;
         void BindConstantBuffer(uint32_t binding, RHI::IBuffer* buffer, uint32_t offset, uint32_t size) override;
         void BindStorageBuffer(uint32_t binding, RHI::IBuffer* buffer, uint32_t offset, uint32_t size) override;
         void BindTexture(uint32_t binding, RHI::ITexture* texture) override;

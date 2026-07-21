@@ -15,7 +15,7 @@
 #include "Math/Math.h"
 #include "RHI/IBuffer.h"
 #include "RHI/IDevice.h"
-#include "RHI/IPipelineState.h"
+#include "RHI/GraphicsPipeline.h"
 #include "RHI/IShader.h"
 #include "RHI/ITexture.h"
 
@@ -389,9 +389,26 @@ bool Renderer::BuildPipelineStates(RHI::IDevice* device)
 	});
 	if(m_fragmentShader == nullptr) return false;
 
+	const RHI::VertexBindingDesc vertexBinding = {
+		0,
+		static_cast<uint32_t>(sizeof(Layout::RendererVertex)),
+		RHI::VertexInputRate::PerVertex
+	};
+	const RHI::VertexAttributeDesc vertexAttributes[] = {
+		{ "POSITION", 0, 0, 0, RHI::Format::R32G32B32_FLOAT, static_cast<uint32_t>(offsetof(Layout::RendererVertex, px)) },
+		{ "NORMAL",   0, 1, 0, RHI::Format::R32G32B32_FLOAT, static_cast<uint32_t>(offsetof(Layout::RendererVertex, nx)) },
+		{ "TEXCOORD", 0, 2, 0, RHI::Format::R32G32_FLOAT,    static_cast<uint32_t>(offsetof(Layout::RendererVertex, u)) },
+		{ "TANGENT",  0, 3, 0, RHI::Format::R32G32B32A32_FLOAT, static_cast<uint32_t>(offsetof(Layout::RendererVertex, tx)) }
+	};
+
 	RHI::GraphicsPipelineDesc desc = {};
 	desc.vertexShader = m_vertexShader;
 	desc.fragmentShader = m_fragmentShader;
+	desc.inputAssembly.topology = RHI::PrimitiveTopology::TriangleList;
+	desc.inputAssembly.vertexBindings = &vertexBinding;
+	desc.inputAssembly.vertexBindingCount = 1;
+	desc.inputAssembly.vertexAttributes = vertexAttributes;
+	desc.inputAssembly.vertexAttributeCount = static_cast<uint32_t>(sizeof(vertexAttributes) / sizeof(vertexAttributes[0]));
 	desc.renderTargetFormat = m_config.renderTargetFormat;
 	desc.depthStencilFormat = m_config.depthStencilFormat;
 	desc.depthEnable = m_config.depthStencilFormat != RHI::Format::Unknown;
@@ -417,6 +434,11 @@ bool Renderer::BuildPipelineStates(RHI::IDevice* device)
 
 		RHI::GraphicsPipelineDesc shadowDesc = {};
 		shadowDesc.vertexShader = m_shadowVertexShader;
+		shadowDesc.inputAssembly.topology = RHI::PrimitiveTopology::TriangleList;
+		shadowDesc.inputAssembly.vertexBindings = &vertexBinding;
+		shadowDesc.inputAssembly.vertexBindingCount = 1;
+		shadowDesc.inputAssembly.vertexAttributes = vertexAttributes;
+		shadowDesc.inputAssembly.vertexAttributeCount = 1;
 		shadowDesc.renderTargetFormat = RHI::Format::Unknown;
 		shadowDesc.depthStencilFormat = shadowFormat;
 		shadowDesc.depthEnable = true;

@@ -10,7 +10,7 @@
 #include "RHI/IBuffer.h"
 #include "RHI/ICommandList.h"
 #include "RHI/IDevice.h"
-#include "RHI/IPipelineState.h"
+#include "RHI/GraphicsPipeline.h"
 #include "RHI/ITexture.h"
 
 using namespace dy;
@@ -20,15 +20,7 @@ namespace Layout = dy::Graphics::RendererShaderLayout;
 
 namespace
 {
-	struct RendererVertex
-	{
-		float px = 0.0f, py = 0.0f, pz = 0.0f;
-		float nx = 0.0f, ny = 0.0f, nz = 1.0f;
-		float u = 0.0f, v = 0.0f;
-		float tx = 1.0f, ty = 0.0f, tz = 0.0f, tw = 1.0f;
-	};
-
-	static_assert(sizeof(RendererVertex) == sizeof(float) * Layout::kRendererVertexFloatCount, "Renderer vertex layout must match shader layout.");
+	using RendererVertex = Layout::RendererVertex;
 
 	struct MeshRange
 	{
@@ -156,11 +148,11 @@ namespace
 
 		const uint32_t newVertexBytes = static_cast<uint32_t>(vertices.size() * sizeof(RendererVertex));
 		const uint32_t newIndexBytes = static_cast<uint32_t>(indices.size() * sizeof(uint32_t));
-		if(EnsureBuffer(device, vertexBuffer, vertexBytes, newVertexBytes, static_cast<uint32_t>(sizeof(RendererVertex)), dy::RHI::BufferUsage::Vertex | dy::RHI::BufferUsage::Storage))
+		if(EnsureBuffer(device, vertexBuffer, vertexBytes, newVertexBytes, static_cast<uint32_t>(sizeof(RendererVertex)), dy::RHI::BufferUsage::Vertex))
 		{
 			UploadBuffer(vertexBuffer, vertices.data(), newVertexBytes);
 		}
-		if(EnsureBuffer(device, indexBuffer, indexBytes, newIndexBytes, static_cast<uint32_t>(sizeof(uint32_t)), dy::RHI::BufferUsage::Index | RHI::BufferUsage::Storage))
+		if(EnsureBuffer(device, indexBuffer, indexBytes, newIndexBytes, static_cast<uint32_t>(sizeof(uint32_t)), dy::RHI::BufferUsage::Index))
 		{
 			UploadBuffer(indexBuffer, indices.data(), newIndexBytes);
 		}
@@ -282,9 +274,7 @@ namespace
 		const MaterialDesc& material,
 		const SceneMaterialState& materialState,
 		const Transform& transform,
-		uint32_t textureFlags,
-		uint32_t firstIndex,
-		int32_t vertexOffset)
+		uint32_t textureFlags)
 	{
 		// bindless 디스크립터 인덱스를 float 로 변환(INVALID 은 0; 해당 텍스처 flag 가 꺼져 샘플 안 됨).
 		const auto texIndex = [&](uint32_t slot) -> float {
@@ -296,8 +286,6 @@ namespace
 		drawConstants.viewProjectionMatrix = config.viewProjectionMatrix;
 		drawConstants.modelMatrix = transform.worldMatrix;
 		drawConstants.drawMode = static_cast<float>(textureFlags);
-		drawConstants.firstIndex = firstIndex;
-		drawConstants.vertexOffset = vertexOffset;
 		drawConstants.emissiveColor = Math::float4(
 			material.emissiveColor.x,
 			material.emissiveColor.y,
@@ -421,8 +409,8 @@ namespace
 				meshState.vertexBytes != vertexBytes || meshState.indexBytes != indexBytes)
 			{
 				DestroyMeshState(device, meshState);
-				const RHI::BufferUsage vertexUsage = RHI::BufferUsage::Vertex | RHI::BufferUsage::Storage;
-				const RHI::BufferUsage indexUsage = RHI::BufferUsage::Index | RHI::BufferUsage::Storage;
+				const RHI::BufferUsage vertexUsage = RHI::BufferUsage::Vertex;
+				const RHI::BufferUsage indexUsage = RHI::BufferUsage::Index;
 				meshState.vertexBuffer = device->CreateBuffer(RHI::BufferDesc{ vertexBytes, static_cast<uint32_t>(sizeof(RendererVertex)), vertexUsage });
 				meshState.indexBuffer = device->CreateBuffer(RHI::BufferDesc{ indexBytes, static_cast<uint32_t>(sizeof(uint32_t)), indexUsage });
 				meshState.vertexBytes = vertexBytes;
@@ -467,14 +455,10 @@ namespace
 			const Transform& transform = scene.GetTransform(entity);
 			const uint32_t textureFlags = ComputeTextureFlags(materialState, renderFlags);
 
-			RHI::GeometryBinding geometry = {};
-			geometry.vertexBuffer = meshState.vertexBuffer;
-			geometry.vertexStride = static_cast<uint32_t>(sizeof(RendererVertex));
-			geometry.indexBuffer = meshState.indexBuffer;
-			geometry.indexFormat = RHI::Format::R32_UINT;
-			commandList->BindGeometry(geometry);
+			commandList->BindVertexBuffer(0, meshState.vertexBuffer, 0);
+			commandList->BindIndexBuffer(meshState.indexBuffer, RHI::Format::R32_UINT, 0);
 
-			Layout::DrawConstants drawConstants = MakeDrawConstants(config, material, materialState, transform, textureFlags, 0, 0);
+			Layout::DrawConstants drawConstants = MakeDrawConstants(config, material, materialState, transform, textureFlags);
 			commandList->SetInlineConstants(sizeof(Layout::DrawConstants), &drawConstants);
 			commandList->DrawIndexedInstanced(meshState.indexCount, 1, 0, 0, 0);
 		}
@@ -523,18 +507,14 @@ namespace
 			const RenderFlags& renderFlags = scene.GetRenderFlags(entity);
 			const uint32_t textureFlags = ComputeTextureFlags(materialState, renderFlags);
 
-			RHI::GeometryBinding geometry = {};
-			geometry.vertexBuffer = meshState.vertexBuffer;
-			geometry.vertexStride = static_cast<uint32_t>(sizeof(RendererVertex));
-			geometry.indexBuffer = meshState.indexBuffer;
-			geometry.indexFormat = RHI::Format::R32_UINT;
-			commandList->BindGeometry(geometry);
+			commandList->BindVertexBuffer(0, meshState.vertexBuffer, 0);
+			commandList->BindIndexBuffer(meshState.indexBuffer, RHI::Format::R32_UINT, 0);
 			if(!config.enableBindlessTextures)
 			{
 				BindMaterialTextures(commandList, materialState);
 			}
 
-			Layout::DrawConstants drawConstants = MakeDrawConstants(config, material, materialState, transform, textureFlags, 0, 0);
+			Layout::DrawConstants drawConstants = MakeDrawConstants(config, material, materialState, transform, textureFlags);
 			commandList->SetInlineConstants(sizeof(Layout::DrawConstants), &drawConstants);
 			commandList->DrawIndexedInstanced(meshState.indexCount, 1, 0, 0, 0);
 		}
@@ -594,12 +574,8 @@ namespace
 		const RendererDesc& config = *context.config;
 		const std::vector<SceneMaterialState>& materialStates = *context.materialStates;
 
-		RHI::GeometryBinding geometry = {};
-		geometry.vertexBuffer = m_vertexBuffer;
-		geometry.vertexStride = static_cast<uint32_t>(sizeof(RendererVertex));
-		geometry.indexBuffer = m_indexBuffer;
-		geometry.indexFormat = RHI::Format::R32_UINT;
-		commandList->BindGeometry(geometry);
+		commandList->BindVertexBuffer(0, m_vertexBuffer, 0);
+		commandList->BindIndexBuffer(m_indexBuffer, RHI::Format::R32_UINT, 0);
 
 		const uint32_t entityCount = scene.GetEntityCount();
 		for(uint32_t entityIndex = 0; entityIndex < entityCount; ++entityIndex)
@@ -626,7 +602,7 @@ namespace
 			const uint32_t textureFlags = ComputeTextureFlags(materialState, renderFlags);
 
 			Layout::DrawConstants drawConstants = MakeDrawConstants(
-				config, material, materialState, transform, textureFlags, range.firstIndex, static_cast<int32_t>(range.firstVertex));
+				config, material, materialState, transform, textureFlags);
 			commandList->SetInlineConstants(sizeof(Layout::DrawConstants), &drawConstants);
 			commandList->DrawIndexedInstanced(range.indexCount, 1, range.firstIndex, static_cast<int32_t>(range.firstVertex), 0);
 		}
@@ -647,12 +623,8 @@ namespace
 
 		if(!BeginMainPassOn(commandList, backBuffer, context)) return;
 
-		RHI::GeometryBinding geometry = {};
-		geometry.vertexBuffer = m_vertexBuffer;
-		geometry.vertexStride = static_cast<uint32_t>(sizeof(RendererVertex));
-		geometry.indexBuffer = m_indexBuffer;
-		geometry.indexFormat = RHI::Format::R32_UINT;
-		commandList->BindGeometry(geometry);
+		commandList->BindVertexBuffer(0, m_vertexBuffer, 0);
+		commandList->BindIndexBuffer(m_indexBuffer, RHI::Format::R32_UINT, 0);
 
 		BuildMainDrawBatches(scene, context, m_meshRanges, m_drawBatches, m_instances);
 		if(UploadInstanceTransforms(device, m_instanceBuffer, m_instanceBufferBytes, m_instances))
@@ -674,8 +646,8 @@ namespace
 				}
 
 				Layout::DrawConstants drawConstants = MakeDrawConstants(
-					config, material, materialState, Transform{}, batch.textureFlags, range.firstIndex, static_cast<int32_t>(range.firstVertex));
-				drawConstants.firstVertex = batch.firstInstance + 1u;
+					config, material, materialState, Transform{}, batch.textureFlags);
+				drawConstants.instanceTransformOffset = batch.firstInstance + 1u;
 				commandList->SetInlineConstants(sizeof(Layout::DrawConstants), &drawConstants);
 				commandList->DrawIndexedInstanced(range.indexCount, batch.instanceCount, range.firstIndex, static_cast<int32_t>(range.firstVertex), 0);
 			}
@@ -730,12 +702,8 @@ namespace
 		const RendererDesc& config = *context.config;
 		const std::vector<SceneMaterialState>& materialStates = *context.materialStates;
 
-		RHI::GeometryBinding geometry = {};
-		geometry.vertexBuffer = m_vertexBuffer;
-		geometry.vertexStride = static_cast<uint32_t>(sizeof(RendererVertex));
-		geometry.indexBuffer = m_indexBuffer;
-		geometry.indexFormat = RHI::Format::R32_UINT;
-		commandList->BindGeometry(geometry);
+		commandList->BindVertexBuffer(0, m_vertexBuffer, 0);
+		commandList->BindIndexBuffer(m_indexBuffer, RHI::Format::R32_UINT, 0);
 
 		const uint32_t entityCount = scene.GetEntityCount();
 		for(uint32_t entityIndex = 0; entityIndex < entityCount; ++entityIndex)
@@ -762,7 +730,7 @@ namespace
 			const uint32_t textureFlags = ComputeTextureFlags(materialState, renderFlags);
 
 			Layout::DrawConstants drawConstants = MakeDrawConstants(
-				config, material, materialState, transform, textureFlags, range.firstIndex, static_cast<int32_t>(range.firstVertex));
+				config, material, materialState, transform, textureFlags);
 			commandList->SetInlineConstants(sizeof(Layout::DrawConstants), &drawConstants);
 			commandList->DrawIndexedInstanced(range.indexCount, 1, range.firstIndex, static_cast<int32_t>(range.firstVertex), 0);
 		}
@@ -783,12 +751,8 @@ namespace
 
 		if(!BeginMainPassOn(commandList, backBuffer, context)) return;
 
-		RHI::GeometryBinding geometry = {};
-		geometry.vertexBuffer = m_vertexBuffer;
-		geometry.vertexStride = static_cast<uint32_t>(sizeof(RendererVertex));
-		geometry.indexBuffer = m_indexBuffer;
-		geometry.indexFormat = RHI::Format::R32_UINT;
-		commandList->BindGeometry(geometry);
+		commandList->BindVertexBuffer(0, m_vertexBuffer, 0);
+		commandList->BindIndexBuffer(m_indexBuffer, RHI::Format::R32_UINT, 0);
 
 		BuildMainDrawBatches(scene, context, m_meshRanges, m_drawBatches, m_instances);
 		if(UploadInstanceTransforms(device, m_instanceBuffer, m_instanceBufferBytes, m_instances))
@@ -805,8 +769,8 @@ namespace
 				const MaterialDesc& material = scene.GetMaterial(static_cast<MaterialID>(batch.materialIndex));
 				const SceneMaterialState& materialState = materialStates[batch.materialIndex];
 				Layout::DrawConstants drawConstants = MakeDrawConstants(
-					config, material, materialState, Transform{}, batch.textureFlags, range.firstIndex, static_cast<int32_t>(range.firstVertex));
-				drawConstants.firstVertex = batch.firstInstance + 1u;
+					config, material, materialState, Transform{}, batch.textureFlags);
+				drawConstants.instanceTransformOffset = batch.firstInstance + 1u;
 				commandList->SetInlineConstants(sizeof(Layout::DrawConstants), &drawConstants);
 				commandList->DrawIndexedInstanced(range.indexCount, batch.instanceCount, range.firstIndex, static_cast<int32_t>(range.firstVertex), 0);
 			}

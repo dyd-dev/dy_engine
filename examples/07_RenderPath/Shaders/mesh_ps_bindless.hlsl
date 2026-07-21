@@ -8,9 +8,7 @@ cbuffer DrawConstants : register(b0)
     column_major float4x4 viewProjectionMatrix;
     column_major float4x4 modelMatrix;
     float drawMode;
-    uint  firstIndex;
-    int   vertexOffset;
-    uint  firstVertex;
+    uint  instanceTransformOffset;
     float3 emissiveColor;
     float  emissiveTextureIndex;
     float4 baseColor;

@@ -1,5 +1,7 @@
 #pragma once
-#include "RHI/IPipelineState.h"
+#include "RHI/GraphicsPipeline.h"
+#include <cstdint>
+#include <vector>
 
 // 전방 선언을 사용
 struct ID3D12PipelineState;
@@ -14,13 +16,22 @@ namespace dy::Backends
     {
     public:
         // ComPtr 대신 원시 포인터로 받습니다.
-        D3D12PipelineState(ID3D12PipelineState* pso, ID3D12RootSignature* rootSignature);
+        D3D12PipelineState(
+            ID3D12PipelineState* pso,
+            ID3D12RootSignature* rootSignature,
+            RHI::PrimitiveTopology topology,
+            const RHI::VertexBindingDesc* vertexBindings,
+            uint32_t vertexBindingCount);
         ~D3D12PipelineState() override;
 
         ID3D12PipelineState* GetNativePSO() const;
         ID3D12RootSignature* GetNativeRootSignature() const;
+        RHI::PrimitiveTopology GetPrimitiveTopology() const;
+        bool GetVertexStride(uint32_t slot, uint32_t& stride) const;
 
     private:
+        RHI::PrimitiveTopology m_topology = RHI::PrimitiveTopology::TriangleList;
+        std::vector<RHI::VertexBindingDesc> m_vertexBindings;
         D3D12PipelineStateInternal* m_internal; // ComPtr들은 이 안에 숨깁니다.
     };
 }

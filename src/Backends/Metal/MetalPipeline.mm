@@ -70,6 +70,7 @@ namespace dy::Backends
         float depthBias = 0.0f;
         float depthBiasSlope = 0.0f;
         float depthBiasClamp = 0.0f;
+        RHI::PrimitiveTopology topology = RHI::PrimitiveTopology::TriangleList;
     };
 
     static MTLPixelFormat ToMTLFormat(RHI::Format format)
@@ -96,6 +97,7 @@ namespace dy::Backends
         m_impl->depthBias = static_cast<float>(desc.depthBias);
         m_impl->depthBiasSlope = desc.depthBiasSlope;
         m_impl->depthBiasClamp = desc.depthBiasClamp;
+        m_impl->topology = desc.inputAssembly.topology;
 
         const auto* vertexShader = dynamic_cast<const MetalShader*>(desc.vertexShader);
         const auto* fragmentShader = dynamic_cast<const MetalShader*>(desc.fragmentShader);
@@ -112,6 +114,59 @@ namespace dy::Backends
         MTLRenderPipelineDescriptor* pipeDesc = [MTLRenderPipelineDescriptor new];
         pipeDesc.vertexFunction   = vertFunc;
         pipeDesc.fragmentFunction = fragFunc;
+
+        if(desc.inputAssembly.vertexBindingCount > 0 || desc.inputAssembly.vertexAttributeCount > 0)
+        {
+            MTLVertexDescriptor* vertexDesc = [MTLVertexDescriptor vertexDescriptor];
+            for(uint32_t bindingIndex = 0; bindingIndex < desc.inputAssembly.vertexBindingCount; ++bindingIndex)
+            {
+                const RHI::VertexBindingDesc& binding = desc.inputAssembly.vertexBindings[bindingIndex];
+                const uint32_t bufferIndex = GetNativeVertexBufferIndex(binding.slot);
+                if(bufferIndex >= 31u || binding.stride == 0) return;
+                for(uint32_t previous = 0; previous < bindingIndex; ++previous)
+                {
+                    if(desc.inputAssembly.vertexBindings[previous].slot == binding.slot) return;
+                }
+                vertexDesc.layouts[bufferIndex].stride = binding.stride;
+                vertexDesc.layouts[bufferIndex].stepFunction = binding.inputRate == RHI::VertexInputRate::PerInstance
+                    ? MTLVertexStepFunctionPerInstance
+                    : MTLVertexStepFunctionPerVertex;
+                vertexDesc.layouts[bufferIndex].stepRate = 1;
+            }
+
+            for(uint32_t attributeIndex = 0; attributeIndex < desc.inputAssembly.vertexAttributeCount; ++attributeIndex)
+            {
+                const RHI::VertexAttributeDesc& attribute = desc.inputAssembly.vertexAttributes[attributeIndex];
+                const uint32_t bufferIndex = GetNativeVertexBufferIndex(attribute.binding);
+                if(attribute.location >= 31u || bufferIndex >= 31u) return;
+
+                bool hasBinding = false;
+                for(uint32_t bindingIndex = 0; bindingIndex < desc.inputAssembly.vertexBindingCount; ++bindingIndex)
+                {
+                    if(desc.inputAssembly.vertexBindings[bindingIndex].slot == attribute.binding)
+                    {
+                        hasBinding = true;
+                        break;
+                    }
+                }
+                if(!hasBinding) return;
+
+                MTLVertexFormat format = MTLVertexFormatInvalid;
+                switch(attribute.format)
+                {
+                case RHI::Format::R32_FLOAT: format = MTLVertexFormatFloat; break;
+                case RHI::Format::R32G32_FLOAT: format = MTLVertexFormatFloat2; break;
+                case RHI::Format::R32G32B32_FLOAT: format = MTLVertexFormatFloat3; break;
+                case RHI::Format::R32G32B32A32_FLOAT: format = MTLVertexFormatFloat4; break;
+                case RHI::Format::R8G8B8A8_UNORM: format = MTLVertexFormatUChar4Normalized; break;
+                default: return;
+                }
+                vertexDesc.attributes[attribute.location].format = format;
+                vertexDesc.attributes[attribute.location].offset = attribute.offset;
+                vertexDesc.attributes[attribute.location].bufferIndex = bufferIndex;
+            }
+            pipeDesc.vertexDescriptor = vertexDesc;
+        }
 
         if(desc.renderTargetFormat != RHI::Format::Unknown)
             pipeDesc.colorAttachments[0].pixelFormat = ToMTLFormat(desc.renderTargetFormat);
@@ -160,6 +215,16 @@ namespace dy::Backends
     float MetalPipeline::GetDepthBiasClamp() const
     {
         return m_impl->depthBiasClamp;
+    }
+
+    RHI::PrimitiveTopology MetalPipeline::GetPrimitiveTopology() const
+    {
+        return m_impl->topology;
+    }
+
+    uint32_t MetalPipeline::GetNativeVertexBufferIndex(uint32_t slot)
+    {
+        return 16u + slot;
     }
 
     bool MetalPipeline::IsValid() const

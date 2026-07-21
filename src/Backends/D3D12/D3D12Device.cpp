@@ -1,7 +1,7 @@
 #include "D3D12Device.h"
 #include "D3D12CommandList.h"
 #include "D3D12Buffer.h"
-#include "RHI/IPipelineState.h"
+#include "RHI/GraphicsPipeline.h"
 #include "D3D12PipelineState.h"
 #include "D3D12Texture.h"
 #include "d3dx12.h"
@@ -367,6 +367,17 @@ namespace dy::Backends
         if (vertexShader == nullptr || vertexShader->GetStage() != RHI::ShaderStage::Vertex) return nullptr;
         if (hasFragmentShader &&
             (fragmentShader == nullptr || fragmentShader->GetStage() != RHI::ShaderStage::Fragment)) return nullptr;
+        if ((desc.inputAssembly.vertexBindingCount > 0 && desc.inputAssembly.vertexBindings == nullptr) ||
+            (desc.inputAssembly.vertexAttributeCount > 0 && desc.inputAssembly.vertexAttributes == nullptr)) return nullptr;
+        for (uint32_t bindingIndex = 0; bindingIndex < desc.inputAssembly.vertexBindingCount; ++bindingIndex)
+        {
+            const RHI::VertexBindingDesc& binding = desc.inputAssembly.vertexBindings[bindingIndex];
+            if (binding.stride == 0 || binding.slot >= D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT) return nullptr;
+            for (uint32_t previous = 0; previous < bindingIndex; ++previous)
+            {
+                if (desc.inputAssembly.vertexBindings[previous].slot == binding.slot) return nullptr;
+            }
+        }
 
         // 1. Root Signature 1.1 지원 여부 확인
         D3D12_FEATURE_DATA_ROOT_SIGNATURE featureData = {};
@@ -441,13 +452,47 @@ namespace dy::Backends
 
         // 4. PSO 설정 (CD3DX12 헬퍼로 대폭 축소!)
         D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-        static const D3D12_INPUT_ELEMENT_DESC kInputLayout[] = {
-            { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-            { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-            { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,       0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-            { "TANGENT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        };
-        psoDesc.InputLayout = { kInputLayout, static_cast<UINT>(sizeof(kInputLayout) / sizeof(kInputLayout[0])) };
+        std::vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
+        inputElements.reserve(desc.inputAssembly.vertexAttributeCount);
+        for (uint32_t attributeIndex = 0; attributeIndex < desc.inputAssembly.vertexAttributeCount; ++attributeIndex)
+        {
+            const RHI::VertexAttributeDesc& attribute = desc.inputAssembly.vertexAttributes[attributeIndex];
+            DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+            switch (attribute.format)
+            {
+            case RHI::Format::R32_FLOAT: format = DXGI_FORMAT_R32_FLOAT; break;
+            case RHI::Format::R32G32_FLOAT: format = DXGI_FORMAT_R32G32_FLOAT; break;
+            case RHI::Format::R32G32B32_FLOAT: format = DXGI_FORMAT_R32G32B32_FLOAT; break;
+            case RHI::Format::R32G32B32A32_FLOAT: format = DXGI_FORMAT_R32G32B32A32_FLOAT; break;
+            case RHI::Format::R8G8B8A8_UNORM: format = DXGI_FORMAT_R8G8B8A8_UNORM; break;
+            default: return nullptr;
+            }
+            if (attribute.semanticName == nullptr || attribute.semanticName[0] == '\0') return nullptr;
+
+            const RHI::VertexBindingDesc* binding = nullptr;
+            for (uint32_t bindingIndex = 0; bindingIndex < desc.inputAssembly.vertexBindingCount; ++bindingIndex)
+            {
+                if (desc.inputAssembly.vertexBindings[bindingIndex].slot == attribute.binding)
+                {
+                    binding = &desc.inputAssembly.vertexBindings[bindingIndex];
+                    break;
+                }
+            }
+            if (binding == nullptr || binding->stride == 0) return nullptr;
+
+            D3D12_INPUT_ELEMENT_DESC element = {};
+            element.SemanticName = attribute.semanticName;
+            element.SemanticIndex = attribute.semanticIndex;
+            element.Format = format;
+            element.InputSlot = attribute.binding;
+            element.AlignedByteOffset = attribute.offset;
+            element.InputSlotClass = binding->inputRate == RHI::VertexInputRate::PerInstance
+                ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA
+                : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+            element.InstanceDataStepRate = binding->inputRate == RHI::VertexInputRate::PerInstance ? 1u : 0u;
+            inputElements.push_back(element);
+        }
+        psoDesc.InputLayout = { inputElements.data(), static_cast<UINT>(inputElements.size()) };
         psoDesc.pRootSignature = pRootSignature.Get();
 
         psoDesc.VS = { vertexShader->GetBinary(), vertexShader->GetBinarySize() };
@@ -480,7 +525,20 @@ namespace dy::Backends
             : DXGI_FORMAT_UNKNOWN;
 
         psoDesc.SampleMask = UINT_MAX;
-        psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        switch (desc.inputAssembly.topology)
+        {
+        case RHI::PrimitiveTopology::PointList:
+            psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+            break;
+        case RHI::PrimitiveTopology::LineList:
+        case RHI::PrimitiveTopology::LineStrip:
+            psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+            break;
+        case RHI::PrimitiveTopology::TriangleList:
+        case RHI::PrimitiveTopology::TriangleStrip:
+            psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            break;
+        }
         psoDesc.NumRenderTargets = hasColorAttachment ? 1u : 0u;
         if (hasColorAttachment) {
             psoDesc.RTVFormats[0] = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(desc.renderTargetFormat));
@@ -497,7 +555,12 @@ namespace dy::Backends
 
         // 6. 래퍼 객체로 반환
         DumpInfoQueue(m_internal, "CreateGraphicsPipeline");
-        return new D3D12PipelineState(pPSO.Get(), pRootSignature.Get());
+        return new D3D12PipelineState(
+            pPSO.Get(),
+            pRootSignature.Get(),
+            desc.inputAssembly.topology,
+            desc.inputAssembly.vertexBindings,
+            desc.inputAssembly.vertexBindingCount);
     }
 
     RHI::DescriptorIndex D3D12Device::AllocateDescriptorSlot() {
