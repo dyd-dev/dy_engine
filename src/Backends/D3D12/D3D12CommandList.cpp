@@ -228,6 +228,7 @@ namespace dy::Backends
 
         m_internal->commandList->SetPipelineState(d3d12PSO->GetNativePSO());
         m_internal->commandList->SetGraphicsRootSignature(d3d12PSO->GetNativeRootSignature());
+        m_internal->commandList->OMSetStencilRef(d3d12PSO->GetStencilReference());
         m_internal->activeGraphicsPipeline = d3d12PSO;
         D3D_PRIMITIVE_TOPOLOGY topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
         switch(d3d12PSO->GetPrimitiveTopology())

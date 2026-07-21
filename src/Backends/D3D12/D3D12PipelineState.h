@@ -21,17 +21,20 @@ namespace dy::Backends
             ID3D12RootSignature* rootSignature,
             RHI::PrimitiveTopology topology,
             const RHI::VertexBindingDesc* vertexBindings,
-            uint32_t vertexBindingCount);
+            uint32_t vertexBindingCount,
+            uint32_t stencilReference);
         ~D3D12PipelineState() override;
 
         ID3D12PipelineState* GetNativePSO() const;
         ID3D12RootSignature* GetNativeRootSignature() const;
         RHI::PrimitiveTopology GetPrimitiveTopology() const;
         bool GetVertexStride(uint32_t slot, uint32_t& stride) const;
+        uint32_t GetStencilReference() const;
 
     private:
         RHI::PrimitiveTopology m_topology = RHI::PrimitiveTopology::TriangleList;
         std::vector<RHI::VertexBindingDesc> m_vertexBindings;
+        uint32_t m_stencilReference = 0;
         D3D12PipelineStateInternal* m_internal; // ComPtr들은 이 안에 숨깁니다.
     };
 }

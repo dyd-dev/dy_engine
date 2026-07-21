@@ -207,7 +207,10 @@ namespace dy::Backends
     {
         const bool hasColorAttachment = desc.renderTargetFormat != RHI::Format::Unknown;
         const bool hasDepthAttachment = desc.depthStencilFormat != RHI::Format::Unknown;
-        if((!hasColorAttachment && !hasDepthAttachment) || (desc.depthEnable && !hasDepthAttachment))
+        if((!hasColorAttachment && !hasDepthAttachment) ||
+           ((desc.depthStencil.depthTestEnable || desc.depthStencil.depthWriteEnable || desc.depthStencil.stencilTestEnable) && !hasDepthAttachment) ||
+           (desc.depthStencil.depthWriteEnable && !desc.depthStencil.depthTestEnable) ||
+           (desc.depthStencil.stencilTestEnable && desc.depthStencilFormat != RHI::Format::D24_UNORM_S8_UINT))
             return nullptr;
         if((desc.inputAssembly.vertexBindingCount > 0 && desc.inputAssembly.vertexBindings == nullptr) ||
            (desc.inputAssembly.vertexAttributeCount > 0 && desc.inputAssembly.vertexAttributes == nullptr))

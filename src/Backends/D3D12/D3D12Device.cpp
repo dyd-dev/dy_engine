@@ -363,7 +363,10 @@ namespace dy::Backends
         const bool hasFragmentShader = desc.fragmentShader != nullptr;
         const auto* vertexShader = dynamic_cast<const D3D12Shader*>(desc.vertexShader);
         const auto* fragmentShader = dynamic_cast<const D3D12Shader*>(desc.fragmentShader);
-        if ((!hasColorAttachment && !hasDepthAttachment) || (desc.depthEnable && !hasDepthAttachment)) return nullptr;
+        if ((!hasColorAttachment && !hasDepthAttachment) ||
+            ((desc.depthStencil.depthTestEnable || desc.depthStencil.depthWriteEnable || desc.depthStencil.stencilTestEnable) && !hasDepthAttachment) ||
+            (desc.depthStencil.depthWriteEnable && !desc.depthStencil.depthTestEnable) ||
+            (desc.depthStencil.stencilTestEnable && desc.depthStencilFormat != RHI::Format::D24_UNORM_S8_UINT)) return nullptr;
         if (vertexShader == nullptr || vertexShader->GetStage() != RHI::ShaderStage::Vertex) return nullptr;
         if (hasFragmentShader &&
             (fragmentShader == nullptr || fragmentShader->GetStage() != RHI::ShaderStage::Fragment)) return nullptr;
@@ -501,12 +504,28 @@ namespace dy::Backends
         }
 
         psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
-        psoDesc.RasterizerState.FrontCounterClockwise = TRUE; // 엔진 메시/Vulkan과 동일하게 CCW를 앞면으로
-        if (!hasColorAttachment) psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        psoDesc.RasterizerState.DepthBias = desc.depthBias;
-        psoDesc.RasterizerState.SlopeScaledDepthBias = desc.depthBiasSlope;
-        psoDesc.RasterizerState.DepthBiasClamp = desc.depthBiasClamp;
+        switch(desc.rasterization.fillMode)
+        {
+        case RHI::FillMode::Solid: psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID; break;
+        case RHI::FillMode::Wireframe: psoDesc.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME; break;
+        default: return nullptr;
+        }
+        switch(desc.rasterization.cullMode)
+        {
+        case RHI::CullMode::None: psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE; break;
+        case RHI::CullMode::Front: psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_FRONT; break;
+        case RHI::CullMode::Back: psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK; break;
+        default: return nullptr;
+        }
+        switch(desc.rasterization.frontFace)
+        {
+        case RHI::FrontFace::CounterClockwise: psoDesc.RasterizerState.FrontCounterClockwise = TRUE; break;
+        case RHI::FrontFace::Clockwise: psoDesc.RasterizerState.FrontCounterClockwise = FALSE; break;
+        default: return nullptr;
+        }
+        psoDesc.RasterizerState.DepthBias = desc.rasterization.depthBias;
+        psoDesc.RasterizerState.SlopeScaledDepthBias = desc.rasterization.depthBiasSlope;
+        psoDesc.RasterizerState.DepthBiasClamp = desc.rasterization.depthBiasClamp;
         psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
         psoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
         psoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
@@ -516,10 +535,65 @@ namespace dy::Backends
         psoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
         psoDesc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
         psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-        psoDesc.DepthStencilState.DepthEnable = desc.depthEnable ? TRUE : FALSE;
-        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        psoDesc.DepthStencilState = {};
+        psoDesc.DepthStencilState.DepthEnable = desc.depthStencil.depthTestEnable ? TRUE : FALSE;
+        psoDesc.DepthStencilState.DepthWriteMask = desc.depthStencil.depthWriteEnable
+            ? D3D12_DEPTH_WRITE_MASK_ALL
+            : D3D12_DEPTH_WRITE_MASK_ZERO;
+        switch(desc.depthStencil.depthCompareOp)
+        {
+        case RHI::CompareOp::Never: psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_NEVER; break;
+        case RHI::CompareOp::Less: psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS; break;
+        case RHI::CompareOp::Equal: psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_EQUAL; break;
+        case RHI::CompareOp::LessEqual: psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL; break;
+        case RHI::CompareOp::Greater: psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER; break;
+        case RHI::CompareOp::NotEqual: psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_NOT_EQUAL; break;
+        case RHI::CompareOp::GreaterEqual: psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL; break;
+        case RHI::CompareOp::Always: psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS; break;
+        default: return nullptr;
+        }
+        psoDesc.DepthStencilState.StencilEnable = desc.depthStencil.stencilTestEnable ? TRUE : FALSE;
+        psoDesc.DepthStencilState.StencilReadMask = desc.depthStencil.stencilReadMask;
+        psoDesc.DepthStencilState.StencilWriteMask = desc.depthStencil.stencilWriteMask;
+        const RHI::StencilFaceDesc* stencilFaces[] = { &desc.depthStencil.frontFace, &desc.depthStencil.backFace };
+        D3D12_DEPTH_STENCILOP_DESC* nativeStencilFaces[] = {
+            &psoDesc.DepthStencilState.FrontFace,
+            &psoDesc.DepthStencilState.BackFace
+        };
+        for(uint32_t faceIndex = 0; faceIndex < 2; ++faceIndex)
+        {
+            const RHI::StencilFaceDesc& source = *stencilFaces[faceIndex];
+            D3D12_DEPTH_STENCILOP_DESC& target = *nativeStencilFaces[faceIndex];
+            switch(source.compareOp)
+            {
+            case RHI::CompareOp::Never: target.StencilFunc = D3D12_COMPARISON_FUNC_NEVER; break;
+            case RHI::CompareOp::Less: target.StencilFunc = D3D12_COMPARISON_FUNC_LESS; break;
+            case RHI::CompareOp::Equal: target.StencilFunc = D3D12_COMPARISON_FUNC_EQUAL; break;
+            case RHI::CompareOp::LessEqual: target.StencilFunc = D3D12_COMPARISON_FUNC_LESS_EQUAL; break;
+            case RHI::CompareOp::Greater: target.StencilFunc = D3D12_COMPARISON_FUNC_GREATER; break;
+            case RHI::CompareOp::NotEqual: target.StencilFunc = D3D12_COMPARISON_FUNC_NOT_EQUAL; break;
+            case RHI::CompareOp::GreaterEqual: target.StencilFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL; break;
+            case RHI::CompareOp::Always: target.StencilFunc = D3D12_COMPARISON_FUNC_ALWAYS; break;
+            default: return nullptr;
+            }
+            const RHI::StencilOp operations[] = { source.failOp, source.depthFailOp, source.passOp };
+            D3D12_STENCIL_OP* nativeOperations[] = { &target.StencilFailOp, &target.StencilDepthFailOp, &target.StencilPassOp };
+            for(uint32_t operationIndex = 0; operationIndex < 3; ++operationIndex)
+            {
+                switch(operations[operationIndex])
+                {
+                case RHI::StencilOp::Keep: *nativeOperations[operationIndex] = D3D12_STENCIL_OP_KEEP; break;
+                case RHI::StencilOp::Zero: *nativeOperations[operationIndex] = D3D12_STENCIL_OP_ZERO; break;
+                case RHI::StencilOp::Replace: *nativeOperations[operationIndex] = D3D12_STENCIL_OP_REPLACE; break;
+                case RHI::StencilOp::IncrementClamp: *nativeOperations[operationIndex] = D3D12_STENCIL_OP_INCR_SAT; break;
+                case RHI::StencilOp::DecrementClamp: *nativeOperations[operationIndex] = D3D12_STENCIL_OP_DECR_SAT; break;
+                case RHI::StencilOp::Invert: *nativeOperations[operationIndex] = D3D12_STENCIL_OP_INVERT; break;
+                case RHI::StencilOp::IncrementWrap: *nativeOperations[operationIndex] = D3D12_STENCIL_OP_INCR; break;
+                case RHI::StencilOp::DecrementWrap: *nativeOperations[operationIndex] = D3D12_STENCIL_OP_DECR; break;
+                default: return nullptr;
+                }
+            }
+        }
         psoDesc.DSVFormat = hasDepthAttachment
             ? static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiDepthStencilFormat(desc.depthStencilFormat))
             : DXGI_FORMAT_UNKNOWN;
@@ -560,7 +634,8 @@ namespace dy::Backends
             pRootSignature.Get(),
             desc.inputAssembly.topology,
             desc.inputAssembly.vertexBindings,
-            desc.inputAssembly.vertexBindingCount);
+            desc.inputAssembly.vertexBindingCount,
+            desc.depthStencil.stencilReference);
     }
 
     RHI::DescriptorIndex D3D12Device::AllocateDescriptorSlot() {

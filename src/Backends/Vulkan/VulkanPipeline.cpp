@@ -32,21 +32,6 @@ VulkanShader::~VulkanShader()
 
 namespace
 {
-	VkPipelineRasterizationStateCreateInfo CreateRasterizerState(const dy::RHI::GraphicsPipelineDesc& desc)
-	{
-		VkPipelineRasterizationStateCreateInfo rasterizer{};
-		rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-		rasterizer.polygonMode = desc.wireframe ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
-		rasterizer.cullMode = VK_CULL_MODE_NONE;
-		rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-		rasterizer.lineWidth = 1.0f;
-		rasterizer.depthBiasEnable = desc.depthBias != 0 || desc.depthBiasSlope != 0.0f || desc.depthBiasClamp != 0.0f;
-		rasterizer.depthBiasConstantFactor = static_cast<float>(desc.depthBias);
-		rasterizer.depthBiasSlopeFactor = desc.depthBiasSlope;
-		rasterizer.depthBiasClamp = desc.depthBiasClamp;
-		return rasterizer;
-	}
-
 	VkPipelineColorBlendAttachmentState CreateAlphaBlendAttachmentState()
 	{
 		VkPipelineColorBlendAttachmentState colorBlendAttachment{};
@@ -172,7 +157,34 @@ void VulkanPipeline::Initialize(
 	viewportState.scissorCount = 1;
 	viewportState.pScissors = nullptr;
 
-	VkPipelineRasterizationStateCreateInfo rasterizer = CreateRasterizerState(desc);
+	VkPipelineRasterizationStateCreateInfo rasterizer{};
+	rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+	switch(desc.rasterization.fillMode)
+	{
+	case dy::RHI::FillMode::Solid: rasterizer.polygonMode = VK_POLYGON_MODE_FILL; break;
+	case dy::RHI::FillMode::Wireframe: rasterizer.polygonMode = VK_POLYGON_MODE_LINE; break;
+	default: throw std::runtime_error("invalid Vulkan fill mode");
+	}
+	switch(desc.rasterization.cullMode)
+	{
+	case dy::RHI::CullMode::None: rasterizer.cullMode = VK_CULL_MODE_NONE; break;
+	case dy::RHI::CullMode::Front: rasterizer.cullMode = VK_CULL_MODE_FRONT_BIT; break;
+	case dy::RHI::CullMode::Back: rasterizer.cullMode = VK_CULL_MODE_BACK_BIT; break;
+	default: throw std::runtime_error("invalid Vulkan cull mode");
+	}
+	switch(desc.rasterization.frontFace)
+	{
+	case dy::RHI::FrontFace::CounterClockwise: rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; break;
+	case dy::RHI::FrontFace::Clockwise: rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE; break;
+	default: throw std::runtime_error("invalid Vulkan front face");
+	}
+	rasterizer.lineWidth = 1.0f;
+	rasterizer.depthBiasEnable = desc.rasterization.depthBias != 0 ||
+		desc.rasterization.depthBiasSlope != 0.0f ||
+		desc.rasterization.depthBiasClamp != 0.0f;
+	rasterizer.depthBiasConstantFactor = static_cast<float>(desc.rasterization.depthBias);
+	rasterizer.depthBiasSlopeFactor = desc.rasterization.depthBiasSlope;
+	rasterizer.depthBiasClamp = desc.rasterization.depthBiasClamp;
 
 	VkPipelineMultisampleStateCreateInfo multisampling{};
 	multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
@@ -195,11 +207,61 @@ void VulkanPipeline::Initialize(
 
 	VkPipelineDepthStencilStateCreateInfo depthStencil{};
 	depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-	depthStencil.depthTestEnable = desc.depthEnable ? VK_TRUE : VK_FALSE;
-	depthStencil.depthWriteEnable = desc.depthEnable ? VK_TRUE : VK_FALSE;
-	depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+	depthStencil.depthTestEnable = desc.depthStencil.depthTestEnable ? VK_TRUE : VK_FALSE;
+	depthStencil.depthWriteEnable = desc.depthStencil.depthWriteEnable ? VK_TRUE : VK_FALSE;
+	switch(desc.depthStencil.depthCompareOp)
+	{
+	case dy::RHI::CompareOp::Never: depthStencil.depthCompareOp = VK_COMPARE_OP_NEVER; break;
+	case dy::RHI::CompareOp::Less: depthStencil.depthCompareOp = VK_COMPARE_OP_LESS; break;
+	case dy::RHI::CompareOp::Equal: depthStencil.depthCompareOp = VK_COMPARE_OP_EQUAL; break;
+	case dy::RHI::CompareOp::LessEqual: depthStencil.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL; break;
+	case dy::RHI::CompareOp::Greater: depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER; break;
+	case dy::RHI::CompareOp::NotEqual: depthStencil.depthCompareOp = VK_COMPARE_OP_NOT_EQUAL; break;
+	case dy::RHI::CompareOp::GreaterEqual: depthStencil.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL; break;
+	case dy::RHI::CompareOp::Always: depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS; break;
+	default: throw std::runtime_error("invalid Vulkan depth compare operation");
+	}
 	depthStencil.depthBoundsTestEnable = VK_FALSE;
-	depthStencil.stencilTestEnable = VK_FALSE;
+	depthStencil.stencilTestEnable = desc.depthStencil.stencilTestEnable ? VK_TRUE : VK_FALSE;
+	const dy::RHI::StencilFaceDesc* stencilFaces[] = { &desc.depthStencil.frontFace, &desc.depthStencil.backFace };
+	VkStencilOpState* nativeStencilFaces[] = { &depthStencil.front, &depthStencil.back };
+	for(uint32_t faceIndex = 0; faceIndex < 2; ++faceIndex)
+	{
+		const dy::RHI::StencilFaceDesc& source = *stencilFaces[faceIndex];
+		VkStencilOpState& target = *nativeStencilFaces[faceIndex];
+		switch(source.compareOp)
+		{
+		case dy::RHI::CompareOp::Never: target.compareOp = VK_COMPARE_OP_NEVER; break;
+		case dy::RHI::CompareOp::Less: target.compareOp = VK_COMPARE_OP_LESS; break;
+		case dy::RHI::CompareOp::Equal: target.compareOp = VK_COMPARE_OP_EQUAL; break;
+		case dy::RHI::CompareOp::LessEqual: target.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL; break;
+		case dy::RHI::CompareOp::Greater: target.compareOp = VK_COMPARE_OP_GREATER; break;
+		case dy::RHI::CompareOp::NotEqual: target.compareOp = VK_COMPARE_OP_NOT_EQUAL; break;
+		case dy::RHI::CompareOp::GreaterEqual: target.compareOp = VK_COMPARE_OP_GREATER_OR_EQUAL; break;
+		case dy::RHI::CompareOp::Always: target.compareOp = VK_COMPARE_OP_ALWAYS; break;
+		default: throw std::runtime_error("invalid Vulkan stencil compare operation");
+		}
+		const dy::RHI::StencilOp operations[] = { source.failOp, source.depthFailOp, source.passOp };
+		VkStencilOp* nativeOperations[] = { &target.failOp, &target.depthFailOp, &target.passOp };
+		for(uint32_t operationIndex = 0; operationIndex < 3; ++operationIndex)
+		{
+			switch(operations[operationIndex])
+			{
+			case dy::RHI::StencilOp::Keep: *nativeOperations[operationIndex] = VK_STENCIL_OP_KEEP; break;
+			case dy::RHI::StencilOp::Zero: *nativeOperations[operationIndex] = VK_STENCIL_OP_ZERO; break;
+			case dy::RHI::StencilOp::Replace: *nativeOperations[operationIndex] = VK_STENCIL_OP_REPLACE; break;
+			case dy::RHI::StencilOp::IncrementClamp: *nativeOperations[operationIndex] = VK_STENCIL_OP_INCREMENT_AND_CLAMP; break;
+			case dy::RHI::StencilOp::DecrementClamp: *nativeOperations[operationIndex] = VK_STENCIL_OP_DECREMENT_AND_CLAMP; break;
+			case dy::RHI::StencilOp::Invert: *nativeOperations[operationIndex] = VK_STENCIL_OP_INVERT; break;
+			case dy::RHI::StencilOp::IncrementWrap: *nativeOperations[operationIndex] = VK_STENCIL_OP_INCREMENT_AND_WRAP; break;
+			case dy::RHI::StencilOp::DecrementWrap: *nativeOperations[operationIndex] = VK_STENCIL_OP_DECREMENT_AND_WRAP; break;
+			default: throw std::runtime_error("invalid Vulkan stencil operation");
+			}
+		}
+		target.compareMask = desc.depthStencil.stencilReadMask;
+		target.writeMask = desc.depthStencil.stencilWriteMask;
+		target.reference = desc.depthStencil.stencilReference;
+	}
 
 	VkPushConstantRange pushConstantRange{};
 	pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;

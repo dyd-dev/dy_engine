@@ -168,6 +168,12 @@ namespace dy::Backends
                 (depthStencil->GetUsage() & RHI::TextureUsage::ShaderResource) != RHI::TextureUsage::None
                     ? MTLStoreActionStore
                     : MTLStoreActionDontCare;
+            if(depthStencil->GetFormat() == RHI::Format::D24_UNORM_S8_UINT)
+            {
+                passDesc.stencilAttachment.texture = depthTexture;
+                passDesc.stencilAttachment.loadAction = MTLLoadActionLoad;
+                passDesc.stencilAttachment.storeAction = passDesc.depthAttachment.storeAction;
+            }
         }
 
         m_impl->passDescriptor = passDesc;
@@ -237,6 +243,7 @@ namespace dy::Backends
         auto* pipeline = static_cast<MetalPipeline*>(pipelineState);
         auto* native   = (__bridge id<MTLRenderPipelineState>)pipeline->GetNativePipeline();
         auto* depth    = (__bridge id<MTLDepthStencilState>)pipeline->GetNativeDepthStencil();
+        const RHI::RasterizationDesc& rasterization = pipeline->GetRasterization();
 
         [m_impl->encoder setRenderPipelineState:native];
         switch(pipeline->GetPrimitiveTopology())
@@ -247,11 +254,27 @@ namespace dy::Backends
         case RHI::PrimitiveTopology::TriangleStrip: m_impl->primitiveType = MTLPrimitiveTypeTriangleStrip; break;
         case RHI::PrimitiveTopology::TriangleList: m_impl->primitiveType = MTLPrimitiveTypeTriangle; break;
         }
-        [m_impl->encoder setDepthBias:pipeline->GetDepthBias()
-                             slopeScale:pipeline->GetDepthBiasSlope()
-                                  clamp:pipeline->GetDepthBiasClamp()];
-        if(depth)
-            [m_impl->encoder setDepthStencilState:depth];
+        switch(rasterization.fillMode)
+        {
+        case RHI::FillMode::Solid: [m_impl->encoder setTriangleFillMode:MTLTriangleFillModeFill]; break;
+        case RHI::FillMode::Wireframe: [m_impl->encoder setTriangleFillMode:MTLTriangleFillModeLines]; break;
+        }
+        switch(rasterization.cullMode)
+        {
+        case RHI::CullMode::None: [m_impl->encoder setCullMode:MTLCullModeNone]; break;
+        case RHI::CullMode::Front: [m_impl->encoder setCullMode:MTLCullModeFront]; break;
+        case RHI::CullMode::Back: [m_impl->encoder setCullMode:MTLCullModeBack]; break;
+        }
+        switch(rasterization.frontFace)
+        {
+        case RHI::FrontFace::CounterClockwise: [m_impl->encoder setFrontFacingWinding:MTLWindingClockwise]; break;
+        case RHI::FrontFace::Clockwise: [m_impl->encoder setFrontFacingWinding:MTLWindingCounterClockwise]; break;
+        }
+        [m_impl->encoder setDepthBias:static_cast<float>(rasterization.depthBias)
+                             slopeScale:rasterization.depthBiasSlope
+                                  clamp:rasterization.depthBiasClamp];
+        [m_impl->encoder setDepthStencilState:depth];
+        [m_impl->encoder setStencilReferenceValue:pipeline->GetStencilReference()];
     }
 
     void MetalCommandList::BindGlobalDescriptors()

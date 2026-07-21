@@ -67,9 +67,8 @@ namespace dy::Backends
     {
         id<MTLRenderPipelineState> pipelineState    = nil;
         id<MTLDepthStencilState>   depthStencilState = nil;
-        float depthBias = 0.0f;
-        float depthBiasSlope = 0.0f;
-        float depthBiasClamp = 0.0f;
+        RHI::RasterizationDesc rasterization = {};
+        uint32_t stencilReference = 0;
         RHI::PrimitiveTopology topology = RHI::PrimitiveTopology::TriangleList;
     };
 
@@ -94,10 +93,13 @@ namespace dy::Backends
     {
         id<MTLDevice> mtlDevice = (__bridge id<MTLDevice>)device;
         NSError* error = nil;
-        m_impl->depthBias = static_cast<float>(desc.depthBias);
-        m_impl->depthBiasSlope = desc.depthBiasSlope;
-        m_impl->depthBiasClamp = desc.depthBiasClamp;
+        m_impl->rasterization = desc.rasterization;
+        m_impl->stencilReference = desc.depthStencil.stencilReference;
         m_impl->topology = desc.inputAssembly.topology;
+        if((desc.rasterization.fillMode != RHI::FillMode::Solid && desc.rasterization.fillMode != RHI::FillMode::Wireframe) ||
+           (desc.rasterization.cullMode != RHI::CullMode::None && desc.rasterization.cullMode != RHI::CullMode::Front && desc.rasterization.cullMode != RHI::CullMode::Back) ||
+           (desc.rasterization.frontFace != RHI::FrontFace::CounterClockwise && desc.rasterization.frontFace != RHI::FrontFace::Clockwise) ||
+           static_cast<uint32_t>(desc.depthStencil.depthCompareOp) > static_cast<uint32_t>(RHI::CompareOp::Always)) return;
 
         const auto* vertexShader = dynamic_cast<const MetalShader*>(desc.vertexShader);
         const auto* fragmentShader = dynamic_cast<const MetalShader*>(desc.fragmentShader);
@@ -172,19 +174,84 @@ namespace dy::Backends
             pipeDesc.colorAttachments[0].pixelFormat = ToMTLFormat(desc.renderTargetFormat);
 
         if(desc.depthStencilFormat != RHI::Format::Unknown)
+        {
             pipeDesc.depthAttachmentPixelFormat = ToMTLFormat(desc.depthStencilFormat);
+            if(desc.depthStencilFormat == RHI::Format::D24_UNORM_S8_UINT)
+                pipeDesc.stencilAttachmentPixelFormat = ToMTLFormat(desc.depthStencilFormat);
+        }
 
         m_impl->pipelineState = [mtlDevice newRenderPipelineStateWithDescriptor:pipeDesc error:&error];
         if(!m_impl->pipelineState) { NSLog(@"파이프라인 생성 실패: %@", error); return; }
 
-        // DepthStencil 상태 생성
-        if(desc.depthEnable)
+        MTLDepthStencilDescriptor* depthDesc = [MTLDepthStencilDescriptor new];
+        depthDesc.depthWriteEnabled = desc.depthStencil.depthWriteEnable ? YES : NO;
+        if(!desc.depthStencil.depthTestEnable)
         {
-            MTLDepthStencilDescriptor* depthDesc = [MTLDepthStencilDescriptor new];
-            depthDesc.depthCompareFunction = MTLCompareFunctionLess;
-            depthDesc.depthWriteEnabled    = YES;
-            m_impl->depthStencilState = [mtlDevice newDepthStencilStateWithDescriptor:depthDesc];
+            depthDesc.depthCompareFunction = MTLCompareFunctionAlways;
         }
+        else
+        {
+            switch(desc.depthStencil.depthCompareOp)
+            {
+            case RHI::CompareOp::Never: depthDesc.depthCompareFunction = MTLCompareFunctionNever; break;
+            case RHI::CompareOp::Less: depthDesc.depthCompareFunction = MTLCompareFunctionLess; break;
+            case RHI::CompareOp::Equal: depthDesc.depthCompareFunction = MTLCompareFunctionEqual; break;
+            case RHI::CompareOp::LessEqual: depthDesc.depthCompareFunction = MTLCompareFunctionLessEqual; break;
+            case RHI::CompareOp::Greater: depthDesc.depthCompareFunction = MTLCompareFunctionGreater; break;
+            case RHI::CompareOp::NotEqual: depthDesc.depthCompareFunction = MTLCompareFunctionNotEqual; break;
+            case RHI::CompareOp::GreaterEqual: depthDesc.depthCompareFunction = MTLCompareFunctionGreaterEqual; break;
+            case RHI::CompareOp::Always: depthDesc.depthCompareFunction = MTLCompareFunctionAlways; break;
+            default: return;
+            }
+        }
+
+        const RHI::StencilFaceDesc* stencilFaces[] = { &desc.depthStencil.frontFace, &desc.depthStencil.backFace };
+        MTLStencilDescriptor* nativeStencilFaces[] = { [MTLStencilDescriptor new], [MTLStencilDescriptor new] };
+        for(uint32_t faceIndex = 0; faceIndex < 2; ++faceIndex)
+        {
+            const RHI::StencilFaceDesc& source = *stencilFaces[faceIndex];
+            MTLStencilDescriptor* target = nativeStencilFaces[faceIndex];
+            switch(source.compareOp)
+            {
+            case RHI::CompareOp::Never: target.stencilCompareFunction = MTLCompareFunctionNever; break;
+            case RHI::CompareOp::Less: target.stencilCompareFunction = MTLCompareFunctionLess; break;
+            case RHI::CompareOp::Equal: target.stencilCompareFunction = MTLCompareFunctionEqual; break;
+            case RHI::CompareOp::LessEqual: target.stencilCompareFunction = MTLCompareFunctionLessEqual; break;
+            case RHI::CompareOp::Greater: target.stencilCompareFunction = MTLCompareFunctionGreater; break;
+            case RHI::CompareOp::NotEqual: target.stencilCompareFunction = MTLCompareFunctionNotEqual; break;
+            case RHI::CompareOp::GreaterEqual: target.stencilCompareFunction = MTLCompareFunctionGreaterEqual; break;
+            case RHI::CompareOp::Always: target.stencilCompareFunction = MTLCompareFunctionAlways; break;
+            default: return;
+            }
+            const RHI::StencilOp operations[] = { source.failOp, source.depthFailOp, source.passOp };
+            MTLStencilOperation nativeOperations[3] = {};
+            for(uint32_t operationIndex = 0; operationIndex < 3; ++operationIndex)
+            {
+                switch(operations[operationIndex])
+                {
+                case RHI::StencilOp::Keep: nativeOperations[operationIndex] = MTLStencilOperationKeep; break;
+                case RHI::StencilOp::Zero: nativeOperations[operationIndex] = MTLStencilOperationZero; break;
+                case RHI::StencilOp::Replace: nativeOperations[operationIndex] = MTLStencilOperationReplace; break;
+                case RHI::StencilOp::IncrementClamp: nativeOperations[operationIndex] = MTLStencilOperationIncrementClamp; break;
+                case RHI::StencilOp::DecrementClamp: nativeOperations[operationIndex] = MTLStencilOperationDecrementClamp; break;
+                case RHI::StencilOp::Invert: nativeOperations[operationIndex] = MTLStencilOperationInvert; break;
+                case RHI::StencilOp::IncrementWrap: nativeOperations[operationIndex] = MTLStencilOperationIncrementWrap; break;
+                case RHI::StencilOp::DecrementWrap: nativeOperations[operationIndex] = MTLStencilOperationDecrementWrap; break;
+                default: return;
+                }
+            }
+            target.stencilFailureOperation = nativeOperations[0];
+            target.depthFailureOperation = nativeOperations[1];
+            target.depthStencilPassOperation = nativeOperations[2];
+            target.readMask = desc.depthStencil.stencilReadMask;
+            target.writeMask = desc.depthStencil.stencilWriteMask;
+        }
+        if(desc.depthStencil.stencilTestEnable)
+        {
+            depthDesc.frontFaceStencil = nativeStencilFaces[0];
+            depthDesc.backFaceStencil = nativeStencilFaces[1];
+        }
+        m_impl->depthStencilState = [mtlDevice newDepthStencilStateWithDescriptor:depthDesc];
     }
 
     MetalPipeline::~MetalPipeline()
@@ -202,19 +269,14 @@ namespace dy::Backends
         return (__bridge void*)m_impl->depthStencilState;
     }
 
-    float MetalPipeline::GetDepthBias() const
+    const RHI::RasterizationDesc& MetalPipeline::GetRasterization() const
     {
-        return m_impl->depthBias;
+        return m_impl->rasterization;
     }
 
-    float MetalPipeline::GetDepthBiasSlope() const
+    uint32_t MetalPipeline::GetStencilReference() const
     {
-        return m_impl->depthBiasSlope;
-    }
-
-    float MetalPipeline::GetDepthBiasClamp() const
-    {
-        return m_impl->depthBiasClamp;
+        return m_impl->stencilReference;
     }
 
     RHI::PrimitiveTopology MetalPipeline::GetPrimitiveTopology() const
@@ -229,6 +291,6 @@ namespace dy::Backends
 
     bool MetalPipeline::IsValid() const
     {
-        return m_impl->pipelineState != nil;
+        return m_impl->pipelineState != nil && m_impl->depthStencilState != nil;
     }
 }

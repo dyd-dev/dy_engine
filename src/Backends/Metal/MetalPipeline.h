@@ -34,9 +34,8 @@ namespace dy::Backends
 
         void* GetNativePipeline() const;
         void* GetNativeDepthStencil() const;
-        float GetDepthBias() const;
-        float GetDepthBiasSlope() const;
-        float GetDepthBiasClamp() const;
+        const RHI::RasterizationDesc& GetRasterization() const;
+        uint32_t GetStencilReference() const;
         RHI::PrimitiveTopology GetPrimitiveTopology() const;
         static uint32_t GetNativeVertexBufferIndex(uint32_t slot);
         bool IsValid() const;

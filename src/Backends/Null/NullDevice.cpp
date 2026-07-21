@@ -139,9 +139,24 @@ namespace dy::Backends
 		const bool hasColorAttachment = desc.renderTargetFormat != RHI::Format::Unknown;
 		const bool hasDepthAttachment = desc.depthStencilFormat != RHI::Format::Unknown;
 		const bool hasFragmentShader = desc.fragmentShader != nullptr;
-		if((!hasColorAttachment && !hasDepthAttachment) || (desc.depthEnable && !hasDepthAttachment))
+		if((!hasColorAttachment && !hasDepthAttachment) ||
+			((desc.depthStencil.depthTestEnable || desc.depthStencil.depthWriteEnable || desc.depthStencil.stencilTestEnable) && !hasDepthAttachment) ||
+			(desc.depthStencil.depthWriteEnable && !desc.depthStencil.depthTestEnable) ||
+			(desc.depthStencil.stencilTestEnable && desc.depthStencilFormat != RHI::Format::D24_UNORM_S8_UINT))
 		{
 			return nullptr;
+		}
+		if((desc.rasterization.fillMode != RHI::FillMode::Solid && desc.rasterization.fillMode != RHI::FillMode::Wireframe) ||
+			(desc.rasterization.cullMode != RHI::CullMode::None && desc.rasterization.cullMode != RHI::CullMode::Front && desc.rasterization.cullMode != RHI::CullMode::Back) ||
+			(desc.rasterization.frontFace != RHI::FrontFace::CounterClockwise && desc.rasterization.frontFace != RHI::FrontFace::Clockwise) ||
+			static_cast<uint32_t>(desc.depthStencil.depthCompareOp) > static_cast<uint32_t>(RHI::CompareOp::Always)) return nullptr;
+		const RHI::StencilFaceDesc* stencilFaces[] = { &desc.depthStencil.frontFace, &desc.depthStencil.backFace };
+		for(const RHI::StencilFaceDesc* face : stencilFaces)
+		{
+			if(static_cast<uint32_t>(face->compareOp) > static_cast<uint32_t>(RHI::CompareOp::Always) ||
+				static_cast<uint32_t>(face->failOp) > static_cast<uint32_t>(RHI::StencilOp::DecrementWrap) ||
+				static_cast<uint32_t>(face->depthFailOp) > static_cast<uint32_t>(RHI::StencilOp::DecrementWrap) ||
+				static_cast<uint32_t>(face->passOp) > static_cast<uint32_t>(RHI::StencilOp::DecrementWrap)) return nullptr;
 		}
 		const auto* vertexShader = dynamic_cast<const NullShader*>(desc.vertexShader);
 		const auto* fragmentShader = dynamic_cast<const NullShader*>(desc.fragmentShader);

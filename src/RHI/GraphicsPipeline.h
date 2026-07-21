@@ -47,6 +47,82 @@ namespace dy::RHI
 		uint32_t vertexAttributeCount = 0;
 	};
 
+	enum class FillMode : uint32_t
+	{
+		Solid,
+		Wireframe
+	};
+
+	enum class CullMode : uint32_t
+	{
+		None,
+		Front,
+		Back
+	};
+
+	enum class FrontFace : uint32_t
+	{
+		// Backend viewport 변환 전 RHI clip-space에서의 winding이다.
+		CounterClockwise,
+		Clockwise
+	};
+
+	enum class CompareOp : uint32_t
+	{
+		Never,
+		Less,
+		Equal,
+		LessEqual,
+		Greater,
+		NotEqual,
+		GreaterEqual,
+		Always
+	};
+
+	enum class StencilOp : uint32_t
+	{
+		Keep,
+		Zero,
+		Replace,
+		IncrementClamp,
+		DecrementClamp,
+		Invert,
+		IncrementWrap,
+		DecrementWrap
+	};
+
+	struct RasterizationDesc
+	{
+		FillMode fillMode = FillMode::Solid;
+		CullMode cullMode = CullMode::None;
+		FrontFace frontFace = FrontFace::CounterClockwise;
+		int32_t depthBias = 0;
+		float depthBiasSlope = 0.0f;
+		float depthBiasClamp = 0.0f;
+	};
+
+	struct StencilFaceDesc
+	{
+		StencilOp failOp = StencilOp::Keep;
+		StencilOp depthFailOp = StencilOp::Keep;
+		StencilOp passOp = StencilOp::Keep;
+		CompareOp compareOp = CompareOp::Always;
+	};
+
+	struct DepthStencilDesc
+	{
+		// depthWriteEnable은 depthTestEnable을, stencilTestEnable은 stencil format을 요구한다.
+		bool depthTestEnable = false;
+		bool depthWriteEnable = false;
+		CompareOp depthCompareOp = CompareOp::Less;
+		bool stencilTestEnable = false;
+		uint8_t stencilReadMask = 0xff;
+		uint8_t stencilWriteMask = 0xff;
+		uint32_t stencilReference = 0;
+		StencilFaceDesc frontFace = {};
+		StencilFaceDesc backFace = {};
+	};
+
 	struct GraphicsPipelineDesc
 	{
 		// 참조한 shader는 이 pipeline보다 오래 살아야 한다.
@@ -54,17 +130,13 @@ namespace dy::RHI
 		IShader* fragmentShader = nullptr;
 		// 배열은 CreateGraphicsPipeline() 호출 동안만 유효해도 된다.
 		InputAssemblyDesc inputAssembly = {};
+		RasterizationDesc rasterization = {};
+		DepthStencilDesc depthStencil = {};
 
 		Format renderTargetFormat = Format::Unknown;
 		Format depthStencilFormat = Format::Unknown;
 
-		bool depthEnable = false;
-		bool wireframe = false;
 		bool enableBindlessTextures = false;
-
-		int32_t depthBias = 0;
-		float depthBiasSlope = 0.0f;
-		float depthBiasClamp = 0.0f;
 	};
 
 	class IPipelineState

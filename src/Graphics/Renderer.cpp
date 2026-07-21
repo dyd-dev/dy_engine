@@ -409,10 +409,13 @@ bool Renderer::BuildPipelineStates(RHI::IDevice* device)
 	desc.inputAssembly.vertexBindingCount = 1;
 	desc.inputAssembly.vertexAttributes = vertexAttributes;
 	desc.inputAssembly.vertexAttributeCount = static_cast<uint32_t>(sizeof(vertexAttributes) / sizeof(vertexAttributes[0]));
+	desc.rasterization.cullMode = RHI::CullMode::Back;
+	desc.rasterization.frontFace = RHI::FrontFace::CounterClockwise;
+	desc.depthStencil.depthTestEnable = m_config.depthStencilFormat != RHI::Format::Unknown;
+	desc.depthStencil.depthWriteEnable = m_config.depthStencilFormat != RHI::Format::Unknown;
+	desc.depthStencil.depthCompareOp = RHI::CompareOp::Less;
 	desc.renderTargetFormat = m_config.renderTargetFormat;
 	desc.depthStencilFormat = m_config.depthStencilFormat;
-	desc.depthEnable = m_config.depthStencilFormat != RHI::Format::Unknown;
-	desc.wireframe = false;
 	desc.enableBindlessTextures = m_config.enableBindlessTextures;
 
 	m_pipeline = device->CreateGraphicsPipeline(desc);
@@ -439,11 +442,15 @@ bool Renderer::BuildPipelineStates(RHI::IDevice* device)
 		shadowDesc.inputAssembly.vertexBindingCount = 1;
 		shadowDesc.inputAssembly.vertexAttributes = vertexAttributes;
 		shadowDesc.inputAssembly.vertexAttributeCount = 1;
+		shadowDesc.rasterization.cullMode = RHI::CullMode::None;
+		shadowDesc.rasterization.frontFace = RHI::FrontFace::CounterClockwise;
+		shadowDesc.rasterization.depthBiasSlope = m_config.shadowRasterSlopeBias;
+		shadowDesc.depthStencil.depthTestEnable = true;
+		shadowDesc.depthStencil.depthWriteEnable = true;
+		shadowDesc.depthStencil.depthCompareOp = RHI::CompareOp::Less;
 		shadowDesc.renderTargetFormat = RHI::Format::Unknown;
 		shadowDesc.depthStencilFormat = shadowFormat;
-		shadowDesc.depthEnable = true;
 		shadowDesc.enableBindlessTextures = m_config.enableBindlessTextures;
-		shadowDesc.depthBiasSlope = m_config.shadowRasterSlopeBias;
 
 		m_shadowPipeline = device->CreateGraphicsPipeline(shadowDesc);
 		if(m_shadowPipeline == nullptr) return false;

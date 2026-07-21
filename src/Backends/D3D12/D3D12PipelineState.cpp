@@ -18,8 +18,10 @@ namespace dy::Backends
         ID3D12RootSignature* rootSignature,
         RHI::PrimitiveTopology topology,
         const RHI::VertexBindingDesc* vertexBindings,
-        uint32_t vertexBindingCount)
+        uint32_t vertexBindingCount,
+        uint32_t stencilReference)
         : m_topology(topology)
+        , m_stencilReference(stencilReference)
     {
         m_internal = new D3D12PipelineStateInternal();
         m_internal->pso = pso;
@@ -59,5 +61,10 @@ namespace dy::Backends
             return true;
         }
         return false;
+    }
+
+    uint32_t D3D12PipelineState::GetStencilReference() const
+    {
+        return m_stencilReference;
     }
 }

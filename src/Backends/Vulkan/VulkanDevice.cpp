@@ -583,6 +583,7 @@ private:
 	uint32_t m_fallbackTextureHeight = kFallbackTextureHeight;
 	uint64_t m_frameAcquireTimeoutNanoseconds = dy::RHI::DeviceDesc{}.frameAcquireTimeoutNanoseconds;
 	bool m_depthBiasClampSupported = false;
+	bool m_fillModeNonSolidSupported = false;
 	dy::RHI::ShaderLayoutDesc m_shaderLayout = {};
 	uint32_t m_currentFrameIndex = 0;
 	uint32_t m_currentImageIndex = 0;
@@ -792,7 +793,10 @@ dy::RHI::IPipelineState* VulkanDevice::Impl::CreateGraphicsPipeline(const dy::RH
 	const bool hasColorAttachment = desc.renderTargetFormat != dy::RHI::Format::Unknown;
 	const bool hasDepthAttachment = desc.depthStencilFormat != dy::RHI::Format::Unknown;
 	const bool hasFragmentShader = desc.fragmentShader != nullptr;
-	if ((!hasColorAttachment && !hasDepthAttachment) || (desc.depthEnable && !hasDepthAttachment)) return nullptr;
+	if ((!hasColorAttachment && !hasDepthAttachment) ||
+		((desc.depthStencil.depthTestEnable || desc.depthStencil.depthWriteEnable || desc.depthStencil.stencilTestEnable) && !hasDepthAttachment) ||
+		(desc.depthStencil.depthWriteEnable && !desc.depthStencil.depthTestEnable) ||
+		(desc.depthStencil.stencilTestEnable && desc.depthStencilFormat != dy::RHI::Format::D24_UNORM_S8_UINT)) return nullptr;
 	const VulkanShader* vertexShader = dynamic_cast<const VulkanShader*>(desc.vertexShader);
 	const VulkanShader* fragmentShader = dynamic_cast<const VulkanShader*>(desc.fragmentShader);
 	if (vertexShader == nullptr || vertexShader->GetStage() != dy::RHI::ShaderStage::Vertex) return nullptr;
@@ -800,7 +804,8 @@ dy::RHI::IPipelineState* VulkanDevice::Impl::CreateGraphicsPipeline(const dy::RH
 		(fragmentShader == nullptr || fragmentShader->GetStage() != dy::RHI::ShaderStage::Fragment)) return nullptr;
 	if ((desc.inputAssembly.vertexBindingCount > 0 && desc.inputAssembly.vertexBindings == nullptr) ||
 		(desc.inputAssembly.vertexAttributeCount > 0 && desc.inputAssembly.vertexAttributes == nullptr)) return nullptr;
-	if (desc.depthBiasClamp != 0.0f && !m_depthBiasClampSupported) return nullptr;
+	if (desc.rasterization.depthBiasClamp != 0.0f && !m_depthBiasClampSupported) return nullptr;
+	if (desc.rasterization.fillMode == dy::RHI::FillMode::Wireframe && !m_fillModeNonSolidSupported) return nullptr;
 
 	try {
 		VulkanPipelineState* pipelineState = new VulkanPipelineState(
@@ -1101,7 +1106,9 @@ bool VulkanDevice::Impl::CreateLogicalDevice() {
 	VkPhysicalDeviceFeatures deviceFeatures = {};
 	deviceFeatures.shaderSampledImageArrayDynamicIndexing = supportedFeatures.shaderSampledImageArrayDynamicIndexing;
 	deviceFeatures.depthBiasClamp = supportedFeatures.depthBiasClamp;
+	deviceFeatures.fillModeNonSolid = supportedFeatures.fillModeNonSolid;
 	m_depthBiasClampSupported = supportedFeatures.depthBiasClamp == VK_TRUE;
+	m_fillModeNonSolidSupported = supportedFeatures.fillModeNonSolid == VK_TRUE;
 	VkDeviceCreateInfo createInfo{};
 	createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 	createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
