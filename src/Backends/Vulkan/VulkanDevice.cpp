@@ -118,6 +118,9 @@ namespace {
 		switch (format)
 		{
 		case dy::RHI::Format::R8G8B8A8_UNORM: return VK_FORMAT_R8G8B8A8_UNORM;
+		case dy::RHI::Format::B8G8R8A8_UNORM: return VK_FORMAT_B8G8R8A8_UNORM;
+		case dy::RHI::Format::R8G8B8A8_UNORM_SRGB: return VK_FORMAT_R8G8B8A8_SRGB;
+		case dy::RHI::Format::B8G8R8A8_UNORM_SRGB: return VK_FORMAT_B8G8R8A8_SRGB;
 		case dy::RHI::Format::R16G16B16A16_FLOAT: return VK_FORMAT_R16G16B16A16_SFLOAT;
 		case dy::RHI::Format::R32G32B32A32_FLOAT: return VK_FORMAT_R32G32B32A32_SFLOAT;
 		case dy::RHI::Format::R32_UINT: return VK_FORMAT_R32_UINT;
@@ -356,8 +359,15 @@ namespace {
 					desc.inputAssembly.vertexAttributes,
 					desc.inputAssembly.vertexAttributes + desc.inputAssembly.vertexAttributeCount);
 			}
+			if(desc.colorAttachmentCount > 0)
+			{
+				m_colorAttachments.assign(
+					desc.colorAttachments,
+					desc.colorAttachments + desc.colorAttachmentCount);
+			}
 			m_desc.inputAssembly.vertexBindings = m_vertexBindings.empty() ? nullptr : m_vertexBindings.data();
 			m_desc.inputAssembly.vertexAttributes = m_vertexAttributes.empty() ? nullptr : m_vertexAttributes.data();
+			m_desc.colorAttachments = m_colorAttachments.empty() ? nullptr : m_colorAttachments.data();
 			m_pipelineCache.reserve(4);
 		}
 
@@ -415,6 +425,7 @@ namespace {
 		dy::RHI::GraphicsPipelineDesc m_desc = {};
 		std::vector<dy::RHI::VertexBindingDesc> m_vertexBindings;
 		std::vector<dy::RHI::VertexAttributeDesc> m_vertexAttributes;
+		std::vector<dy::RHI::ColorAttachmentDesc> m_colorAttachments;
 		uint32_t m_pushConstantSize = 0;
 		mutable std::vector<PipelineCacheEntry> m_pipelineCache;
 		bool m_bindlessTexturesEnabled = false;
@@ -528,9 +539,9 @@ private:
 	void RecordCommandBuffer(const VulkanCommandList& commandList);
 	void RecordPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList, const VulkanCommandList::PassRecord& passRecord, uint32_t firstDraw, uint32_t drawCount);
 	bool ResolvePassTarget(const VulkanCommandList::PassRecord& passRecord, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
-	bool GetOrCreateColorFramebuffer(dy::RHI::ITexture* colorTarget, dy::RHI::ITexture* depthTarget, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
+	bool GetOrCreateColorFramebuffer(const std::vector<dy::RHI::ITexture*>& colorTargets, dy::RHI::ITexture* depthTarget, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
 	bool GetOrCreateDepthOnlyFramebuffer(dy::RHI::ITexture* depthTarget, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
-	bool CreateColorRenderPass(VkFormat colorFormat, VkFormat depthFormat, VkImageLayout colorFinalLayout, VkImageLayout depthFinalLayout, VkRenderPass& renderPass);
+	bool CreateColorRenderPass(const std::vector<VkFormat>& colorFormats, VkFormat depthFormat, const std::vector<VkImageLayout>& colorFinalLayouts, VkImageLayout depthFinalLayout, VkRenderPass& renderPass);
 	bool CreateDepthOnlyRenderPass(VkFormat depthFormat, bool shaderReadable, VkRenderPass& renderPass);
 	void ReleaseRenderPassPipelines(VkRenderPass renderPass);
 	void DestroyRenderTargetCache();
@@ -565,7 +576,7 @@ private:
 
 	struct RenderTargetCacheEntry
 	{
-		dy::RHI::ITexture* colorTarget = nullptr;
+		std::vector<dy::RHI::ITexture*> colorTargets;
 		dy::RHI::ITexture* depthTarget = nullptr;
 		VkRenderPass renderPass = VK_NULL_HANDLE;
 		VkFramebuffer framebuffer = VK_NULL_HANDLE;
@@ -790,13 +801,41 @@ bool VulkanDevice::Impl::UpdateTexture(dy::RHI::ITexture* texture, const void* r
 }
 
 dy::RHI::IPipelineState* VulkanDevice::Impl::CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) {
-	const bool hasColorAttachment = desc.renderTargetFormat != dy::RHI::Format::Unknown;
+	const bool hasColorAttachment = desc.colorAttachmentCount > 0;
 	const bool hasDepthAttachment = desc.depthStencilFormat != dy::RHI::Format::Unknown;
 	const bool hasFragmentShader = desc.fragmentShader != nullptr;
 	if ((!hasColorAttachment && !hasDepthAttachment) ||
 		((desc.depthStencil.depthTestEnable || desc.depthStencil.depthWriteEnable || desc.depthStencil.stencilTestEnable) && !hasDepthAttachment) ||
 		(desc.depthStencil.depthWriteEnable && !desc.depthStencil.depthTestEnable) ||
 		(desc.depthStencil.stencilTestEnable && desc.depthStencilFormat != dy::RHI::Format::D24_UNORM_S8_UINT)) return nullptr;
+	VkPhysicalDeviceProperties deviceProperties{};
+	vkGetPhysicalDeviceProperties(m_context.physicalDevice, &deviceProperties);
+	if(desc.colorAttachmentCount > deviceProperties.limits.maxColorAttachments ||
+		(desc.colorAttachmentCount > 0 && desc.colorAttachments == nullptr)) return nullptr;
+	for(uint32_t attachmentIndex = 0; attachmentIndex < desc.colorAttachmentCount; ++attachmentIndex)
+	{
+		const dy::RHI::ColorAttachmentDesc& attachment = desc.colorAttachments[attachmentIndex];
+		switch(attachment.format)
+		{
+		case dy::RHI::Format::R8G8B8A8_UNORM:
+		case dy::RHI::Format::B8G8R8A8_UNORM:
+		case dy::RHI::Format::R8G8B8A8_UNORM_SRGB:
+		case dy::RHI::Format::B8G8R8A8_UNORM_SRGB:
+		case dy::RHI::Format::R16G16B16A16_FLOAT:
+		case dy::RHI::Format::R32G32B32A32_FLOAT:
+			break;
+		default:
+			return nullptr;
+		}
+		if(ToVkFormat(attachment.format) == VK_FORMAT_UNDEFINED ||
+			(attachment.writeMask & ~dy::RHI::ColorWriteAll) != 0 ||
+			static_cast<uint32_t>(attachment.sourceColorFactor) > static_cast<uint32_t>(dy::RHI::BlendFactor::OneMinusDestinationAlpha) ||
+			static_cast<uint32_t>(attachment.destinationColorFactor) > static_cast<uint32_t>(dy::RHI::BlendFactor::OneMinusDestinationAlpha) ||
+			static_cast<uint32_t>(attachment.sourceAlphaFactor) > static_cast<uint32_t>(dy::RHI::BlendFactor::OneMinusDestinationAlpha) ||
+			static_cast<uint32_t>(attachment.destinationAlphaFactor) > static_cast<uint32_t>(dy::RHI::BlendFactor::OneMinusDestinationAlpha) ||
+			static_cast<uint32_t>(attachment.colorOp) > static_cast<uint32_t>(dy::RHI::BlendOp::Max) ||
+			static_cast<uint32_t>(attachment.alphaOp) > static_cast<uint32_t>(dy::RHI::BlendOp::Max)) return nullptr;
+	}
 	const VulkanShader* vertexShader = dynamic_cast<const VulkanShader*>(desc.vertexShader);
 	const VulkanShader* fragmentShader = dynamic_cast<const VulkanShader*>(desc.fragmentShader);
 	if (vertexShader == nullptr || vertexShader->GetStage() != dy::RHI::ShaderStage::Vertex) return nullptr;
@@ -812,7 +851,7 @@ dy::RHI::IPipelineState* VulkanDevice::Impl::CreateGraphicsPipeline(const dy::RH
 			m_context,
 			desc,
 			m_shaderLayout.pushConstantRangeSize);
-		if (hasColorAttachment && pipelineState->GetPipelineForRenderPass(
+		if (desc.colorAttachmentCount == 1 && pipelineState->GetPipelineForRenderPass(
 			m_context,
 			m_mainRenderPass,
 			m_swapchain.GetExtent(),
@@ -1157,23 +1196,15 @@ void VulkanDevice::Impl::RecordPass(
 	VkExtent2D renderExtent = {};
 	if (!ResolvePassTarget(passRecord, renderPass, framebuffer, renderExtent)) return;
 
-	std::array<VkClearValue, 2> clearValues = {};
-	uint32_t clearValueCount = 0;
-	if (passRecord.renderTargetCount == 0 && passRecord.depthStencil != nullptr) {
-		clearValues[0].depthStencil = { passRecord.clearDepth, 0 };
-		clearValueCount = 1;
-	} else {
-		clearValues[0].color = { {
-			passRecord.clearColor[0],
-			passRecord.clearColor[1],
-			passRecord.clearColor[2],
-			passRecord.clearColor[3]
-		} };
-		clearValueCount = 1;
-		if (passRecord.depthStencil != nullptr) {
-			clearValues[1].depthStencil = { passRecord.clearDepth, 0 };
-			clearValueCount = 2;
-		}
+	std::vector<VkClearValue> clearValues(passRecord.renderTargets.size() + (passRecord.depthStencil != nullptr ? 1u : 0u));
+	for(size_t attachmentIndex = 0; attachmentIndex < passRecord.renderTargets.size(); ++attachmentIndex)
+	{
+		const std::array<float, 4>& color = passRecord.clearColors[attachmentIndex];
+		clearValues[attachmentIndex].color = { { color[0], color[1], color[2], color[3] } };
+	}
+	if(passRecord.depthStencil != nullptr)
+	{
+		clearValues.back().depthStencil = { passRecord.clearDepth, 0 };
 	}
 	VkRenderPassBeginInfo renderPassInfo{};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -1181,7 +1212,7 @@ void VulkanDevice::Impl::RecordPass(
 	renderPassInfo.framebuffer = framebuffer;
 	renderPassInfo.renderArea.offset = {0, 0};
 	renderPassInfo.renderArea.extent = renderExtent;
-	renderPassInfo.clearValueCount = clearValueCount;
+	renderPassInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
 	renderPassInfo.pClearValues = clearValues.data();
 
 	vkCmdBeginRenderPass(commandBuffer, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
@@ -1325,24 +1356,20 @@ void VulkanDevice::Impl::RecordPass(
 }
 
 bool VulkanDevice::Impl::ResolvePassTarget(const VulkanCommandList::PassRecord& passRecord, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent) {
-	if (passRecord.renderTargetCount > 1) {
-		SDL_Log("Vulkan passes currently support one color render target.");
-		return false;
-	}
-	if (passRecord.renderTargetCount == 0) {
+	if (passRecord.renderTargets.empty()) {
 		if (passRecord.depthStencil == nullptr) {
 			SDL_Log("Vulkan pass has no attachments.");
 			return false;
 		}
 		return GetOrCreateDepthOnlyFramebuffer(passRecord.depthStencil, renderPass, framebuffer, extent);
 	}
-	if (passRecord.renderTargets[0] == nullptr) {
+	for(dy::RHI::ITexture* colorTarget : passRecord.renderTargets)
+	{
+		if(colorTarget != nullptr) continue;
 		SDL_Log("Vulkan pass color target is null.");
 		return false;
 	}
-
-	dy::RHI::ITexture* colorTarget = passRecord.renderTargets[0];
-	if (colorTarget == m_backBuffer && passRecord.depthStencil == nullptr) {
+	if (passRecord.renderTargets.size() == 1 && passRecord.renderTargets[0] == m_backBuffer && passRecord.depthStencil == nullptr) {
 		if (m_currentImageIndex >= m_swapchainFramebuffers.size()) return false;
 		renderPass = m_mainRenderPass;
 		framebuffer = m_swapchainFramebuffers[m_currentImageIndex];
@@ -1350,7 +1377,7 @@ bool VulkanDevice::Impl::ResolvePassTarget(const VulkanCommandList::PassRecord& 
 		return renderPass != VK_NULL_HANDLE && framebuffer != VK_NULL_HANDLE;
 	}
 
-	return GetOrCreateColorFramebuffer(colorTarget, passRecord.depthStencil, renderPass, framebuffer, extent);
+	return GetOrCreateColorFramebuffer(passRecord.renderTargets, passRecord.depthStencil, renderPass, framebuffer, extent);
 }
 
 bool VulkanDevice::Impl::GetOrCreateDepthOnlyFramebuffer(
@@ -1360,7 +1387,7 @@ bool VulkanDevice::Impl::GetOrCreateDepthOnlyFramebuffer(
 	VkExtent2D& extent)
 {
 	for (const RenderTargetCacheEntry& entry : m_renderTargetCache) {
-		if (entry.colorTarget == nullptr && entry.depthTarget == depthTarget) {
+		if (entry.colorTargets.empty() && entry.depthTarget == depthTarget) {
 			renderPass = entry.renderPass;
 			framebuffer = entry.framebuffer;
 			extent = { entry.width, entry.height };
@@ -1422,16 +1449,16 @@ bool VulkanDevice::Impl::GetOrCreateDepthOnlyFramebuffer(
 }
 
 bool VulkanDevice::Impl::GetOrCreateColorFramebuffer(
-	dy::RHI::ITexture* colorTarget,
+	const std::vector<dy::RHI::ITexture*>& colorTargets,
 	dy::RHI::ITexture* depthTarget,
 	VkRenderPass& renderPass,
 	VkFramebuffer& framebuffer,
 	VkExtent2D& extent)
 {
-	const bool swapchainTarget = colorTarget == m_backBuffer;
+	const bool swapchainTarget = std::find(colorTargets.begin(), colorTargets.end(), m_backBuffer) != colorTargets.end();
 	const uint32_t imageIndex = swapchainTarget ? m_currentImageIndex : 0u;
 	for (const RenderTargetCacheEntry& entry : m_renderTargetCache) {
-		if (entry.colorTarget == colorTarget &&
+		if (entry.colorTargets == colorTargets &&
 			entry.depthTarget == depthTarget &&
 			(!swapchainTarget || entry.imageIndex == imageIndex)) {
 			renderPass = entry.renderPass;
@@ -1441,36 +1468,67 @@ bool VulkanDevice::Impl::GetOrCreateColorFramebuffer(
 		}
 	}
 
-	if (!HasTextureUsage(colorTarget->GetUsage(), dy::RHI::TextureUsage::RenderTarget)) {
-		SDL_Log("Vulkan color target is missing RenderTarget usage.");
-		return false;
-	}
-
-	VkImageView colorView = VK_NULL_HANDLE;
-	VkFormat colorFormat = VK_FORMAT_UNDEFINED;
-	VkImageLayout colorFinalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-	uint32_t width = colorTarget->GetWidth();
-	uint32_t height = colorTarget->GetHeight();
-	VulkanTexture* colorTexture = nullptr;
-	if (swapchainTarget) {
-		const auto& views = m_swapchain.GetImageViews();
-		if (imageIndex >= views.size()) return false;
-		colorView = views[imageIndex];
-		colorFormat = m_swapchain.GetImageFormat();
-		colorFinalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-		width = m_swapchain.GetExtent().width;
-		height = m_swapchain.GetExtent().height;
-	} else {
-		colorTexture = dynamic_cast<VulkanTexture*>(colorTarget);
-		if (colorTexture == nullptr || colorTexture->GetImageView() == VK_NULL_HANDLE) {
-			SDL_Log("Vulkan color target is not a valid Vulkan texture.");
+	std::vector<VkImageView> attachments;
+	std::vector<VkFormat> colorFormats;
+	std::vector<VkImageLayout> colorFinalLayouts;
+	std::vector<VulkanTexture*> colorTextures;
+	attachments.reserve(colorTargets.size() + (depthTarget != nullptr ? 1u : 0u));
+	colorFormats.reserve(colorTargets.size());
+	colorFinalLayouts.reserve(colorTargets.size());
+	colorTextures.reserve(colorTargets.size());
+	uint32_t width = 0;
+	uint32_t height = 0;
+	for(size_t attachmentIndex = 0; attachmentIndex < colorTargets.size(); ++attachmentIndex)
+	{
+		dy::RHI::ITexture* colorTarget = colorTargets[attachmentIndex];
+		if(!HasTextureUsage(colorTarget->GetUsage(), dy::RHI::TextureUsage::RenderTarget))
+		{
+			SDL_Log("Vulkan color target is missing RenderTarget usage.");
 			return false;
 		}
-		colorView = colorTexture->GetImageView();
-		colorFormat = colorTexture->GetVkFormat();
-		if (HasTextureUsage(colorTarget->GetUsage(), dy::RHI::TextureUsage::ShaderResource)) {
-			colorFinalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		VkImageView colorView = VK_NULL_HANDLE;
+		VkFormat colorFormat = VK_FORMAT_UNDEFINED;
+		VkImageLayout finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		uint32_t targetWidth = colorTarget->GetWidth();
+		uint32_t targetHeight = colorTarget->GetHeight();
+		VulkanTexture* colorTexture = nullptr;
+		if(colorTarget == m_backBuffer)
+		{
+			const auto& views = m_swapchain.GetImageViews();
+			if(imageIndex >= views.size()) return false;
+			colorView = views[imageIndex];
+			colorFormat = m_swapchain.GetImageFormat();
+			finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+			targetWidth = m_swapchain.GetExtent().width;
+			targetHeight = m_swapchain.GetExtent().height;
 		}
+		else
+		{
+			colorTexture = dynamic_cast<VulkanTexture*>(colorTarget);
+			if(colorTexture == nullptr || colorTexture->GetImageView() == VK_NULL_HANDLE)
+			{
+				SDL_Log("Vulkan color target is not a valid Vulkan texture.");
+				return false;
+			}
+			colorView = colorTexture->GetImageView();
+			colorFormat = colorTexture->GetVkFormat();
+			if(HasTextureUsage(colorTarget->GetUsage(), dy::RHI::TextureUsage::ShaderResource))
+				finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+		}
+		if(attachmentIndex == 0)
+		{
+			width = targetWidth;
+			height = targetHeight;
+		}
+		else if(width != targetWidth || height != targetHeight)
+		{
+			SDL_Log("Vulkan color target sizes do not match.");
+			return false;
+		}
+		attachments.push_back(colorView);
+		colorFormats.push_back(colorFormat);
+		colorFinalLayouts.push_back(finalLayout);
+		colorTextures.push_back(colorTexture);
 	}
 	if (width == 0u || height == 0u) return false;
 
@@ -1499,24 +1557,21 @@ bool VulkanDevice::Impl::GetOrCreateColorFramebuffer(
 
 	VkRenderPass colorRenderPass = VK_NULL_HANDLE;
 	if (!CreateColorRenderPass(
-		colorFormat,
+		colorFormats,
 		depthFormat,
-		colorFinalLayout,
+		colorFinalLayouts,
 		depthFinalLayout,
 		colorRenderPass)) {
 		return false;
 	}
 
-	std::array<VkImageView, 2> attachments = { colorView, VK_NULL_HANDLE };
-	uint32_t attachmentCount = 1;
 	if (depthTexture != nullptr) {
-		attachments[1] = depthTexture->GetImageView();
-		attachmentCount = 2;
+		attachments.push_back(depthTexture->GetImageView());
 	}
 	VkFramebufferCreateInfo fbInfo{};
 	fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
 	fbInfo.renderPass = colorRenderPass;
-	fbInfo.attachmentCount = attachmentCount;
+	fbInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
 	fbInfo.pAttachments = attachments.data();
 	fbInfo.width = width;
 	fbInfo.height = height;
@@ -1528,11 +1583,15 @@ bool VulkanDevice::Impl::GetOrCreateColorFramebuffer(
 		return false;
 	}
 
-	if (colorTexture != nullptr) colorTexture->SetImageLayout(colorFinalLayout);
+	for(size_t attachmentIndex = 0; attachmentIndex < colorTextures.size(); ++attachmentIndex)
+	{
+		if(colorTextures[attachmentIndex] != nullptr)
+			colorTextures[attachmentIndex]->SetImageLayout(colorFinalLayouts[attachmentIndex]);
+	}
 	if (depthTexture != nullptr) depthTexture->SetImageLayout(depthFinalLayout);
 
 	RenderTargetCacheEntry entry{};
-	entry.colorTarget = colorTarget;
+	entry.colorTargets = colorTargets;
 	entry.depthTarget = depthTarget;
 	entry.renderPass = colorRenderPass;
 	entry.framebuffer = colorFramebuffer;
@@ -1548,17 +1607,37 @@ bool VulkanDevice::Impl::GetOrCreateColorFramebuffer(
 	return true;
 }
 
-bool VulkanDevice::Impl::CreateColorRenderPass(VkFormat colorFormat, VkFormat depthFormat, VkImageLayout colorFinalLayout, VkImageLayout depthFinalLayout, VkRenderPass& renderPass) {
+bool VulkanDevice::Impl::CreateColorRenderPass(
+	const std::vector<VkFormat>& colorFormats,
+	VkFormat depthFormat,
+	const std::vector<VkImageLayout>& colorFinalLayouts,
+	VkImageLayout depthFinalLayout,
+	VkRenderPass& renderPass)
+{
+	if(colorFormats.empty() || colorFormats.size() != colorFinalLayouts.size()) return false;
 	const bool hasDepthAttachment = depthFormat != VK_FORMAT_UNDEFINED;
-	VkAttachmentDescription colorAttachment{};
-	colorAttachment.format = colorFormat;
-	colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-	colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	colorAttachment.finalLayout = colorFinalLayout;
+	std::vector<VkAttachmentDescription> attachments;
+	std::vector<VkAttachmentReference> colorAttachmentRefs;
+	attachments.reserve(colorFormats.size() + (hasDepthAttachment ? 1u : 0u));
+	colorAttachmentRefs.reserve(colorFormats.size());
+	for(size_t attachmentIndex = 0; attachmentIndex < colorFormats.size(); ++attachmentIndex)
+	{
+		VkAttachmentDescription colorAttachment{};
+		colorAttachment.format = colorFormats[attachmentIndex];
+		colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
+		colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		colorAttachment.finalLayout = colorFinalLayouts[attachmentIndex];
+		attachments.push_back(colorAttachment);
+
+		VkAttachmentReference colorAttachmentRef{};
+		colorAttachmentRef.attachment = static_cast<uint32_t>(attachmentIndex);
+		colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+		colorAttachmentRefs.push_back(colorAttachmentRef);
+	}
 
 	VkAttachmentDescription depthAttachment{};
 	depthAttachment.format = depthFormat;
@@ -1571,19 +1650,16 @@ bool VulkanDevice::Impl::CreateColorRenderPass(VkFormat colorFormat, VkFormat de
 	depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
 	depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	depthAttachment.finalLayout = depthFinalLayout;
-
-	VkAttachmentReference colorAttachmentRef{};
-	colorAttachmentRef.attachment = 0;
-	colorAttachmentRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+	if(hasDepthAttachment) attachments.push_back(depthAttachment);
 
 	VkAttachmentReference depthAttachmentRef{};
-	depthAttachmentRef.attachment = 1;
+	depthAttachmentRef.attachment = static_cast<uint32_t>(colorFormats.size());
 	depthAttachmentRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
 	VkSubpassDescription subpass{};
 	subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-	subpass.colorAttachmentCount = 1;
-	subpass.pColorAttachments = &colorAttachmentRef;
+	subpass.colorAttachmentCount = static_cast<uint32_t>(colorAttachmentRefs.size());
+	subpass.pColorAttachments = colorAttachmentRefs.data();
 	subpass.pDepthStencilAttachment = hasDepthAttachment ? &depthAttachmentRef : nullptr;
 
 	std::array<VkSubpassDependency, 2> dependencies = {};
@@ -1601,7 +1677,10 @@ bool VulkanDevice::Impl::CreateColorRenderPass(VkFormat colorFormat, VkFormat de
 	dependencies[0].dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT;
 
 	uint32_t dependencyCount = 1;
-	const bool shaderReadableColor = colorFinalLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	const bool shaderReadableColor = std::find(
+		colorFinalLayouts.begin(),
+		colorFinalLayouts.end(),
+		VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) != colorFinalLayouts.end();
 	const bool shaderReadableDepth = depthFinalLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
 	if (shaderReadableColor || shaderReadableDepth) {
 		dependencies[1].srcSubpass = 0;
@@ -1618,10 +1697,9 @@ bool VulkanDevice::Impl::CreateColorRenderPass(VkFormat colorFormat, VkFormat de
 		dependencyCount = 2;
 	}
 
-	std::array<VkAttachmentDescription, 2> attachments = { colorAttachment, depthAttachment };
 	VkRenderPassCreateInfo renderPassInfo{};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-	renderPassInfo.attachmentCount = hasDepthAttachment ? 2u : 1u;
+	renderPassInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
 	renderPassInfo.pAttachments = attachments.data();
 	renderPassInfo.subpassCount = 1;
 	renderPassInfo.pSubpasses = &subpass;
@@ -1690,10 +1768,12 @@ bool VulkanDevice::Impl::CreateDepthOnlyRenderPass(VkFormat depthFormat, bool sh
 }
 
 bool VulkanDevice::Impl::CreateMainRenderPass() {
+	const std::vector<VkFormat> colorFormats = { m_swapchain.GetImageFormat() };
+	const std::vector<VkImageLayout> finalLayouts = { VK_IMAGE_LAYOUT_PRESENT_SRC_KHR };
 	return CreateColorRenderPass(
-		m_swapchain.GetImageFormat(),
+		colorFormats,
 		VK_FORMAT_UNDEFINED,
-		VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+		finalLayouts,
 		VK_IMAGE_LAYOUT_UNDEFINED,
 		m_mainRenderPass);
 }

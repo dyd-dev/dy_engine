@@ -13,7 +13,6 @@ namespace dy::Backends
 inline constexpr uint32_t kMaxDescriptorBindings = 16u;
 inline constexpr uint32_t kMaxMaterialTextures = 8u;
 inline constexpr uint32_t kMaxPushConstantBytes = 256u;
-inline constexpr uint32_t kDefaultMaxRenderTargets = 4u;
 
 class VulkanDevice;
 
@@ -42,7 +41,6 @@ public:
 
 private:
 	static constexpr uint32_t kMaxConstantBufferBindings = kMaxDescriptorBindings;
-	static constexpr uint32_t kMaxRenderTargets = kDefaultMaxRenderTargets;
 	static constexpr uint32_t kMaxTextureBindings = kMaxDescriptorBindings;
 
 	struct ConstantBufferBinding
@@ -69,10 +67,9 @@ private:
 	struct PassRecord
 	{
 		uint32_t firstDraw = 0;
-		uint32_t renderTargetCount = 0;
-		std::array<dy::RHI::ITexture*, kMaxRenderTargets> renderTargets = {};
+		std::vector<dy::RHI::ITexture*> renderTargets;
 		dy::RHI::ITexture* depthStencil = nullptr;
-		std::array<float, 4> clearColor = { 0.4f, 0.7f, 1.0f, 1.0f };
+		std::vector<std::array<float, 4>> clearColors;
 		float clearDepth = 1.0f;
 	};
 

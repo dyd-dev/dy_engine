@@ -88,12 +88,12 @@ void VulkanCommandList::SetRenderTargets(uint32_t numRenderTargets, dy::RHI::ITe
 {
 	PassRecord passRecord = {};
 	passRecord.firstDraw = static_cast<uint32_t>(m_drawCalls.size());
-	passRecord.renderTargetCount = std::min<uint32_t>(numRenderTargets, kMaxRenderTargets);
-	for (uint32_t i = 0; i < passRecord.renderTargetCount; ++i) {
-		passRecord.renderTargets[i] = renderTargets != nullptr ? renderTargets[i] : nullptr;
+	if(numRenderTargets > 0 && renderTargets != nullptr)
+	{
+		passRecord.renderTargets.assign(renderTargets, renderTargets + numRenderTargets);
+		passRecord.clearColors.assign(numRenderTargets, m_clearColor);
 	}
 	passRecord.depthStencil = depthStencil;
-	passRecord.clearColor = m_clearColor;
 	passRecord.clearDepth = m_clearDepth;
 	m_passRecords.push_back(passRecord);
 }
@@ -102,9 +102,14 @@ void VulkanCommandList::ClearColor(dy::RHI::ITexture* renderTarget, float r, flo
 {
 	if (m_passRecords.empty()) return;
 	PassRecord& passRecord = m_passRecords.back();
-	if (passRecord.renderTargetCount != 1 || renderTarget == nullptr || passRecord.renderTargets[0] != renderTarget) return;
-	m_clearColor = { { r, g, b, a } };
-	passRecord.clearColor = m_clearColor;
+	if(renderTarget == nullptr) return;
+	for(size_t attachmentIndex = 0; attachmentIndex < passRecord.renderTargets.size(); ++attachmentIndex)
+	{
+		if(passRecord.renderTargets[attachmentIndex] != renderTarget) continue;
+		m_clearColor = { { r, g, b, a } };
+		passRecord.clearColors[attachmentIndex] = m_clearColor;
+		return;
+	}
 }
 
 void VulkanCommandList::ClearDepth(dy::RHI::ITexture* depthStencil, float depth)

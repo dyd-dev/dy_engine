@@ -205,12 +205,14 @@ namespace dy::Backends
 
     RHI::IPipelineState* MetalDevice::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc)
     {
-        const bool hasColorAttachment = desc.renderTargetFormat != RHI::Format::Unknown;
+        const bool hasColorAttachment = desc.colorAttachmentCount > 0;
         const bool hasDepthAttachment = desc.depthStencilFormat != RHI::Format::Unknown;
         if((!hasColorAttachment && !hasDepthAttachment) ||
            ((desc.depthStencil.depthTestEnable || desc.depthStencil.depthWriteEnable || desc.depthStencil.stencilTestEnable) && !hasDepthAttachment) ||
            (desc.depthStencil.depthWriteEnable && !desc.depthStencil.depthTestEnable) ||
            (desc.depthStencil.stencilTestEnable && desc.depthStencilFormat != RHI::Format::D24_UNORM_S8_UINT))
+            return nullptr;
+        if(desc.colorAttachmentCount > 8u || (desc.colorAttachmentCount > 0 && desc.colorAttachments == nullptr))
             return nullptr;
         if((desc.inputAssembly.vertexBindingCount > 0 && desc.inputAssembly.vertexBindings == nullptr) ||
            (desc.inputAssembly.vertexAttributeCount > 0 && desc.inputAssembly.vertexAttributes == nullptr))

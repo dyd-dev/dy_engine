@@ -136,7 +136,7 @@ namespace dy::Backends
 
 	RHI::IPipelineState* NullDevice::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc)
 	{
-		const bool hasColorAttachment = desc.renderTargetFormat != RHI::Format::Unknown;
+		const bool hasColorAttachment = desc.colorAttachmentCount > 0;
 		const bool hasDepthAttachment = desc.depthStencilFormat != RHI::Format::Unknown;
 		const bool hasFragmentShader = desc.fragmentShader != nullptr;
 		if((!hasColorAttachment && !hasDepthAttachment) ||
@@ -145,6 +145,31 @@ namespace dy::Backends
 			(desc.depthStencil.stencilTestEnable && desc.depthStencilFormat != RHI::Format::D24_UNORM_S8_UINT))
 		{
 			return nullptr;
+		}
+		if(desc.colorAttachmentCount > 0 && desc.colorAttachments == nullptr) return nullptr;
+		for(uint32_t attachmentIndex = 0; attachmentIndex < desc.colorAttachmentCount; ++attachmentIndex)
+		{
+			const RHI::ColorAttachmentDesc& attachment = desc.colorAttachments[attachmentIndex];
+			switch(attachment.format)
+			{
+			case RHI::Format::R8G8B8A8_UNORM:
+			case RHI::Format::B8G8R8A8_UNORM:
+			case RHI::Format::R8G8B8A8_UNORM_SRGB:
+			case RHI::Format::B8G8R8A8_UNORM_SRGB:
+			case RHI::Format::R16G16B16A16_FLOAT:
+			case RHI::Format::R32G32B32A32_FLOAT:
+				break;
+			default:
+				return nullptr;
+			}
+			if(attachment.format == RHI::Format::Unknown ||
+				(attachment.writeMask & ~RHI::ColorWriteAll) != 0 ||
+				static_cast<uint32_t>(attachment.sourceColorFactor) > static_cast<uint32_t>(RHI::BlendFactor::OneMinusDestinationAlpha) ||
+				static_cast<uint32_t>(attachment.destinationColorFactor) > static_cast<uint32_t>(RHI::BlendFactor::OneMinusDestinationAlpha) ||
+				static_cast<uint32_t>(attachment.sourceAlphaFactor) > static_cast<uint32_t>(RHI::BlendFactor::OneMinusDestinationAlpha) ||
+				static_cast<uint32_t>(attachment.destinationAlphaFactor) > static_cast<uint32_t>(RHI::BlendFactor::OneMinusDestinationAlpha) ||
+				static_cast<uint32_t>(attachment.colorOp) > static_cast<uint32_t>(RHI::BlendOp::Max) ||
+				static_cast<uint32_t>(attachment.alphaOp) > static_cast<uint32_t>(RHI::BlendOp::Max)) return nullptr;
 		}
 		if((desc.rasterization.fillMode != RHI::FillMode::Solid && desc.rasterization.fillMode != RHI::FillMode::Wireframe) ||
 			(desc.rasterization.cullMode != RHI::CullMode::None && desc.rasterization.cullMode != RHI::CullMode::Front && desc.rasterization.cullMode != RHI::CullMode::Back) ||

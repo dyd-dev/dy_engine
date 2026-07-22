@@ -402,6 +402,17 @@ bool Renderer::BuildPipelineStates(RHI::IDevice* device)
 	};
 
 	RHI::GraphicsPipelineDesc desc = {};
+	const RHI::ColorAttachmentDesc colorAttachment = {
+		m_config.renderTargetFormat,
+		RHI::ColorWriteAll,
+		true,
+		RHI::BlendFactor::SourceAlpha,
+		RHI::BlendFactor::OneMinusSourceAlpha,
+		RHI::BlendOp::Add,
+		RHI::BlendFactor::One,
+		RHI::BlendFactor::Zero,
+		RHI::BlendOp::Add
+	};
 	desc.vertexShader = m_vertexShader;
 	desc.fragmentShader = m_fragmentShader;
 	desc.inputAssembly.topology = RHI::PrimitiveTopology::TriangleList;
@@ -414,7 +425,8 @@ bool Renderer::BuildPipelineStates(RHI::IDevice* device)
 	desc.depthStencil.depthTestEnable = m_config.depthStencilFormat != RHI::Format::Unknown;
 	desc.depthStencil.depthWriteEnable = m_config.depthStencilFormat != RHI::Format::Unknown;
 	desc.depthStencil.depthCompareOp = RHI::CompareOp::Less;
-	desc.renderTargetFormat = m_config.renderTargetFormat;
+	desc.colorAttachments = &colorAttachment;
+	desc.colorAttachmentCount = 1;
 	desc.depthStencilFormat = m_config.depthStencilFormat;
 	desc.enableBindlessTextures = m_config.enableBindlessTextures;
 
@@ -448,7 +460,6 @@ bool Renderer::BuildPipelineStates(RHI::IDevice* device)
 		shadowDesc.depthStencil.depthTestEnable = true;
 		shadowDesc.depthStencil.depthWriteEnable = true;
 		shadowDesc.depthStencil.depthCompareOp = RHI::CompareOp::Less;
-		shadowDesc.renderTargetFormat = RHI::Format::Unknown;
 		shadowDesc.depthStencilFormat = shadowFormat;
 		shadowDesc.enableBindlessTextures = m_config.enableBindlessTextures;
 

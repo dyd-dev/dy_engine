@@ -358,7 +358,7 @@ namespace dy::Backends
     }
 
     RHI::IPipelineState* D3D12Device::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc) {
-        const bool hasColorAttachment = desc.renderTargetFormat != RHI::Format::Unknown;
+        const bool hasColorAttachment = desc.colorAttachmentCount > 0;
         const bool hasDepthAttachment = desc.depthStencilFormat != RHI::Format::Unknown;
         const bool hasFragmentShader = desc.fragmentShader != nullptr;
         const auto* vertexShader = dynamic_cast<const D3D12Shader*>(desc.vertexShader);
@@ -367,6 +367,8 @@ namespace dy::Backends
             ((desc.depthStencil.depthTestEnable || desc.depthStencil.depthWriteEnable || desc.depthStencil.stencilTestEnable) && !hasDepthAttachment) ||
             (desc.depthStencil.depthWriteEnable && !desc.depthStencil.depthTestEnable) ||
             (desc.depthStencil.stencilTestEnable && desc.depthStencilFormat != RHI::Format::D24_UNORM_S8_UINT)) return nullptr;
+        if((desc.colorAttachmentCount > 0 && desc.colorAttachments == nullptr) ||
+            desc.colorAttachmentCount > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT) return nullptr;
         if (vertexShader == nullptr || vertexShader->GetStage() != RHI::ShaderStage::Vertex) return nullptr;
         if (hasFragmentShader &&
             (fragmentShader == nullptr || fragmentShader->GetStage() != RHI::ShaderStage::Fragment)) return nullptr;
@@ -526,15 +528,75 @@ namespace dy::Backends
         psoDesc.RasterizerState.DepthBias = desc.rasterization.depthBias;
         psoDesc.RasterizerState.SlopeScaledDepthBias = desc.rasterization.depthBiasSlope;
         psoDesc.RasterizerState.DepthBiasClamp = desc.rasterization.depthBiasClamp;
-        psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-        psoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
-        psoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
-        psoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-        psoDesc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-        psoDesc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-        psoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
-        psoDesc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        psoDesc.BlendState = {};
+        psoDesc.BlendState.IndependentBlendEnable = desc.colorAttachmentCount > 1 ? TRUE : FALSE;
+        for(uint32_t attachmentIndex = 0; attachmentIndex < desc.colorAttachmentCount; ++attachmentIndex)
+        {
+            const RHI::ColorAttachmentDesc& source = desc.colorAttachments[attachmentIndex];
+            if(source.format == RHI::Format::Unknown || (source.writeMask & ~RHI::ColorWriteAll) != 0) return nullptr;
+            switch(source.format)
+            {
+            case RHI::Format::R8G8B8A8_UNORM:
+            case RHI::Format::B8G8R8A8_UNORM:
+            case RHI::Format::R8G8B8A8_UNORM_SRGB:
+            case RHI::Format::B8G8R8A8_UNORM_SRGB:
+            case RHI::Format::R16G16B16A16_FLOAT:
+            case RHI::Format::R32G32B32A32_FLOAT:
+                break;
+            default:
+                return nullptr;
+            }
+            D3D12_RENDER_TARGET_BLEND_DESC& target = psoDesc.BlendState.RenderTarget[attachmentIndex];
+            target.BlendEnable = source.blendEnable ? TRUE : FALSE;
+            target.LogicOpEnable = FALSE;
+            const RHI::BlendFactor factors[] = {
+                source.sourceColorFactor,
+                source.destinationColorFactor,
+                source.sourceAlphaFactor,
+                source.destinationAlphaFactor
+            };
+            D3D12_BLEND* nativeFactors[] = {
+                &target.SrcBlend,
+                &target.DestBlend,
+                &target.SrcBlendAlpha,
+                &target.DestBlendAlpha
+            };
+            for(uint32_t factorIndex = 0; factorIndex < 4; ++factorIndex)
+            {
+                switch(factors[factorIndex])
+                {
+                case RHI::BlendFactor::Zero: *nativeFactors[factorIndex] = D3D12_BLEND_ZERO; break;
+                case RHI::BlendFactor::One: *nativeFactors[factorIndex] = D3D12_BLEND_ONE; break;
+                case RHI::BlendFactor::SourceColor: *nativeFactors[factorIndex] = D3D12_BLEND_SRC_COLOR; break;
+                case RHI::BlendFactor::OneMinusSourceColor: *nativeFactors[factorIndex] = D3D12_BLEND_INV_SRC_COLOR; break;
+                case RHI::BlendFactor::SourceAlpha: *nativeFactors[factorIndex] = D3D12_BLEND_SRC_ALPHA; break;
+                case RHI::BlendFactor::OneMinusSourceAlpha: *nativeFactors[factorIndex] = D3D12_BLEND_INV_SRC_ALPHA; break;
+                case RHI::BlendFactor::DestinationColor: *nativeFactors[factorIndex] = D3D12_BLEND_DEST_COLOR; break;
+                case RHI::BlendFactor::OneMinusDestinationColor: *nativeFactors[factorIndex] = D3D12_BLEND_INV_DEST_COLOR; break;
+                case RHI::BlendFactor::DestinationAlpha: *nativeFactors[factorIndex] = D3D12_BLEND_DEST_ALPHA; break;
+                case RHI::BlendFactor::OneMinusDestinationAlpha: *nativeFactors[factorIndex] = D3D12_BLEND_INV_DEST_ALPHA; break;
+                default: return nullptr;
+                }
+            }
+            const RHI::BlendOp operations[] = { source.colorOp, source.alphaOp };
+            D3D12_BLEND_OP* nativeOperations[] = { &target.BlendOp, &target.BlendOpAlpha };
+            for(uint32_t operationIndex = 0; operationIndex < 2; ++operationIndex)
+            {
+                switch(operations[operationIndex])
+                {
+                case RHI::BlendOp::Add: *nativeOperations[operationIndex] = D3D12_BLEND_OP_ADD; break;
+                case RHI::BlendOp::Subtract: *nativeOperations[operationIndex] = D3D12_BLEND_OP_SUBTRACT; break;
+                case RHI::BlendOp::ReverseSubtract: *nativeOperations[operationIndex] = D3D12_BLEND_OP_REV_SUBTRACT; break;
+                case RHI::BlendOp::Min: *nativeOperations[operationIndex] = D3D12_BLEND_OP_MIN; break;
+                case RHI::BlendOp::Max: *nativeOperations[operationIndex] = D3D12_BLEND_OP_MAX; break;
+                default: return nullptr;
+                }
+            }
+            target.LogicOp = D3D12_LOGIC_OP_NOOP;
+            target.RenderTargetWriteMask = source.writeMask;
+            psoDesc.RTVFormats[attachmentIndex] = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(source.format));
+            if(psoDesc.RTVFormats[attachmentIndex] == DXGI_FORMAT_UNKNOWN) return nullptr;
+        }
         psoDesc.DepthStencilState = {};
         psoDesc.DepthStencilState.DepthEnable = desc.depthStencil.depthTestEnable ? TRUE : FALSE;
         psoDesc.DepthStencilState.DepthWriteMask = desc.depthStencil.depthWriteEnable
@@ -613,10 +675,7 @@ namespace dy::Backends
             psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
             break;
         }
-        psoDesc.NumRenderTargets = hasColorAttachment ? 1u : 0u;
-        if (hasColorAttachment) {
-            psoDesc.RTVFormats[0] = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(desc.renderTargetFormat));
-        }
+        psoDesc.NumRenderTargets = desc.colorAttachmentCount;
         psoDesc.SampleDesc.Count = 1;
 
         // 5. PSO 생성

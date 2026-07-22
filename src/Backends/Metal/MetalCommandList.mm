@@ -52,7 +52,7 @@ namespace dy::Backends
         uint32_t                     inlineConstantSize = 0;
         uint32_t                     renderWidth = 1;
         uint32_t                     renderHeight = 1;
-        RHI::ITexture*               activeColorTarget = nullptr;
+        std::vector<RHI::ITexture*> activeColorTargets;
         RHI::ITexture*               activeDepthTarget = nullptr;
     };
 
@@ -80,7 +80,7 @@ namespace dy::Backends
         m_impl->inlineConstantSize = 0;
         m_impl->renderWidth = 1;
         m_impl->renderHeight = 1;
-        m_impl->activeColorTarget = nullptr;
+        m_impl->activeColorTargets.clear();
         m_impl->activeDepthTarget = nullptr;
     }
 
@@ -88,29 +88,31 @@ namespace dy::Backends
     {
         EndActivePass();
 
-        if(numRenderTargets > 1)
+        if(numRenderTargets > 8u)
             return;
         if(numRenderTargets == 0 && depthStencil == nullptr)
             return;
+        if(numRenderTargets > 0 && renderTargets == nullptr)
+            return;
 
-        RHI::ITexture* colorTarget = nullptr;
-        id<MTLTexture> colorTexture = nil;
+        std::vector<id<MTLTexture>> colorTextures;
         uint32_t width = 0;
         uint32_t height = 0;
 
-        if(numRenderTargets == 1)
+        colorTextures.reserve(numRenderTargets);
+        for(uint32_t attachmentIndex = 0; attachmentIndex < numRenderTargets; ++attachmentIndex)
         {
-            if(renderTargets == nullptr || renderTargets[0] == nullptr)
+            RHI::ITexture* colorTarget = renderTargets[attachmentIndex];
+            if(colorTarget == nullptr)
                 return;
 
-            colorTarget = renderTargets[0];
             if((colorTarget->GetUsage() & RHI::TextureUsage::RenderTarget) == RHI::TextureUsage::None ||
                colorTarget->GetWidth() == 0 || colorTarget->GetHeight() == 0)
             {
                 return;
             }
 
-            colorTexture = GetMetalTexture(colorTarget);
+            id<MTLTexture> colorTexture = GetMetalTexture(colorTarget);
             if(colorTexture == nil ||
                colorTexture.width != colorTarget->GetWidth() ||
                colorTexture.height != colorTarget->GetHeight())
@@ -118,8 +120,16 @@ namespace dy::Backends
                 return;
             }
 
-            width = colorTarget->GetWidth();
-            height = colorTarget->GetHeight();
+            if(attachmentIndex == 0)
+            {
+                width = colorTarget->GetWidth();
+                height = colorTarget->GetHeight();
+            }
+            else if(width != colorTarget->GetWidth() || height != colorTarget->GetHeight())
+            {
+                return;
+            }
+            colorTextures.push_back(colorTexture);
         }
 
         id<MTLTexture> depthTexture = nil;
@@ -139,13 +149,13 @@ namespace dy::Backends
                 return;
             }
 
-            if(colorTarget != nullptr &&
+            if(!colorTextures.empty() &&
                (depthStencil->GetWidth() != width || depthStencil->GetHeight() != height))
             {
                 return;
             }
 
-            if(colorTarget == nullptr)
+            if(colorTextures.empty())
             {
                 width = depthStencil->GetWidth();
                 height = depthStencil->GetHeight();
@@ -153,11 +163,11 @@ namespace dy::Backends
         }
 
         MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor new];
-        if(colorTarget != nullptr)
+        for(uint32_t attachmentIndex = 0; attachmentIndex < numRenderTargets; ++attachmentIndex)
         {
-            passDesc.colorAttachments[0].texture = colorTexture;
-            passDesc.colorAttachments[0].loadAction = MTLLoadActionLoad;
-            passDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
+            passDesc.colorAttachments[attachmentIndex].texture = colorTextures[attachmentIndex];
+            passDesc.colorAttachments[attachmentIndex].loadAction = MTLLoadActionLoad;
+            passDesc.colorAttachments[attachmentIndex].storeAction = MTLStoreActionStore;
         }
 
         if(depthStencil != nullptr)
@@ -179,7 +189,8 @@ namespace dy::Backends
         m_impl->passDescriptor = passDesc;
         m_impl->renderWidth = width;
         m_impl->renderHeight = height;
-        m_impl->activeColorTarget = colorTarget;
+        if(numRenderTargets > 0)
+            m_impl->activeColorTargets.assign(renderTargets, renderTargets + numRenderTargets);
         m_impl->activeDepthTarget = depthStencil;
     }
 
@@ -212,15 +223,18 @@ namespace dy::Backends
     void MetalCommandList::ClearColor(RHI::ITexture* renderTarget, float r, float g, float b, float a)
     {
         if(m_impl->passDescriptor == nil || m_impl->encoder != nil ||
-           renderTarget == nullptr || renderTarget != m_impl->activeColorTarget)
+           renderTarget == nullptr)
             return;
 
-        MTLRenderPassColorAttachmentDescriptor* attachment = m_impl->passDescriptor.colorAttachments[0];
-        if(attachment.texture == nil)
+        for(size_t attachmentIndex = 0; attachmentIndex < m_impl->activeColorTargets.size(); ++attachmentIndex)
+        {
+            if(m_impl->activeColorTargets[attachmentIndex] != renderTarget) continue;
+            MTLRenderPassColorAttachmentDescriptor* attachment = m_impl->passDescriptor.colorAttachments[attachmentIndex];
+            if(attachment.texture == nil) return;
+            attachment.loadAction = MTLLoadActionClear;
+            attachment.clearColor = MTLClearColorMake(r, g, b, a);
             return;
-
-        attachment.loadAction = MTLLoadActionClear;
-        attachment.clearColor = MTLClearColorMake(r, g, b, a);
+        }
     }
 
     void MetalCommandList::ClearDepth(RHI::ITexture* depthStencil, float depth)
@@ -446,9 +460,16 @@ namespace dy::Backends
     {
         if(m_impl->passDescriptor != nil && m_impl->encoder == nil)
         {
-            const bool clearsColor =
-                m_impl->passDescriptor.colorAttachments[0].texture != nil &&
-                m_impl->passDescriptor.colorAttachments[0].loadAction == MTLLoadActionClear;
+            bool clearsColor = false;
+            for(size_t attachmentIndex = 0; attachmentIndex < m_impl->activeColorTargets.size(); ++attachmentIndex)
+            {
+                if(m_impl->passDescriptor.colorAttachments[attachmentIndex].texture != nil &&
+                   m_impl->passDescriptor.colorAttachments[attachmentIndex].loadAction == MTLLoadActionClear)
+                {
+                    clearsColor = true;
+                    break;
+                }
+            }
             const bool clearsDepth =
                 m_impl->passDescriptor.depthAttachment.texture != nil &&
                 m_impl->passDescriptor.depthAttachment.loadAction == MTLLoadActionClear;
@@ -463,7 +484,7 @@ namespace dy::Backends
         }
 
         m_impl->passDescriptor = nil;
-        m_impl->activeColorTarget = nullptr;
+        m_impl->activeColorTargets.clear();
         m_impl->activeDepthTarget = nullptr;
         m_impl->renderWidth = 1;
         m_impl->renderHeight = 1;

@@ -170,8 +170,76 @@ namespace dy::Backends
             pipeDesc.vertexDescriptor = vertexDesc;
         }
 
-        if(desc.renderTargetFormat != RHI::Format::Unknown)
-            pipeDesc.colorAttachments[0].pixelFormat = ToMTLFormat(desc.renderTargetFormat);
+        for(uint32_t attachmentIndex = 0; attachmentIndex < desc.colorAttachmentCount; ++attachmentIndex)
+        {
+            const RHI::ColorAttachmentDesc& source = desc.colorAttachments[attachmentIndex];
+            if(source.format == RHI::Format::Unknown || (source.writeMask & ~RHI::ColorWriteAll) != 0) return;
+            switch(source.format)
+            {
+            case RHI::Format::R8G8B8A8_UNORM:
+            case RHI::Format::B8G8R8A8_UNORM:
+            case RHI::Format::R8G8B8A8_UNORM_SRGB:
+            case RHI::Format::B8G8R8A8_UNORM_SRGB:
+            case RHI::Format::R16G16B16A16_FLOAT:
+            case RHI::Format::R32G32B32A32_FLOAT:
+                break;
+            default:
+                return;
+            }
+            MTLRenderPipelineColorAttachmentDescriptor* target = pipeDesc.colorAttachments[attachmentIndex];
+            target.pixelFormat = ToMTLFormat(source.format);
+            if(target.pixelFormat == MTLPixelFormatInvalid) return;
+            target.blendingEnabled = source.blendEnable ? YES : NO;
+            const RHI::BlendFactor factors[] = {
+                source.sourceColorFactor,
+                source.destinationColorFactor,
+                source.sourceAlphaFactor,
+                source.destinationAlphaFactor
+            };
+            MTLBlendFactor nativeFactors[4] = {};
+            for(uint32_t factorIndex = 0; factorIndex < 4; ++factorIndex)
+            {
+                switch(factors[factorIndex])
+                {
+                case RHI::BlendFactor::Zero: nativeFactors[factorIndex] = MTLBlendFactorZero; break;
+                case RHI::BlendFactor::One: nativeFactors[factorIndex] = MTLBlendFactorOne; break;
+                case RHI::BlendFactor::SourceColor: nativeFactors[factorIndex] = MTLBlendFactorSourceColor; break;
+                case RHI::BlendFactor::OneMinusSourceColor: nativeFactors[factorIndex] = MTLBlendFactorOneMinusSourceColor; break;
+                case RHI::BlendFactor::SourceAlpha: nativeFactors[factorIndex] = MTLBlendFactorSourceAlpha; break;
+                case RHI::BlendFactor::OneMinusSourceAlpha: nativeFactors[factorIndex] = MTLBlendFactorOneMinusSourceAlpha; break;
+                case RHI::BlendFactor::DestinationColor: nativeFactors[factorIndex] = MTLBlendFactorDestinationColor; break;
+                case RHI::BlendFactor::OneMinusDestinationColor: nativeFactors[factorIndex] = MTLBlendFactorOneMinusDestinationColor; break;
+                case RHI::BlendFactor::DestinationAlpha: nativeFactors[factorIndex] = MTLBlendFactorDestinationAlpha; break;
+                case RHI::BlendFactor::OneMinusDestinationAlpha: nativeFactors[factorIndex] = MTLBlendFactorOneMinusDestinationAlpha; break;
+                default: return;
+                }
+            }
+            target.sourceRGBBlendFactor = nativeFactors[0];
+            target.destinationRGBBlendFactor = nativeFactors[1];
+            target.sourceAlphaBlendFactor = nativeFactors[2];
+            target.destinationAlphaBlendFactor = nativeFactors[3];
+            const RHI::BlendOp operations[] = { source.colorOp, source.alphaOp };
+            MTLBlendOperation nativeOperations[2] = {};
+            for(uint32_t operationIndex = 0; operationIndex < 2; ++operationIndex)
+            {
+                switch(operations[operationIndex])
+                {
+                case RHI::BlendOp::Add: nativeOperations[operationIndex] = MTLBlendOperationAdd; break;
+                case RHI::BlendOp::Subtract: nativeOperations[operationIndex] = MTLBlendOperationSubtract; break;
+                case RHI::BlendOp::ReverseSubtract: nativeOperations[operationIndex] = MTLBlendOperationReverseSubtract; break;
+                case RHI::BlendOp::Min: nativeOperations[operationIndex] = MTLBlendOperationMin; break;
+                case RHI::BlendOp::Max: nativeOperations[operationIndex] = MTLBlendOperationMax; break;
+                default: return;
+                }
+            }
+            target.rgbBlendOperation = nativeOperations[0];
+            target.alphaBlendOperation = nativeOperations[1];
+            target.writeMask = MTLColorWriteMaskNone;
+            if((source.writeMask & RHI::ColorWriteRed) != 0) target.writeMask |= MTLColorWriteMaskRed;
+            if((source.writeMask & RHI::ColorWriteGreen) != 0) target.writeMask |= MTLColorWriteMaskGreen;
+            if((source.writeMask & RHI::ColorWriteBlue) != 0) target.writeMask |= MTLColorWriteMaskBlue;
+            if((source.writeMask & RHI::ColorWriteAlpha) != 0) target.writeMask |= MTLColorWriteMaskAlpha;
+        }
 
         if(desc.depthStencilFormat != RHI::Format::Unknown)
         {

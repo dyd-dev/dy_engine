@@ -5,6 +5,7 @@
 #include "D3D12Texture.h"
 
 #include <d3d12.h>
+#include <vector>
 #include <wrl.h>
 
 using Microsoft::WRL::ComPtr;
@@ -76,10 +77,10 @@ namespace dy::Backends
         ID3D12DescriptorHeap* globalDescriptorHeap = nullptr;
         uint32_t srvDescriptorSize = 0;
         D3D12Texture* backBufferTexture = nullptr; // 상태 추적기(GetBackBuffer 가 돌려주는 래퍼와 동일 리소스)
-        RHI::ITexture* activeColorTarget = nullptr;
+        std::vector<RHI::ITexture*> activeColorTargets;
         RHI::ITexture* activeDepthTarget = nullptr;
         D3D12PipelineState* activeGraphicsPipeline = nullptr;
-        D3D12_CPU_DESCRIPTOR_HANDLE activeRtvHandle = {};
+        std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> activeRtvHandles;
         D3D12_CPU_DESCRIPTOR_HANDLE activeDsvHandle = {};
         bool hasActivePass = false;
     };
@@ -112,10 +113,10 @@ namespace dy::Backends
     {
         if(FAILED(m_internal->allocator->Reset())) return false;
         if(FAILED(m_internal->commandList->Reset(m_internal->allocator.Get(), nullptr))) return false;
-        m_internal->activeColorTarget = nullptr;
+        m_internal->activeColorTargets.clear();
         m_internal->activeDepthTarget = nullptr;
         m_internal->activeGraphicsPipeline = nullptr;
-        m_internal->activeRtvHandle = {};
+        m_internal->activeRtvHandles.clear();
         m_internal->activeDsvHandle = {};
         m_internal->hasActivePass = false;
         return true;
@@ -130,7 +131,7 @@ namespace dy::Backends
             TransitionTexture(m_internal->commandList.Get(), m_internal->backBufferTexture, D3D12_RESOURCE_STATE_PRESENT);
         }
         m_internal->commandList->Close();
-        m_internal->activeColorTarget = nullptr;
+        m_internal->activeColorTargets.clear();
         m_internal->activeDepthTarget = nullptr;
         m_internal->activeGraphicsPipeline = nullptr;
         m_internal->hasActivePass = false;
@@ -146,13 +147,18 @@ namespace dy::Backends
     {
         if (!m_internal->hasActivePass ||
             renderTarget == nullptr ||
-            renderTarget != m_internal->activeColorTarget)
+            m_internal->activeColorTargets.empty())
         {
             return;
         }
 
-        const float color[] = { r, g, b, a };
-        m_internal->commandList->ClearRenderTargetView(m_internal->activeRtvHandle, color, 0, nullptr);
+        for(size_t attachmentIndex = 0; attachmentIndex < m_internal->activeColorTargets.size(); ++attachmentIndex)
+        {
+            if(m_internal->activeColorTargets[attachmentIndex] != renderTarget) continue;
+            const float color[] = { r, g, b, a };
+            m_internal->commandList->ClearRenderTargetView(m_internal->activeRtvHandles[attachmentIndex], color, 0, nullptr);
+            return;
+        }
     }
 
     void D3D12CommandList::ClearDepth(RHI::ITexture* depthStencil, float depth)
@@ -371,9 +377,9 @@ namespace dy::Backends
 
     void D3D12CommandList::SetRenderTargets(uint32_t numRenderTargets, RHI::ITexture** renderTargets, RHI::ITexture* depthStencil)
     {
-        m_internal->activeColorTarget = nullptr;
+        m_internal->activeColorTargets.clear();
         m_internal->activeDepthTarget = nullptr;
-        m_internal->activeRtvHandle = {};
+        m_internal->activeRtvHandles.clear();
         m_internal->activeDsvHandle = {};
         m_internal->hasActivePass = false;
 
@@ -382,30 +388,32 @@ namespace dy::Backends
             m_internal->commandList->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
         };
 
-        if (numRenderTargets > 1 ||
+        if (numRenderTargets > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT ||
             (numRenderTargets == 1 && (renderTargets == nullptr || renderTargets[0] == nullptr)) ||
+            (numRenderTargets > 1 && renderTargets == nullptr) ||
             (numRenderTargets == 0 && depthStencil == nullptr))
         {
             invalidatePass();
             return;
         }
 
-        D3D12Texture* colorTexture = nullptr;
+        std::vector<D3D12Texture*> colorTextures;
+        std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> rtvHandles;
         D3D12Texture* depthTexture = nullptr;
-        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = {};
         D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = {};
-        D3D12_CPU_DESCRIPTOR_HANDLE* rtvPtr = nullptr;
         D3D12_CPU_DESCRIPTOR_HANDLE* dsvPtr = nullptr;
         uint32_t width = 0;
         uint32_t height = 0;
 
-        if (numRenderTargets == 1)
+        colorTextures.reserve(numRenderTargets);
+        rtvHandles.reserve(numRenderTargets);
+        for(uint32_t attachmentIndex = 0; attachmentIndex < numRenderTargets; ++attachmentIndex)
         {
-            RHI::ITexture* colorTarget = renderTargets[0];
-            colorTexture = dynamic_cast<D3D12Texture*>(colorTarget);
+            RHI::ITexture* colorTarget = renderTargets[attachmentIndex];
+            D3D12Texture* colorTexture = dynamic_cast<D3D12Texture*>(colorTarget);
             const bool isBackBuffer = colorTexture != nullptr && colorTexture == m_internal->backBufferTexture;
             const bool hasRenderTargetUsage =
-                (colorTarget->GetUsage() & RHI::TextureUsage::RenderTarget) != RHI::TextureUsage::None;
+                colorTarget != nullptr && (colorTarget->GetUsage() & RHI::TextureUsage::RenderTarget) != RHI::TextureUsage::None;
 
             if (colorTexture == nullptr ||
                 colorTexture->GetNativeResource() == nullptr ||
@@ -418,8 +426,17 @@ namespace dy::Backends
                 return;
             }
 
-            width = colorTarget->GetWidth();
-            height = colorTarget->GetHeight();
+            if(attachmentIndex == 0)
+            {
+                width = colorTarget->GetWidth();
+                height = colorTarget->GetHeight();
+            }
+            else if(width != colorTarget->GetWidth() || height != colorTarget->GetHeight())
+            {
+                invalidatePass();
+                return;
+            }
+            D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = {};
             rtvHandle.ptr = isBackBuffer
                 ? m_internal->rtvHandle.ptr
                 : colorTexture->GetRenderTargetViewHandlePtr();
@@ -428,7 +445,8 @@ namespace dy::Backends
                 invalidatePass();
                 return;
             }
-            rtvPtr = &rtvHandle;
+            colorTextures.push_back(colorTexture);
+            rtvHandles.push_back(rtvHandle);
         }
 
         if (depthStencil != nullptr)
@@ -448,7 +466,7 @@ namespace dy::Backends
                 return;
             }
 
-            if (colorTexture != nullptr &&
+            if (!colorTextures.empty() &&
                 (width != depthStencil->GetWidth() || height != depthStencil->GetHeight()))
             {
                 invalidatePass();
@@ -466,7 +484,7 @@ namespace dy::Backends
             dsvPtr = &dsvHandle;
         }
 
-        if (colorTexture != nullptr)
+        for(D3D12Texture* colorTexture : colorTextures)
         {
             TransitionTexture(m_internal->commandList.Get(), colorTexture, D3D12_RESOURCE_STATE_RENDER_TARGET);
         }
@@ -475,11 +493,16 @@ namespace dy::Backends
             TransitionTexture(m_internal->commandList.Get(), depthTexture, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         }
 
-        m_internal->commandList->OMSetRenderTargets(rtvPtr != nullptr ? 1u : 0u, rtvPtr, FALSE, dsvPtr);
+        m_internal->commandList->OMSetRenderTargets(
+            static_cast<UINT>(rtvHandles.size()),
+            rtvHandles.empty() ? nullptr : rtvHandles.data(),
+            FALSE,
+            dsvPtr);
 
-        m_internal->activeColorTarget = numRenderTargets == 1 ? renderTargets[0] : nullptr;
+        if(numRenderTargets > 0)
+            m_internal->activeColorTargets.assign(renderTargets, renderTargets + numRenderTargets);
         m_internal->activeDepthTarget = depthStencil;
-        m_internal->activeRtvHandle = rtvHandle;
+        m_internal->activeRtvHandles = std::move(rtvHandles);
         m_internal->activeDsvHandle = dsvHandle;
         m_internal->hasActivePass = true;
 

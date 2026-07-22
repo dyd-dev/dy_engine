@@ -30,23 +30,6 @@ VulkanShader::~VulkanShader()
 	if(m_module != VK_NULL_HANDLE) vkDestroyShaderModule(m_device, m_module, nullptr);
 }
 
-namespace
-{
-	VkPipelineColorBlendAttachmentState CreateAlphaBlendAttachmentState()
-	{
-		VkPipelineColorBlendAttachmentState colorBlendAttachment{};
-		colorBlendAttachment.blendEnable = VK_TRUE;
-		colorBlendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
-		colorBlendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-		colorBlendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
-		colorBlendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-		colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
-		colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
-		colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-		return colorBlendAttachment;
-	}
-}
-
 void VulkanPipeline::Initialize(
 	const VulkanContext& context,
 	VkRenderPass renderPass,
@@ -62,8 +45,6 @@ void VulkanPipeline::Initialize(
 
 	const bool hasFragmentShader = desc.fragmentShader != nullptr;
 	if(hasFragmentShader && fragmentShader == nullptr) throw std::runtime_error("graphics pipeline fragment shader is invalid");
-	const bool hasColorAttachment = desc.renderTargetFormat != dy::RHI::Format::Unknown;
-
 	VkPipelineShaderStageCreateInfo shaderStages[2]{};
 	shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 	shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -190,11 +171,69 @@ void VulkanPipeline::Initialize(
 	multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
 	multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
-	VkPipelineColorBlendAttachmentState colorBlendAttachment = CreateAlphaBlendAttachmentState();
+	std::vector<VkPipelineColorBlendAttachmentState> colorBlendAttachments;
+	colorBlendAttachments.reserve(desc.colorAttachmentCount);
+	for(uint32_t attachmentIndex = 0; attachmentIndex < desc.colorAttachmentCount; ++attachmentIndex)
+	{
+		const dy::RHI::ColorAttachmentDesc& source = desc.colorAttachments[attachmentIndex];
+		if(source.format == dy::RHI::Format::Unknown || (source.writeMask & ~dy::RHI::ColorWriteAll) != 0)
+			throw std::runtime_error("invalid Vulkan color attachment");
+		VkPipelineColorBlendAttachmentState target{};
+		target.blendEnable = source.blendEnable ? VK_TRUE : VK_FALSE;
+		const dy::RHI::BlendFactor factors[] = {
+			source.sourceColorFactor,
+			source.destinationColorFactor,
+			source.sourceAlphaFactor,
+			source.destinationAlphaFactor
+		};
+		VkBlendFactor* nativeFactors[] = {
+			&target.srcColorBlendFactor,
+			&target.dstColorBlendFactor,
+			&target.srcAlphaBlendFactor,
+			&target.dstAlphaBlendFactor
+		};
+		for(uint32_t factorIndex = 0; factorIndex < 4; ++factorIndex)
+		{
+			switch(factors[factorIndex])
+			{
+			case dy::RHI::BlendFactor::Zero: *nativeFactors[factorIndex] = VK_BLEND_FACTOR_ZERO; break;
+			case dy::RHI::BlendFactor::One: *nativeFactors[factorIndex] = VK_BLEND_FACTOR_ONE; break;
+			case dy::RHI::BlendFactor::SourceColor: *nativeFactors[factorIndex] = VK_BLEND_FACTOR_SRC_COLOR; break;
+			case dy::RHI::BlendFactor::OneMinusSourceColor: *nativeFactors[factorIndex] = VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR; break;
+			case dy::RHI::BlendFactor::SourceAlpha: *nativeFactors[factorIndex] = VK_BLEND_FACTOR_SRC_ALPHA; break;
+			case dy::RHI::BlendFactor::OneMinusSourceAlpha: *nativeFactors[factorIndex] = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; break;
+			case dy::RHI::BlendFactor::DestinationColor: *nativeFactors[factorIndex] = VK_BLEND_FACTOR_DST_COLOR; break;
+			case dy::RHI::BlendFactor::OneMinusDestinationColor: *nativeFactors[factorIndex] = VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR; break;
+			case dy::RHI::BlendFactor::DestinationAlpha: *nativeFactors[factorIndex] = VK_BLEND_FACTOR_DST_ALPHA; break;
+			case dy::RHI::BlendFactor::OneMinusDestinationAlpha: *nativeFactors[factorIndex] = VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA; break;
+			default: throw std::runtime_error("invalid Vulkan blend factor");
+			}
+		}
+		const dy::RHI::BlendOp operations[] = { source.colorOp, source.alphaOp };
+		VkBlendOp* nativeOperations[] = { &target.colorBlendOp, &target.alphaBlendOp };
+		for(uint32_t operationIndex = 0; operationIndex < 2; ++operationIndex)
+		{
+			switch(operations[operationIndex])
+			{
+			case dy::RHI::BlendOp::Add: *nativeOperations[operationIndex] = VK_BLEND_OP_ADD; break;
+			case dy::RHI::BlendOp::Subtract: *nativeOperations[operationIndex] = VK_BLEND_OP_SUBTRACT; break;
+			case dy::RHI::BlendOp::ReverseSubtract: *nativeOperations[operationIndex] = VK_BLEND_OP_REVERSE_SUBTRACT; break;
+			case dy::RHI::BlendOp::Min: *nativeOperations[operationIndex] = VK_BLEND_OP_MIN; break;
+			case dy::RHI::BlendOp::Max: *nativeOperations[operationIndex] = VK_BLEND_OP_MAX; break;
+			default: throw std::runtime_error("invalid Vulkan blend operation");
+			}
+		}
+		target.colorWriteMask = 0;
+		if((source.writeMask & dy::RHI::ColorWriteRed) != 0) target.colorWriteMask |= VK_COLOR_COMPONENT_R_BIT;
+		if((source.writeMask & dy::RHI::ColorWriteGreen) != 0) target.colorWriteMask |= VK_COLOR_COMPONENT_G_BIT;
+		if((source.writeMask & dy::RHI::ColorWriteBlue) != 0) target.colorWriteMask |= VK_COLOR_COMPONENT_B_BIT;
+		if((source.writeMask & dy::RHI::ColorWriteAlpha) != 0) target.colorWriteMask |= VK_COLOR_COMPONENT_A_BIT;
+		colorBlendAttachments.push_back(target);
+	}
 	VkPipelineColorBlendStateCreateInfo colorBlending{};
 	colorBlending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-	colorBlending.attachmentCount = hasColorAttachment ? 1u : 0u;
-	colorBlending.pAttachments = hasColorAttachment ? &colorBlendAttachment : nullptr;
+	colorBlending.attachmentCount = static_cast<uint32_t>(colorBlendAttachments.size());
+	colorBlending.pAttachments = colorBlendAttachments.data();
 
 	const VkDynamicState dynamicStates[] = {
 		VK_DYNAMIC_STATE_VIEWPORT,

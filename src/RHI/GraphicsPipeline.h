@@ -123,6 +123,52 @@ namespace dy::RHI
 		StencilFaceDesc backFace = {};
 	};
 
+	enum ColorWrite : uint8_t
+	{
+		ColorWriteNone = 0,
+		ColorWriteRed = 1u << 0,
+		ColorWriteGreen = 1u << 1,
+		ColorWriteBlue = 1u << 2,
+		ColorWriteAlpha = 1u << 3,
+		ColorWriteAll = ColorWriteRed | ColorWriteGreen | ColorWriteBlue | ColorWriteAlpha
+	};
+
+	enum class BlendFactor : uint32_t
+	{
+		Zero,
+		One,
+		SourceColor,
+		OneMinusSourceColor,
+		SourceAlpha,
+		OneMinusSourceAlpha,
+		DestinationColor,
+		OneMinusDestinationColor,
+		DestinationAlpha,
+		OneMinusDestinationAlpha
+	};
+
+	enum class BlendOp : uint32_t
+	{
+		Add,
+		Subtract,
+		ReverseSubtract,
+		Min,
+		Max
+	};
+
+	struct ColorAttachmentDesc
+	{
+		Format format = Format::Unknown;
+		uint8_t writeMask = ColorWriteAll;
+		bool blendEnable = false;
+		BlendFactor sourceColorFactor = BlendFactor::One;
+		BlendFactor destinationColorFactor = BlendFactor::Zero;
+		BlendOp colorOp = BlendOp::Add;
+		BlendFactor sourceAlphaFactor = BlendFactor::One;
+		BlendFactor destinationAlphaFactor = BlendFactor::Zero;
+		BlendOp alphaOp = BlendOp::Add;
+	};
+
 	struct GraphicsPipelineDesc
 	{
 		// 참조한 shader는 이 pipeline보다 오래 살아야 한다.
@@ -132,8 +178,10 @@ namespace dy::RHI
 		InputAssemblyDesc inputAssembly = {};
 		RasterizationDesc rasterization = {};
 		DepthStencilDesc depthStencil = {};
+		// 배열은 CreateGraphicsPipeline() 호출 동안만 유효해도 된다.
+		const ColorAttachmentDesc* colorAttachments = nullptr;
+		uint32_t colorAttachmentCount = 0;
 
-		Format renderTargetFormat = Format::Unknown;
 		Format depthStencilFormat = Format::Unknown;
 
 		bool enableBindlessTextures = false;
