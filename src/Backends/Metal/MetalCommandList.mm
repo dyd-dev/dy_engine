@@ -77,15 +77,20 @@ namespace dy::Backends
         m_impl->activeDepthTarget = nullptr;
     }
 
-    void MetalCommandList::SetRenderTargets(uint32_t numRenderTargets, RHI::ITexture** renderTargets, RHI::ITexture* depthStencil)
+    void MetalCommandList::BeginRendering(const RHI::RenderingInfo& renderingInfo)
     {
-        EndActivePass();
+        if(m_impl->passDescriptor != nil)
+            return;
+        const uint32_t numRenderTargets = renderingInfo.colorAttachmentCount;
+        const RHI::ColorAttachmentInfo* colorAttachments = renderingInfo.colorAttachments;
+        const RHI::DepthStencilAttachmentInfo* depthAttachment = renderingInfo.depthStencilAttachment;
+        RHI::ITexture* depthStencil = depthAttachment != nullptr ? depthAttachment->texture : nullptr;
 
         if(numRenderTargets > 8u)
             return;
         if(numRenderTargets == 0 && depthStencil == nullptr)
             return;
-        if(numRenderTargets > 0 && renderTargets == nullptr)
+        if(numRenderTargets > 0 && colorAttachments == nullptr)
             return;
 
         std::vector<id<MTLTexture>> colorTextures;
@@ -95,7 +100,7 @@ namespace dy::Backends
         colorTextures.reserve(numRenderTargets);
         for(uint32_t attachmentIndex = 0; attachmentIndex < numRenderTargets; ++attachmentIndex)
         {
-            RHI::ITexture* colorTarget = renderTargets[attachmentIndex];
+            RHI::ITexture* colorTarget = colorAttachments[attachmentIndex].texture;
             if(colorTarget == nullptr)
                 return;
 
@@ -158,24 +163,56 @@ namespace dy::Backends
         MTLRenderPassDescriptor* passDesc = [MTLRenderPassDescriptor new];
         for(uint32_t attachmentIndex = 0; attachmentIndex < numRenderTargets; ++attachmentIndex)
         {
-            passDesc.colorAttachments[attachmentIndex].texture = colorTextures[attachmentIndex];
-            passDesc.colorAttachments[attachmentIndex].loadAction = MTLLoadActionLoad;
-            passDesc.colorAttachments[attachmentIndex].storeAction = MTLStoreActionStore;
+            MTLRenderPassColorAttachmentDescriptor* attachment = passDesc.colorAttachments[attachmentIndex];
+            attachment.texture = colorTextures[attachmentIndex];
+            switch(colorAttachments[attachmentIndex].loadOp)
+            {
+            case RHI::LoadOp::Load: attachment.loadAction = MTLLoadActionLoad; break;
+            case RHI::LoadOp::Clear:
+                attachment.loadAction = MTLLoadActionClear;
+                attachment.clearColor = MTLClearColorMake(
+                    colorAttachments[attachmentIndex].clearColor[0],
+                    colorAttachments[attachmentIndex].clearColor[1],
+                    colorAttachments[attachmentIndex].clearColor[2],
+                    colorAttachments[attachmentIndex].clearColor[3]);
+                break;
+            case RHI::LoadOp::DontCare: attachment.loadAction = MTLLoadActionDontCare; break;
+            }
+            attachment.storeAction = colorAttachments[attachmentIndex].storeOp == RHI::StoreOp::Store
+                ? MTLStoreActionStore
+                : MTLStoreActionDontCare;
         }
 
         if(depthStencil != nullptr)
         {
             passDesc.depthAttachment.texture = depthTexture;
-            passDesc.depthAttachment.loadAction = MTLLoadActionLoad;
-            passDesc.depthAttachment.storeAction =
-                (depthStencil->GetUsage() & RHI::TextureUsage::ShaderResource) != RHI::TextureUsage::None
-                    ? MTLStoreActionStore
-                    : MTLStoreActionDontCare;
+            switch(depthAttachment->depthLoadOp)
+            {
+            case RHI::LoadOp::Load: passDesc.depthAttachment.loadAction = MTLLoadActionLoad; break;
+            case RHI::LoadOp::Clear:
+                passDesc.depthAttachment.loadAction = MTLLoadActionClear;
+                passDesc.depthAttachment.clearDepth = depthAttachment->clearDepth;
+                break;
+            case RHI::LoadOp::DontCare: passDesc.depthAttachment.loadAction = MTLLoadActionDontCare; break;
+            }
+            passDesc.depthAttachment.storeAction = depthAttachment->depthStoreOp == RHI::StoreOp::Store
+                ? MTLStoreActionStore
+                : MTLStoreActionDontCare;
             if(depthStencil->GetFormat() == RHI::Format::D24_UNORM_S8_UINT)
             {
                 passDesc.stencilAttachment.texture = depthTexture;
-                passDesc.stencilAttachment.loadAction = MTLLoadActionLoad;
-                passDesc.stencilAttachment.storeAction = passDesc.depthAttachment.storeAction;
+                switch(depthAttachment->stencilLoadOp)
+                {
+                case RHI::LoadOp::Load: passDesc.stencilAttachment.loadAction = MTLLoadActionLoad; break;
+                case RHI::LoadOp::Clear:
+                    passDesc.stencilAttachment.loadAction = MTLLoadActionClear;
+                    passDesc.stencilAttachment.clearStencil = depthAttachment->clearStencil;
+                    break;
+                case RHI::LoadOp::DontCare: passDesc.stencilAttachment.loadAction = MTLLoadActionDontCare; break;
+                }
+                passDesc.stencilAttachment.storeAction = depthAttachment->stencilStoreOp == RHI::StoreOp::Store
+                    ? MTLStoreActionStore
+                    : MTLStoreActionDontCare;
             }
         }
 
@@ -183,7 +220,11 @@ namespace dy::Backends
         m_impl->renderWidth = width;
         m_impl->renderHeight = height;
         if(numRenderTargets > 0)
-            m_impl->activeColorTargets.assign(renderTargets, renderTargets + numRenderTargets);
+        {
+            m_impl->activeColorTargets.reserve(numRenderTargets);
+            for(uint32_t attachmentIndex = 0; attachmentIndex < numRenderTargets; ++attachmentIndex)
+                m_impl->activeColorTargets.push_back(colorAttachments[attachmentIndex].texture);
+        }
         m_impl->activeDepthTarget = depthStencil;
     }
 
@@ -211,36 +252,6 @@ namespace dy::Backends
             static_cast<NSUInteger>(rect.height)
         };
         [m_impl->encoder setScissorRect:scissor];
-    }
-
-    void MetalCommandList::ClearColor(RHI::ITexture* renderTarget, float r, float g, float b, float a)
-    {
-        if(m_impl->passDescriptor == nil || m_impl->encoder != nil ||
-           renderTarget == nullptr)
-            return;
-
-        for(size_t attachmentIndex = 0; attachmentIndex < m_impl->activeColorTargets.size(); ++attachmentIndex)
-        {
-            if(m_impl->activeColorTargets[attachmentIndex] != renderTarget) continue;
-            MTLRenderPassColorAttachmentDescriptor* attachment = m_impl->passDescriptor.colorAttachments[attachmentIndex];
-            if(attachment.texture == nil) return;
-            attachment.loadAction = MTLLoadActionClear;
-            attachment.clearColor = MTLClearColorMake(r, g, b, a);
-            return;
-        }
-    }
-
-    void MetalCommandList::ClearDepth(RHI::ITexture* depthStencil, float depth)
-    {
-        if(m_impl->passDescriptor == nil || m_impl->encoder != nil ||
-           depthStencil == nullptr || depthStencil != m_impl->activeDepthTarget)
-            return;
-
-        if(m_impl->passDescriptor.depthAttachment.texture != nil)
-        {
-            m_impl->passDescriptor.depthAttachment.loadAction = MTLLoadActionClear;
-            m_impl->passDescriptor.depthAttachment.clearDepth = depth;
-        }
     }
 
     void MetalCommandList::BindGraphicsPipeline(RHI::IPipelineState* pipelineState)
@@ -357,7 +368,7 @@ namespace dy::Backends
 
     void MetalCommandList::Close()
     {
-        EndActivePass();
+        EndRendering();
     }
 
     void MetalCommandList::SetNativePipelineState(void* pipelineState)
@@ -406,7 +417,7 @@ namespace dy::Backends
         [m_impl->encoder setScissorRect:scissor];
     }
 
-    void MetalCommandList::EndActivePass()
+    void MetalCommandList::EndRendering()
     {
         if(m_impl->passDescriptor != nil && m_impl->encoder == nil)
         {

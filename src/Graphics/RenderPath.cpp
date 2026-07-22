@@ -302,12 +302,20 @@ namespace
 		return drawConstants;
 	}
 
-	// 깊이 전용(그림자) 패스 시작: 컬러 RT 없이 그림자 깊이타겟만 바인딩하고 파이프라인/행렬 세팅.
-	// 뷰포트는 백엔드 SetRenderTargets 가 깊이타겟 해상도로 맞춘다.
+	// 깊이 전용(그림자) 렌더링 스코프 시작.
 	void BeginShadowPass(RHI::ICommandList* commandList, const RenderPathContext& ctx)
 	{
-		commandList->SetRenderTargets(0, nullptr, ctx.shadowDepth);
-		commandList->ClearDepth(ctx.shadowDepth, 1.0f);
+		const RHI::DepthStencilAttachmentInfo depthAttachment = {
+			ctx.shadowDepth,
+			RHI::LoadOp::Clear,
+			RHI::StoreOp::Store,
+			1.0f,
+			RHI::LoadOp::DontCare,
+			RHI::StoreOp::DontCare,
+			0
+		};
+		const RHI::RenderingInfo renderingInfo = { nullptr, 0, &depthAttachment };
+		commandList->BeginRendering(renderingInfo);
 		commandList->BindGraphicsPipeline(ctx.shadowPipeline);
 		if(ctx.shadowResourceSet != nullptr) commandList->BindResourceSet(ctx.shadowResourceSet);
 	}
@@ -318,19 +326,35 @@ namespace
 	{
 		if(commandList == nullptr || backBuffer == nullptr || ctx.pipeline == nullptr) return false;
 
+		commandList->EndRendering();
 		const RendererDesc& config = *ctx.config;
-		commandList->SetRenderTargets(1, &backBuffer, ctx.depthStencil);
-		commandList->ClearColor(backBuffer, config.clearColor.x, config.clearColor.y, config.clearColor.z, config.clearColor.w);
-		if(ctx.depthStencil != nullptr)
-		{
-			commandList->ClearDepth(ctx.depthStencil, 1.0f);
-		}
+		RHI::ColorAttachmentInfo colorAttachment = { backBuffer, RHI::LoadOp::Clear, RHI::StoreOp::Store };
+		colorAttachment.clearColor[0] = config.clearColor.x;
+		colorAttachment.clearColor[1] = config.clearColor.y;
+		colorAttachment.clearColor[2] = config.clearColor.z;
+		colorAttachment.clearColor[3] = config.clearColor.w;
+		const RHI::DepthStencilAttachmentInfo depthAttachment = {
+			ctx.depthStencil,
+			RHI::LoadOp::Clear,
+			RHI::StoreOp::DontCare,
+			1.0f,
+			RHI::LoadOp::DontCare,
+			RHI::StoreOp::DontCare,
+			0
+		};
+		const RHI::RenderingInfo renderingInfo = {
+			&colorAttachment,
+			1,
+			ctx.depthStencil != nullptr ? &depthAttachment : nullptr
+		};
+		commandList->BeginRendering(renderingInfo);
 		commandList->BindGraphicsPipeline(ctx.pipeline);
 		return true;
 	}
 
 	void SubmitMainPass(RHI::IDevice* device, RHI::ICommandList* commandList)
 	{
+		commandList->EndRendering();
 		commandList->Close();
 		std::array<RHI::ICommandList*, 1> commandLists = { commandList };
 		device->Submit(commandLists.data(), static_cast<uint32_t>(commandLists.size()));

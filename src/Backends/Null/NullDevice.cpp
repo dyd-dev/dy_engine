@@ -81,11 +81,10 @@ namespace dy::Backends
 			void BindGraphicsPipeline(RHI::IPipelineState*) override {}
 			void BindResourceSet(RHI::IResourceSet*) override {}
 			void SetInlineConstants(uint32_t, uint32_t, const void*) override {}
-			void SetRenderTargets(uint32_t, RHI::ITexture**, RHI::ITexture*) override {}
+			void BeginRendering(const RHI::RenderingInfo&) override {}
+			void EndRendering() override {}
 			void SetViewport(const RHI::Viewport&) override {}
 			void SetScissor(const RHI::Rect&) override {}
-			void ClearColor(RHI::ITexture*, float, float, float, float) override {}
-			void ClearDepth(RHI::ITexture*, float) override {}
 			void BindVertexBuffer(uint32_t, RHI::IBuffer*, uint32_t) override {}
 			void BindIndexBuffer(RHI::IBuffer*, RHI::Format, uint32_t) override {}
 			void DrawInstanced(uint32_t, uint32_t, uint32_t, uint32_t) override {}

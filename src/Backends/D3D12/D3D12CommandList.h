@@ -18,14 +18,10 @@ namespace dy::Backends
 
         void BindResourceSet(RHI::IResourceSet* resourceSet) override;
         void SetInlineConstants(uint32_t offset, uint32_t size, const void* data) override;
-        void SetRenderTargets(uint32_t numRenderTargets, RHI::ITexture** renderTargets, RHI::ITexture* depthStencil) override;
+        void BeginRendering(const RHI::RenderingInfo& renderingInfo) override;
+        void EndRendering() override;
         void SetViewport(const RHI::Viewport& viewport) override;
         void SetScissor(const RHI::Rect& rect) override;
-
-        // 배경색 지우기!
-        void ClearColor(RHI::ITexture* renderTarget, float r, float g, float b, float a) override;
-
-        void ClearDepth(RHI::ITexture* depthStencil, float depth) override;
 
         void BindVertexBuffer(uint32_t slot, RHI::IBuffer* buffer, uint32_t offset) override;
         void BindIndexBuffer(RHI::IBuffer* buffer, RHI::Format format, uint32_t offset) override;

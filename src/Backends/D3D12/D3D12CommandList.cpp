@@ -46,6 +46,9 @@ namespace dy::Backends
         D3D12PipelineState* activeGraphicsPipeline = nullptr;
         std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> activeRtvHandles;
         D3D12_CPU_DESCRIPTOR_HANDLE activeDsvHandle = {};
+        std::vector<RHI::StoreOp> activeColorStoreOps;
+        RHI::StoreOp activeDepthStoreOp = RHI::StoreOp::Store;
+        RHI::StoreOp activeStencilStoreOp = RHI::StoreOp::Store;
         bool hasActivePass = false;
     };
 
@@ -79,14 +82,16 @@ namespace dy::Backends
         m_internal->activeGraphicsPipeline = nullptr;
         m_internal->activeRtvHandles.clear();
         m_internal->activeDsvHandle = {};
+        m_internal->activeColorStoreOps.clear();
         m_internal->hasActivePass = false;
         return true;
     }
 
     void D3D12CommandList::Close()
     {
+        EndRendering();
         // 백버퍼를 PRESENT 로 전이. 추적기(D3D12Texture)를 거쳐 상태를 갱신해야
-        // 다음 프레임 재사용 시 SetRenderTargets 가 올바른 before-state 로 배리어를 친다.
+        // 다음 프레임 재사용 시 BeginRendering 이 올바른 before-state 로 배리어를 친다.
         if (m_internal->backBufferTexture != nullptr)
         {
             TransitionTexture(m_internal->commandList.Get(), m_internal->backBufferTexture, D3D12_RESOURCE_STATE_PRESENT);
@@ -102,42 +107,6 @@ namespace dy::Backends
     {
         m_internal->backBufferTexture = dynamic_cast<D3D12Texture*>(texture);
         m_internal->rtvHandle.ptr = rtvHandlePtr;
-    }
-
-    void D3D12CommandList::ClearColor(RHI::ITexture* renderTarget, float r, float g, float b, float a)
-    {
-        if (!m_internal->hasActivePass ||
-            renderTarget == nullptr ||
-            m_internal->activeColorTargets.empty())
-        {
-            return;
-        }
-
-        for(size_t attachmentIndex = 0; attachmentIndex < m_internal->activeColorTargets.size(); ++attachmentIndex)
-        {
-            if(m_internal->activeColorTargets[attachmentIndex] != renderTarget) continue;
-            const float color[] = { r, g, b, a };
-            m_internal->commandList->ClearRenderTargetView(m_internal->activeRtvHandles[attachmentIndex], color, 0, nullptr);
-            return;
-        }
-    }
-
-    void D3D12CommandList::ClearDepth(RHI::ITexture* depthStencil, float depth)
-    {
-        if (!m_internal->hasActivePass ||
-            depthStencil == nullptr ||
-            depthStencil != m_internal->activeDepthTarget)
-        {
-            return;
-        }
-
-        m_internal->commandList->ClearDepthStencilView(
-            m_internal->activeDsvHandle,
-            D3D12_CLEAR_FLAG_DEPTH,
-            depth,
-            0,
-            0,
-            nullptr);
     }
 
     void D3D12CommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance)
@@ -223,12 +192,18 @@ namespace dy::Backends
         }
     }
 
-    void D3D12CommandList::SetRenderTargets(uint32_t numRenderTargets, RHI::ITexture** renderTargets, RHI::ITexture* depthStencil)
+    void D3D12CommandList::BeginRendering(const RHI::RenderingInfo& renderingInfo)
     {
+        if (m_internal->hasActivePass) return;
+        const uint32_t numRenderTargets = renderingInfo.colorAttachmentCount;
+        const RHI::ColorAttachmentInfo* colorAttachments = renderingInfo.colorAttachments;
+        const RHI::DepthStencilAttachmentInfo* depthAttachment = renderingInfo.depthStencilAttachment;
+        RHI::ITexture* depthStencil = depthAttachment != nullptr ? depthAttachment->texture : nullptr;
         m_internal->activeColorTargets.clear();
         m_internal->activeDepthTarget = nullptr;
         m_internal->activeRtvHandles.clear();
         m_internal->activeDsvHandle = {};
+        m_internal->activeColorStoreOps.clear();
         m_internal->hasActivePass = false;
 
         const auto invalidatePass = [this]()
@@ -237,8 +212,7 @@ namespace dy::Backends
         };
 
         if (numRenderTargets > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT ||
-            (numRenderTargets == 1 && (renderTargets == nullptr || renderTargets[0] == nullptr)) ||
-            (numRenderTargets > 1 && renderTargets == nullptr) ||
+            (numRenderTargets > 0 && colorAttachments == nullptr) ||
             (numRenderTargets == 0 && depthStencil == nullptr))
         {
             invalidatePass();
@@ -257,7 +231,7 @@ namespace dy::Backends
         rtvHandles.reserve(numRenderTargets);
         for(uint32_t attachmentIndex = 0; attachmentIndex < numRenderTargets; ++attachmentIndex)
         {
-            RHI::ITexture* colorTarget = renderTargets[attachmentIndex];
+            RHI::ITexture* colorTarget = colorAttachments[attachmentIndex].texture;
             D3D12Texture* colorTexture = dynamic_cast<D3D12Texture*>(colorTarget);
             const bool isBackBuffer = colorTexture != nullptr && colorTexture == m_internal->backBufferTexture;
             const bool hasRenderTargetUsage =
@@ -347,9 +321,50 @@ namespace dy::Backends
             FALSE,
             dsvPtr);
 
+        for(uint32_t attachmentIndex = 0; attachmentIndex < numRenderTargets; ++attachmentIndex)
+        {
+            ID3D12Resource* resource = static_cast<ID3D12Resource*>(colorTextures[attachmentIndex]->GetNativeResource());
+            if(colorAttachments[attachmentIndex].loadOp == RHI::LoadOp::Clear)
+                m_internal->commandList->ClearRenderTargetView(rtvHandles[attachmentIndex], colorAttachments[attachmentIndex].clearColor, 0, nullptr);
+            else if(colorAttachments[attachmentIndex].loadOp == RHI::LoadOp::DontCare)
+                m_internal->commandList->DiscardResource(resource, nullptr);
+        }
+        if(depthTexture != nullptr && depthAttachment != nullptr)
+        {
+            D3D12_CLEAR_FLAGS clearFlags = static_cast<D3D12_CLEAR_FLAGS>(0);
+            if(depthAttachment->depthLoadOp == RHI::LoadOp::Clear)
+                clearFlags = static_cast<D3D12_CLEAR_FLAGS>(clearFlags | D3D12_CLEAR_FLAG_DEPTH);
+            if(depthAttachment->stencilLoadOp == RHI::LoadOp::Clear && depthStencil->GetFormat() == RHI::Format::D24_UNORM_S8_UINT)
+                clearFlags = static_cast<D3D12_CLEAR_FLAGS>(clearFlags | D3D12_CLEAR_FLAG_STENCIL);
+            if(clearFlags != 0)
+                m_internal->commandList->ClearDepthStencilView(
+                    dsvHandle,
+                    clearFlags,
+                    depthAttachment->clearDepth,
+                    static_cast<UINT8>(depthAttachment->clearStencil),
+                    0,
+                    nullptr);
+            if(depthAttachment->depthLoadOp == RHI::LoadOp::DontCare &&
+               (depthStencil->GetFormat() != RHI::Format::D24_UNORM_S8_UINT || depthAttachment->stencilLoadOp == RHI::LoadOp::DontCare))
+                m_internal->commandList->DiscardResource(static_cast<ID3D12Resource*>(depthTexture->GetNativeResource()), nullptr);
+        }
+
         if(numRenderTargets > 0)
-            m_internal->activeColorTargets.assign(renderTargets, renderTargets + numRenderTargets);
+        {
+            m_internal->activeColorTargets.reserve(numRenderTargets);
+            m_internal->activeColorStoreOps.reserve(numRenderTargets);
+            for(uint32_t attachmentIndex = 0; attachmentIndex < numRenderTargets; ++attachmentIndex)
+            {
+                m_internal->activeColorTargets.push_back(colorAttachments[attachmentIndex].texture);
+                m_internal->activeColorStoreOps.push_back(colorAttachments[attachmentIndex].storeOp);
+            }
+        }
         m_internal->activeDepthTarget = depthStencil;
+        if(depthAttachment != nullptr)
+        {
+            m_internal->activeDepthStoreOp = depthAttachment->depthStoreOp;
+            m_internal->activeStencilStoreOp = depthAttachment->stencilStoreOp;
+        }
         m_internal->activeRtvHandles = std::move(rtvHandles);
         m_internal->activeDsvHandle = dsvHandle;
         m_internal->hasActivePass = true;
@@ -358,6 +373,31 @@ namespace dy::Backends
         D3D12_RECT scissorRect = { 0, 0, static_cast<LONG>(width), static_cast<LONG>(height) };
         m_internal->commandList->RSSetViewports(1, &viewport);
         m_internal->commandList->RSSetScissorRects(1, &scissorRect);
+    }
+
+    void D3D12CommandList::EndRendering()
+    {
+        if(!m_internal->hasActivePass) return;
+        for(size_t attachmentIndex = 0; attachmentIndex < m_internal->activeColorTargets.size(); ++attachmentIndex)
+        {
+            if(m_internal->activeColorStoreOps[attachmentIndex] != RHI::StoreOp::DontCare) continue;
+            auto* texture = static_cast<D3D12Texture*>(m_internal->activeColorTargets[attachmentIndex]);
+            m_internal->commandList->DiscardResource(static_cast<ID3D12Resource*>(texture->GetNativeResource()), nullptr);
+        }
+        if(m_internal->activeDepthTarget != nullptr &&
+           m_internal->activeDepthStoreOp == RHI::StoreOp::DontCare &&
+           (m_internal->activeDepthTarget->GetFormat() != RHI::Format::D24_UNORM_S8_UINT ||
+            m_internal->activeStencilStoreOp == RHI::StoreOp::DontCare))
+        {
+            auto* texture = static_cast<D3D12Texture*>(m_internal->activeDepthTarget);
+            m_internal->commandList->DiscardResource(static_cast<ID3D12Resource*>(texture->GetNativeResource()), nullptr);
+        }
+        m_internal->commandList->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
+        m_internal->activeColorTargets.clear();
+        m_internal->activeDepthTarget = nullptr;
+        m_internal->activeRtvHandles.clear();
+        m_internal->activeColorStoreOps.clear();
+        m_internal->hasActivePass = false;
     }
 
     void D3D12CommandList::SetViewport(const RHI::Viewport& viewport)

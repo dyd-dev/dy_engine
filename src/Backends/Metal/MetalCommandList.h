@@ -16,11 +16,10 @@ namespace dy::Backends
         void BindIndexBuffer(RHI::IBuffer* buffer, RHI::Format format, uint32_t offset) override;
         void SetInlineConstants(uint32_t offset, uint32_t size, const void* data) override;
 
-        void SetRenderTargets(uint32_t numRenderTargets, RHI::ITexture** renderTargets, RHI::ITexture* depthStencil) override;
+        void BeginRendering(const RHI::RenderingInfo& renderingInfo) override;
+        void EndRendering() override;
         void SetViewport(const RHI::Viewport& viewport) override;
         void SetScissor(const RHI::Rect& rect) override;
-        void ClearColor(RHI::ITexture* renderTarget, float r, float g, float b, float a) override;
-        void ClearDepth(RHI::ITexture* depthStencil, float depth) override;
 
         void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
         void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
@@ -36,7 +35,6 @@ namespace dy::Backends
 
     private:
         void EnsureRenderEncoder();
-        void EndActivePass();
 
         struct Impl;
         Impl* m_impl = nullptr;

@@ -747,10 +747,10 @@ private:
 	void RecordCommandBuffer(const VulkanCommandList& commandList);
 	void RecordPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList, const VulkanCommandList::PassRecord& passRecord, uint32_t firstDraw, uint32_t drawCount);
 	bool ResolvePassTarget(const VulkanCommandList::PassRecord& passRecord, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
-	bool GetOrCreateColorFramebuffer(const std::vector<dy::RHI::ITexture*>& colorTargets, dy::RHI::ITexture* depthTarget, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
-	bool GetOrCreateDepthOnlyFramebuffer(dy::RHI::ITexture* depthTarget, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
-	bool CreateColorRenderPass(const std::vector<VkFormat>& colorFormats, VkFormat depthFormat, const std::vector<VkImageLayout>& colorFinalLayouts, VkImageLayout depthFinalLayout, VkRenderPass& renderPass);
-	bool CreateDepthOnlyRenderPass(VkFormat depthFormat, bool shaderReadable, VkRenderPass& renderPass);
+	bool GetOrCreateColorFramebuffer(const std::vector<dy::RHI::ColorAttachmentInfo>& colorAttachments, const dy::RHI::DepthStencilAttachmentInfo* depthAttachment, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
+	bool GetOrCreateDepthOnlyFramebuffer(const dy::RHI::DepthStencilAttachmentInfo& depthAttachment, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent);
+	bool CreateColorRenderPass(const std::vector<VkFormat>& colorFormats, VkFormat depthFormat, const std::vector<VkImageLayout>& colorFinalLayouts, VkImageLayout depthFinalLayout, const std::vector<dy::RHI::ColorAttachmentInfo>& colorAttachments, const dy::RHI::DepthStencilAttachmentInfo* depthAttachment, VkRenderPass& renderPass);
+	bool CreateDepthOnlyRenderPass(VkFormat depthFormat, bool shaderReadable, const dy::RHI::DepthStencilAttachmentInfo& depthAttachment, VkRenderPass& renderPass);
 	void ReleaseRenderPassPipelines(VkRenderPass renderPass);
 	void DestroyRenderTargetCache();
 	void UpdateBackBufferMetadata();
@@ -777,6 +777,7 @@ private:
 	{
 		std::vector<dy::RHI::ITexture*> colorTargets;
 		dy::RHI::ITexture* depthTarget = nullptr;
+		std::vector<uint8_t> loadStoreKey;
 		VkRenderPass renderPass = VK_NULL_HANDLE;
 		VkFramebuffer framebuffer = VK_NULL_HANDLE;
 		uint32_t imageIndex = 0;
@@ -1409,15 +1410,18 @@ void VulkanDevice::Impl::RecordPass(
 	VkExtent2D renderExtent = {};
 	if (!ResolvePassTarget(passRecord, renderPass, framebuffer, renderExtent)) return;
 
-	std::vector<VkClearValue> clearValues(passRecord.renderTargets.size() + (passRecord.depthStencil != nullptr ? 1u : 0u));
-	for(size_t attachmentIndex = 0; attachmentIndex < passRecord.renderTargets.size(); ++attachmentIndex)
+	std::vector<VkClearValue> clearValues(passRecord.colorAttachments.size() + (passRecord.hasDepthStencilAttachment ? 1u : 0u));
+	for(size_t attachmentIndex = 0; attachmentIndex < passRecord.colorAttachments.size(); ++attachmentIndex)
 	{
-		const std::array<float, 4>& color = passRecord.clearColors[attachmentIndex];
+		const float* color = passRecord.colorAttachments[attachmentIndex].clearColor;
 		clearValues[attachmentIndex].color = { { color[0], color[1], color[2], color[3] } };
 	}
-	if(passRecord.depthStencil != nullptr)
+	if(passRecord.hasDepthStencilAttachment)
 	{
-		clearValues.back().depthStencil = { passRecord.clearDepth, 0 };
+		clearValues.back().depthStencil = {
+			passRecord.depthStencilAttachment.clearDepth,
+			passRecord.depthStencilAttachment.clearStencil
+		};
 	}
 	VkRenderPassBeginInfo renderPassInfo{};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -1571,20 +1575,24 @@ void VulkanDevice::Impl::RecordPass(
 }
 
 bool VulkanDevice::Impl::ResolvePassTarget(const VulkanCommandList::PassRecord& passRecord, VkRenderPass& renderPass, VkFramebuffer& framebuffer, VkExtent2D& extent) {
-	if (passRecord.renderTargets.empty()) {
-		if (passRecord.depthStencil == nullptr) {
+	if (passRecord.colorAttachments.empty()) {
+		if (!passRecord.hasDepthStencilAttachment) {
 			SDL_Log("Vulkan pass has no attachments.");
 			return false;
 		}
-		return GetOrCreateDepthOnlyFramebuffer(passRecord.depthStencil, renderPass, framebuffer, extent);
+		return GetOrCreateDepthOnlyFramebuffer(passRecord.depthStencilAttachment, renderPass, framebuffer, extent);
 	}
-	for(dy::RHI::ITexture* colorTarget : passRecord.renderTargets)
+	for(const dy::RHI::ColorAttachmentInfo& colorAttachment : passRecord.colorAttachments)
 	{
-		if(colorTarget != nullptr) continue;
+		if(colorAttachment.texture != nullptr) continue;
 		SDL_Log("Vulkan pass color target is null.");
 		return false;
 	}
-	if (passRecord.renderTargets.size() == 1 && passRecord.renderTargets[0] == m_backBuffer && passRecord.depthStencil == nullptr) {
+	if (passRecord.colorAttachments.size() == 1 &&
+		passRecord.colorAttachments[0].texture == m_backBuffer &&
+		passRecord.colorAttachments[0].loadOp == dy::RHI::LoadOp::Clear &&
+		passRecord.colorAttachments[0].storeOp == dy::RHI::StoreOp::Store &&
+		!passRecord.hasDepthStencilAttachment) {
 		if (m_currentImageIndex >= m_swapchainFramebuffers.size()) return false;
 		renderPass = m_mainRenderPass;
 		framebuffer = m_swapchainFramebuffers[m_currentImageIndex];
@@ -1592,17 +1600,29 @@ bool VulkanDevice::Impl::ResolvePassTarget(const VulkanCommandList::PassRecord& 
 		return renderPass != VK_NULL_HANDLE && framebuffer != VK_NULL_HANDLE;
 	}
 
-	return GetOrCreateColorFramebuffer(passRecord.renderTargets, passRecord.depthStencil, renderPass, framebuffer, extent);
+	return GetOrCreateColorFramebuffer(
+		passRecord.colorAttachments,
+		passRecord.hasDepthStencilAttachment ? &passRecord.depthStencilAttachment : nullptr,
+		renderPass,
+		framebuffer,
+		extent);
 }
 
 bool VulkanDevice::Impl::GetOrCreateDepthOnlyFramebuffer(
-	dy::RHI::ITexture* depthTarget,
+	const dy::RHI::DepthStencilAttachmentInfo& depthAttachment,
 	VkRenderPass& renderPass,
 	VkFramebuffer& framebuffer,
 	VkExtent2D& extent)
 {
+	dy::RHI::ITexture* depthTarget = depthAttachment.texture;
+	const std::vector<uint8_t> loadStoreKey = {
+		static_cast<uint8_t>(depthAttachment.depthLoadOp),
+		static_cast<uint8_t>(depthAttachment.depthStoreOp),
+		static_cast<uint8_t>(depthAttachment.stencilLoadOp),
+		static_cast<uint8_t>(depthAttachment.stencilStoreOp)
+	};
 	for (const RenderTargetCacheEntry& entry : m_renderTargetCache) {
-		if (entry.colorTargets.empty() && entry.depthTarget == depthTarget) {
+		if (entry.colorTargets.empty() && entry.depthTarget == depthTarget && entry.loadStoreKey == loadStoreKey) {
 			renderPass = entry.renderPass;
 			framebuffer = entry.framebuffer;
 			extent = { entry.width, entry.height };
@@ -1623,7 +1643,7 @@ bool VulkanDevice::Impl::GetOrCreateDepthOnlyFramebuffer(
 
 	const bool shaderReadable = HasTextureUsage(depthTarget->GetUsage(), dy::RHI::TextureUsage::ShaderResource);
 	VkRenderPass depthOnlyRenderPass = VK_NULL_HANDLE;
-	if (!CreateDepthOnlyRenderPass(depthTexture->GetVkFormat(), shaderReadable, depthOnlyRenderPass)) {
+	if (!CreateDepthOnlyRenderPass(depthTexture->GetVkFormat(), shaderReadable, depthAttachment, depthOnlyRenderPass)) {
 		return false;
 	}
 
@@ -1650,6 +1670,7 @@ bool VulkanDevice::Impl::GetOrCreateDepthOnlyFramebuffer(
 
 	RenderTargetCacheEntry entry{};
 	entry.depthTarget = depthTarget;
+	entry.loadStoreKey = loadStoreKey;
 	entry.renderPass = depthOnlyRenderPass;
 	entry.framebuffer = depthOnlyFramebuffer;
 	entry.width = depthTexture->GetWidth();
@@ -1664,17 +1685,36 @@ bool VulkanDevice::Impl::GetOrCreateDepthOnlyFramebuffer(
 }
 
 bool VulkanDevice::Impl::GetOrCreateColorFramebuffer(
-	const std::vector<dy::RHI::ITexture*>& colorTargets,
-	dy::RHI::ITexture* depthTarget,
+	const std::vector<dy::RHI::ColorAttachmentInfo>& colorAttachments,
+	const dy::RHI::DepthStencilAttachmentInfo* depthAttachment,
 	VkRenderPass& renderPass,
 	VkFramebuffer& framebuffer,
 	VkExtent2D& extent)
 {
+	std::vector<dy::RHI::ITexture*> colorTargets;
+	std::vector<uint8_t> loadStoreKey;
+	colorTargets.reserve(colorAttachments.size());
+	loadStoreKey.reserve(colorAttachments.size() * 2 + (depthAttachment != nullptr ? 4u : 0u));
+	for(const dy::RHI::ColorAttachmentInfo& attachment : colorAttachments)
+	{
+		colorTargets.push_back(attachment.texture);
+		loadStoreKey.push_back(static_cast<uint8_t>(attachment.loadOp));
+		loadStoreKey.push_back(static_cast<uint8_t>(attachment.storeOp));
+	}
+	dy::RHI::ITexture* depthTarget = depthAttachment != nullptr ? depthAttachment->texture : nullptr;
+	if(depthAttachment != nullptr)
+	{
+		loadStoreKey.push_back(static_cast<uint8_t>(depthAttachment->depthLoadOp));
+		loadStoreKey.push_back(static_cast<uint8_t>(depthAttachment->depthStoreOp));
+		loadStoreKey.push_back(static_cast<uint8_t>(depthAttachment->stencilLoadOp));
+		loadStoreKey.push_back(static_cast<uint8_t>(depthAttachment->stencilStoreOp));
+	}
 	const bool swapchainTarget = std::find(colorTargets.begin(), colorTargets.end(), m_backBuffer) != colorTargets.end();
 	const uint32_t imageIndex = swapchainTarget ? m_currentImageIndex : 0u;
 	for (const RenderTargetCacheEntry& entry : m_renderTargetCache) {
 		if (entry.colorTargets == colorTargets &&
 			entry.depthTarget == depthTarget &&
+			entry.loadStoreKey == loadStoreKey &&
 			(!swapchainTarget || entry.imageIndex == imageIndex)) {
 			renderPass = entry.renderPass;
 			framebuffer = entry.framebuffer;
@@ -1776,6 +1816,8 @@ bool VulkanDevice::Impl::GetOrCreateColorFramebuffer(
 		depthFormat,
 		colorFinalLayouts,
 		depthFinalLayout,
+		colorAttachments,
+		depthAttachment,
 		colorRenderPass)) {
 		return false;
 	}
@@ -1808,6 +1850,7 @@ bool VulkanDevice::Impl::GetOrCreateColorFramebuffer(
 	RenderTargetCacheEntry entry{};
 	entry.colorTargets = colorTargets;
 	entry.depthTarget = depthTarget;
+	entry.loadStoreKey = loadStoreKey;
 	entry.renderPass = colorRenderPass;
 	entry.framebuffer = colorFramebuffer;
 	entry.imageIndex = imageIndex;
@@ -1827,9 +1870,11 @@ bool VulkanDevice::Impl::CreateColorRenderPass(
 	VkFormat depthFormat,
 	const std::vector<VkImageLayout>& colorFinalLayouts,
 	VkImageLayout depthFinalLayout,
+	const std::vector<dy::RHI::ColorAttachmentInfo>& colorAttachments,
+	const dy::RHI::DepthStencilAttachmentInfo* depthAttachment,
 	VkRenderPass& renderPass)
 {
-	if(colorFormats.empty() || colorFormats.size() != colorFinalLayouts.size()) return false;
+	if(colorFormats.empty() || colorFormats.size() != colorFinalLayouts.size() || colorFormats.size() != colorAttachments.size()) return false;
 	const bool hasDepthAttachment = depthFormat != VK_FORMAT_UNDEFINED;
 	std::vector<VkAttachmentDescription> attachments;
 	std::vector<VkAttachmentReference> colorAttachmentRefs;
@@ -1840,11 +1885,20 @@ bool VulkanDevice::Impl::CreateColorRenderPass(
 		VkAttachmentDescription colorAttachment{};
 		colorAttachment.format = colorFormats[attachmentIndex];
 		colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-		colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-		colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		switch(colorAttachments[attachmentIndex].loadOp)
+		{
+		case dy::RHI::LoadOp::Load: colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; break;
+		case dy::RHI::LoadOp::Clear: colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; break;
+		case dy::RHI::LoadOp::DontCare: colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; break;
+		}
+		colorAttachment.storeOp = colorAttachments[attachmentIndex].storeOp == dy::RHI::StoreOp::Store
+			? VK_ATTACHMENT_STORE_OP_STORE
+			: VK_ATTACHMENT_STORE_OP_DONT_CARE;
 		colorAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
 		colorAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-		colorAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		colorAttachment.initialLayout = colorAttachments[attachmentIndex].loadOp == dy::RHI::LoadOp::Load
+			? colorFinalLayouts[attachmentIndex]
+			: VK_IMAGE_LAYOUT_UNDEFINED;
 		colorAttachment.finalLayout = colorFinalLayouts[attachmentIndex];
 		attachments.push_back(colorAttachment);
 
@@ -1854,18 +1908,35 @@ bool VulkanDevice::Impl::CreateColorRenderPass(
 		colorAttachmentRefs.push_back(colorAttachmentRef);
 	}
 
-	VkAttachmentDescription depthAttachment{};
-	depthAttachment.format = depthFormat;
-	depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-	depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	depthAttachment.storeOp = depthFinalLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-		? VK_ATTACHMENT_STORE_OP_STORE
-		: VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-	depthAttachment.finalLayout = depthFinalLayout;
-	if(hasDepthAttachment) attachments.push_back(depthAttachment);
+	VkAttachmentDescription depthAttachmentDesc{};
+	depthAttachmentDesc.format = depthFormat;
+	depthAttachmentDesc.samples = VK_SAMPLE_COUNT_1_BIT;
+	if(depthAttachment != nullptr)
+	{
+		switch(depthAttachment->depthLoadOp)
+		{
+		case dy::RHI::LoadOp::Load: depthAttachmentDesc.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; break;
+		case dy::RHI::LoadOp::Clear: depthAttachmentDesc.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; break;
+		case dy::RHI::LoadOp::DontCare: depthAttachmentDesc.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; break;
+		}
+		depthAttachmentDesc.storeOp = depthAttachment->depthStoreOp == dy::RHI::StoreOp::Store
+			? VK_ATTACHMENT_STORE_OP_STORE
+			: VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		switch(depthAttachment->stencilLoadOp)
+		{
+		case dy::RHI::LoadOp::Load: depthAttachmentDesc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD; break;
+		case dy::RHI::LoadOp::Clear: depthAttachmentDesc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; break;
+		case dy::RHI::LoadOp::DontCare: depthAttachmentDesc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; break;
+		}
+		depthAttachmentDesc.stencilStoreOp = depthAttachment->stencilStoreOp == dy::RHI::StoreOp::Store
+			? VK_ATTACHMENT_STORE_OP_STORE
+			: VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		depthAttachmentDesc.initialLayout = depthAttachment->depthLoadOp == dy::RHI::LoadOp::Load
+			? depthFinalLayout
+			: VK_IMAGE_LAYOUT_UNDEFINED;
+		depthAttachmentDesc.finalLayout = depthFinalLayout;
+		attachments.push_back(depthAttachmentDesc);
+	}
 
 	VkAttachmentReference depthAttachmentRef{};
 	depthAttachmentRef.attachment = static_cast<uint32_t>(colorFormats.size());
@@ -1924,15 +1995,36 @@ bool VulkanDevice::Impl::CreateColorRenderPass(
 	return vkCreateRenderPass(m_context.device, &renderPassInfo, nullptr, &renderPass) == VK_SUCCESS;
 }
 
-bool VulkanDevice::Impl::CreateDepthOnlyRenderPass(VkFormat depthFormat, bool shaderReadable, VkRenderPass& renderPass) {
+bool VulkanDevice::Impl::CreateDepthOnlyRenderPass(
+	VkFormat depthFormat,
+	bool shaderReadable,
+	const dy::RHI::DepthStencilAttachmentInfo& attachmentInfo,
+	VkRenderPass& renderPass)
+{
 	VkAttachmentDescription depthAttachment{};
 	depthAttachment.format = depthFormat;
 	depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
-	depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-	depthAttachment.storeOp = shaderReadable ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-	depthAttachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-	depthAttachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+	switch(attachmentInfo.depthLoadOp)
+	{
+	case dy::RHI::LoadOp::Load: depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; break;
+	case dy::RHI::LoadOp::Clear: depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; break;
+	case dy::RHI::LoadOp::DontCare: depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; break;
+	}
+	depthAttachment.storeOp = attachmentInfo.depthStoreOp == dy::RHI::StoreOp::Store
+		? VK_ATTACHMENT_STORE_OP_STORE
+		: VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	switch(attachmentInfo.stencilLoadOp)
+	{
+	case dy::RHI::LoadOp::Load: depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD; break;
+	case dy::RHI::LoadOp::Clear: depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; break;
+	case dy::RHI::LoadOp::DontCare: depthAttachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; break;
+	}
+	depthAttachment.stencilStoreOp = attachmentInfo.stencilStoreOp == dy::RHI::StoreOp::Store
+		? VK_ATTACHMENT_STORE_OP_STORE
+		: VK_ATTACHMENT_STORE_OP_DONT_CARE;
+	depthAttachment.initialLayout = attachmentInfo.depthLoadOp == dy::RHI::LoadOp::Load
+		? (shaderReadable ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+		: VK_IMAGE_LAYOUT_UNDEFINED;
 	depthAttachment.finalLayout = shaderReadable
 		? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
 		: VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -1985,11 +2077,16 @@ bool VulkanDevice::Impl::CreateDepthOnlyRenderPass(VkFormat depthFormat, bool sh
 bool VulkanDevice::Impl::CreateMainRenderPass() {
 	const std::vector<VkFormat> colorFormats = { m_swapchain.GetImageFormat() };
 	const std::vector<VkImageLayout> finalLayouts = { VK_IMAGE_LAYOUT_PRESENT_SRC_KHR };
+	const std::vector<dy::RHI::ColorAttachmentInfo> colorAttachments = {
+		{ m_backBuffer, dy::RHI::LoadOp::Clear, dy::RHI::StoreOp::Store }
+	};
 	return CreateColorRenderPass(
 		colorFormats,
 		VK_FORMAT_UNDEFINED,
 		finalLayouts,
 		VK_IMAGE_LAYOUT_UNDEFINED,
+		colorAttachments,
+		nullptr,
 		m_mainRenderPass);
 }
 

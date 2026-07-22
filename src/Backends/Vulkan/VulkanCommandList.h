@@ -18,14 +18,13 @@ public:
 	void BindVertexBuffer(uint32_t slot, dy::RHI::IBuffer* buffer, uint32_t offset) override;
 	void BindIndexBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset) override;
 	void SetInlineConstants(uint32_t offset, uint32_t size, const void* data) override;
-	void SetRenderTargets(uint32_t numRenderTargets, dy::RHI::ITexture** renderTargets, dy::RHI::ITexture* depthStencil) override;
+	void BeginRendering(const dy::RHI::RenderingInfo& renderingInfo) override;
+	void EndRendering() override;
 	void SetViewport(const dy::RHI::Viewport& viewport) override;
 	void SetScissor(const dy::RHI::Rect& rect) override;
-	void ClearColor(dy::RHI::ITexture* renderTarget, float r, float g, float b, float a) override;
-	void ClearDepth(dy::RHI::ITexture* depthStencil, float depth) override;
 	void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
 	void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
-	void Close() override { m_isClosed = true; }
+	void Close() override;
 
 	void Begin();
 	void End();
@@ -41,10 +40,9 @@ private:
 	struct PassRecord
 	{
 		uint32_t firstDraw = 0;
-		std::vector<dy::RHI::ITexture*> renderTargets;
-		dy::RHI::ITexture* depthStencil = nullptr;
-		std::vector<std::array<float, 4>> clearColors;
-		float clearDepth = 1.0f;
+		std::vector<dy::RHI::ColorAttachmentInfo> colorAttachments;
+		bool hasDepthStencilAttachment = false;
+		dy::RHI::DepthStencilAttachmentInfo depthStencilAttachment = {};
 	};
 
 	struct DrawCall
@@ -72,8 +70,6 @@ private:
 	};
 
 	friend struct VulkanDevice::Impl;
-	std::array<float, 4> m_clearColor = { 0.4f, 0.7f, 1.0f, 1.0f };
-	float m_clearDepth = 1.0f;
 	dy::RHI::IPipelineState* m_boundPipeline = nullptr;
 	std::vector<uint8_t> m_pendingInlineConstants;
 	uint32_t m_pendingInlineConstantOffset = 0;
@@ -89,6 +85,7 @@ private:
 	std::vector<PassRecord> m_passRecords;
 	std::vector<DrawCall> m_drawCalls;
 	bool m_isClosed = false;
+	bool m_isRendering = false;
 };
 
 }

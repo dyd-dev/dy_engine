@@ -7,8 +7,6 @@ namespace dy::Backends
 
 void VulkanCommandList::Begin()
 {
-	m_clearColor = { { 0.4f, 0.7f, 1.0f, 1.0f } };
-	m_clearDepth = 1.0f;
 	m_boundPipeline = nullptr;
 	m_pendingInlineConstants.clear();
 	m_pendingInlineConstantOffset = 0;
@@ -22,6 +20,7 @@ void VulkanCommandList::Begin()
 	m_passRecords.clear();
 	m_drawCalls.clear();
 	m_isClosed = false;
+	m_isRendering = false;
 }
 
 void VulkanCommandList::BindGraphicsPipeline(dy::RHI::IPipelineState* pipelineState)
@@ -64,41 +63,29 @@ void VulkanCommandList::BindIndexBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Forma
 	m_pendingIndexOffset = offset;
 }
 
-void VulkanCommandList::SetRenderTargets(uint32_t numRenderTargets, dy::RHI::ITexture** renderTargets, dy::RHI::ITexture* depthStencil)
+void VulkanCommandList::BeginRendering(const dy::RHI::RenderingInfo& renderingInfo)
 {
+	if(m_isRendering ||
+	   (renderingInfo.colorAttachmentCount > 0 && renderingInfo.colorAttachments == nullptr) ||
+	   (renderingInfo.colorAttachmentCount == 0 && renderingInfo.depthStencilAttachment == nullptr)) return;
 	PassRecord passRecord = {};
 	passRecord.firstDraw = static_cast<uint32_t>(m_drawCalls.size());
-	if(numRenderTargets > 0 && renderTargets != nullptr)
+	if(renderingInfo.colorAttachmentCount > 0)
+		passRecord.colorAttachments.assign(
+			renderingInfo.colorAttachments,
+			renderingInfo.colorAttachments + renderingInfo.colorAttachmentCount);
+	if(renderingInfo.depthStencilAttachment != nullptr)
 	{
-		passRecord.renderTargets.assign(renderTargets, renderTargets + numRenderTargets);
-		passRecord.clearColors.assign(numRenderTargets, m_clearColor);
+		passRecord.hasDepthStencilAttachment = true;
+		passRecord.depthStencilAttachment = *renderingInfo.depthStencilAttachment;
 	}
-	passRecord.depthStencil = depthStencil;
-	passRecord.clearDepth = m_clearDepth;
 	m_passRecords.push_back(passRecord);
+	m_isRendering = true;
 }
 
-void VulkanCommandList::ClearColor(dy::RHI::ITexture* renderTarget, float r, float g, float b, float a)
+void VulkanCommandList::EndRendering()
 {
-	if (m_passRecords.empty()) return;
-	PassRecord& passRecord = m_passRecords.back();
-	if(renderTarget == nullptr) return;
-	for(size_t attachmentIndex = 0; attachmentIndex < passRecord.renderTargets.size(); ++attachmentIndex)
-	{
-		if(passRecord.renderTargets[attachmentIndex] != renderTarget) continue;
-		m_clearColor = { { r, g, b, a } };
-		passRecord.clearColors[attachmentIndex] = m_clearColor;
-		return;
-	}
-}
-
-void VulkanCommandList::ClearDepth(dy::RHI::ITexture* depthStencil, float depth)
-{
-	if (m_passRecords.empty()) return;
-	PassRecord& passRecord = m_passRecords.back();
-	if (depthStencil == nullptr || passRecord.depthStencil != depthStencil) return;
-	m_clearDepth = depth;
-	passRecord.clearDepth = depth;
+	m_isRendering = false;
 }
 
 void VulkanCommandList::SetViewport(const dy::RHI::Viewport& viewport)
@@ -115,7 +102,7 @@ void VulkanCommandList::SetScissor(const dy::RHI::Rect& rect)
 
 void VulkanCommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance)
 {
-	if (m_passRecords.empty()) return;
+	if (!m_isRendering) return;
 	DrawCall drawCall = {};
 	drawCall.indexed = false;
 	drawCall.vertexCount = vertexCount;
@@ -139,7 +126,7 @@ void VulkanCommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCou
 
 void VulkanCommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance)
 {
-	if (m_passRecords.empty()) return;
+	if (!m_isRendering) return;
 	DrawCall drawCall = {};
 	drawCall.indexed = true;
 	drawCall.indexCount = indexCount;
@@ -164,6 +151,12 @@ void VulkanCommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t insta
 
 void VulkanCommandList::End()
 {
+}
+
+void VulkanCommandList::Close()
+{
+	EndRendering();
+	m_isClosed = true;
 }
 
 }
