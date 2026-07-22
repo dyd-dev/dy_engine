@@ -2,7 +2,6 @@
 #include <cstdint>
 
 #include "Format.h"
-#include "ShaderLayout.h"
 
 namespace dy::RHI
 {
@@ -10,10 +9,14 @@ namespace dy::RHI
 
 	class IBuffer;
 	class IShader;
+	class IResourceSet;
+	class ISampler;
 	class ITexture;
 	class IPipelineState;
 
 	struct BufferDesc;
+	struct ResourceSetWrite;
+	struct SamplerDesc;
 	struct ShaderDesc;
 	struct TextureDesc;
 	struct GraphicsPipelineDesc;
@@ -28,10 +31,7 @@ namespace dy::RHI
 		// 동시에 완료되지 않을 수 있는 제출의 상한이자 순환 재사용할 frame context 수. 0은 유효하지 않다.
 		// swapchain image 수와는 독립적이며 GetCurrentFrameIndex()는 이 범위의 context index를 반환한다.
 		uint32_t maxFramesInFlight = 2;
-		uint32_t maxDrawsPerFrame = 128;
-		uint32_t maxBindlessTextures = 128;
 		uint64_t frameAcquireTimeoutNanoseconds = 16666667ull;
-		ShaderLayoutDesc shaderLayout = {};
 	};
 
 	class IDevice
@@ -55,19 +55,21 @@ namespace dy::RHI
 
 		[[nodiscard]] virtual IBuffer* CreateBuffer(const BufferDesc& desc) = 0;
 		[[nodiscard]] virtual IShader* CreateShader(const ShaderDesc& desc) = 0;
+		[[nodiscard]] virtual ISampler* CreateSampler(const SamplerDesc& desc) = 0;
 		[[nodiscard]] virtual ITexture* CreateTexture(const TextureDesc& desc) = 0;
 		[[nodiscard]] virtual IPipelineState* CreateGraphicsPipeline(const GraphicsPipelineDesc& desc) = 0;
+		// pipeline은 생성한 resource set보다 오래 살아야 한다. set에 기록한 자원과 sampler는 GPU 사용 완료까지 유효해야 한다.
+		[[nodiscard]] virtual IResourceSet* CreateResourceSet(IPipelineState* pipeline) = 0;
+		virtual bool UpdateResourceSet(IResourceSet* resourceSet, const ResourceSetWrite* writes, uint32_t writeCount) = 0;
 		
 		virtual void DestroyBuffer(IBuffer* buffer) = 0;
 		virtual void DestroyShader(IShader* shader) = 0;
+		virtual void DestroySampler(ISampler* sampler) = 0;
 		virtual void DestroyTexture(ITexture* texture) = 0;
 		virtual void DestroyPipelineState(IPipelineState* pipeline) = 0;
+		virtual void DestroyResourceSet(IResourceSet* resourceSet) = 0;
 
 		virtual bool UpdateTexture(ITexture* texture, const void* data, uint32_t rowPitch) = 0;
-
-		[[nodiscard]] virtual DescriptorIndex AllocateDescriptorSlot() { return INVALID_DESCRIPTOR_INDEX; }
-		virtual void UpdateDescriptorSlot(DescriptorIndex index, ITexture* texture) { (void)index; (void)texture; }
-		virtual void UpdateDescriptorSlot(DescriptorIndex index, IBuffer* buffer) { (void)index; (void)buffer; }
 
 	protected:
 		virtual int Initialize(const void* windowHandle, const DeviceDesc& desc) = 0;

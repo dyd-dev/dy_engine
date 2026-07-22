@@ -2,9 +2,6 @@
 #include "MetalBuffer.h"
 #include "MetalTexture.h"
 #include "MetalPipeline.h"
-#include "RHI/ShaderLayout.h"
-#include <algorithm>
-#include <array>
 #include <cstring>
 #include <vector>
 #import <Metal/Metal.h>
@@ -13,9 +10,6 @@ namespace dy::Backends
 {
     namespace
     {
-        constexpr uint32_t kMaxDescriptorBindings = 16u;
-        constexpr uint32_t kMaxPushConstantBytes = 256u;
-
         id<MTLBuffer> GetMetalBuffer(RHI::IBuffer* buffer)
         {
             if(buffer == nullptr)
@@ -43,13 +37,12 @@ namespace dy::Backends
         id<MTLCommandBuffer>         commandBuffer  = nil;
         id<MTLRenderCommandEncoder>  encoder        = nil;
         MTLRenderPassDescriptor*     passDescriptor = nil;
-        std::vector<id<MTLTexture>>  textures;
+        MetalPipeline*             activePipeline = nullptr;
         RHI::IBuffer*               indexBuffer    = nullptr;
         RHI::Format                 indexFormat    = RHI::Format::Unknown;
         uint32_t                    indexOffset    = 0;
         MTLPrimitiveType            primitiveType  = MTLPrimitiveTypeTriangle;
-        std::array<uint8_t, kMaxPushConstantBytes> inlineConstants = {};
-        uint32_t                     inlineConstantSize = 0;
+        std::vector<uint8_t>        inlineConstants;
         uint32_t                     renderWidth = 1;
         uint32_t                     renderHeight = 1;
         std::vector<RHI::ITexture*> activeColorTargets;
@@ -76,8 +69,8 @@ namespace dy::Backends
         m_impl->indexFormat = RHI::Format::Unknown;
         m_impl->indexOffset = 0;
         m_impl->primitiveType = MTLPrimitiveTypeTriangle;
-        m_impl->inlineConstants = {};
-        m_impl->inlineConstantSize = 0;
+        m_impl->activePipeline = nullptr;
+        m_impl->inlineConstants.clear();
         m_impl->renderWidth = 1;
         m_impl->renderHeight = 1;
         m_impl->activeColorTargets.clear();
@@ -289,16 +282,14 @@ namespace dy::Backends
                                   clamp:rasterization.depthBiasClamp];
         [m_impl->encoder setDepthStencilState:depth];
         [m_impl->encoder setStencilReferenceValue:pipeline->GetStencilReference()];
+        m_impl->activePipeline = pipeline;
     }
 
-    void MetalCommandList::BindGlobalDescriptors()
+    void MetalCommandList::BindResourceSet(RHI::IResourceSet* resourceSet)
     {
         EnsureRenderEncoder();
-        for(uint32_t i = 0; i < m_impl->textures.size(); ++i)
-        {
-            if(m_impl->textures[i] != nil)
-                [m_impl->encoder setFragmentTexture:m_impl->textures[i] atIndex:i];
-        }
+        auto* metalSet = dynamic_cast<MetalResourceSet*>(resourceSet);
+        if(metalSet != nullptr) metalSet->Bind((__bridge void*)m_impl->encoder, m_impl->activePipeline);
     }
 
     void MetalCommandList::BindVertexBuffer(uint32_t slot, RHI::IBuffer* buffer, uint32_t offset)
@@ -316,51 +307,21 @@ namespace dy::Backends
         m_impl->indexOffset = offset;
     }
 
-    void MetalCommandList::BindConstantBuffer(uint32_t binding, RHI::IBuffer* buffer, uint32_t offset, uint32_t size)
-    {
-        (void)size;
-        if(binding >= kMaxDescriptorBindings)
-            return;
-
-        EnsureRenderEncoder();
-        id<MTLBuffer> mtlBuffer = GetMetalBuffer(buffer);
-        [m_impl->encoder setVertexBuffer:mtlBuffer offset:offset atIndex:binding];
-        [m_impl->encoder setFragmentBuffer:mtlBuffer offset:offset atIndex:binding];
-    }
-
-    void MetalCommandList::BindStorageBuffer(uint32_t binding, RHI::IBuffer* buffer, uint32_t offset, uint32_t size)
-    {
-        (void)size;
-        if(binding >= kMaxDescriptorBindings)
-            return;
-
-        EnsureRenderEncoder();
-        id<MTLBuffer> mtlBuffer = GetMetalBuffer(buffer);
-        [m_impl->encoder setVertexBuffer:mtlBuffer offset:offset atIndex:binding];
-        [m_impl->encoder setFragmentBuffer:mtlBuffer offset:offset atIndex:binding];
-    }
-
-    void MetalCommandList::BindTexture(uint32_t binding, RHI::ITexture* texture)
+    void MetalCommandList::SetInlineConstants(uint32_t offset, uint32_t size, const void* data)
     {
         EnsureRenderEncoder();
-        [m_impl->encoder setFragmentTexture:GetMetalTexture(texture) atIndex:binding];
-    }
-
-    void MetalCommandList::SetInlineConstants(uint32_t size, const void* data)
-    {
-        EnsureRenderEncoder();
-
-        if(data == nullptr || size == 0)
+        if(data == nullptr || size == 0 || m_impl->activePipeline == nullptr) return;
+        for(const RHI::InlineConstantRangeDesc& range : m_impl->activePipeline->GetInlineConstantRanges())
         {
-            m_impl->inlineConstantSize = 0;
+            if(offset < range.offset || offset + size > range.offset + range.size) continue;
+            m_impl->inlineConstants.resize(range.size, 0);
+            std::memcpy(m_impl->inlineConstants.data() + offset - range.offset, data, size);
+            if((range.stages & RHI::ShaderStageFlags::Vertex) != RHI::ShaderStageFlags::None)
+                [m_impl->encoder setVertexBytes:m_impl->inlineConstants.data() length:range.size atIndex:range.binding];
+            if((range.stages & RHI::ShaderStageFlags::Fragment) != RHI::ShaderStageFlags::None)
+                [m_impl->encoder setFragmentBytes:m_impl->inlineConstants.data() length:range.size atIndex:range.binding];
             return;
         }
-
-        m_impl->inlineConstantSize = std::min<uint32_t>(size, static_cast<uint32_t>(m_impl->inlineConstants.size()));
-        std::memcpy(m_impl->inlineConstants.data(), data, m_impl->inlineConstantSize);
-
-        [m_impl->encoder setVertexBytes:m_impl->inlineConstants.data() length:m_impl->inlineConstantSize atIndex:0];
-        [m_impl->encoder setFragmentBytes:m_impl->inlineConstants.data() length:m_impl->inlineConstantSize atIndex:0];
     }
 
     void MetalCommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance)
@@ -413,17 +374,6 @@ namespace dy::Backends
         EnsureRenderEncoder();
 
         [m_impl->encoder setVertexBuffer:GetMetalBuffer(buffer) offset:0 atIndex:index];
-    }
-
-    void MetalCommandList::SetNativeTexture(void* texture, uint32_t index)
-    {
-        id<MTLTexture> mtlTexture = (__bridge id<MTLTexture>)texture;
-        if(index >= m_impl->textures.size())
-            m_impl->textures.resize(index + 1, nil);
-        m_impl->textures[index] = mtlTexture;
-
-        if(m_impl->encoder != nil)
-            [m_impl->encoder setFragmentTexture:mtlTexture atIndex:index];
     }
 
     void MetalCommandList::DrawIndexed(RHI::IBuffer* indexBuffer, uint32_t indexCount)

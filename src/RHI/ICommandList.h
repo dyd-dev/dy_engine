@@ -7,6 +7,7 @@ namespace dy::RHI
 	class IBuffer;
 	class ITexture;
 	class IPipelineState;
+	class IResourceSet;
 
 	struct Viewport
 	{
@@ -33,22 +34,14 @@ namespace dy::RHI
 
 		// pipeline
 		virtual void BindGraphicsPipeline(IPipelineState* pipelineState) = 0;
-		virtual void BindGlobalDescriptors() = 0;
+		virtual void BindResourceSet(IResourceSet* resourceSet) = 0;
 
 		// Input Assembly
 		virtual void BindVertexBuffer(uint32_t slot, IBuffer* buffer, uint32_t offset) = 0;
 		virtual void BindIndexBuffer(IBuffer* buffer, Format format, uint32_t offset) = 0;
 
-		// descriptor binding
-		virtual void BindConstantBuffer(uint32_t binding, IBuffer* buffer, uint32_t offset, uint32_t size) { (void)binding; (void)buffer; (void)offset; (void)size; }
-		virtual void BindTexture(uint32_t binding, ITexture* texture) { (void)binding; (void)texture; }
-		virtual void BindStorageBuffer(uint32_t binding, IBuffer* buffer, uint32_t offset, uint32_t size)
-		{
-			(void)binding; (void)buffer; (void)offset; (void)size;
-		}
-
 		// shader constants
-		virtual void SetInlineConstants(uint32_t size, const void* data) = 0;
+		virtual void SetInlineConstants(uint32_t offset, uint32_t size, const void* data) = 0;
 
 		// output state
 		virtual void SetRenderTargets(uint32_t numRenderTargets, ITexture** renderTargets, ITexture* depthStencil) = 0;

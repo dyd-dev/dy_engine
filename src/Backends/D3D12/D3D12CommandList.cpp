@@ -14,21 +14,6 @@ namespace dy::Backends
 {
     namespace
     {
-        constexpr uint32_t kBaseColorTextureBinding = 0; // DY_RENDERER_BINDING_BASE_COLOR_TEXTURE
-        constexpr uint32_t kShadowMapBinding = 2; // DY_RENDERER_BINDING_SHADOW_MAP
-        constexpr uint32_t kMetallicRoughnessTextureBinding = 6;
-        constexpr uint32_t kNormalTextureBinding = 7;
-        constexpr uint32_t kOcclusionTextureBinding = 8;
-        constexpr uint32_t kEmissiveTextureBinding = 9;
-        constexpr uint32_t kBindlessTransformStorageBinding = 11;
-        constexpr uint32_t kBaseColorTextureRootParameter = 1;
-        constexpr uint32_t kShadowMapSrvRootParameter = 5;
-        constexpr uint32_t kMetallicRoughnessTextureRootParameter = 6;
-        constexpr uint32_t kNormalTextureRootParameter = 7;
-        constexpr uint32_t kOcclusionTextureRootParameter = 8;
-        constexpr uint32_t kEmissiveTextureRootParameter = 9;
-        constexpr uint32_t kBindlessTransformStorageRootParameter = 4;
-
         void TransitionTexture(ID3D12GraphicsCommandList* commandList, D3D12Texture* texture, D3D12_RESOURCE_STATES after)
         {
             if (commandList == nullptr || texture == nullptr) return;
@@ -48,25 +33,6 @@ namespace dy::Backends
             texture->SetResourceState(after);
         }
 
-        void BindTextureDescriptorTable(
-            ID3D12GraphicsCommandList* commandList,
-            ID3D12DescriptorHeap* descriptorHeap,
-            uint32_t descriptorSize,
-            uint32_t rootParameter,
-            D3D12Texture* texture)
-        {
-            if (commandList == nullptr ||
-                descriptorHeap == nullptr ||
-                texture == nullptr ||
-                texture->GetGlobalSrvIndex() == 0xFFFFFFFFu)
-            {
-                return;
-            }
-
-            D3D12_GPU_DESCRIPTOR_HANDLE gpuHandle = descriptorHeap->GetGPUDescriptorHandleForHeapStart();
-            gpuHandle.ptr += static_cast<UINT64>(texture->GetGlobalSrvIndex()) * descriptorSize;
-            commandList->SetGraphicsRootDescriptorTable(rootParameter, gpuHandle);
-        }
     }
 
     struct D3D12CommandListInternal
@@ -74,8 +40,6 @@ namespace dy::Backends
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> commandList;
         D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = {};
-        ID3D12DescriptorHeap* globalDescriptorHeap = nullptr;
-        uint32_t srvDescriptorSize = 0;
         D3D12Texture* backBufferTexture = nullptr; // 상태 추적기(GetBackBuffer 가 돌려주는 래퍼와 동일 리소스)
         std::vector<RHI::ITexture*> activeColorTargets;
         RHI::ITexture* activeDepthTarget = nullptr;
@@ -85,15 +49,12 @@ namespace dy::Backends
         bool hasActivePass = false;
     };
 
-    D3D12CommandList::D3D12CommandList(void* nativeDevice, size_t rtvHandlePtr, void* globalDescriptorHeap, uint32_t srvDescriptorSize)
+    D3D12CommandList::D3D12CommandList(void* nativeDevice, size_t rtvHandlePtr)
     {
         m_internal = new D3D12CommandListInternal();
         ID3D12Device* device = static_cast<ID3D12Device*>(nativeDevice);
 
         m_internal->rtvHandle.ptr = rtvHandlePtr;
-        m_internal->globalDescriptorHeap = static_cast<ID3D12DescriptorHeap*>(globalDescriptorHeap);
-        m_internal->srvDescriptorSize = srvDescriptorSize;
-
         device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_internal->allocator));
         device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_internal->allocator.Get(), nullptr, IID_PPV_ARGS(&m_internal->commandList));
         m_internal->commandList->Close();
@@ -219,14 +180,6 @@ namespace dy::Backends
         m_internal->commandList->DrawIndexedInstanced(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
     }
 
-    void D3D12CommandList::BindGlobalDescriptors()
-    {
-        if (m_internal->globalDescriptorHeap == nullptr) return;
-        ID3D12DescriptorHeap* heaps[] = { m_internal->globalDescriptorHeap };
-        m_internal->commandList->SetDescriptorHeaps(1, heaps);
-        m_internal->commandList->SetGraphicsRootDescriptorTable(1, m_internal->globalDescriptorHeap->GetGPUDescriptorHandleForHeapStart());
-    }
-
     void D3D12CommandList::BindGraphicsPipeline(RHI::IPipelineState* pipelineState)
     {
         auto* d3d12PSO = static_cast<D3D12PipelineState*>(pipelineState);
@@ -248,131 +201,26 @@ namespace dy::Backends
         m_internal->commandList->IASetPrimitiveTopology(topology);
     }
 
-    void D3D12CommandList::BindConstantBuffer(uint32_t binding, RHI::IBuffer* buffer, uint32_t offset, uint32_t size)
+    void D3D12CommandList::BindResourceSet(RHI::IResourceSet* resourceSet)
     {
-        (void)size;
-        if (buffer == nullptr) return;
-
-        uint32_t rootParameterIndex = UINT32_MAX;
-        if (binding == 1)
-        {
-            rootParameterIndex = 2;
-        }
-        else if (binding == 3)
-        {
-            rootParameterIndex = 3;
-        }
-
-        if (rootParameterIndex == UINT32_MAX) return;
-
-        auto* d3d12Buffer = static_cast<D3D12Buffer*>(buffer);
-        ID3D12Resource* resource = static_cast<ID3D12Resource*>(d3d12Buffer->GetNativeResource());
-        if (resource == nullptr) return;
-
-        m_internal->commandList->SetGraphicsRootConstantBufferView(rootParameterIndex, resource->GetGPUVirtualAddress() + offset);
+        auto* d3dSet = dynamic_cast<D3D12ResourceSet*>(resourceSet);
+        if(d3dSet != nullptr) d3dSet->Bind(m_internal->commandList.Get(), m_internal->activeGraphicsPipeline);
     }
 
-    void D3D12CommandList::BindTexture(uint32_t binding, RHI::ITexture* texture)
+    void D3D12CommandList::SetInlineConstants(uint32_t offset, uint32_t size, const void* data)
     {
-        if (texture == nullptr) return;
-        auto* d3dTexture = static_cast<D3D12Texture*>(texture);
-        TransitionTexture(m_internal->commandList.Get(), d3dTexture, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-
-        // 그림자 맵: 전용 SRV 디스크립터 테이블(루트 파라미터 7)에 바인딩.
-        // 머티리얼 텍스처는 bindless 글로벌 힙(루트 1)로 가므로 상태 전환만 한다.
-        if (binding == kBaseColorTextureBinding)
+        if(m_internal->activeGraphicsPipeline == nullptr || data == nullptr || size == 0 ||
+            (offset & 3u) != 0 || (size & 3u) != 0) return;
+        for(const D3D12InlineConstantRange& range : m_internal->activeGraphicsPipeline->GetInlineConstantRanges())
         {
-            // per-draw 베이스컬러: 텍스처의 글로벌 SRV 슬롯에 디스크립터 테이블을 직접 바인딩.
-            // (과거의 단일 공유 슬롯 1023 복사 방식은 CopyDescriptorsSimple 이 CPU 즉시 실행이라
-            //  한 프레임의 모든 드로우가 같은 슬롯을 덮어써 GPU 실행 시 마지막 텍스처만 샘플되는 버그가 있었음.
-            //  루트 범위가 unbounded 라 텍스처별 글로벌 슬롯을 테이블 시작점으로 직접 쓰면 드로우마다 올바른 텍스처가 샘플된다.)
-            BindTextureDescriptorTable(
-                m_internal->commandList.Get(),
-                m_internal->globalDescriptorHeap,
-                m_internal->srvDescriptorSize,
-                kBaseColorTextureRootParameter,
-                d3dTexture);
+            if(offset < range.desc.offset || offset + size > range.desc.offset + range.desc.size) continue;
+            m_internal->commandList->SetGraphicsRoot32BitConstants(
+                range.rootParameter,
+                size / 4,
+                data,
+                (offset - range.desc.offset) / 4);
             return;
         }
-
-        if (binding == kMetallicRoughnessTextureBinding)
-        {
-            BindTextureDescriptorTable(
-                m_internal->commandList.Get(),
-                m_internal->globalDescriptorHeap,
-                m_internal->srvDescriptorSize,
-                kMetallicRoughnessTextureRootParameter,
-                d3dTexture);
-            return;
-        }
-
-        if (binding == kNormalTextureBinding)
-        {
-            BindTextureDescriptorTable(
-                m_internal->commandList.Get(),
-                m_internal->globalDescriptorHeap,
-                m_internal->srvDescriptorSize,
-                kNormalTextureRootParameter,
-                d3dTexture);
-            return;
-        }
-
-        if (binding == kOcclusionTextureBinding)
-        {
-            BindTextureDescriptorTable(
-                m_internal->commandList.Get(),
-                m_internal->globalDescriptorHeap,
-                m_internal->srvDescriptorSize,
-                kOcclusionTextureRootParameter,
-                d3dTexture);
-            return;
-        }
-
-        if (binding == kEmissiveTextureBinding)
-        {
-            BindTextureDescriptorTable(
-                m_internal->commandList.Get(),
-                m_internal->globalDescriptorHeap,
-                m_internal->srvDescriptorSize,
-                kEmissiveTextureRootParameter,
-                d3dTexture);
-            return;
-        }
-
-        if (binding == kShadowMapBinding)
-        {
-            BindTextureDescriptorTable(
-                m_internal->commandList.Get(),
-                m_internal->globalDescriptorHeap,
-                m_internal->srvDescriptorSize,
-                kShadowMapSrvRootParameter,
-                d3dTexture);
-        }
-    }
-
-    void D3D12CommandList::BindStorageBuffer(uint32_t binding, RHI::IBuffer* buffer, uint32_t offset, uint32_t size)
-    {
-        (void)size;
-        if (buffer == nullptr) return;
-
-        uint32_t rootParameterIndex = UINT32_MAX;
-        if (binding == kBindlessTransformStorageBinding)
-        {
-            rootParameterIndex = kBindlessTransformStorageRootParameter;
-        }
-
-        if (rootParameterIndex == UINT32_MAX) return;
-
-        auto* d3d12Buffer = static_cast<D3D12Buffer*>(buffer);
-        ID3D12Resource* resource = static_cast<ID3D12Resource*>(d3d12Buffer->GetNativeResource());
-        if (resource == nullptr) return;
-
-        m_internal->commandList->SetGraphicsRootShaderResourceView(rootParameterIndex, resource->GetGPUVirtualAddress() + offset);
-    }
-
-    void D3D12CommandList::SetInlineConstants(uint32_t size, const void* data)
-    {
-        m_internal->commandList->SetGraphicsRoot32BitConstants(0, size / 4, data, 0);
     }
 
     void D3D12CommandList::SetRenderTargets(uint32_t numRenderTargets, RHI::ITexture** renderTargets, RHI::ITexture* depthStencil)

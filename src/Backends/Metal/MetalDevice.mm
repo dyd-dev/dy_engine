@@ -3,6 +3,8 @@
 #include "MetalTexture.h"
 #include "MetalPipeline.h"
 #include "MetalCommandList.h"
+#include "RHI/IResourceSet.h"
+#include "RHI/ISampler.h"
 #include <vector>
 
 #import <Metal/Metal.h>
@@ -25,8 +27,6 @@ namespace dy::Backends
         MetalCommandList*   commandList     = nullptr;
         MetalTexture*       backBufferTex   = nullptr;  // cached; not owned by Renderer
 
-        RHI::DescriptorIndex        nextDescriptorIndex = 0;
-        std::vector<RHI::ITexture*> textures;
     };
 
     MetalDevice::MetalDevice()
@@ -126,15 +126,6 @@ namespace dy::Backends
 
         m_impl->commandList->Begin();
 
-        for(uint32_t i = 0; i < m_impl->textures.size(); i++)
-        {
-            if(m_impl->textures[i] != nullptr)
-            {
-                auto* metalTex = static_cast<MetalTexture*>(m_impl->textures[i]);
-                m_impl->commandList->SetNativeTexture(metalTex->GetNativeTexture(), i);
-            }
-        }
-
         return true;
     }
 
@@ -203,6 +194,24 @@ namespace dy::Backends
         return shader;
     }
 
+    RHI::ISampler* MetalDevice::CreateSampler(const RHI::SamplerDesc& desc)
+    {
+        if(desc.minLod > desc.maxLod ||
+           static_cast<uint32_t>(desc.minFilter) > static_cast<uint32_t>(RHI::SamplerFilter::Linear) ||
+           static_cast<uint32_t>(desc.magFilter) > static_cast<uint32_t>(RHI::SamplerFilter::Linear) ||
+           static_cast<uint32_t>(desc.mipFilter) > static_cast<uint32_t>(RHI::SamplerFilter::Linear) ||
+           static_cast<uint32_t>(desc.addressU) > static_cast<uint32_t>(RHI::SamplerAddressMode::ClampToEdge) ||
+           static_cast<uint32_t>(desc.addressV) > static_cast<uint32_t>(RHI::SamplerAddressMode::ClampToEdge) ||
+           static_cast<uint32_t>(desc.addressW) > static_cast<uint32_t>(RHI::SamplerAddressMode::ClampToEdge)) return nullptr;
+        auto* sampler = new MetalSampler(desc, (__bridge void*)m_impl->device);
+        if(!sampler->IsValid())
+        {
+            delete sampler;
+            return nullptr;
+        }
+        return sampler;
+    }
+
     RHI::IPipelineState* MetalDevice::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc)
     {
         const bool hasColorAttachment = desc.colorAttachmentCount > 0;
@@ -227,20 +236,24 @@ namespace dy::Backends
         return pipeline;
     }
 
+    RHI::IResourceSet* MetalDevice::CreateResourceSet(RHI::IPipelineState* pipeline)
+    {
+        auto* metalPipeline = dynamic_cast<MetalPipeline*>(pipeline);
+        return metalPipeline == nullptr ? nullptr : new MetalResourceSet(metalPipeline);
+    }
+
+    bool MetalDevice::UpdateResourceSet(RHI::IResourceSet* resourceSet, const RHI::ResourceSetWrite* writes, uint32_t writeCount)
+    {
+        auto* metalSet = dynamic_cast<MetalResourceSet*>(resourceSet);
+        return metalSet != nullptr && metalSet->Update(writes, writeCount);
+    }
+
     void MetalDevice::DestroyBuffer(RHI::IBuffer* buffer)                 { delete buffer; }
     void MetalDevice::DestroyShader(RHI::IShader* shader)                 { delete shader; }
-    void MetalDevice::DestroyTexture(RHI::ITexture* texture)
-    {
-        if(texture == nullptr) return;
-        for(uint32_t i = 0; i < m_impl->textures.size(); ++i)
-        {
-            if(m_impl->textures[i] != texture) continue;
-            m_impl->textures[i] = nullptr;
-            m_impl->commandList->SetNativeTexture(nullptr, i);
-        }
-        delete texture;
-    }
+    void MetalDevice::DestroySampler(RHI::ISampler* sampler)              { delete sampler; }
+    void MetalDevice::DestroyTexture(RHI::ITexture* texture)              { delete texture; }
     void MetalDevice::DestroyPipelineState(RHI::IPipelineState* pipeline) { delete pipeline; }
+    void MetalDevice::DestroyResourceSet(RHI::IResourceSet* resourceSet)  { delete resourceSet; }
 
     bool MetalDevice::UpdateTexture(RHI::ITexture* texture, const void* data, uint32_t rowPitch)
     {
@@ -258,22 +271,6 @@ namespace dy::Backends
                             withBytes:data
                           bytesPerRow:rowPitch];
         return true;
-    }
-
-    RHI::DescriptorIndex MetalDevice::AllocateDescriptorSlot()
-    {
-        return m_impl->nextDescriptorIndex++;
-    }
-
-    void MetalDevice::UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::ITexture* texture)
-    {
-        if(index >= m_impl->textures.size())
-            m_impl->textures.resize(index + 1, nullptr);
-
-        m_impl->textures[index] = texture;
-
-        auto* metalTex = static_cast<MetalTexture*>(texture);
-        m_impl->commandList->SetNativeTexture(metalTex->GetNativeTexture(), index);
     }
 
     RHI::ITexture* MetalDevice::GetBackBuffer()

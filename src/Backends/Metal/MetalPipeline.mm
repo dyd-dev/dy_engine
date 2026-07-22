@@ -1,4 +1,6 @@
 #include "MetalPipeline.h"
+#include "MetalBuffer.h"
+#include "MetalTexture.h"
 #import <Metal/Metal.h>
 
 namespace dy::Backends
@@ -70,6 +72,8 @@ namespace dy::Backends
         RHI::RasterizationDesc rasterization = {};
         uint32_t stencilReference = 0;
         RHI::PrimitiveTopology topology = RHI::PrimitiveTopology::TriangleList;
+        std::vector<RHI::ResourceBindingDesc> resourceBindings;
+        std::vector<RHI::InlineConstantRangeDesc> inlineConstantRanges;
     };
 
     static MTLPixelFormat ToMTLFormat(RHI::Format format)
@@ -96,6 +100,34 @@ namespace dy::Backends
         m_impl->rasterization = desc.rasterization;
         m_impl->stencilReference = desc.depthStencil.stencilReference;
         m_impl->topology = desc.inputAssembly.topology;
+        if((desc.pipelineLayout.resourceBindingCount > 0 && desc.pipelineLayout.resourceBindings == nullptr) ||
+           (desc.pipelineLayout.inlineConstantRangeCount > 0 && desc.pipelineLayout.inlineConstantRanges == nullptr)) return;
+        if(desc.pipelineLayout.resourceBindingCount > 0)
+            m_impl->resourceBindings.assign(
+                desc.pipelineLayout.resourceBindings,
+                desc.pipelineLayout.resourceBindings + desc.pipelineLayout.resourceBindingCount);
+        if(desc.pipelineLayout.inlineConstantRangeCount > 0)
+            m_impl->inlineConstantRanges.assign(
+                desc.pipelineLayout.inlineConstantRanges,
+                desc.pipelineLayout.inlineConstantRanges + desc.pipelineLayout.inlineConstantRangeCount);
+        for(uint32_t bindingIndex = 0; bindingIndex < m_impl->resourceBindings.size(); ++bindingIndex)
+        {
+            const RHI::ResourceBindingDesc& binding = m_impl->resourceBindings[bindingIndex];
+            if(binding.arrayCount == 0 || binding.stages == RHI::ShaderStageFlags::None ||
+               binding.binding + binding.arrayCount > 31u) return;
+            for(uint32_t previous = 0; previous < bindingIndex; ++previous)
+            {
+                const RHI::ResourceBindingDesc& other = m_impl->resourceBindings[previous];
+                if(other.set == binding.set && other.binding == binding.binding) return;
+                if(other.set != binding.set &&
+                   binding.binding < other.binding + other.arrayCount &&
+                   other.binding < binding.binding + binding.arrayCount) return;
+            }
+        }
+        for(const RHI::InlineConstantRangeDesc& range : m_impl->inlineConstantRanges)
+        {
+            if(range.size == 0 || range.stages == RHI::ShaderStageFlags::None || range.binding >= 31u) return;
+        }
         if((desc.rasterization.fillMode != RHI::FillMode::Solid && desc.rasterization.fillMode != RHI::FillMode::Wireframe) ||
            (desc.rasterization.cullMode != RHI::CullMode::None && desc.rasterization.cullMode != RHI::CullMode::Front && desc.rasterization.cullMode != RHI::CullMode::Back) ||
            (desc.rasterization.frontFace != RHI::FrontFace::CounterClockwise && desc.rasterization.frontFace != RHI::FrontFace::Clockwise) ||
@@ -352,6 +384,16 @@ namespace dy::Backends
         return m_impl->topology;
     }
 
+    const std::vector<RHI::ResourceBindingDesc>& MetalPipeline::GetResourceBindings() const
+    {
+        return m_impl->resourceBindings;
+    }
+
+    const std::vector<RHI::InlineConstantRangeDesc>& MetalPipeline::GetInlineConstantRanges() const
+    {
+        return m_impl->inlineConstantRanges;
+    }
+
     uint32_t MetalPipeline::GetNativeVertexBufferIndex(uint32_t slot)
     {
         return 16u + slot;
@@ -360,5 +402,160 @@ namespace dy::Backends
     bool MetalPipeline::IsValid() const
     {
         return m_impl->pipelineState != nil && m_impl->depthStencilState != nil;
+    }
+
+    struct MetalSampler::Impl
+    {
+        id<MTLSamplerState> sampler = nil;
+    };
+
+    MetalSampler::MetalSampler(const RHI::SamplerDesc& desc, void* device)
+        : RHI::ISampler(desc)
+        , m_impl(new Impl())
+    {
+        MTLSamplerDescriptor* nativeDesc = [MTLSamplerDescriptor new];
+        nativeDesc.minFilter = desc.minFilter == RHI::SamplerFilter::Linear ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+        nativeDesc.magFilter = desc.magFilter == RHI::SamplerFilter::Linear ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+        nativeDesc.mipFilter = desc.mipFilter == RHI::SamplerFilter::Linear ? MTLSamplerMipFilterLinear : MTLSamplerMipFilterNearest;
+        const RHI::SamplerAddressMode sourceModes[] = { desc.addressU, desc.addressV, desc.addressW };
+        MTLSamplerAddressMode nativeModes[3] = {};
+        for(uint32_t index = 0; index < 3; ++index)
+        {
+            switch(sourceModes[index])
+            {
+            case RHI::SamplerAddressMode::Repeat: nativeModes[index] = MTLSamplerAddressModeRepeat; break;
+            case RHI::SamplerAddressMode::MirroredRepeat: nativeModes[index] = MTLSamplerAddressModeMirrorRepeat; break;
+            case RHI::SamplerAddressMode::ClampToEdge: nativeModes[index] = MTLSamplerAddressModeClampToEdge; break;
+            }
+        }
+        nativeDesc.sAddressMode = nativeModes[0];
+        nativeDesc.tAddressMode = nativeModes[1];
+        nativeDesc.rAddressMode = nativeModes[2];
+        nativeDesc.lodMinClamp = desc.minLod;
+        nativeDesc.lodMaxClamp = desc.maxLod;
+        m_impl->sampler = [(__bridge id<MTLDevice>)device newSamplerStateWithDescriptor:nativeDesc];
+    }
+
+    MetalSampler::~MetalSampler()
+    {
+        delete m_impl;
+    }
+
+    void* MetalSampler::GetNativeSampler() const
+    {
+        return (__bridge void*)m_impl->sampler;
+    }
+
+    bool MetalSampler::IsValid() const
+    {
+        return m_impl->sampler != nil;
+    }
+
+    struct MetalResourceSet::Impl
+    {
+        struct Binding
+        {
+            RHI::ResourceBindingDesc desc = {};
+            std::vector<RHI::IBuffer*> buffers;
+            std::vector<RHI::ITexture*> textures;
+            std::vector<RHI::ISampler*> samplers;
+            std::vector<uint32_t> offsets;
+        };
+
+        MetalPipeline* pipeline = nullptr;
+        std::vector<Binding> bindings;
+    };
+
+    MetalResourceSet::MetalResourceSet(MetalPipeline* pipeline)
+        : m_impl(new Impl())
+    {
+        m_impl->pipeline = pipeline;
+        if(pipeline == nullptr) return;
+        for(const RHI::ResourceBindingDesc& desc : pipeline->GetResourceBindings())
+        {
+            Impl::Binding binding;
+            binding.desc = desc;
+            binding.buffers.resize(desc.arrayCount, nullptr);
+            binding.textures.resize(desc.arrayCount, nullptr);
+            binding.samplers.resize(desc.arrayCount, nullptr);
+            binding.offsets.resize(desc.arrayCount, 0);
+            m_impl->bindings.push_back(std::move(binding));
+        }
+    }
+
+    MetalResourceSet::~MetalResourceSet()
+    {
+        delete m_impl;
+    }
+
+    bool MetalResourceSet::Update(const RHI::ResourceSetWrite* writes, uint32_t writeCount)
+    {
+        if(writeCount > 0 && writes == nullptr) return false;
+        for(uint32_t writeIndex = 0; writeIndex < writeCount; ++writeIndex)
+        {
+            const RHI::ResourceSetWrite& write = writes[writeIndex];
+            Impl::Binding* target = nullptr;
+            for(Impl::Binding& binding : m_impl->bindings)
+            {
+                if(binding.desc.set == write.set && binding.desc.binding == write.binding)
+                {
+                    target = &binding;
+                    break;
+                }
+            }
+            if(target == nullptr || write.arrayElement >= target->desc.arrayCount) return false;
+            if(target->desc.type == RHI::ResourceType::TextureSampler)
+            {
+                if(dynamic_cast<MetalTexture*>(write.texture) == nullptr ||
+                   dynamic_cast<MetalSampler*>(write.sampler) == nullptr || write.buffer != nullptr) return false;
+            }
+            else if(dynamic_cast<MetalBuffer*>(write.buffer) == nullptr || write.texture != nullptr || write.sampler != nullptr ||
+                    write.bufferOffset >= write.buffer->GetSize()) return false;
+            target->buffers[write.arrayElement] = write.buffer;
+            target->textures[write.arrayElement] = write.texture;
+            target->samplers[write.arrayElement] = write.sampler;
+            target->offsets[write.arrayElement] = write.bufferOffset;
+        }
+        return true;
+    }
+
+    void MetalResourceSet::Bind(void* encoder, MetalPipeline* activePipeline)
+    {
+        if(activePipeline != m_impl->pipeline) return;
+        id<MTLRenderCommandEncoder> nativeEncoder = (__bridge id<MTLRenderCommandEncoder>)encoder;
+        if(nativeEncoder == nil) return;
+        for(const Impl::Binding& binding : m_impl->bindings)
+        {
+            for(uint32_t element = 0; element < binding.desc.arrayCount; ++element)
+            {
+                const uint32_t nativeIndex = binding.desc.binding + element;
+                const bool vertex = (binding.desc.stages & RHI::ShaderStageFlags::Vertex) != RHI::ShaderStageFlags::None;
+                const bool fragment = (binding.desc.stages & RHI::ShaderStageFlags::Fragment) != RHI::ShaderStageFlags::None;
+                if(binding.desc.type == RHI::ResourceType::TextureSampler)
+                {
+                    auto* texture = dynamic_cast<MetalTexture*>(binding.textures[element]);
+                    auto* sampler = dynamic_cast<MetalSampler*>(binding.samplers[element]);
+                    id<MTLTexture> nativeTexture = texture == nullptr ? nil : (__bridge id<MTLTexture>)texture->GetNativeTexture();
+                    id<MTLSamplerState> nativeSampler = sampler == nullptr ? nil : (__bridge id<MTLSamplerState>)sampler->GetNativeSampler();
+                    if(vertex)
+                    {
+                        [nativeEncoder setVertexTexture:nativeTexture atIndex:nativeIndex];
+                        [nativeEncoder setVertexSamplerState:nativeSampler atIndex:nativeIndex];
+                    }
+                    if(fragment)
+                    {
+                        [nativeEncoder setFragmentTexture:nativeTexture atIndex:nativeIndex];
+                        [nativeEncoder setFragmentSamplerState:nativeSampler atIndex:nativeIndex];
+                    }
+                }
+                else
+                {
+                    auto* buffer = dynamic_cast<MetalBuffer*>(binding.buffers[element]);
+                    id<MTLBuffer> nativeBuffer = buffer == nullptr ? nil : (__bridge id<MTLBuffer>)buffer->GetNativeBuffer();
+                    if(vertex) [nativeEncoder setVertexBuffer:nativeBuffer offset:binding.offsets[element] atIndex:nativeIndex];
+                    if(fragment) [nativeEncoder setFragmentBuffer:nativeBuffer offset:binding.offsets[element] atIndex:nativeIndex];
+                }
+            }
+        }
     }
 }

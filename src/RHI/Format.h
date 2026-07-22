@@ -33,9 +33,4 @@ namespace dy::RHI
 		return format == Format::R8G8B8A8_UNORM_SRGB || format == Format::B8G8R8A8_UNORM_SRGB;
 	}
 
-	using DescriptorIndex = uint32_t;
-	static const DescriptorIndex INVALID_DESCRIPTOR_INDEX = static_cast<DescriptorIndex>(-1);
-
-	using BindingIndex = uint32_t;
-	static const BindingIndex INVALID_BINDING_INDEX = static_cast<BindingIndex>(-1);
 }

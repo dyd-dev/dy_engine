@@ -34,10 +34,8 @@ void VulkanPipeline::Initialize(
 	const VulkanContext& context,
 	VkRenderPass renderPass,
 	VkExtent2D,
-	VkDescriptorSetLayout descriptorSetLayout,
-	const dy::RHI::GraphicsPipelineDesc& desc,
-	uint32_t pushConstantSize,
-	VkDescriptorSetLayout bindlessDescriptorSetLayout)
+	VkPipelineLayout pipelineLayout,
+	const dy::RHI::GraphicsPipelineDesc& desc)
 {
 	const VulkanShader* vertexShader = dynamic_cast<const VulkanShader*>(desc.vertexShader);
 	const VulkanShader* fragmentShader = dynamic_cast<const VulkanShader*>(desc.fragmentShader);
@@ -302,26 +300,6 @@ void VulkanPipeline::Initialize(
 		target.reference = desc.depthStencil.stencilReference;
 	}
 
-	VkPushConstantRange pushConstantRange{};
-	pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-	pushConstantRange.offset = 0;
-	pushConstantRange.size = pushConstantSize;
-
-	std::array<VkDescriptorSetLayout, 2> descriptorSetLayouts = {
-		descriptorSetLayout,
-		bindlessDescriptorSetLayout
-	};
-	VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-	pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-	pipelineLayoutInfo.setLayoutCount = desc.enableBindlessTextures && bindlessDescriptorSetLayout != VK_NULL_HANDLE ? 2u : 1u;
-	pipelineLayoutInfo.pSetLayouts = descriptorSetLayouts.data();
-	pipelineLayoutInfo.pushConstantRangeCount = 1;
-	pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
-
-	if (vkCreatePipelineLayout(context.device, &pipelineLayoutInfo, nullptr, &m_pipelineLayout) != VK_SUCCESS) {
-		throw std::runtime_error("failed to create pipeline layout");
-	}
-
 	VkGraphicsPipelineCreateInfo pipelineInfo{};
 	pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
 	pipelineInfo.stageCount = hasFragmentShader ? 2u : 1u;
@@ -334,13 +312,11 @@ void VulkanPipeline::Initialize(
 	pipelineInfo.pDepthStencilState = &depthStencil;
 	pipelineInfo.pColorBlendState = &colorBlending;
 	pipelineInfo.pDynamicState = &dynamicState;
-	pipelineInfo.layout = m_pipelineLayout;
+	pipelineInfo.layout = pipelineLayout;
 	pipelineInfo.renderPass = renderPass;
 	pipelineInfo.subpass = 0;
 
 	if (vkCreateGraphicsPipelines(context.device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &m_graphicsPipeline) != VK_SUCCESS) {
-		vkDestroyPipelineLayout(context.device, m_pipelineLayout, nullptr);
-		m_pipelineLayout = VK_NULL_HANDLE;
 		throw std::runtime_error("failed to create graphics pipeline");
 	}
 
@@ -351,10 +327,6 @@ void VulkanPipeline::Cleanup(VkDevice device)
 	if (m_graphicsPipeline != VK_NULL_HANDLE) {
 		vkDestroyPipeline(device, m_graphicsPipeline, nullptr);
 		m_graphicsPipeline = VK_NULL_HANDLE;
-	}
-	if (m_pipelineLayout != VK_NULL_HANDLE) {
-		vkDestroyPipelineLayout(device, m_pipelineLayout, nullptr);
-		m_pipelineLayout = VK_NULL_HANDLE;
 	}
 }
 

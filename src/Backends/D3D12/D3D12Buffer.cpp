@@ -27,7 +27,9 @@ namespace dy::Backends
         D3D12_RESOURCE_DESC resourceDesc = {};
         resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
         resourceDesc.Alignment = 0;
-        resourceDesc.Width = desc.size;
+        resourceDesc.Width = (desc.usage & RHI::BufferUsage::Constant) != RHI::BufferUsage::None
+            ? (static_cast<uint64_t>(desc.size) + 255u) & ~255ull
+            : desc.size;
         resourceDesc.Height = 1;
         resourceDesc.DepthOrArraySize = 1;
         resourceDesc.MipLevels = 1;

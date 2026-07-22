@@ -21,6 +21,7 @@ namespace dy::RHI
 	class IBuffer;
 	class IDevice;
 	class IPipelineState;
+	class IResourceSet;
 	class ITexture;
 }
 
@@ -28,7 +29,7 @@ namespace dy::Graphics
 {
 	class Scene;
 
-	inline constexpr uint32_t kInvalidDescriptorIndex = 0xFFFFFFFFu;
+	inline constexpr uint32_t kInvalidTextureIndex = 0xFFFFFFFFu;
 
 	// 머티리얼 텍스처 슬롯 인덱스(셰이더 레이아웃의 텍스처 순서와 일치).
 	inline constexpr uint32_t kMaterialBaseColorTextureSlot = 0;
@@ -42,11 +43,12 @@ namespace dy::Graphics
 	{
 		SceneMaterialState()
 		{
-			textureDescriptorIndices.fill(kInvalidDescriptorIndex);
+			textureIndices.fill(kInvalidTextureIndex);
 		}
 
 		std::array<RHI::ITexture*, RendererShaderLayout::kMaterialTextureBindingCount> textures = {};
-		std::array<uint32_t, RendererShaderLayout::kMaterialTextureBindingCount> textureDescriptorIndices = {};
+		std::array<uint32_t, RendererShaderLayout::kMaterialTextureBindingCount> textureIndices = {};
+		RHI::IResourceSet* resourceSet = nullptr;
 		uint32_t textureFlags = 0;
 	};
 
@@ -60,10 +62,12 @@ namespace dy::Graphics
 		RHI::IBuffer* shadowMatrixBuffer = nullptr;
 		GpuScene* gpuScene = nullptr;
 		const std::vector<SceneMaterialState>* materialStates = nullptr;
+		RHI::IResourceSet* mainResourceSet = nullptr;
 
 		// 둘 다 non-null 이면 RenderPath 가 메인 패스 전에 깊이 전용 패스를 기록한다.
 		RHI::IPipelineState* shadowPipeline = nullptr;
 		RHI::ITexture* shadowDepth = nullptr;
+		RHI::IResourceSet* shadowResourceSet = nullptr;
 	};
 
 	class IRenderPath

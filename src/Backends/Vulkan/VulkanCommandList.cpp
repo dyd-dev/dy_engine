@@ -10,14 +10,13 @@ void VulkanCommandList::Begin()
 	m_clearColor = { { 0.4f, 0.7f, 1.0f, 1.0f } };
 	m_clearDepth = 1.0f;
 	m_boundPipeline = nullptr;
-	m_pendingPushConstantSize = 0;
+	m_pendingInlineConstants.clear();
+	m_pendingInlineConstantOffset = 0;
+	m_pendingResourceSet = nullptr;
 	m_pendingVertexBuffers.clear();
 	m_pendingIndexBuffer = nullptr;
 	m_pendingIndexFormat = dy::RHI::Format::Unknown;
 	m_pendingIndexOffset = 0;
-	m_pendingConstantBuffers = {};
-	m_pendingStorageBuffers = {};
-	m_pendingTextures = {};
 	m_hasPendingViewport = false;
 	m_hasPendingScissor = false;
 	m_passRecords.clear();
@@ -30,15 +29,20 @@ void VulkanCommandList::BindGraphicsPipeline(dy::RHI::IPipelineState* pipelineSt
 	m_boundPipeline = pipelineState;
 }
 
-void VulkanCommandList::SetInlineConstants(uint32_t size, const void* data)
+void VulkanCommandList::BindResourceSet(dy::RHI::IResourceSet* resourceSet)
 {
-	if (data == nullptr) {
-		m_pendingPushConstantSize = 0;
+	m_pendingResourceSet = resourceSet;
+}
+
+void VulkanCommandList::SetInlineConstants(uint32_t offset, uint32_t size, const void* data)
+{
+	if (data == nullptr || size == 0) {
+		m_pendingInlineConstants.clear();
 		return;
 	}
-
-	m_pendingPushConstantSize = std::min<uint32_t>(size, static_cast<uint32_t>(m_pendingPushConstants.size()));
-	memcpy(m_pendingPushConstants.data(), data, m_pendingPushConstantSize);
+	m_pendingInlineConstantOffset = offset;
+	m_pendingInlineConstants.resize(size);
+	memcpy(m_pendingInlineConstants.data(), data, size);
 }
 
 void VulkanCommandList::BindVertexBuffer(uint32_t slot, dy::RHI::IBuffer* buffer, uint32_t offset)
@@ -58,30 +62,6 @@ void VulkanCommandList::BindIndexBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Forma
 	m_pendingIndexBuffer = buffer;
 	m_pendingIndexFormat = format;
 	m_pendingIndexOffset = offset;
-}
-
-void VulkanCommandList::BindConstantBuffer(uint32_t binding, dy::RHI::IBuffer* buffer, uint32_t offset, uint32_t size)
-{
-	if (binding >= m_pendingConstantBuffers.size()) return;
-
-	m_pendingConstantBuffers[binding].buffer = buffer;
-	m_pendingConstantBuffers[binding].offset = offset;
-	m_pendingConstantBuffers[binding].size = size;
-}
-
-void VulkanCommandList::BindStorageBuffer(uint32_t binding, dy::RHI::IBuffer* buffer, uint32_t offset, uint32_t size)
-{
-	if (binding >= m_pendingStorageBuffers.size()) return;
-
-	m_pendingStorageBuffers[binding].buffer = buffer;
-	m_pendingStorageBuffers[binding].offset = offset;
-	m_pendingStorageBuffers[binding].size = size;
-}
-
-void VulkanCommandList::BindTexture(uint32_t binding, dy::RHI::ITexture* texture)
-{
-	if (binding >= m_pendingTextures.size()) return;
-	m_pendingTextures[binding] = texture;
 }
 
 void VulkanCommandList::SetRenderTargets(uint32_t numRenderTargets, dy::RHI::ITexture** renderTargets, dy::RHI::ITexture* depthStencil)
@@ -142,22 +122,18 @@ void VulkanCommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCou
 	drawCall.instanceCount = instanceCount;
 	drawCall.startVertex = startVertex;
 	drawCall.startInstance = startInstance;
-	drawCall.pushConstantSize = m_pendingPushConstantSize;
+	drawCall.inlineConstantOffset = m_pendingInlineConstantOffset;
 	drawCall.pipelineState = m_boundPipeline;
+	drawCall.resourceSet = m_pendingResourceSet;
 	drawCall.vertexBuffers = m_pendingVertexBuffers;
 	drawCall.indexBuffer = m_pendingIndexBuffer;
 	drawCall.indexFormat = m_pendingIndexFormat;
 	drawCall.indexOffset = m_pendingIndexOffset;
-	drawCall.constantBuffers = m_pendingConstantBuffers;
-	drawCall.storageBuffers = m_pendingStorageBuffers;
-	drawCall.textures = m_pendingTextures;
 	drawCall.hasViewport = m_hasPendingViewport;
 	drawCall.hasScissor = m_hasPendingScissor;
 	drawCall.viewport = m_pendingViewport;
 	drawCall.scissor = m_pendingScissor;
-	if (m_pendingPushConstantSize > 0) {
-		memcpy(drawCall.pushConstants.data(), m_pendingPushConstants.data(), m_pendingPushConstantSize);
-	}
+	drawCall.inlineConstants = m_pendingInlineConstants;
 	m_drawCalls.push_back(drawCall);
 }
 
@@ -171,22 +147,18 @@ void VulkanCommandList::DrawIndexedInstanced(uint32_t indexCount, uint32_t insta
 	drawCall.firstIndex = firstIndex;
 	drawCall.baseVertex = vertexOffset;
 	drawCall.startInstance = firstInstance;
-	drawCall.pushConstantSize = m_pendingPushConstantSize;
+	drawCall.inlineConstantOffset = m_pendingInlineConstantOffset;
 	drawCall.pipelineState = m_boundPipeline;
+	drawCall.resourceSet = m_pendingResourceSet;
 	drawCall.vertexBuffers = m_pendingVertexBuffers;
 	drawCall.indexBuffer = m_pendingIndexBuffer;
 	drawCall.indexFormat = m_pendingIndexFormat;
 	drawCall.indexOffset = m_pendingIndexOffset;
-	drawCall.constantBuffers = m_pendingConstantBuffers;
-	drawCall.storageBuffers = m_pendingStorageBuffers;
-	drawCall.textures = m_pendingTextures;
 	drawCall.hasViewport = m_hasPendingViewport;
 	drawCall.hasScissor = m_hasPendingScissor;
 	drawCall.viewport = m_pendingViewport;
 	drawCall.scissor = m_pendingScissor;
-	if (m_pendingPushConstantSize > 0) {
-		memcpy(drawCall.pushConstants.data(), m_pendingPushConstants.data(), m_pendingPushConstantSize);
-	}
+	drawCall.inlineConstants = m_pendingInlineConstants;
 	m_drawCalls.push_back(drawCall);
 }
 

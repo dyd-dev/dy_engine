@@ -19,7 +19,6 @@ namespace dy::Backends
         D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
         bool hasRTV = false;
         bool hasDSV = false;
-        uint32_t globalSrvIndex = 0xFFFFFFFFu;
     };
 
     namespace
@@ -215,13 +214,4 @@ namespace dy::Backends
         m_internal->state = static_cast<D3D12_RESOURCE_STATES>(state);
     }
 
-    uint32_t D3D12Texture::GetGlobalSrvIndex() const
-    {
-        return m_internal->globalSrvIndex;
-    }
-
-    void D3D12Texture::SetGlobalSrvIndex(uint32_t index)
-    {
-        m_internal->globalSrvIndex = index;
-    }
 }

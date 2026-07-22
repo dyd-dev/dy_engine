@@ -2,6 +2,8 @@
 #include "D3D12CommandList.h"
 #include "D3D12Buffer.h"
 #include "RHI/GraphicsPipeline.h"
+#include "RHI/IResourceSet.h"
+#include "RHI/ISampler.h"
 #include "D3D12PipelineState.h"
 #include "D3D12Texture.h"
 #include "d3dx12.h"
@@ -19,9 +21,6 @@ namespace dy::Backends
 {
     namespace
     {
-        constexpr uint32_t kGlobalDescriptorHeapSize = 1024;
-        constexpr uint32_t kTransientDescriptorSlotCount = 1;
-
 		class D3D12Shader final : public RHI::IShader
 		{
 		public:
@@ -65,10 +64,6 @@ namespace dy::Backends
         uint32_t frameIndex = 0;
         uint32_t backBufferIndex = 0;
         uint32_t rtvDescriptorSize = 0;
-
-        ComPtr<ID3D12DescriptorHeap> globalDescriptorHeap;
-        uint32_t descriptorSlotOffset = 0;
-        uint32_t srvDescriptorSize = 0;
 
         std::vector<D3D12CommandList*> commandLists;
         std::vector<D3D12Texture*> backBufferTextures;
@@ -264,26 +259,9 @@ namespace dy::Backends
         m_internal->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_internal->fence));
         m_internal->fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 
-        // 7. 글로벌 디스크립터 힙 생성
-        D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-        srvHeapDesc.NumDescriptors = kGlobalDescriptorHeapSize;
-        srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        
-        if(FAILED(m_internal->device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&m_internal->globalDescriptorHeap))))
-        {
-            std::cout << "Failed to create descriptor heap!" << std::endl;
-            return -1;
-        }
-        m_internal->srvDescriptorSize = m_internal->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-
-        // 8. 커맨드 리스트 미리 할당
+        // 7. 커맨드 리스트 미리 할당
         for (uint32_t i = 0; i < m_internal->maxFramesInFlight; i++) {
-            m_internal->commandLists[i] = new D3D12CommandList(
-                m_internal->device.Get(),
-                0,
-                m_internal->globalDescriptorHeap.Get(),
-                m_internal->srvDescriptorSize);
+            m_internal->commandLists[i] = new D3D12CommandList(m_internal->device.Get(), 0);
         }
 
         std::cout << "[D3D12Device] Initialization Complete!" << std::endl;
@@ -357,6 +335,17 @@ namespace dy::Backends
         return new D3D12Shader(desc);
     }
 
+    RHI::ISampler* D3D12Device::CreateSampler(const RHI::SamplerDesc& desc) {
+        if (desc.minLod > desc.maxLod ||
+            static_cast<uint32_t>(desc.minFilter) > static_cast<uint32_t>(RHI::SamplerFilter::Linear) ||
+            static_cast<uint32_t>(desc.magFilter) > static_cast<uint32_t>(RHI::SamplerFilter::Linear) ||
+            static_cast<uint32_t>(desc.mipFilter) > static_cast<uint32_t>(RHI::SamplerFilter::Linear) ||
+            static_cast<uint32_t>(desc.addressU) > static_cast<uint32_t>(RHI::SamplerAddressMode::ClampToEdge) ||
+            static_cast<uint32_t>(desc.addressV) > static_cast<uint32_t>(RHI::SamplerAddressMode::ClampToEdge) ||
+            static_cast<uint32_t>(desc.addressW) > static_cast<uint32_t>(RHI::SamplerAddressMode::ClampToEdge)) return nullptr;
+        return new D3D12Sampler(desc);
+    }
+
     RHI::IPipelineState* D3D12Device::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc) {
         const bool hasColorAttachment = desc.colorAttachmentCount > 0;
         const bool hasDepthAttachment = desc.depthStencilFormat != RHI::Format::Unknown;
@@ -391,51 +380,119 @@ namespace dy::Backends
             featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
         }
 
-        // 2. Root Parameter 정의
-        // 머티리얼 텍스처 테이블: 글로벌 디스크립터 힙을 덮는 unbounded SRV 배열(register t0, space0).
-        //  - non-bindless: 셰이더가 인덱스 0(=트랜지언트 슬롯)만 읽음.
-        //  - bindless    : 셰이더가 per-draw 디스크립터 인덱스로 BindlessTextures[idx] 를 읽음.
-        // DESCRIPTORS_VOLATILE 라 접근하지 않는 슬롯은 미초기화여도 무방.
-        CD3DX12_DESCRIPTOR_RANGE1 textureSrvRange;
-        textureSrvRange.Init(
-            D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
-            UINT_MAX, // unbounded
-            0,
-            0,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE,
-            0);
+        if ((desc.pipelineLayout.resourceBindingCount > 0 && desc.pipelineLayout.resourceBindings == nullptr) ||
+            (desc.pipelineLayout.inlineConstantRangeCount > 0 && desc.pipelineLayout.inlineConstantRanges == nullptr)) return nullptr;
 
-        // 그림자 맵 SRV: bindless 텍스처 힙과 겹치지 않도록 register(t0, space4) 에 단독 배치.
-        CD3DX12_DESCRIPTOR_RANGE1 shadowSrvRange;
-        shadowSrvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 4, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 0);
+        uint32_t textureBindingCount = 0;
+        uint32_t setCount = 0;
+        for(uint32_t index = 0; index < desc.pipelineLayout.resourceBindingCount; ++index)
+        {
+            const RHI::ResourceBindingDesc& binding = desc.pipelineLayout.resourceBindings[index];
+            if(binding.type == RHI::ResourceType::TextureSampler) ++textureBindingCount;
+            setCount = std::max(setCount, binding.set + 1u);
+        }
+        std::vector<CD3DX12_DESCRIPTOR_RANGE1> descriptorRanges(desc.pipelineLayout.resourceBindingCount + textureBindingCount);
+        std::vector<CD3DX12_ROOT_PARAMETER1> rootParameters(desc.pipelineLayout.inlineConstantRangeCount + setCount * 2u);
+        std::vector<D3D12ResourceBinding> resourceBindings;
+        std::vector<D3D12InlineConstantRange> inlineConstantRanges;
+        resourceBindings.reserve(desc.pipelineLayout.resourceBindingCount);
+        inlineConstantRanges.reserve(desc.pipelineLayout.inlineConstantRangeCount);
 
-        CD3DX12_DESCRIPTOR_RANGE1 metallicRoughnessSrvRange;
-        metallicRoughnessSrvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1, 1, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 0);
-        CD3DX12_DESCRIPTOR_RANGE1 normalSrvRange;
-        normalSrvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2, 1, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 0);
-        CD3DX12_DESCRIPTOR_RANGE1 occlusionSrvRange;
-        occlusionSrvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 3, 1, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 0);
-        CD3DX12_DESCRIPTOR_RANGE1 emissiveSrvRange;
-        emissiveSrvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4, 1, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 0);
+        uint32_t rootParameterIndex = 0;
+        for(uint32_t index = 0; index < desc.pipelineLayout.inlineConstantRangeCount; ++index)
+        {
+            const RHI::InlineConstantRangeDesc& range = desc.pipelineLayout.inlineConstantRanges[index];
+            if(range.size == 0 || (range.size & 3u) != 0 || (range.offset & 3u) != 0 ||
+                range.stages == RHI::ShaderStageFlags::None) return nullptr;
+            D3D12_SHADER_VISIBILITY visibility = D3D12_SHADER_VISIBILITY_ALL;
+            if(range.stages == RHI::ShaderStageFlags::Vertex) visibility = D3D12_SHADER_VISIBILITY_VERTEX;
+            else if(range.stages == RHI::ShaderStageFlags::Fragment) visibility = D3D12_SHADER_VISIBILITY_PIXEL;
+            rootParameters[rootParameterIndex].InitAsConstants(range.size / 4, range.binding, 0, visibility);
+            inlineConstantRanges.push_back({ range, rootParameterIndex++ });
+        }
 
-        CD3DX12_ROOT_PARAMETER1 rootParameters[10] = {};
-        rootParameters[0].InitAsConstants(52, 0); // register(b0): DrawConstants 208 bytes = 52 DWORDs
-        rootParameters[1].InitAsDescriptorTable(1, &textureSrvRange, D3D12_SHADER_VISIBILITY_PIXEL); // register(t0, space0)
-        rootParameters[2].InitAsConstantBufferView(1); // register(b1): RendererLighting
-        rootParameters[3].InitAsConstantBufferView(3); // register(b3): ShadowMatrix
-        // bindless storage SRV 는 space0~2 의 무한(unbounded) 범위(param 1)와 겹치면 안 되므로 space3 에 둔다.
-        rootParameters[4].InitAsShaderResourceView(11, 3); // register(t11, space3): instance transforms
-        rootParameters[5].InitAsDescriptorTable(1, &shadowSrvRange, D3D12_SHADER_VISIBILITY_PIXEL); // register(t0, space4): shadow map
-        rootParameters[6].InitAsDescriptorTable(1, &metallicRoughnessSrvRange, D3D12_SHADER_VISIBILITY_PIXEL); // register(t1, space1)
-        rootParameters[7].InitAsDescriptorTable(1, &normalSrvRange, D3D12_SHADER_VISIBILITY_PIXEL); // register(t2, space1)
-        rootParameters[8].InitAsDescriptorTable(1, &occlusionSrvRange, D3D12_SHADER_VISIBILITY_PIXEL); // register(t3, space1)
-        rootParameters[9].InitAsDescriptorTable(1, &emissiveSrvRange, D3D12_SHADER_VISIBILITY_PIXEL); // register(t4, space1)
+        uint32_t resourceHeapOffset = 0;
+        uint32_t samplerHeapOffset = 0;
+        for(uint32_t index = 0; index < desc.pipelineLayout.resourceBindingCount; ++index)
+        {
+            const RHI::ResourceBindingDesc& binding = desc.pipelineLayout.resourceBindings[index];
+            if(binding.arrayCount == 0 || binding.stages == RHI::ShaderStageFlags::None ||
+                static_cast<uint32_t>(binding.type) > static_cast<uint32_t>(RHI::ResourceType::TextureSampler)) return nullptr;
+            for(uint32_t previous = 0; previous < index; ++previous)
+            {
+                const RHI::ResourceBindingDesc& other = desc.pipelineLayout.resourceBindings[previous];
+                if(other.set == binding.set && other.binding == binding.binding) return nullptr;
+            }
+            D3D12ResourceBinding nativeBinding = {};
+            nativeBinding.desc = binding;
+            nativeBinding.heapOffset = resourceHeapOffset;
+            nativeBinding.samplerHeapOffset = samplerHeapOffset;
+            resourceHeapOffset += binding.arrayCount;
+            if(binding.type == RHI::ResourceType::TextureSampler) samplerHeapOffset += binding.arrayCount;
+            resourceBindings.push_back(nativeBinding);
+        }
 
-        CD3DX12_STATIC_SAMPLER_DESC samplerDesc(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
+        uint32_t rangeIndex = 0;
+        for(uint32_t set = 0; set < setCount; ++set)
+        {
+            const uint32_t firstRange = rangeIndex;
+            for(D3D12ResourceBinding& binding : resourceBindings)
+            {
+                if(binding.desc.set != set) continue;
+                const D3D12_DESCRIPTOR_RANGE_TYPE rangeType = binding.desc.type == RHI::ResourceType::ConstantBuffer
+                    ? D3D12_DESCRIPTOR_RANGE_TYPE_CBV
+                    : D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+                descriptorRanges[rangeIndex++].Init(
+                    rangeType,
+                    binding.desc.arrayCount,
+                    binding.desc.binding,
+                    binding.desc.set,
+                    D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
+                    binding.heapOffset);
+            }
+            if(rangeIndex == firstRange) continue;
+            rootParameters[rootParameterIndex].InitAsDescriptorTable(
+                rangeIndex - firstRange,
+                &descriptorRanges[firstRange],
+                D3D12_SHADER_VISIBILITY_ALL);
+            for(D3D12ResourceBinding& binding : resourceBindings)
+                if(binding.desc.set == set) binding.resourceRootParameter = rootParameterIndex;
+            ++rootParameterIndex;
+        }
+        for(uint32_t set = 0; set < setCount; ++set)
+        {
+            const uint32_t firstRange = rangeIndex;
+            for(D3D12ResourceBinding& binding : resourceBindings)
+            {
+                if(binding.desc.set != set || binding.desc.type != RHI::ResourceType::TextureSampler) continue;
+                descriptorRanges[rangeIndex++].Init(
+                    D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER,
+                    binding.desc.arrayCount,
+                    binding.desc.binding,
+                    binding.desc.set,
+                    D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE,
+                    binding.samplerHeapOffset);
+            }
+            if(rangeIndex == firstRange) continue;
+            rootParameters[rootParameterIndex].InitAsDescriptorTable(
+                rangeIndex - firstRange,
+                &descriptorRanges[firstRange],
+                D3D12_SHADER_VISIBILITY_ALL);
+            for(D3D12ResourceBinding& binding : resourceBindings)
+                if(binding.desc.set == set && binding.desc.type == RHI::ResourceType::TextureSampler)
+                    binding.samplerRootParameter = rootParameterIndex;
+            ++rootParameterIndex;
+        }
+        rootParameters.resize(rootParameterIndex);
 
         // 3. Versioned Root Signature 생성
         CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSigDesc;
-        rootSigDesc.Init_1_1(10, rootParameters, 1, &samplerDesc, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+        rootSigDesc.Init_1_1(
+            static_cast<uint32_t>(rootParameters.size()),
+            rootParameters.data(),
+            0,
+            nullptr,
+            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
         Microsoft::WRL::ComPtr<ID3DBlob> signature;
         Microsoft::WRL::ComPtr<ID3DBlob> error;
@@ -694,66 +751,25 @@ namespace dy::Backends
             desc.inputAssembly.topology,
             desc.inputAssembly.vertexBindings,
             desc.inputAssembly.vertexBindingCount,
-            desc.depthStencil.stencilReference);
+            desc.depthStencil.stencilReference,
+            std::move(resourceBindings),
+            std::move(inlineConstantRanges));
     }
 
-    RHI::DescriptorIndex D3D12Device::AllocateDescriptorSlot() {
-        if(m_internal->descriptorSlotOffset >= kGlobalDescriptorHeapSize - kTransientDescriptorSlotCount) return RHI::INVALID_DESCRIPTOR_INDEX;
-        return m_internal->descriptorSlotOffset++;
+    RHI::IResourceSet* D3D12Device::CreateResourceSet(RHI::IPipelineState* pipeline) {
+        auto* d3dPipeline = dynamic_cast<D3D12PipelineState*>(pipeline);
+        if(d3dPipeline == nullptr) return nullptr;
+        auto* resourceSet = new D3D12ResourceSet(m_internal->device.Get(), d3dPipeline);
+        if(!resourceSet->IsValid()) {
+            delete resourceSet;
+            return nullptr;
+        }
+        return resourceSet;
     }
 
-    void D3D12Device::UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::IBuffer* buffer) {
-        if(index == RHI::INVALID_DESCRIPTOR_INDEX || buffer == nullptr) return;
-        D3D12Buffer* dxBuffer = static_cast<D3D12Buffer*>(buffer);
-
-        CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_internal->globalDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
-        srvHandle.Offset(index, m_internal->srvDescriptorSize);
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        srvDesc.Format = DXGI_FORMAT_UNKNOWN;
-        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvDesc.Buffer.FirstElement = 0;
-        srvDesc.Buffer.NumElements = dxBuffer->GetSize() / dxBuffer->GetStride();
-        srvDesc.Buffer.StructureByteStride = dxBuffer->GetStride();
-        srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
-
-        m_internal->device->CreateShaderResourceView(
-            static_cast<ID3D12Resource*>(dxBuffer->GetNativeResource()),
-            &srvDesc,
-            srvHandle
-        );
-    }
-
-    void D3D12Device::UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::ITexture* texture) {
-        if(index == RHI::INVALID_DESCRIPTOR_INDEX || texture == nullptr) return;
-        // ITexture를 D3D12Texture로 다운캐스팅
-        D3D12Texture* dxTexture = static_cast<D3D12Texture*>(texture);
-
-        // 1. 글로벌 힙의 시작 주소 가져오기
-        CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_internal->globalDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
-        
-        // 2. 인덱스(슬롯 번호)만큼 주소 이동
-        srvHandle.Offset(index, m_internal->srvDescriptorSize);
-
-        // 3. SRV(Shader Resource View) 생성
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        
-        srvDesc.Format = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiShaderResourceFormat(dxTexture->GetFormat()));
-        
-        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvDesc.Texture2D.MipLevels = 1;
-
-        // 실제 리소스(ID3D12Resource)를 가져와서 뷰 생성
-        m_internal->device->CreateShaderResourceView(
-            static_cast<ID3D12Resource*>(dxTexture->GetNativeResource()),
-            &srvDesc,
-            srvHandle
-        );
-
-        // 커맨드 리스트가 SRV 디스크립터 테이블을 바인딩할 때 GPU 핸들을 계산할 수 있도록 슬롯 기억.
-        dxTexture->SetGlobalSrvIndex(index);
+    bool D3D12Device::UpdateResourceSet(RHI::IResourceSet* resourceSet, const RHI::ResourceSetWrite* writes, uint32_t writeCount) {
+        auto* d3dSet = dynamic_cast<D3D12ResourceSet*>(resourceSet);
+        return d3dSet != nullptr && d3dSet->Update(m_internal->device.Get(), writes, writeCount);
     }
 
     RHI::ITexture* D3D12Device::CreateTexture(const RHI::TextureDesc& desc) {
@@ -835,6 +851,8 @@ namespace dy::Backends
 
     void D3D12Device::DestroyPipelineState(RHI::IPipelineState* pipeline) { delete pipeline; }
     void D3D12Device::DestroyShader(RHI::IShader* shader) { delete shader; }
+    void D3D12Device::DestroySampler(RHI::ISampler* sampler) { delete sampler; }
+    void D3D12Device::DestroyResourceSet(RHI::IResourceSet* resourceSet) { delete resourceSet; }
 
     RHI::ITexture* D3D12Device::GetBackBuffer() {
         return m_internal->backBufferTextures[m_internal->backBufferIndex];

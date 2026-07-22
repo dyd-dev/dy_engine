@@ -29,17 +29,13 @@ public:
         const VulkanContext& context,
         VkRenderPass renderPass,
         VkExtent2D extent,
-        VkDescriptorSetLayout descriptorSetLayout,
-        const dy::RHI::GraphicsPipelineDesc& desc,
-        uint32_t pushConstantSize,
-        VkDescriptorSetLayout bindlessDescriptorSetLayout = VK_NULL_HANDLE);
+        VkPipelineLayout pipelineLayout,
+        const dy::RHI::GraphicsPipelineDesc& desc);
     void Cleanup(VkDevice device);
 
     VkPipeline GetPipeline() const { return m_graphicsPipeline; }
-    VkPipelineLayout GetLayout() const { return m_pipelineLayout; }
 
 private:
-    VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_graphicsPipeline = VK_NULL_HANDLE;
 };
 

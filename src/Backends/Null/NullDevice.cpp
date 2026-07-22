@@ -3,10 +3,13 @@
 #include "RHI/IBuffer.h"
 #include "RHI/ICommandList.h"
 #include "RHI/GraphicsPipeline.h"
+#include "RHI/IResourceSet.h"
 #include "RHI/IShader.h"
+#include "RHI/ISampler.h"
 #include "RHI/ITexture.h"
 
 #include <memory>
+#include <vector>
 
 namespace dy::Backends
 {
@@ -36,7 +39,26 @@ namespace dy::Backends
 		class NullPipelineState final : public RHI::IPipelineState
 		{
 		public:
-			explicit NullPipelineState(const RHI::GraphicsPipelineDesc&) {}
+			explicit NullPipelineState(const RHI::GraphicsPipelineDesc& desc)
+			{
+				if(desc.pipelineLayout.resourceBindingCount > 0)
+					bindings.assign(desc.pipelineLayout.resourceBindings, desc.pipelineLayout.resourceBindings + desc.pipelineLayout.resourceBindingCount);
+			}
+
+			std::vector<RHI::ResourceBindingDesc> bindings;
+		};
+
+		class NullSampler final : public RHI::ISampler
+		{
+		public:
+			explicit NullSampler(const RHI::SamplerDesc& desc) : RHI::ISampler(desc) {}
+		};
+
+		class NullResourceSet final : public RHI::IResourceSet
+		{
+		public:
+			explicit NullResourceSet(NullPipelineState* pipelineState) : pipeline(pipelineState) {}
+			NullPipelineState* pipeline = nullptr;
 		};
 
 		class NullShader final : public RHI::IShader
@@ -57,10 +79,8 @@ namespace dy::Backends
 		{
 		public:
 			void BindGraphicsPipeline(RHI::IPipelineState*) override {}
-			void BindGlobalDescriptors() override {}
-			void BindConstantBuffer(uint32_t, RHI::IBuffer*, uint32_t, uint32_t) override {}
-			void BindTexture(uint32_t, RHI::ITexture*) override {}
-			void SetInlineConstants(uint32_t, const void*) override {}
+			void BindResourceSet(RHI::IResourceSet*) override {}
+			void SetInlineConstants(uint32_t, uint32_t, const void*) override {}
 			void SetRenderTargets(uint32_t, RHI::ITexture**, RHI::ITexture*) override {}
 			void SetViewport(const RHI::Viewport&) override {}
 			void SetScissor(const RHI::Rect&) override {}
@@ -78,7 +98,6 @@ namespace dy::Backends
 	{
 		NullCommandList commandList;
 		std::unique_ptr<NullTexture> backBuffer;
-		RHI::DescriptorIndex nextDescriptorIndex = 0;
 		uint32_t frameIndex = 0;
 	};
 
@@ -127,6 +146,18 @@ namespace dy::Backends
 			desc.binary == nullptr || desc.binarySize == 0 ||
 			desc.entryPoint == nullptr || desc.entryPoint[0] == '\0') return nullptr;
 		return new NullShader(desc);
+	}
+
+	RHI::ISampler* NullDevice::CreateSampler(const RHI::SamplerDesc& desc)
+	{
+		if(static_cast<uint32_t>(desc.minFilter) > static_cast<uint32_t>(RHI::SamplerFilter::Linear) ||
+			static_cast<uint32_t>(desc.magFilter) > static_cast<uint32_t>(RHI::SamplerFilter::Linear) ||
+			static_cast<uint32_t>(desc.mipFilter) > static_cast<uint32_t>(RHI::SamplerFilter::Linear) ||
+			static_cast<uint32_t>(desc.addressU) > static_cast<uint32_t>(RHI::SamplerAddressMode::ClampToEdge) ||
+			static_cast<uint32_t>(desc.addressV) > static_cast<uint32_t>(RHI::SamplerAddressMode::ClampToEdge) ||
+			static_cast<uint32_t>(desc.addressW) > static_cast<uint32_t>(RHI::SamplerAddressMode::ClampToEdge) ||
+			desc.minLod > desc.maxLod) return nullptr;
+		return new NullSampler(desc);
 	}
 
 	bool NullDevice::UpdateTexture(RHI::ITexture*, const void*, uint32_t)
@@ -226,16 +257,66 @@ namespace dy::Backends
 			}
 		}
 
+		if((desc.pipelineLayout.resourceBindingCount > 0 && desc.pipelineLayout.resourceBindings == nullptr) ||
+			(desc.pipelineLayout.inlineConstantRangeCount > 0 && desc.pipelineLayout.inlineConstantRanges == nullptr)) return nullptr;
+		for(uint32_t bindingIndex = 0; bindingIndex < desc.pipelineLayout.resourceBindingCount; ++bindingIndex)
+		{
+			const RHI::ResourceBindingDesc& binding = desc.pipelineLayout.resourceBindings[bindingIndex];
+			if(binding.arrayCount == 0 || binding.stages == RHI::ShaderStageFlags::None ||
+				static_cast<uint32_t>(binding.type) > static_cast<uint32_t>(RHI::ResourceType::TextureSampler)) return nullptr;
+			for(uint32_t previous = 0; previous < bindingIndex; ++previous)
+			{
+				const RHI::ResourceBindingDesc& other = desc.pipelineLayout.resourceBindings[previous];
+				if(other.set == binding.set && other.binding == binding.binding) return nullptr;
+			}
+		}
+		for(uint32_t rangeIndex = 0; rangeIndex < desc.pipelineLayout.inlineConstantRangeCount; ++rangeIndex)
+		{
+			const RHI::InlineConstantRangeDesc& range = desc.pipelineLayout.inlineConstantRanges[rangeIndex];
+			if(range.size == 0 || range.stages == RHI::ShaderStageFlags::None) return nullptr;
+		}
+
 		return new NullPipelineState(desc);
 	}
 
-	RHI::DescriptorIndex NullDevice::AllocateDescriptorSlot()
+	RHI::IResourceSet* NullDevice::CreateResourceSet(RHI::IPipelineState* pipeline)
 	{
-		return m_impl->nextDescriptorIndex++;
+		auto* nullPipeline = dynamic_cast<NullPipelineState*>(pipeline);
+		return nullPipeline == nullptr ? nullptr : new NullResourceSet(nullPipeline);
 	}
 
-	void NullDevice::UpdateDescriptorSlot(RHI::DescriptorIndex, RHI::ITexture*) {}
-	void NullDevice::UpdateDescriptorSlot(RHI::DescriptorIndex, RHI::IBuffer*) {}
+	bool NullDevice::UpdateResourceSet(RHI::IResourceSet* resourceSet, const RHI::ResourceSetWrite* writes, uint32_t writeCount)
+	{
+		auto* nullSet = dynamic_cast<NullResourceSet*>(resourceSet);
+		if(nullSet == nullptr || (writeCount > 0 && writes == nullptr)) return false;
+		for(uint32_t writeIndex = 0; writeIndex < writeCount; ++writeIndex)
+		{
+			const RHI::ResourceSetWrite& write = writes[writeIndex];
+			const RHI::ResourceBindingDesc* declared = nullptr;
+			for(const RHI::ResourceBindingDesc& binding : nullSet->pipeline->bindings)
+			{
+				if(binding.set == write.set && binding.binding == write.binding)
+				{
+					declared = &binding;
+					break;
+				}
+			}
+			if(declared == nullptr || write.arrayElement >= declared->arrayCount) return false;
+			switch(declared->type)
+			{
+			case RHI::ResourceType::ConstantBuffer:
+			case RHI::ResourceType::StorageBuffer:
+				if(write.buffer == nullptr || write.texture != nullptr || write.sampler != nullptr) return false;
+				break;
+			case RHI::ResourceType::TextureSampler:
+				if(write.buffer != nullptr || write.texture == nullptr || write.sampler == nullptr) return false;
+				break;
+			default:
+				return false;
+			}
+		}
+		return true;
+	}
 
 	void NullDevice::DestroyBuffer(RHI::IBuffer* buffer)
 	{
@@ -247,6 +328,11 @@ namespace dy::Backends
 		delete shader;
 	}
 
+	void NullDevice::DestroySampler(RHI::ISampler* sampler)
+	{
+		delete sampler;
+	}
+
 	void NullDevice::DestroyTexture(RHI::ITexture* texture)
 	{
 		delete texture;
@@ -255,6 +341,11 @@ namespace dy::Backends
 	void NullDevice::DestroyPipelineState(RHI::IPipelineState* pipeline)
 	{
 		delete pipeline;
+	}
+
+	void NullDevice::DestroyResourceSet(RHI::IResourceSet* resourceSet)
+	{
+		delete resourceSet;
 	}
 
 	RHI::ITexture* NullDevice::GetBackBuffer()

@@ -7,7 +7,10 @@
 
 #pragma once
 #include "RHI/GraphicsPipeline.h"
+#include "RHI/IResourceSet.h"
+#include "RHI/ISampler.h"
 #include <cstdint>
+#include <vector>
 
 namespace dy::Backends
 {
@@ -37,8 +40,36 @@ namespace dy::Backends
         const RHI::RasterizationDesc& GetRasterization() const;
         uint32_t GetStencilReference() const;
         RHI::PrimitiveTopology GetPrimitiveTopology() const;
+        const std::vector<RHI::ResourceBindingDesc>& GetResourceBindings() const;
+        const std::vector<RHI::InlineConstantRangeDesc>& GetInlineConstantRanges() const;
         static uint32_t GetNativeVertexBufferIndex(uint32_t slot);
         bool IsValid() const;
+
+    private:
+        struct Impl;
+        Impl* m_impl = nullptr;
+    };
+
+    class MetalSampler final : public RHI::ISampler
+    {
+    public:
+        MetalSampler(const RHI::SamplerDesc& desc, void* device);
+        ~MetalSampler() override;
+        void* GetNativeSampler() const;
+        bool IsValid() const;
+
+    private:
+        struct Impl;
+        Impl* m_impl = nullptr;
+    };
+
+    class MetalResourceSet final : public RHI::IResourceSet
+    {
+    public:
+        explicit MetalResourceSet(MetalPipeline* pipeline);
+        ~MetalResourceSet() override;
+        bool Update(const RHI::ResourceSetWrite* writes, uint32_t writeCount);
+        void Bind(void* encoder, MetalPipeline* activePipeline);
 
     private:
         struct Impl;

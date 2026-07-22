@@ -3,6 +3,8 @@
 #include "Graphics/ImageFile.h"
 #include "Graphics/Scene.h"
 #include "RHI/IDevice.h"
+#include "RHI/IResourceSet.h"
+#include "RHI/ISampler.h"
 #include "RHI/ITexture.h"
 
 namespace dy::Graphics
@@ -40,7 +42,7 @@ namespace dy::Graphics
 		}
 	}
 
-	void GpuScene::SyncTextures(const Scene& scene, RHI::IDevice* device)
+	void GpuScene::SyncTextures(const Scene& scene, RHI::IDevice* device, RHI::IResourceSet* bindlessSet, RHI::ISampler* sampler)
 	{
 		if(device == nullptr) return;
 
@@ -50,7 +52,15 @@ namespace dy::Graphics
 		for(uint32_t textureIndex = 0; textureIndex < textureCount; ++textureIndex)
 		{
 			TextureSlot& slot = m_textures[textureIndex];
-			if(slot.texture != nullptr) continue;
+			if(slot.texture != nullptr)
+			{
+				if(bindlessSet != nullptr && sampler != nullptr && !slot.bindlessAvailable)
+				{
+					const RHI::ResourceSetWrite write = { 1, 0, textureIndex, nullptr, slot.texture, sampler, 0, 0 };
+					slot.bindlessAvailable = device->UpdateResourceSet(bindlessSet, &write, 1);
+				}
+				continue;
+			}
 
 			const TextureAsset& textureData = scene.GetTexture(static_cast<TextureID>(textureIndex));
 			ImageFile loadedImage;
@@ -66,18 +76,21 @@ namespace dy::Graphics
 			textureDesc.usage = RHI::TextureUsage::ShaderResource;
 
 			slot.texture = device->CreateTexture(textureDesc);
-			slot.descriptorIndex = device->AllocateDescriptorSlot();
 			if(slot.texture != nullptr)
 			{
 				if(device->UpdateTexture(slot.texture, upload.pixels, upload.rowPitch))
 				{
-					device->UpdateDescriptorSlot(slot.descriptorIndex, slot.texture);
+					if(bindlessSet != nullptr && sampler != nullptr)
+					{
+						const RHI::ResourceSetWrite write = { 1, 0, textureIndex, nullptr, slot.texture, sampler, 0, 0 };
+						slot.bindlessAvailable = device->UpdateResourceSet(bindlessSet, &write, 1);
+					}
 				}
 				else
 				{
 					device->DestroyTexture(slot.texture);
 					slot.texture = nullptr;
-					slot.descriptorIndex = RHI::INVALID_DESCRIPTOR_INDEX;
+					slot.bindlessAvailable = false;
 				}
 			}
 		}
@@ -105,11 +118,11 @@ namespace dy::Graphics
 		return m_textures[textureIndex].texture;
 	}
 
-	uint32_t GpuScene::ResolveTextureDescriptorIndex(TextureID textureId) const
+	uint32_t GpuScene::ResolveTextureIndex(TextureID textureId) const
 	{
-		if(!IsValid(textureId)) return RHI::INVALID_DESCRIPTOR_INDEX;
+		if(!IsValid(textureId)) return 0xFFFFFFFFu;
 		const uint32_t textureIndex = ToIndex(textureId);
-		if(textureIndex >= m_textures.size()) return RHI::INVALID_DESCRIPTOR_INDEX;
-		return m_textures[textureIndex].descriptorIndex;
+		if(textureIndex >= m_textures.size() || !m_textures[textureIndex].bindlessAvailable) return 0xFFFFFFFFu;
+		return textureIndex;
 	}
 }

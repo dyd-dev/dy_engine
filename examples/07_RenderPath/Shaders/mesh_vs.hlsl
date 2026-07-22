@@ -22,7 +22,7 @@ struct InstanceTransform
     column_major float4x4 modelMatrix;
 };
 
-StructuredBuffer<InstanceTransform> InstanceTransforms : register(t11, space3);
+StructuredBuffer<InstanceTransform> InstanceTransforms : register(t11, space0);
 
 struct VSInput
 {

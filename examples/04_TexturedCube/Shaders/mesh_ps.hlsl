@@ -26,10 +26,10 @@ cbuffer RendererLighting : register(b1)
 };
 
 Texture2D BaseColorTexture : register(t0, space0);
-Texture2D MetallicRoughnessTexture : register(t1, space1);
-Texture2D NormalTexture : register(t2, space1);
-Texture2D OcclusionTexture : register(t3, space1);
-Texture2D EmissiveTexture : register(t4, space1);
+Texture2D MetallicRoughnessTexture : register(t6, space0);
+Texture2D NormalTexture : register(t7, space0);
+Texture2D OcclusionTexture : register(t8, space0);
+Texture2D EmissiveTexture : register(t9, space0);
 SamplerState LinearSampler : register(s0);
 
 struct PSInput

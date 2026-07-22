@@ -11,6 +11,7 @@
 #include "RHI/ICommandList.h"
 #include "RHI/IDevice.h"
 #include "RHI/GraphicsPipeline.h"
+#include "RHI/IResourceSet.h"
 #include "RHI/ITexture.h"
 
 using namespace dy;
@@ -276,10 +277,10 @@ namespace
 		const Transform& transform,
 		uint32_t textureFlags)
 	{
-		// bindless 디스크립터 인덱스를 float 로 변환(INVALID 은 0; 해당 텍스처 flag 가 꺼져 샘플 안 됨).
+		// bindless texture array index를 float 로 변환(INVALID 은 0; 해당 텍스처 flag 가 꺼져 샘플 안 됨).
 		const auto texIndex = [&](uint32_t slot) -> float {
-			const uint32_t index = materialState.textureDescriptorIndices[slot];
-			return index == kInvalidDescriptorIndex ? 0.0f : static_cast<float>(index);
+			const uint32_t index = materialState.textureIndices[slot];
+			return index == kInvalidTextureIndex ? 0.0f : static_cast<float>(index);
 		};
 
 		Layout::DrawConstants drawConstants = {};
@@ -308,10 +309,7 @@ namespace
 		commandList->SetRenderTargets(0, nullptr, ctx.shadowDepth);
 		commandList->ClearDepth(ctx.shadowDepth, 1.0f);
 		commandList->BindGraphicsPipeline(ctx.shadowPipeline);
-		if(ctx.shadowMatrixBuffer != nullptr)
-		{
-			commandList->BindConstantBuffer(Layout::kShadowMatrixBinding, ctx.shadowMatrixBuffer, 0, static_cast<uint32_t>(sizeof(Layout::RendererShadowConstants)));
-		}
+		if(ctx.shadowResourceSet != nullptr) commandList->BindResourceSet(ctx.shadowResourceSet);
 	}
 
 	// 메인 포워드 패스 시작: 이미 획득한 커맨드 리스트에 백버퍼/깊이/파이프라인/상수버퍼를 바인딩.
@@ -328,19 +326,6 @@ namespace
 			commandList->ClearDepth(ctx.depthStencil, 1.0f);
 		}
 		commandList->BindGraphicsPipeline(ctx.pipeline);
-		commandList->BindGlobalDescriptors();
-		if(ctx.lightingBuffer != nullptr)
-		{
-			commandList->BindConstantBuffer(Layout::kLightingConstantBinding, ctx.lightingBuffer, 0, static_cast<uint32_t>(sizeof(Layout::RendererLightingConstants)));
-		}
-		if(ctx.shadowMatrixBuffer != nullptr)
-		{
-			commandList->BindConstantBuffer(Layout::kShadowMatrixBinding, ctx.shadowMatrixBuffer, 0, static_cast<uint32_t>(sizeof(Layout::RendererShadowConstants)));
-		}
-		if(ctx.shadowDepth != nullptr)
-		{
-			commandList->BindTexture(Layout::kShadowSamplerBinding, ctx.shadowDepth);
-		}
 		return true;
 	}
 
@@ -351,13 +336,26 @@ namespace
 		device->Submit(commandLists.data(), static_cast<uint32_t>(commandLists.size()));
 	}
 
-	void BindMaterialTextures(RHI::ICommandList* commandList, const SceneMaterialState& materialState)
+	void BindDrawResources(
+		RHI::IDevice* device,
+		RHI::ICommandList* commandList,
+		const RenderPathContext& context,
+		const SceneMaterialState& materialState,
+		RHI::IBuffer* instanceBuffer,
+		uint32_t instanceBufferBytes)
 	{
-		commandList->BindTexture(Layout::kBaseColorTextureBinding, materialState.textures[kMaterialBaseColorTextureSlot]);
-		commandList->BindTexture(Layout::kMetallicRoughnessSamplerBinding, materialState.textures[kMaterialMetallicRoughnessTextureSlot]);
-		commandList->BindTexture(Layout::kNormalSamplerBinding, materialState.textures[kMaterialNormalTextureSlot]);
-		commandList->BindTexture(Layout::kOcclusionSamplerBinding, materialState.textures[kMaterialOcclusionTextureSlot]);
-		commandList->BindTexture(Layout::kEmissiveSamplerBinding, materialState.textures[kMaterialEmissiveTextureSlot]);
+		RHI::IResourceSet* resourceSet = context.config->enableBindlessTextures
+			? context.mainResourceSet
+			: materialState.resourceSet;
+		if(resourceSet == nullptr) return;
+		if(instanceBuffer != nullptr && instanceBufferBytes > 0)
+		{
+			const RHI::ResourceSetWrite write = {
+				0, Layout::kBindlessTransformStorageBinding, 0, instanceBuffer, nullptr, nullptr, 0, instanceBufferBytes
+			};
+			device->UpdateResourceSet(resourceSet, &write, 1);
+		}
+		commandList->BindResourceSet(resourceSet);
 	}
 
 	// ===== ??Per-draw bind ============================================================
@@ -459,7 +457,7 @@ namespace
 			commandList->BindIndexBuffer(meshState.indexBuffer, RHI::Format::R32_UINT, 0);
 
 			Layout::DrawConstants drawConstants = MakeDrawConstants(config, material, materialState, transform, textureFlags);
-			commandList->SetInlineConstants(sizeof(Layout::DrawConstants), &drawConstants);
+			commandList->SetInlineConstants(0, sizeof(Layout::DrawConstants), &drawConstants);
 			commandList->DrawIndexedInstanced(meshState.indexCount, 1, 0, 0, 0);
 		}
 	}
@@ -480,10 +478,7 @@ namespace
 		const RendererDesc& config = *context.config;
 		const std::vector<SceneMaterialState>& materialStates = *context.materialStates;
 		m_instances.assign(1, InstanceTransform{ Math::float4x4::Identity() });
-		if(UploadInstanceTransforms(device, m_instanceBuffer, m_instanceBufferBytes, m_instances))
-		{
-			commandList->BindStorageBuffer(Layout::kBindlessTransformStorageBinding, m_instanceBuffer, 0, m_instanceBufferBytes);
-		}
+		UploadInstanceTransforms(device, m_instanceBuffer, m_instanceBufferBytes, m_instances);
 
 		const uint32_t entityCount = scene.GetEntityCount();
 		for(uint32_t entityIndex = 0; entityIndex < entityCount; ++entityIndex)
@@ -509,13 +504,10 @@ namespace
 
 			commandList->BindVertexBuffer(0, meshState.vertexBuffer, 0);
 			commandList->BindIndexBuffer(meshState.indexBuffer, RHI::Format::R32_UINT, 0);
-			if(!config.enableBindlessTextures)
-			{
-				BindMaterialTextures(commandList, materialState);
-			}
+			BindDrawResources(device, commandList, context, materialState, m_instanceBuffer, m_instanceBufferBytes);
 
 			Layout::DrawConstants drawConstants = MakeDrawConstants(config, material, materialState, transform, textureFlags);
-			commandList->SetInlineConstants(sizeof(Layout::DrawConstants), &drawConstants);
+			commandList->SetInlineConstants(0, sizeof(Layout::DrawConstants), &drawConstants);
 			commandList->DrawIndexedInstanced(meshState.indexCount, 1, 0, 0, 0);
 		}
 
@@ -603,7 +595,7 @@ namespace
 
 			Layout::DrawConstants drawConstants = MakeDrawConstants(
 				config, material, materialState, transform, textureFlags);
-			commandList->SetInlineConstants(sizeof(Layout::DrawConstants), &drawConstants);
+			commandList->SetInlineConstants(0, sizeof(Layout::DrawConstants), &drawConstants);
 			commandList->DrawIndexedInstanced(range.indexCount, 1, range.firstIndex, static_cast<int32_t>(range.firstVertex), 0);
 		}
 	}
@@ -629,7 +621,6 @@ namespace
 		BuildMainDrawBatches(scene, context, m_meshRanges, m_drawBatches, m_instances);
 		if(UploadInstanceTransforms(device, m_instanceBuffer, m_instanceBufferBytes, m_instances))
 		{
-			commandList->BindStorageBuffer(Layout::kBindlessTransformStorageBinding, m_instanceBuffer, 0, m_instanceBufferBytes);
 			const RendererDesc& config = *context.config;
 			const std::vector<SceneMaterialState>& materialStates = *context.materialStates;
 			for(const DrawBatch& batch : m_drawBatches)
@@ -640,15 +631,12 @@ namespace
 
 				const MaterialDesc& material = scene.GetMaterial(static_cast<MaterialID>(batch.materialIndex));
 				const SceneMaterialState& materialState = materialStates[batch.materialIndex];
-				if(!config.enableBindlessTextures)
-				{
-					BindMaterialTextures(commandList, materialState);
-				}
+				BindDrawResources(device, commandList, context, materialState, m_instanceBuffer, m_instanceBufferBytes);
 
 				Layout::DrawConstants drawConstants = MakeDrawConstants(
 					config, material, materialState, Transform{}, batch.textureFlags);
 				drawConstants.instanceTransformOffset = batch.firstInstance + 1u;
-				commandList->SetInlineConstants(sizeof(Layout::DrawConstants), &drawConstants);
+				commandList->SetInlineConstants(0, sizeof(Layout::DrawConstants), &drawConstants);
 				commandList->DrawIndexedInstanced(range.indexCount, batch.instanceCount, range.firstIndex, static_cast<int32_t>(range.firstVertex), 0);
 			}
 		}
@@ -731,7 +719,7 @@ namespace
 
 			Layout::DrawConstants drawConstants = MakeDrawConstants(
 				config, material, materialState, transform, textureFlags);
-			commandList->SetInlineConstants(sizeof(Layout::DrawConstants), &drawConstants);
+			commandList->SetInlineConstants(0, sizeof(Layout::DrawConstants), &drawConstants);
 			commandList->DrawIndexedInstanced(range.indexCount, 1, range.firstIndex, static_cast<int32_t>(range.firstVertex), 0);
 		}
 	}
@@ -757,7 +745,6 @@ namespace
 		BuildMainDrawBatches(scene, context, m_meshRanges, m_drawBatches, m_instances);
 		if(UploadInstanceTransforms(device, m_instanceBuffer, m_instanceBufferBytes, m_instances))
 		{
-			commandList->BindStorageBuffer(Layout::kBindlessTransformStorageBinding, m_instanceBuffer, 0, m_instanceBufferBytes);
 			const RendererDesc& config = *context.config;
 			const std::vector<SceneMaterialState>& materialStates = *context.materialStates;
 			for(const DrawBatch& batch : m_drawBatches)
@@ -768,10 +755,11 @@ namespace
 
 				const MaterialDesc& material = scene.GetMaterial(static_cast<MaterialID>(batch.materialIndex));
 				const SceneMaterialState& materialState = materialStates[batch.materialIndex];
+				BindDrawResources(device, commandList, context, materialState, m_instanceBuffer, m_instanceBufferBytes);
 				Layout::DrawConstants drawConstants = MakeDrawConstants(
 					config, material, materialState, Transform{}, batch.textureFlags);
 				drawConstants.instanceTransformOffset = batch.firstInstance + 1u;
-				commandList->SetInlineConstants(sizeof(Layout::DrawConstants), &drawConstants);
+				commandList->SetInlineConstants(0, sizeof(Layout::DrawConstants), &drawConstants);
 				commandList->DrawIndexedInstanced(range.indexCount, batch.instanceCount, range.firstIndex, static_cast<int32_t>(range.firstVertex), 0);
 			}
 		}

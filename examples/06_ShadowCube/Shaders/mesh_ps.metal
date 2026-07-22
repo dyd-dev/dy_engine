@@ -44,18 +44,6 @@ constant uint kTextureFlagOcclusion = 8u;
 constant uint kTextureFlagEmissive = 16u;
 constant uint kTextureFlagReceiveShadow = 32u;
 constant float kPi = 3.14159265359f;
-
-constexpr sampler materialSampler(
-    coord::normalized,
-    address::repeat,
-    filter::linear,
-    mip_filter::linear);
-
-constexpr sampler shadowSampler(
-    coord::normalized,
-    address::clamp_to_edge,
-    filter::linear);
-
 inline float DistributionGGX(float3 normal, float3 halfway, float roughness)
 {
     const float a = roughness * roughness;
@@ -104,7 +92,8 @@ inline float3 FresnelSchlickRoughness(
 inline float3 ResolveNormal(
     RasterData input,
     constant DrawConstants& drawConstants,
-    texture2d<float> normalTexture)
+    texture2d<float> normalTexture,
+    sampler materialSampler)
 {
     float3 normal = normalize(input.worldNormal);
     const uint textureFlags = uint(drawConstants.drawMode + 0.5f);
@@ -132,7 +121,8 @@ inline float CalculateShadowVisibility(
     float3 lightDirection,
     uint textureFlags,
     constant RendererLighting& lighting,
-    depth2d<float> shadowMap)
+    depth2d<float> shadowMap,
+    sampler shadowSampler)
 {
     if (lighting.directionalLightDirection.w < 0.5f ||
         (textureFlags & kTextureFlagReceiveShadow) == 0u)
@@ -193,7 +183,9 @@ inline float4 RunFragmentShader(
     texture2d<float> metallicRoughnessTexture,
     texture2d<float> normalTexture,
     texture2d<float> occlusionTexture,
-    texture2d<float> emissiveTexture)
+    texture2d<float> emissiveTexture,
+    sampler materialSampler,
+    sampler shadowSampler)
 {
     const uint textureFlags = uint(drawConstants.drawMode + 0.5f);
     float3 albedo = drawConstants.baseColor.rgb;
@@ -233,7 +225,7 @@ inline float4 RunFragmentShader(
     }
 
     const float3 normal =
-        ResolveNormal(input, drawConstants, normalTexture);
+        ResolveNormal(input, drawConstants, normalTexture, materialSampler);
     const float3 viewDirection =
         normalize(lighting.cameraPosition.xyz - input.worldPosition);
 
@@ -299,7 +291,8 @@ inline float4 RunFragmentShader(
         lightDirection,
         textureFlags,
         lighting,
-        shadowMap);
+        shadowMap,
+        shadowSampler);
     const float3 directLight =
         (kD * albedo / kPi + specular) *
         radiance *
@@ -345,7 +338,9 @@ fragment float4 fragmentShader(
     texture2d<float> metallicRoughnessTexture [[texture(6)]],
     texture2d<float> normalTexture [[texture(7)]],
     texture2d<float> occlusionTexture [[texture(8)]],
-    texture2d<float> emissiveTexture [[texture(9)]])
+    texture2d<float> emissiveTexture [[texture(9)]],
+    sampler materialSampler [[sampler(0)]],
+    sampler shadowSampler [[sampler(2)]])
 {
     return RunFragmentShader(
         input,
@@ -356,7 +351,9 @@ fragment float4 fragmentShader(
         metallicRoughnessTexture,
         normalTexture,
         occlusionTexture,
-        emissiveTexture);
+        emissiveTexture,
+        materialSampler,
+        shadowSampler);
 }
 
 // Stock Renderer가 ShaderDesc에서 명시적으로 선택하는 entry point.
@@ -369,7 +366,9 @@ fragment float4 main0(
     texture2d<float> metallicRoughnessTexture [[texture(6)]],
     texture2d<float> normalTexture [[texture(7)]],
     texture2d<float> occlusionTexture [[texture(8)]],
-    texture2d<float> emissiveTexture [[texture(9)]])
+    texture2d<float> emissiveTexture [[texture(9)]],
+    sampler materialSampler [[sampler(0)]],
+    sampler shadowSampler [[sampler(2)]])
 {
     return RunFragmentShader(
         input,
@@ -380,5 +379,7 @@ fragment float4 main0(
         metallicRoughnessTexture,
         normalTexture,
         occlusionTexture,
-        emissiveTexture);
+        emissiveTexture,
+        materialSampler,
+        shadowSampler);
 }

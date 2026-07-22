@@ -16,6 +16,8 @@
 #include "RHI/IBuffer.h"
 #include "RHI/IDevice.h"
 #include "RHI/GraphicsPipeline.h"
+#include "RHI/IResourceSet.h"
+#include "RHI/ISampler.h"
 #include "RHI/IShader.h"
 #include "RHI/ITexture.h"
 
@@ -251,6 +253,24 @@ void Renderer::SetEnvironmentLight(const EnvironmentDesc& environment)
 void Renderer::Shutdown(RHI::IDevice* device)
 {
 	if(device == nullptr) return;
+	for(SceneMaterialState& materialState : m_materialStates)
+	{
+		if(materialState.resourceSet != nullptr)
+		{
+			device->DestroyResourceSet(materialState.resourceSet);
+			materialState.resourceSet = nullptr;
+		}
+	}
+	if(m_mainResourceSet != nullptr)
+	{
+		device->DestroyResourceSet(m_mainResourceSet);
+		m_mainResourceSet = nullptr;
+	}
+	if(m_shadowResourceSet != nullptr)
+	{
+		device->DestroyResourceSet(m_shadowResourceSet);
+		m_shadowResourceSet = nullptr;
+	}
 
 	if(m_path != nullptr) m_path->Shutdown(device);
 	m_path.reset();
@@ -276,7 +296,6 @@ void Renderer::Shutdown(RHI::IDevice* device)
 	{
 		device->DestroyTexture(m_shadowDepthTarget);
 		m_shadowDepthTarget = nullptr;
-		m_shadowDescriptorIndex = 0xFFFFFFFFu;
 	}
 	if(m_shadowMatrixBuffer != nullptr)
 	{
@@ -292,6 +311,16 @@ void Renderer::Shutdown(RHI::IDevice* device)
 	{
 		device->DestroyPipelineState(m_pipeline);
 		m_pipeline = nullptr;
+	}
+	if(m_shadowSampler != nullptr)
+	{
+		device->DestroySampler(m_shadowSampler);
+		m_shadowSampler = nullptr;
+	}
+	if(m_materialSampler != nullptr)
+	{
+		device->DestroySampler(m_materialSampler);
+		m_materialSampler = nullptr;
 	}
 	if(m_shadowVertexShader != nullptr)
 	{
@@ -314,10 +343,16 @@ void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 {
 	if(device == nullptr || m_path == nullptr) return;
 
-	// 공유 준비: 텍스처 GPU 레지던시 + 머티리얼 상태(모든 전략 공통).
-	m_gpuScene.SyncTextures(scene, device);
-	EnsureMaterialStateCapacity(scene.GetMaterialCount());
-	UpdateMaterialStates(scene);
+	EnsureDepthStencilTarget(device);
+	UpdateShadowBuffer(scene, device);
+	if(m_shadowPipeline != nullptr) EnsureShadowDepthTarget(device);
+	UpdateLightingBuffer(scene, device);
+	EnsureMaterialStateCapacity(device, scene.GetMaterialCount());
+	UpdateCommonResourceSets(device);
+
+	// 공유 준비: 텍스처 GPU 레지던시 + 머티리얼 resource set(모든 전략 공통).
+	m_gpuScene.SyncTextures(scene, device, m_mainResourceSet, m_materialSampler);
+	UpdateMaterialStates(scene, device);
 
 	// 전략별 지오메트리/드로우 리소스 준비.
 	RenderPathContext context = {};
@@ -325,16 +360,9 @@ void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 	context.pipeline = m_pipeline;
 	context.gpuScene = &m_gpuScene;
 	context.materialStates = &m_materialStates;
-	EnsureDepthStencilTarget(device);
+	context.mainResourceSet = m_mainResourceSet;
 	context.depthStencil = m_depthStencilTarget;
 	m_path->PrepareResources(scene, device, context);
-
-	UpdateShadowBuffer(scene, device);
-	if(m_shadowPipeline != nullptr)
-	{
-		EnsureShadowDepthTarget(device);
-	}
-	UpdateLightingBuffer(scene, device);
 	context.lightingBuffer = m_lightingBuffer;
 	context.shadowMatrixBuffer = m_shadowMatrixBuffer;
 
@@ -342,6 +370,7 @@ void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 	{
 		context.shadowPipeline = m_shadowPipeline;
 		context.shadowDepth = m_shadowDepthTarget;
+		context.shadowResourceSet = m_shadowResourceSet;
 	}
 
 	// 정식화된 패스 루프: 모든 전략이 동일 경로를 거친다.
@@ -428,7 +457,34 @@ bool Renderer::BuildPipelineStates(RHI::IDevice* device)
 	desc.colorAttachments = &colorAttachment;
 	desc.colorAttachmentCount = 1;
 	desc.depthStencilFormat = m_config.depthStencilFormat;
-	desc.enableBindlessTextures = m_config.enableBindlessTextures;
+	std::vector<RHI::ResourceBindingDesc> resourceBindings = {
+		{ 0, Layout::kLightingConstantBinding, RHI::ResourceType::ConstantBuffer, 1, RHI::ShaderStageFlags::Fragment },
+		{ 0, Layout::kShadowSamplerBinding, RHI::ResourceType::TextureSampler, 1, RHI::ShaderStageFlags::Fragment },
+		{ 0, Layout::kShadowMatrixBinding, RHI::ResourceType::ConstantBuffer, 1, RHI::ShaderStageFlags::Vertex },
+		{ 0, Layout::kBindlessTransformStorageBinding, RHI::ResourceType::StorageBuffer, 1, RHI::ShaderStageFlags::Vertex }
+	};
+	if(m_config.enableBindlessTextures)
+	{
+		resourceBindings.push_back({ 1, 0, RHI::ResourceType::TextureSampler, Layout::kBindlessTextureCount, RHI::ShaderStageFlags::Fragment });
+	}
+	else
+	{
+		resourceBindings.push_back({ 0, Layout::kBaseColorTextureBinding, RHI::ResourceType::TextureSampler, 1, RHI::ShaderStageFlags::Fragment });
+		resourceBindings.push_back({ 0, Layout::kMetallicRoughnessSamplerBinding, RHI::ResourceType::TextureSampler, 1, RHI::ShaderStageFlags::Fragment });
+		resourceBindings.push_back({ 0, Layout::kNormalSamplerBinding, RHI::ResourceType::TextureSampler, 1, RHI::ShaderStageFlags::Fragment });
+		resourceBindings.push_back({ 0, Layout::kOcclusionSamplerBinding, RHI::ResourceType::TextureSampler, 1, RHI::ShaderStageFlags::Fragment });
+		resourceBindings.push_back({ 0, Layout::kEmissiveSamplerBinding, RHI::ResourceType::TextureSampler, 1, RHI::ShaderStageFlags::Fragment });
+	}
+	const RHI::InlineConstantRangeDesc inlineConstants = {
+		0,
+		0,
+		static_cast<uint32_t>(sizeof(Layout::DrawConstants)),
+		RHI::ShaderStageFlags::AllGraphics
+	};
+	desc.pipelineLayout.resourceBindings = resourceBindings.data();
+	desc.pipelineLayout.resourceBindingCount = static_cast<uint32_t>(resourceBindings.size());
+	desc.pipelineLayout.inlineConstantRanges = &inlineConstants;
+	desc.pipelineLayout.inlineConstantRangeCount = 1;
 
 	m_pipeline = device->CreateGraphicsPipeline(desc);
 	if(m_pipeline == nullptr) return false;
@@ -461,10 +517,41 @@ bool Renderer::BuildPipelineStates(RHI::IDevice* device)
 		shadowDesc.depthStencil.depthWriteEnable = true;
 		shadowDesc.depthStencil.depthCompareOp = RHI::CompareOp::Less;
 		shadowDesc.depthStencilFormat = shadowFormat;
-		shadowDesc.enableBindlessTextures = m_config.enableBindlessTextures;
+		const RHI::ResourceBindingDesc shadowBindings[] = {
+			{ 0, Layout::kShadowMatrixBinding, RHI::ResourceType::ConstantBuffer, 1, RHI::ShaderStageFlags::Vertex },
+			{ 0, Layout::kBindlessTransformStorageBinding, RHI::ResourceType::StorageBuffer, 1, RHI::ShaderStageFlags::Vertex }
+		};
+		const RHI::InlineConstantRangeDesc shadowInlineConstants = {
+			0,
+			0,
+			static_cast<uint32_t>(sizeof(Layout::DrawConstants)),
+			RHI::ShaderStageFlags::Vertex
+		};
+		shadowDesc.pipelineLayout.resourceBindings = shadowBindings;
+		shadowDesc.pipelineLayout.resourceBindingCount = static_cast<uint32_t>(sizeof(shadowBindings) / sizeof(shadowBindings[0]));
+		shadowDesc.pipelineLayout.inlineConstantRanges = &shadowInlineConstants;
+		shadowDesc.pipelineLayout.inlineConstantRangeCount = 1;
 
 		m_shadowPipeline = device->CreateGraphicsPipeline(shadowDesc);
 		if(m_shadowPipeline == nullptr) return false;
+	}
+
+	m_materialSampler = device->CreateSampler(RHI::SamplerDesc{});
+	RHI::SamplerDesc shadowSamplerDesc = {};
+	shadowSamplerDesc.addressU = RHI::SamplerAddressMode::ClampToEdge;
+	shadowSamplerDesc.addressV = RHI::SamplerAddressMode::ClampToEdge;
+	shadowSamplerDesc.addressW = RHI::SamplerAddressMode::ClampToEdge;
+	m_shadowSampler = device->CreateSampler(shadowSamplerDesc);
+	if(m_materialSampler == nullptr || m_shadowSampler == nullptr) return false;
+	if(m_config.enableBindlessTextures)
+	{
+		m_mainResourceSet = device->CreateResourceSet(m_pipeline);
+		if(m_mainResourceSet == nullptr) return false;
+	}
+	if(m_shadowPipeline != nullptr)
+	{
+		m_shadowResourceSet = device->CreateResourceSet(m_shadowPipeline);
+		if(m_shadowResourceSet == nullptr) return false;
 	}
 
 	return true;
@@ -545,7 +632,6 @@ void Renderer::EnsureShadowDepthTarget(RHI::IDevice* device)
 	{
 		device->DestroyTexture(m_shadowDepthTarget);
 		m_shadowDepthTarget = nullptr;
-		m_shadowDescriptorIndex = 0xFFFFFFFFu;
 	}
 
 	const RHI::Format shadowFormat = m_config.depthStencilFormat != RHI::Format::Unknown
@@ -561,27 +647,25 @@ void Renderer::EnsureShadowDepthTarget(RHI::IDevice* device)
 	shadowDesc.usage = RHI::TextureUsage::DepthStencil | RHI::TextureUsage::ShaderResource;
 	m_shadowDepthTarget = device->CreateTexture(shadowDesc);
 	if(m_shadowDepthTarget == nullptr) return;
-
-	// 그림자 맵 SRV 를 글로벌 디스크립터 힙에 한 번 등록(메인 패스에서 샘플링).
-	m_shadowDescriptorIndex = device->AllocateDescriptorSlot();
-	if(m_shadowDescriptorIndex == RHI::INVALID_DESCRIPTOR_INDEX)
-	{
-		device->DestroyTexture(m_shadowDepthTarget);
-		m_shadowDepthTarget = nullptr;
-		return;
-	}
-	device->UpdateDescriptorSlot(m_shadowDescriptorIndex, m_shadowDepthTarget);
 }
 
-void Renderer::EnsureMaterialStateCapacity(std::size_t materialCount)
+void Renderer::EnsureMaterialStateCapacity(RHI::IDevice* device, std::size_t materialCount)
 {
 	if(m_materialStates.size() < materialCount)
 	{
+		const std::size_t previousSize = m_materialStates.size();
 		m_materialStates.resize(materialCount);
+		if(!m_config.enableBindlessTextures)
+		{
+			for(std::size_t materialIndex = previousSize; materialIndex < materialCount; ++materialIndex)
+			{
+				m_materialStates[materialIndex].resourceSet = device->CreateResourceSet(m_pipeline);
+			}
+		}
 	}
 }
 
-void Renderer::UpdateMaterialStates(const Scene& scene)
+void Renderer::UpdateMaterialStates(const Scene& scene, RHI::IDevice* device)
 {
 	const uint32_t materialCount = scene.GetMaterialCount();
 	for(uint32_t materialIndex = 0; materialIndex < materialCount; ++materialIndex)
@@ -593,18 +677,18 @@ void Renderer::UpdateMaterialStates(const Scene& scene)
 		materialState.textures[kMaterialNormalTextureSlot] = m_gpuScene.ResolveTexture(material.normalTexture);
 		materialState.textures[kMaterialOcclusionTextureSlot] = m_gpuScene.ResolveTexture(material.occlusionTexture);
 		materialState.textures[kMaterialEmissiveTextureSlot] = m_gpuScene.ResolveTexture(material.emissiveTexture);
-		materialState.textureDescriptorIndices[kMaterialBaseColorTextureSlot] = m_gpuScene.ResolveTextureDescriptorIndex(material.baseColorTexture);
-		materialState.textureDescriptorIndices[kMaterialMetallicRoughnessTextureSlot] = m_gpuScene.ResolveTextureDescriptorIndex(material.metallicRoughnessTexture);
-		materialState.textureDescriptorIndices[kMaterialNormalTextureSlot] = m_gpuScene.ResolveTextureDescriptorIndex(material.normalTexture);
-		materialState.textureDescriptorIndices[kMaterialOcclusionTextureSlot] = m_gpuScene.ResolveTextureDescriptorIndex(material.occlusionTexture);
-		materialState.textureDescriptorIndices[kMaterialEmissiveTextureSlot] = m_gpuScene.ResolveTextureDescriptorIndex(material.emissiveTexture);
+		materialState.textureIndices[kMaterialBaseColorTextureSlot] = m_gpuScene.ResolveTextureIndex(material.baseColorTexture);
+		materialState.textureIndices[kMaterialMetallicRoughnessTextureSlot] = m_gpuScene.ResolveTextureIndex(material.metallicRoughnessTexture);
+		materialState.textureIndices[kMaterialNormalTextureSlot] = m_gpuScene.ResolveTextureIndex(material.normalTexture);
+		materialState.textureIndices[kMaterialOcclusionTextureSlot] = m_gpuScene.ResolveTextureIndex(material.occlusionTexture);
+		materialState.textureIndices[kMaterialEmissiveTextureSlot] = m_gpuScene.ResolveTextureIndex(material.emissiveTexture);
 
 		uint32_t textureFlags = 0;
 		const bool useBindless = m_config.enableBindlessTextures;
 		auto hasTexture = [&](uint32_t slot)
 		{
 			if(materialState.textures[slot] == nullptr) return false;
-			return !useBindless || materialState.textureDescriptorIndices[slot] != kInvalidDescriptorIndex;
+			return !useBindless || materialState.textureIndices[slot] != kInvalidTextureIndex;
 		};
 		if(hasTexture(kMaterialBaseColorTextureSlot)) textureFlags |= Layout::kBaseColorTextureFlag;
 		if(hasTexture(kMaterialMetallicRoughnessTextureSlot)) textureFlags |= Layout::kMetallicRoughnessTextureFlag;
@@ -612,6 +696,51 @@ void Renderer::UpdateMaterialStates(const Scene& scene)
 		if(hasTexture(kMaterialOcclusionTextureSlot)) textureFlags |= Layout::kOcclusionTextureFlag;
 		if(hasTexture(kMaterialEmissiveTextureSlot)) textureFlags |= Layout::kEmissiveTextureFlag;
 		materialState.textureFlags = textureFlags;
+
+		if(materialState.resourceSet != nullptr)
+		{
+			const uint32_t bindings[] = {
+				Layout::kBaseColorTextureBinding,
+				Layout::kMetallicRoughnessSamplerBinding,
+				Layout::kNormalSamplerBinding,
+				Layout::kOcclusionSamplerBinding,
+				Layout::kEmissiveSamplerBinding
+			};
+			std::vector<RHI::ResourceSetWrite> writes;
+			for(uint32_t slot = 0; slot < Layout::kMaterialTextureBindingCount; ++slot)
+			{
+				if(materialState.textures[slot] == nullptr) continue;
+				writes.push_back({ 0, bindings[slot], 0, nullptr, materialState.textures[slot], m_materialSampler, 0, 0 });
+			}
+			if(!writes.empty()) device->UpdateResourceSet(materialState.resourceSet, writes.data(), static_cast<uint32_t>(writes.size()));
+		}
+	}
+}
+
+void Renderer::UpdateCommonResourceSets(RHI::IDevice* device)
+{
+	std::vector<RHI::ResourceSetWrite> writes;
+	if(m_lightingBuffer != nullptr)
+		writes.push_back({ 0, Layout::kLightingConstantBinding, 0, m_lightingBuffer, nullptr, nullptr, 0, static_cast<uint32_t>(sizeof(Layout::RendererLightingConstants)) });
+	if(m_shadowMatrixBuffer != nullptr)
+		writes.push_back({ 0, Layout::kShadowMatrixBinding, 0, m_shadowMatrixBuffer, nullptr, nullptr, 0, static_cast<uint32_t>(sizeof(Layout::RendererShadowConstants)) });
+	if(m_shadowDepthTarget != nullptr)
+		writes.push_back({ 0, Layout::kShadowSamplerBinding, 0, nullptr, m_shadowDepthTarget, m_shadowSampler, 0, 0 });
+	if(m_mainResourceSet != nullptr && !writes.empty())
+		device->UpdateResourceSet(m_mainResourceSet, writes.data(), static_cast<uint32_t>(writes.size()));
+
+	for(SceneMaterialState& materialState : m_materialStates)
+	{
+		if(materialState.resourceSet != nullptr && !writes.empty())
+			device->UpdateResourceSet(materialState.resourceSet, writes.data(), static_cast<uint32_t>(writes.size()));
+	}
+	if(m_shadowResourceSet != nullptr && m_shadowMatrixBuffer != nullptr)
+	{
+		const RHI::ResourceSetWrite shadowWrite = {
+			0, Layout::kShadowMatrixBinding, 0, m_shadowMatrixBuffer, nullptr, nullptr, 0,
+			static_cast<uint32_t>(sizeof(Layout::RendererShadowConstants))
+		};
+		device->UpdateResourceSet(m_shadowResourceSet, &shadowWrite, 1);
 	}
 }
 

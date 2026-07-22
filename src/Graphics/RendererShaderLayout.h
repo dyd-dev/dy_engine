@@ -4,7 +4,6 @@
 #include <cstdint>
 
 #include "Math/Math.h"
-#include "RHI/ShaderLayout.h"
 #include "Graphics/RendererShaderLayout.inc"
 
 namespace dy::Graphics::RendererShaderLayout
@@ -89,22 +88,4 @@ namespace dy::Graphics::RendererShaderLayout
 	static_assert(kPushConstantRangeSize == 208u, "Renderer draw constants must match push constant range.");
 	static_assert(kMaterialTextureBindingCount + 1u == kSamplerDescriptorCount, "Renderer sampler descriptor count must include shadow map.");
 
-	// RHI::ShaderLayoutDesc(데이터) 기본값이 셰이더 공유 .inc 계약과 일치함을 보증한다.
-	// (둘 중 하나만 바뀌면 컴파일 실패 → 드리프트 방지)
-	static_assert(RHI::ShaderLayoutDesc{}.baseColorTextureBinding == kBaseColorTextureBinding, "ShaderLayoutDesc drift: base color binding");
-	static_assert(RHI::ShaderLayoutDesc{}.lightingConstantBinding == kLightingConstantBinding, "ShaderLayoutDesc drift: lighting binding");
-	static_assert(RHI::ShaderLayoutDesc{}.shadowSamplerBinding == kShadowSamplerBinding, "ShaderLayoutDesc drift: shadow sampler binding");
-	static_assert(RHI::ShaderLayoutDesc{}.shadowMatrixBinding == kShadowMatrixBinding, "ShaderLayoutDesc drift: shadow matrix binding");
-	static_assert(RHI::ShaderLayoutDesc{}.bindlessMaterialStorageBinding == kBindlessMaterialStorageBinding, "ShaderLayoutDesc drift: bindless material binding");
-	static_assert(RHI::ShaderLayoutDesc{}.bindlessTransformStorageBinding == kBindlessTransformStorageBinding, "ShaderLayoutDesc drift: bindless transform binding");
-	static_assert(RHI::ShaderLayoutDesc{}.bindlessDrawStorageBinding == kBindlessDrawStorageBinding, "ShaderLayoutDesc drift: bindless draw binding");
-	static_assert(RHI::ShaderLayoutDesc{}.descriptorBindingCount == kDescriptorBindingCount, "ShaderLayoutDesc drift: descriptor binding count");
-	static_assert(RHI::ShaderLayoutDesc{}.materialTextureBindingCount == kMaterialTextureBindingCount, "ShaderLayoutDesc drift: material texture count");
-	static_assert(RHI::ShaderLayoutDesc{}.samplerDescriptorCount == kSamplerDescriptorCount, "ShaderLayoutDesc drift: sampler descriptor count");
-	static_assert(RHI::ShaderLayoutDesc{}.constantBufferDescriptorCount == kConstantBufferDescriptorCount, "ShaderLayoutDesc drift: constant buffer descriptor count");
-	static_assert(RHI::ShaderLayoutDesc{}.storageBufferDescriptorCount == kStorageBufferDescriptorCount, "ShaderLayoutDesc drift: storage buffer descriptor count");
-	static_assert(RHI::ShaderLayoutDesc{}.bindlessTextureCount == kBindlessTextureCount, "ShaderLayoutDesc drift: bindless texture count");
-	static_assert(RHI::ShaderLayoutDesc{}.pushConstantRangeSize == kPushConstantRangeSize, "ShaderLayoutDesc drift: push constant range size");
-	static_assert(RHI::ShaderLayoutDesc{}.drawModePushConstantOffset == kDrawModePushConstantOffset, "ShaderLayoutDesc drift: draw mode offset");
-	static_assert(RHI::ShaderLayoutDesc{}.castShadowFlag == kCastShadowFlag, "ShaderLayoutDesc drift: cast shadow flag");
 }

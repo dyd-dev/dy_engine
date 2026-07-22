@@ -3,7 +3,6 @@
 
 #include "Math/Math.h"
 #include "RHI/Format.h"
-#include "RHI/ShaderLayout.h"
 #include "Graphics/Mesh.h"
 #include "Graphics/ShadowMath.h" // ShadowMapDesc
 
@@ -76,8 +75,5 @@ namespace dy::Graphics
 		float shadowNormalBias = 0.0f;
 		float shadowRasterSlopeBias = 1.75f;
 		uint32_t shadowPcfRadius = 1;
-
-		// 셰이더 바인딩 ABI(데이터). 미지정 시 엔진 표준 계약. 사용자 셰이더 제공 시 함께 지정.
-		RHI::ShaderLayoutDesc shaderLayout = {};
 	};
 }

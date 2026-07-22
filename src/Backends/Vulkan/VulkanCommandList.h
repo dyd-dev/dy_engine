@@ -8,25 +8,16 @@
 namespace dy::Backends
 {
 
-// 백엔드 로컬 상한. 렌더러 셰이더 레이아웃을 컴파일타임에 역참조하지 않기 위한 것으로,
-// 실제 사용 개수/크기는 런타임 RHI::ShaderLayoutDesc 값으로 결정되고 배열만 이 상한으로 잡는다.
-inline constexpr uint32_t kMaxDescriptorBindings = 16u;
-inline constexpr uint32_t kMaxMaterialTextures = 8u;
-inline constexpr uint32_t kMaxPushConstantBytes = 256u;
-
 class VulkanDevice;
 
 class VulkanCommandList : public dy::RHI::ICommandList
 {
 public:
 	void BindGraphicsPipeline(dy::RHI::IPipelineState* pipelineState) override;
-	void BindGlobalDescriptors() override {}
+	void BindResourceSet(dy::RHI::IResourceSet* resourceSet) override;
 	void BindVertexBuffer(uint32_t slot, dy::RHI::IBuffer* buffer, uint32_t offset) override;
 	void BindIndexBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset) override;
-	void BindConstantBuffer(uint32_t binding, dy::RHI::IBuffer* buffer, uint32_t offset, uint32_t size) override;
-	void BindStorageBuffer(uint32_t binding, dy::RHI::IBuffer* buffer, uint32_t offset, uint32_t size) override;
-	void BindTexture(uint32_t binding, dy::RHI::ITexture* texture) override;
-	void SetInlineConstants(uint32_t size, const void* data) override;
+	void SetInlineConstants(uint32_t offset, uint32_t size, const void* data) override;
 	void SetRenderTargets(uint32_t numRenderTargets, dy::RHI::ITexture** renderTargets, dy::RHI::ITexture* depthStencil) override;
 	void SetViewport(const dy::RHI::Viewport& viewport) override;
 	void SetScissor(const dy::RHI::Rect& rect) override;
@@ -40,23 +31,6 @@ public:
 	void End();
 
 private:
-	static constexpr uint32_t kMaxConstantBufferBindings = kMaxDescriptorBindings;
-	static constexpr uint32_t kMaxTextureBindings = kMaxDescriptorBindings;
-
-	struct ConstantBufferBinding
-	{
-		dy::RHI::IBuffer* buffer = nullptr;
-		uint32_t offset = 0;
-		uint32_t size = 0;
-	};
-
-	struct StorageBufferBinding
-	{
-		dy::RHI::IBuffer* buffer = nullptr;
-		uint32_t offset = 0;
-		uint32_t size = 0;
-	};
-
 	struct VertexBufferBinding
 	{
 		uint32_t slot = 0;
@@ -83,35 +57,31 @@ private:
 		uint32_t firstIndex = 0;
 		int32_t baseVertex = 0;
 		uint32_t startInstance = 0;
-		uint32_t pushConstantSize = 0;
+		uint32_t inlineConstantOffset = 0;
 		bool hasViewport = false;
 		bool hasScissor = false;
 		dy::RHI::IPipelineState* pipelineState = nullptr;
+		dy::RHI::IResourceSet* resourceSet = nullptr;
 		std::vector<VertexBufferBinding> vertexBuffers;
 		dy::RHI::IBuffer* indexBuffer = nullptr;
 		dy::RHI::Format indexFormat = dy::RHI::Format::Unknown;
 		uint32_t indexOffset = 0;
-		std::array<ConstantBufferBinding, kMaxConstantBufferBindings> constantBuffers = {};
-		std::array<StorageBufferBinding, kMaxConstantBufferBindings> storageBuffers = {};
-		std::array<dy::RHI::ITexture*, kMaxTextureBindings> textures = {};
 		dy::RHI::Viewport viewport = {};
 		dy::RHI::Rect scissor = {};
-		std::array<uint8_t, kMaxPushConstantBytes> pushConstants = {};
+		std::vector<uint8_t> inlineConstants;
 	};
 
 	friend struct VulkanDevice::Impl;
 	std::array<float, 4> m_clearColor = { 0.4f, 0.7f, 1.0f, 1.0f };
 	float m_clearDepth = 1.0f;
 	dy::RHI::IPipelineState* m_boundPipeline = nullptr;
-	std::array<uint8_t, kMaxPushConstantBytes> m_pendingPushConstants = {};
-	uint32_t m_pendingPushConstantSize = 0;
+	std::vector<uint8_t> m_pendingInlineConstants;
+	uint32_t m_pendingInlineConstantOffset = 0;
+	dy::RHI::IResourceSet* m_pendingResourceSet = nullptr;
 	std::vector<VertexBufferBinding> m_pendingVertexBuffers;
 	dy::RHI::IBuffer* m_pendingIndexBuffer = nullptr;
 	dy::RHI::Format m_pendingIndexFormat = dy::RHI::Format::Unknown;
 	uint32_t m_pendingIndexOffset = 0;
-	std::array<ConstantBufferBinding, kMaxConstantBufferBindings> m_pendingConstantBuffers = {};
-	std::array<StorageBufferBinding, kMaxConstantBufferBindings> m_pendingStorageBuffers = {};
-	std::array<dy::RHI::ITexture*, kMaxTextureBindings> m_pendingTextures = {};
 	bool m_hasPendingViewport = false;
 	bool m_hasPendingScissor = false;
 	dy::RHI::Viewport m_pendingViewport = {};

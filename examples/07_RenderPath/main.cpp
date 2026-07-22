@@ -154,8 +154,6 @@ int main(int argc, char** argv)
 		Platform::Window window(1280, 720, "RenderPath");
 
 		RHI::DeviceDesc deviceDesc = {};
-		deviceDesc.maxDrawsPerFrame = targetCount + 16u;     // PerDraw 모드: 드로우당 디스크립터 필요
-		deviceDesc.maxBindlessTextures = 256u;               // 여러 모델의 텍스처 수용
 		std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(window.GetHandle(), deviceDesc));
 		if(!device) throw std::runtime_error("Failed to create RHI device");
 

@@ -2,6 +2,7 @@
 #include <cstdint>
 #include "Format.h"
 #include "IShader.h"
+#include "PipelineLayout.h"
 
 namespace dy::RHI
 {
@@ -178,13 +179,13 @@ namespace dy::RHI
 		InputAssemblyDesc inputAssembly = {};
 		RasterizationDesc rasterization = {};
 		DepthStencilDesc depthStencil = {};
+		// 배열은 CreateGraphicsPipeline() 호출 동안만 유효해도 되며 backend가 복사한다.
+		PipelineLayoutDesc pipelineLayout = {};
 		// 배열은 CreateGraphicsPipeline() 호출 동안만 유효해도 된다.
 		const ColorAttachmentDesc* colorAttachments = nullptr;
 		uint32_t colorAttachmentCount = 0;
 
 		Format depthStencilFormat = Format::Unknown;
-
-		bool enableBindlessTextures = false;
 	};
 
 	class IPipelineState

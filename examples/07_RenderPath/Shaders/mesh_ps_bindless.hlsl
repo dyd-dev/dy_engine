@@ -32,10 +32,10 @@ cbuffer RendererLighting : register(b1)
 // Bindless 머티리얼 텍스처 배열(글로벌 힙). 루트 param 1 의 SRV 테이블과 일치.
 // 크기는 DY_RENDERER_BINDLESS_TEXTURE_COUNT(=128)와 동일. unbounded 배열은 FXC 기본설정에서
 // 막혀 있어(X3596) 고정 크기로 선언한다(루트 시그니처 범위는 unbounded 라 더 커도 무방).
-Texture2D BindlessTextures[128] : register(t0, space0);
-// 그림자 맵은 전용 SRV 테이블(루트 param 7, space4).
-Texture2D ShadowMap : register(t0, space4);
-SamplerState LinearSampler : register(s0);
+Texture2D BindlessTextures[128] : register(t0, space1);
+// 그림자 맵은 set 0, binding 2를 사용한다.
+Texture2D ShadowMap : register(t2, space0);
+SamplerState LinearSampler : register(s0, space1);
 
 #define DY_TEXTURE_FLAG_BASE_COLOR 1u
 #define DY_TEXTURE_FLAG_METALLIC_ROUGHNESS 2u

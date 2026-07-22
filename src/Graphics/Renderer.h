@@ -16,6 +16,8 @@ namespace dy::RHI
 	class IBuffer;
 	class IDevice;
 	class IPipelineState;
+	class IResourceSet;
+	class ISampler;
 	class IShader;
 	class ITexture;
 }
@@ -61,8 +63,9 @@ namespace dy::Graphics
 		void BuildRenderPassPlan();
 		void EnsureDepthStencilTarget(RHI::IDevice* device);
 		void EnsureShadowDepthTarget(RHI::IDevice* device);
-		void EnsureMaterialStateCapacity(std::size_t materialCount);
-		void UpdateMaterialStates(const Scene& scene);
+		void EnsureMaterialStateCapacity(RHI::IDevice* device, std::size_t materialCount);
+		void UpdateMaterialStates(const Scene& scene, RHI::IDevice* device);
+		void UpdateCommonResourceSets(RHI::IDevice* device);
 		void UpdateLightingBuffer(const Scene& scene, RHI::IDevice* device);
 		void UpdateShadowBuffer(const Scene& scene, RHI::IDevice* device);
 		[[nodiscard]] bool IsRenderPassEnabled(RenderPassKind passKind) const;
@@ -82,7 +85,10 @@ namespace dy::Graphics
 		RHI::ITexture* m_shadowDepthTarget = nullptr;
 		RHI::IBuffer* m_lightingBuffer = nullptr;
 		RHI::IBuffer* m_shadowMatrixBuffer = nullptr;
-		uint32_t m_shadowDescriptorIndex = 0xFFFFFFFFu;
+		RHI::ISampler* m_materialSampler = nullptr;
+		RHI::ISampler* m_shadowSampler = nullptr;
+		RHI::IResourceSet* m_mainResourceSet = nullptr;
+		RHI::IResourceSet* m_shadowResourceSet = nullptr;
 		GpuScene m_gpuScene;
 		std::vector<SceneMaterialState> m_materialStates;
 		std::unique_ptr<IRenderPath> m_path;

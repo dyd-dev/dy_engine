@@ -9,19 +9,15 @@ namespace dy::Backends
     class D3D12CommandList : public RHI::ICommandList
     {
     public:
-        D3D12CommandList(void* nativeDevice, size_t rtvHandlePtr, void* globalDescriptorHeap = nullptr, uint32_t srvDescriptorSize = 0);
+        D3D12CommandList(void* nativeDevice, size_t rtvHandlePtr);
         ~D3D12CommandList() override;
 
         bool Reset();
 
         void BindGraphicsPipeline(RHI::IPipelineState* pipelineState) override;
 
-        void BindGlobalDescriptors() override;
-
-        void BindConstantBuffer(uint32_t binding, RHI::IBuffer* buffer, uint32_t offset, uint32_t size) override;
-        void BindTexture(uint32_t binding, RHI::ITexture* texture) override;
-        void BindStorageBuffer(uint32_t binding, RHI::IBuffer* buffer, uint32_t offset, uint32_t size) override;
-        void SetInlineConstants(uint32_t size, const void* data) override;
+        void BindResourceSet(RHI::IResourceSet* resourceSet) override;
+        void SetInlineConstants(uint32_t offset, uint32_t size, const void* data) override;
         void SetRenderTargets(uint32_t numRenderTargets, RHI::ITexture** renderTargets, RHI::ITexture* depthStencil) override;
         void SetViewport(const RHI::Viewport& viewport) override;
         void SetScissor(const RHI::Rect& rect) override;
