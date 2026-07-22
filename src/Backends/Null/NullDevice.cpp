@@ -81,6 +81,7 @@ namespace dy::Backends
 			void BindGraphicsPipeline(RHI::IPipelineState*) override {}
 			void BindResourceSet(RHI::IResourceSet*) override {}
 			void SetInlineConstants(uint32_t, uint32_t, const void*) override {}
+			void Barrier(const RHI::TextureBarrier*, uint32_t) override {}
 			void BeginRendering(const RHI::RenderingInfo&) override {}
 			void EndRendering() override {}
 			void SetViewport(const RHI::Viewport&) override {}
@@ -159,9 +160,10 @@ namespace dy::Backends
 		return new NullSampler(desc);
 	}
 
-	bool NullDevice::UpdateTexture(RHI::ITexture*, const void*, uint32_t)
+	bool NullDevice::UpdateTexture(RHI::ITexture* texture, const void* data, uint32_t rowPitch, RHI::ResourceState finalState)
 	{
-		return true;
+		return texture != nullptr && data != nullptr && rowPitch > 0 &&
+			finalState != RHI::ResourceState::Undefined && finalState != RHI::ResourceState::Present;
 	}
 
 	RHI::IPipelineState* NullDevice::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc)

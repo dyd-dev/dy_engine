@@ -22,6 +22,7 @@ public:
     RHI::Format GetFormat() const { return m_format; }
     VkExtent2D GetExtent() const { return m_swapchainExtent; }
     const std::vector<VkImageView>& GetImageViews() const { return m_swapchainImageViews; }
+    const std::vector<VkImage>& GetImages() const { return m_swapchainImages; }
     size_t GetImageCount() const { return m_swapchainImages.size(); }
 
     static SwapchainSupportDetails QuerySwapchainSupport(VkPhysicalDevice device, VkSurfaceKHR surface);

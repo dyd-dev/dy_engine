@@ -141,7 +141,6 @@ namespace dy::Backends
         ComPtr<ID3D12DescriptorHeap> samplerHeap;
         uint32_t resourceDescriptorSize = 0;
         uint32_t samplerDescriptorSize = 0;
-        std::vector<D3D12Texture*> textures;
         bool valid = false;
     };
 
@@ -175,7 +174,6 @@ namespace dy::Backends
             if(FAILED(device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&m_internal->samplerHeap)))) return;
             m_internal->samplerDescriptorSize = device->GetDescriptorHandleIncrementSize(desc.Type);
         }
-        m_internal->textures.resize(resourceCount, nullptr);
         m_internal->valid = true;
     }
 
@@ -223,7 +221,6 @@ namespace dy::Backends
                 D3D12_CPU_DESCRIPTOR_HANDLE samplerHandle = m_internal->samplerHeap->GetCPUDescriptorHandleForHeapStart();
                 samplerHandle.ptr += static_cast<SIZE_T>(declared->samplerHeapOffset + write.arrayElement) * m_internal->samplerDescriptorSize;
                 device->CreateSampler(static_cast<const D3D12_SAMPLER_DESC*>(sampler->GetNativeDesc()), samplerHandle);
-                m_internal->textures[declared->heapOffset + write.arrayElement] = texture;
                 continue;
             }
 
@@ -273,22 +270,6 @@ namespace dy::Backends
             if(binding.desc.type != RHI::ResourceType::TextureSampler) continue;
             D3D12_GPU_DESCRIPTOR_HANDLE samplerHandle = m_internal->samplerHeap->GetGPUDescriptorHandleForHeapStart();
             commandList->SetGraphicsRootDescriptorTable(binding.samplerRootParameter, samplerHandle);
-            for(uint32_t element = 0; element < binding.desc.arrayCount; ++element)
-            {
-                D3D12Texture* texture = m_internal->textures[binding.heapOffset + element];
-                if(texture == nullptr) continue;
-                ID3D12Resource* resource = static_cast<ID3D12Resource*>(texture->GetNativeResource());
-                const D3D12_RESOURCE_STATES before = static_cast<D3D12_RESOURCE_STATES>(texture->GetResourceState());
-                if(resource == nullptr || before == D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE) continue;
-                D3D12_RESOURCE_BARRIER barrier = {};
-                barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                barrier.Transition.pResource = resource;
-                barrier.Transition.StateBefore = before;
-                barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-                barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                commandList->ResourceBarrier(1, &barrier);
-                texture->SetResourceState(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            }
         }
     }
 }

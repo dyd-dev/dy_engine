@@ -5,6 +5,7 @@
 
 namespace dy::RHI
 {
+	enum class ResourceState : uint8_t;
 	class ICommandList;
 
 	class IBuffer;
@@ -69,7 +70,7 @@ namespace dy::RHI
 		virtual void DestroyPipelineState(IPipelineState* pipeline) = 0;
 		virtual void DestroyResourceSet(IResourceSet* resourceSet) = 0;
 
-		virtual bool UpdateTexture(ITexture* texture, const void* data, uint32_t rowPitch) = 0;
+		virtual bool UpdateTexture(ITexture* texture, const void* data, uint32_t rowPitch, ResourceState finalState) = 0;
 
 	protected:
 		virtual int Initialize(const void* windowHandle, const DeviceDesc& desc) = 0;

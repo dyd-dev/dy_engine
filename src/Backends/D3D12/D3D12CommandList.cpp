@@ -12,29 +12,6 @@ using Microsoft::WRL::ComPtr;
 
 namespace dy::Backends
 {
-    namespace
-    {
-        void TransitionTexture(ID3D12GraphicsCommandList* commandList, D3D12Texture* texture, D3D12_RESOURCE_STATES after)
-        {
-            if (commandList == nullptr || texture == nullptr) return;
-            ID3D12Resource* resource = static_cast<ID3D12Resource*>(texture->GetNativeResource());
-            if (resource == nullptr) return;
-
-            const D3D12_RESOURCE_STATES before = static_cast<D3D12_RESOURCE_STATES>(texture->GetResourceState());
-            if (before == after) return;
-
-            D3D12_RESOURCE_BARRIER barrier = {};
-            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            barrier.Transition.pResource = resource;
-            barrier.Transition.StateBefore = before;
-            barrier.Transition.StateAfter = after;
-            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            commandList->ResourceBarrier(1, &barrier);
-            texture->SetResourceState(after);
-        }
-
-    }
-
     struct D3D12CommandListInternal
     {
         ComPtr<ID3D12CommandAllocator> allocator;
@@ -90,12 +67,6 @@ namespace dy::Backends
     void D3D12CommandList::Close()
     {
         EndRendering();
-        // 백버퍼를 PRESENT 로 전이. 추적기(D3D12Texture)를 거쳐 상태를 갱신해야
-        // 다음 프레임 재사용 시 BeginRendering 이 올바른 before-state 로 배리어를 친다.
-        if (m_internal->backBufferTexture != nullptr)
-        {
-            TransitionTexture(m_internal->commandList.Get(), m_internal->backBufferTexture, D3D12_RESOURCE_STATE_PRESENT);
-        }
         m_internal->commandList->Close();
         m_internal->activeColorTargets.clear();
         m_internal->activeDepthTarget = nullptr;
@@ -189,6 +160,47 @@ namespace dy::Backends
                 data,
                 (offset - range.desc.offset) / 4);
             return;
+        }
+    }
+
+    void D3D12CommandList::Barrier(const RHI::TextureBarrier* barriers, uint32_t barrierCount)
+    {
+        if(m_internal->hasActivePass || (barrierCount > 0 && barriers == nullptr)) return;
+        for(uint32_t barrierIndex = 0; barrierIndex < barrierCount; ++barrierIndex)
+        {
+            auto* texture = dynamic_cast<D3D12Texture*>(barriers[barrierIndex].texture);
+            if(texture == nullptr || texture->GetNativeResource() == nullptr ||
+               barriers[barrierIndex].after == RHI::ResourceState::Undefined ||
+               barriers[barrierIndex].before == barriers[barrierIndex].after) continue;
+            D3D12_RESOURCE_STATES before = D3D12_RESOURCE_STATE_COMMON;
+            D3D12_RESOURCE_STATES after = D3D12_RESOURCE_STATE_COMMON;
+            switch(barriers[barrierIndex].before)
+            {
+            case RHI::ResourceState::Undefined: before = D3D12_RESOURCE_STATE_COMMON; break;
+            case RHI::ResourceState::ShaderResource: before = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE; break;
+            case RHI::ResourceState::RenderTarget: before = D3D12_RESOURCE_STATE_RENDER_TARGET; break;
+            case RHI::ResourceState::DepthStencilWrite: before = D3D12_RESOURCE_STATE_DEPTH_WRITE; break;
+            case RHI::ResourceState::Storage: before = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; break;
+            case RHI::ResourceState::Present: before = D3D12_RESOURCE_STATE_PRESENT; break;
+            }
+            switch(barriers[barrierIndex].after)
+            {
+            case RHI::ResourceState::Undefined: after = D3D12_RESOURCE_STATE_COMMON; break;
+            case RHI::ResourceState::ShaderResource: after = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE; break;
+            case RHI::ResourceState::RenderTarget: after = D3D12_RESOURCE_STATE_RENDER_TARGET; break;
+            case RHI::ResourceState::DepthStencilWrite: after = D3D12_RESOURCE_STATE_DEPTH_WRITE; break;
+            case RHI::ResourceState::Storage: after = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; break;
+            case RHI::ResourceState::Present: after = D3D12_RESOURCE_STATE_PRESENT; break;
+            }
+            if(static_cast<D3D12_RESOURCE_STATES>(texture->GetResourceState()) != before) continue;
+            D3D12_RESOURCE_BARRIER nativeBarrier = {};
+            nativeBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            nativeBarrier.Transition.pResource = static_cast<ID3D12Resource*>(texture->GetNativeResource());
+            nativeBarrier.Transition.StateBefore = before;
+            nativeBarrier.Transition.StateAfter = after;
+            nativeBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            m_internal->commandList->ResourceBarrier(1, &nativeBarrier);
+            texture->SetResourceState(after);
         }
     }
 
@@ -304,15 +316,6 @@ namespace dy::Backends
                 return;
             }
             dsvPtr = &dsvHandle;
-        }
-
-        for(D3D12Texture* colorTexture : colorTextures)
-        {
-            TransitionTexture(m_internal->commandList.Get(), colorTexture, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        }
-        if (depthTexture != nullptr)
-        {
-            TransitionTexture(m_internal->commandList.Get(), depthTexture, D3D12_RESOURCE_STATE_DEPTH_WRITE);
         }
 
         m_internal->commandList->OMSetRenderTargets(

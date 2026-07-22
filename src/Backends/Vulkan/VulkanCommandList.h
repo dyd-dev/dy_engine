@@ -3,6 +3,7 @@
 #include "VulkanDevice.h"
 #include <array>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace dy::Backends
@@ -18,6 +19,7 @@ public:
 	void BindVertexBuffer(uint32_t slot, dy::RHI::IBuffer* buffer, uint32_t offset) override;
 	void BindIndexBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset) override;
 	void SetInlineConstants(uint32_t offset, uint32_t size, const void* data) override;
+	void Barrier(const dy::RHI::TextureBarrier* barriers, uint32_t barrierCount) override;
 	void BeginRendering(const dy::RHI::RenderingInfo& renderingInfo) override;
 	void EndRendering() override;
 	void SetViewport(const dy::RHI::Viewport& viewport) override;
@@ -83,6 +85,7 @@ private:
 	dy::RHI::Viewport m_pendingViewport = {};
 	dy::RHI::Rect m_pendingScissor = {};
 	std::vector<PassRecord> m_passRecords;
+	std::vector<std::pair<uint32_t, dy::RHI::TextureBarrier>> m_barriers;
 	std::vector<DrawCall> m_drawCalls;
 	bool m_isClosed = false;
 	bool m_isRendering = false;

@@ -18,6 +18,7 @@ void VulkanCommandList::Begin()
 	m_hasPendingViewport = false;
 	m_hasPendingScissor = false;
 	m_passRecords.clear();
+	m_barriers.clear();
 	m_drawCalls.clear();
 	m_isClosed = false;
 	m_isRendering = false;
@@ -54,6 +55,21 @@ void VulkanCommandList::BindVertexBuffer(uint32_t slot, dy::RHI::IBuffer* buffer
 		return;
 	}
 	m_pendingVertexBuffers.push_back(VertexBufferBinding{ slot, buffer, offset });
+}
+
+void VulkanCommandList::Barrier(const dy::RHI::TextureBarrier* barriers, uint32_t barrierCount)
+{
+	if(m_isRendering || (barrierCount > 0 && barriers == nullptr)) return;
+	for(uint32_t barrierIndex = 0; barrierIndex < barrierCount; ++barrierIndex)
+	{
+		if(barriers[barrierIndex].texture == nullptr ||
+		   barriers[barrierIndex].after == dy::RHI::ResourceState::Undefined ||
+		   barriers[barrierIndex].before == barriers[barrierIndex].after) continue;
+		m_barriers.push_back({
+			static_cast<uint32_t>(m_passRecords.size()),
+			barriers[barrierIndex]
+		});
+	}
 }
 
 void VulkanCommandList::BindIndexBuffer(dy::RHI::IBuffer* buffer, dy::RHI::Format format, uint32_t offset)

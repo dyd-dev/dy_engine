@@ -305,6 +305,12 @@ namespace
 	// 깊이 전용(그림자) 렌더링 스코프 시작.
 	void BeginShadowPass(RHI::ICommandList* commandList, const RenderPathContext& ctx)
 	{
+		if(ctx.shadowDepthState != nullptr)
+		{
+			const RHI::TextureBarrier barrier = { ctx.shadowDepth, *ctx.shadowDepthState, RHI::ResourceState::DepthStencilWrite };
+			commandList->Barrier(&barrier, 1);
+			*ctx.shadowDepthState = RHI::ResourceState::DepthStencilWrite;
+		}
 		const RHI::DepthStencilAttachmentInfo depthAttachment = {
 			ctx.shadowDepth,
 			RHI::LoadOp::Clear,
@@ -321,12 +327,26 @@ namespace
 	}
 
 	// 메인 포워드 패스 시작: 이미 획득한 커맨드 리스트에 백버퍼/깊이/파이프라인/상수버퍼를 바인딩.
-	// 그림자 깊이타겟이 있으면 SRV 로 바인딩한다(백엔드가 DEPTH_WRITE→PIXEL_SHADER_RESOURCE 전환).
+	// 그림자 깊이타겟이 있으면 명시적 barrier 후 SRV 로 바인딩한다.
 	[[nodiscard]] bool BeginMainPassOn(RHI::ICommandList* commandList, RHI::ITexture* backBuffer, const RenderPathContext& ctx)
 	{
 		if(commandList == nullptr || backBuffer == nullptr || ctx.pipeline == nullptr) return false;
 
 		commandList->EndRendering();
+		if(ctx.shadowDepth != nullptr && ctx.shadowDepthState != nullptr)
+		{
+			const RHI::TextureBarrier shadowBarrier = { ctx.shadowDepth, *ctx.shadowDepthState, RHI::ResourceState::ShaderResource };
+			commandList->Barrier(&shadowBarrier, 1);
+			*ctx.shadowDepthState = RHI::ResourceState::ShaderResource;
+		}
+		const RHI::TextureBarrier backBufferBarrier = { backBuffer, RHI::ResourceState::Present, RHI::ResourceState::RenderTarget };
+		commandList->Barrier(&backBufferBarrier, 1);
+		if(ctx.depthStencil != nullptr && ctx.depthStencilState != nullptr && *ctx.depthStencilState != RHI::ResourceState::DepthStencilWrite)
+		{
+			const RHI::TextureBarrier depthBarrier = { ctx.depthStencil, *ctx.depthStencilState, RHI::ResourceState::DepthStencilWrite };
+			commandList->Barrier(&depthBarrier, 1);
+			*ctx.depthStencilState = RHI::ResourceState::DepthStencilWrite;
+		}
 		const RendererDesc& config = *ctx.config;
 		RHI::ColorAttachmentInfo colorAttachment = { backBuffer, RHI::LoadOp::Clear, RHI::StoreOp::Store };
 		colorAttachment.clearColor[0] = config.clearColor.x;
@@ -352,9 +372,11 @@ namespace
 		return true;
 	}
 
-	void SubmitMainPass(RHI::IDevice* device, RHI::ICommandList* commandList)
+	void SubmitMainPass(RHI::IDevice* device, RHI::ICommandList* commandList, RHI::ITexture* backBuffer)
 	{
 		commandList->EndRendering();
+		const RHI::TextureBarrier barrier = { backBuffer, RHI::ResourceState::RenderTarget, RHI::ResourceState::Present };
+		commandList->Barrier(&barrier, 1);
 		commandList->Close();
 		std::array<RHI::ICommandList*, 1> commandLists = { commandList };
 		device->Submit(commandLists.data(), static_cast<uint32_t>(commandLists.size()));
@@ -535,7 +557,7 @@ namespace
 			commandList->DrawIndexedInstanced(meshState.indexCount, 1, 0, 0, 0);
 		}
 
-		SubmitMainPass(device, commandList);
+		SubmitMainPass(device, commandList, backBuffer);
 	}
 
 	void PerDrawBindPath::DestroyMeshState(RHI::IDevice* device, SceneMeshState& meshState)
@@ -665,7 +687,7 @@ namespace
 			}
 		}
 
-		SubmitMainPass(device, commandList);
+		SubmitMainPass(device, commandList, backBuffer);
 	}
 
 	void BatchedBindPath::Shutdown(RHI::IDevice* device)
@@ -788,7 +810,7 @@ namespace
 			}
 		}
 
-		SubmitMainPass(device, commandList);
+		SubmitMainPass(device, commandList, backBuffer);
 	}
 
 	void BindlessPath::Shutdown(RHI::IDevice* device)

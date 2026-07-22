@@ -18,6 +18,7 @@ namespace dy::Backends
 
         void BindResourceSet(RHI::IResourceSet* resourceSet) override;
         void SetInlineConstants(uint32_t offset, uint32_t size, const void* data) override;
+        void Barrier(const RHI::TextureBarrier* barriers, uint32_t barrierCount) override;
         void BeginRendering(const RHI::RenderingInfo& renderingInfo) override;
         void EndRendering() override;
         void SetViewport(const RHI::Viewport& viewport) override;

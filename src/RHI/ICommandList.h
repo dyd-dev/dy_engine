@@ -2,13 +2,13 @@
 #include <cstdint>
 #include "Format.h"
 #include "Rendering.h"
+#include "ResourceBarrier.h"
 
 namespace dy::RHI
 {
 	class IBuffer;
 	class IPipelineState;
 	class IResourceSet;
-
 	class ICommandList
 	{
 	public:
@@ -24,6 +24,7 @@ namespace dy::RHI
 
 		// shader constants
 		virtual void SetInlineConstants(uint32_t offset, uint32_t size, const void* data) = 0;
+		virtual void Barrier(const TextureBarrier* barriers, uint32_t barrierCount) = 0;
 
 		// rendering scope
 		virtual void BeginRendering(const RenderingInfo& renderingInfo) = 0;

@@ -6,6 +6,7 @@
 #include "RHI/IResourceSet.h"
 #include "RHI/ISampler.h"
 #include "RHI/ITexture.h"
+#include "RHI/ResourceBarrier.h"
 
 namespace dy::Graphics
 {
@@ -78,7 +79,7 @@ namespace dy::Graphics
 			slot.texture = device->CreateTexture(textureDesc);
 			if(slot.texture != nullptr)
 			{
-				if(device->UpdateTexture(slot.texture, upload.pixels, upload.rowPitch))
+				if(device->UpdateTexture(slot.texture, upload.pixels, upload.rowPitch, RHI::ResourceState::ShaderResource))
 				{
 					if(bindlessSet != nullptr && sampler != nullptr)
 					{

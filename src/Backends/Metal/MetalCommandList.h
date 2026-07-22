@@ -15,6 +15,7 @@ namespace dy::Backends
         void BindVertexBuffer(uint32_t slot, RHI::IBuffer* buffer, uint32_t offset) override;
         void BindIndexBuffer(RHI::IBuffer* buffer, RHI::Format format, uint32_t offset) override;
         void SetInlineConstants(uint32_t offset, uint32_t size, const void* data) override;
+        void Barrier(const RHI::TextureBarrier* barriers, uint32_t barrierCount) override;
 
         void BeginRendering(const RHI::RenderingInfo& renderingInfo) override;
         void EndRendering() override;

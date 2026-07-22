@@ -255,9 +255,10 @@ namespace dy::Backends
     void MetalDevice::DestroyPipelineState(RHI::IPipelineState* pipeline) { delete pipeline; }
     void MetalDevice::DestroyResourceSet(RHI::IResourceSet* resourceSet)  { delete resourceSet; }
 
-    bool MetalDevice::UpdateTexture(RHI::ITexture* texture, const void* data, uint32_t rowPitch)
+    bool MetalDevice::UpdateTexture(RHI::ITexture* texture, const void* data, uint32_t rowPitch, RHI::ResourceState finalState)
     {
-        if(texture == nullptr || data == nullptr || rowPitch == 0)
+        if(texture == nullptr || data == nullptr || rowPitch == 0 ||
+           finalState == RHI::ResourceState::Undefined || finalState == RHI::ResourceState::Present)
             return false;
 
         auto* metalTexture = static_cast<MetalTexture*>(texture);

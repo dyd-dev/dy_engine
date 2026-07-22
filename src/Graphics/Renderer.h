@@ -10,6 +10,8 @@
 #include "Graphics/RenderPath.h"
 #include "Graphics/RendererConfig.h"
 #include "Graphics/RendererShaderLayout.h"
+#include "RHI/ITexture.h"
+#include "RHI/ResourceBarrier.h"
 
 namespace dy::RHI
 {
@@ -83,6 +85,8 @@ namespace dy::Graphics
 		RHI::IShader* m_shadowVertexShader = nullptr;
 		RHI::ITexture* m_depthStencilTarget = nullptr;
 		RHI::ITexture* m_shadowDepthTarget = nullptr;
+		RHI::ResourceState m_depthStencilState = RHI::ResourceState::Undefined;
+		RHI::ResourceState m_shadowDepthState = RHI::ResourceState::Undefined;
 		RHI::IBuffer* m_lightingBuffer = nullptr;
 		RHI::IBuffer* m_shadowMatrixBuffer = nullptr;
 		RHI::ISampler* m_materialSampler = nullptr;

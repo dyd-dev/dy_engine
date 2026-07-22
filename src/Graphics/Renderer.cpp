@@ -362,6 +362,7 @@ void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 	context.materialStates = &m_materialStates;
 	context.mainResourceSet = m_mainResourceSet;
 	context.depthStencil = m_depthStencilTarget;
+	context.depthStencilState = &m_depthStencilState;
 	m_path->PrepareResources(scene, device, context);
 	context.lightingBuffer = m_lightingBuffer;
 	context.shadowMatrixBuffer = m_shadowMatrixBuffer;
@@ -370,6 +371,7 @@ void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 	{
 		context.shadowPipeline = m_shadowPipeline;
 		context.shadowDepth = m_shadowDepthTarget;
+		context.shadowDepthState = &m_shadowDepthState;
 		context.shadowResourceSet = m_shadowResourceSet;
 	}
 
@@ -603,6 +605,7 @@ void Renderer::EnsureDepthStencilTarget(RHI::IDevice* device)
 	{
 		device->DestroyTexture(m_depthStencilTarget);
 		m_depthStencilTarget = nullptr;
+		m_depthStencilState = RHI::ResourceState::Undefined;
 	}
 
 	RHI::TextureDesc depthDesc = {};
@@ -613,6 +616,7 @@ void Renderer::EnsureDepthStencilTarget(RHI::IDevice* device)
 	depthDesc.format = m_config.depthStencilFormat;
 	depthDesc.usage = RHI::TextureUsage::DepthStencil;
 	m_depthStencilTarget = device->CreateTexture(depthDesc);
+	m_depthStencilState = RHI::ResourceState::Undefined;
 }
 
 void Renderer::EnsureShadowDepthTarget(RHI::IDevice* device)
@@ -632,6 +636,7 @@ void Renderer::EnsureShadowDepthTarget(RHI::IDevice* device)
 	{
 		device->DestroyTexture(m_shadowDepthTarget);
 		m_shadowDepthTarget = nullptr;
+		m_shadowDepthState = RHI::ResourceState::Undefined;
 	}
 
 	const RHI::Format shadowFormat = m_config.depthStencilFormat != RHI::Format::Unknown
@@ -646,6 +651,7 @@ void Renderer::EnsureShadowDepthTarget(RHI::IDevice* device)
 	shadowDesc.format = shadowFormat;
 	shadowDesc.usage = RHI::TextureUsage::DepthStencil | RHI::TextureUsage::ShaderResource;
 	m_shadowDepthTarget = device->CreateTexture(shadowDesc);
+	m_shadowDepthState = RHI::ResourceState::Undefined;
 	if(m_shadowDepthTarget == nullptr) return;
 }
 

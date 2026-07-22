@@ -48,12 +48,6 @@ namespace dy::Backends
             return static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(format));
         }
 
-        D3D12_RESOURCE_STATES InitialState(RHI::TextureUsage usage)
-        {
-            if (HasUsage(usage, RHI::TextureUsage::DepthStencil)) return D3D12_RESOURCE_STATE_DEPTH_WRITE;
-            if (HasUsage(usage, RHI::TextureUsage::RenderTarget)) return D3D12_RESOURCE_STATE_RENDER_TARGET;
-            return D3D12_RESOURCE_STATE_COPY_DEST;
-        }
     }
 
     uint32_t D3D12Texture::ToDxgiFormat(RHI::Format format)
@@ -123,7 +117,7 @@ namespace dy::Backends
             optimizedClearValuePtr = &optimizedClearValue;
         }
 
-        m_internal->state = InitialState(desc.usage);
+        m_internal->state = D3D12_RESOURCE_STATE_COMMON;
         device->CreateCommittedResource(
             &heapProps,
             D3D12_HEAP_FLAG_NONE,

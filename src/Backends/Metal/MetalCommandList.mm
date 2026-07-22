@@ -335,6 +335,11 @@ namespace dy::Backends
         }
     }
 
+    void MetalCommandList::Barrier(const RHI::TextureBarrier*, uint32_t)
+    {
+        // Metal tracks texture hazards for this queue; rendering scope boundaries carry attachment hazards.
+    }
+
     void MetalCommandList::DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance)
     {
         EnsureRenderEncoder();

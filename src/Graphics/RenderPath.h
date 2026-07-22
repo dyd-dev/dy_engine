@@ -23,6 +23,7 @@ namespace dy::RHI
 	class IPipelineState;
 	class IResourceSet;
 	class ITexture;
+	enum class ResourceState : uint8_t;
 }
 
 namespace dy::Graphics
@@ -58,6 +59,7 @@ namespace dy::Graphics
 		const RendererDesc* config = nullptr;
 		RHI::IPipelineState* pipeline = nullptr;
 		RHI::ITexture* depthStencil = nullptr;
+		RHI::ResourceState* depthStencilState = nullptr;
 		RHI::IBuffer* lightingBuffer = nullptr;
 		RHI::IBuffer* shadowMatrixBuffer = nullptr;
 		GpuScene* gpuScene = nullptr;
@@ -67,6 +69,7 @@ namespace dy::Graphics
 		// 둘 다 non-null 이면 RenderPath 가 메인 패스 전에 깊이 전용 패스를 기록한다.
 		RHI::IPipelineState* shadowPipeline = nullptr;
 		RHI::ITexture* shadowDepth = nullptr;
+		RHI::ResourceState* shadowDepthState = nullptr;
 		RHI::IResourceSet* shadowResourceSet = nullptr;
 	};
 

@@ -31,7 +31,7 @@ namespace dy::Backends
         void DestroyTexture(RHI::ITexture* texture) override;
         void DestroyPipelineState(RHI::IPipelineState* pipeline) override;
         void DestroyResourceSet(RHI::IResourceSet* resourceSet) override;
-        bool UpdateTexture(RHI::ITexture* texture, const void* data, uint32_t rowPitch) override;
+        bool UpdateTexture(RHI::ITexture* texture, const void* data, uint32_t rowPitch, RHI::ResourceState finalState) override;
 
         RHI::ITexture* GetBackBuffer() override;
 

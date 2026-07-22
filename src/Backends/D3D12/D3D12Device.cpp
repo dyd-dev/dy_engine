@@ -776,9 +776,10 @@ namespace dy::Backends
         return new D3D12Texture(m_internal->device.Get(), desc);
     }
 
-    bool D3D12Device::UpdateTexture(RHI::ITexture* texture, const void* data, uint32_t rowPitch) {
+    bool D3D12Device::UpdateTexture(RHI::ITexture* texture, const void* data, uint32_t rowPitch, RHI::ResourceState finalState) {
         auto d3dTexture = static_cast<D3D12Texture*>(texture);
         ID3D12Resource* destResource = static_cast<ID3D12Resource*>(d3dTexture->GetNativeResource());
+        if(destResource == nullptr || data == nullptr || finalState == RHI::ResourceState::Undefined || finalState == RHI::ResourceState::Present) return false;
 
         D3D12_RESOURCE_DESC desc = destResource->GetDesc();
         UINT64 requiredSize = 0;
@@ -810,6 +811,18 @@ namespace dy::Backends
         subresourceData.RowPitch = rowPitch;
         subresourceData.SlicePitch = rowPitch * desc.Height;
 
+        const D3D12_RESOURCE_STATES previousState = static_cast<D3D12_RESOURCE_STATES>(d3dTexture->GetResourceState());
+        if(previousState != D3D12_RESOURCE_STATE_COPY_DEST)
+        {
+            D3D12_RESOURCE_BARRIER copyBarrier = {};
+            copyBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            copyBarrier.Transition.pResource = destResource;
+            copyBarrier.Transition.StateBefore = previousState;
+            copyBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+            copyBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            cmdList->ResourceBarrier(1, &copyBarrier);
+        }
+
         UINT64 bytesCopied = UpdateSubresources(cmdList.Get(), destResource, uploadBuffer.Get(), 0, 0, 1, &subresourceData);
         if (bytesCopied == 0) {
             std::cout << "[D3D12Device] UpdateSubresources FAILED (0 bytes copied)!" << std::endl;
@@ -818,14 +831,23 @@ namespace dy::Backends
             std::cout << "[D3D12Device] UpdateSubresources FAILED (0 bytes copied)!" << std::endl;
         }
 
-        // 텍스처 상태 변경: COPY_DEST -> PIXEL_SHADER_RESOURCE
+        D3D12_RESOURCE_STATES nativeFinalState = D3D12_RESOURCE_STATE_COMMON;
+        switch(finalState)
+        {
+        case RHI::ResourceState::ShaderResource: nativeFinalState = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE; break;
+        case RHI::ResourceState::RenderTarget: nativeFinalState = D3D12_RESOURCE_STATE_RENDER_TARGET; break;
+        case RHI::ResourceState::DepthStencilWrite: nativeFinalState = D3D12_RESOURCE_STATE_DEPTH_WRITE; break;
+        case RHI::ResourceState::Storage: nativeFinalState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; break;
+        case RHI::ResourceState::Undefined:
+        case RHI::ResourceState::Present: return false;
+        }
         D3D12_RESOURCE_BARRIER barrier = {};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
         barrier.Transition.pResource = destResource;
         barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.StateAfter = nativeFinalState;
         barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        cmdList->ResourceBarrier(1, &barrier);
+		cmdList->ResourceBarrier(1, &barrier);
 
         cmdList->Close();
 
@@ -839,7 +861,7 @@ namespace dy::Backends
         m_internal->frameUploadAllocators[m_internal->frameIndex].push_back(alloc);
         m_internal->frameUploadCommandLists[m_internal->frameIndex].push_back(cmdList);
         
-        d3dTexture->SetResourceState(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        d3dTexture->SetResourceState(nativeFinalState);
         return true;
     }
 

@@ -23,7 +23,7 @@ public:
 	dy::RHI::IShader* CreateShader(const dy::RHI::ShaderDesc& desc) override;
 	dy::RHI::ISampler* CreateSampler(const dy::RHI::SamplerDesc& desc) override;
 	dy::RHI::ITexture* CreateTexture(const dy::RHI::TextureDesc& desc) override;
-	bool UpdateTexture(dy::RHI::ITexture* texture, const void* rgba8Pixels, uint32_t rowPitch) override;
+	bool UpdateTexture(dy::RHI::ITexture* texture, const void* rgba8Pixels, uint32_t rowPitch, dy::RHI::ResourceState finalState) override;
 	dy::RHI::IPipelineState* CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) override;
 	dy::RHI::IResourceSet* CreateResourceSet(dy::RHI::IPipelineState* pipeline) override;
 	bool UpdateResourceSet(dy::RHI::IResourceSet* resourceSet, const dy::RHI::ResourceSetWrite* writes, uint32_t writeCount) override;
