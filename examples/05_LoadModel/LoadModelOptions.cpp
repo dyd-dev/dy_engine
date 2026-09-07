@@ -2,6 +2,9 @@
 
 #include <charconv>
 #include <cmath>
+#include <limits>
+#include <locale>
+#include <sstream>
 #include <string_view>
 
 namespace
@@ -17,11 +20,18 @@ namespace
 
 	bool ParseFiniteFloat(std::string_view text, float& outValue)
 	{
-		if(text.empty()) return false;
-		const char* begin = text.data();
-		const char* end = begin + text.size();
-		const std::from_chars_result result = std::from_chars(begin, end, outValue, std::chars_format::general);
-		return result.ec == std::errc{} && result.ptr == end && std::isfinite(outValue);
+		if(text.empty() || text.front() == '+'
+			|| text.find_first_not_of("0123456789.eE+-") != std::string_view::npos) return false;
+		// Apple libc++ does not provide floating-point from_chars on all supported toolchains.
+		std::istringstream input{ std::string(text) };
+		input.imbue(std::locale::classic());
+		double value = 0.0;
+		if(!(input >> std::noskipws >> value) || !input.eof()
+			|| !std::isfinite(value) || std::fabs(value) > std::numeric_limits<float>::max()) return false;
+		outValue = static_cast<float>(value);
+		// Reject underflow without rejecting representable subnormals or a literal zero.
+		return outValue != 0.0f
+			|| text.substr(0, text.find_first_of("eE")).find_first_of("123456789") == std::string_view::npos;
 	}
 }
 
