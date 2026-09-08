@@ -2,6 +2,7 @@
 
 #include "Graphics/ImageFile.h"
 #include "Graphics/Scene.h"
+#include "Platform/Profiler.h"
 #include "RHI/IDevice.h"
 #include "RHI/ITexture.h"
 
@@ -42,6 +43,7 @@ namespace dy::Graphics
 
 	void GpuScene::SyncTextures(const Scene& scene, RHI::IDevice* device)
 	{
+		DY_PROFILE_CPU_ZONE_NAMED("GpuScene::SyncTextures");
 		if(device == nullptr) return;
 
 		const uint32_t textureCount = scene.GetTextureCount();

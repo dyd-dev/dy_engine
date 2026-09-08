@@ -218,6 +218,75 @@ namespace dy::Math
 	// ===== 변환 빌더 (열-주도 저장: 평행이동 = m[12..14]) =====
 	// 합성은 operator* 로: world = Translation(t) * RotationZ(yaw) * Scaling(s).
 
+	[[nodiscard]] inline bool Inverse(const float4x4& matrix, float4x4& outInverse)
+	{
+		float augmented[4][8] = {};
+		for(size_t row = 0; row < 4; ++row)
+		{
+			for(size_t column = 0; column < 4; ++column)
+				augmented[row][column] = matrix.m[column * 4 + row];
+			augmented[row][row + 4] = 1.0f;
+		}
+
+		for(size_t column = 0; column < 4; ++column)
+		{
+			size_t pivotRow = column;
+			float pivotMagnitude = std::fabs(augmented[pivotRow][column]);
+			for(size_t row = column + 1; row < 4; ++row)
+			{
+				const float magnitude = std::fabs(augmented[row][column]);
+				if(magnitude > pivotMagnitude)
+				{
+					pivotMagnitude = magnitude;
+					pivotRow = row;
+				}
+			}
+			if(pivotMagnitude <= 1.0e-8f) return false;
+
+			if(pivotRow != column)
+			{
+				for(size_t element = 0; element < 8; ++element)
+					std::swap(augmented[column][element], augmented[pivotRow][element]);
+			}
+
+			const float inversePivot = 1.0f / augmented[column][column];
+			for(size_t element = 0; element < 8; ++element)
+				augmented[column][element] *= inversePivot;
+
+			for(size_t row = 0; row < 4; ++row)
+			{
+				if(row == column) continue;
+				const float factor = augmented[row][column];
+				for(size_t element = 0; element < 8; ++element)
+					augmented[row][element] -= factor * augmented[column][element];
+			}
+		}
+
+		float4x4 result = {};
+		for(size_t row = 0; row < 4; ++row)
+			for(size_t column = 0; column < 4; ++column)
+				result.m[column * 4 + row] = augmented[row][column + 4];
+		outInverse = result;
+		return true;
+	}
+
+	[[nodiscard]] inline float4x4 Transpose(const float4x4& matrix)
+	{
+		float4x4 result = {};
+		for(size_t column = 0; column < 4; ++column)
+			for(size_t row = 0; row < 4; ++row)
+				result.m[column * 4 + row] = matrix.m[row * 4 + column];
+		return result;
+	}
+
+	[[nodiscard]] inline bool InverseTranspose(const float4x4& matrix, float4x4& outInverseTranspose)
+	{
+		float4x4 inverse = {};
+		if(!Inverse(matrix, inverse)) return false;
+		outInverseTranspose = Transpose(inverse);
+		return true;
+	}
+
 	[[nodiscard]] inline float4x4 Translation(const float3& t)
 	{
 		float4x4 m = float4x4::Identity();
@@ -491,6 +560,120 @@ namespace dy::Math
 		m.m[4] = 2.0f * (xy - wz);        m.m[5] = 1.0f - 2.0f * (xx + zz); m.m[6] = 2.0f * (yz + wx);
 		m.m[8] = 2.0f * (xz + wy);        m.m[9] = 2.0f * (yz - wx);        m.m[10] = 1.0f - 2.0f * (xx + yy);
 		return m;
+	}
+
+	struct alignas(16) DualQuaternionTRS
+	{
+		quat real = quat::Identity();
+		quat dual = quat(0.0f, 0.0f, 0.0f, 0.0f);
+		float3 scale = float3(1.0f, 1.0f, 1.0f);
+	};
+
+	[[nodiscard]] inline float Determinant3x3(const float4x4& matrix)
+	{
+		return matrix.m[0] * (matrix.m[5] * matrix.m[10] - matrix.m[9] * matrix.m[6])
+			- matrix.m[4] * (matrix.m[1] * matrix.m[10] - matrix.m[9] * matrix.m[2])
+			+ matrix.m[8] * (matrix.m[1] * matrix.m[6] - matrix.m[5] * matrix.m[2]);
+	}
+
+	[[nodiscard]] inline bool DecomposeTRS(
+		const float4x4& matrix,
+		float3& outTranslation,
+		quat& outRotation,
+		float3& outScale)
+	{
+		for(float component : matrix.m)
+			if(!std::isfinite(component)) return false;
+		const float3 column0(matrix.m[0], matrix.m[1], matrix.m[2]);
+		const float3 column1(matrix.m[4], matrix.m[5], matrix.m[6]);
+		const float3 column2(matrix.m[8], matrix.m[9], matrix.m[10]);
+		float scaleX = Length(column0);
+		const float scaleY = Length(column1);
+		const float scaleZ = Length(column2);
+		if(scaleX <= 1.0e-8f || scaleY <= 1.0e-8f || scaleZ <= 1.0e-8f) return false;
+		if(Dot(column0, Cross(column1, column2)) < 0.0f) scaleX = -scaleX;
+		const float3 axisX = column0 * (1.0f / scaleX);
+		const float3 axisY = column1 * (1.0f / scaleY);
+		const float3 axisZ = column2 * (1.0f / scaleZ);
+		if(std::fabs(Dot(axisX, axisY)) > 1.0e-4f
+			|| std::fabs(Dot(axisX, axisZ)) > 1.0e-4f
+			|| std::fabs(Dot(axisY, axisZ)) > 1.0e-4f) return false;
+
+		const float r00 = axisX.x, r01 = axisY.x, r02 = axisZ.x;
+		const float r10 = axisX.y, r11 = axisY.y, r12 = axisZ.y;
+		const float r20 = axisX.z, r21 = axisY.z, r22 = axisZ.z;
+		quat rotation;
+		const float trace = r00 + r11 + r22;
+		if(trace > 0.0f)
+		{
+			const float s = std::sqrt(trace + 1.0f) * 2.0f;
+			rotation = quat((r21 - r12) / s, (r02 - r20) / s, (r10 - r01) / s, 0.25f * s);
+		}
+		else if(r00 > r11 && r00 > r22)
+		{
+			const float s = std::sqrt(1.0f + r00 - r11 - r22) * 2.0f;
+			rotation = quat(0.25f * s, (r01 + r10) / s, (r02 + r20) / s, (r21 - r12) / s);
+		}
+		else if(r11 > r22)
+		{
+			const float s = std::sqrt(1.0f + r11 - r00 - r22) * 2.0f;
+			rotation = quat((r01 + r10) / s, 0.25f * s, (r12 + r21) / s, (r02 - r20) / s);
+		}
+		else
+		{
+			const float s = std::sqrt(1.0f + r22 - r00 - r11) * 2.0f;
+			rotation = quat((r02 + r20) / s, (r12 + r21) / s, 0.25f * s, (r10 - r01) / s);
+		}
+		outTranslation = float3(matrix.m[12], matrix.m[13], matrix.m[14]);
+		outRotation = Normalize(rotation);
+		outScale = float3(scaleX, scaleY, scaleZ);
+		return std::isfinite(outRotation.x) && std::isfinite(outRotation.y)
+			&& std::isfinite(outRotation.z) && std::isfinite(outRotation.w);
+	}
+
+	[[nodiscard]] inline bool MakeDualQuaternionTRS(
+		const float3& translation,
+		const quat& rotation,
+		const float3& scale,
+		DualQuaternionTRS& outTransform)
+	{
+		if(!std::isfinite(translation.x) || !std::isfinite(translation.y) || !std::isfinite(translation.z)
+			|| !std::isfinite(rotation.x) || !std::isfinite(rotation.y)
+			|| !std::isfinite(rotation.z) || !std::isfinite(rotation.w)
+			|| !std::isfinite(scale.x) || !std::isfinite(scale.y) || !std::isfinite(scale.z)) return false;
+		const float rotationLengthSquared = Dot(rotation, rotation);
+		if(rotationLengthSquared <= 1.0e-12f) return false;
+		outTransform.real = Normalize(rotation);
+		const quat translationQuaternion(translation.x, translation.y, translation.z, 0.0f);
+		const quat dual = translationQuaternion * outTransform.real;
+		outTransform.dual = quat(dual.x * 0.5f, dual.y * 0.5f, dual.z * 0.5f, dual.w * 0.5f);
+		outTransform.scale = scale;
+		return true;
+	}
+
+	[[nodiscard]] inline float3 DualQuaternionTranslation(const DualQuaternionTRS& transform)
+	{
+		const quat conjugate(
+			-transform.real.x,
+			-transform.real.y,
+			-transform.real.z,
+			transform.real.w);
+		const quat translation = transform.dual * conjugate;
+		return float3(translation.x * 2.0f, translation.y * 2.0f, translation.z * 2.0f);
+	}
+
+	[[nodiscard]] inline float3 TransformPoint(const DualQuaternionTRS& transform, const float3& point)
+	{
+		const float3 scaled(point.x * transform.scale.x, point.y * transform.scale.y, point.z * transform.scale.z);
+		return Math::TransformVector(QuatToMatrix(transform.real), scaled)
+			+ DualQuaternionTranslation(transform);
+	}
+
+	[[nodiscard]] inline float4x4 DualQuaternionToMatrix(const DualQuaternionTRS& transform)
+	{
+		return Translation(DualQuaternionTranslation(transform))
+			* QuatToMatrix(transform.real)
+			* Scaling(transform.scale);
 	}
 
 	inline void MultiplyMatricesBatch(const float4x4* lhs, const float4x4* rhs, float4x4* out, size_t count)

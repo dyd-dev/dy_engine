@@ -68,6 +68,47 @@ int main()
 		light.castShadow = false;
 		[[maybe_unused]] const DirectionalLightID lightId = scene.CreateDirectionalLight(light);
 
+		Graphics::PointLight warmPoint = {};
+		warmPoint.position = Math::float3(1.5f, 1.0f, 1.5f);
+		warmPoint.range = 5.0f;
+		warmPoint.color = Math::float3(1.0f, 0.35f, 0.2f);
+		warmPoint.intensity = 2.0f;
+		[[maybe_unused]] const PointLightID warmPointId = scene.CreatePointLight(warmPoint);
+
+		Graphics::PointLight coolPoint = {};
+		coolPoint.position = Math::float3(-1.6f, 0.6f, 1.0f);
+		coolPoint.range = 5.0f;
+		coolPoint.color = Math::float3(0.2f, 0.45f, 1.0f);
+		coolPoint.intensity = 1.5f;
+		[[maybe_unused]] const PointLightID coolPointId = scene.CreatePointLight(coolPoint);
+
+		Graphics::SpotLight spot = {};
+		spot.position = Math::float3(0.0f, 2.0f, 2.0f);
+		spot.range = 6.0f;
+		spot.direction = Math::float3(0.0f, -0.7f, -0.7f);
+		spot.innerConeRadians = 0.25f;
+		spot.outerConeRadians = 0.55f;
+		spot.color = Math::float3(0.95f, 0.9f, 0.65f);
+		spot.intensity = 5.0f;
+		[[maybe_unused]] const SpotLightID spotId = scene.CreateSpotLight(spot);
+
+		Graphics::RectAreaLight rect = {};
+		rect.position = Math::float3(0.0f, 1.7f, 1.0f);
+		rect.intensity = 4.0f;
+		rect.direction = Math::float3(0.0f, -0.8f, -0.6f);
+		rect.width = 1.4f;
+		rect.height = 0.8f;
+		rect.color = Math::float3(1.0f, 0.75f, 0.45f);
+		[[maybe_unused]] const RectAreaLightID rectId = scene.CreateRectAreaLight(rect);
+
+		Graphics::DiscAreaLight disc = {};
+		disc.position = Math::float3(-1.4f, 1.4f, 0.5f);
+		disc.intensity = 3.0f;
+		disc.direction = Math::float3(0.65f, -0.7f, -0.25f);
+		disc.radius = 0.6f;
+		disc.color = Math::float3(0.45f, 0.8f, 1.0f);
+		[[maybe_unused]] const DiscAreaLightID discId = scene.CreateDiscAreaLight(disc);
+
 		while(window.IsRunning())
 		{
 			window.PollEvents();

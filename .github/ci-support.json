@@ -239,6 +239,10 @@
             {
               "source": "Shaders/mesh_vs.glsl",
               "stage": "vertex"
+            },
+            {
+              "source": "Shaders/mesh_skinning_cs.glsl",
+              "stage": "compute"
             }
           ],
           "gpu_required": false
@@ -393,6 +397,95 @@
           "status": "planned",
           "checks": [
             "build"
+          ],
+          "shaders": [],
+          "gpu_required": false
+        }
+      }
+    },
+    "LightingLab": {
+      "kind": "example",
+      "target": "LightingLab",
+      "directory": "examples/08_LightingLab",
+      "requires": [],
+      "arguments": [],
+      "rendering": true,
+      "apis": {
+        "vulkan": {
+          "status": "planned",
+          "checks": [
+            "build",
+            "shader"
+          ],
+          "shaders": [
+            {
+              "source": "Shaders/mesh_vs.glsl",
+              "stage": "vertex"
+            },
+            {
+              "source": "Shaders/mesh_ps.glsl",
+              "stage": "fragment"
+            },
+            {
+              "source": "Shaders/mesh_shadow_vs.glsl",
+              "stage": "vertex"
+            },
+            {
+              "source": "Shaders/tone_map_vs.glsl",
+              "stage": "vertex"
+            },
+            {
+              "source": "Shaders/tone_map_ps.glsl",
+              "stage": "fragment"
+            }
+          ],
+          "gpu_required": false
+        },
+        "d3d12": {
+          "status": "unsupported",
+          "checks": [],
+          "shaders": [],
+          "gpu_required": false
+        },
+        "metal": {
+          "status": "unsupported",
+          "checks": [],
+          "shaders": [],
+          "gpu_required": false
+        }
+      }
+    },
+    "RenderGraph": {
+      "kind": "example",
+      "target": "RenderGraph",
+      "directory": "examples/RenderGraph",
+      "requires": [],
+      "arguments": [],
+      "rendering": false,
+      "apis": {
+        "vulkan": {
+          "status": "supported",
+          "checks": [
+            "build",
+            "cpu"
+          ],
+          "shaders": [],
+          "gpu_required": false
+        },
+        "d3d12": {
+          "status": "supported",
+          "checks": [
+            "build",
+            "cpu"
+          ],
+          "shaders": [],
+          "gpu_required": false
+        },
+        "metal": {
+          "status": "supported",
+          "checks": [
+            "build",
+            "cpu"
           ],
           "shaders": [],
           "gpu_required": false

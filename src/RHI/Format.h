@@ -34,5 +34,4 @@ namespace dy::RHI
 	static const DescriptorIndex INVALID_DESCRIPTOR_INDEX = static_cast<DescriptorIndex>(-1);
 
 	using BindingIndex = uint32_t;
-	static const BindingIndex INVALID_BINDING_INDEX = static_cast<BindingIndex>(-1);
 }

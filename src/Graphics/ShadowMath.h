@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <cstdint>
 
 #include "Core/Types.h"
@@ -9,13 +10,8 @@
 // 광원은 데이터(struct)로 유지하고, 시점 행렬 계산은 여기(자유 함수)에 모은다.
 namespace dy::Graphics
 {
-	// 평면 투영 그림자(레거시) 파라미터.
-	struct ShadowDesc
-	{
-		Math::float3 lightDirection = Math::float3(0.0f, 0.0f, 1.0f);
-		float receiverPlaneZ = 0.0f;
-		float bias = 0.001f;
-	};
+	inline constexpr uint32_t kMaxShadowCascades = 4u;
+	inline constexpr uint32_t kMaxShadowViews = 6u;
 
 	// 그림자 맵(광원 시점 카메라) 파라미터.
 	struct ShadowMapDesc
@@ -29,6 +25,43 @@ namespace dy::Graphics
 		Math::float3 sceneCenter = Math::float3(0.0f, 0.0f, 0.0f);
 		float lightDistance = 8.0f;
 	};
+
+	struct CameraFrustumDesc
+	{
+		Math::float3 position = Math::float3(0.0f, 0.0f, 0.0f);
+		Math::float3 forward = Math::float3(0.0f, 1.0f, 0.0f);
+		Math::float3 up = Math::float3(0.0f, 0.0f, 1.0f);
+		float nearPlane = 0.1f;
+		float farPlane = 100.0f;
+		float fovYRadians = 1.04719755f;
+		float aspect = 16.0f / 9.0f;
+	};
+
+	struct DirectionalCascadeData
+	{
+		std::array<Math::float4x4, kMaxShadowCascades> viewProjections = {};
+		std::array<float, kMaxShadowCascades> splits = {};
+		uint32_t count = 0u;
+	};
+
+	[[nodiscard]] std::array<float, kMaxShadowCascades> ComputePracticalCascadeSplits(
+		float nearPlane,
+		float farPlane,
+		uint32_t cascadeCount,
+		float lambda);
+
+	[[nodiscard]] DirectionalCascadeData ComputeDirectionalCascades(
+		const CameraFrustumDesc& camera,
+		const Math::float3& lightDirection,
+		const ShadowMapDesc& baseDesc,
+		uint32_t cascadeCount,
+		float splitLambda,
+		float boundsPadding);
+
+	[[nodiscard]] std::array<Math::float4x4, kMaxShadowViews> ComputePointLightViewProjections(
+		const Math::float3& lightPosition,
+		float nearPlane,
+		float farPlane);
 
 	[[nodiscard]] Math::float4x4 ComputeDirectionalLightViewProj(
 		const Math::float3& lightDirection,
@@ -45,6 +78,4 @@ namespace dy::Graphics
 		const Math::float3& boundsMin,
 		const Math::float3& boundsMax,
 		float padding);
-
-	[[nodiscard]] MeshData BuildShadowMesh(const MeshData& sourceMesh, const Math::float4x4& worldMatrix, const ShadowDesc& desc);
 }

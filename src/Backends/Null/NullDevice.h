@@ -30,6 +30,9 @@ namespace dy::Backends
 		void DestroyTexture(RHI::ITexture* texture) override;
 		void DestroyPipelineState(RHI::IPipelineState* pipeline) override;
 		RHI::ITexture* GetBackBuffer() override;
+		[[nodiscard]] bool SupportsGpuTimestamps() const override { return true; }
+		[[nodiscard]] uint32_t GetMaxGpuTimestampScopes() const override { return 32u; }
+		[[nodiscard]] bool TryGetLastGpuTimestamp(const char* name, RHI::GpuTimestampResult& result) const override;
 
 	protected:
 		int Initialize(const void* windowHandle, const RHI::DeviceDesc& desc) override;

@@ -21,6 +21,7 @@ target_compile_definitions(Engine_Options INTERFACE
 
 # ===== ===== SIMD ===== =====
 option(DY_ENABLE_SIMD "Enable dy::Math SIMD code paths when supported by the target CPU." ON)
+option(DY_ENABLE_TRACY "Embed Tracy profiling instrumentation in engine applications." ON)
 
 if(DY_ENABLE_SIMD)
 	target_compile_definitions(Engine_Options INTERFACE DY_SIMD_ENABLED=1)

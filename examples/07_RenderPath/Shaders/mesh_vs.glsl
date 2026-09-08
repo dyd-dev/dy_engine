@@ -9,7 +9,7 @@ layout(location = 2) out vec3 fragNormal;
 layout(location = 3) out vec4 fragTangent;
 layout(location = 4) out vec4 fragLightSpacePosition;
 
-layout(push_constant) uniform DrawConstants {
+layout(std140, set = 0, binding = DY_VULKAN_BINDING_DRAW_CONSTANTS) uniform VulkanDrawConstants {
     mat4 viewProjectionMatrix;
     mat4 modelMatrix;
     float drawMode;
@@ -17,9 +17,10 @@ layout(push_constant) uniform DrawConstants {
     int vertexOffset;
     uint firstVertex;
     vec3 emissiveColor;
-    float baseColorTextureIndex;
+    float emissiveTextureIndex;
     vec4 baseColor;
     vec4 materialParams;
+    vec4 textureIndices;
 } pushConstants;
 
 layout(std430, set = 0, binding = DY_RENDERER_BINDING_VERTEX_STORAGE) readonly buffer VertexStorage {
@@ -34,8 +35,12 @@ layout(std430, set = 0, binding = DY_RENDERER_BINDING_BINDLESS_TRANSFORM_STORAGE
     mat4 modelMatrices[];
 } instanceTransforms;
 
-layout(set = 0, binding = DY_RENDERER_BINDING_SHADOW_MATRIX) uniform ShadowMatrix {
-    mat4 lightViewProjectionMatrix;
+layout(std140, set = 0, binding = DY_RENDERER_BINDING_SHADOW_MATRIX) uniform ShadowMatrix {
+    mat4 lightViewProjectionMatrices[6];
+    vec4 cascadeSplits;
+    vec4 shadowInfo;
+    vec4 pcssParams;
+    mat4 cameraViewMatrix;
 } shadowMatrix;
 
 struct Vertex {
@@ -81,5 +86,5 @@ void main() {
     fragWorldPosition = worldPosition.xyz;
     fragNormal = normalize(mat3(resolvedModelMatrix) * vertex.normal);
     fragTangent = vec4(normalize(mat3(resolvedModelMatrix) * vertex.tangent.xyz), vertex.tangent.w);
-    fragLightSpacePosition = shadowMatrix.lightViewProjectionMatrix * worldPosition;
+    fragLightSpacePosition = shadowMatrix.lightViewProjectionMatrices[0] * worldPosition;
 }

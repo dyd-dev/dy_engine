@@ -11,6 +11,19 @@
 
 using namespace dy::Platform;
 
+namespace
+{
+	bool g_f11Pressed = false;
+
+	void OnKey(GLFWwindow*, int key, int, int action, int)
+	{
+		if(key == GLFW_KEY_F11 && action == GLFW_PRESS)
+		{
+			g_f11Pressed = true;
+		}
+	}
+}
+
 Window::Window(unsigned int width, unsigned int height)
 	: Window(width, height, "New Window") {}
 
@@ -27,6 +40,8 @@ Window::Window(unsigned int width, unsigned int height, const char* title)
 		glfwTerminate();
 		throw std::runtime_error("Failed to create GLFW window.");
 	}
+
+	glfwSetKeyCallback(m_window, OnKey);
 }
 
 Window::~Window()
@@ -38,6 +53,18 @@ Window::~Window()
 bool Window::IsRunning() const { return !glfwWindowShouldClose(m_window); }
 
 void Window::PollEvents() const { glfwPollEvents(); }
+
+void Window::Resize(unsigned int width, unsigned int height) const
+{
+	glfwSetWindowSize(m_window, static_cast<int>(width), static_cast<int>(height));
+}
+
+bool Window::ConsumeKeyPress(Key key)
+{
+	if(key != Key::F11 || !g_f11Pressed) return false;
+	g_f11Pressed = false;
+	return true;
+}
 
 void* Window::GetHandle() const
 {

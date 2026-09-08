@@ -2,9 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ['**']
-  pull_request:
-  workflow_dispatch:
+    branches: [main]
 
 permissions:
   contents: read
@@ -27,6 +25,7 @@ jobs:
         run: |
           python .github/scripts/check-ci-support.py --self-test
           python .github/scripts/check-ci-support.py --self-test-cmake
+          python .github/scripts/check-vulkan-smoke.py --self-test
       - name: Validate the current support manifest
         shell: bash
         run: |
@@ -68,6 +67,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build xorg-dev pkg-config
 
+      - name: Install software Vulkan smoke dependencies
+        if: runner.os == 'Linux' && matrix.api == 'vulkan' && matrix.config == 'Debug'
+        run: sudo apt-get install -y mesa-vulkan-drivers xvfb xauth
+
       - name: Install Vulkan SDK on Linux
         if: runner.os == 'Linux' && matrix.api == 'vulkan'
         shell: bash
@@ -80,6 +83,7 @@ jobs:
           sdk="$RUNNER_TEMP/vulkan/$VULKAN_SDK_VERSION/x86_64"
           test -x "$sdk/bin/glslc"
           echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
+          echo "VK_LAYER_PATH=$sdk/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$sdk/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
           echo "$sdk/bin" >> "$GITHUB_PATH"
 
@@ -150,6 +154,16 @@ jobs:
         run: |
           python .github/scripts/check-ci-support.py --verify-build build/ci --config "$CI_CONFIG" --api "$CI_API" 2>&1 | tee build/ci-logs/checks.log
 
+      - name: Vulkan API smoke with Lavapipe software rendering
+        if: runner.os == 'Linux' && matrix.api == 'vulkan' && matrix.config == 'Debug'
+        shell: bash
+        env:
+          VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.json
+        run: |
+          dpkg-query -W mesa-vulkan-drivers | tee build/ci-logs/vulkan-smoke-tools.log
+          xvfb-run -a -s '-screen 0 1280x720x24' "$VULKAN_SDK/bin/vulkaninfo" --summary 2>&1 | tee -a build/ci-logs/vulkan-smoke-tools.log
+          xvfb-run -a -s '-screen 0 1280x720x24' python .github/scripts/check-vulkan-smoke.py --build-dir build/ci 2>&1 | tee build/ci-logs/vulkan-smoke.log
+
       - name: Publish job summary
         if: always()
         shell: bash
@@ -159,7 +173,7 @@ jobs:
           CI_CONFIG: ${{ matrix.config }}
         run: |
           printf '### %s / %s / %s\n\nResult: %s\n\nCommit: `%s`\n\n' "$RUNNER_OS" "$CI_API" "$CI_CONFIG" "$JOB_RESULT" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
-          printf 'Registered examples are built; feature checks follow the API support contract. GPU execution is not verified by this job.\n' >> "$GITHUB_STEP_SUMMARY"
+          printf 'Registered examples are built; feature checks follow the API support contract. Ubuntu Vulkan Debug also runs LoadModel with software Vulkan; physical GPU rendering is not verified by these hosted jobs.\n' >> "$GITHUB_STEP_SUMMARY"
           if [ -f build/ci-logs/checks.log ]; then
             printf '\n```text\n' >> "$GITHUB_STEP_SUMMARY"
             tail -n 35 build/ci-logs/checks.log >> "$GITHUB_STEP_SUMMARY"

@@ -9,11 +9,11 @@ class VulkanPipeline {
 public:
     void Initialize(
         const VulkanContext& context,
-        VkRenderPass renderPass,
-        VkExtent2D extent,
+        const VkFormat* colorAttachmentFormats,
+        uint32_t colorAttachmentCount,
+        VkFormat depthAttachmentFormat,
         VkDescriptorSetLayout descriptorSetLayout,
         const dy::RHI::GraphicsPipelineDesc& desc,
-        uint32_t pushConstantSize,
         VkDescriptorSetLayout bindlessDescriptorSetLayout = VK_NULL_HANDLE);
     void Cleanup(VkDevice device);
 
@@ -21,8 +21,6 @@ public:
     VkPipelineLayout GetLayout() const { return m_pipelineLayout; }
 
 private:
-    VkShaderModule CreateShaderModule(VkDevice device, const void* shaderCode, size_t shaderSize);
-
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_graphicsPipeline = VK_NULL_HANDLE;
 };

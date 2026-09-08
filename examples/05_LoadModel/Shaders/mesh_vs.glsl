@@ -2,6 +2,121 @@
 #extension GL_GOOGLE_include_directive : require
 
 #include "Graphics/RendererShaderLayout.inc"
+#ifndef DY_SKINNING_INFLUENCE_BINDING
+#define DY_SKINNING_INFLUENCE_BINDING DY_RENDERER_BINDING_SKIN_INFLUENCE_STORAGE
+#endif
+
+#ifndef DY_SKINNING_PALETTE_BINDING
+#define DY_SKINNING_PALETTE_BINDING DY_RENDERER_BINDING_SKIN_PALETTE_STORAGE
+#endif
+
+struct SkinInfluence {
+    uvec4 joints;
+    vec4 weights;
+    float dqBlendWeight;
+    float _padding0;
+    float _padding1;
+    float _padding2;
+};
+
+layout(std430, set = 0, binding = DY_SKINNING_INFLUENCE_BINDING) readonly buffer SkinInfluenceStorage {
+    SkinInfluence influences[];
+} skinInfluenceStorage;
+
+struct SkinJointMatrices {
+    mat4 positionMatrix;
+    mat4 normalMatrix;
+    vec4 dqReal;
+    vec4 dqDual;
+    vec4 dqScale;
+};
+
+layout(std430, set = 0, binding = DY_SKINNING_PALETTE_BINDING) readonly buffer SkinPaletteStorage {
+    SkinJointMatrices joints[];
+} skinPaletteStorage;
+
+vec4 QuaternionMultiply(vec4 lhs, vec4 rhs) {
+    return vec4(
+        lhs.w * rhs.xyz + rhs.w * lhs.xyz + cross(lhs.xyz, rhs.xyz),
+        lhs.w * rhs.w - dot(lhs.xyz, rhs.xyz));
+}
+
+mat3 QuaternionRotation(vec4 quaternion) {
+    vec4 q = normalize(quaternion);
+    float xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;
+    float xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z;
+    float wx = q.w * q.x, wy = q.w * q.y, wz = q.w * q.z;
+    return mat3(
+        vec3(1.0 - 2.0 * (yy + zz), 2.0 * (xy + wz), 2.0 * (xz - wy)),
+        vec3(2.0 * (xy - wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz + wx)),
+        vec3(2.0 * (xz + wy), 2.0 * (yz - wx), 1.0 - 2.0 * (xx + yy)));
+}
+
+mat4 LoadLinearSkinMatrix(SkinInfluence influence, uint paletteOffset, vec4 weights) {
+    return skinPaletteStorage.joints[paletteOffset + influence.joints.x].positionMatrix * weights.x
+         + skinPaletteStorage.joints[paletteOffset + influence.joints.y].positionMatrix * weights.y
+         + skinPaletteStorage.joints[paletteOffset + influence.joints.z].positionMatrix * weights.z
+         + skinPaletteStorage.joints[paletteOffset + influence.joints.w].positionMatrix * weights.w;
+}
+
+mat4 LoadDualQuaternionSkinMatrix(SkinInfluence influence, uint paletteOffset, vec4 weights) {
+    uint firstComponent = weights.x > 0.0 ? 0u : (weights.y > 0.0 ? 1u : (weights.z > 0.0 ? 2u : 3u));
+    uint firstJoint = influence.joints[firstComponent];
+    vec4 referenceReal = skinPaletteStorage.joints[paletteOffset + firstJoint].dqReal;
+    vec4 realSum = vec4(0.0);
+    vec4 dualSum = vec4(0.0);
+    vec3 scaleSum = vec3(0.0);
+    for(uint component = 0u; component < 4u; ++component) {
+        float weight = weights[component];
+        if(weight <= 0.0) continue;
+        SkinJointMatrices joint = skinPaletteStorage.joints[paletteOffset + influence.joints[component]];
+        float signCorrection = dot(referenceReal, joint.dqReal) < 0.0 ? -1.0 : 1.0;
+        realSum += joint.dqReal * (weight * signCorrection);
+        dualSum += joint.dqDual * (weight * signCorrection);
+        scaleSum += joint.dqScale.xyz * weight;
+    }
+    float realLength = length(realSum);
+    if(realLength <= 1.0e-6) return mat4(1.0);
+    vec4 real = realSum / realLength;
+    vec4 dual = dualSum / realLength;
+    vec4 conjugateReal = vec4(-real.xyz, real.w);
+    vec3 translation = 2.0 * QuaternionMultiply(dual, conjugateReal).xyz;
+    mat3 rotation = QuaternionRotation(real);
+    mat4 result = mat4(1.0);
+    result[0].xyz = rotation[0] * scaleSum.x;
+    result[1].xyz = rotation[1] * scaleSum.y;
+    result[2].xyz = rotation[2] * scaleSum.z;
+    result[3].xyz = translation;
+    return result;
+}
+
+mat4 LoadSkinMatrix(uint vertexIndex, uint paletteOffset) {
+    SkinInfluence influence = skinInfluenceStorage.influences[vertexIndex];
+    float total = dot(influence.weights, vec4(1.0));
+    if (total <= 1.0e-6) return mat4(1.0);
+
+    vec4 weights = influence.weights / total;
+    mat4 linearMatrix = LoadLinearSkinMatrix(influence, paletteOffset, weights);
+    if(influence.dqBlendWeight <= 0.0) return linearMatrix;
+    mat4 dualQuaternionMatrix = LoadDualQuaternionSkinMatrix(influence, paletteOffset, weights);
+    float dqBlendWeight = clamp(influence.dqBlendWeight, 0.0, 1.0);
+    return linearMatrix + (dualQuaternionMatrix - linearMatrix) * dqBlendWeight;
+}
+
+mat3 LoadSkinNormalMatrix(uint vertexIndex, uint paletteOffset) {
+    SkinInfluence influence = skinInfluenceStorage.influences[vertexIndex];
+    float total = dot(influence.weights, vec4(1.0));
+    if (total <= 1.0e-6) return mat3(1.0);
+
+    vec4 weights = influence.weights / total;
+    mat3 finalLinear = mat3(LoadSkinMatrix(vertexIndex, paletteOffset));
+    float linearDeterminant = determinant(finalLinear);
+    if(abs(linearDeterminant) > 1.0e-8) return transpose(inverse(finalLinear));
+    return mat3(skinPaletteStorage.joints[paletteOffset + influence.joints.x].normalMatrix) * weights.x
+         + mat3(skinPaletteStorage.joints[paletteOffset + influence.joints.y].normalMatrix) * weights.y
+         + mat3(skinPaletteStorage.joints[paletteOffset + influence.joints.z].normalMatrix) * weights.z
+         + mat3(skinPaletteStorage.joints[paletteOffset + influence.joints.w].normalMatrix) * weights.w;
+}
 
 layout(location = 0) out vec2 fragUv;
 layout(location = 1) out vec3 fragWorldPosition;
@@ -9,7 +124,7 @@ layout(location = 2) out vec3 fragNormal;
 layout(location = 3) out vec4 fragTangent;
 layout(location = 4) out vec4 fragLightSpacePosition;
 
-layout(push_constant) uniform DrawConstants {
+layout(std140, set = 0, binding = DY_VULKAN_BINDING_DRAW_CONSTANTS) uniform VulkanDrawConstants {
     mat4 viewProjectionMatrix;
     mat4 modelMatrix;
     float drawMode;
@@ -17,9 +132,10 @@ layout(push_constant) uniform DrawConstants {
     int vertexOffset;
     uint firstVertex;
     vec3 emissiveColor;
-    float baseColorTextureIndex;
+    float emissiveTextureIndex;
     vec4 baseColor;
     vec4 materialParams;
+    vec4 textureIndices;
 } pushConstants;
 
 layout(std430, set = 0, binding = DY_RENDERER_BINDING_VERTEX_STORAGE) readonly buffer VertexStorage {
@@ -30,8 +146,12 @@ layout(std430, set = 0, binding = DY_RENDERER_BINDING_INDEX_STORAGE) readonly bu
     uint indices[];
 } indexStorage;
 
-layout(set = 0, binding = DY_RENDERER_BINDING_SHADOW_MATRIX) uniform ShadowMatrix {
-    mat4 lightViewProjectionMatrix;
+layout(std140, set = 0, binding = DY_RENDERER_BINDING_SHADOW_MATRIX) uniform ShadowMatrix {
+    mat4 lightViewProjectionMatrices[6];
+    vec4 cascadeSplits;
+    vec4 shadowInfo;
+    vec4 pcssParams;
+    mat4 cameraViewMatrix;
 } shadowMatrix;
 
 struct Vertex {
@@ -66,11 +186,27 @@ Vertex LoadVertex(uint vertexIndex) {
 void main() {
     int resolvedVertexIndex = int(indexStorage.indices[pushConstants.firstIndex + uint(gl_VertexIndex)]) + pushConstants.vertexOffset;
     Vertex vertex = LoadVertex(uint(resolvedVertexIndex));
+    bool skinned = (uint(pushConstants.drawMode + 0.5) & DY_RENDERER_TEXTURE_FLAG_SKINNED) != 0u;
+    if (skinned) {
+        mat4 skinMatrix = LoadSkinMatrix(uint(resolvedVertexIndex), pushConstants.firstVertex);
+        vertex.position = (skinMatrix * vec4(vertex.position, 1.0)).xyz;
+        mat3 skinNormalMatrix = LoadSkinNormalMatrix(uint(resolvedVertexIndex), pushConstants.firstVertex);
+        vertex.normal = normalize(skinNormalMatrix * vertex.normal);
+        vec3 transformedTangent = mat3(skinMatrix) * vertex.tangent.xyz;
+        vertex.tangent.xyz = normalize(
+            transformedTangent - vertex.normal * dot(vertex.normal, transformedTangent));
+        if(determinant(mat3(skinMatrix)) < 0.0) vertex.tangent.w = -vertex.tangent.w;
+    }
     vec4 worldPosition = pushConstants.modelMatrix * vec4(vertex.position, 1.0);
+    mat3 modelLinear = mat3(pushConstants.modelMatrix);
+    mat3 modelNormalMatrix = transpose(inverse(modelLinear));
     gl_Position = pushConstants.viewProjectionMatrix * worldPosition;
     fragUv = vertex.uv;
     fragWorldPosition = worldPosition.xyz;
-    fragNormal = normalize(mat3(pushConstants.modelMatrix) * vertex.normal);
-    fragTangent = vec4(normalize(mat3(pushConstants.modelMatrix) * vertex.tangent.xyz), vertex.tangent.w);
-    fragLightSpacePosition = shadowMatrix.lightViewProjectionMatrix * worldPosition;
+    fragNormal = normalize(modelNormalMatrix * vertex.normal);
+    vec3 worldTangent = modelLinear * vertex.tangent.xyz;
+    fragTangent = vec4(
+        normalize(worldTangent - fragNormal * dot(fragNormal, worldTangent)),
+        determinant(modelLinear) < 0.0 ? -vertex.tangent.w : vertex.tangent.w);
+    fragLightSpacePosition = shadowMatrix.lightViewProjectionMatrices[0] * worldPosition;
 }
