@@ -1,26 +1,61 @@
 #pragma once
-#include "RHI/IPipelineState.h"
 
-// 전방 선언을 사용
+#include "RHI/Pipeline.h"
+
+#include <cstdint>
+#include <vector>
+
 struct ID3D12PipelineState;
 struct ID3D12RootSignature;
 
 namespace dy::Backends
 {
-    // 내부 구현체 숨기기 (Pimpl)
+    struct D3D12ObjectDeleter;
     struct D3D12PipelineStateInternal;
 
-    class D3D12PipelineState : public RHI::IPipelineState
+    struct D3D12PipelineBinding
+    {
+        RHI::ResourceBindingLayout layout = {};
+        uint32_t rootParameter = 0;
+        uint32_t descriptorOffset = 0;
+    };
+
+    struct D3D12VertexBinding
+    {
+        uint32_t binding = 0;
+        uint32_t stride = 0;
+    };
+
+    class D3D12PipelineState final : public RHI::Pipeline
     {
     public:
-        // ComPtr 대신 원시 포인터로 받습니다.
-        D3D12PipelineState(ID3D12PipelineState* pso, ID3D12RootSignature* rootSignature);
-        ~D3D12PipelineState() override;
+        D3D12PipelineState(
+            const RHI::PipelineLayoutDesc& layout,
+            ID3D12PipelineState* pipelineState,
+            ID3D12RootSignature* rootSignature,
+            std::vector<D3D12PipelineBinding> bindings,
+            std::vector<D3D12VertexBinding> vertexBindings,
+            uint32_t inlineConstantRootParameter,
+            uint32_t descriptorCount,
+            uint32_t primitiveTopology,
+            bool stencilEnabled,
+            bool requiresDepthWrite);
 
-        ID3D12PipelineState* GetNativePSO() const;
+        ID3D12PipelineState* GetNativePipelineState() const;
         ID3D12RootSignature* GetNativeRootSignature() const;
+        const std::vector<D3D12PipelineBinding>& GetBindings() const;
+        uint32_t GetInlineConstantRootParameter() const;
+        uint32_t GetDescriptorCount() const;
+        uint32_t GetPrimitiveTopology() const;
+        uint32_t GetVertexStride(uint32_t binding) const;
+        bool IsStencilEnabled() const;
+        bool RequiresDepthWrite() const;
 
     private:
-        D3D12PipelineStateInternal* m_internal; // ComPtr들은 이 안에 숨깁니다.
+        friend struct D3D12ObjectDeleter;
+
+        ~D3D12PipelineState() override;
+
+        D3D12PipelineStateInternal* m_internal = nullptr;
     };
 }

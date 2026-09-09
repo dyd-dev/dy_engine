@@ -10,7 +10,7 @@ target_compile_features(Engine_Options INTERFACE cxx_std_17)
 
 # ===== ===== Include ===== =====
 target_include_directories(Engine_Options INTERFACE
-	${CMAKE_SOURCE_DIR}/src
+	${PROJECT_SOURCE_DIR}/src/Public
 )
 
 # ===== ===== Compile definition ===== =====

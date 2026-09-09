@@ -10,39 +10,74 @@
 
 namespace dy::Backends
 {
+	namespace
+	{
+		[[nodiscard]] bool HasUsage(RHI::BufferUsage value, RHI::BufferUsage usage)
+		{
+			return (value & usage) != RHI::BufferUsage::None;
+		}
+
+		[[nodiscard]] bool IsStateAllowed(
+			const RHI::BufferDesc& desc,
+			RHI::ResourceState state)
+		{
+			switch(state)
+			{
+			case RHI::ResourceState::Undefined:
+			case RHI::ResourceState::Common:
+			case RHI::ResourceState::CopyDestination:
+				return true;
+			case RHI::ResourceState::VertexBuffer:
+				return HasUsage(desc.usage, RHI::BufferUsage::Vertex);
+			case RHI::ResourceState::IndexBuffer:
+				return HasUsage(desc.usage, RHI::BufferUsage::Index);
+			case RHI::ResourceState::ConstantBuffer:
+				return HasUsage(desc.usage, RHI::BufferUsage::Constant);
+			case RHI::ResourceState::ShaderResource:
+			case RHI::ResourceState::UnorderedAccess:
+				return HasUsage(desc.usage, RHI::BufferUsage::Storage);
+			default:
+				return false;
+			}
+		}
+	}
+
     struct MetalBuffer::Impl
     {
         id<MTLBuffer> buffer = nil;
     };
 
     MetalBuffer::MetalBuffer(const RHI::BufferDesc& desc, void* device)
-        : RHI::IBuffer(desc)
+        : RHI::Buffer(desc)
         , m_impl(new Impl())
+		, m_state(desc.initialState)
     {
         id<MTLDevice> mtlDevice = (__bridge id<MTLDevice>)device;
-        // CPU에서 쓰고 GPU가 읽는 용도 → Shared
+		if(mtlDevice == nil || desc.size == 0 || desc.usage == RHI::BufferUsage::None ||
+			!IsStateAllowed(desc, desc.initialState))
+			return;
         m_impl->buffer = [mtlDevice newBufferWithLength:desc.size
-                           options:MTLResourceStorageModeShared];
+			options:MTLResourceStorageModePrivate];
     }
 
     MetalBuffer::~MetalBuffer()
     {
+#if !__has_feature(objc_arc)
+		[m_impl->buffer release];
+#endif
+		m_impl->buffer = nil;
         delete m_impl;
     }
 
-    void* MetalBuffer::Map(uint32_t offset)
+	void* MetalBuffer::GetNativeBuffer() const
     {
-        // Shared 모드라 별도 map 불필요, 그냥 포인터 반환
-        return static_cast<uint8_t*>([m_impl->buffer contents]) + offset;
+		return m_impl == nullptr ? nullptr : (__bridge void*)m_impl->buffer;
     }
 
-    void MetalBuffer::Unmap()
+	RHI::ResourceState MetalBuffer::GetState() const
     {
-        // Shared 모드라 별도 unmap 불필요
+		return m_state;
     }
 
-    void* MetalBuffer::GetNativeBuffer() const
-    {
-        return (__bridge void*)m_impl->buffer;
-    }
+	void MetalBuffer::SetState(RHI::ResourceState state) { m_state = state; }
 }

@@ -1,4 +1,5 @@
-#include "Graphics/ImageFile.h"
+#include "Graphics/Private/ImageFile.h"
+#include "Graphics/Texture.h"
 
 #include <cstring>
 #include <limits>
@@ -12,6 +13,19 @@
 
 namespace dy::Graphics
 {
+	bool LoadImage(const std::string& path, TextureAsset& result)
+	{
+		const ImageFile decoded = LoadImageFile(path);
+		if(!decoded.IsValid()) return false;
+		TextureAsset image;
+		image.sourcePath = path;
+		image.width = decoded.GetWidth();
+		image.height = decoded.GetHeight();
+		image.rgba8 = decoded.GetPixels();
+		result = std::move(image);
+		return true;
+	}
+
 	namespace
 	{
 		[[nodiscard]] bool ComputeDecodedByteSize(

@@ -1,29 +1,108 @@
 #include "D3D12Device.h"
-#include "D3D12CommandList.h"
 #include "D3D12Buffer.h"
-#include "RHI/IPipelineState.h"
+#include "D3D12CommandList.h"
 #include "D3D12PipelineState.h"
+#include "D3D12ResourceSet.h"
+#include "D3D12Shader.h"
 #include "D3D12Texture.h"
+#include "RHI/ResourceSet.h"
+#include "RHI/Shader.h"
+#include "RHI/Pipeline.h"
+#include "RHI/Readback.h"
 #include "d3dx12.h"
-#include <d3dcompiler.h>
-
-#pragma comment(lib, "d3dcompiler.lib")
 
 #include <d3d12.h>
 #include <dxgi1_6.h>
+#include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <iostream>
+#include <limits>
+#include <memory>
+#include <utility>
 #include <vector>
 #include <wrl.h>
-#include <thread>
 
 using Microsoft::WRL::ComPtr;
 
 namespace dy::Backends
 {
-    namespace
+    struct D3D12ObjectDeleter
     {
-        constexpr uint32_t kGlobalDescriptorHeapSize = 1024;
-        constexpr uint32_t kTransientDescriptorSlotCount = 1;
+        template<typename Object>
+        void operator()(Object* object) const
+        {
+            delete object;
+        }
+    };
+
+    struct D3D12FrameSlot
+    {
+        uint64_t completionValue = 0;
+    };
+
+    struct D3D12SubmissionRecord
+    {
+        uint64_t completionValue = 0;
+        std::vector<std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>> commandLists;
+    };
+
+    template<typename Object>
+    struct D3D12RetiredObject
+    {
+        uint64_t completionValue = 0;
+        std::unique_ptr<Object, D3D12ObjectDeleter> object;
+    };
+
+    template<typename Object, typename Interface>
+    bool OwnsObject(
+        const std::vector<std::unique_ptr<Object, D3D12ObjectDeleter>>& liveObjects,
+        const Interface* object)
+    {
+        return std::find_if(
+            liveObjects.begin(),
+            liveObjects.end(),
+            [object](const std::unique_ptr<Object, D3D12ObjectDeleter>& candidate)
+            {
+                return static_cast<const Interface*>(candidate.get()) == object;
+            }) != liveObjects.end();
+    }
+
+    template<typename Object, typename Interface>
+    bool RetireObject(
+        std::vector<std::unique_ptr<Object, D3D12ObjectDeleter>>& liveObjects,
+        Interface* object,
+        uint64_t completionValue,
+        std::vector<D3D12RetiredObject<Object>>& retiredObjects)
+    {
+        const auto found = std::find_if(
+            liveObjects.begin(),
+            liveObjects.end(),
+            [object](const std::unique_ptr<Object, D3D12ObjectDeleter>& candidate)
+            {
+                return static_cast<Interface*>(candidate.get()) == object;
+            });
+        if (found == liveObjects.end()) return false;
+        retiredObjects.push_back({completionValue, nullptr});
+        retiredObjects.back().object = std::move(*found);
+        liveObjects.erase(found);
+        return true;
+    }
+
+    template<typename Object>
+    void ReclaimObjects(
+        std::vector<D3D12RetiredObject<Object>>& objects,
+        uint64_t completedValue)
+    {
+        objects.erase(
+            std::remove_if(
+                objects.begin(),
+                objects.end(),
+                [completedValue](const D3D12RetiredObject<Object>& object)
+                {
+                    return object.completionValue <= completedValue;
+                }),
+            objects.end());
     }
 
     // 헤더에서 선언만 했던 구조체의 실제 정의
@@ -32,37 +111,248 @@ namespace dy::Backends
         ComPtr<ID3D12Device> device;
         ComPtr<ID3D12InfoQueue> infoQueue; // 디버그 빌드: D3D12 검증 메시지 수집
         ComPtr<ID3D12CommandQueue> commandQueue;
+        HWND windowHandle = nullptr;
         ComPtr<IDXGISwapChain3> swapChain;
         ComPtr<ID3D12DescriptorHeap> rtvHeap;
-        ComPtr<ID3D12Resource> renderTargets[2];
+        std::vector<std::unique_ptr<D3D12Texture, D3D12ObjectDeleter>> backBufferTextures;
+        std::vector<uint64_t> imageCompletionValues;
 
         ComPtr<ID3D12Fence> fence;
-        uint32_t fenceValue = 1;
-        uint64_t frameFenceValues[2] = { 0, 0 };
-        std::vector<Microsoft::WRL::ComPtr<ID3D12Resource>> frameUploadBuffers[2];
-        std::vector<Microsoft::WRL::ComPtr<ID3D12CommandAllocator>> frameUploadAllocators[2];
-        std::vector<Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList>> frameUploadCommandLists[2];
+        uint64_t nextCompletionValue = 1;
         HANDLE fenceEvent = nullptr;
+        std::vector<D3D12FrameSlot> frames;
+        std::vector<D3D12SubmissionRecord> submissions;
+        std::vector<std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>> activeCommandLists;
+        // Keep diagnostic work alive if native submission succeeds but its
+        // completion signal fails. Device teardown drains the queue.
+        std::vector<ComPtr<ID3D12Object>> readbackResources;
+        std::vector<std::unique_ptr<D3D12Buffer, D3D12ObjectDeleter>> liveBuffers;
+        std::vector<std::unique_ptr<D3D12Texture, D3D12ObjectDeleter>> liveTextures;
+        std::vector<std::unique_ptr<D3D12Shader, D3D12ObjectDeleter>> liveShaders;
+        std::vector<std::unique_ptr<D3D12PipelineState, D3D12ObjectDeleter>> livePipelines;
+        std::vector<std::unique_ptr<D3D12ResourceSet, D3D12ObjectDeleter>> liveResourceSets;
+        std::vector<D3D12RetiredObject<D3D12Buffer>> retiredBuffers;
+        std::vector<D3D12RetiredObject<D3D12Texture>> retiredTextures;
+        std::vector<D3D12RetiredObject<D3D12Shader>> retiredShaders;
+        std::vector<D3D12RetiredObject<D3D12PipelineState>> retiredPipelines;
+        std::vector<D3D12RetiredObject<D3D12ResourceSet>> retiredResourceSets;
+        uint64_t lastSubmittedValue = 0;
 
-        uint32_t frameIndex = 0;
-        uint32_t rtvDescriptorSize = 0;
+        uint32_t nextFrameIndex = 0;
+        uint32_t activeFrameIndex = 0;
+        uint32_t activeImageIndex = 0;
+        UINT presentSyncInterval = 1;
+        UINT presentFlags = 0;
+        UINT swapchainFlags = 0;
+        DXGI_FORMAT swapchainResourceFormat = DXGI_FORMAT_UNKNOWN;
+        DXGI_FORMAT swapchainRtvFormat = DXGI_FORMAT_UNKNOWN;
+        RHI::Format swapchainFormat = RHI::Format::Unknown;
+        RHI::SwapchainDesc swapchainDesc = {};
+        bool swapchainReady = false;
+        bool frameReady = false;
+        bool frameSubmitted = false;
+        bool submissionFaulted = false;
 
-        ComPtr<ID3D12DescriptorHeap> globalDescriptorHeap;
-        uint32_t descriptorSlotOffset = 0;
-        uint32_t srvDescriptorSize = 0;
+        bool CollectCompletedWork(uint64_t& completedValue)
+        {
+            if (fence == nullptr) return false;
+            completedValue = fence->GetCompletedValue();
+            if (completedValue == std::numeric_limits<uint64_t>::max())
+            {
+                submissionFaulted = true;
+                return false;
+            }
+            submissions.erase(
+                std::remove_if(
+                    submissions.begin(),
+                    submissions.end(),
+                    [completedValue](const D3D12SubmissionRecord& submission)
+                    {
+                        return submission.completionValue <= completedValue;
+                    }),
+                submissions.end());
+            ReclaimObjects(retiredResourceSets, completedValue);
+            ReclaimObjects(retiredPipelines, completedValue);
+            ReclaimObjects(retiredShaders, completedValue);
+            ReclaimObjects(retiredTextures, completedValue);
+            ReclaimObjects(retiredBuffers, completedValue);
+            return true;
+        }
 
-        // Depth Stencil 관련
-        ComPtr<ID3D12DescriptorHeap> dsvHeap;
-        ComPtr<ID3D12Resource> depthStencilBuffer;
-        uint32_t dsvDescriptorSize = 0;
-
-        D3D12CommandList* commandLists[2] = { nullptr, nullptr };
-        D3D12Texture* backBufferTextures[2] = { nullptr, nullptr };
-        
-        ComPtr<ID3D12CommandAllocator> commandAllocators[2];
-        ComPtr<ID3D12RootSignature> deviceRootSignature;
-        ComPtr<ID3D12PipelineState> texturedTrianglePipeline;
+        bool CollectCompletedWork()
+        {
+            uint64_t completedValue = 0;
+            return CollectCompletedWork(completedValue);
+        }
     };
+
+    bool D3D12Device::ReadTexture(RHI::TextureHandle texture, RHI::TextureReadback& result)
+    {
+        if(!m_internal || !texture || m_internal->submissionFaulted ||
+            !m_internal->activeCommandLists.empty()) return false;
+        const bool backBuffer = texture == GetBackBuffer();
+        if(backBuffer)
+        {
+            if(!m_internal->swapchainDesc.allowReadback || !m_internal->frameSubmitted) return false;
+        }
+        else if(!OwnsObject(m_internal->liveTextures, texture)) return false;
+        const auto& desc = texture->GetDesc();
+        if(!RHI::IsReadbackFormat(desc.format) || !desc.width || !desc.height ||
+            desc.width > UINT32_MAX / 4u) return false;
+        const uint64_t bytes = static_cast<uint64_t>(desc.width) * desc.height * 4u;
+        if(bytes > std::numeric_limits<size_t>::max()) return false;
+        auto* image = static_cast<D3D12Texture*>(texture);
+        D3D12_RESOURCE_STATES before;
+        switch(image->GetState(0, 0))
+        {
+        case RHI::ResourceState::Common: before = D3D12_RESOURCE_STATE_COMMON; break;
+        case RHI::ResourceState::Present: before = D3D12_RESOURCE_STATE_PRESENT; break;
+        case RHI::ResourceState::CopyDestination: before = D3D12_RESOURCE_STATE_COPY_DEST; break;
+        case RHI::ResourceState::RenderTarget: before = D3D12_RESOURCE_STATE_RENDER_TARGET; break;
+        case RHI::ResourceState::ShaderResource:
+            before = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE; break;
+        case RHI::ResourceState::UnorderedAccess: before = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; break;
+        default: return false;
+        }
+        auto* resource = static_cast<ID3D12Resource*>(image->GetNativeResource());
+        if(!resource) return false;
+        const auto nativeDesc = resource->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT64 storageBytes = 0;
+        m_internal->device->GetCopyableFootprints(&nativeDesc, 0, 1, 0, &footprint, nullptr, nullptr, &storageBytes);
+        if(storageBytes > std::numeric_limits<size_t>::max()) return false;
+        const auto heap = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
+        const auto bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(storageBytes);
+        ComPtr<ID3D12Resource> buffer;
+        ComPtr<ID3D12CommandAllocator> allocator;
+        ComPtr<ID3D12GraphicsCommandList> commands;
+        ComPtr<ID3D12Fence> fence;
+        if(FAILED(m_internal->device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE,
+                &bufferDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&buffer))) ||
+            FAILED(m_internal->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator))) ||
+            FAILED(m_internal->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+                allocator.Get(), nullptr, IID_PPV_ARGS(&commands))) ||
+            FAILED(m_internal->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence)))) return false;
+        struct Event
+        {
+            HANDLE handle = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+            ~Event() { if(handle) CloseHandle(handle); }
+        } event;
+        if(!event.handle) return false;
+        RHI::TextureReadback output;
+        output.width = desc.width; output.height = desc.height;
+        output.rowPitch = desc.width * 4u; output.format = desc.format;
+        output.pixels.resize(static_cast<size_t>(bytes));
+        auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(resource, before, D3D12_RESOURCE_STATE_COPY_SOURCE, 0);
+        commands->ResourceBarrier(1, &barrier);
+        D3D12_TEXTURE_COPY_LOCATION source{};
+        source.pResource = resource; source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        D3D12_TEXTURE_COPY_LOCATION destination{};
+        destination.pResource = buffer.Get(); destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        destination.PlacedFootprint = footprint;
+        commands->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
+        commands->ResourceBarrier(1, &barrier);
+        if(FAILED(commands->Close())) return false;
+        const size_t retirementBase = m_internal->readbackResources.size();
+        m_internal->readbackResources.reserve(retirementBase + 4);
+        m_internal->readbackResources.emplace_back(buffer.Get());
+        m_internal->readbackResources.emplace_back(allocator.Get());
+        m_internal->readbackResources.emplace_back(commands.Get());
+        m_internal->readbackResources.emplace_back(fence.Get());
+        ID3D12CommandList* native = commands.Get();
+        m_internal->commandQueue->ExecuteCommandLists(1, &native);
+        if(FAILED(m_internal->commandQueue->Signal(fence.Get(), 1)) ||
+            FAILED(fence->SetEventOnCompletion(1, event.handle)) ||
+            WaitForSingleObject(event.handle, INFINITE) != WAIT_OBJECT_0 ||
+            fence->GetCompletedValue() == UINT64_MAX)
+        {
+            m_internal->submissionFaulted = true;
+            return false;
+        }
+        m_internal->readbackResources.resize(retirementBase);
+        void* mapped = nullptr;
+        const D3D12_RANGE range{0, static_cast<SIZE_T>(storageBytes)};
+        if(FAILED(buffer->Map(0, &range, &mapped))) return false;
+        for(uint32_t row = 0; row < desc.height; ++row)
+            std::memcpy(output.pixels.data() + static_cast<size_t>(row) * output.rowPitch,
+                static_cast<const uint8_t*>(mapped) + footprint.Offset +
+                    static_cast<size_t>(row) * footprint.Footprint.RowPitch, output.rowPitch);
+        const D3D12_RANGE written{0, 0};
+        buffer->Unmap(0, &written);
+        result = std::move(output);
+        return true;
+    }
+
+    static bool CreateBackBufferViews(
+        D3D12InternalState* internal,
+        IDXGISwapChain3* swapchain,
+        RHI::Format format,
+        DXGI_FORMAT resourceFormat,
+        DXGI_FORMAT rtvFormat,
+        ComPtr<ID3D12DescriptorHeap>& rtvHeap,
+        std::vector<std::unique_ptr<D3D12Texture, D3D12ObjectDeleter>>& textures)
+    {
+        if (internal == nullptr || internal->device == nullptr || swapchain == nullptr)
+        {
+            return false;
+        }
+
+        DXGI_SWAP_CHAIN_DESC1 actualDesc = {};
+        if (FAILED(swapchain->GetDesc1(&actualDesc)) || actualDesc.BufferCount == 0 ||
+            actualDesc.Format != resourceFormat)
+        {
+            return false;
+        }
+
+        D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+        heapDesc.NumDescriptors = actualDesc.BufferCount;
+        heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+        ComPtr<ID3D12DescriptorHeap> newRtvHeap;
+        if (FAILED(internal->device->CreateDescriptorHeap(
+                &heapDesc, IID_PPV_ARGS(&newRtvHeap))))
+        {
+            return false;
+        }
+
+        const uint32_t descriptorSize =
+            internal->device->GetDescriptorHandleIncrementSize(
+                D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle =
+            newRtvHeap->GetCPUDescriptorHandleForHeapStart();
+        D3D12_RENDER_TARGET_VIEW_DESC viewDesc = {};
+        viewDesc.Format = rtvFormat;
+        viewDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+
+        std::vector<std::unique_ptr<D3D12Texture, D3D12ObjectDeleter>> newTextures;
+        newTextures.reserve(actualDesc.BufferCount);
+        for (UINT imageIndex = 0; imageIndex < actualDesc.BufferCount; ++imageIndex)
+        {
+            ComPtr<ID3D12Resource> resource;
+            if (FAILED(swapchain->GetBuffer(imageIndex, IID_PPV_ARGS(&resource))))
+            {
+                return false;
+            }
+
+            internal->device->CreateRenderTargetView(
+                resource.Get(), &viewDesc, rtvHandle);
+            const D3D12_RESOURCE_DESC nativeDesc = resource->GetDesc();
+            RHI::TextureDesc textureDesc = {};
+            textureDesc.width = static_cast<uint32_t>(nativeDesc.Width);
+            textureDesc.height = nativeDesc.Height;
+            textureDesc.format = format;
+            textureDesc.usage = RHI::TextureUsage::RenderTarget;
+            newTextures.push_back(
+                std::unique_ptr<D3D12Texture, D3D12ObjectDeleter>(
+                    new D3D12Texture(
+                        resource.Get(), textureDesc, rtvHandle.ptr, true)));
+            rtvHandle.ptr += descriptorSize;
+        }
+
+        rtvHeap = std::move(newRtvHeap);
+        textures = std::move(newTextures);
+        return true;
+    }
 
     // 누적된 D3D12 검증 메시지를 stdout 으로 덤프하고 디바이스 제거 사유를 확인한다.
     // (디버그 레이어가 켜진 디버그 빌드에서만 메시지가 쌓인다.)
@@ -94,16 +384,31 @@ namespace dy::Backends
 
     D3D12Device::~D3D12Device()
     {
-        for (int i = 0; i < 2; ++i) {
-            delete m_internal->commandLists[i];
-            delete m_internal->backBufferTextures[i];
+        if (m_internal == nullptr) return;
+
+        if (m_internal->commandQueue != nullptr &&
+            m_internal->fence != nullptr &&
+            m_internal->fenceEvent != nullptr)
+        {
+            const uint64_t completionValue = m_internal->nextCompletionValue++;
+            if (SUCCEEDED(m_internal->commandQueue->Signal(
+                    m_internal->fence.Get(), completionValue)) &&
+                m_internal->fence->GetCompletedValue() < completionValue &&
+                SUCCEEDED(m_internal->fence->SetEventOnCompletion(
+                    completionValue, m_internal->fenceEvent)))
+            {
+                WaitForSingleObject(m_internal->fenceEvent, INFINITE);
+            }
         }
+
+        if (m_internal->fenceEvent != nullptr) CloseHandle(m_internal->fenceEvent);
         delete m_internal;
     }
 
     int D3D12Device::Initialize(const void* windowHandle, const RHI::DeviceDesc& desc)
     {
-        HWND hwnd = static_cast<HWND>(const_cast<void*>(windowHandle));
+        if (windowHandle == nullptr || desc.maxFramesInFlight == 0) return -1;
+        m_internal->windowHandle = static_cast<HWND>(const_cast<void*>(windowHandle));
 
 #if defined(_DEBUG)
         // 디버그 레이어 활성화(디바이스 생성 전 필수). 이래야 InfoQueue 에 검증 메시지가 쌓인다.
@@ -117,8 +422,6 @@ namespace dy::Backends
 #endif
 
         // 1. 디바이스 생성
-        ComPtr<IDXGIFactory4> factory;
-        CreateDXGIFactory1(IID_PPV_ARGS(&factory));
         if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_internal->device)))) {
             return -1;
         }
@@ -135,498 +438,1913 @@ namespace dy::Backends
         // 2. 커맨드 큐 생성
         D3D12_COMMAND_QUEUE_DESC queueDesc = {};
         queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-        m_internal->device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&m_internal->commandQueue));
-
-        // 3. 스왑체인(화면 버퍼 2개) 생성
-        RECT rect = {};
-        GetClientRect(hwnd, &rect);
-        uint32_t width = rect.right - rect.left;
-        uint32_t height = rect.bottom - rect.top;
-        if (width == 0 || height == 0) {
-            width = 1280;
-            height = 720;
-        }
-
-        // DeviceDesc 의 포맷을 그대로 따른다(기본 R8G8B8A8_UNORM).
-        // 주의: FLIP 스왑체인은 sRGB 버퍼 포맷을 직접 허용하지 않으므로, sRGB 가 필요하면
-        // 버퍼는 UNORM 으로 만들고 RTV 만 sRGB 로 두는 분리가 필요(현재 기본 UNORM 이라 무관).
-        const DXGI_FORMAT swapchainDxgiFormat = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(desc.swapchainFormat));
-
-        DXGI_SWAP_CHAIN_DESC1 swapChainDesc = {};
-        swapChainDesc.BufferCount = 2;
-        swapChainDesc.Width = width;
-        swapChainDesc.Height = height;
-        swapChainDesc.Format = swapchainDxgiFormat;
-        swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-        swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-        swapChainDesc.SampleDesc.Count = 1;
-
-        ComPtr<IDXGISwapChain1> tempSwapChain;
-        factory->CreateSwapChainForHwnd(m_internal->commandQueue.Get(), hwnd, &swapChainDesc, nullptr, nullptr, &tempSwapChain);
-        tempSwapChain.As(&m_internal->swapChain);
-        m_internal->frameIndex = m_internal->swapChain->GetCurrentBackBufferIndex();
-
-        // 4. RTV(렌더 타겟 뷰) 힙 생성
-        D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
-        rtvHeapDesc.NumDescriptors = 2;
-        rtvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-        rtvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-        m_internal->device->CreateDescriptorHeap(&rtvHeapDesc, IID_PPV_ARGS(&m_internal->rtvHeap));
-        m_internal->rtvDescriptorSize = m_internal->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-
-        // 4-1. 커맨드 할당자(Command Allocator) 생성
-        for (int i = 0; i < 2; i++) {
-            m_internal->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_internal->commandAllocators[i]));
-        }
-
-        // 5. 렌더 타겟 뷰(RTV) 연결
-        D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = m_internal->rtvHeap->GetCPUDescriptorHandleForHeapStart();
-        
-        RHI::TextureDesc bbDesc = {};
-        bbDesc.width = swapChainDesc.Width;
-        bbDesc.height = swapChainDesc.Height;
-        bbDesc.format = desc.swapchainFormat;
-        bbDesc.usage = RHI::TextureUsage::RenderTarget;
-
-        for (UINT n = 0; n < 2; n++)
+        if (FAILED(m_internal->device->CreateCommandQueue(
+                &queueDesc, IID_PPV_ARGS(&m_internal->commandQueue))))
         {
-            m_internal->swapChain->GetBuffer(n, IID_PPV_ARGS(&m_internal->renderTargets[n]));
-            m_internal->device->CreateRenderTargetView(m_internal->renderTargets[n].Get(), nullptr, rtvHandle);
-            
-            m_internal->backBufferTextures[n] = new D3D12Texture(m_internal->renderTargets[n].Get(), bbDesc);
-            
-            rtvHandle.ptr += m_internal->rtvDescriptorSize;
+            return -1;
         }
 
         // 6. 동기화용 펜스(Fence) 생성
-        m_internal->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_internal->fence));
-        m_internal->fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-
-        // 7. 글로벌 디스크립터 힙 생성
-        D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
-        srvHeapDesc.NumDescriptors = kGlobalDescriptorHeapSize;
-        srvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-        srvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-        
-        if(FAILED(m_internal->device->CreateDescriptorHeap(&srvHeapDesc, IID_PPV_ARGS(&m_internal->globalDescriptorHeap))))
+        if (FAILED(m_internal->device->CreateFence(
+                0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_internal->fence))))
         {
-            std::cout << "Failed to create descriptor heap!" << std::endl;
             return -1;
         }
-        m_internal->srvDescriptorSize = m_internal->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        m_internal->fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+        if (m_internal->fenceEvent == nullptr) return -1;
 
-        // 8. 깊이 버퍼(Depth Buffer) 생성
-        D3D12_DESCRIPTOR_HEAP_DESC dsvHeapDesc = {};
-        dsvHeapDesc.NumDescriptors = 1;
-        dsvHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-        dsvHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
-        m_internal->device->CreateDescriptorHeap(&dsvHeapDesc, IID_PPV_ARGS(&m_internal->dsvHeap));
-        m_internal->dsvDescriptorSize = m_internal->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
-
-        D3D12_RESOURCE_DESC depthDesc = {};
-        depthDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        depthDesc.Alignment = 0;
-        depthDesc.Width = swapChainDesc.Width;
-        depthDesc.Height = swapChainDesc.Height;
-        depthDesc.DepthOrArraySize = 1;
-        depthDesc.MipLevels = 1;
-        depthDesc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-        depthDesc.SampleDesc.Count = 1;
-        depthDesc.SampleDesc.Quality = 0;
-        depthDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-        depthDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-
-        D3D12_CLEAR_VALUE depthOptimizedClearValue = {};
-        depthOptimizedClearValue.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-        depthOptimizedClearValue.DepthStencil.Depth = 1.0f;
-        depthOptimizedClearValue.DepthStencil.Stencil = 0;
-
-        CD3DX12_HEAP_PROPERTIES depthHeapProps(D3D12_HEAP_TYPE_DEFAULT);
-        m_internal->device->CreateCommittedResource(
-            &depthHeapProps,
-            D3D12_HEAP_FLAG_NONE,
-            &depthDesc,
-            D3D12_RESOURCE_STATE_DEPTH_WRITE,
-            &depthOptimizedClearValue,
-            IID_PPV_ARGS(&m_internal->depthStencilBuffer)
-        );
-
-        m_internal->device->CreateDepthStencilView(m_internal->depthStencilBuffer.Get(), nullptr, m_internal->dsvHeap->GetCPUDescriptorHandleForHeapStart());
-
-        // 9. 커맨드 리스트 미리 할당
-        D3D12_CPU_DESCRIPTOR_HANDLE currentRtv = m_internal->rtvHeap->GetCPUDescriptorHandleForHeapStart();
-        D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_internal->dsvHeap->GetCPUDescriptorHandleForHeapStart();
-        for (int i = 0; i < 2; i++) {
-            m_internal->commandLists[i] = new D3D12CommandList(m_internal->device.Get(), m_internal->renderTargets[i].Get(), currentRtv.ptr, m_internal->globalDescriptorHeap.Get(), m_internal->srvDescriptorSize);
-            m_internal->commandLists[i]->SetDepthStencilView(dsvHandle.ptr); // DSV 등록
-            m_internal->commandLists[i]->SetBackBufferTexture(m_internal->backBufferTextures[i]); // 백버퍼 상태 추적기 연결
-            currentRtv.ptr += m_internal->rtvDescriptorSize;
-        }
-
-        std::cout << "[D3D12Device] Initialization Complete (with Depth Buffer)!" << std::endl;
+        m_internal->frames.resize(desc.maxFramesInFlight);
         return 0;
     }
 
-    void D3D12Device::BeginFrame() { 
-        m_internal->commandLists[m_internal->frameIndex]->Reset();
-    }
-    uint32_t D3D12Device::GetCurrentFrameIndex() const { return m_internal->frameIndex; }
-
-    RHI::ICommandList* D3D12Device::AcquireCommandList() { 
-        return m_internal->commandLists[m_internal->frameIndex];
-    }
-    void D3D12Device::Submit(RHI::ICommandList** cmdLists, uint32_t count) {
-		if (count == 0) return;
-        // 1. 실행할 DX12 커맨드 리스트들을 모을 배열
-        std::vector<ID3D12CommandList*> ppCommandLists;
-        ppCommandLists.reserve(count);
-
-        for (uint32_t i = 0; i < count; ++i) {
-            D3D12CommandList* d3d12List = static_cast<D3D12CommandList*>(cmdLists[i]);
-            ppCommandLists.push_back(reinterpret_cast<ID3D12CommandList*>(d3d12List->GetNativeList()));
+    bool D3D12Device::CreateSwapchain(const RHI::SwapchainDesc& desc)
+    {
+        if (m_internal == nullptr || m_internal->device == nullptr ||
+            m_internal->commandQueue == nullptr || m_internal->windowHandle == nullptr ||
+            m_internal->swapchainReady || desc.minimumImageCount == 0 ||
+            desc.minimumImageCount > DXGI_MAX_SWAP_CHAIN_BUFFERS)
+        {
+            return false;
         }
 
-        // 2. 한 번에 묶어서 GPU에 제출 (성능 상 훨씬 유리)
-        m_internal->commandQueue->ExecuteCommandLists(count, ppCommandLists.data());
+        RHI::Format actualFormat = desc.format;
+        DXGI_FORMAT resourceFormat = DXGI_FORMAT_UNKNOWN;
+        DXGI_FORMAT rtvFormat = DXGI_FORMAT_UNKNOWN;
+        switch (desc.format)
+        {
+        case RHI::Format::Unknown:
+            actualFormat = RHI::Format::R8G8B8A8_UNORM;
+            resourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+            rtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+            break;
+        case RHI::Format::R8G8B8A8_UNORM:
+            resourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+            rtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+            break;
+        case RHI::Format::B8G8R8A8_UNORM:
+            resourceFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+            rtvFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+            break;
+        case RHI::Format::R8G8B8A8_UNORM_SRGB:
+            resourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+            rtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+            break;
+        case RHI::Format::B8G8R8A8_UNORM_SRGB:
+            resourceFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+            rtvFormat = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+            break;
+        case RHI::Format::R16G16B16A16_FLOAT:
+            resourceFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            rtvFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            break;
+        default:
+            return false;
+        }
+
+        ComPtr<IDXGIFactory4> factory;
+        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return false;
+
+        UINT presentSyncInterval = 1;
+        UINT presentFlags = 0;
+        UINT swapchainFlags = 0;
+        switch (desc.presentMode)
+        {
+        case RHI::PresentMode::Fifo:
+            break;
+        case RHI::PresentMode::Immediate:
+        {
+            ComPtr<IDXGIFactory5> factory5;
+            BOOL tearingSupported = FALSE;
+            if (FAILED(factory.As(&factory5)) || factory5 == nullptr ||
+                FAILED(factory5->CheckFeatureSupport(
+                    DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                    &tearingSupported,
+                    sizeof(tearingSupported))) ||
+                tearingSupported == FALSE)
+            {
+                return false;
+            }
+            presentSyncInterval = 0;
+            presentFlags = DXGI_PRESENT_ALLOW_TEARING;
+            swapchainFlags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+            break;
+        }
+        case RHI::PresentMode::Mailbox:
+        default:
+            return false;
+        }
+
+        RECT clientRect = {};
+        if (!GetClientRect(m_internal->windowHandle, &clientRect) ||
+            clientRect.right <= clientRect.left ||
+            clientRect.bottom <= clientRect.top)
+        {
+            return false;
+        }
+
+        DXGI_SWAP_CHAIN_DESC1 requestedDesc = {};
+        requestedDesc.BufferCount = std::max(desc.minimumImageCount, 2u);
+        requestedDesc.Width = static_cast<UINT>(clientRect.right - clientRect.left);
+        requestedDesc.Height = static_cast<UINT>(clientRect.bottom - clientRect.top);
+        requestedDesc.Format = resourceFormat;
+        requestedDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        requestedDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        requestedDesc.SampleDesc.Count = 1;
+        requestedDesc.Flags = swapchainFlags;
+
+        ComPtr<IDXGISwapChain1> swapchain1;
+        ComPtr<IDXGISwapChain3> swapchain3;
+        if (FAILED(factory->CreateSwapChainForHwnd(
+                m_internal->commandQueue.Get(),
+                m_internal->windowHandle,
+                &requestedDesc,
+                nullptr,
+                nullptr,
+                &swapchain1)) ||
+            FAILED(swapchain1.As(&swapchain3)))
+        {
+            return false;
+        }
+
+        DXGI_SWAP_CHAIN_DESC1 actualDesc = {};
+        if (FAILED(swapchain3->GetDesc1(&actualDesc)) ||
+            actualDesc.BufferCount < desc.minimumImageCount ||
+            actualDesc.Format != resourceFormat)
+        {
+            return false;
+        }
+
+        ComPtr<ID3D12DescriptorHeap> rtvHeap;
+        std::vector<std::unique_ptr<D3D12Texture, D3D12ObjectDeleter>> backBufferTextures;
+        if (!CreateBackBufferViews(
+                m_internal,
+                swapchain3.Get(),
+                actualFormat,
+                resourceFormat,
+                rtvFormat,
+                rtvHeap,
+                backBufferTextures))
+        {
+            return false;
+        }
+
+        m_internal->swapChain = std::move(swapchain3);
+        if((desc.initialWidth && desc.initialWidth != actualDesc.Width) ||
+            (desc.initialHeight && desc.initialHeight != actualDesc.Height))
+        {
+            m_internal->swapChain.Reset();
+            return false;
+        }
+        m_internal->rtvHeap = std::move(rtvHeap);
+        m_internal->backBufferTextures = std::move(backBufferTextures);
+        m_internal->imageCompletionValues.assign(actualDesc.BufferCount, 0);
+        m_internal->presentSyncInterval = presentSyncInterval;
+        m_internal->presentFlags = presentFlags;
+        m_internal->swapchainFlags = swapchainFlags;
+        m_internal->swapchainResourceFormat = resourceFormat;
+        m_internal->swapchainRtvFormat = rtvFormat;
+        m_internal->swapchainFormat = actualFormat;
+        m_internal->swapchainDesc = desc;
+        m_internal->activeImageIndex = m_internal->swapChain->GetCurrentBackBufferIndex();
+        m_internal->swapchainReady =
+            m_internal->activeImageIndex < m_internal->backBufferTextures.size();
+        return m_internal->swapchainReady;
+    }
+
+    bool D3D12Device::BeginFrame()
+    {
+        if (m_internal == nullptr || !m_internal->swapchainReady ||
+            m_internal->submissionFaulted || m_internal->frameSubmitted ||
+            m_internal->frames.empty())
+        {
+            return false;
+        }
+
+        uint64_t completedValue = 0;
+        if (!m_internal->CollectCompletedWork(completedValue)) return false;
+        if (m_internal->frameReady)
+        {
+            return m_internal->activeFrameIndex == m_internal->nextFrameIndex &&
+                m_internal->activeFrameIndex < m_internal->frames.size() &&
+                m_internal->activeImageIndex <
+                    m_internal->backBufferTextures.size() &&
+                m_internal->activeImageIndex ==
+                    m_internal->swapChain->GetCurrentBackBufferIndex();
+        }
+
+        RECT clientRect = {};
+        if (!GetClientRect(m_internal->windowHandle, &clientRect) ||
+            clientRect.right <= clientRect.left ||
+            clientRect.bottom <= clientRect.top)
+        {
+            return false;
+        }
+        const uint32_t width = static_cast<uint32_t>(
+            clientRect.right - clientRect.left);
+        const uint32_t height = static_cast<uint32_t>(
+            clientRect.bottom - clientRect.top);
+
+        if (m_internal->backBufferTextures.empty())
+        {
+            ComPtr<ID3D12DescriptorHeap> rtvHeap;
+            std::vector<std::unique_ptr<D3D12Texture, D3D12ObjectDeleter>> backBufferTextures;
+            if (!CreateBackBufferViews(
+                    m_internal,
+                    m_internal->swapChain.Get(),
+                    m_internal->swapchainFormat,
+                    m_internal->swapchainResourceFormat,
+                    m_internal->swapchainRtvFormat,
+                    rtvHeap,
+                    backBufferTextures))
+            {
+                return false;
+            }
+            m_internal->rtvHeap = std::move(rtvHeap);
+            m_internal->backBufferTextures = std::move(backBufferTextures);
+            m_internal->imageCompletionValues.assign(
+                m_internal->backBufferTextures.size(), 0);
+        }
+
+        const RHI::TextureDesc& backBufferDesc =
+            m_internal->backBufferTextures.front()->GetDesc();
+        if (backBufferDesc.width != width || backBufferDesc.height != height)
+        {
+            for (const D3D12FrameSlot& frame : m_internal->frames)
+            {
+                if (frame.completionValue > completedValue) return false;
+            }
+            for (uint64_t completionValue : m_internal->imageCompletionValues)
+            {
+                if (completionValue > completedValue) return false;
+            }
+            for (const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& commandList :
+                m_internal->activeCommandLists)
+            {
+                if (!commandList->GetReferencedSwapchainImages().empty()) return false;
+            }
+
+            const UINT imageCount = static_cast<UINT>(
+                m_internal->imageCompletionValues.size());
+            if (imageCount < m_internal->swapchainDesc.minimumImageCount)
+            {
+                return false;
+            }
+
+            m_internal->backBufferTextures.clear();
+            m_internal->rtvHeap.Reset();
+            if (FAILED(m_internal->swapChain->ResizeBuffers(
+                    imageCount,
+                    width,
+                    height,
+                    m_internal->swapchainResourceFormat,
+                    m_internal->swapchainFlags)))
+            {
+                ComPtr<ID3D12DescriptorHeap> rtvHeap;
+                std::vector<std::unique_ptr<D3D12Texture, D3D12ObjectDeleter>> backBufferTextures;
+                if (CreateBackBufferViews(
+                        m_internal,
+                        m_internal->swapChain.Get(),
+                        m_internal->swapchainFormat,
+                        m_internal->swapchainResourceFormat,
+                        m_internal->swapchainRtvFormat,
+                        rtvHeap,
+                        backBufferTextures))
+                {
+                    m_internal->rtvHeap = std::move(rtvHeap);
+                    m_internal->backBufferTextures = std::move(backBufferTextures);
+                    m_internal->imageCompletionValues.assign(
+                        m_internal->backBufferTextures.size(), 0);
+                }
+                return false;
+            }
+
+            ComPtr<ID3D12DescriptorHeap> rtvHeap;
+            std::vector<std::unique_ptr<D3D12Texture, D3D12ObjectDeleter>> backBufferTextures;
+            const RHI::Format format =
+                m_internal->swapchainDesc.format == RHI::Format::Unknown
+                    ? m_internal->swapchainFormat
+                    : m_internal->swapchainDesc.format;
+            if (!CreateBackBufferViews(
+                    m_internal,
+                    m_internal->swapChain.Get(),
+                    format,
+                    m_internal->swapchainResourceFormat,
+                    m_internal->swapchainRtvFormat,
+                    rtvHeap,
+                    backBufferTextures))
+            {
+                return false;
+            }
+            m_internal->rtvHeap = std::move(rtvHeap);
+            m_internal->backBufferTextures = std::move(backBufferTextures);
+            m_internal->imageCompletionValues.assign(
+                m_internal->backBufferTextures.size(), 0);
+        }
+
+        const uint32_t imageIndex = m_internal->swapChain->GetCurrentBackBufferIndex();
+        if (m_internal->nextFrameIndex >= m_internal->frames.size() ||
+            imageIndex >= m_internal->imageCompletionValues.size() ||
+            m_internal->frames[m_internal->nextFrameIndex].completionValue > completedValue ||
+            m_internal->imageCompletionValues[imageIndex] > completedValue)
+        {
+            return false;
+        }
+
+        m_internal->activeFrameIndex = m_internal->nextFrameIndex;
+        m_internal->activeImageIndex = imageIndex;
+        m_internal->frameReady = true;
+        return true;
+    }
+
+    RHI::ICommandList* D3D12Device::AcquireCommandList()
+    {
+        if (m_internal == nullptr || m_internal->device == nullptr ||
+            m_internal->submissionFaulted)
+        {
+            return nullptr;
+        }
+
+        if (!m_internal->CollectCompletedWork()) return nullptr;
+
+        auto commandList = std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>(
+            new D3D12CommandList(m_internal->device.Get()));
+        if (commandList->GetNativeList() == nullptr) return nullptr;
+        D3D12CommandList* result = commandList.get();
+        m_internal->activeCommandLists.push_back(std::move(commandList));
+        return result;
+    }
+
+    bool D3D12Device::Submit(RHI::ICommandList** cmdLists, uint32_t count)
+    {
+        if (m_internal == nullptr || cmdLists == nullptr || count == 0)
+        {
+            return false;
+        }
+
+        D3D12Texture* activeBackBuffer = nullptr;
+        if (m_internal->frameReady &&
+            m_internal->activeImageIndex < m_internal->backBufferTextures.size())
+        {
+            activeBackBuffer =
+                m_internal->backBufferTextures[m_internal->activeImageIndex].get();
+        }
+
+        std::vector<D3D12CommandList*> submittedCommandLists;
+        submittedCommandLists.reserve(count);
+        std::vector<ID3D12CommandList*> nativeCommandLists;
+        nativeCommandLists.reserve(count);
+        bool frameSubmission = false;
+        bool submissionValid = !m_internal->submissionFaulted &&
+            m_internal->commandQueue != nullptr && m_internal->fence != nullptr;
+        for (uint32_t index = 0; index < count; ++index)
+        {
+            if (cmdLists[index] == nullptr) return false;
+            for (uint32_t previous = 0; previous < index; ++previous)
+            {
+                if (cmdLists[previous] == cmdLists[index]) return false;
+            }
+
+            const auto owned = std::find_if(
+                m_internal->activeCommandLists.begin(),
+                m_internal->activeCommandLists.end(),
+                [command = cmdLists[index]](
+                    const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& candidate)
+                {
+                    return candidate.get() == command;
+                });
+            if (owned == m_internal->activeCommandLists.end()) return false;
+
+            D3D12CommandList* commandList = owned->get();
+            if (!commandList->IsClosed() ||
+                commandList->GetNativeList() == nullptr)
+            {
+                return false;
+            }
+
+            for (D3D12Texture* image : commandList->GetReferencedSwapchainImages())
+            {
+                frameSubmission = true;
+                if (activeBackBuffer == nullptr || image != activeBackBuffer)
+                {
+                    submissionValid = false;
+                }
+            }
+
+            submittedCommandLists.push_back(commandList);
+            nativeCommandLists.push_back(
+                static_cast<ID3D12CommandList*>(commandList->GetNativeList()));
+        }
+
+        D3D12SubmissionState resourceStates = {};
+        if (submissionValid)
+        {
+            for (D3D12CommandList* commandList : submittedCommandLists)
+            {
+                if (!commandList->ValidateForSubmit(resourceStates))
+                {
+                    submissionValid = false;
+                    break;
+                }
+            }
+        }
+        if (submissionValid && frameSubmission)
+        {
+            const auto key = std::make_pair(activeBackBuffer, 0u);
+            const auto found = resourceStates.textureSubresources.find(key);
+            const RHI::ResourceState finalState =
+                found == resourceStates.textureSubresources.end()
+                ? activeBackBuffer->GetState(0, 0)
+                : found->second;
+            if (finalState != RHI::ResourceState::Present)
+                submissionValid = false;
+        }
+        if (!submissionValid)
+        {
+            for (D3D12CommandList* commandList : submittedCommandLists)
+            {
+                const auto owned = std::find_if(
+                    m_internal->activeCommandLists.begin(),
+                    m_internal->activeCommandLists.end(),
+                    [commandList](
+                        const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& candidate)
+                    {
+                        return candidate.get() == commandList;
+                    });
+                if (owned != m_internal->activeCommandLists.end())
+                    m_internal->activeCommandLists.erase(owned);
+            }
+            return false;
+        }
+
+        m_internal->submissions.emplace_back();
+        D3D12SubmissionRecord& submission = m_internal->submissions.back();
+        submission.completionValue = m_internal->nextCompletionValue++;
+        submission.commandLists.reserve(count);
+        for (D3D12CommandList* commandList : submittedCommandLists)
+        {
+            const auto owned = std::find_if(
+                m_internal->activeCommandLists.begin(),
+                m_internal->activeCommandLists.end(),
+                [commandList](
+                    const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& candidate)
+                {
+                    return candidate.get() == commandList;
+                });
+            submission.commandLists.push_back(std::move(*owned));
+            m_internal->activeCommandLists.erase(owned);
+        }
+
+        m_internal->commandQueue->ExecuteCommandLists(
+            count, nativeCommandLists.data());
+        if (FAILED(m_internal->commandQueue->Signal(
+                m_internal->fence.Get(), submission.completionValue)))
+        {
+            submission.completionValue = std::numeric_limits<uint64_t>::max();
+            m_internal->lastSubmittedValue = submission.completionValue;
+            m_internal->submissionFaulted = true;
+            if (frameSubmission) m_internal->frameReady = false;
+            return false;
+        }
+
+        for (const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& commandList :
+            submission.commandLists)
+        {
+            commandList->CommitResourceStates();
+        }
+        m_internal->lastSubmittedValue = submission.completionValue;
+
+        if (frameSubmission)
+        {
+            m_internal->frames[m_internal->activeFrameIndex].completionValue =
+                submission.completionValue;
+            m_internal->imageCompletionValues[m_internal->activeImageIndex] =
+                submission.completionValue;
+            m_internal->nextFrameIndex =
+                (m_internal->activeFrameIndex + 1) %
+                static_cast<uint32_t>(m_internal->frames.size());
+            m_internal->frameReady = false;
+            m_internal->frameSubmitted = true;
+        }
         DumpInfoQueue(m_internal, "Submit");
+        return true;
     }
-    void D3D12Device::Present() {
+
+    void D3D12Device::Present()
+    {
+        if (m_internal == nullptr || m_internal->submissionFaulted ||
+            !m_internal->frameSubmitted)
+        {
+            return;
+        }
+
+        const HRESULT result = m_internal->swapChain->Present(
+            m_internal->presentSyncInterval,
+            m_internal->presentFlags);
+        m_internal->frameSubmitted = false;
+        if (FAILED(result)) m_internal->submissionFaulted = true;
         DumpInfoQueue(m_internal, "Present");
-
-        // 1. 현재 프레임이 끝났음을 나타내기 위해 Fence를 Signal
-        const uint64_t currentFenceValue = m_internal->fenceValue;
-        m_internal->commandQueue->Signal(m_internal->fence.Get(), currentFenceValue);
-        m_internal->frameFenceValues[m_internal->frameIndex] = currentFenceValue;
-        m_internal->fenceValue++;
-
-        // 2. 화면 표시 (Present)
-        m_internal->swapChain->Present(1, 0);
-
-        // 3. 다음 프레임 버퍼 인덱스 갱신
-        m_internal->frameIndex = m_internal->swapChain->GetCurrentBackBufferIndex();
-
-        // 4. 다음 프레임이 사용할 백버퍼의 이전 GPU 작업이 완료되었는지 확인하고 대기 (Busy-wait)
-        const uint64_t waitFenceValue = m_internal->frameFenceValues[m_internal->frameIndex];
-        while (m_internal->fence->GetCompletedValue() < waitFenceValue) {
-            std::this_thread::yield();
-        }
-
-        // 5. 대기가 완료되었으므로, 해당 프레임에 사용했던 임시 업로드 리소스를 지연 해제
-        m_internal->frameUploadBuffers[m_internal->frameIndex].clear();
-        m_internal->frameUploadAllocators[m_internal->frameIndex].clear();
-        m_internal->frameUploadCommandLists[m_internal->frameIndex].clear();
     }
 
-    RHI::IBuffer* D3D12Device::CreateBuffer(const RHI::BufferDesc& desc) { 
-        return new D3D12Buffer(m_internal->device.Get(), desc);
+    namespace
+    {
+        bool HasUsage(RHI::BufferUsage usage, RHI::BufferUsage flag)
+        {
+            return (static_cast<uint32_t>(usage) & static_cast<uint32_t>(flag)) != 0;
+        }
+
+        bool HasUsage(RHI::TextureUsage usage, RHI::TextureUsage flag)
+        {
+            return (static_cast<uint32_t>(usage) & static_cast<uint32_t>(flag)) != 0;
+        }
+
+        bool IsDefaultSubresourceRange(
+            const RHI::TextureSubresourceRange& range)
+        {
+            return range.firstMipLevel == 0 && range.mipLevelCount == 0 &&
+                range.firstArrayLayer == 0 && range.arrayLayerCount == 0;
+        }
+
+        bool ResolveTextureSubresourceRange(
+            const RHI::Texture& texture,
+            const RHI::TextureSubresourceRange& range,
+            uint32_t& mipLevelCount,
+            uint32_t& arrayLayerCount)
+        {
+            if (range.firstMipLevel >= texture.GetDesc().mipLevels ||
+                range.firstArrayLayer >= texture.GetDesc().depthOrArraySize)
+            {
+                return false;
+            }
+            mipLevelCount = range.mipLevelCount == 0
+                ? texture.GetDesc().mipLevels - range.firstMipLevel
+                : range.mipLevelCount;
+            arrayLayerCount = range.arrayLayerCount == 0
+                ? texture.GetDesc().depthOrArraySize - range.firstArrayLayer
+                : range.arrayLayerCount;
+            return mipLevelCount <= texture.GetDesc().mipLevels - range.firstMipLevel &&
+                arrayLayerCount <=
+                    texture.GetDesc().depthOrArraySize - range.firstArrayLayer;
+        }
+
+        bool HasStage(RHI::ShaderStageFlags stages, RHI::ShaderStageFlags stage)
+        {
+            return (static_cast<uint32_t>(stages) & static_cast<uint32_t>(stage)) != 0;
+        }
+
+        D3D12_SHADER_VISIBILITY ToShaderVisibility(RHI::ShaderStageFlags stages)
+        {
+            const bool vertex = HasStage(stages, RHI::ShaderStageFlags::Vertex);
+            const bool fragment = HasStage(stages, RHI::ShaderStageFlags::Fragment);
+            if (vertex && !fragment) return D3D12_SHADER_VISIBILITY_VERTEX;
+            if (fragment && !vertex) return D3D12_SHADER_VISIBILITY_PIXEL;
+            return D3D12_SHADER_VISIBILITY_ALL;
+        }
+
+        DXGI_FORMAT ToVertexFormat(RHI::Format format)
+        {
+            switch (format)
+            {
+            case RHI::Format::R8G8B8A8_UNORM: return DXGI_FORMAT_R8G8B8A8_UNORM;
+            case RHI::Format::R16G16B16A16_FLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+            case RHI::Format::R32G32_FLOAT: return DXGI_FORMAT_R32G32_FLOAT;
+            case RHI::Format::R32G32B32_FLOAT: return DXGI_FORMAT_R32G32B32_FLOAT;
+            case RHI::Format::R32G32B32A32_FLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
+            case RHI::Format::R32_UINT: return DXGI_FORMAT_R32_UINT;
+            case RHI::Format::R16_UINT: return DXGI_FORMAT_R16_UINT;
+            default: return DXGI_FORMAT_UNKNOWN;
+            }
+        }
+
+        D3D12_PRIMITIVE_TOPOLOGY_TYPE ToTopologyType(RHI::PrimitiveTopology topology)
+        {
+            switch (topology)
+            {
+            case RHI::PrimitiveTopology::PointList: return D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+            case RHI::PrimitiveTopology::LineList: return D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+            case RHI::PrimitiveTopology::TriangleList:
+            case RHI::PrimitiveTopology::TriangleStrip:
+                return D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            default: return D3D12_PRIMITIVE_TOPOLOGY_TYPE_UNDEFINED;
+            }
+        }
+
+        D3D12_PRIMITIVE_TOPOLOGY ToPrimitiveTopology(RHI::PrimitiveTopology topology)
+        {
+            switch (topology)
+            {
+            case RHI::PrimitiveTopology::PointList: return D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
+            case RHI::PrimitiveTopology::LineList: return D3D_PRIMITIVE_TOPOLOGY_LINELIST;
+            case RHI::PrimitiveTopology::TriangleList: return D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+            case RHI::PrimitiveTopology::TriangleStrip: return D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+            default: return D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+            }
+        }
+
+        D3D12_FILL_MODE ToFillMode(RHI::FillMode mode)
+        {
+            switch (mode)
+            {
+            case RHI::FillMode::Solid: return D3D12_FILL_MODE_SOLID;
+            case RHI::FillMode::Wireframe: return D3D12_FILL_MODE_WIREFRAME;
+            default: return static_cast<D3D12_FILL_MODE>(0);
+            }
+        }
+
+        D3D12_CULL_MODE ToCullMode(RHI::CullMode mode)
+        {
+            switch (mode)
+            {
+            case RHI::CullMode::None: return D3D12_CULL_MODE_NONE;
+            case RHI::CullMode::Front: return D3D12_CULL_MODE_FRONT;
+            case RHI::CullMode::Back: return D3D12_CULL_MODE_BACK;
+            default: return static_cast<D3D12_CULL_MODE>(0);
+            }
+        }
+
+        D3D12_COMPARISON_FUNC ToCompareOp(RHI::CompareOp op)
+        {
+            switch (op)
+            {
+            case RHI::CompareOp::Never: return D3D12_COMPARISON_FUNC_NEVER;
+            case RHI::CompareOp::Less: return D3D12_COMPARISON_FUNC_LESS;
+            case RHI::CompareOp::Equal: return D3D12_COMPARISON_FUNC_EQUAL;
+            case RHI::CompareOp::LessEqual: return D3D12_COMPARISON_FUNC_LESS_EQUAL;
+            case RHI::CompareOp::Greater: return D3D12_COMPARISON_FUNC_GREATER;
+            case RHI::CompareOp::NotEqual: return D3D12_COMPARISON_FUNC_NOT_EQUAL;
+            case RHI::CompareOp::GreaterEqual: return D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+            case RHI::CompareOp::Always: return D3D12_COMPARISON_FUNC_ALWAYS;
+            default: return static_cast<D3D12_COMPARISON_FUNC>(0);
+            }
+        }
+
+        D3D12_STENCIL_OP ToStencilOp(RHI::StencilOp op)
+        {
+            switch (op)
+            {
+            case RHI::StencilOp::Keep: return D3D12_STENCIL_OP_KEEP;
+            case RHI::StencilOp::Zero: return D3D12_STENCIL_OP_ZERO;
+            case RHI::StencilOp::Replace: return D3D12_STENCIL_OP_REPLACE;
+            case RHI::StencilOp::IncrementClamp: return D3D12_STENCIL_OP_INCR_SAT;
+            case RHI::StencilOp::DecrementClamp: return D3D12_STENCIL_OP_DECR_SAT;
+            case RHI::StencilOp::Invert: return D3D12_STENCIL_OP_INVERT;
+            case RHI::StencilOp::IncrementWrap: return D3D12_STENCIL_OP_INCR;
+            case RHI::StencilOp::DecrementWrap: return D3D12_STENCIL_OP_DECR;
+            default: return static_cast<D3D12_STENCIL_OP>(0);
+            }
+        }
+
+        D3D12_BLEND ToBlendFactor(RHI::BlendFactor factor)
+        {
+            switch (factor)
+            {
+            case RHI::BlendFactor::Zero: return D3D12_BLEND_ZERO;
+            case RHI::BlendFactor::One: return D3D12_BLEND_ONE;
+            case RHI::BlendFactor::SourceColor: return D3D12_BLEND_SRC_COLOR;
+            case RHI::BlendFactor::OneMinusSourceColor: return D3D12_BLEND_INV_SRC_COLOR;
+            case RHI::BlendFactor::DestinationColor: return D3D12_BLEND_DEST_COLOR;
+            case RHI::BlendFactor::OneMinusDestinationColor: return D3D12_BLEND_INV_DEST_COLOR;
+            case RHI::BlendFactor::SourceAlpha: return D3D12_BLEND_SRC_ALPHA;
+            case RHI::BlendFactor::OneMinusSourceAlpha: return D3D12_BLEND_INV_SRC_ALPHA;
+            case RHI::BlendFactor::DestinationAlpha: return D3D12_BLEND_DEST_ALPHA;
+            case RHI::BlendFactor::OneMinusDestinationAlpha: return D3D12_BLEND_INV_DEST_ALPHA;
+            default: return static_cast<D3D12_BLEND>(0);
+            }
+        }
+
+        D3D12_BLEND_OP ToBlendOp(RHI::BlendOp op)
+        {
+            switch (op)
+            {
+            case RHI::BlendOp::Add: return D3D12_BLEND_OP_ADD;
+            case RHI::BlendOp::Subtract: return D3D12_BLEND_OP_SUBTRACT;
+            case RHI::BlendOp::ReverseSubtract: return D3D12_BLEND_OP_REV_SUBTRACT;
+            case RHI::BlendOp::Min: return D3D12_BLEND_OP_MIN;
+            case RHI::BlendOp::Max: return D3D12_BLEND_OP_MAX;
+            default: return static_cast<D3D12_BLEND_OP>(0);
+            }
+        }
+
+        D3D12_TEXTURE_ADDRESS_MODE ToAddressMode(RHI::SamplerAddressMode mode)
+        {
+            switch (mode)
+            {
+            case RHI::SamplerAddressMode::Repeat: return D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+            case RHI::SamplerAddressMode::MirroredRepeat: return D3D12_TEXTURE_ADDRESS_MODE_MIRROR;
+            case RHI::SamplerAddressMode::ClampToEdge: return D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+            case RHI::SamplerAddressMode::ClampToBorder: return D3D12_TEXTURE_ADDRESS_MODE_BORDER;
+            default: return static_cast<D3D12_TEXTURE_ADDRESS_MODE>(0);
+            }
+        }
+
+        D3D12_STATIC_BORDER_COLOR ToBorderColor(RHI::SamplerBorderColor color)
+        {
+            switch (color)
+            {
+            case RHI::SamplerBorderColor::TransparentBlack:
+                return D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+            case RHI::SamplerBorderColor::OpaqueBlack:
+                return D3D12_STATIC_BORDER_COLOR_OPAQUE_BLACK;
+            case RHI::SamplerBorderColor::OpaqueWhite:
+                return D3D12_STATIC_BORDER_COLOR_OPAQUE_WHITE;
+            default:
+                return static_cast<D3D12_STATIC_BORDER_COLOR>(-1);
+            }
+        }
+
+        bool ToSamplerFilter(const RHI::SamplerDesc& desc, D3D12_FILTER& filter)
+        {
+            if (desc.minFilter == RHI::SamplerFilter::Undefined ||
+                desc.magFilter == RHI::SamplerFilter::Undefined ||
+                desc.mipFilter == RHI::SamplerFilter::Undefined ||
+                desc.maxAnisotropy == 0 ||
+                desc.maxAnisotropy > D3D12_MAX_MAXANISOTROPY ||
+                !std::isfinite(desc.mipLodBias) ||
+                !std::isfinite(desc.minLod) ||
+                !std::isfinite(desc.maxLod) ||
+                desc.minLod > desc.maxLod)
+            {
+                return false;
+            }
+            if (desc.maxAnisotropy > 1)
+            {
+                if (desc.minFilter != RHI::SamplerFilter::Linear ||
+                    desc.magFilter != RHI::SamplerFilter::Linear ||
+                    desc.mipFilter != RHI::SamplerFilter::Linear)
+                {
+                    return false;
+                }
+                filter = D3D12_FILTER_ANISOTROPIC;
+                return true;
+            }
+            const D3D12_FILTER_TYPE minFilter = desc.minFilter == RHI::SamplerFilter::Linear
+                ? D3D12_FILTER_TYPE_LINEAR
+                : D3D12_FILTER_TYPE_POINT;
+            const D3D12_FILTER_TYPE magFilter = desc.magFilter == RHI::SamplerFilter::Linear
+                ? D3D12_FILTER_TYPE_LINEAR
+                : D3D12_FILTER_TYPE_POINT;
+            const D3D12_FILTER_TYPE mipFilter = desc.mipFilter == RHI::SamplerFilter::Linear
+                ? D3D12_FILTER_TYPE_LINEAR
+                : D3D12_FILTER_TYPE_POINT;
+            filter = D3D12_ENCODE_BASIC_FILTER(
+                minFilter, magFilter, mipFilter, D3D12_FILTER_REDUCTION_TYPE_STANDARD);
+            return true;
+        }
+
+        uint32_t RegisterNamespace(RHI::ResourceBindingType type)
+        {
+            switch (type)
+            {
+            case RHI::ResourceBindingType::ConstantBuffer: return 0;
+            case RHI::ResourceBindingType::ReadOnlyStorageBuffer:
+            case RHI::ResourceBindingType::SampledTexture:
+                return 1;
+            case RHI::ResourceBindingType::ReadWriteStorageBuffer:
+            case RHI::ResourceBindingType::StorageTexture:
+                return 2;
+            case RHI::ResourceBindingType::StaticSampler: return 3;
+            default: return std::numeric_limits<uint32_t>::max();
+            }
+        }
+
+        bool RangesOverlap(uint32_t firstA, uint32_t countA, uint32_t firstB, uint32_t countB)
+        {
+            const uint64_t endA = static_cast<uint64_t>(firstA) + countA;
+            const uint64_t endB = static_cast<uint64_t>(firstB) + countB;
+            return static_cast<uint64_t>(firstA) < endB &&
+                static_cast<uint64_t>(firstB) < endA;
+        }
+
+        D3D12_DESCRIPTOR_RANGE_TYPE ToDescriptorRangeType(RHI::ResourceBindingType type)
+        {
+            switch (type)
+            {
+            case RHI::ResourceBindingType::ConstantBuffer:
+                return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+            case RHI::ResourceBindingType::ReadOnlyStorageBuffer:
+            case RHI::ResourceBindingType::SampledTexture:
+                return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+            case RHI::ResourceBindingType::ReadWriteStorageBuffer:
+            case RHI::ResourceBindingType::StorageTexture:
+                return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+            default:
+                return static_cast<D3D12_DESCRIPTOR_RANGE_TYPE>(-1);
+            }
+        }
+
+        bool ToDepthBias(
+            float constant,
+            INT& nativeBias)
+        {
+            if (!std::isfinite(constant)) return false;
+            const double value = static_cast<double>(constant);
+            if (std::trunc(value) != value ||
+                value < static_cast<double>(std::numeric_limits<INT>::min()) ||
+                value > static_cast<double>(std::numeric_limits<INT>::max()))
+            {
+                return false;
+            }
+            nativeBias = static_cast<INT>(constant);
+            return true;
+        }
     }
 
-    RHI::IPipelineState* D3D12Device::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc) {
-        // 1. Root Signature 1.1 지원 여부 확인
-        D3D12_FEATURE_DATA_ROOT_SIGNATURE featureData = {};
-        featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
-        if (FAILED(m_internal->device->CheckFeatureSupport(D3D12_FEATURE_ROOT_SIGNATURE, &featureData, sizeof(featureData)))) {
-            featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
+    RHI::BufferHandle D3D12Device::CreateBuffer(const RHI::BufferDesc& desc)
+    {
+        if (m_internal == nullptr || m_internal->device == nullptr || desc.size == 0)
+            return nullptr;
+        if ((desc.initialState == RHI::ResourceState::VertexBuffer &&
+                !HasUsage(desc.usage, RHI::BufferUsage::Vertex)) ||
+            (desc.initialState == RHI::ResourceState::IndexBuffer &&
+                !HasUsage(desc.usage, RHI::BufferUsage::Index)) ||
+            (desc.initialState == RHI::ResourceState::ConstantBuffer &&
+                !HasUsage(desc.usage, RHI::BufferUsage::Constant)) ||
+            ((desc.initialState == RHI::ResourceState::ShaderResource ||
+                desc.initialState == RHI::ResourceState::UnorderedAccess) &&
+                !HasUsage(desc.usage, RHI::BufferUsage::Storage)))
+        {
+            return nullptr;
         }
-
-        // 2. Root Parameter 정의
-        // 머티리얼 텍스처 테이블: 글로벌 디스크립터 힙을 덮는 unbounded SRV 배열(register t0, space0).
-        //  - non-bindless: 셰이더가 인덱스 0(=트랜지언트 슬롯)만 읽음.
-        //  - bindless    : 셰이더가 per-draw 디스크립터 인덱스로 BindlessTextures[idx] 를 읽음.
-        // DESCRIPTORS_VOLATILE 라 접근하지 않는 슬롯은 미초기화여도 무방.
-        CD3DX12_DESCRIPTOR_RANGE1 textureSrvRange;
-        textureSrvRange.Init(
-            D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
-            UINT_MAX, // unbounded
-            0,
-            0,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE,
-            0);
-
-        // 그림자 맵 SRV: bindless 텍스처 힙과 겹치지 않도록 register(t0, space4) 에 단독 배치.
-        CD3DX12_DESCRIPTOR_RANGE1 shadowSrvRange;
-        shadowSrvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 4, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 0);
-
-        CD3DX12_DESCRIPTOR_RANGE1 metallicRoughnessSrvRange;
-        metallicRoughnessSrvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 1, 1, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 0);
-        CD3DX12_DESCRIPTOR_RANGE1 normalSrvRange;
-        normalSrvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 2, 1, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 0);
-        CD3DX12_DESCRIPTOR_RANGE1 occlusionSrvRange;
-        occlusionSrvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 3, 1, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 0);
-        CD3DX12_DESCRIPTOR_RANGE1 emissiveSrvRange;
-        emissiveSrvRange.Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4, 1, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 0);
-
-        CD3DX12_ROOT_PARAMETER1 rootParameters[10] = {};
-        rootParameters[0].InitAsConstants(52, 0); // register(b0): DrawConstants 208 bytes = 52 DWORDs
-        rootParameters[1].InitAsDescriptorTable(1, &textureSrvRange, D3D12_SHADER_VISIBILITY_PIXEL); // register(t0, space0)
-        rootParameters[2].InitAsConstantBufferView(1); // register(b1): RendererLighting
-        rootParameters[3].InitAsConstantBufferView(3); // register(b3): ShadowMatrix
-        // bindless storage SRV 는 space0~2 의 무한(unbounded) 범위(param 1)와 겹치면 안 되므로 space3 에 둔다.
-        rootParameters[4].InitAsShaderResourceView(11, 3); // register(t11, space3): instance transforms
-        rootParameters[5].InitAsDescriptorTable(1, &shadowSrvRange, D3D12_SHADER_VISIBILITY_PIXEL); // register(t0, space4): shadow map
-        rootParameters[6].InitAsDescriptorTable(1, &metallicRoughnessSrvRange, D3D12_SHADER_VISIBILITY_PIXEL); // register(t1, space1)
-        rootParameters[7].InitAsDescriptorTable(1, &normalSrvRange, D3D12_SHADER_VISIBILITY_PIXEL); // register(t2, space1)
-        rootParameters[8].InitAsDescriptorTable(1, &occlusionSrvRange, D3D12_SHADER_VISIBILITY_PIXEL); // register(t3, space1)
-        rootParameters[9].InitAsDescriptorTable(1, &emissiveSrvRange, D3D12_SHADER_VISIBILITY_PIXEL); // register(t4, space1)
-
-        CD3DX12_STATIC_SAMPLER_DESC samplerDesc(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR);
-
-        // 3. Versioned Root Signature 생성
-        CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSigDesc;
-        rootSigDesc.Init_1_1(10, rootParameters, 1, &samplerDesc, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
-
-        Microsoft::WRL::ComPtr<ID3DBlob> signature;
-        Microsoft::WRL::ComPtr<ID3DBlob> error;
-
-        // SerializeVersionedRootSignature를 사용하면 기기 지원 버전에 맞게 자동으로 1.1 또는 1.0으로 다운그레이드 직렬화 해줌
-        if (FAILED(D3DX12SerializeVersionedRootSignature(&rootSigDesc, featureData.HighestVersion, &signature, &error))) {
-            std::cout << "[D3D12] RootSignature serialize FAILED";
-            if (error) std::cout << ": " << static_cast<const char*>(error->GetBufferPointer());
-            std::cout << std::endl;
+        switch (desc.initialState)
+        {
+        case RHI::ResourceState::Undefined:
+        case RHI::ResourceState::Common:
+        case RHI::ResourceState::CopyDestination:
+        case RHI::ResourceState::VertexBuffer:
+        case RHI::ResourceState::IndexBuffer:
+        case RHI::ResourceState::ConstantBuffer:
+        case RHI::ResourceState::ShaderResource:
+        case RHI::ResourceState::UnorderedAccess:
+            break;
+        default:
             return nullptr;
         }
 
-        Microsoft::WRL::ComPtr<ID3D12RootSignature> pRootSignature;
-        if (FAILED(m_internal->device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&pRootSignature)))) {
-            std::cout << "[D3D12] CreateRootSignature FAILED" << std::endl;
-            DumpInfoQueue(m_internal, "CreateRootSignature");
+        auto buffer = std::unique_ptr<D3D12Buffer, D3D12ObjectDeleter>(
+            new D3D12Buffer(m_internal->device.Get(), desc));
+        if (buffer->GetNativeResource() == nullptr) return nullptr;
+        D3D12Buffer* result = buffer.get();
+        m_internal->liveBuffers.push_back(std::move(buffer));
+        return result;
+    }
+
+    RHI::TextureHandle D3D12Device::CreateTexture(const RHI::TextureDesc& desc)
+    {
+        if (m_internal == nullptr || m_internal->device == nullptr ||
+            desc.width == 0 || desc.height == 0 ||
+            desc.depthOrArraySize == 0 || desc.mipLevels == 0 ||
+            desc.depthOrArraySize > std::numeric_limits<UINT16>::max() ||
+            desc.mipLevels > std::numeric_limits<UINT16>::max())
+        {
+            return nullptr;
+        }
+        const bool depthFormat = desc.format == RHI::Format::D32_FLOAT ||
+            desc.format == RHI::Format::D24_UNORM_S8_UINT;
+        if (depthFormat != HasUsage(
+                desc.usage, RHI::TextureUsage::DepthStencil) ||
+            (depthFormat &&
+                (HasUsage(desc.usage, RHI::TextureUsage::RenderTarget) ||
+                    HasUsage(desc.usage, RHI::TextureUsage::Storage))) ||
+            (RHI::IsSrgbFormat(desc.format) &&
+                HasUsage(desc.usage, RHI::TextureUsage::Storage)))
+        {
+            return nullptr;
+        }
+        auto texture = std::unique_ptr<D3D12Texture, D3D12ObjectDeleter>(
+            new D3D12Texture(m_internal->device.Get(), desc));
+        if (texture->GetNativeResource() == nullptr ||
+            (HasUsage(desc.usage, RHI::TextureUsage::RenderTarget) &&
+                texture->GetRenderTargetViewHandle(0, 0) == 0) ||
+            (HasUsage(desc.usage, RHI::TextureUsage::DepthStencil) &&
+                (texture->GetDepthStencilViewHandle(0, 0, false) == 0 ||
+                    texture->GetDepthStencilViewHandle(0, 0, true) == 0)))
+        {
+            return nullptr;
+        }
+        D3D12Texture* result = texture.get();
+        m_internal->liveTextures.push_back(std::move(texture));
+        return result;
+    }
+
+    RHI::ShaderHandle D3D12Device::CreateShader(const RHI::ShaderDesc& desc)
+    {
+        if ((desc.stage != RHI::ShaderStage::Vertex &&
+                desc.stage != RHI::ShaderStage::Fragment) ||
+            desc.entryPoint == nullptr || desc.entryPoint[0] == '\0' ||
+            desc.binary == nullptr || desc.binarySize == 0)
+        {
+            return nullptr;
+        }
+        auto shader = std::unique_ptr<D3D12Shader, D3D12ObjectDeleter>(
+            new D3D12Shader(desc));
+        D3D12Shader* result = shader.get();
+        m_internal->liveShaders.push_back(std::move(shader));
+        return result;
+    }
+
+    RHI::PipelineHandle D3D12Device::CreateGraphicsPipeline(
+        const RHI::GraphicsPipelineDesc& desc)
+    {
+        if (m_internal == nullptr || m_internal->device == nullptr ||
+            desc.vertexShader == nullptr ||
+            desc.topology == RHI::PrimitiveTopology::Undefined ||
+            desc.raster.fillMode == RHI::FillMode::Undefined ||
+            desc.raster.cullMode == RHI::CullMode::Undefined ||
+            desc.raster.frontFace == RHI::FrontFace::Undefined ||
+            (desc.vertexBufferCount != 0 && desc.vertexBuffers == nullptr) ||
+            (desc.vertexAttributeCount != 0 && desc.vertexAttributes == nullptr) ||
+            (desc.colorAttachmentCount != 0 && desc.colorAttachments == nullptr) ||
+            (desc.layout.bindingCount != 0 && desc.layout.bindings == nullptr) ||
+            (desc.vertexAttributeCount != 0 && desc.vertexBufferCount == 0) ||
+            !std::isfinite(desc.raster.depthBiasSlope) ||
+            !std::isfinite(desc.raster.depthBiasClamp) ||
+            desc.colorAttachmentCount > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT)
+        {
             return nullptr;
         }
 
-        // 4. PSO 설정 (CD3DX12 헬퍼로 대폭 축소!)
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC psoDesc = {};
-        static const D3D12_INPUT_ELEMENT_DESC kInputLayout[] = {
-            { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-            { "NORMAL",   0, DXGI_FORMAT_R32G32B32_FLOAT,    0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-            { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,       0, 24, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-            { "TANGENT",  0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0 },
-        };
-        psoDesc.InputLayout = { kInputLayout, static_cast<UINT>(sizeof(kInputLayout) / sizeof(kInputLayout[0])) };
-        psoDesc.pRootSignature = pRootSignature.Get();
-
-        // 셰이더 컴파일
-        ComPtr<ID3DBlob> vsBlob;
-        ComPtr<ID3DBlob> psBlob;
-        ComPtr<ID3DBlob> errorBlob;
-
-        UINT compileFlags = D3DCOMPILE_ENABLE_UNBOUNDED_DESCRIPTOR_TABLES;
-#if defined(_DEBUG) || defined(DEBUG)
-        compileFlags |= D3DCOMPILE_DEBUG | D3DCOMPILE_SKIP_OPTIMIZATION;
-#endif
-
-        const bool hasPixelShader = desc.pixelShader != nullptr && desc.pixelShaderSize > 0u;
-
-        HRESULT hr = D3DCompile(desc.vertexShader, desc.vertexShaderSize, nullptr, nullptr, nullptr, "main", "vs_5_1", compileFlags, 0, &vsBlob, &errorBlob);
-        if (FAILED(hr)) {
-            if (errorBlob) std::cout << "VS Compile Error: " << (char*)errorBlob->GetBufferPointer() << std::endl;
+        auto* vertexShader = dynamic_cast<D3D12Shader*>(desc.vertexShader);
+        auto* fragmentShader = dynamic_cast<D3D12Shader*>(desc.fragmentShader);
+        if (vertexShader == nullptr ||
+            !OwnsObject(m_internal->liveShaders, desc.vertexShader) ||
+            vertexShader->GetStage() != RHI::ShaderStage::Vertex ||
+            vertexShader->GetBinarySize() == 0 ||
+            (desc.fragmentShader != nullptr &&
+                (!OwnsObject(
+                        m_internal->liveShaders, desc.fragmentShader) ||
+                    fragmentShader == nullptr ||
+                    fragmentShader->GetStage() != RHI::ShaderStage::Fragment ||
+                    fragmentShader->GetBinarySize() == 0)))
+        {
             return nullptr;
         }
 
-        if (hasPixelShader) {
-            hr = D3DCompile(desc.pixelShader, desc.pixelShaderSize, nullptr, nullptr, nullptr, "main", "ps_5_1", compileFlags, 0, &psBlob, &errorBlob);
-            if (FAILED(hr)) {
-                if (errorBlob) std::cout << "PS Compile Error: " << (char*)errorBlob->GetBufferPointer() << std::endl;
+        if ((desc.depthStencil.depthTestEnabled ||
+                desc.depthStencil.depthWriteEnabled ||
+                desc.depthStencil.stencilEnabled) &&
+            (desc.depthStencil.format != RHI::Format::D32_FLOAT &&
+                desc.depthStencil.format != RHI::Format::D24_UNORM_S8_UINT))
+        {
+            return nullptr;
+        }
+        if (desc.depthStencil.depthTestEnabled &&
+            desc.depthStencil.depthCompareOp == RHI::CompareOp::Undefined)
+        {
+            return nullptr;
+        }
+        if (desc.depthStencil.stencilEnabled &&
+            (desc.depthStencil.format != RHI::Format::D24_UNORM_S8_UINT ||
+                desc.depthStencil.front.failOp == RHI::StencilOp::Undefined ||
+                desc.depthStencil.front.depthFailOp == RHI::StencilOp::Undefined ||
+                desc.depthStencil.front.passOp == RHI::StencilOp::Undefined ||
+                desc.depthStencil.front.compareOp == RHI::CompareOp::Undefined ||
+                desc.depthStencil.back.failOp == RHI::StencilOp::Undefined ||
+                desc.depthStencil.back.depthFailOp == RHI::StencilOp::Undefined ||
+                desc.depthStencil.back.passOp == RHI::StencilOp::Undefined ||
+                desc.depthStencil.back.compareOp == RHI::CompareOp::Undefined))
+        {
+            return nullptr;
+        }
+
+        for (uint32_t index = 0; index < desc.layout.bindingCount; ++index)
+        {
+            const RHI::ResourceBindingLayout& binding = desc.layout.bindings[index];
+            const uint32_t stages = static_cast<uint32_t>(binding.stages);
+            if (binding.type == RHI::ResourceBindingType::Undefined ||
+                binding.count == 0 ||
+                binding.stages == RHI::ShaderStageFlags::None ||
+                (stages & ~static_cast<uint32_t>(
+                    RHI::ShaderStageFlags::Vertex |
+                    RHI::ShaderStageFlags::Fragment)) != 0 ||
+                static_cast<uint64_t>(binding.binding) + binding.count >
+                    static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) + 1)
+            {
+                return nullptr;
+            }
+            for (uint32_t previous = 0; previous < index; ++previous)
+            {
+                const RHI::ResourceBindingLayout& other =
+                    desc.layout.bindings[previous];
+                if ((binding.binding == other.binding) ||
+                        (RegisterNamespace(binding.type) ==
+                            RegisterNamespace(other.type) &&
+                            RangesOverlap(
+                                binding.binding,
+                                binding.count,
+                                other.binding,
+                                other.count)))
+                {
+                    return nullptr;
+                }
+            }
+            if (binding.type == RHI::ResourceBindingType::ConstantBuffer &&
+                desc.layout.inlineConstantSize != 0 &&
+                RangesOverlap(
+                    binding.binding,
+                    binding.count,
+                    desc.layout.inlineConstantBinding,
+                    1))
+            {
                 return nullptr;
             }
         }
 
-        psoDesc.VS = CD3DX12_SHADER_BYTECODE(vsBlob.Get());
-        if (hasPixelShader) {
-            psoDesc.PS = CD3DX12_SHADER_BYTECODE(psBlob.Get());
-        }
-
-        psoDesc.RasterizerState = CD3DX12_RASTERIZER_DESC(D3D12_DEFAULT);
-        psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK; // 뒷면 컬링 활성화
-        psoDesc.RasterizerState.FrontCounterClockwise = TRUE; // 엔진 메시/Vulkan과 동일하게 CCW를 앞면으로
-        if (!hasPixelShader)
+        if (desc.layout.inlineConstantSize != 0 &&
+            (desc.layout.inlineConstantStages == RHI::ShaderStageFlags::None ||
+                (static_cast<uint32_t>(desc.layout.inlineConstantStages) &
+                    ~static_cast<uint32_t>(
+                        RHI::ShaderStageFlags::Vertex |
+                        RHI::ShaderStageFlags::Fragment)) != 0 ||
+                (desc.layout.inlineConstantSize % 4) != 0))
         {
-            // 깊이 전용(그림자) PSO: 양면 모두 캐스트하도록 컬링 해제 + 깊이 바이어스로 아크네 완화.
-            psoDesc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-            psoDesc.RasterizerState.DepthBias = desc.depthBias;
-            psoDesc.RasterizerState.SlopeScaledDepthBias = desc.depthBiasSlope;
-            psoDesc.RasterizerState.DepthBiasClamp = desc.depthBiasClamp;
-        }
-        psoDesc.BlendState = CD3DX12_BLEND_DESC(D3D12_DEFAULT);
-        psoDesc.BlendState.RenderTarget[0].BlendEnable = TRUE;
-        psoDesc.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_SRC_ALPHA;
-        psoDesc.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
-        psoDesc.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-        psoDesc.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-        psoDesc.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
-        psoDesc.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        psoDesc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        psoDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
-        psoDesc.DepthStencilState.DepthEnable = desc.depthEnable ? TRUE : FALSE;
-        psoDesc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
-        psoDesc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-        const RHI::Format dsvFormat = desc.depthStencilFormat == RHI::Format::Unknown
-            ? RHI::Format::D24_UNORM_S8_UINT
-            : desc.depthStencilFormat;
-        psoDesc.DSVFormat = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiDepthStencilFormat(dsvFormat));
-
-        psoDesc.SampleMask = UINT_MAX;
-        psoDesc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        psoDesc.NumRenderTargets = hasPixelShader ? 1u : 0u;
-        if (hasPixelShader) {
-            const RHI::Format rtvFormat = desc.renderTargetFormat == RHI::Format::Unknown
-                ? RHI::Format::R8G8B8A8_UNORM
-                : desc.renderTargetFormat;
-            psoDesc.RTVFormats[0] = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(rtvFormat));
-        }
-        psoDesc.SampleDesc.Count = 1;
-
-        // 5. PSO 생성
-        Microsoft::WRL::ComPtr<ID3D12PipelineState> pPSO;
-        if (FAILED(m_internal->device->CreateGraphicsPipelineState(&psoDesc, IID_PPV_ARGS(&pPSO)))) {
-            std::cout << "[D3D12] CreateGraphicsPipelineState FAILED (hasPixelShader=" << hasPixelShader << ")" << std::endl;
-            DumpInfoQueue(m_internal, "CreateGraphicsPipelineState");
             return nullptr;
         }
 
-        // 6. 래퍼 객체로 반환
-        DumpInfoQueue(m_internal, "CreateGraphicsPipeline");
-        return new D3D12PipelineState(pPSO.Get(), pRootSignature.Get());
-    }
-
-    RHI::DescriptorIndex D3D12Device::AllocateDescriptorSlot() {
-        if(m_internal->descriptorSlotOffset >= kGlobalDescriptorHeapSize - kTransientDescriptorSlotCount) return RHI::INVALID_DESCRIPTOR_INDEX;
-        return m_internal->descriptorSlotOffset++;
-    }
-
-    void D3D12Device::UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::IBuffer* buffer) {
-        if(index == RHI::INVALID_DESCRIPTOR_INDEX || buffer == nullptr) return;
-        D3D12Buffer* dxBuffer = static_cast<D3D12Buffer*>(buffer);
-
-        CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_internal->globalDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
-        srvHandle.Offset(index, m_internal->srvDescriptorSize);
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        srvDesc.Format = DXGI_FORMAT_UNKNOWN;
-        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvDesc.Buffer.FirstElement = 0;
-        srvDesc.Buffer.NumElements = dxBuffer->GetSize() / dxBuffer->GetStride();
-        srvDesc.Buffer.StructureByteStride = dxBuffer->GetStride();
-        srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
-
-        m_internal->device->CreateShaderResourceView(
-            static_cast<ID3D12Resource*>(dxBuffer->GetNativeResource()),
-            &srvDesc,
-            srvHandle
-        );
-    }
-
-    void D3D12Device::UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::ITexture* texture) {
-        if(index == RHI::INVALID_DESCRIPTOR_INDEX || texture == nullptr) return;
-        // ITexture를 D3D12Texture로 다운캐스팅
-        D3D12Texture* dxTexture = static_cast<D3D12Texture*>(texture);
-
-        // 1. 글로벌 힙의 시작 주소 가져오기
-        CD3DX12_CPU_DESCRIPTOR_HANDLE srvHandle(m_internal->globalDescriptorHeap->GetCPUDescriptorHandleForHeapStart());
-        
-        // 2. 인덱스(슬롯 번호)만큼 주소 이동
-        srvHandle.Offset(index, m_internal->srvDescriptorSize);
-
-        // 3. SRV(Shader Resource View) 생성
-        D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-        
-        srvDesc.Format = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiShaderResourceFormat(dxTexture->GetFormat()));
-        
-        srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        srvDesc.Texture2D.MipLevels = 1;
-
-        // 실제 리소스(ID3D12Resource)를 가져와서 뷰 생성
-        m_internal->device->CreateShaderResourceView(
-            static_cast<ID3D12Resource*>(dxTexture->GetNativeResource()),
-            &srvDesc,
-            srvHandle
-        );
-
-        // 커맨드 리스트가 SRV 디스크립터 테이블을 바인딩할 때 GPU 핸들을 계산할 수 있도록 슬롯 기억.
-        dxTexture->SetGlobalSrvIndex(index);
-    }
-
-    RHI::ITexture* D3D12Device::CreateTexture(const RHI::TextureDesc& desc) {
-        return new D3D12Texture(m_internal->device.Get(), desc);
-    }
-
-    bool D3D12Device::UpdateTexture(RHI::ITexture* texture, const void* data, uint32_t rowPitch) {
-        auto d3dTexture = static_cast<D3D12Texture*>(texture);
-        ID3D12Resource* destResource = static_cast<ID3D12Resource*>(d3dTexture->GetNativeResource());
-
-        D3D12_RESOURCE_DESC desc = destResource->GetDesc();
-        UINT64 requiredSize = 0;
-        m_internal->device->GetCopyableFootprints(&desc, 0, 1, 0, nullptr, nullptr, nullptr, &requiredSize);
-
-        std::cout << "[D3D12Device] UpdateTexture started. requiredSize=" << requiredSize << std::endl;
-
-        // Upload Heap 버퍼 생성
-        ComPtr<ID3D12Resource> uploadBuffer;
-        CD3DX12_HEAP_PROPERTIES heapProps(D3D12_HEAP_TYPE_UPLOAD);
-        CD3DX12_RESOURCE_DESC bufferDesc = CD3DX12_RESOURCE_DESC::Buffer(requiredSize);
-        HRESULT hr = m_internal->device->CreateCommittedResource(
-            &heapProps, D3D12_HEAP_FLAG_NONE, &bufferDesc, 
-            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&uploadBuffer));
-        
-        if (FAILED(hr)) {
-            std::cout << "[D3D12Device] Failed to create uploadBuffer! HR=" << std::hex << hr << std::endl;
+        uint32_t tableCount = 0;
+        uint32_t descriptorCount = 0;
+        uint32_t staticSamplerCount = 0;
+        for (uint32_t index = 0; index < desc.layout.bindingCount; ++index)
+        {
+            const RHI::ResourceBindingLayout& binding = desc.layout.bindings[index];
+            if (binding.type == RHI::ResourceBindingType::StaticSampler)
+            {
+                if (binding.count > std::numeric_limits<uint32_t>::max() -
+                        staticSamplerCount)
+                {
+                    return nullptr;
+                }
+                staticSamplerCount += binding.count;
+            }
+            else
+            {
+                if (descriptorCount > std::numeric_limits<uint32_t>::max() -
+                        binding.count)
+                {
+                    return nullptr;
+                }
+                descriptorCount += binding.count;
+                ++tableCount;
+            }
+        }
+        const uint32_t rootConstantDwords = desc.layout.inlineConstantSize / 4;
+        if (static_cast<uint64_t>(tableCount) + rootConstantDwords >
+            D3D12_MAX_ROOT_COST)
+        {
+            return nullptr;
         }
 
-        // 임시 커맨드 리스트 생성
-        ComPtr<ID3D12CommandAllocator> alloc;
-        m_internal->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc));
-        ComPtr<ID3D12GraphicsCommandList> cmdList;
-        m_internal->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.Get(), nullptr, IID_PPV_ARGS(&cmdList));
+        std::vector<CD3DX12_DESCRIPTOR_RANGE1> descriptorRanges;
+        std::vector<CD3DX12_ROOT_PARAMETER1> rootParameters;
+        std::vector<D3D12PipelineBinding> pipelineBindings;
+        std::vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers;
+        descriptorRanges.reserve(tableCount);
+        rootParameters.reserve(tableCount + (rootConstantDwords != 0 ? 1u : 0u));
+        pipelineBindings.reserve(tableCount);
+        staticSamplers.reserve(staticSamplerCount);
 
-        // d3dx12.h 헬퍼를 사용해 완벽한 복사 수행
-        D3D12_SUBRESOURCE_DATA subresourceData = {};
-        subresourceData.pData = data;
-        subresourceData.RowPitch = rowPitch;
-        subresourceData.SlicePitch = rowPitch * desc.Height;
+        uint32_t descriptorOffset = 0;
+        for (uint32_t index = 0; index < desc.layout.bindingCount; ++index)
+        {
+            const RHI::ResourceBindingLayout& binding = desc.layout.bindings[index];
+            if (binding.type == RHI::ResourceBindingType::StaticSampler)
+            {
+                D3D12_FILTER filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+                if (!ToSamplerFilter(binding.staticSampler, filter) ||
+                    binding.staticSampler.addressU == RHI::SamplerAddressMode::Undefined ||
+                    binding.staticSampler.addressV == RHI::SamplerAddressMode::Undefined ||
+                    binding.staticSampler.addressW == RHI::SamplerAddressMode::Undefined)
+                {
+                    return nullptr;
+                }
+                const bool usesBorder =
+                    binding.staticSampler.addressU == RHI::SamplerAddressMode::ClampToBorder ||
+                    binding.staticSampler.addressV == RHI::SamplerAddressMode::ClampToBorder ||
+                    binding.staticSampler.addressW == RHI::SamplerAddressMode::ClampToBorder;
+                if (usesBorder &&
+                    binding.staticSampler.borderColor ==
+                        RHI::SamplerBorderColor::Undefined)
+                {
+                    return nullptr;
+                }
+                const D3D12_STATIC_BORDER_COLOR borderColor =
+                    binding.staticSampler.borderColor ==
+                        RHI::SamplerBorderColor::Undefined
+                    ? D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK
+                    : ToBorderColor(binding.staticSampler.borderColor);
+                if (static_cast<int>(borderColor) < 0) return nullptr;
 
-        UINT64 bytesCopied = UpdateSubresources(cmdList.Get(), destResource, uploadBuffer.Get(), 0, 0, 1, &subresourceData);
-        if (bytesCopied == 0) {
-            std::cout << "[D3D12Device] UpdateSubresources FAILED (0 bytes copied)!" << std::endl;
+                for (uint32_t arrayIndex = 0;
+                    arrayIndex < binding.count;
+                    ++arrayIndex)
+                {
+                    D3D12_STATIC_SAMPLER_DESC sampler = {};
+                    sampler.Filter = filter;
+                    sampler.AddressU = ToAddressMode(binding.staticSampler.addressU);
+                    sampler.AddressV = ToAddressMode(binding.staticSampler.addressV);
+                    sampler.AddressW = ToAddressMode(binding.staticSampler.addressW);
+                    sampler.MaxAnisotropy = binding.staticSampler.maxAnisotropy;
+                    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+                    sampler.BorderColor = borderColor;
+                    sampler.MipLODBias = binding.staticSampler.mipLodBias;
+                    sampler.MinLOD = binding.staticSampler.minLod;
+                    sampler.MaxLOD = binding.staticSampler.maxLod;
+                    sampler.ShaderRegister = binding.binding + arrayIndex;
+                    sampler.RegisterSpace = 0;
+                    sampler.ShaderVisibility = ToShaderVisibility(binding.stages);
+                    staticSamplers.push_back(sampler);
+                }
+                continue;
+            }
+
+            descriptorRanges.emplace_back();
+            descriptorRanges.back().Init(
+                ToDescriptorRangeType(binding.type),
+                binding.count,
+                binding.binding,
+                0,
+                D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE |
+                    D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
+                0);
+            rootParameters.emplace_back();
+            rootParameters.back().InitAsDescriptorTable(
+                1,
+                &descriptorRanges.back(),
+                ToShaderVisibility(binding.stages));
+
+            D3D12PipelineBinding pipelineBinding = {};
+            pipelineBinding.layout = binding;
+            pipelineBinding.rootParameter =
+                static_cast<uint32_t>(rootParameters.size() - 1);
+            pipelineBinding.descriptorOffset = descriptorOffset;
+            pipelineBindings.push_back(pipelineBinding);
+            descriptorOffset += binding.count;
         }
-        if (bytesCopied == 0) {
-            std::cout << "[D3D12Device] UpdateSubresources FAILED (0 bytes copied)!" << std::endl;
+
+        uint32_t inlineConstantRootParameter =
+            std::numeric_limits<uint32_t>::max();
+        if (rootConstantDwords != 0)
+        {
+            inlineConstantRootParameter =
+                static_cast<uint32_t>(rootParameters.size());
+            rootParameters.emplace_back();
+            rootParameters.back().InitAsConstants(
+                rootConstantDwords,
+                desc.layout.inlineConstantBinding,
+                0,
+                ToShaderVisibility(desc.layout.inlineConstantStages));
         }
 
-        // 텍스처 상태 변경: COPY_DEST -> PIXEL_SHADER_RESOURCE
-        D3D12_RESOURCE_BARRIER barrier = {};
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        barrier.Transition.pResource = destResource;
-        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        cmdList->ResourceBarrier(1, &barrier);
+        D3D12_FEATURE_DATA_ROOT_SIGNATURE rootSignatureFeature = {};
+        rootSignatureFeature.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
+        if (FAILED(m_internal->device->CheckFeatureSupport(
+                D3D12_FEATURE_ROOT_SIGNATURE,
+                &rootSignatureFeature,
+                sizeof(rootSignatureFeature))))
+        {
+            rootSignatureFeature.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
+        }
 
-        cmdList->Close();
+        CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc;
+        rootSignatureDesc.Init_1_1(
+            static_cast<UINT>(rootParameters.size()),
+            rootParameters.empty() ? nullptr : rootParameters.data(),
+            static_cast<UINT>(staticSamplers.size()),
+            staticSamplers.empty() ? nullptr : staticSamplers.data(),
+            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+        ComPtr<ID3DBlob> serializedRootSignature;
+        ComPtr<ID3DBlob> rootSignatureError;
+        if (FAILED(D3DX12SerializeVersionedRootSignature(
+                &rootSignatureDesc,
+                rootSignatureFeature.HighestVersion,
+                &serializedRootSignature,
+                &rootSignatureError)))
+        {
+            if (rootSignatureError != nullptr)
+            {
+                std::cout << "[D3D12] root signature: "
+                    << static_cast<const char*>(
+                        rootSignatureError->GetBufferPointer())
+                    << std::endl;
+            }
+            return nullptr;
+        }
 
-        // 커맨드 실행
-        ID3D12CommandList* lists[] = { cmdList.Get() };
-        m_internal->commandQueue->ExecuteCommandLists(1, lists);
+        ComPtr<ID3D12RootSignature> rootSignature;
+        if (FAILED(m_internal->device->CreateRootSignature(
+                0,
+                serializedRootSignature->GetBufferPointer(),
+                serializedRootSignature->GetBufferSize(),
+                IID_PPV_ARGS(&rootSignature))))
+        {
+            return nullptr;
+        }
 
-        // 임시 업로드 버퍼와 커맨드 리스트/할당자가 즉시 파괴되는 것을 막기 위해 지연 소멸 큐에 등록합니다.
-        // 다음 프레임 버퍼가 다 돌아와 대기가 완료될 때 안전하게 해제됩니다.
-        m_internal->frameUploadBuffers[m_internal->frameIndex].push_back(uploadBuffer);
-        m_internal->frameUploadAllocators[m_internal->frameIndex].push_back(alloc);
-        m_internal->frameUploadCommandLists[m_internal->frameIndex].push_back(cmdList);
-        
-        d3dTexture->SetResourceState(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        return true;
+        std::vector<D3D12VertexBinding> vertexBindings;
+        vertexBindings.reserve(desc.vertexBufferCount);
+        for (uint32_t index = 0; index < desc.vertexBufferCount; ++index)
+        {
+            const RHI::VertexBufferLayout& layout = desc.vertexBuffers[index];
+            if (layout.stride == 0 ||
+                layout.stepMode == RHI::VertexStepMode::Undefined ||
+                layout.binding >= D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT)
+            {
+                return nullptr;
+            }
+            for (const D3D12VertexBinding& previous : vertexBindings)
+            {
+                if (previous.binding == layout.binding) return nullptr;
+            }
+            vertexBindings.push_back({ layout.binding, layout.stride });
+        }
+
+        std::vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
+        inputElements.reserve(desc.vertexAttributeCount);
+        for (uint32_t index = 0; index < desc.vertexAttributeCount; ++index)
+        {
+            const RHI::VertexAttribute& attribute = desc.vertexAttributes[index];
+            const DXGI_FORMAT format = ToVertexFormat(attribute.format);
+            const auto vertexBinding = std::find_if(
+                desc.vertexBuffers,
+                desc.vertexBuffers + desc.vertexBufferCount,
+                [&attribute](const RHI::VertexBufferLayout& layout)
+                {
+                    return layout.binding == attribute.binding;
+                });
+            if (format == DXGI_FORMAT_UNKNOWN ||
+                vertexBinding == desc.vertexBuffers + desc.vertexBufferCount)
+            {
+                return nullptr;
+            }
+            for (const D3D12_INPUT_ELEMENT_DESC& previous : inputElements)
+            {
+                if (previous.SemanticIndex == attribute.location) return nullptr;
+            }
+
+            D3D12_INPUT_ELEMENT_DESC element = {};
+            element.SemanticName = "TEXCOORD";
+            element.SemanticIndex = attribute.location;
+            element.Format = format;
+            element.InputSlot = attribute.binding;
+            element.AlignedByteOffset = attribute.offset;
+            element.InputSlotClass =
+                vertexBinding->stepMode == RHI::VertexStepMode::Instance
+                ? D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA
+                : D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+            element.InstanceDataStepRate =
+                vertexBinding->stepMode == RHI::VertexStepMode::Instance ? 1u : 0u;
+            inputElements.push_back(element);
+        }
+
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC pipelineDesc = {};
+        pipelineDesc.pRootSignature = rootSignature.Get();
+        pipelineDesc.VS = {
+            vertexShader->GetBinary(),
+            vertexShader->GetBinarySize()
+        };
+        if (fragmentShader != nullptr)
+        {
+            pipelineDesc.PS = {
+                fragmentShader->GetBinary(),
+                fragmentShader->GetBinarySize()
+            };
+        }
+        pipelineDesc.InputLayout = {
+            inputElements.empty() ? nullptr : inputElements.data(),
+            static_cast<UINT>(inputElements.size())
+        };
+        pipelineDesc.PrimitiveTopologyType = ToTopologyType(desc.topology);
+        if (pipelineDesc.PrimitiveTopologyType ==
+            D3D12_PRIMITIVE_TOPOLOGY_TYPE_UNDEFINED)
+        {
+            return nullptr;
+        }
+
+        pipelineDesc.RasterizerState.FillMode = ToFillMode(desc.raster.fillMode);
+        pipelineDesc.RasterizerState.CullMode = ToCullMode(desc.raster.cullMode);
+        pipelineDesc.RasterizerState.FrontCounterClockwise =
+            desc.raster.frontFace == RHI::FrontFace::CounterClockwise;
+        if (!ToDepthBias(
+                desc.raster.depthBiasConstant,
+                pipelineDesc.RasterizerState.DepthBias))
+        {
+            return nullptr;
+        }
+        pipelineDesc.RasterizerState.DepthBiasClamp = desc.raster.depthBiasClamp;
+        pipelineDesc.RasterizerState.SlopeScaledDepthBias =
+            desc.raster.depthBiasSlope;
+        pipelineDesc.RasterizerState.DepthClipEnable = TRUE;
+
+        pipelineDesc.BlendState.AlphaToCoverageEnable = FALSE;
+        pipelineDesc.BlendState.IndependentBlendEnable =
+            desc.colorAttachmentCount > 1;
+        pipelineDesc.NumRenderTargets = desc.colorAttachmentCount;
+        for (uint32_t index = 0; index < desc.colorAttachmentCount; ++index)
+        {
+            const RHI::ColorAttachmentDesc& attachment =
+                desc.colorAttachments[index];
+            const DXGI_FORMAT format = static_cast<DXGI_FORMAT>(
+                D3D12Texture::ToDxgiFormat(attachment.format));
+            if (format == DXGI_FORMAT_UNKNOWN) return nullptr;
+            pipelineDesc.RTVFormats[index] = format;
+
+            D3D12_RENDER_TARGET_BLEND_DESC& blend =
+                pipelineDesc.BlendState.RenderTarget[index];
+            blend.BlendEnable = attachment.blend.enabled;
+            blend.LogicOpEnable = FALSE;
+            blend.LogicOp = D3D12_LOGIC_OP_NOOP;
+            blend.RenderTargetWriteMask =
+                static_cast<UINT8>(attachment.writeMask);
+            if (attachment.blend.enabled)
+            {
+                if (attachment.blend.sourceColor == RHI::BlendFactor::Undefined ||
+                    attachment.blend.destinationColor == RHI::BlendFactor::Undefined ||
+                    attachment.blend.colorOp == RHI::BlendOp::Undefined ||
+                    attachment.blend.sourceAlpha == RHI::BlendFactor::Undefined ||
+                    attachment.blend.destinationAlpha == RHI::BlendFactor::Undefined ||
+                    attachment.blend.alphaOp == RHI::BlendOp::Undefined)
+                {
+                    return nullptr;
+                }
+                blend.SrcBlend = ToBlendFactor(attachment.blend.sourceColor);
+                blend.DestBlend =
+                    ToBlendFactor(attachment.blend.destinationColor);
+                blend.BlendOp = ToBlendOp(attachment.blend.colorOp);
+                blend.SrcBlendAlpha =
+                    ToBlendFactor(attachment.blend.sourceAlpha);
+                blend.DestBlendAlpha =
+                    ToBlendFactor(attachment.blend.destinationAlpha);
+                blend.BlendOpAlpha = ToBlendOp(attachment.blend.alphaOp);
+            }
+            else
+            {
+                blend.SrcBlend = D3D12_BLEND_ONE;
+                blend.DestBlend = D3D12_BLEND_ZERO;
+                blend.BlendOp = D3D12_BLEND_OP_ADD;
+                blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+                blend.DestBlendAlpha = D3D12_BLEND_ZERO;
+                blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+            }
+        }
+
+        pipelineDesc.DepthStencilState.DepthEnable =
+            desc.depthStencil.depthTestEnabled ||
+            desc.depthStencil.depthWriteEnabled;
+        pipelineDesc.DepthStencilState.DepthWriteMask =
+            desc.depthStencil.depthWriteEnabled
+            ? D3D12_DEPTH_WRITE_MASK_ALL
+            : D3D12_DEPTH_WRITE_MASK_ZERO;
+        pipelineDesc.DepthStencilState.DepthFunc =
+            desc.depthStencil.depthTestEnabled
+            ? ToCompareOp(desc.depthStencil.depthCompareOp)
+            : D3D12_COMPARISON_FUNC_ALWAYS;
+        pipelineDesc.DepthStencilState.StencilEnable =
+            desc.depthStencil.stencilEnabled;
+        pipelineDesc.DepthStencilState.StencilReadMask =
+            desc.depthStencil.stencilReadMask;
+        pipelineDesc.DepthStencilState.StencilWriteMask =
+            desc.depthStencil.stencilWriteMask;
+        if (desc.depthStencil.stencilEnabled)
+        {
+            pipelineDesc.DepthStencilState.FrontFace.StencilFailOp =
+                ToStencilOp(desc.depthStencil.front.failOp);
+            pipelineDesc.DepthStencilState.FrontFace.StencilDepthFailOp =
+                ToStencilOp(desc.depthStencil.front.depthFailOp);
+            pipelineDesc.DepthStencilState.FrontFace.StencilPassOp =
+                ToStencilOp(desc.depthStencil.front.passOp);
+            pipelineDesc.DepthStencilState.FrontFace.StencilFunc =
+                ToCompareOp(desc.depthStencil.front.compareOp);
+            pipelineDesc.DepthStencilState.BackFace.StencilFailOp =
+                ToStencilOp(desc.depthStencil.back.failOp);
+            pipelineDesc.DepthStencilState.BackFace.StencilDepthFailOp =
+                ToStencilOp(desc.depthStencil.back.depthFailOp);
+            pipelineDesc.DepthStencilState.BackFace.StencilPassOp =
+                ToStencilOp(desc.depthStencil.back.passOp);
+            pipelineDesc.DepthStencilState.BackFace.StencilFunc =
+                ToCompareOp(desc.depthStencil.back.compareOp);
+        }
+        else
+        {
+            pipelineDesc.DepthStencilState.FrontFace = {
+                D3D12_STENCIL_OP_KEEP,
+                D3D12_STENCIL_OP_KEEP,
+                D3D12_STENCIL_OP_KEEP,
+                D3D12_COMPARISON_FUNC_ALWAYS
+            };
+            pipelineDesc.DepthStencilState.BackFace =
+                pipelineDesc.DepthStencilState.FrontFace;
+        }
+        pipelineDesc.DSVFormat = static_cast<DXGI_FORMAT>(
+            D3D12Texture::ToDxgiDepthStencilFormat(
+                desc.depthStencil.format));
+        if (desc.depthStencil.format != RHI::Format::Unknown &&
+            pipelineDesc.DSVFormat == DXGI_FORMAT_UNKNOWN)
+        {
+            return nullptr;
+        }
+
+        pipelineDesc.SampleMask = UINT_MAX;
+        pipelineDesc.SampleDesc.Count = 1;
+
+        ComPtr<ID3D12PipelineState> pipelineState;
+        if (FAILED(m_internal->device->CreateGraphicsPipelineState(
+                &pipelineDesc, IID_PPV_ARGS(&pipelineState))))
+        {
+            DumpInfoQueue(m_internal, "CreateGraphicsPipeline");
+            return nullptr;
+        }
+
+        auto pipeline = std::unique_ptr<D3D12PipelineState, D3D12ObjectDeleter>(
+            new D3D12PipelineState(
+                desc.layout,
+                pipelineState.Get(),
+                rootSignature.Get(),
+                std::move(pipelineBindings),
+                std::move(vertexBindings),
+                inlineConstantRootParameter,
+                descriptorCount,
+                static_cast<uint32_t>(ToPrimitiveTopology(desc.topology)),
+                desc.depthStencil.stencilEnabled,
+                desc.depthStencil.depthWriteEnabled ||
+                    desc.depthStencil.stencilEnabled));
+        D3D12PipelineState* result = pipeline.get();
+        m_internal->livePipelines.push_back(std::move(pipeline));
+        return result;
     }
 
-    void D3D12Device::DestroyBuffer(RHI::IBuffer* buffer) { delete buffer; }
+    RHI::ResourceSetHandle D3D12Device::CreateResourceSet(
+        const RHI::ResourceSetDesc& desc)
+    {
+        if (m_internal == nullptr || m_internal->device == nullptr ||
+            desc.pipeline == nullptr ||
+            (desc.bindingCount != 0 && desc.bindings == nullptr))
+        {
+            return nullptr;
+        }
+        auto* pipeline = dynamic_cast<D3D12PipelineState*>(desc.pipeline);
+        if (pipeline == nullptr ||
+            !OwnsObject(m_internal->livePipelines, desc.pipeline) ||
+            desc.bindingCount != pipeline->GetDescriptorCount())
+        {
+            return nullptr;
+        }
 
-    void D3D12Device::DestroyTexture(RHI::ITexture* texture) {
-        delete texture;
+        ComPtr<ID3D12DescriptorHeap> descriptorHeap;
+        const uint32_t descriptorSize =
+            m_internal->device->GetDescriptorHandleIncrementSize(
+                D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        if (pipeline->GetDescriptorCount() != 0)
+        {
+            D3D12_DESCRIPTOR_HEAP_DESC heapDesc = {};
+            heapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+            heapDesc.NumDescriptors = pipeline->GetDescriptorCount();
+            heapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+            if (FAILED(m_internal->device->CreateDescriptorHeap(
+                    &heapDesc, IID_PPV_ARGS(&descriptorHeap))))
+            {
+                return nullptr;
+            }
+        }
+
+        std::vector<uint8_t> written(pipeline->GetDescriptorCount(), 0);
+        std::vector<ID3D12Resource*> resources;
+        resources.reserve(desc.bindingCount);
+        for (uint32_t index = 0; index < desc.bindingCount; ++index)
+        {
+            const RHI::ResourceBinding& binding = desc.bindings[index];
+            const auto slot = std::find_if(
+                pipeline->GetBindings().begin(),
+                pipeline->GetBindings().end(),
+                [&binding](const D3D12PipelineBinding& candidate)
+                {
+                    return candidate.layout.binding == binding.binding;
+                });
+            if (slot == pipeline->GetBindings().end() ||
+                binding.arrayElement >= slot->layout.count)
+            {
+                return nullptr;
+            }
+            const uint32_t descriptorIndex =
+                slot->descriptorOffset + binding.arrayElement;
+            if (written[descriptorIndex] != 0) return nullptr;
+            written[descriptorIndex] = 1;
+
+            D3D12_CPU_DESCRIPTOR_HANDLE handle =
+                descriptorHeap->GetCPUDescriptorHandleForHeapStart();
+            handle.ptr += static_cast<SIZE_T>(descriptorIndex) * descriptorSize;
+
+            if (slot->layout.type == RHI::ResourceBindingType::ConstantBuffer)
+            {
+                auto* buffer = dynamic_cast<D3D12Buffer*>(binding.buffer);
+                if (buffer == nullptr || binding.texture != nullptr ||
+                    !OwnsObject(m_internal->liveBuffers, binding.buffer) ||
+                    !IsDefaultSubresourceRange(binding.subresources) ||
+                    !HasUsage(buffer->GetDesc().usage, RHI::BufferUsage::Constant) ||
+                    (binding.offset % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT) != 0 ||
+                    binding.offset >= buffer->GetDesc().size)
+                {
+                    return nullptr;
+                }
+                const uint32_t requestedSize = binding.size == 0
+                    ? buffer->GetDesc().size - binding.offset
+                    : binding.size;
+                if (requestedSize == 0 ||
+                    requestedSize > buffer->GetDesc().size - binding.offset)
+                {
+                    return nullptr;
+                }
+                const uint64_t alignedSize =
+                    (static_cast<uint64_t>(requestedSize) +
+                        D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT - 1) &
+                    ~(static_cast<uint64_t>(
+                        D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT) - 1);
+                if (alignedSize > std::numeric_limits<UINT>::max())
+                    return nullptr;
+
+                auto* resource = static_cast<ID3D12Resource*>(
+                    buffer->GetNativeResource());
+                D3D12_CONSTANT_BUFFER_VIEW_DESC view = {};
+                view.BufferLocation =
+                    resource->GetGPUVirtualAddress() + binding.offset;
+                view.SizeInBytes = static_cast<UINT>(alignedSize);
+                m_internal->device->CreateConstantBufferView(&view, handle);
+                resources.push_back(resource);
+            }
+            else if (slot->layout.type ==
+                RHI::ResourceBindingType::ReadOnlyStorageBuffer)
+            {
+                auto* buffer = dynamic_cast<D3D12Buffer*>(binding.buffer);
+                if (buffer == nullptr || binding.texture != nullptr ||
+                    !OwnsObject(m_internal->liveBuffers, binding.buffer) ||
+                    !IsDefaultSubresourceRange(binding.subresources) ||
+                    !HasUsage(buffer->GetDesc().usage, RHI::BufferUsage::Storage) ||
+                    binding.offset >= buffer->GetDesc().size)
+                {
+                    return nullptr;
+                }
+                const uint32_t requestedSize = binding.size == 0
+                    ? buffer->GetDesc().size - binding.offset
+                    : binding.size;
+                if (requestedSize == 0 ||
+                    requestedSize > buffer->GetDesc().size - binding.offset)
+                {
+                    return nullptr;
+                }
+
+                D3D12_SHADER_RESOURCE_VIEW_DESC view = {};
+                view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+                view.Shader4ComponentMapping =
+                    D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                if (buffer->GetDesc().stride != 0)
+                {
+                    if ((binding.offset % buffer->GetDesc().stride) != 0 ||
+                        (requestedSize % buffer->GetDesc().stride) != 0)
+                    {
+                        return nullptr;
+                    }
+                    view.Format = DXGI_FORMAT_UNKNOWN;
+                    view.Buffer.FirstElement =
+                        binding.offset / buffer->GetDesc().stride;
+                    view.Buffer.NumElements =
+                        requestedSize / buffer->GetDesc().stride;
+                    view.Buffer.StructureByteStride = buffer->GetDesc().stride;
+                }
+                else
+                {
+                    if ((binding.offset % 4) != 0 ||
+                        (requestedSize % 4) != 0)
+                    {
+                        return nullptr;
+                    }
+                    view.Format = DXGI_FORMAT_R32_TYPELESS;
+                    view.Buffer.FirstElement = binding.offset / 4;
+                    view.Buffer.NumElements = requestedSize / 4;
+                    view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
+                }
+
+                auto* resource = static_cast<ID3D12Resource*>(
+                    buffer->GetNativeResource());
+                m_internal->device->CreateShaderResourceView(
+                    resource, &view, handle);
+                resources.push_back(resource);
+            }
+            else if (slot->layout.type ==
+                RHI::ResourceBindingType::ReadWriteStorageBuffer)
+            {
+                auto* buffer = dynamic_cast<D3D12Buffer*>(binding.buffer);
+                if (buffer == nullptr || binding.texture != nullptr ||
+                    !OwnsObject(m_internal->liveBuffers, binding.buffer) ||
+                    !IsDefaultSubresourceRange(binding.subresources) ||
+                    !HasUsage(buffer->GetDesc().usage, RHI::BufferUsage::Storage) ||
+                    binding.offset >= buffer->GetDesc().size)
+                {
+                    return nullptr;
+                }
+                const uint32_t requestedSize = binding.size == 0
+                    ? buffer->GetDesc().size - binding.offset
+                    : binding.size;
+                if (requestedSize == 0 ||
+                    requestedSize > buffer->GetDesc().size - binding.offset)
+                {
+                    return nullptr;
+                }
+
+                D3D12_UNORDERED_ACCESS_VIEW_DESC view = {};
+                view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+                if (buffer->GetDesc().stride != 0)
+                {
+                    if ((binding.offset % buffer->GetDesc().stride) != 0 ||
+                        (requestedSize % buffer->GetDesc().stride) != 0)
+                    {
+                        return nullptr;
+                    }
+                    view.Format = DXGI_FORMAT_UNKNOWN;
+                    view.Buffer.FirstElement =
+                        binding.offset / buffer->GetDesc().stride;
+                    view.Buffer.NumElements =
+                        requestedSize / buffer->GetDesc().stride;
+                    view.Buffer.StructureByteStride = buffer->GetDesc().stride;
+                }
+                else
+                {
+                    if ((binding.offset % 4) != 0 ||
+                        (requestedSize % 4) != 0)
+                    {
+                        return nullptr;
+                    }
+                    view.Format = DXGI_FORMAT_R32_TYPELESS;
+                    view.Buffer.FirstElement = binding.offset / 4;
+                    view.Buffer.NumElements = requestedSize / 4;
+                    view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+                }
+
+                auto* resource = static_cast<ID3D12Resource*>(
+                    buffer->GetNativeResource());
+                m_internal->device->CreateUnorderedAccessView(
+                    resource, nullptr, &view, handle);
+                resources.push_back(resource);
+            }
+            else if (slot->layout.type ==
+                RHI::ResourceBindingType::SampledTexture)
+            {
+                auto* texture = dynamic_cast<D3D12Texture*>(binding.texture);
+                if (texture == nullptr || binding.buffer != nullptr ||
+                    (!OwnsObject(
+                            m_internal->liveTextures, binding.texture) &&
+                        !OwnsObject(
+                            m_internal->backBufferTextures,
+                            binding.texture)) ||
+                    binding.offset != 0 || binding.size != 0 ||
+                    !HasUsage(
+                        texture->GetDesc().usage,
+                        RHI::TextureUsage::ShaderResource))
+                {
+                    return nullptr;
+                }
+                auto* resource = static_cast<ID3D12Resource*>(
+                    texture->GetNativeResource());
+                D3D12_SHADER_RESOURCE_VIEW_DESC view = {};
+                view.Format = static_cast<DXGI_FORMAT>(
+                    D3D12Texture::ToDxgiShaderResourceFormat(
+                        texture->GetDesc().format));
+                view.Shader4ComponentMapping =
+                    D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+                if (view.Format == DXGI_FORMAT_UNKNOWN) return nullptr;
+                uint32_t mipLevelCount = 0;
+                uint32_t arrayLayerCount = 0;
+                if (!ResolveTextureSubresourceRange(
+                        *texture,
+                        binding.subresources,
+                        mipLevelCount,
+                        arrayLayerCount))
+                {
+                    return nullptr;
+                }
+                if (texture->GetDesc().depthOrArraySize > 1)
+                {
+                    view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+                    view.Texture2DArray.MostDetailedMip =
+                        binding.subresources.firstMipLevel;
+                    view.Texture2DArray.MipLevels = mipLevelCount;
+                    view.Texture2DArray.FirstArraySlice =
+                        binding.subresources.firstArrayLayer;
+                    view.Texture2DArray.ArraySize = arrayLayerCount;
+                }
+                else
+                {
+                    view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                    view.Texture2D.MostDetailedMip =
+                        binding.subresources.firstMipLevel;
+                    view.Texture2D.MipLevels = mipLevelCount;
+                }
+                m_internal->device->CreateShaderResourceView(
+                    resource, &view, handle);
+                resources.push_back(resource);
+            }
+            else if (slot->layout.type ==
+                RHI::ResourceBindingType::StorageTexture)
+            {
+                auto* texture = dynamic_cast<D3D12Texture*>(binding.texture);
+                if (texture == nullptr || binding.buffer != nullptr ||
+                    (!OwnsObject(
+                            m_internal->liveTextures, binding.texture) &&
+                        !OwnsObject(
+                            m_internal->backBufferTextures,
+                            binding.texture)) ||
+                    binding.offset != 0 || binding.size != 0 ||
+                    binding.subresources.mipLevelCount != 1 ||
+                    !HasUsage(texture->GetDesc().usage, RHI::TextureUsage::Storage) ||
+                    RHI::IsSrgbFormat(texture->GetDesc().format) ||
+                    texture->GetDesc().format == RHI::Format::D32_FLOAT ||
+                    texture->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT)
+                {
+                    return nullptr;
+                }
+                uint32_t mipLevelCount = 0;
+                uint32_t arrayLayerCount = 0;
+                if (!ResolveTextureSubresourceRange(
+                        *texture,
+                        binding.subresources,
+                        mipLevelCount,
+                        arrayLayerCount) ||
+                    mipLevelCount != 1)
+                {
+                    return nullptr;
+                }
+
+                auto* resource = static_cast<ID3D12Resource*>(
+                    texture->GetNativeResource());
+                D3D12_UNORDERED_ACCESS_VIEW_DESC view = {};
+                view.Format = static_cast<DXGI_FORMAT>(
+                    D3D12Texture::ToDxgiFormat(texture->GetDesc().format));
+                if (view.Format == DXGI_FORMAT_UNKNOWN) return nullptr;
+                if (texture->GetDesc().depthOrArraySize > 1)
+                {
+                    view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+                    view.Texture2DArray.MipSlice =
+                        binding.subresources.firstMipLevel;
+                    view.Texture2DArray.FirstArraySlice =
+                        binding.subresources.firstArrayLayer;
+                    view.Texture2DArray.ArraySize = arrayLayerCount;
+                }
+                else
+                {
+                    view.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+                    view.Texture2D.MipSlice =
+                        binding.subresources.firstMipLevel;
+                }
+                m_internal->device->CreateUnorderedAccessView(
+                    resource, nullptr, &view, handle);
+                resources.push_back(resource);
+            }
+            else
+            {
+                return nullptr;
+            }
+        }
+        if (std::find(written.begin(), written.end(), 0) != written.end())
+            return nullptr;
+
+        auto resourceSet = std::unique_ptr<D3D12ResourceSet, D3D12ObjectDeleter>(
+            new D3D12ResourceSet(
+                desc,
+                descriptorHeap.Get(),
+                descriptorSize,
+                resources));
+        D3D12ResourceSet* result = resourceSet.get();
+        m_internal->liveResourceSets.push_back(std::move(resourceSet));
+        return result;
     }
 
-    void D3D12Device::DestroyPipelineState(RHI::IPipelineState* pipeline) { delete pipeline; }
+    void D3D12Device::DestroyBuffer(RHI::BufferHandle buffer)
+    {
+        if (m_internal != nullptr && RetireObject(
+                m_internal->liveBuffers,
+                buffer,
+                m_internal->lastSubmittedValue,
+                m_internal->retiredBuffers))
+        {
+            m_internal->CollectCompletedWork();
+        }
+    }
 
-    RHI::ITexture* D3D12Device::GetBackBuffer() { 
-        return m_internal->backBufferTextures[m_internal->frameIndex]; 
+    void D3D12Device::DestroyTexture(RHI::TextureHandle texture)
+    {
+        if (m_internal != nullptr && RetireObject(
+                m_internal->liveTextures,
+                texture,
+                m_internal->lastSubmittedValue,
+                m_internal->retiredTextures))
+        {
+            m_internal->CollectCompletedWork();
+        }
+    }
+
+    void D3D12Device::DestroyShader(RHI::ShaderHandle shader)
+    {
+        if (m_internal != nullptr && RetireObject(
+                m_internal->liveShaders,
+                shader,
+                m_internal->lastSubmittedValue,
+                m_internal->retiredShaders))
+        {
+            m_internal->CollectCompletedWork();
+        }
+    }
+
+    void D3D12Device::DestroyPipeline(RHI::PipelineHandle pipeline)
+    {
+        if (m_internal != nullptr && RetireObject(
+                m_internal->livePipelines,
+                pipeline,
+                m_internal->lastSubmittedValue,
+                m_internal->retiredPipelines))
+        {
+            m_internal->CollectCompletedWork();
+        }
+    }
+
+    void D3D12Device::DestroyResourceSet(RHI::ResourceSetHandle resourceSet)
+    {
+        if (m_internal != nullptr && RetireObject(
+                m_internal->liveResourceSets,
+                resourceSet,
+                m_internal->lastSubmittedValue,
+                m_internal->retiredResourceSets))
+        {
+            m_internal->CollectCompletedWork();
+        }
+    }
+
+    bool D3D12Device::UpdateBuffer(
+        RHI::ICommandList& commandList,
+        RHI::BufferHandle buffer,
+        uint32_t offset,
+        const void* data,
+        uint32_t size)
+    {
+        if (m_internal == nullptr) return false;
+        auto* d3dCommandList = dynamic_cast<D3D12CommandList*>(&commandList);
+        auto* d3dBuffer = dynamic_cast<D3D12Buffer*>(buffer);
+        const auto owned = std::find_if(
+            m_internal->activeCommandLists.begin(),
+            m_internal->activeCommandLists.end(),
+            [d3dCommandList](
+                const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& candidate)
+            {
+                return candidate.get() == d3dCommandList;
+            });
+        return d3dCommandList != nullptr && d3dBuffer != nullptr &&
+            owned != m_internal->activeCommandLists.end() &&
+            OwnsObject(m_internal->liveBuffers, buffer) &&
+            d3dCommandList->RecordBufferUpload(
+                d3dBuffer, offset, data, size);
+    }
+
+    bool D3D12Device::UpdateTexture(
+        RHI::ICommandList& commandList,
+        RHI::TextureHandle texture,
+        uint32_t mipLevel,
+        uint32_t arrayLayer,
+        const void* data,
+        uint32_t dataSize,
+        uint32_t rowPitch,
+        uint32_t slicePitch)
+    {
+        if (m_internal == nullptr) return false;
+        auto* d3dCommandList = dynamic_cast<D3D12CommandList*>(&commandList);
+        auto* d3dTexture = dynamic_cast<D3D12Texture*>(texture);
+        const auto owned = std::find_if(
+            m_internal->activeCommandLists.begin(),
+            m_internal->activeCommandLists.end(),
+            [d3dCommandList](
+                const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& candidate)
+            {
+                return candidate.get() == d3dCommandList;
+            });
+        return d3dCommandList != nullptr && d3dTexture != nullptr &&
+            owned != m_internal->activeCommandLists.end() &&
+            (OwnsObject(m_internal->liveTextures, texture) ||
+                OwnsObject(m_internal->backBufferTextures, texture)) &&
+            d3dCommandList->RecordTextureUpload(
+                d3dTexture,
+                mipLevel,
+                arrayLayer,
+                data,
+                dataSize,
+                rowPitch,
+                slicePitch);
+    }
+
+    RHI::TextureHandle D3D12Device::GetBackBuffer() {
+        if (m_internal == nullptr || !m_internal->swapchainReady ||
+            m_internal->backBufferTextures.empty())
+        {
+            return nullptr;
+        }
+        const uint32_t imageIndex = (m_internal->frameReady || m_internal->frameSubmitted)
+            ? m_internal->activeImageIndex
+            : m_internal->swapChain->GetCurrentBackBufferIndex();
+        return imageIndex < m_internal->backBufferTextures.size()
+            ? m_internal->backBufferTextures[imageIndex].get()
+            : nullptr;
     }
 }

@@ -1,5 +1,5 @@
-#include "Graphics/ModelLoaderInternal.h"
-#include "Graphics/ImageFile.h"
+#include "Graphics/Private/ModelLoaderInternal.h"
+#include "Graphics/Private/ImageFile.h"
 
 #include <algorithm>
 #include <cmath>
@@ -638,10 +638,10 @@ namespace dy::Graphics::ModelLoaderInternal
 					filepath,
 					"failed to query ufbx model source size");
 			}
-			UfbxExternalFileContext externalFileContext{
-				std::filesystem::path(filepath).parent_path(),
-				options.maxSourceBytes,
-				static_cast<uint64_t>(mainSourceSize) };
+			UfbxExternalFileContext externalFileContext{};
+			externalFileContext.modelDirectory = std::filesystem::path(filepath).parent_path();
+			externalFileContext.sourceByteLimit = options.maxSourceBytes;
+			externalFileContext.sourceBytes = static_cast<uint64_t>(mainSourceSize);
 			ufbx_load_opts opts = {};
 			opts.temp_allocator.allocator = sharedAllocator;
 			opts.temp_allocator.memory_limit = parserByteLimit;
