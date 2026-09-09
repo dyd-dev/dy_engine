@@ -1,3 +1,13 @@
+set(DY_SELECTED_BACKEND_COUNT 0)
+foreach(backend IN ITEMS USE_D3D12 USE_METAL USE_VULKAN)
+	if(${backend})
+		math(EXPR DY_SELECTED_BACKEND_COUNT "${DY_SELECTED_BACKEND_COUNT} + 1")
+	endif()
+endforeach()
+if(DY_SELECTED_BACKEND_COUNT GREATER 1)
+	message(FATAL_ERROR "Select exactly one native backend: USE_D3D12, USE_METAL or USE_VULKAN.")
+endif()
+
 if(USE_D3D12)
 	if(NOT WIN32)
 		message(FATAL_ERROR "[${PROJECT_NAME}] D3D12 is only supported with Windows OS")

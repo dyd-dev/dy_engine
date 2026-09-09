@@ -1,22 +1,26 @@
 #pragma once
-#include "RHI/IBuffer.h"
+#include "RHI/Buffer.h"
 
 namespace dy::Backends
 {
-    class MetalBuffer : public RHI::IBuffer
+    struct MetalObjectDeleter;
+
+    class MetalBuffer : public RHI::Buffer
     {
     public:
         MetalBuffer(const RHI::BufferDesc& desc, void* device);
-        ~MetalBuffer() override;
 
-        void* Map(uint32_t offset) override;
-        void  Unmap() override;
-
-        // MetalDevice.mm에서 내부적으로 접근할 용도
-        void* GetNativeBuffer() const;
+        [[nodiscard]] void* GetNativeBuffer() const;
+        [[nodiscard]] RHI::ResourceState GetState() const;
+        void SetState(RHI::ResourceState state);
 
     private:
+        friend struct MetalObjectDeleter;
+
+        ~MetalBuffer() override;
+
         struct Impl;
         Impl* m_impl = nullptr;
+		RHI::ResourceState m_state = RHI::ResourceState::Undefined;
     };
 }

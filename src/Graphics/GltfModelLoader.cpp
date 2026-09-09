@@ -1,4 +1,4 @@
-#include "Graphics/ModelLoaderInternal.h"
+#include "Graphics/Private/ModelLoaderInternal.h"
 
 #include <algorithm>
 #include <cmath>
@@ -9,7 +9,7 @@
 #include <utility>
 #include <vector>
 
-#include "Graphics/ImageFile.h"
+#include "Graphics/Private/ImageFile.h"
 
 #include <fastgltf/core.hpp>
 #include <fastgltf/math.hpp>

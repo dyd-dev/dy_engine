@@ -1,4 +1,4 @@
-#include "Graphics/ModelLoaderInternal.h"
+#include "Graphics/Private/ModelLoaderInternal.h"
 
 #include <algorithm>
 #include <cctype>
