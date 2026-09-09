@@ -283,13 +283,28 @@ void VulkanCommandList::BufferMemoryBarrier(
 	uint32_t size)
 {
 	if(buffer == nullptr) return;
-	m_bufferBarriers.push_back(BufferBarrier{
+	m_bufferBarriers.push_back(BufferBarrierRecord{
 		buffer,
 		sourceAccess,
 		destinationAccess,
 		offset,
 		size });
 	m_workItems.push_back(WorkItem{ WorkType::BufferBarrier, static_cast<uint32_t>(m_bufferBarriers.size() - 1u) });
+}
+
+void VulkanCommandList::TextureBarrier(dy::RHI::ITexture* texture, uint32_t beforeAccess, uint32_t afterAccess)
+{
+	(void)texture; (void)beforeAccess; (void)afterAccess;
+}
+
+void VulkanCommandList::BufferBarrier(dy::RHI::IBuffer* buffer, uint32_t beforeAccess, uint32_t afterAccess)
+{
+	(void)buffer; (void)beforeAccess; (void)afterAccess;
+}
+
+void VulkanCommandList::GlobalBarrier(uint32_t beforeAccess, uint32_t afterAccess)
+{
+	(void)beforeAccess; (void)afterAccess;
 }
 
 }

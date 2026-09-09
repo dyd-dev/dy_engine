@@ -46,6 +46,11 @@ public:
 		uint32_t offset,
 		uint32_t size) override;
 
+	// 멀티 플랫폼 정석 3대 리소스 배리어 오버라이드 (Vulkan)
+	void TextureBarrier(dy::RHI::ITexture* texture, uint32_t beforeAccess, uint32_t afterAccess) override;
+	void BufferBarrier(dy::RHI::IBuffer* buffer, uint32_t beforeAccess, uint32_t afterAccess) override;
+	void GlobalBarrier(uint32_t beforeAccess, uint32_t afterAccess) override;
+
 	void Begin(uint32_t maxColorAttachments, uint32_t maxDrawsPerFrame);
 	[[nodiscard]] uint32_t GetRemainingDrawCapacity() const override
 	{
@@ -107,7 +112,7 @@ private:
 		std::array<uint8_t, kMaxPushConstantBytes> inlineConstants = {};
 	};
 
-	struct BufferBarrier
+	struct BufferBarrierRecord
 	{
 		dy::RHI::IBuffer* buffer = nullptr;
 		dy::RHI::BufferAccess sourceAccess = dy::RHI::BufferAccess::ComputeShaderWrite;
@@ -197,7 +202,7 @@ private:
 	dy::RHI::Rect m_pendingScissor = {};
 	std::vector<DrawCall> m_drawCalls;
 	std::vector<ComputeDispatch> m_computeDispatches;
-	std::vector<BufferBarrier> m_bufferBarriers;
+	std::vector<BufferBarrierRecord> m_bufferBarriers;
 	std::vector<ColorClear> m_colorClears;
 	std::vector<DepthClear> m_depthClears;
 	std::vector<WorkItem> m_workItems;

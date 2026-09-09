@@ -26,6 +26,12 @@ namespace dy::Backends
         void ClearColor(RHI::ITexture* renderTarget, float r, float g, float b, float a) override;
         void ClearDepth(RHI::ITexture* depthStencil, float depth) override;
 
+        // 3대 리소스 배리어 오버라이드 (Metal)
+        // 멀티 플랫폼 정석 3대 리소스 배리어 오버라이드
+        void TextureBarrier(RHI::ITexture* texture, uint32_t beforeAccess, uint32_t afterAccess) override;
+        void BufferBarrier(RHI::IBuffer* buffer, uint32_t beforeAccess, uint32_t afterAccess) override;
+        void GlobalBarrier(uint32_t beforeAccess, uint32_t afterAccess) override;
+
         void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
         void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
 

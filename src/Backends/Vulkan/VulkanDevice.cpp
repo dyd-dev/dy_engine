@@ -2526,7 +2526,7 @@ bool VulkanDevice::Impl::RecordBufferBarrier(
 	uint32_t barrierIndex)
 {
 	if(barrierIndex >= commandList.m_bufferBarriers.size()) return false;
-	const VulkanCommandList::BufferBarrier& captured = commandList.m_bufferBarriers[barrierIndex];
+	const VulkanCommandList::BufferBarrierRecord& captured = commandList.m_bufferBarriers[barrierIndex];
 	if(captured.sourceAccess != dy::RHI::BufferAccess::ComputeShaderWrite
 		|| captured.destinationAccess != dy::RHI::BufferAccess::VertexShaderRead) return false;
 	const VulkanBuffer* buffer = dynamic_cast<const VulkanBuffer*>(captured.buffer);

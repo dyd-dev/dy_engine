@@ -103,6 +103,25 @@ namespace dy::RHI
 		{
 			(void)buffer; (void)sourceAccess; (void)destinationAccess; (void)offset; (void)size;
 		}
+
+		// 멀티 플랫폼 정석 3대 리소스 배리어 API
+		// 1. Texture Barrier (텍스처/이미지 상태 전환 배리어)
+		virtual void TextureBarrier(ITexture* texture, uint32_t beforeAccess, uint32_t afterAccess)
+		{
+			(void)texture; (void)beforeAccess; (void)afterAccess;
+		}
+
+		// 2. Buffer Barrier (버퍼 접근 권한/캐시 동기화 배리어)
+		virtual void BufferBarrier(IBuffer* buffer, uint32_t beforeAccess, uint32_t afterAccess)
+		{
+			(void)buffer; (void)beforeAccess; (void)afterAccess;
+		}
+
+		// 3. Global Barrier (파이프라인 전역 메모리 캐시 플러시 및 동기화 배리어)
+		virtual void GlobalBarrier(uint32_t beforeAccess, uint32_t afterAccess)
+		{
+			(void)beforeAccess; (void)afterAccess;
+		}
 		// API-neutral GPU command annotations. Backends translate these to PIX events,
 		// Vulkan debug labels, Metal debug groups, or validation-only Null events.
 		virtual void BeginDebugEvent(const char* name, const DebugLabelColor& color = {}) { (void)name; (void)color; }

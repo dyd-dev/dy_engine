@@ -61,6 +61,21 @@ namespace dy::Graphics
 		RHI::IBuffer* bufferPtr = nullptr;
 	};
 
+	enum class RGBarrierType
+	{
+		Texture, // 1. 텍스처 배리어 (Texture / Image Barrier)
+		Buffer,  // 2. 버퍼 배리어 (Buffer Memory Barrier)
+		Global   // 3. 글로벌 메모리 배리어 (Global / Pipeline Memory Barrier)
+	};
+
+	struct RGBarrierCmd
+	{
+		RGBarrierType type = RGBarrierType::Texture;
+		RGResourceHandle resourceHandle;
+		RGResourceAccess beforeAccess = RGResourceAccess::Undefined;
+		RGResourceAccess afterAccess = RGResourceAccess::Undefined;
+	};
+
 	using RGPassExecuteCallback = std::function<void(RHI::ICommandList* cmdList)>;
 
 	class RenderGraphPass
@@ -74,12 +89,21 @@ namespace dy::Graphics
 		RenderGraphPass& SetPipeline(RHI::IPipelineState* pipeline);
 		RenderGraphPass& SetExecute(RGPassExecuteCallback callback);
 
+		// 멀티 플랫폼 정석 3대 리소스 배리어 API
+		// 1. Texture Barrier (텍스처 상태/레이아웃 전환 배리어)
+		RenderGraphPass& TextureBarrier(RGResourceHandle texture, RGResourceAccess beforeAccess, RGResourceAccess afterAccess);
+		// 2. Buffer Barrier (버퍼 접근 권한/캐시 동기화 배리어)
+		RenderGraphPass& BufferBarrier(RGResourceHandle buffer, RGResourceAccess beforeAccess, RGResourceAccess afterAccess);
+		// 3. Global Barrier (전역 메모리/파이프라인 캐시 플러시 배리어)
+		RenderGraphPass& GlobalBarrier(RGResourceAccess beforeAccess, RGResourceAccess afterAccess);
+
 		[[nodiscard]] const std::string& GetName() const { return m_name; }
 		[[nodiscard]] uint32_t GetIndex() const { return m_index; }
 		[[nodiscard]] uint64_t GetRevision() const { return m_revision; }
 		[[nodiscard]] RHI::IPipelineState* GetPipeline() const { return m_pipeline; }
 		[[nodiscard]] const std::vector<RGResourceBinding>& GetReads() const { return m_reads; }
 		[[nodiscard]] const std::vector<RGResourceBinding>& GetWrites() const { return m_writes; }
+		[[nodiscard]] const std::vector<RGBarrierCmd>& GetBarriers() const { return m_barriers; }
 		[[nodiscard]] bool HasExecuteCallback() const { return static_cast<bool>(m_executeCallback); }
 
 		void Execute(RHI::ICommandList* cmdList) const;
@@ -91,6 +115,7 @@ namespace dy::Graphics
 		RHI::IPipelineState* m_pipeline = nullptr;
 		std::vector<RGResourceBinding> m_reads;
 		std::vector<RGResourceBinding> m_writes;
+		std::vector<RGBarrierCmd> m_barriers;
 		RGPassExecuteCallback m_executeCallback;
 	};
 
@@ -126,6 +151,7 @@ namespace dy::Graphics
 		[[nodiscard]] const std::vector<uint32_t>& GetExecutionOrderIndices() const { return m_executionOrder; }
 		[[nodiscard]] std::vector<std::string> GetExecutionOrderNames() const;
 		[[nodiscard]] const RenderGraphPass* GetPass(uint32_t index) const;
+		[[nodiscard]] const RGResourceDesc* GetResourceDesc(RGResourceHandle handle) const;
 
 	private:
 		std::vector<RGResourceDesc> m_resources;

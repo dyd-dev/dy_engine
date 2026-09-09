@@ -427,4 +427,92 @@ namespace dy::Backends
         D3D12_RECT d3dRect = { rect.x, rect.y, rect.x + static_cast<LONG>(rect.width), rect.y + static_cast<LONG>(rect.height) };
         m_internal->commandList->RSSetScissorRects(1, &d3dRect);
     }
+
+    static D3D12_RESOURCE_STATES MapRGAccessToD3D12State(uint32_t rgAccess)
+    {
+        switch (rgAccess)
+        {
+        case 1: return D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        case 2: return D3D12_RESOURCE_STATE_RENDER_TARGET;
+        case 3: return D3D12_RESOURCE_STATE_DEPTH_WRITE;
+        case 4: return D3D12_RESOURCE_STATE_DEPTH_READ;
+        case 5: return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        case 6: return D3D12_RESOURCE_STATE_COPY_SOURCE;
+        case 7: return D3D12_RESOURCE_STATE_COPY_DEST;
+        case 8: return D3D12_RESOURCE_STATE_PRESENT;
+        default: return D3D12_RESOURCE_STATE_COMMON;
+        }
+    }
+
+    void D3D12CommandList::TextureBarrier(RHI::ITexture* texture, uint32_t beforeAccess, uint32_t afterAccess)
+    {
+        if (texture == nullptr || m_internal->commandList == nullptr) return;
+        auto* d3dTex = static_cast<D3D12Texture*>(texture);
+        ID3D12Resource* res = static_cast<ID3D12Resource*>(d3dTex->GetNativeResource());
+        if (res == nullptr) return;
+
+        D3D12_RESOURCE_STATES stateBefore = MapRGAccessToD3D12State(beforeAccess);
+        D3D12_RESOURCE_STATES stateAfter = MapRGAccessToD3D12State(afterAccess);
+
+        if (stateBefore != stateAfter)
+        {
+            D3D12_RESOURCE_BARRIER barrier = {};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            barrier.Transition.pResource = res;
+            barrier.Transition.StateBefore = stateBefore;
+            barrier.Transition.StateAfter = stateAfter;
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            m_internal->commandList->ResourceBarrier(1, &barrier);
+        }
+    }
+
+    void D3D12CommandList::BufferBarrier(RHI::IBuffer* buffer, uint32_t beforeAccess, uint32_t afterAccess)
+    {
+        if (m_internal->commandList == nullptr) return;
+        ID3D12Resource* res = nullptr;
+        if (buffer != nullptr)
+        {
+            auto* d3dBuf = static_cast<D3D12Buffer*>(buffer);
+            res = static_cast<ID3D12Resource*>(d3dBuf->GetNativeResource());
+        }
+
+        D3D12_RESOURCE_STATES stateBefore = MapRGAccessToD3D12State(beforeAccess);
+        D3D12_RESOURCE_STATES stateAfter = MapRGAccessToD3D12State(afterAccess);
+
+        if (stateBefore != stateAfter && res != nullptr)
+        {
+            D3D12_RESOURCE_BARRIER barrier = {};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            barrier.Transition.pResource = res;
+            barrier.Transition.StateBefore = stateBefore;
+            barrier.Transition.StateAfter = stateAfter;
+            barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            m_internal->commandList->ResourceBarrier(1, &barrier);
+        }
+        else
+        {
+            // 동일 상태에서의 쓰기 완료 동기화(UAV Barrier)
+            D3D12_RESOURCE_BARRIER barrier = {};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+            barrier.UAV.pResource = res;
+            m_internal->commandList->ResourceBarrier(1, &barrier);
+        }
+    }
+
+    void D3D12CommandList::GlobalBarrier(uint32_t beforeAccess, uint32_t afterAccess)
+    {
+        (void)beforeAccess;
+        (void)afterAccess;
+        if (m_internal->commandList == nullptr) return;
+
+        // D3D12의 전역 메모리 배리어 (pResource가 nullptr인 UAV Barrier는 파이프라인의 모든 UAV 읽기/쓰기를 플러시 및 동기화)
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+        barrier.UAV.pResource = nullptr;
+        m_internal->commandList->ResourceBarrier(1, &barrier);
+    }
 }

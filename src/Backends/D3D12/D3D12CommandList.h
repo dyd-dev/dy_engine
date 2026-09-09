@@ -33,6 +33,11 @@ namespace dy::Backends
 
         void ClearDepth(RHI::ITexture* depthStencil, float depth) override;
 
+        // 멀티 플랫폼 정석 3대 리소스 배리어 오버라이드
+        void TextureBarrier(RHI::ITexture* texture, uint32_t beforeAccess, uint32_t afterAccess) override;
+        void BufferBarrier(RHI::IBuffer* buffer, uint32_t beforeAccess, uint32_t afterAccess) override;
+        void GlobalBarrier(uint32_t beforeAccess, uint32_t afterAccess) override;
+
         void BindVertexBuffer(RHI::IBuffer* buffer, uint32_t stride, uint32_t offset) override;
         void BindIndexBuffer(RHI::IBuffer* buffer, RHI::Format format, uint32_t offset) override;
         void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;

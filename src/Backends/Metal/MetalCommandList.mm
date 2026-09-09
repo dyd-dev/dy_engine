@@ -401,4 +401,37 @@ namespace dy::Backends
     {
         return (__bridge void*)m_impl->commandBuffer;
     }
+
+    void MetalCommandList::TextureBarrier(RHI::ITexture* texture, uint32_t beforeAccess, uint32_t afterAccess)
+    {
+        (void)texture; (void)beforeAccess; (void)afterAccess;
+        if (m_impl && m_impl->renderEncoder)
+        {
+#if defined(__APPLE__)
+            [m_impl->renderEncoder memoryBarrierWithScope:MTLBarrierScopeTextures afterStages:MTLRenderStageRender beforeStages:MTLRenderStageRender];
+#endif
+        }
+    }
+
+    void MetalCommandList::BufferBarrier(RHI::IBuffer* buffer, uint32_t beforeAccess, uint32_t afterAccess)
+    {
+        (void)buffer; (void)beforeAccess; (void)afterAccess;
+        if (m_impl && m_impl->renderEncoder)
+        {
+#if defined(__APPLE__)
+            [m_impl->renderEncoder memoryBarrierWithScope:MTLBarrierScopeBuffers afterStages:MTLRenderStageRender beforeStages:MTLRenderStageRender];
+#endif
+        }
+    }
+
+    void MetalCommandList::GlobalBarrier(uint32_t beforeAccess, uint32_t afterAccess)
+    {
+        (void)beforeAccess; (void)afterAccess;
+        if (m_impl && m_impl->renderEncoder)
+        {
+#if defined(__APPLE__)
+            [m_impl->renderEncoder memoryBarrierWithScope:(MTLBarrierScopeBuffers | MTLBarrierScopeTextures) afterStages:MTLRenderStageRender beforeStages:MTLRenderStageRender];
+#endif
+        }
+    }
 }

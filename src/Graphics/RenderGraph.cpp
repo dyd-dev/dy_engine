@@ -37,6 +37,27 @@ namespace dy::Graphics
 		return *this;
 	}
 
+	RenderGraphPass& RenderGraphPass::TextureBarrier(RGResourceHandle texture, RGResourceAccess beforeAccess, RGResourceAccess afterAccess)
+	{
+		m_barriers.push_back({ RGBarrierType::Texture, texture, beforeAccess, afterAccess });
+		++m_revision;
+		return *this;
+	}
+
+	RenderGraphPass& RenderGraphPass::BufferBarrier(RGResourceHandle buffer, RGResourceAccess beforeAccess, RGResourceAccess afterAccess)
+	{
+		m_barriers.push_back({ RGBarrierType::Buffer, buffer, beforeAccess, afterAccess });
+		++m_revision;
+		return *this;
+	}
+
+	RenderGraphPass& RenderGraphPass::GlobalBarrier(RGResourceAccess beforeAccess, RGResourceAccess afterAccess)
+	{
+		m_barriers.push_back({ RGBarrierType::Global, {}, beforeAccess, afterAccess });
+		++m_revision;
+		return *this;
+	}
+
 	void RenderGraphPass::Execute(RHI::ICommandList* cmdList) const
 	{
 		if (m_pipeline && cmdList)
@@ -269,7 +290,33 @@ namespace dy::Graphics
 		{
 			if (passIndex < m_passes.size())
 			{
-				m_passes[passIndex]->Execute(commandList);
+				const auto& pass = m_passes[passIndex];
+
+				// 멀티 플랫폼 정석 3대 리소스 배리어 (Texture, Buffer, Global) 방출
+				if (commandList != nullptr)
+				{
+					for (const auto& barrier : pass->GetBarriers())
+					{
+						const RGResourceDesc* resDesc = GetResourceDesc(barrier.resourceHandle);
+
+						if (barrier.type == RGBarrierType::Texture)
+						{
+							RHI::ITexture* texPtr = resDesc ? resDesc->texturePtr : nullptr;
+							commandList->TextureBarrier(texPtr, static_cast<uint32_t>(barrier.beforeAccess), static_cast<uint32_t>(barrier.afterAccess));
+						}
+						else if (barrier.type == RGBarrierType::Buffer)
+						{
+							RHI::IBuffer* bufPtr = resDesc ? resDesc->bufferPtr : nullptr;
+							commandList->BufferBarrier(bufPtr, static_cast<uint32_t>(barrier.beforeAccess), static_cast<uint32_t>(barrier.afterAccess));
+						}
+						else if (barrier.type == RGBarrierType::Global)
+						{
+							commandList->GlobalBarrier(static_cast<uint32_t>(barrier.beforeAccess), static_cast<uint32_t>(barrier.afterAccess));
+						}
+					}
+				}
+
+				pass->Execute(commandList);
 			}
 		}
 	}
@@ -303,6 +350,15 @@ namespace dy::Graphics
 		if (index < m_passes.size())
 		{
 			return m_passes[index].get();
+		}
+		return nullptr;
+	}
+
+	const RGResourceDesc* RenderGraph::GetResourceDesc(RGResourceHandle handle) const
+	{
+		if (handle.IsValid() && handle.id < m_resources.size())
+		{
+			return &m_resources[handle.id];
 		}
 		return nullptr;
 	}
