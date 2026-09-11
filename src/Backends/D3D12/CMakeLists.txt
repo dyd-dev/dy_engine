@@ -14,10 +14,11 @@ add_library(${BACKEND_NAME} OBJECT
 
 target_link_libraries(${BACKEND_NAME} PRIVATE
 	Engine_Options
+	WinPixEventRuntime::WinPixEventRuntime
 	d3d12 dxgi dxguid d3dcompiler
 )
 
-target_compile_definitions(${BACKEND_NAME} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_compile_definitions(${BACKEND_NAME} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN USE_PIX)
 
 target_sources(${PROJECT_NAME} PRIVATE $<TARGET_OBJECTS:${BACKEND_NAME}>)
 message(STATUS "[${PROJECT_NAME}] Ready to Use ${BACKEND_NAME}")

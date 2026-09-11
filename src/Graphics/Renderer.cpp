@@ -17,6 +17,7 @@
 #include "Graphics/SkinningPass.h"
 #include "Math/Math.h"
 #include "Platform/Profiler.h"
+#include "Platform/RenderDocCapture.h"
 #include "Platform/Window.h"
 #include "RHI/IBuffer.h"
 #include "RHI/ICommandList.h"
@@ -193,6 +194,9 @@ bool Renderer::Initialize(RHI::IDevice* device, const RendererDesc& config)
 	{
 		m_profilerHud.Initialize(device, m_config.profilerHudStartsExpanded);
 	}
+	m_profilerSampler.Reset();
+	m_lastProfilerMetrics = {};
+	(void)Platform::RenderDocCapture::Initialize();
 	return m_pipeline != nullptr && m_path != nullptr && (!m_config.enableHdrRendering || m_toneMapPipeline != nullptr);
 }
 
@@ -259,6 +263,8 @@ void Renderer::Shutdown(RHI::IDevice* device)
 	m_profilerHud.Shutdown(device);
 	m_hasLastFrameStart = false;
 	m_lastCpuRenderMilliseconds = 0.0;
+	m_profilerSampler.Reset();
+	m_lastProfilerMetrics = {};
 
 	if(m_path != nullptr) m_path->Shutdown(device);
 	m_path.reset();
@@ -345,26 +351,70 @@ void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 	{
 		m_profilerHud.ToggleExpanded();
 	}
-
+	if(Platform::Window::ConsumeKeyPress(Platform::Key::F12))
+	{
+		(void)Platform::RenderDocCapture::TriggerNextFrame();
+	}
 	// Backends publish only completed-frame results. Because this lives in the
 	// engine renderer, every application using dy_engine gets the same plots.
 	RHI::GpuTimestampResult gpuTimestamp = {};
-	if(device->TryGetLastGpuTimestamp("Shadow", gpuTimestamp))
-	{
-		DY_PROFILE_GPU_MILLISECONDS("GPU.Shadow.ms", static_cast<double>(gpuTimestamp.durationNanoseconds) / 1000000.0);
-	}
+	const bool hasGpuShadowTimestamp = device->TryGetLastGpuTimestamp("Shadow", gpuTimestamp);
+	const double gpuShadowMilliseconds = hasGpuShadowTimestamp
+		? static_cast<double>(gpuTimestamp.durationNanoseconds) / 1000000.0
+		: 0.0;
 	const bool hasGpuMainTimestamp = device->TryGetLastGpuTimestamp("MainForward", gpuTimestamp);
 	const double gpuMainMilliseconds = hasGpuMainTimestamp
 		? static_cast<double>(gpuTimestamp.durationNanoseconds) / 1000000.0
 		: 0.0;
-	if(hasGpuMainTimestamp)
-	{
-		DY_PROFILE_GPU_MILLISECONDS("GPU.MainForward.ms", gpuMainMilliseconds);
-	}
+	DY_PROFILE_RAW_VALUE("Frame.Raw.ms", frameMilliseconds);
+	DY_PROFILE_RAW_VALUE("CPU.Render.Raw.ms", m_lastCpuRenderMilliseconds);
+	if(hasGpuShadowTimestamp) DY_PROFILE_RAW_VALUE("GPU.Shadow.Raw.ms", gpuShadowMilliseconds);
+	if(hasGpuMainTimestamp) DY_PROFILE_RAW_VALUE("GPU.MainForward.Raw.ms", gpuMainMilliseconds);
 	const RHI::ResourceAllocationCounters resourceCounters = device->GetResourceAllocationCounters();
-	DY_PROFILE_RESOURCE_COUNT("GPU.Resources.Buffers.Live", resourceCounters.buffers.live);
-	DY_PROFILE_RESOURCE_COUNT("GPU.Resources.Textures.Live", resourceCounters.textures.live);
-	DY_PROFILE_RESOURCE_COUNT("GPU.Resources.Pipelines.Live", resourceCounters.pipelines.live);
+	m_lastProfilerMetrics.gpuTimestampsSupported = device->SupportsGpuTimestamps();
+	ProfilerTimingSnapshot timingSnapshot = {};
+	const bool profilerSampleUpdated = m_profilerSampler.AddSample({
+		frameMilliseconds,
+		m_lastCpuRenderMilliseconds,
+		gpuMainMilliseconds,
+		gpuShadowMilliseconds,
+		hasGpuMainTimestamp,
+		hasGpuShadowTimestamp
+	}, timingSnapshot);
+	if(profilerSampleUpdated)
+	{
+		m_lastProfilerMetrics.fps = timingSnapshot.fps;
+		m_lastProfilerMetrics.frameMilliseconds = timingSnapshot.frameAverageMilliseconds;
+		m_lastProfilerMetrics.frameMaximumMilliseconds = timingSnapshot.frameMaximumMilliseconds;
+		m_lastProfilerMetrics.cpuRenderMilliseconds = timingSnapshot.cpuRenderAverageMilliseconds;
+		m_lastProfilerMetrics.gpuMainMilliseconds = timingSnapshot.gpuMainAverageMilliseconds;
+		m_lastProfilerMetrics.hasGpuMain = timingSnapshot.hasGpuMain;
+		m_lastProfilerMetrics.gpuTimestampsSupported = device->SupportsGpuTimestamps();
+		m_lastProfilerMetrics.liveBuffers = resourceCounters.buffers.live;
+		m_lastProfilerMetrics.createdBuffers = resourceCounters.buffers.created;
+		m_lastProfilerMetrics.destroyedBuffers = resourceCounters.buffers.destroyed;
+		m_lastProfilerMetrics.liveTextures = resourceCounters.textures.live;
+		m_lastProfilerMetrics.createdTextures = resourceCounters.textures.created;
+		m_lastProfilerMetrics.destroyedTextures = resourceCounters.textures.destroyed;
+		m_lastProfilerMetrics.livePipelines = resourceCounters.pipelines.live;
+		m_lastProfilerMetrics.createdPipelines = resourceCounters.pipelines.created;
+		m_lastProfilerMetrics.destroyedPipelines = resourceCounters.pipelines.destroyed;
+
+		DY_PROFILE_GPU_MILLISECONDS("Frame.Average.ms", timingSnapshot.frameAverageMilliseconds);
+		DY_PROFILE_GPU_MILLISECONDS("Frame.Maximum.ms", timingSnapshot.frameMaximumMilliseconds);
+		DY_PROFILE_GPU_MILLISECONDS("CPU.Render.Average.ms", timingSnapshot.cpuRenderAverageMilliseconds);
+		if(timingSnapshot.hasGpuShadow)
+		{
+			DY_PROFILE_GPU_MILLISECONDS("GPU.Shadow.Average.ms", timingSnapshot.gpuShadowAverageMilliseconds);
+		}
+		if(timingSnapshot.hasGpuMain)
+		{
+			DY_PROFILE_GPU_MILLISECONDS("GPU.MainForward.Average.ms", timingSnapshot.gpuMainAverageMilliseconds);
+		}
+		DY_PROFILE_RESOURCE_COUNT("GPU.Resources.Buffers.Live", resourceCounters.buffers.live);
+		DY_PROFILE_RESOURCE_COUNT("GPU.Resources.Textures.Live", resourceCounters.textures.live);
+		DY_PROFILE_RESOURCE_COUNT("GPU.Resources.Pipelines.Live", resourceCounters.pipelines.live);
+	}
 
 	// 공유 준비: 텍스처 GPU 레지던시 + 머티리얼 상태(모든 전략 공통).
 	m_gpuScene.SyncTextures(scene, device);
@@ -396,22 +446,13 @@ void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 	{
 		if(RHI::ITexture* backBuffer = device->GetBackBuffer())
 		{
-			ProfilerHudMetrics metrics = {};
-			metrics.frameMilliseconds = frameMilliseconds;
-			metrics.fps = frameMilliseconds > 0.001 ? 1000.0 / frameMilliseconds : 0.0;
-			metrics.cpuRenderMilliseconds = m_lastCpuRenderMilliseconds;
-			metrics.gpuMainMilliseconds = gpuMainMilliseconds;
-			metrics.hasGpuMain = hasGpuMainTimestamp;
-			metrics.liveBuffers = resourceCounters.buffers.live;
-			metrics.createdBuffers = resourceCounters.buffers.created;
-			metrics.destroyedBuffers = resourceCounters.buffers.destroyed;
-			metrics.liveTextures = resourceCounters.textures.live;
-			metrics.createdTextures = resourceCounters.textures.created;
-			metrics.destroyedTextures = resourceCounters.textures.destroyed;
-			metrics.livePipelines = resourceCounters.pipelines.live;
-			metrics.createdPipelines = resourceCounters.pipelines.created;
-			metrics.destroyedPipelines = resourceCounters.pipelines.destroyed;
-			m_profilerHud.PrepareFrame(device, metrics, backBuffer->GetWidth(), backBuffer->GetHeight(), m_clipYFlip);
+			m_profilerHud.PrepareFrame(
+				device,
+				m_lastProfilerMetrics,
+				backBuffer->GetWidth(),
+				backBuffer->GetHeight(),
+				m_clipYFlip,
+				profilerSampleUpdated);
 			context.profilerHudPipeline = m_profilerHudPipeline;
 			context.profilerHud = &m_profilerHud;
 		}
@@ -481,6 +522,7 @@ void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 	m_renderGraph.Reset();
 	m_lastCpuRenderMilliseconds = std::chrono::duration<double, std::milli>(
 		std::chrono::steady_clock::now() - renderStart).count();
+	DY_PROFILE_FRAME_MARK();
 }
 
 void Renderer::BuildPipelineStates(RHI::IDevice* device)
@@ -557,7 +599,13 @@ void Renderer::BuildPipelineStates(RHI::IDevice* device)
 	{
 		RHI::GraphicsPipelineDesc hudDesc = desc;
 		hudDesc.depthEnable = false;
+	#if defined(ENABLE_METAL)
+		// Metal render-pipeline compatibility still requires the framebuffer's
+		// depth format even when the HUD disables depth testing and writes.
+		hudDesc.depthStencilFormat = desc.depthStencilFormat;
+	#else
 		hudDesc.depthStencilFormat = RHI::Format::Unknown;
+	#endif
 		hudDesc.renderTargetFormat = device->GetBackBuffer()->GetFormat();
 		m_profilerHudPipeline = device->CreateGraphicsPipeline(hudDesc);
 	}

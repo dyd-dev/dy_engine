@@ -6,6 +6,22 @@
 
 #include <d3d12.h>
 #include <wrl.h>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+#include <algorithm>
+
+#if defined(USE_PIX)
+#include <pix3.h>
+#ifndef PIX_COLOR_F
+#define PIX_COLOR_F(r, g, b) PIX_COLOR( \
+    static_cast<UINT8>(std::clamp((r), 0.0f, 1.0f) * 255.0f), \
+    static_cast<UINT8>(std::clamp((g), 0.0f, 1.0f) * 255.0f), \
+    static_cast<UINT8>(std::clamp((b), 0.0f, 1.0f) * 255.0f))
+#endif
+#endif
 
 using Microsoft::WRL::ComPtr;
 
@@ -80,6 +96,16 @@ namespace dy::Backends
         ID3D12DescriptorHeap* globalDescriptorHeap = nullptr;
         uint32_t srvDescriptorSize = 0;
         D3D12Texture* backBufferTexture = nullptr; // 상태 추적기(GetBackBuffer 가 돌려주는 래퍼와 동일 리소스)
+        ComPtr<ID3D12QueryHeap> timestampQueryHeap;
+        ComPtr<ID3D12Resource> timestampReadbackBuffer;
+        uint32_t timestampQueryOffset = 0;
+        uint32_t timestampQueryCapacity = 0;
+        uint32_t timestampQueryCount = 0;
+        struct TimestampPair { std::string name; uint32_t beginQuery = 0; uint32_t endQuery = 0; };
+        struct OpenTimestamp { std::string name; uint32_t beginQuery = 0; };
+        std::vector<TimestampPair> timestampPairs;
+        std::vector<OpenTimestamp> openTimestamps;
+        std::unordered_map<std::string, RHI::GpuTimestampResult> completedTimestamps;
     };
 
     D3D12CommandList::D3D12CommandList(void* nativeDevice, void* nativeBackBuffer, size_t rtvHandlePtr, void* globalDescriptorHeap, uint32_t srvDescriptorSize)
@@ -112,6 +138,9 @@ namespace dy::Backends
     {
         m_internal->allocator->Reset();
         m_internal->commandList->Reset(m_internal->allocator.Get(), nullptr);
+        m_internal->timestampQueryCount = 0;
+        m_internal->timestampPairs.clear();
+        m_internal->openTimestamps.clear();
     }
 
     void D3D12CommandList::Close()
@@ -132,7 +161,113 @@ namespace dy::Backends
             barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             m_internal->commandList->ResourceBarrier(1, &barrier);
         }
+        if(m_internal->timestampQueryHeap != nullptr &&
+            m_internal->timestampReadbackBuffer != nullptr &&
+            m_internal->timestampQueryCount > 0)
+        {
+            m_internal->commandList->ResolveQueryData(
+                m_internal->timestampQueryHeap.Get(),
+                D3D12_QUERY_TYPE_TIMESTAMP,
+                m_internal->timestampQueryOffset,
+                m_internal->timestampQueryCount,
+                m_internal->timestampReadbackBuffer.Get(),
+                static_cast<UINT64>(m_internal->timestampQueryOffset) * sizeof(uint64_t));
+        }
         m_internal->commandList->Close();
+    }
+
+    void D3D12CommandList::SetGpuTimestampResources(
+        void* queryHeap, void* readbackBuffer, uint32_t queryOffset, uint32_t queryCapacity)
+    {
+        m_internal->timestampQueryHeap = static_cast<ID3D12QueryHeap*>(queryHeap);
+        m_internal->timestampReadbackBuffer = static_cast<ID3D12Resource*>(readbackBuffer);
+        m_internal->timestampQueryOffset = queryOffset;
+        m_internal->timestampQueryCapacity = queryCapacity;
+    }
+
+    void D3D12CommandList::CollectGpuTimestampResults(uint64_t timestampFrequency, uint64_t frameSerial)
+    {
+        if(timestampFrequency == 0 || m_internal->timestampReadbackBuffer == nullptr ||
+            m_internal->timestampPairs.empty()) return;
+
+        const UINT64 byteOffset = static_cast<UINT64>(m_internal->timestampQueryOffset) * sizeof(uint64_t);
+        const D3D12_RANGE readRange = {
+            static_cast<SIZE_T>(byteOffset),
+            static_cast<SIZE_T>(byteOffset + static_cast<UINT64>(m_internal->timestampQueryCount) * sizeof(uint64_t))
+        };
+        uint64_t* timestamps = nullptr;
+        if(FAILED(m_internal->timestampReadbackBuffer->Map(0, &readRange, reinterpret_cast<void**>(&timestamps)))) return;
+
+        for(const auto& pair : m_internal->timestampPairs)
+        {
+            const uint64_t begin = timestamps[m_internal->timestampQueryOffset + pair.beginQuery];
+            const uint64_t end = timestamps[m_internal->timestampQueryOffset + pair.endQuery];
+            if(end < begin) continue;
+            const uint64_t nanoseconds = static_cast<uint64_t>(
+                (static_cast<long double>(end - begin) * 1000000000.0L) /
+                static_cast<long double>(timestampFrequency));
+            m_internal->completedTimestamps[pair.name] = { nanoseconds, frameSerial };
+        }
+        const D3D12_RANGE writtenRange = { 0, 0 };
+        m_internal->timestampReadbackBuffer->Unmap(0, &writtenRange);
+    }
+
+    bool D3D12CommandList::TryGetLastGpuTimestamp(const char* name, RHI::GpuTimestampResult& result) const
+    {
+        if(name == nullptr) return false;
+        const auto it = m_internal->completedTimestamps.find(name);
+        if(it == m_internal->completedTimestamps.end()) return false;
+        result = it->second;
+        return true;
+    }
+
+    void D3D12CommandList::BeginDebugEvent(const char* name, const RHI::DebugLabelColor& color)
+    {
+#if defined(USE_PIX)
+        if(name != nullptr) PIXBeginEvent(m_internal->commandList.Get(), PIX_COLOR_F(color.r, color.g, color.b), "%s", name);
+#else
+        (void)name; (void)color;
+#endif
+    }
+
+    void D3D12CommandList::EndDebugEvent()
+    {
+#if defined(USE_PIX)
+        PIXEndEvent(m_internal->commandList.Get());
+#endif
+    }
+
+    void D3D12CommandList::InsertDebugMarker(const char* name, const RHI::DebugLabelColor& color)
+    {
+#if defined(USE_PIX)
+        if(name != nullptr) PIXSetMarker(m_internal->commandList.Get(), PIX_COLOR_F(color.r, color.g, color.b), "%s", name);
+#else
+        (void)name; (void)color;
+#endif
+    }
+
+    bool D3D12CommandList::BeginGpuTimestamp(const char* name)
+    {
+        if(name == nullptr || name[0] == '\0' || m_internal->timestampQueryHeap == nullptr ||
+            m_internal->timestampQueryCount + 2u > m_internal->timestampQueryCapacity) return false;
+        const uint32_t query = m_internal->timestampQueryCount++;
+        m_internal->commandList->EndQuery(
+            m_internal->timestampQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+            m_internal->timestampQueryOffset + query);
+        m_internal->openTimestamps.push_back({ name, query });
+        return true;
+    }
+
+    void D3D12CommandList::EndGpuTimestamp()
+    {
+        if(m_internal->openTimestamps.empty() || m_internal->timestampQueryHeap == nullptr) return;
+        auto open = std::move(m_internal->openTimestamps.back());
+        m_internal->openTimestamps.pop_back();
+        const uint32_t query = m_internal->timestampQueryCount++;
+        m_internal->commandList->EndQuery(
+            m_internal->timestampQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+            m_internal->timestampQueryOffset + query);
+        m_internal->timestampPairs.push_back({ std::move(open.name), open.beginQuery, query });
     }
 
     void D3D12CommandList::SetBackBufferTexture(RHI::ITexture* texture)

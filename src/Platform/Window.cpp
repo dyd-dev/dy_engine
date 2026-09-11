@@ -14,12 +14,17 @@ using namespace dy::Platform;
 namespace
 {
 	bool g_f11Pressed = false;
+	bool g_f12Pressed = false;
 
 	void OnKey(GLFWwindow*, int key, int, int action, int)
 	{
 		if(key == GLFW_KEY_F11 && action == GLFW_PRESS)
 		{
 			g_f11Pressed = true;
+		}
+		else if(key == GLFW_KEY_F12 && action == GLFW_PRESS)
+		{
+			g_f12Pressed = true;
 		}
 	}
 }
@@ -61,9 +66,17 @@ void Window::Resize(unsigned int width, unsigned int height) const
 
 bool Window::ConsumeKeyPress(Key key)
 {
-	if(key != Key::F11 || !g_f11Pressed) return false;
-	g_f11Pressed = false;
-	return true;
+	if(key == Key::F11 && g_f11Pressed)
+	{
+		g_f11Pressed = false;
+		return true;
+	}
+	if(key == Key::F12 && g_f12Pressed)
+	{
+		g_f12Pressed = false;
+		return true;
+	}
+	return false;
 }
 
 void* Window::GetHandle() const

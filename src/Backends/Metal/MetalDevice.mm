@@ -3,6 +3,7 @@
 #include "MetalTexture.h"
 #include "MetalPipeline.h"
 #include "MetalCommandList.h"
+#include <algorithm>
 #include <vector>
 
 #import <Metal/Metal.h>
@@ -48,6 +49,11 @@ namespace dy::Backends
         m_impl->metalLayer.device      = m_impl->device;
         m_impl->metalLayer.pixelFormat = MTLPixelFormatRGBA8Unorm;
         m_impl->metalLayer.frame       = window.contentView.bounds;
+        const CGFloat contentScale = std::max(window.backingScaleFactor, 1.0);
+        m_impl->metalLayer.contentsScale = contentScale;
+        m_impl->metalLayer.drawableSize = CGSizeMake(
+            std::max(window.contentView.bounds.size.width * contentScale, 1.0),
+            std::max(window.contentView.bounds.size.height * contentScale, 1.0));
         [window.contentView setWantsLayer:YES];
         [window.contentView setLayer:m_impl->metalLayer];
 
@@ -110,22 +116,47 @@ namespace dy::Backends
 
     RHI::IBuffer* MetalDevice::CreateBuffer(const RHI::BufferDesc& desc)
     {
-        return new MetalBuffer(desc, (__bridge void*)m_impl->device);
+        auto* buffer = new MetalBuffer(desc, (__bridge void*)m_impl->device);
+        TrackBufferCreated(buffer);
+        return buffer;
     }
 
     RHI::ITexture* MetalDevice::CreateTexture(const RHI::TextureDesc& desc)
     {
-        return new MetalTexture(desc, (__bridge void*)m_impl->device);
+        auto* texture = new MetalTexture(desc, (__bridge void*)m_impl->device);
+        TrackTextureCreated(texture);
+        return texture;
     }
 
     RHI::IPipelineState* MetalDevice::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc)
     {
-        return new MetalPipeline(desc, (__bridge void*)m_impl->device);
+        auto* pipeline = new MetalPipeline(desc, (__bridge void*)m_impl->device);
+        if(!pipeline->IsValid())
+        {
+            delete pipeline;
+            return nullptr;
+        }
+        TrackPipelineCreated(pipeline);
+        return pipeline;
     }
 
-    void MetalDevice::DestroyBuffer(RHI::IBuffer* buffer)                 { delete buffer; }
-    void MetalDevice::DestroyTexture(RHI::ITexture* texture)              { delete texture; }
-    void MetalDevice::DestroyPipelineState(RHI::IPipelineState* pipeline) { delete pipeline; }
+    void MetalDevice::DestroyBuffer(RHI::IBuffer* buffer)
+    {
+        TrackBufferDestroyed(buffer);
+        delete buffer;
+    }
+
+    void MetalDevice::DestroyTexture(RHI::ITexture* texture)
+    {
+        TrackTextureDestroyed(texture);
+        delete texture;
+    }
+
+    void MetalDevice::DestroyPipelineState(RHI::IPipelineState* pipeline)
+    {
+        TrackPipelineDestroyed(pipeline);
+        delete pipeline;
+    }
 
     bool MetalDevice::UpdateTexture(RHI::ITexture* texture, const void* data, uint32_t rowPitch)
     {
@@ -163,19 +194,18 @@ namespace dy::Backends
 
     RHI::ITexture* MetalDevice::GetBackBuffer()
     {
-        if(!m_impl->currentDrawable) return nullptr;
-
         if(!m_impl->backBufferTex)
         {
             RHI::TextureDesc desc{};
-            desc.width  = static_cast<uint32_t>(m_impl->metalLayer.drawableSize.width);
-            desc.height = static_cast<uint32_t>(m_impl->metalLayer.drawableSize.height);
+            desc.width  = std::max(static_cast<uint32_t>(m_impl->metalLayer.drawableSize.width), 1u);
+            desc.height = std::max(static_cast<uint32_t>(m_impl->metalLayer.drawableSize.height), 1u);
             desc.format = RHI::Format::R8G8B8A8_UNORM;
             desc.usage  = RHI::TextureUsage::RenderTarget;
             m_impl->backBufferTex = new MetalTexture(desc, (__bridge void*)m_impl->device);
         }
 
-        m_impl->backBufferTex->SetNativeTexture((__bridge void*)m_impl->currentDrawable.texture);
+        if(m_impl->currentDrawable != nil)
+            m_impl->backBufferTex->SetNativeTexture((__bridge void*)m_impl->currentDrawable.texture);
         return m_impl->backBufferTex;
     }
 }

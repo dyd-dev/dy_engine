@@ -4,6 +4,7 @@
 # 빌드된 셰이더(또는 소스)를 예제 작업 폴더로 배치한다.
 #  - Vulkan : glslc 로 .glsl -> .spv
 #  - D3D12  : .hlsl 소스 복사(런타임 D3DCompile)
+#  - Metal  : .metal 소스 복사(런타임 MSL 컴파일)
 #  - 그 외  : .glsl 소스 복사(Null)
 function(dy_example_shaders target)
     set(src_dir "${CMAKE_CURRENT_SOURCE_DIR}/Shaders")
@@ -58,6 +59,30 @@ function(dy_example_shaders target)
         if(EXISTS "${src_dir}/mesh_shadow_vs.hlsl")
             add_custom_command(TARGET ${target} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy "${src_dir}/mesh_shadow_vs.hlsl" "${out_dir}/mesh_shadow_vs.hlsl"
+                VERBATIM)
+        endif()
+    elseif(USE_METAL)
+        set(metal_common_dir "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Common/Shaders")
+        set(metal_vs "${metal_common_dir}/mesh_vs.metal")
+        set(metal_ps "${metal_common_dir}/mesh_ps.metal")
+        if(EXISTS "${src_dir}/mesh_vs.metal")
+            set(metal_vs "${src_dir}/mesh_vs.metal")
+        endif()
+        if(EXISTS "${src_dir}/mesh_ps.metal")
+            set(metal_ps "${src_dir}/mesh_ps.metal")
+        endif()
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${metal_vs}" "${out_dir}/mesh_vs.metal"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${metal_ps}" "${out_dir}/mesh_ps.metal"
+            VERBATIM)
+        if(EXISTS "${src_dir}/mesh_shadow_vs.metal")
+            set(metal_shadow_vs "${src_dir}/mesh_shadow_vs.metal")
+        else()
+            set(metal_shadow_vs "${metal_common_dir}/mesh_shadow_vs.metal")
+        endif()
+        if(EXISTS "${metal_shadow_vs}")
+            add_custom_command(TARGET ${target} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different "${metal_shadow_vs}" "${out_dir}/mesh_shadow_vs.metal"
                 VERBATIM)
         endif()
     else()

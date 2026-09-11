@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(dy_engine CXX)
 
+include(CTest)
+
 # add module path
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
@@ -14,6 +16,7 @@ add_library(${PROJECT_NAME} STATIC
 	"src/Graphics/Renderer.cpp"
 	"src/Graphics/RenderPath.cpp"
 	"src/Graphics/ProfilerHud.cpp"
+	"src/Graphics/ProfilerSampler.cpp"
 	"src/Graphics/RenderGraph.cpp"
 	"src/Graphics/SkinningPass.cpp"
 	"src/Graphics/GpuScene.cpp"
@@ -27,6 +30,7 @@ add_library(${PROJECT_NAME} STATIC
 	"src/Graphics/UfbxModelLoader.cpp"
 	"src/Graphics/ShadowMath.cpp"
 	"src/Platform/Window.cpp"
+	"src/Platform/RenderDocCapture.cpp"
 )
 
 # global options
@@ -39,6 +43,16 @@ include(BuildOptions)
 # Only add the executable if this is the main project being built (not when included as a subdirectory in another project)
 if(CMAKE_PROJECT_NAME  STREQUAL PROJECT_NAME)
 	add_subdirectory(examples)
+endif()
+
+if(BUILD_TESTING)
+	add_executable(ProfilerSamplerTest
+		"tests/ProfilerSamplerTest.cpp"
+		"src/Graphics/ProfilerSampler.cpp"
+	)
+	target_link_libraries(ProfilerSamplerTest PRIVATE Engine_Options)
+	target_include_directories(ProfilerSamplerTest PRIVATE ${CMAKE_SOURCE_DIR}/src)
+	add_test(NAME ProfilerSampler COMMAND ProfilerSamplerTest)
 endif()
 
 # ===== Configuration Messages =====
