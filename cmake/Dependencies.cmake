@@ -126,7 +126,7 @@ if(USE_D3D12 AND WIN32)
 	set_target_properties(WinPixEventRuntime PROPERTIES
 		IMPORTED_LOCATION "${winpixeventruntime_SOURCE_DIR}/bin/${DY_WINPIX_ARCH}/WinPixEventRuntime.dll"
 		IMPORTED_IMPLIB "${winpixeventruntime_SOURCE_DIR}/bin/${DY_WINPIX_ARCH}/WinPixEventRuntime.lib"
-		INTERFACE_INCLUDE_DIRECTORIES "${winpixeventruntime_SOURCE_DIR}/Include"
+		INTERFACE_INCLUDE_DIRECTORIES "${winpixeventruntime_SOURCE_DIR}/Include/WinPixEventRuntime"
 	)
 	add_library(WinPixEventRuntime::WinPixEventRuntime ALIAS WinPixEventRuntime)
 	target_link_libraries(${PROJECT_NAME} PRIVATE WinPixEventRuntime::WinPixEventRuntime)

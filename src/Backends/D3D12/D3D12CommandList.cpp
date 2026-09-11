@@ -11,8 +11,16 @@
 #include <utility>
 #include <vector>
 
+#include <algorithm>
+
 #if defined(USE_PIX)
 #include <pix3.h>
+#ifndef PIX_COLOR_F
+#define PIX_COLOR_F(r, g, b) PIX_COLOR( \
+    static_cast<UINT8>(std::clamp((r), 0.0f, 1.0f) * 255.0f), \
+    static_cast<UINT8>(std::clamp((g), 0.0f, 1.0f) * 255.0f), \
+    static_cast<UINT8>(std::clamp((b), 0.0f, 1.0f) * 255.0f))
+#endif
 #endif
 
 using Microsoft::WRL::ComPtr;
