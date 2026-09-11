@@ -100,9 +100,12 @@ namespace
 			bucket.vertices.push_back({ ClipX(x1 + px), ClipY(y1 + py), 0.0f });
 			bucket.vertices.push_back({ ClipX(x1 - px), ClipY(y1 - py), 0.0f });
 			bucket.vertices.push_back({ ClipX(x0 - px), ClipY(y0 - py), 0.0f });
+			// The perpendicular offsets above produce the opposite vertex order from
+			// Quad after screen Y is converted to clip space. Keep these triangles
+			// CCW so D3D12's back-face culling does not discard graph lines.
 			bucket.indices.insert(bucket.indices.end(), {
-				first, first + 2u, first + 1u,
-				first, first + 3u, first + 2u
+				first, first + 1u, first + 2u,
+				first, first + 2u, first + 3u
 			});
 		}
 	};
