@@ -18,6 +18,7 @@ namespace dy::Backends
 
         void* GetNativePipeline() const;
         void* GetNativeDepthStencil() const;
+        bool IsValid() const;
 
     private:
         struct Impl;

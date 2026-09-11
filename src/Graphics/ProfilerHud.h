@@ -20,9 +20,11 @@ namespace dy::Graphics
 	{
 		double fps = 0.0;
 		double frameMilliseconds = 0.0;
+		double frameMaximumMilliseconds = 0.0;
 		double cpuRenderMilliseconds = 0.0;
 		double gpuMainMilliseconds = 0.0;
 		bool hasGpuMain = false;
+		bool gpuTimestampsSupported = false;
 		uint64_t liveBuffers = 0;
 		uint64_t createdBuffers = 0;
 		uint64_t destroyedBuffers = 0;
@@ -50,7 +52,8 @@ namespace dy::Graphics
 			const ProfilerHudMetrics& metrics,
 			uint32_t width,
 			uint32_t height,
-			bool clipYFlip);
+			bool clipYFlip,
+			bool sampleUpdated);
 		void Record(
 			RHI::ICommandList* commandList,
 			RHI::IPipelineState* pipeline,
@@ -84,6 +87,7 @@ namespace dy::Graphics
 		std::vector<float> m_frameHistory;
 		std::vector<float> m_cpuHistory;
 		std::vector<float> m_gpuHistory;
+		std::vector<uint8_t> m_gpuHistoryValid;
 		uint32_t m_historyCursor = 0;
 		uint32_t m_historyCount = 0;
 		uint32_t m_currentFrame = 0;
@@ -91,6 +95,7 @@ namespace dy::Graphics
 		uint32_t m_viewportHeight = 0;
 		bool m_expanded = false;
 		bool m_hasGpuMain = false;
+		float m_graphScaleMilliseconds = 33.33f;
 
 	public: // Shared with the implementation's small geometry builder.
 		struct HudVertex

@@ -5,7 +5,8 @@ namespace dy::Platform
 {
 	enum class Key
 	{
-		F11
+		F11,
+		F12
 	};
 
 	class Window

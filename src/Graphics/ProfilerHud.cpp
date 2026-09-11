@@ -225,6 +225,8 @@ void ProfilerHud::Initialize(RHI::IDevice* device, bool startsExpanded)
 	m_frameHistory.assign(kHistorySize, 0.0f);
 	m_cpuHistory.assign(kHistorySize, 0.0f);
 	m_gpuHistory.assign(kHistorySize, 0.0f);
+	m_gpuHistoryValid.assign(kHistorySize, 0u);
+	m_graphScaleMilliseconds = 33.33f;
 }
 
 void ProfilerHud::Shutdown(RHI::IDevice* device)
@@ -243,8 +245,14 @@ void ProfilerHud::Shutdown(RHI::IDevice* device)
 	m_vertices.clear();
 	m_indices.clear();
 	m_batches.clear();
+	m_frameHistory.clear();
+	m_cpuHistory.clear();
+	m_gpuHistory.clear();
+	m_gpuHistoryValid.clear();
 	m_historyCursor = 0;
 	m_historyCount = 0;
+	m_hasGpuMain = false;
+	m_graphScaleMilliseconds = 33.33f;
 }
 
 void ProfilerHud::PushHistory(const ProfilerHudMetrics& metrics)
@@ -253,9 +261,28 @@ void ProfilerHud::PushHistory(const ProfilerHudMetrics& metrics)
 	m_frameHistory[m_historyCursor] = static_cast<float>(metrics.frameMilliseconds);
 	m_cpuHistory[m_historyCursor] = static_cast<float>(metrics.cpuRenderMilliseconds);
 	m_gpuHistory[m_historyCursor] = metrics.hasGpuMain ? static_cast<float>(metrics.gpuMainMilliseconds) : 0.0f;
+	m_gpuHistoryValid[m_historyCursor] = metrics.hasGpuMain ? 1u : 0u;
 	m_historyCursor = (m_historyCursor + 1u) % kHistorySize;
 	m_historyCount = std::min(m_historyCount + 1u, kHistorySize);
-	m_hasGpuMain = metrics.hasGpuMain;
+	m_hasGpuMain = std::any_of(m_gpuHistoryValid.begin(), m_gpuHistoryValid.end(), [](uint8_t valid) { return valid != 0u; });
+
+	float targetScaleMilliseconds = 33.33f;
+	for(uint32_t i = 0; i < m_historyCount; ++i)
+	{
+		const uint32_t index = (m_historyCursor + kHistorySize - m_historyCount + i) % kHistorySize;
+		const float gpuMilliseconds = m_gpuHistoryValid[index] != 0u ? m_gpuHistory[index] : 0.0f;
+		targetScaleMilliseconds = std::max(
+			targetScaleMilliseconds,
+			std::max({ m_frameHistory[index], m_cpuHistory[index], gpuMilliseconds }) * 1.15f);
+	}
+	if(targetScaleMilliseconds >= m_graphScaleMilliseconds)
+	{
+		m_graphScaleMilliseconds = targetScaleMilliseconds;
+	}
+	else
+	{
+		m_graphScaleMilliseconds = std::max(targetScaleMilliseconds, m_graphScaleMilliseconds * 0.97f);
+	}
 }
 
 void ProfilerHud::PrepareFrame(
@@ -263,12 +290,13 @@ void ProfilerHud::PrepareFrame(
 	const ProfilerHudMetrics& metrics,
 	uint32_t width,
 	uint32_t height,
-	bool clipYFlip)
+	bool clipYFlip,
+	bool sampleUpdated)
 {
 	if(device == nullptr || m_frames.empty() || width == 0u || height == 0u) return;
 	m_viewportWidth = width;
 	m_viewportHeight = height;
-	PushHistory(metrics);
+	if(sampleUpdated) PushHistory(metrics);
 	BuildGeometry(width, height, clipYFlip, metrics);
 	m_currentFrame = device->GetCurrentFrameIndex() % static_cast<uint32_t>(m_frames.size());
 	EnsureAndUpload(device, m_frames[m_currentFrame]);
@@ -288,10 +316,12 @@ void ProfilerHud::BuildGeometry(uint32_t width, uint32_t height, bool clipYFlip,
 		canvas.Quad(Palette::Background, x, y, x + 282.0f, y + 114.0f);
 		Text(canvas, Palette::Cyan, x + 12.0f, y + 10.0f, "DY PROFILER");
 		Text(canvas, Palette::White, x + 168.0f, y + 10.0f, "F11");
-		Text(canvas, Palette::White, x + 12.0f, y + 32.0f, ValueLine("FPS", metrics.fps));
-		Text(canvas, Palette::Green, x + 12.0f, y + 52.0f, ValueLine("CPU", metrics.cpuRenderMilliseconds, " MS"));
+		Text(canvas, Palette::White, x + 12.0f, y + 32.0f, ValueLine("FPS AVG", metrics.fps));
+		Text(canvas, Palette::Green, x + 12.0f, y + 52.0f, ValueLine("CPU AVG", metrics.cpuRenderMilliseconds, " MS"));
 		Text(canvas, Palette::Orange, x + 12.0f, y + 72.0f,
-			metrics.hasGpuMain ? ValueLine("GPU", metrics.gpuMainMilliseconds, " MS") : "GPU  N/A");
+			metrics.hasGpuMain
+				? ValueLine("GPU AVG", metrics.gpuMainMilliseconds, " MS")
+				: (metrics.gpuTimestampsSupported ? "GPU AVG  WARMUP" : "GPU  UNSUPPORTED"));
 		char resources[64] = {};
 		std::snprintf(
 			resources,
@@ -309,31 +339,30 @@ void ProfilerHud::BuildGeometry(uint32_t width, uint32_t height, bool clipYFlip,
 		canvas.Quad(Palette::Background, x, y, x + panelWidth, y + panelHeight);
 		Text(canvas, Palette::Cyan, x + 14.0f, y + 12.0f, "DY ENGINE PROFILER", 2.0f);
 		Text(canvas, Palette::White, x + panelWidth - 190.0f, y + 12.0f, "F11 HIDE", 2.0f);
-		Text(canvas, Palette::White, x + 14.0f, y + 38.0f, ValueLine("FPS", metrics.fps));
-		Text(canvas, Palette::Cyan, x + 14.0f, y + 60.0f, ValueLine("FRAME", metrics.frameMilliseconds, " MS"));
-		Text(canvas, Palette::Green, x + 240.0f, y + 38.0f, ValueLine("CPU RENDER", metrics.cpuRenderMilliseconds, " MS"));
+		Text(canvas, Palette::White, x + 14.0f, y + 38.0f, ValueLine("FPS AVG", metrics.fps));
+		Text(canvas, Palette::Cyan, x + 14.0f, y + 60.0f, ValueLine("FRAME AVG", metrics.frameMilliseconds, " MS"));
+		Text(canvas, Palette::Red, x + 14.0f, y + 82.0f, ValueLine("FRAME MAX", metrics.frameMaximumMilliseconds, " MS"));
+		Text(canvas, Palette::Green, x + 240.0f, y + 38.0f, ValueLine("CPU AVG", metrics.cpuRenderMilliseconds, " MS"));
 		Text(canvas, Palette::Orange, x + 240.0f, y + 60.0f,
-			metrics.hasGpuMain ? ValueLine("GPU MAIN", metrics.gpuMainMilliseconds, " MS") : "GPU MAIN  N/A");
-		Text(canvas, Palette::White, x + 14.0f, y + 88.0f,
+			metrics.hasGpuMain
+				? ValueLine("GPU AVG", metrics.gpuMainMilliseconds, " MS")
+				: (metrics.gpuTimestampsSupported ? "GPU AVG  WARMUP" : "GPU  UNSUPPORTED"));
+		Text(canvas, Palette::White, x + 240.0f, y + 82.0f, "WINDOW 200 MS / 5 HZ");
+		Text(canvas, Palette::White, x + 14.0f, y + 110.0f,
 			ResourceLine("BUFFER", metrics.liveBuffers, metrics.createdBuffers, metrics.destroyedBuffers));
-		Text(canvas, Palette::White, x + 14.0f, y + 108.0f,
+		Text(canvas, Palette::White, x + 14.0f, y + 130.0f,
 			ResourceLine("TEXTURE", metrics.liveTextures, metrics.createdTextures, metrics.destroyedTextures));
-		Text(canvas, Palette::White, x + 14.0f, y + 128.0f,
+		Text(canvas, Palette::White, x + 14.0f, y + 150.0f,
 			ResourceLine("PIPELINE", metrics.livePipelines, metrics.createdPipelines, metrics.destroyedPipelines));
-		Text(canvas, Palette::White, x + 14.0f, y + 154.0f, "FRAME TIME HISTORY");
+		Text(canvas, Palette::White, x + 14.0f, y + 176.0f, "FRAME TIME HISTORY / 24 SECONDS");
 
 		const float graphX = x + 16.0f;
-		const float graphY = y + 182.0f;
+		const float graphY = y + 204.0f;
 		const float graphW = panelWidth - 32.0f;
-		const float graphH = panelHeight - 222.0f;
+		const float graphH = panelHeight - 244.0f;
 		canvas.Quad(Palette::Grid, graphX, graphY, graphX + graphW, graphY + graphH);
 
-		float scaleMs = 33.33f;
-		for(uint32_t i = 0; i < m_historyCount; ++i)
-		{
-			const uint32_t index = (m_historyCursor + kHistorySize - m_historyCount + i) % kHistorySize;
-			scaleMs = std::max(scaleMs, std::max({ m_frameHistory[index], m_cpuHistory[index], m_gpuHistory[index] }) * 1.15f);
-		}
+		const float scaleMs = m_graphScaleMilliseconds;
 		for(uint32_t line = 1; line < 4; ++line)
 		{
 			const float gy = graphY + graphH * static_cast<float>(line) / 4.0f;
@@ -342,25 +371,32 @@ void ProfilerHud::BuildGeometry(uint32_t width, uint32_t height, bool clipYFlip,
 		const float budgetY = graphY + graphH - std::min(16.67f / scaleMs, 1.0f) * graphH;
 		canvas.Line(Palette::Red, graphX, budgetY, graphX + graphW, budgetY, 1.2f);
 
-		auto drawHistory = [&](const std::vector<float>& values, Palette palette)
+		auto drawHistory = [&](const std::vector<float>& values, Palette palette, const std::vector<uint8_t>* validity = nullptr)
 		{
 			if(m_historyCount < 2u) return;
 			float previousX = graphX;
 			float previousY = graphY + graphH;
+			bool hasPrevious = false;
 			for(uint32_t i = 0; i < m_historyCount; ++i)
 			{
 				const uint32_t index = (m_historyCursor + kHistorySize - m_historyCount + i) % kHistorySize;
 				const float px = graphX + graphW * static_cast<float>(i) / static_cast<float>(kHistorySize - 1u);
+				if(validity != nullptr && (*validity)[index] == 0u)
+				{
+					hasPrevious = false;
+					continue;
+				}
 				const float normalized = std::clamp(values[index] / scaleMs, 0.0f, 1.0f);
 				const float py = graphY + graphH - normalized * graphH;
-				if(i > 0u) canvas.Line(palette, previousX, previousY, px, py, 2.0f);
+				if(hasPrevious) canvas.Line(palette, previousX, previousY, px, py, 2.0f);
 				previousX = px;
 				previousY = py;
+				hasPrevious = true;
 			}
 		};
 		drawHistory(m_frameHistory, Palette::Cyan);
 		drawHistory(m_cpuHistory, Palette::Green);
-		if(m_hasGpuMain) drawHistory(m_gpuHistory, Palette::Orange);
+		if(m_hasGpuMain) drawHistory(m_gpuHistory, Palette::Orange, &m_gpuHistoryValid);
 
 		Text(canvas, Palette::Cyan, graphX, graphY + graphH + 10.0f, "FRAME");
 		Text(canvas, Palette::Green, graphX + 100.0f, graphY + graphH + 10.0f, "CPU");

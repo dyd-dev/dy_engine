@@ -11,6 +11,7 @@
 #include "Graphics/RenderPass.h"
 #include "Graphics/RenderPath.h"
 #include "Graphics/ProfilerHud.h"
+#include "Graphics/ProfilerSampler.h"
 #include "Graphics/RendererConfig.h"
 #include "Graphics/RendererShaderLayout.h"
 
@@ -89,6 +90,8 @@ namespace dy::Graphics
 		RenderGraph m_renderGraph;
 		bool m_clipYFlip = false; // 백엔드 클립공간 Y 뒤집기 필요 여부(Initialize 에서 device 질의)
 		ProfilerHud m_profilerHud;
+		ProfilerSampler m_profilerSampler;
+		ProfilerHudMetrics m_lastProfilerMetrics = {};
 		std::chrono::steady_clock::time_point m_lastFrameStart = {};
 		double m_lastCpuRenderMilliseconds = 0.0;
 		bool m_hasLastFrameStart = false;

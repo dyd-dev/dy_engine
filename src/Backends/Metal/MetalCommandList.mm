@@ -19,6 +19,23 @@ namespace dy::Backends
         constexpr uint32_t kVertexStorageBinding = RHI::ShaderLayoutDesc{}.vertexStorageBinding;
         constexpr uint32_t kIndexStorageBinding = RHI::ShaderLayoutDesc{}.indexStorageBinding;
 
+        id<MTLTexture> CreateFallbackTexture(id<MTLDevice> device)
+        {
+            MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
+                texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                width:1
+                height:1
+                mipmapped:NO];
+            descriptor.usage = MTLTextureUsageShaderRead;
+            id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
+            const uint32_t whitePixel = 0xffffffffu;
+            [texture replaceRegion:MTLRegionMake2D(0, 0, 1, 1)
+                       mipmapLevel:0
+                         withBytes:&whitePixel
+                       bytesPerRow:sizeof(whitePixel)];
+            return texture;
+        }
+
         id<MTLBuffer> GetMetalBuffer(RHI::IBuffer* buffer)
         {
             if(buffer == nullptr)
@@ -51,12 +68,14 @@ namespace dy::Backends
         uint32_t                     inlineConstantSize = 0;
         uint32_t                     renderWidth = 1;
         uint32_t                     renderHeight = 1;
+        id<MTLTexture>               fallbackTexture = nil;
     };
 
     MetalCommandList::MetalCommandList(void* commandQueue)
         : m_impl(new Impl())
     {
         m_impl->commandQueue = (__bridge id<MTLCommandQueue>)commandQueue;
+        m_impl->fallbackTexture = CreateFallbackTexture(m_impl->commandQueue.device);
     }
 
     MetalCommandList::~MetalCommandList()
@@ -217,6 +236,11 @@ namespace dy::Backends
     void MetalCommandList::BindGlobalDescriptors()
     {
         EnsureRenderEncoder();
+        // MSL declares all material texture slots. Bind a harmless 1x1 texture
+        // first so untextured materials and the profiler HUD pass validation.
+        constexpr uint32_t materialTextureBindings[] = { 0u, 6u, 7u, 8u, 9u };
+        for(uint32_t binding : materialTextureBindings)
+            [m_impl->encoder setFragmentTexture:m_impl->fallbackTexture atIndex:binding];
         for(uint32_t i = 0; i < m_impl->textures.size(); ++i)
         {
             if(m_impl->textures[i] != nil)
@@ -278,7 +302,9 @@ namespace dy::Backends
     void MetalCommandList::BindTexture(uint32_t binding, RHI::ITexture* texture)
     {
         EnsureRenderEncoder();
-        [m_impl->encoder setFragmentTexture:GetMetalTexture(texture) atIndex:binding];
+        id<MTLTexture> nativeTexture = GetMetalTexture(texture);
+        [m_impl->encoder setFragmentTexture:(nativeTexture != nil ? nativeTexture : m_impl->fallbackTexture)
+                                    atIndex:binding];
     }
 
     void MetalCommandList::SetInlineConstants(uint32_t size, const void* data)

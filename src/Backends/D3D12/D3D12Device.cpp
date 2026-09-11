@@ -24,6 +24,7 @@ namespace dy::Backends
     {
         constexpr uint32_t kGlobalDescriptorHeapSize = 1024;
         constexpr uint32_t kTransientDescriptorSlotCount = 1;
+        constexpr uint32_t kTimestampQueriesPerFrame = 64;
     }
 
     // 헤더에서 선언만 했던 구조체의 실제 정의
@@ -43,6 +44,11 @@ namespace dy::Backends
         std::vector<Microsoft::WRL::ComPtr<ID3D12CommandAllocator>> frameUploadAllocators[2];
         std::vector<Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList>> frameUploadCommandLists[2];
         HANDLE fenceEvent = nullptr;
+
+        ComPtr<ID3D12QueryHeap> timestampQueryHeap;
+        ComPtr<ID3D12Resource> timestampReadbackBuffer;
+        uint64_t timestampFrequency = 0;
+        uint64_t timestampFrameSerial = 0;
 
         uint32_t frameIndex = 0;
         uint32_t rtvDescriptorSize = 0;
@@ -97,6 +103,11 @@ namespace dy::Backends
         for (int i = 0; i < 2; ++i) {
             delete m_internal->commandLists[i];
             delete m_internal->backBufferTextures[i];
+        }
+        if(m_internal->fenceEvent != nullptr)
+        {
+            CloseHandle(m_internal->fenceEvent);
+            m_internal->fenceEvent = nullptr;
         }
         delete m_internal;
     }
@@ -202,6 +213,52 @@ namespace dy::Backends
         m_internal->device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_internal->fence));
         m_internal->fenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 
+        D3D12_QUERY_HEAP_DESC timestampHeapDesc = {};
+        timestampHeapDesc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        timestampHeapDesc.Count = kTimestampQueriesPerFrame * 2u;
+        const HRESULT timestampHeapResult = m_internal->device->CreateQueryHeap(
+            &timestampHeapDesc, IID_PPV_ARGS(&m_internal->timestampQueryHeap));
+        if(SUCCEEDED(timestampHeapResult))
+        {
+            CD3DX12_HEAP_PROPERTIES readbackHeapProps(D3D12_HEAP_TYPE_READBACK);
+            CD3DX12_RESOURCE_DESC readbackDesc = CD3DX12_RESOURCE_DESC::Buffer(
+                static_cast<UINT64>(timestampHeapDesc.Count) * sizeof(uint64_t));
+            const HRESULT timestampReadbackResult = m_internal->device->CreateCommittedResource(
+                &readbackHeapProps,
+                D3D12_HEAP_FLAG_NONE,
+                &readbackDesc,
+                D3D12_RESOURCE_STATE_COPY_DEST,
+                nullptr,
+                IID_PPV_ARGS(&m_internal->timestampReadbackBuffer));
+            if(FAILED(timestampReadbackResult))
+            {
+                std::cerr << "[D3D12] GPU timestamps disabled: readback buffer creation failed (HRESULT=0x"
+                    << std::hex << static_cast<unsigned long>(timestampReadbackResult) << std::dec << ").\n";
+                m_internal->timestampQueryHeap.Reset();
+            }
+        }
+        else
+        {
+            std::cerr << "[D3D12] GPU timestamps disabled: query heap creation failed (HRESULT=0x"
+                << std::hex << static_cast<unsigned long>(timestampHeapResult) << std::dec << ").\n";
+        }
+        if(m_internal->timestampQueryHeap != nullptr && m_internal->timestampReadbackBuffer != nullptr)
+        {
+            const HRESULT frequencyResult = m_internal->commandQueue->GetTimestampFrequency(&m_internal->timestampFrequency);
+            if(FAILED(frequencyResult) || m_internal->timestampFrequency == 0u)
+            {
+                std::cerr << "[D3D12] GPU timestamps disabled: queue frequency unavailable (HRESULT=0x"
+                    << std::hex << static_cast<unsigned long>(frequencyResult) << std::dec << ").\n";
+                m_internal->timestampQueryHeap.Reset();
+                m_internal->timestampReadbackBuffer.Reset();
+                m_internal->timestampFrequency = 0u;
+            }
+            else
+            {
+                std::cout << "[D3D12] GPU timestamps ready at " << m_internal->timestampFrequency << " ticks/second.\n";
+            }
+        }
+
         // 7. 글로벌 디스크립터 힙 생성
         D3D12_DESCRIPTOR_HEAP_DESC srvHeapDesc = {};
         srvHeapDesc.NumDescriptors = kGlobalDescriptorHeapSize;
@@ -260,6 +317,11 @@ namespace dy::Backends
             m_internal->commandLists[i] = new D3D12CommandList(m_internal->device.Get(), m_internal->renderTargets[i].Get(), currentRtv.ptr, m_internal->globalDescriptorHeap.Get(), m_internal->srvDescriptorSize);
             m_internal->commandLists[i]->SetDepthStencilView(dsvHandle.ptr); // DSV 등록
             m_internal->commandLists[i]->SetBackBufferTexture(m_internal->backBufferTextures[i]); // 백버퍼 상태 추적기 연결
+            m_internal->commandLists[i]->SetGpuTimestampResources(
+                m_internal->timestampQueryHeap.Get(),
+                m_internal->timestampReadbackBuffer.Get(),
+                static_cast<uint32_t>(i) * kTimestampQueriesPerFrame,
+                kTimestampQueriesPerFrame);
             currentRtv.ptr += m_internal->rtvDescriptorSize;
         }
 
@@ -267,8 +329,30 @@ namespace dy::Backends
         return 0;
     }
 
-    void D3D12Device::BeginFrame() { 
+    void D3D12Device::BeginFrame() {
+        const uint64_t frameFenceValue = m_internal->frameFenceValues[m_internal->frameIndex];
+        if(frameFenceValue != 0u && m_internal->fence->GetCompletedValue() < frameFenceValue)
+        {
+            if(m_internal->fenceEvent != nullptr &&
+                SUCCEEDED(m_internal->fence->SetEventOnCompletion(frameFenceValue, m_internal->fenceEvent)))
+            {
+                WaitForSingleObject(m_internal->fenceEvent, INFINITE);
+            }
+            else
+            {
+                while(m_internal->fence->GetCompletedValue() < frameFenceValue)
+                {
+                    std::this_thread::yield();
+                }
+            }
+        }
+
+        m_internal->commandLists[m_internal->frameIndex]->CollectGpuTimestampResults(
+            m_internal->timestampFrequency, ++m_internal->timestampFrameSerial);
         m_internal->commandLists[m_internal->frameIndex]->Reset();
+        m_internal->frameUploadBuffers[m_internal->frameIndex].clear();
+        m_internal->frameUploadAllocators[m_internal->frameIndex].clear();
+        m_internal->frameUploadCommandLists[m_internal->frameIndex].clear();
     }
     uint32_t D3D12Device::GetCurrentFrameIndex() const { return m_internal->frameIndex; }
 
@@ -305,20 +389,14 @@ namespace dy::Backends
         // 3. 다음 프레임 버퍼 인덱스 갱신
         m_internal->frameIndex = m_internal->swapChain->GetCurrentBackBufferIndex();
 
-        // 4. 다음 프레임이 사용할 백버퍼의 이전 GPU 작업이 완료되었는지 확인하고 대기 (Busy-wait)
-        const uint64_t waitFenceValue = m_internal->frameFenceValues[m_internal->frameIndex];
-        while (m_internal->fence->GetCompletedValue() < waitFenceValue) {
-            std::this_thread::yield();
-        }
-
-        // 5. 대기가 완료되었으므로, 해당 프레임에 사용했던 임시 업로드 리소스를 지연 해제
-        m_internal->frameUploadBuffers[m_internal->frameIndex].clear();
-        m_internal->frameUploadAllocators[m_internal->frameIndex].clear();
-        m_internal->frameUploadCommandLists[m_internal->frameIndex].clear();
+        // The next BeginFrame waits before reading timestamp results or reusing
+        // resources associated with that back buffer.
     }
 
     RHI::IBuffer* D3D12Device::CreateBuffer(const RHI::BufferDesc& desc) { 
-        return new D3D12Buffer(m_internal->device.Get(), desc);
+        auto* buffer = new D3D12Buffer(m_internal->device.Get(), desc);
+        TrackBufferCreated(buffer);
+        return buffer;
     }
 
     RHI::IPipelineState* D3D12Device::CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc& desc) {
@@ -485,7 +563,9 @@ namespace dy::Backends
 
         // 6. 래퍼 객체로 반환
         DumpInfoQueue(m_internal, "CreateGraphicsPipeline");
-        return new D3D12PipelineState(pPSO.Get(), pRootSignature.Get());
+        auto* pipeline = new D3D12PipelineState(pPSO.Get(), pRootSignature.Get());
+        TrackPipelineCreated(pipeline);
+        return pipeline;
     }
 
     RHI::DescriptorIndex D3D12Device::AllocateDescriptorSlot() {
@@ -548,7 +628,9 @@ namespace dy::Backends
     }
 
     RHI::ITexture* D3D12Device::CreateTexture(const RHI::TextureDesc& desc) {
-        return new D3D12Texture(m_internal->device.Get(), desc);
+        auto* texture = new D3D12Texture(m_internal->device.Get(), desc);
+        TrackTextureCreated(texture);
+        return texture;
     }
 
     bool D3D12Device::UpdateTexture(RHI::ITexture* texture, const void* data, uint32_t rowPitch) {
@@ -618,15 +700,44 @@ namespace dy::Backends
         return true;
     }
 
-    void D3D12Device::DestroyBuffer(RHI::IBuffer* buffer) { delete buffer; }
-
-    void D3D12Device::DestroyTexture(RHI::ITexture* texture) {
-        delete texture;
+    void D3D12Device::DestroyBuffer(RHI::IBuffer* buffer) {
+        if(TrackBufferDestroyed(buffer)) delete buffer;
     }
 
-    void D3D12Device::DestroyPipelineState(RHI::IPipelineState* pipeline) { delete pipeline; }
+    void D3D12Device::DestroyTexture(RHI::ITexture* texture) {
+        if(TrackTextureDestroyed(texture)) delete texture;
+    }
+
+    void D3D12Device::DestroyPipelineState(RHI::IPipelineState* pipeline) {
+        if(TrackPipelineDestroyed(pipeline)) delete pipeline;
+    }
 
     RHI::ITexture* D3D12Device::GetBackBuffer() { 
         return m_internal->backBufferTextures[m_internal->frameIndex]; 
+    }
+
+    bool D3D12Device::SupportsGpuTimestamps() const {
+        return m_internal->timestampQueryHeap != nullptr &&
+            m_internal->timestampReadbackBuffer != nullptr &&
+            m_internal->timestampFrequency != 0u;
+    }
+
+    uint32_t D3D12Device::GetMaxGpuTimestampScopes() const {
+        return SupportsGpuTimestamps() ? kTimestampQueriesPerFrame / 2u : 0u;
+    }
+
+    bool D3D12Device::TryGetLastGpuTimestamp(const char* name, RHI::GpuTimestampResult& result) const {
+        bool found = false;
+        RHI::GpuTimestampResult candidate = {};
+        for(const D3D12CommandList* commandList : m_internal->commandLists)
+        {
+            if(commandList != nullptr && commandList->TryGetLastGpuTimestamp(name, candidate) &&
+                (!found || candidate.frameSerial > result.frameSerial))
+            {
+                result = candidate;
+                found = true;
+            }
+        }
+        return found;
     }
 }

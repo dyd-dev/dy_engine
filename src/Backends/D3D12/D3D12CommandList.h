@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include "RHI/ICommandList.h"
+#include "RHI/IDevice.h"
 
 namespace dy::Backends
 {
@@ -38,9 +39,18 @@ namespace dy::Backends
         void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
         void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
 
+        void BeginDebugEvent(const char* name, const RHI::DebugLabelColor& color = {}) override;
+        void EndDebugEvent() override;
+        void InsertDebugMarker(const char* name, const RHI::DebugLabelColor& color = {}) override;
+        bool BeginGpuTimestamp(const char* name) override;
+        void EndGpuTimestamp() override;
+
         void Close() override;
         void SetDepthStencilView(size_t dsvHandlePtr);
         void SetBackBufferTexture(RHI::ITexture* texture); // Close 에서 백버퍼 상태를 추적기로 전이하기 위함
+        void SetGpuTimestampResources(void* queryHeap, void* readbackBuffer, uint32_t queryOffset, uint32_t queryCapacity);
+        void CollectGpuTimestampResults(uint64_t timestampFrequency, uint64_t frameSerial);
+        bool TryGetLastGpuTimestamp(const char* name, RHI::GpuTimestampResult& result) const;
 
         void* GetNativeList(); // 디바이스가 가져가기 위한 함수
 
