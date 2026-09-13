@@ -1,6 +1,6 @@
 #pragma once
 
-#include "RHI/ResourceSet.h"
+#include "dyf/RHI/ResourceSet.h"
 
 #include <cstdint>
 #include <vector>
@@ -8,7 +8,7 @@
 struct ID3D12DescriptorHeap;
 struct ID3D12Resource;
 
-namespace dy::Backends
+namespace dyf::Backends
 {
     struct D3D12ObjectDeleter;
     struct D3D12ResourceSetInternal;

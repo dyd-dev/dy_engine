@@ -11,19 +11,22 @@ endif()
 # main target
 add_library(${PROJECT_NAME} STATIC
 	"src/RHI/IDevice.cpp"
-	"src/Graphics/Renderer.cpp"
+	"src/RHI/ICommandList.cpp"
+	"src/RHI/Resources.cpp"
+	"src/dyf/Renderer.cpp"
+	"src/dyf/Image.cpp"
+	"src/dyf/Canvas.cpp"
+	"src/dyf/Font.cpp"
+	"src/dyf/MeshPrimitives.cpp"
+	"src/dyf/Shaders.cpp"
 	"src/RHI/RenderGraph.cpp"
-	"src/Graphics/Private/CanvasRenderer.cpp"
-	"src/Graphics/Private/DrawData.cpp"
-	"src/Graphics/Private/TextureCache.cpp"
-	"src/Graphics/Animation.cpp"
-	"src/Graphics/Scene.cpp"
-	"src/Graphics/ImageFile.cpp"
-	"src/Graphics/Model.cpp"
-	"src/Graphics/ModelLoader.cpp"
-	"src/Graphics/ModelLoaderCommon.cpp"
-	"src/Graphics/GltfModelLoader.cpp"
-	"src/Graphics/UfbxModelLoader.cpp"
+	"src/dyf/CanvasRenderer.cpp"
+    "src/dyf/PostProcess.cpp"
+    "src/dyf/Lighting.cpp"
+    "src/dyf/Profiler.cpp"
+	"src/dyf/DrawData.cpp"
+	"src/dyf/TextureCache.cpp"
+	"src/dyf/Scene.cpp"
 	"src/Platform/Window.cpp"
 )
 
@@ -34,32 +37,23 @@ target_link_libraries(${PROJECT_NAME} PUBLIC Engine_Options)
 target_include_directories(${PROJECT_NAME} BEFORE PUBLIC "${PROJECT_SOURCE_DIR}/src/Public")
 target_include_directories(${PROJECT_NAME} PRIVATE "${PROJECT_SOURCE_DIR}/src")
 
+option(DY_EXTEND_MODEL "Build the optional Model extension." OFF)
+
 include(Dependencies)
 include(BuildOptions)
 
-# CPU font data and compiled shader assets are usable independently of Renderer.
-add_library(dy_graphics_assets STATIC
-	"src/Graphics/Canvas.cpp"
-	"src/Graphics/Font.cpp"
-	"src/Graphics/MeshPrimitives.cpp"
-	"src/Graphics/Private/StockShaderAssets.cpp"
-)
-target_compile_features(dy_graphics_assets PUBLIC cxx_std_17)
-target_link_libraries(dy_graphics_assets PUBLIC Engine_Options)
-target_include_directories(dy_graphics_assets PUBLIC "${PROJECT_SOURCE_DIR}/src/Public")
-target_include_directories(dy_graphics_assets PRIVATE "${PROJECT_SOURCE_DIR}/src" "${stb_SOURCE_DIR}")
+# 기본 구현과 내장 셰이더는 같은 엔진 타깃에서 공개 RHI를 사용한다.
 include(ShaderAssets)
-target_link_libraries(${PROJECT_NAME} PRIVATE dy_graphics_assets)
+
+if(DY_EXTEND_MODEL)
+	add_subdirectory(src/Extend/Model)
+endif()
 
 # Only add the executable if this is the main project being built (not when included as a subdirectory in another project)
 if(CMAKE_PROJECT_NAME  STREQUAL PROJECT_NAME)
-	option(DY_BUILD_EXAMPLES "Build the self-contained Graphics and RHI examples." OFF)
+	option(DY_BUILD_EXAMPLES "Build the self-contained dyf and RHI examples." OFF)
 	if(DY_BUILD_EXAMPLES)
 		add_subdirectory(examples)
-	endif()
-	include(CTest)
-	if(BUILD_TESTING)
-		add_subdirectory(tests)
 	endif()
 endif()
 

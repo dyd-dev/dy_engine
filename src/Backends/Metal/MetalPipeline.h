@@ -3,9 +3,9 @@
 #include <cstdint>
 #include <vector>
 
-#include "RHI/Pipeline.h"
+#include "dyf/RHI/Pipeline.h"
 
-namespace dy::Backends
+namespace dyf::Backends
 {
 	struct MetalObjectDeleter;
 
@@ -20,6 +20,11 @@ namespace dy::Backends
 	{
 	public:
 		MetalPipeline(const RHI::GraphicsPipelineDesc& desc, void* device);
+
+        // 생성 전 조회와 실제 생성이 같은 Metal slot 제약을 사용한다.
+        [[nodiscard]] static bool SupportsSampler(const RHI::SamplerDesc& desc);
+        [[nodiscard]] static bool SupportsLayout(const RHI::PipelineLayoutDesc& desc, void* device);
+        [[nodiscard]] static bool SupportsGraphics(const RHI::GraphicsPipelineDesc& desc, void* device);
 
 		[[nodiscard]] const RHI::GraphicsPipelineDesc& GetDesc() const;
 		[[nodiscard]] void* GetNativePipeline() const;

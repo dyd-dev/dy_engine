@@ -1,6 +1,6 @@
 #pragma once
 
-#include "RHI/ICommandList.h"
+#include "dyf/RHI/ICommandList.h"
 
 #include <cstdint>
 #include <map>
@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-namespace dy::Backends
+namespace dyf::Backends
 {
     struct D3D12ObjectDeleter;
     struct D3D12CommandListInternal;
@@ -27,24 +27,24 @@ namespace dy::Backends
     public:
         explicit D3D12CommandList(void* nativeDevice);
 
-        void ResourceBarrier(const RHI::ResourceBarrierDesc* barriers, uint32_t count) override;
-        void BeginRendering(const RHI::RenderingDesc& desc) override;
-        void EndRendering() override;
+        void ResourceBarrierNative(const RHI::ResourceBarrierDesc* barriers, uint32_t count) override;
+        void BeginRenderingNative(const RHI::RenderingDesc& desc) override;
+        void EndRenderingNative() override;
 
-        void BindGraphicsPipeline(RHI::PipelineHandle pipelineState) override;
-        void BindResourceSet(RHI::ResourceSetHandle resourceSet) override;
-        void BindVertexBuffer(uint32_t binding, RHI::BufferHandle buffer, uint32_t offset) override;
-        void BindIndexBuffer(RHI::BufferHandle buffer, RHI::Format format, uint32_t offset) override;
-        void SetInlineConstants(uint32_t offset, uint32_t size, const void* data) override;
-        void SetStencilReference(uint32_t reference) override;
+        void BindGraphicsPipelineNative(RHI::PipelineHandle pipelineState) override;
+        void BindResourceSetNative(RHI::ResourceSetHandle resourceSet) override;
+        void BindVertexBufferNative(uint32_t binding, RHI::BufferHandle buffer, uint32_t offset) override;
+        void BindIndexBufferNative(RHI::BufferHandle buffer, RHI::Format format, uint32_t offset) override;
+        void SetInlineConstantsNative(uint32_t offset, uint32_t size, const void* data) override;
+        void SetStencilReferenceNative(uint32_t reference) override;
 
-        void SetViewport(const RHI::Viewport& viewport) override;
-        void SetScissor(const RHI::Rect& rect) override;
+        void SetViewportNative(const RHI::Viewport& viewport) override;
+        void SetScissorNative(const RHI::Rect& rect) override;
 
-        void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
-        void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
+        void DrawInstancedNative(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
+        void DrawIndexedInstancedNative(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
 
-        void Close() override;
+        bool CloseNative() override;
 
         void* GetNativeList();
         bool IsClosed() const;

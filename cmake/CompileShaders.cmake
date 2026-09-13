@@ -1,9 +1,8 @@
-# Compile one program stage from the caller's own source files. The generated
-# header contains bytecode and its entry point only; no rendering policy.
+# 예제의 셰이더를 컴파일하고 바이트 데이터와 진입점만 헤더에 담는다.
 include_guard(GLOBAL)
 
 function(dy_compile_shader target name stage)
-    cmake_parse_arguments(SHADER "" "GLSL;HLSL;METAL;METAL_ENTRY" "DEFINES;INCLUDE_DIRS" ${ARGN})
+    cmake_parse_arguments(SHADER "" "GLSL;HLSL;METAL;METAL_ENTRY" "INCLUDE_DIRS" ${ARGN})
     if(NOT stage MATCHES "^(vert|frag)$")
         message(FATAL_ERROR "dy_compile_shader: stage must be vert or frag")
     endif()
@@ -16,10 +15,6 @@ function(dy_compile_shader target name stage)
     set(header "${directory}/${name}.h")
     set(binary "${directory}/${name}.bin")
     set(embed "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/EmbedBinary.cmake")
-    set(defines)
-    foreach(define IN LISTS SHADER_DEFINES)
-        list(APPEND defines "-D${define}")
-    endforeach()
     set(includes)
     set(dependencies "${SHADER_GLSL}" "${SHADER_HLSL}" "${SHADER_METAL}")
     foreach(include IN LISTS SHADER_INCLUDE_DIRS)
@@ -33,7 +28,7 @@ function(dy_compile_shader target name stage)
         find_program(DY_GLSLC NAMES glslc HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin" REQUIRED)
         add_custom_command(OUTPUT "${binary}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${directory}"
-            COMMAND "${DY_GLSLC}" "-fshader-stage=${stage}" ${defines} ${includes} "${SHADER_GLSL}" -o "${binary}"
+            COMMAND "${DY_GLSLC}" "-fshader-stage=${stage}" ${includes} "${SHADER_GLSL}" -o "${binary}"
             DEPENDS ${dependencies} VERBATIM)
     elseif(USE_D3D12)
         find_program(DY_DXC NAMES dxc HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin" REQUIRED)
@@ -44,7 +39,7 @@ function(dy_compile_shader target name stage)
         endif()
         add_custom_command(OUTPUT "${binary}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${directory}"
-            COMMAND "${DY_DXC}" -T "${profile}" -E "${entry}" ${defines} ${includes} -Fo "${binary}" "${SHADER_HLSL}"
+            COMMAND "${DY_DXC}" -T "${profile}" -E "${entry}" ${includes} -Fo "${binary}" "${SHADER_HLSL}"
             DEPENDS ${dependencies} VERBATIM)
     elseif(USE_METAL)
         find_program(DY_XCRUN NAMES xcrun REQUIRED)
@@ -55,7 +50,7 @@ function(dy_compile_shader target name stage)
         add_custom_command(OUTPUT "${binary}"
             BYPRODUCTS "${directory}/${name}.air"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${directory}"
-            COMMAND "${DY_XCRUN}" -sdk macosx metal ${defines} ${includes}
+            COMMAND "${DY_XCRUN}" -sdk macosx metal ${includes}
                 -c "${SHADER_METAL}" -o "${directory}/${name}.air"
             COMMAND "${DY_XCRUN}" -sdk macosx metallib "${directory}/${name}.air" -o "${binary}"
             DEPENDS ${dependencies} VERBATIM)

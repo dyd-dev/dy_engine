@@ -4,4 +4,15 @@ layout(set=0,binding=1) uniform sampler imageSampler;
 layout(location=0) in vec2 uv;
 layout(location=1) in vec4 color;
 layout(location=0) out vec4 result;
-void main() { result=color*texture(sampler2D(image,imageSampler),uv); }
+// 이미지는 선형으로 샘플링하고 Canvas의 화면 색상 공간에서 tint를 곱한다.
+float ToSrgb(float value)
+{
+    return value<=0.0031308 ? value*12.92 : 1.055*pow(value,1.0/2.4)-0.055;
+}
+
+void main()
+{
+    vec4 sampled=texture(sampler2D(image,imageSampler),uv);
+    sampled.rgb=vec3(ToSrgb(sampled.r),ToSrgb(sampled.g),ToSrgb(sampled.b));
+    result=color*sampled;
+}

@@ -5,10 +5,11 @@
 #include "MetalCommandList.h"
 #include "MetalResourceSet.h"
 #include "MetalShader.h"
-#include "RHI/Readback.h"
+#include "dyf/RHI/Readback.h"
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -17,11 +18,12 @@
 #include <vector>
 
 #import <AppKit/AppKit.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <dispatch/dispatch.h>
 
-namespace dy::Backends
+namespace dyf::Backends
 {
     struct MetalObjectDeleter
     {
@@ -64,63 +66,16 @@ namespace dy::Backends
                 status == MTLCommandBufferStatusError;
         }
 
-		template<typename Object>
-		struct RetiredObject
-		{
-			uint64_t completionValue = 0;
-			std::unique_ptr<Object, MetalObjectDeleter> object;
-		};
-
-		template<typename Object, typename Interface>
-		bool RetireObject(
-			std::vector<std::unique_ptr<Object, MetalObjectDeleter>>& liveObjects,
-			Interface* object,
-			uint64_t completionValue,
-			std::vector<RetiredObject<Object>>& retiredObjects)
-		{
-			const auto found = std::find_if(
-				liveObjects.begin(), liveObjects.end(),
-				[object](const std::unique_ptr<Object, MetalObjectDeleter>& candidate)
-				{
-					return static_cast<Interface*>(candidate.get()) == object;
-				});
-			if(found == liveObjects.end()) return false;
-			retiredObjects.push_back({completionValue, nullptr});
-			retiredObjects.back().object = std::move(*found);
-			liveObjects.erase(found);
-			return true;
-		}
-
-		template<typename Object>
-		void ReclaimObjects(
-			std::vector<RetiredObject<Object>>& objects,
-			uint64_t completedValue)
-		{
-			objects.erase(
-				std::remove_if(
-					objects.begin(), objects.end(),
-					[completedValue](const RetiredObject<Object>& object)
-					{
-						return object.completionValue <= completedValue;
-					}),
-				objects.end());
-		}
     }
 
     struct MetalDevice::Impl
     {
-        struct FrameSlot
-        {
-            uint64_t submissionValue = 0;
-        };
-
         struct Submission
         {
             uint64_t value = 0;
             std::vector<std::unique_ptr<MetalCommandList, MetalObjectDeleter>> commandLists;
             id<MTLCommandBuffer> presentCommandBuffer = nil;
             id<CAMetalDrawable> drawable = nil;
-            bool waitingForPresent = false;
         };
 
         id<MTLDevice> device = nil;
@@ -137,18 +92,13 @@ namespace dy::Backends
         bool drawableRequestPending = false;
         bool stoppingDrawableAcquisition = false;
 
-        std::vector<FrameSlot> frameSlots;
+        std::vector<uint64_t> frameSlots;
         std::vector<std::unique_ptr<MetalCommandList, MetalObjectDeleter>> activeCommandLists;
 		std::vector<std::unique_ptr<MetalBuffer, MetalObjectDeleter>> liveBuffers;
 		std::vector<std::unique_ptr<MetalTexture, MetalObjectDeleter>> liveTextures;
 		std::vector<std::unique_ptr<MetalShader, MetalObjectDeleter>> liveShaders;
 		std::vector<std::unique_ptr<MetalPipeline, MetalObjectDeleter>> livePipelines;
 		std::vector<std::unique_ptr<MetalResourceSet, MetalObjectDeleter>> liveResourceSets;
-		std::vector<RetiredObject<MetalBuffer>> retiredBuffers;
-		std::vector<RetiredObject<MetalTexture>> retiredTextures;
-		std::vector<RetiredObject<MetalShader>> retiredShaders;
-		std::vector<RetiredObject<MetalPipeline>> retiredPipelines;
-		std::vector<RetiredObject<MetalResourceSet>> retiredResourceSets;
         uint32_t nextFrameSlot = 0;
         uint32_t activeFrameSlot = 0;
         bool frameActive = false;
@@ -158,7 +108,7 @@ namespace dy::Backends
         uint64_t nextSubmissionValue = 1;
         uint64_t completedSubmissionValue = 0;
 		uint64_t lastSubmittedValue = 0;
-        uint64_t pendingPresentValue = 0;
+        uint64_t frameLastSubmissionValue = 0;
         bool asyncWorkFailed = false;
 
         void RequestDrawable()
@@ -249,9 +199,6 @@ namespace dy::Backends
             while(!submissions.empty())
             {
                 Submission& submission = submissions.front();
-                if(submission.waitingForPresent)
-                    break;
-
                 id<MTLCommandBuffer> completion = submission.presentCommandBuffer;
                 if(completion == nil && !submission.commandLists.empty())
                 {
@@ -270,42 +217,22 @@ namespace dy::Backends
                     if(commandBuffer.status == MTLCommandBufferStatusError)
                     {
                         asyncWorkFailed = true;
-                        NSLog(@"Metal submission failed: %@", commandBuffer.error);
+                        std::fprintf(stderr, "%s", [[NSString stringWithFormat:
+                            @"Metal submission failed: %@\n", commandBuffer.error] UTF8String]);
                     }
                 }
                 if(submission.presentCommandBuffer.status ==
                     MTLCommandBufferStatusError)
                 {
                     asyncWorkFailed = true;
-                    NSLog(@"Metal presentation failed: %@",
-                        submission.presentCommandBuffer.error);
+                    std::fprintf(stderr, "%s", [[NSString stringWithFormat:
+                        @"Metal presentation failed: %@\n", submission.presentCommandBuffer.error] UTF8String]);
                 }
 
                 completedSubmissionValue = submission.value;
                 ReleaseSubmission(submission);
                 submissions.erase(submissions.begin());
             }
-			CollectRetiredObjects();
-        }
-
-		void CollectRetiredObjects()
-		{
-			ReclaimObjects(retiredResourceSets, completedSubmissionValue);
-			ReclaimObjects(retiredPipelines, completedSubmissionValue);
-			ReclaimObjects(retiredShaders, completedSubmissionValue);
-			ReclaimObjects(retiredTextures, completedSubmissionValue);
-			ReclaimObjects(retiredBuffers, completedSubmissionValue);
-		}
-
-        Submission* FindSubmission(uint64_t value)
-        {
-            const auto it = std::find_if(
-                submissions.begin(), submissions.end(),
-                [value](const Submission& submission)
-                {
-                    return submission.value == value;
-                });
-            return it == submissions.end() ? nullptr : &*it;
         }
 
         bool DrainGpuForShutdown()
@@ -332,25 +259,22 @@ namespace dy::Backends
         m_impl->StopDrawableAcquisition();
         if(!m_impl->submissions.empty() && !m_impl->DrainGpuForShutdown())
         {
+            AbandonResources();
             m_impl = nullptr;
             return;
         }
 
+        ReleaseResources();
         m_impl->activeCommandLists.clear();
 
         m_impl->ClearCurrentDrawable();
         for(Impl::Submission& submission : m_impl->submissions)
             Impl::ReleaseSubmission(submission);
         m_impl->submissions.clear();
-		m_impl->retiredResourceSets.clear();
 		m_impl->liveResourceSets.clear();
-		m_impl->retiredPipelines.clear();
 		m_impl->livePipelines.clear();
-		m_impl->retiredShaders.clear();
 		m_impl->liveShaders.clear();
-		m_impl->retiredTextures.clear();
 		m_impl->liveTextures.clear();
-		m_impl->retiredBuffers.clear();
 		m_impl->liveBuffers.clear();
 
         if(m_impl->backBufferTex != nullptr)
@@ -379,12 +303,22 @@ namespace dy::Backends
 
     int MetalDevice::Initialize(const void* windowHandle, const RHI::DeviceDesc& desc)
     {
-        if(windowHandle == nullptr || desc.maxFramesInFlight == 0)
+        if(desc.maxFramesInFlight == 0 || desc.enableValidation)
             return -1;
 
         m_impl->windowHandle = windowHandle;
-        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-        if(device == nil) return -1;
+        NSArray<id<MTLDevice>>* adapters=MTLCopyAllDevices();
+        if(desc.adapterIndex>=adapters.count) {
+#if !__has_feature(objc_arc)
+            [adapters release];
+#endif
+            return -1;
+        }
+        id<MTLDevice> device=adapters[desc.adapterIndex];
+#if !__has_feature(objc_arc)
+        [device retain];
+        [adapters release];
+#endif
         m_impl->device = device;
 
         m_impl->commandQueue = [device newCommandQueue];
@@ -396,8 +330,124 @@ namespace dy::Backends
         return 0;
     }
 
-    bool MetalDevice::CreateSwapchain(const RHI::SwapchainDesc& desc)
+
+uint64_t MetalDevice::GetLastSubmissionNative() const {return m_impl->lastSubmittedValue;}
+uint64_t MetalDevice::GetCompletedSubmissionNative()
+{
+    // Present의 마무리 커맨드도 동일 제출열에서 완료 여부를 판정한다.
+    m_impl->CollectCompletedSubmissions();
+    return m_impl->asyncWorkFailed ? 0 : m_impl->completedSubmissionValue;
+}
+void MetalDevice::DiscardCommandListNative(RHI::ICommandList* list) {auto& active=m_impl->activeCommandLists; active.erase(std::remove_if(active.begin(),active.end(),[list](const auto& value){return value.get()==list;}),active.end());}
+
+bool MetalDevice::SupportsNative(RHI::Feature feature) const
+{
+    if(!m_impl || m_impl->device == nil) return false;
+    switch(feature)
     {
+    case RHI::Feature::Rasterization:
+    case RHI::Feature::DescriptorIndexing:
+    case RHI::Feature::FractionalDepthBias:
+    case RHI::Feature::Wireframe:
+    case RHI::Feature::DepthBiasClamp:
+        return true;
+    // 이 구현은 shader bias 인자를 추가하지 않으므로 sampler LOD bias는 지원하지 않는다.
+    default: return false;
+    }
+}
+
+uint64_t MetalDevice::GetLimitNative(RHI::Limit limit) const
+{
+    if(!m_impl || m_impl->device == nil) return 0;
+    id<MTLDevice> device = m_impl->device;
+    switch(limit)
+    {
+    case RHI::Limit::InlineConstantBytes:
+    case RHI::Limit::UniformBufferBytes:
+    case RHI::Limit::StorageBufferBytes:
+        // inline constants도 setBytes가 아닌 MTLBuffer로 전달하므로 setBytes의 4KB 제한은 적용하지 않는다.
+        if(@available(macOS 10.14, *))
+            return static_cast<uint64_t>(device.maxBufferLength);
+        // 조회 API 이전 OS의 한도는 과거 feature table을 보존한 Dawn 구현과 대조했다.
+        // https://dawn.googlesource.com/dawn/+/41e4d9a34c1d9dcb2eef3ff39ff9c1f987bfa02a/src/dawn/native/metal/BufferMTL.mm
+        if(@available(macOS 10.12, *)) return 1024ull * 1024 * 1024;
+        return 256ull * 1024 * 1024;
+    case RHI::Limit::Texture2DDimension:
+        // Apple의 GPU family 표: macOS GPU 및 Apple3~9는 16384, Apple10은 32768이다.
+        // https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf
+#if defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+        if(@available(macOS 26.0, *))
+            if([device supportsFamily:MTLGPUFamilyApple10]) return 32768;
+#endif
+        return 16384;
+    case RHI::Limit::UniformBufferOffsetAlignment:
+        // Apple GPU의 constant 정렬은 4B, Mac2의 정렬은 32B다. 장치 family를 확인한다.
+        if(@available(macOS 11.0, *))
+            if([device supportsFamily:MTLGPUFamilyApple1]) return 4;
+        if(@available(macOS 10.15, *))
+            if([device supportsFamily:MTLGPUFamilyMac2]) return 32;
+        // Mac1은 과거 Apple feature table을 보존한 Dawn의 family 표에서 256B로 확인된다.
+        // https://dawn.googlesource.com/dawn/+/4a845f198685328fc4881288fc6c8ea570c7176d/src/dawn/native/metal/PhysicalDeviceMTL.mm
+        return 256;
+    case RHI::Limit::StorageBufferOffsetAlignment:
+        // device 주소공간은 고정 장치 정렬이 없다. shader 데이터 타입의 ABI 정렬은 호출자가 맞춘다.
+        return 1;
+    case RHI::Limit::SamplerAnisotropy:
+        // MTLSamplerDescriptor.maxAnisotropy의 명시 범위는 1~16이다.
+        return 16;
+    default: return 0;
+    }
+}
+
+bool MetalDevice::SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc& desc) const
+{
+    return m_impl && MetalPipeline::SupportsLayout(desc, (__bridge void*)m_impl->device);
+}
+
+bool MetalDevice::SupportsSamplerNative(const RHI::SamplerDesc& desc) const
+{
+    return m_impl && m_impl->device != nil && MetalPipeline::SupportsSampler(desc);
+}
+
+bool MetalDevice::SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc& desc) const
+{
+    return m_impl && MetalPipeline::SupportsGraphics(desc, (__bridge void*)m_impl->device);
+}
+bool MetalDevice::IsLostNative() const {return !m_impl || m_impl->asyncWorkFailed;}
+bool MetalDevice::WaitIdleNative()
+{
+    if(!m_impl || !m_impl->DrainGpuForShutdown()) return false;
+    m_impl->CollectCompletedSubmissions();
+    return !m_impl->asyncWorkFailed;
+}
+void MetalDevice::DestroySwapchainNative()
+{
+    m_impl->StopDrawableAcquisition();
+    m_impl->ClearCurrentDrawable();
+    delete m_impl->backBufferTex;
+    m_impl->backBufferTex = nullptr;
+    if(m_impl->metalLayer != nil) m_impl->metalLayer.device = nil;
+#if !__has_feature(objc_arc)
+    [m_impl->metalLayer release];
+    if(m_impl->drawableQueue != nullptr) dispatch_release(m_impl->drawableQueue);
+#endif
+    m_impl->metalLayer = nil;
+    m_impl->drawableQueue = nullptr;
+    m_impl->stoppingDrawableAcquisition = false;
+    m_impl->frameActive = false;
+    m_impl->frameLastSubmissionValue = 0;
+}
+
+    bool MetalDevice::CreateSwapchainNative(const RHI::SwapchainDesc& desc)
+    {
+        // CAMetalLayer는 2/3개만 지원한다. 범위 밖 값을 setter에 넘기면 예외를 유발할 수 있다.
+        if(desc.minimumImageCount > 3)
+        {
+            ReportDiagnostic(DiagnosticSeverity::Error,
+                "Metal swapchains support at most 3 drawable images; minimumImageCount exceeds 3.");
+            return false;
+        }
+        m_impl->windowHandle=desc.window;
         if(m_impl->device == nil || m_impl->commandQueue == nil ||
             m_impl->windowHandle == nullptr || m_impl->metalLayer != nil ||
             m_impl->backBufferTex != nullptr || ![NSThread isMainThread] ||
@@ -414,7 +464,28 @@ namespace dy::Backends
         if(layer == nil) return false;
         layer.device = m_impl->device;
 
-        if(desc.format != RHI::Format::Unknown)
+        // 창 합성 의미를 요청값으로 정한다. Core Animation은 투명 layer를 premultiplied로 합성한다.
+        switch(desc.compositeAlpha)
+        {
+        case RHI::CompositeAlpha::Opaque: layer.opaque = YES; break;
+        case RHI::CompositeAlpha::Premultiplied: layer.opaque = NO; break;
+        default: return false;
+        }
+        CFStringRef colorSpaceName = nullptr;
+        switch(desc.colorSpace)
+        {
+        case RHI::ColorSpace::Srgb: colorSpaceName = kCGColorSpaceSRGB; break;
+        case RHI::ColorSpace::LinearSrgb: colorSpaceName = kCGColorSpaceLinearSRGB; break;
+        default: return false;
+        }
+        CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(colorSpaceName);
+        if(colorSpace == nullptr) return false;
+        layer.colorspace = colorSpace;
+        const bool colorSpaceAccepted = layer.colorspace != nullptr && CFEqual(layer.colorspace, colorSpace);
+        CGColorSpaceRelease(colorSpace);
+        if(!colorSpaceAccepted) return false;
+
+        if(desc.format == RHI::Format::Unknown) return false;
         {
             const MTLPixelFormat requestedFormat = ToLayerPixelFormat(desc.format);
             if(requestedFormat == MTLPixelFormatInvalid) return false;
@@ -489,14 +560,22 @@ namespace dy::Backends
         m_impl->backBufferTex = backBuffer.release();
         m_impl->drawableQueue = drawableQueue;
         m_impl->RequestDrawable();
+        if(layer.maximumDrawableCount > desc.minimumImageCount)
+        {
+            char message[160];
+            std::snprintf(message, sizeof(message),
+                "Metal swapchain uses %llu drawable images for requested minimum %u.",
+                static_cast<unsigned long long>(layer.maximumDrawableCount), desc.minimumImageCount);
+            ReportDiagnostic(DiagnosticSeverity::Info, message);
+        }
         return true;
     }
 
-    bool MetalDevice::BeginFrame()
+    bool MetalDevice::BeginFrameNative()
     {
         m_impl->CollectCompletedSubmissions();
         if(m_impl->asyncWorkFailed ||
-            m_impl->pendingPresentValue != 0 || m_impl->metalLayer == nil ||
+            m_impl->metalLayer == nil ||
             m_impl->backBufferTex == nullptr || m_impl->frameSlots.empty() ||
             m_impl->windowHandle == nullptr || ![NSThread isMainThread])
         {
@@ -512,8 +591,7 @@ namespace dy::Backends
         NSView* contentView = window.contentView;
         if(contentView == nil) return false;
 
-        Impl::FrameSlot& slot = m_impl->frameSlots[m_impl->nextFrameSlot];
-        if(slot.submissionValue > m_impl->completedSubmissionValue)
+        if(m_impl->frameSlots[m_impl->nextFrameSlot] > m_impl->completedSubmissionValue)
             return false;
 
         id<CAMetalDrawable> drawable = nil;
@@ -574,11 +652,12 @@ namespace dy::Backends
             (__bridge void*)texture, backBufferDesc);
 
         m_impl->activeFrameSlot = m_impl->nextFrameSlot;
+        m_impl->frameLastSubmissionValue = 0;
         m_impl->frameActive = true;
         return true;
     }
 
-    RHI::ICommandList* MetalDevice::AcquireCommandList()
+    RHI::ICommandList* MetalDevice::AcquireCommandListNative()
     {
         m_impl->CollectCompletedSubmissions();
         if(m_impl->device == nil || m_impl->commandQueue == nil ||
@@ -596,7 +675,7 @@ namespace dy::Backends
         return result;
     }
 
-    bool MetalDevice::Submit(RHI::ICommandList** cmdLists, uint32_t count)
+    bool MetalDevice::SubmitNative(RHI::ICommandList** cmdLists, uint32_t count)
     {
         if(cmdLists == nullptr || count == 0)
         {
@@ -668,16 +747,6 @@ namespace dy::Backends
 		{
 			if(!commandList->ValidateForSubmit(resourceStates)) return false;
 		}
-		if(usesBackBuffer)
-		{
-			const auto key = std::make_pair(m_impl->backBufferTex, 0u);
-			const auto found = resourceStates.textureSubresources.find(key);
-			const RHI::ResourceState finalState =
-				found == resourceStates.textureSubresources.end()
-				? m_impl->backBufferTex->GetState(0, 0) : found->second;
-			if(finalState != RHI::ResourceState::Present) return false;
-		}
-
         m_impl->submissions.emplace_back();
         Impl::Submission& submission = m_impl->submissions.back();
         submission.value = m_impl->nextSubmissionValue++;
@@ -694,63 +763,49 @@ namespace dy::Backends
         }
 		m_impl->lastSubmittedValue = submission.value;
 
+        // 같은 drawable을 여러 제출에서 사용할 수 있다. 프레임 종료는 Present가 맡는다.
         if(usesBackBuffer)
-        {
-            submission.drawable = m_impl->currentDrawable;
-            submission.waitingForPresent = true;
-            m_impl->currentDrawable = nil;
-
-            m_impl->frameSlots[m_impl->activeFrameSlot].submissionValue =
-                submission.value;
-            m_impl->pendingPresentValue = submission.value;
-            m_impl->nextFrameSlot = static_cast<uint32_t>(
-                (m_impl->activeFrameSlot + 1) % m_impl->frameSlots.size());
-            m_impl->frameActive = false;
-
-            const RHI::TextureDesc backBufferDesc =
-                m_impl->backBufferTex->GetDesc();
-            m_impl->backBufferTex->SetBackBuffer(nullptr, backBufferDesc);
-        }
+            m_impl->frameLastSubmissionValue = submission.value;
         return true;
     }
 
-    void MetalDevice::Present()
+    bool MetalDevice::PresentNative()
     {
-        if(m_impl->pendingPresentValue == 0) return;
+        if(!m_impl->frameActive || m_impl->currentDrawable == nil || m_impl->asyncWorkFailed)
+            return false;
 
-        Impl::Submission* submission = m_impl->FindSubmission(
-            m_impl->pendingPresentValue);
-        m_impl->pendingPresentValue = 0;
-        if(submission == nullptr)
-        {
-            m_impl->asyncWorkFailed = true;
-            return;
-        }
-        if(submission->drawable == nil)
-        {
-            submission->waitingForPresent = false;
-            m_impl->asyncWorkFailed = true;
-            return;
-        }
-
-        id<MTLCommandBuffer> commandBuffer =
-            [m_impl->commandQueue commandBuffer];
+        // 이미 commit된 렌더 커맨드는 수정하지 않는다. 같은 queue 뒤에 표시 전용 커맨드를 제출한다.
+        id<MTLCommandBuffer> commandBuffer = [m_impl->commandQueue commandBuffer];
         if(commandBuffer == nil)
         {
-            submission->waitingForPresent = false;
             m_impl->asyncWorkFailed = true;
-            return;
+            return false;
         }
+        m_impl->submissions.emplace_back();
+        Impl::Submission& submission = m_impl->submissions.back();
+        submission.value = m_impl->nextSubmissionValue++;
+        submission.presentCommandBuffer = commandBuffer;
+        submission.drawable = m_impl->currentDrawable;
 #if !__has_feature(objc_arc)
         [commandBuffer retain];
 #endif
-        submission->presentCommandBuffer = commandBuffer;
-        [commandBuffer presentDrawable:submission->drawable];
+        [commandBuffer presentDrawable:submission.drawable];
         [commandBuffer commit];
-        submission->waitingForPresent = false;
+        m_impl->lastSubmittedValue = submission.value;
+
+        // drawable의 소유권은 표시 제출로 옮기고, frame slot은 표시 커맨드 완료까지 재사용하지 않는다.
+        m_impl->currentDrawable = nil;
+        m_impl->frameSlots[m_impl->activeFrameSlot] = submission.value;
+        m_impl->nextFrameSlot = static_cast<uint32_t>(
+            (m_impl->activeFrameSlot + 1) % m_impl->frameSlots.size());
+        m_impl->frameActive = false;
+        m_impl->frameLastSubmissionValue = 0;
+        const RHI::TextureDesc backBufferDesc = m_impl->backBufferTex->GetDesc();
+        m_impl->backBufferTex->SetBackBuffer(nullptr, backBufferDesc);
+        return true;
     }
 
-    RHI::BufferHandle MetalDevice::CreateBuffer(const RHI::BufferDesc& desc)
+    RHI::BufferHandle MetalDevice::CreateBufferNative(const RHI::BufferDesc& desc)
     {
 		auto buffer = std::unique_ptr<MetalBuffer, MetalObjectDeleter>(
 			new MetalBuffer(desc, (__bridge void*)m_impl->device));
@@ -760,7 +815,7 @@ namespace dy::Backends
 		return result;
     }
 
-    RHI::TextureHandle MetalDevice::CreateTexture(const RHI::TextureDesc& desc)
+    RHI::TextureHandle MetalDevice::CreateTextureNative(const RHI::TextureDesc& desc)
     {
 		auto texture = std::unique_ptr<MetalTexture, MetalObjectDeleter>(
 			new MetalTexture(desc, (__bridge void*)m_impl->device));
@@ -770,7 +825,7 @@ namespace dy::Backends
 		return result;
     }
 
-	RHI::ShaderHandle MetalDevice::CreateShader(const RHI::ShaderDesc& desc)
+	RHI::ShaderHandle MetalDevice::CreateShaderNative(const RHI::ShaderDesc& desc)
 	{
 		auto shader = std::unique_ptr<MetalShader, MetalObjectDeleter>(
 			new MetalShader(desc, (__bridge void*)m_impl->device));
@@ -780,7 +835,7 @@ namespace dy::Backends
 		return result;
 	}
 
-    RHI::PipelineHandle MetalDevice::CreateGraphicsPipeline(
+    RHI::PipelineHandle MetalDevice::CreateGraphicsPipelineNative(
         const RHI::GraphicsPipelineDesc& desc)
     {
 		const auto ownsShader = [this](RHI::ShaderHandle shader)
@@ -807,7 +862,7 @@ namespace dy::Backends
 		return result;
     }
 
-	RHI::ResourceSetHandle MetalDevice::CreateResourceSet(
+	RHI::ResourceSetHandle MetalDevice::CreateResourceSetNative(
 		const RHI::ResourceSetDesc& desc)
 	{
 		const auto pipelineIt = std::find_if(
@@ -936,67 +991,47 @@ namespace dy::Backends
 		return result;
 	}
 
-    void MetalDevice::DestroyBuffer(RHI::BufferHandle buffer)
+    void MetalDevice::DestroyBufferNative(RHI::BufferHandle buffer)
     {
-		if(RetireObject(
-			m_impl->liveBuffers,
-			buffer,
-			m_impl->lastSubmittedValue,
-			m_impl->retiredBuffers))
-		{
-			m_impl->CollectCompletedSubmissions();
-		}
+        if(!m_impl) return;
+        auto& objects = m_impl->liveBuffers;
+        objects.erase(std::remove_if(objects.begin(), objects.end(),
+            [buffer](const auto& object) { return object.get() == buffer; }), objects.end());
     }
 
-    void MetalDevice::DestroyTexture(RHI::TextureHandle texture)
+    void MetalDevice::DestroyTextureNative(RHI::TextureHandle texture)
     {
-		if(RetireObject(
-			m_impl->liveTextures,
-			texture,
-			m_impl->lastSubmittedValue,
-			m_impl->retiredTextures))
-		{
-			m_impl->CollectCompletedSubmissions();
-		}
+        if(!m_impl) return;
+        auto& objects = m_impl->liveTextures;
+        objects.erase(std::remove_if(objects.begin(), objects.end(),
+            [texture](const auto& object) { return object.get() == texture; }), objects.end());
     }
 
-	void MetalDevice::DestroyShader(RHI::ShaderHandle shader)
+	void MetalDevice::DestroyShaderNative(RHI::ShaderHandle shader)
 	{
-		if(RetireObject(
-			m_impl->liveShaders,
-			shader,
-			m_impl->lastSubmittedValue,
-			m_impl->retiredShaders))
-		{
-			m_impl->CollectCompletedSubmissions();
-		}
-	}
-
-    void MetalDevice::DestroyPipeline(RHI::PipelineHandle pipeline)
-    {
-		if(RetireObject(
-			m_impl->livePipelines,
-			pipeline,
-			m_impl->lastSubmittedValue,
-			m_impl->retiredPipelines))
-		{
-			m_impl->CollectCompletedSubmissions();
-		}
+        if(!m_impl) return;
+        auto& objects = m_impl->liveShaders;
+        objects.erase(std::remove_if(objects.begin(), objects.end(),
+            [shader](const auto& object) { return object.get() == shader; }), objects.end());
     }
 
-	void MetalDevice::DestroyResourceSet(RHI::ResourceSetHandle resourceSet)
-	{
-		if(RetireObject(
-			m_impl->liveResourceSets,
-			resourceSet,
-			m_impl->lastSubmittedValue,
-			m_impl->retiredResourceSets))
-		{
-			m_impl->CollectCompletedSubmissions();
-		}
-	}
+    void MetalDevice::DestroyPipelineNative(RHI::PipelineHandle pipeline)
+    {
+        if(!m_impl) return;
+        auto& objects = m_impl->livePipelines;
+        objects.erase(std::remove_if(objects.begin(), objects.end(),
+            [pipeline](const auto& object) { return object.get() == pipeline; }), objects.end());
+    }
 
-	bool MetalDevice::UpdateBuffer(
+	void MetalDevice::DestroyResourceSetNative(RHI::ResourceSetHandle resourceSet)
+	{
+        if(!m_impl) return;
+        auto& objects = m_impl->liveResourceSets;
+        objects.erase(std::remove_if(objects.begin(), objects.end(),
+            [resourceSet](const auto& object) { return object.get() == resourceSet; }), objects.end());
+    }
+
+	bool MetalDevice::UpdateBufferNative(
 		RHI::ICommandList& commandList,
 		RHI::BufferHandle buffer,
 		uint32_t offset,
@@ -1022,7 +1057,7 @@ namespace dy::Backends
 				ownedBuffer->get(), offset, data, size);
     }
 
-	bool MetalDevice::UpdateTexture(
+	bool MetalDevice::UpdateTextureNative(
 		RHI::ICommandList& commandList,
 		RHI::TextureHandle texture,
 		uint32_t mipLevel,
@@ -1057,22 +1092,22 @@ namespace dy::Backends
 				slicePitch);
     }
 
-    RHI::TextureHandle MetalDevice::GetBackBuffer()
+    RHI::TextureHandle MetalDevice::GetBackBufferNative()
     {
         return m_impl->metalLayer == nil ? nullptr : m_impl->backBufferTex;
     }
 
-    bool MetalDevice::ReadTexture(RHI::TextureHandle texture, RHI::TextureReadback& result)
+    bool MetalDevice::ReadTextureNative(RHI::TextureHandle texture, RHI::TextureReadback& result)
     {
         if(!m_impl || !texture || m_impl->asyncWorkFailed || !m_impl->activeCommandLists.empty()) return false;
         const bool backBuffer = texture == m_impl->backBufferTex;
         id<MTLTexture> image = nil;
         if(backBuffer)
         {
-            if(!m_impl->allowReadback || !m_impl->pendingPresentValue) return false;
-            const auto* submission = m_impl->FindSubmission(m_impl->pendingPresentValue);
-            if(!submission || !submission->waitingForPresent || submission->drawable == nil) return false;
-            image = submission->drawable.texture;
+            if(!m_impl->allowReadback || !m_impl->frameActive ||
+                !m_impl->frameLastSubmissionValue || m_impl->currentDrawable == nil) return false;
+            // Submit 뒤에도 현재 drawable을 보존하므로 Present 전의 진단 readback이 가능하다.
+            image = m_impl->currentDrawable.texture;
         }
         else
         {

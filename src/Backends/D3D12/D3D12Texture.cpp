@@ -6,7 +6,7 @@
 
 using Microsoft::WRL::ComPtr;
 
-namespace dy::Backends
+namespace dyf::Backends
 {
     namespace
     {
@@ -99,16 +99,6 @@ namespace dy::Backends
         {
         case RHI::Format::D32_FLOAT: return DXGI_FORMAT_R32_FLOAT;
         case RHI::Format::D24_UNORM_S8_UINT: return DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-        default: return ToDxgiFormat(format);
-        }
-    }
-
-    uint32_t D3D12Texture::ToDxgiDepthStencilFormat(RHI::Format format)
-    {
-        switch (format)
-        {
-        case RHI::Format::D32_FLOAT: return DXGI_FORMAT_D32_FLOAT;
-        case RHI::Format::D24_UNORM_S8_UINT: return DXGI_FORMAT_D24_UNORM_S8_UINT;
         default: return ToDxgiFormat(format);
         }
     }
@@ -223,7 +213,7 @@ namespace dy::Backends
                         {
                             D3D12_DEPTH_STENCIL_VIEW_DESC view = {};
                             view.Format = static_cast<DXGI_FORMAT>(
-                                ToDxgiDepthStencilFormat(desc.format));
+                                ToDxgiFormat(desc.format));
                             if (readOnlyIndex != 0)
                             {
                                 view.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;

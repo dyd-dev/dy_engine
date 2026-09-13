@@ -1,7 +1,7 @@
 #pragma once
 
-#include "RHI/Texture.h"
-#include "RHI/ResourceState.h"
+#include "dyf/RHI/Texture.h"
+#include "dyf/RHI/ResourceState.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -10,7 +10,7 @@
 struct ID3D12Device;
 struct ID3D12Resource;
 
-namespace dy::Backends
+namespace dyf::Backends
 {
     struct D3D12ObjectDeleter;
     struct D3D12TextureInternal;
@@ -44,7 +44,6 @@ namespace dy::Backends
 
         static uint32_t ToDxgiFormat(RHI::Format format);
         static uint32_t ToDxgiShaderResourceFormat(RHI::Format format);
-        static uint32_t ToDxgiDepthStencilFormat(RHI::Format format);
 
     private:
         friend struct D3D12ObjectDeleter;

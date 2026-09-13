@@ -31,6 +31,7 @@ target_link_libraries(${BACKEND_NAME} PRIVATE
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
     "-framework AppKit"
+    "-framework CoreGraphics"
     "-framework Metal"
     "-framework Foundation"
     "-framework QuartzCore"

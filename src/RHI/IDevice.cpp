@@ -8,24 +8,24 @@
 #include "Backends/Null/NullDevice.h"
 #endif
 
-using namespace dy::RHI;
+using namespace dyf::RHI;
 
-IDevice* IDevice::Create(const void* windowHandle, const DeviceDesc& desc)
+IDevice* IDevice::Create(const DeviceDesc& desc)
 {
 	IDevice *device = nullptr;
 #if defined(ENABLE_D3D12)
-	device = new dy::Backends::D3D12Device();
+	device = new dyf::Backends::D3D12Device();
 #elif defined(ENABLE_METAL)
-    device = new dy::Backends::MetalDevice();
+    device = new dyf::Backends::MetalDevice();
 #elif defined(ENABLE_VULKAN)
-	device = new dy::Backends::VulkanDevice();
+	device = new dyf::Backends::VulkanDevice();
 #else
-	device = new dy::Backends::NullDevice();
+	device = new dyf::Backends::NullDevice();
 #endif
 	if(device)
 	{
-		device->SetDesc(desc);
-		if(device->Initialize(windowHandle, device->GetDesc()) != 0)
+		device->m_desc = desc;
+		if(device->Initialize(nullptr, device->GetDesc()) != 0)
 		{
 			delete device;
 			device = nullptr;
@@ -33,3 +33,5 @@ IDevice* IDevice::Create(const void* windowHandle, const DeviceDesc& desc)
 	}
 	return device;
 }
+
+bool IDevice::Supports(Feature feature) const {return SupportsNative(feature);}

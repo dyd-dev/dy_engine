@@ -15,13 +15,14 @@ dy_compile_shader(RhiLight vertex vert
     GLSL "${shader_dir}/mesh_vs.glsl"
     HLSL "${shader_dir}/mesh_vs.hlsl"
     METAL "${shader_dir}/mesh_vs.metal"
-    METAL_ENTRY vertexMain
-    DEFINES RENDERER_ENABLE_SHADOWS=0 RENDERER_VERTEX_ENTRY=vertexMain
-    INCLUDE_DIRS "${shader_dir}")
+    METAL_ENTRY vertexMain)
 dy_compile_shader(RhiLight fragment frag
     GLSL "${shader_dir}/mesh_ps.glsl"
     HLSL "${shader_dir}/mesh_ps.hlsl"
     METAL "${shader_dir}/mesh_ps.metal"
-    METAL_ENTRY fragmentMain
-    DEFINES RENDERER_ENABLE_SHADOWS=0 RENDERER_FRAGMENT_ENTRY=fragmentMain
-    INCLUDE_DIRS "${shader_dir}")
+    METAL_ENTRY fragmentMain)
+dy_compile_shader(RhiLight shadow vert
+    GLSL "${shader_dir}/mesh_shadow_vs.glsl"
+    HLSL "${shader_dir}/mesh_shadow_vs.hlsl"
+    METAL "${shader_dir}/mesh_shadow_vs.metal"
+    METAL_ENTRY shadowVertexShader)

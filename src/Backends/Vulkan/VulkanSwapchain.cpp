@@ -11,11 +11,11 @@
 #include <windows.h>
 #endif
 
-namespace dy::Backends
+namespace dyf::Backends
 {
 namespace
 {
-    VkImageView CreateImageView(VkDevice device, VkImage image, VkFormat format)
+    VkResult CreateImageView(VkDevice device, VkImage image, VkFormat format, VkImageView& view)
     {
         VkImageViewCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -27,11 +27,7 @@ namespace
         info.subresourceRange.levelCount = 1;
         info.subresourceRange.baseArrayLayer = 0;
         info.subresourceRange.layerCount = 1;
-        VkImageView view = VK_NULL_HANDLE;
-        if (vkCreateImageView(device, &info, nullptr, &view) != VK_SUCCESS) {
-            throw std::runtime_error("Failed to create Vulkan swapchain image view");
-        }
-        return view;
+        return vkCreateImageView(device, &info, nullptr, &view);
     }
 }
 
@@ -59,28 +55,33 @@ bool VulkanSwapchain::Initialize(
     const VulkanContext& context,
     void* windowHandle,
     VkFormat requestedFormat,
+    VkColorSpaceKHR requestedColorSpace,
+    VkCompositeAlphaFlagBitsKHR requestedCompositeAlpha,
     VkPresentModeKHR requestedPresentMode,
     uint32_t requestedMinimumImageCount,
     bool allowReadback,
     uint32_t initialWidth,
     uint32_t initialHeight,
     VkSwapchainKHR oldSwapchain,
-    bool& oldSwapchainRetired)
+    bool& oldSwapchainRetired,
+    InitializationStatus& status)
 {
     oldSwapchainRetired = false;
+    status = {};
     if (context.device == VK_NULL_HANDLE || context.physicalDevice == VK_NULL_HANDLE || context.surface == VK_NULL_HANDLE) {
         return false;
     }
 
-    SwapchainSupportDetails swapchainSupport = QuerySwapchainSupport(context.physicalDevice, context.surface);
+    SwapchainSupportDetails swapchainSupport = QuerySwapchainSupport(context.physicalDevice, context.surface, status);
+    if (status.result != VK_SUCCESS) return false;
     if (swapchainSupport.formats.empty() || swapchainSupport.presentModes.empty()) return false;
 
     VkSurfaceFormatKHR surfaceFormat{};
     VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
     VkExtent2D extent{};
-    if (!ChooseSwapSurfaceFormat(swapchainSupport.formats, requestedFormat, surfaceFormat) ||
+    if (!ChooseSwapSurfaceFormat(swapchainSupport.formats, requestedFormat, requestedColorSpace, surfaceFormat) ||
         !ChoosePresentMode(swapchainSupport.presentModes, requestedPresentMode, presentMode) ||
-        !ChooseSwapExtent(swapchainSupport.capabilities, windowHandle, extent)) {
+        !ChooseSwapExtent(swapchainSupport.capabilities, windowHandle, extent, status)) {
         return false;
     }
 
@@ -90,19 +91,8 @@ bool VulkanSwapchain::Initialize(
     if (swapchainSupport.capabilities.maxImageCount > 0 && imageCount > swapchainSupport.capabilities.maxImageCount) return false;
     const uint32_t minimumImageCount = imageCount;
 
-    VkCompositeAlphaFlagBitsKHR compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    if ((swapchainSupport.capabilities.supportedCompositeAlpha & compositeAlpha) == 0) {
-        if ((swapchainSupport.capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR) != 0) {
-            compositeAlpha = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
-        } else if ((swapchainSupport.capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR) != 0) {
-            compositeAlpha = VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
-        } else if ((swapchainSupport.capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) != 0) {
-            compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
-        } else {
-            return false;
-        }
-    }
-
+    const VkCompositeAlphaFlagBitsKHR compositeAlpha = requestedCompositeAlpha;
+    if ((swapchainSupport.capabilities.supportedCompositeAlpha & compositeAlpha) == 0) return false;
     VkSwapchainCreateInfoKHR createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
     createInfo.surface = context.surface;
@@ -134,30 +124,29 @@ bool VulkanSwapchain::Initialize(
 
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     oldSwapchainRetired = oldSwapchain != VK_NULL_HANDLE;
-    if (vkCreateSwapchainKHR(context.device, &createInfo, nullptr, &swapchain) != VK_SUCCESS) return false;
-
-    if (vkGetSwapchainImagesKHR(context.device, swapchain, &imageCount, nullptr) != VK_SUCCESS || imageCount < minimumImageCount) {
-        vkDestroySwapchainKHR(context.device, swapchain, nullptr);
-        return false;
-    }
-
-    std::vector<VkImage> images(imageCount);
-    if (vkGetSwapchainImagesKHR(context.device, swapchain, &imageCount, images.data()) != VK_SUCCESS) {
-        vkDestroySwapchainKHR(context.device, swapchain, nullptr);
-        return false;
-    }
-    images.resize(imageCount);
-
+    if (!status.Check(vkCreateSwapchainKHR(context.device, &createInfo, nullptr, &swapchain), "vkCreateSwapchainKHR")) return false;
     std::vector<VkImageView> imageViews;
-    imageViews.reserve(images.size());
-    try {
-        for (VkImage image : images) {
-            imageViews.push_back(CreateImageView(context.device, image, surfaceFormat.format));
+    struct PendingSwapchain {
+        VkDevice device;
+        VkSwapchainKHR handle;
+        std::vector<VkImageView>& views;
+        ~PendingSwapchain() {
+            if (handle == VK_NULL_HANDLE) return;
+            for (VkImageView view : views) vkDestroyImageView(device, view, nullptr);
+            vkDestroySwapchainKHR(device, handle, nullptr);
         }
-    } catch (...) {
-        for (VkImageView imageView : imageViews) vkDestroyImageView(context.device, imageView, nullptr);
-        vkDestroySwapchainKHR(context.device, swapchain, nullptr);
-        return false;
+    } pending{context.device, swapchain, imageViews};
+    if (!status.Check(vkGetSwapchainImagesKHR(context.device, swapchain, &imageCount, nullptr), "vkGetSwapchainImagesKHR(count)") ||
+        imageCount < minimumImageCount) return false;
+    std::vector<VkImage> images(imageCount);
+    if (!status.Check(vkGetSwapchainImagesKHR(context.device, swapchain, &imageCount, images.data()), "vkGetSwapchainImagesKHR(images)")) return false;
+    if (imageCount < minimumImageCount) return false;
+    images.resize(imageCount);
+    imageViews.reserve(images.size());
+    for (VkImage image : images) {
+        VkImageView view = VK_NULL_HANDLE;
+        if (!status.Check(CreateImageView(context.device, image, surfaceFormat.format, view), "vkCreateImageView(swapchain)")) return false;
+        imageViews.push_back(view);
     }
 
     m_swapchain = swapchain;
@@ -165,6 +154,7 @@ bool VulkanSwapchain::Initialize(
     m_swapchainImageViews = std::move(imageViews);
     m_swapchainImageFormat = surfaceFormat.format;
     m_swapchainExtent = extent;
+    pending.handle = VK_NULL_HANDLE;
     return true;
 }
 
@@ -183,15 +173,15 @@ void VulkanSwapchain::Cleanup(VkDevice device) {
     m_swapchainExtent = {};
 }
 
-VulkanSwapchain::SwapchainSupportDetails VulkanSwapchain::QuerySwapchainSupport(VkPhysicalDevice device, VkSurfaceKHR surface) {
+VulkanSwapchain::SwapchainSupportDetails VulkanSwapchain::QuerySwapchainSupport(VkPhysicalDevice device, VkSurfaceKHR surface, InitializationStatus& status) {
     SwapchainSupportDetails details{};
-    if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities) != VK_SUCCESS) return details;
+    if (!status.Check(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, &details.capabilities), "vkGetPhysicalDeviceSurfaceCapabilitiesKHR")) return details;
 
     uint32_t formatCount = 0;
-    if (vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nullptr) != VK_SUCCESS) return details;
+    if (!status.Check(vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, nullptr), "vkGetPhysicalDeviceSurfaceFormatsKHR(count)")) return details;
     if (formatCount != 0) {
         details.formats.resize(formatCount);
-        if (vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, details.formats.data()) != VK_SUCCESS) {
+        if (!status.Check(vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &formatCount, details.formats.data()), "vkGetPhysicalDeviceSurfaceFormatsKHR(formats)")) {
             details.formats.clear();
             return details;
         }
@@ -199,10 +189,10 @@ VulkanSwapchain::SwapchainSupportDetails VulkanSwapchain::QuerySwapchainSupport(
     }
 
     uint32_t presentModeCount = 0;
-    if (vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, nullptr) != VK_SUCCESS) return details;
+    if (!status.Check(vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, nullptr), "vkGetPhysicalDeviceSurfacePresentModesKHR(count)")) return details;
     if (presentModeCount != 0) {
         details.presentModes.resize(presentModeCount);
-        if (vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, details.presentModes.data()) != VK_SUCCESS) {
+        if (!status.Check(vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, &presentModeCount, details.presentModes.data()), "vkGetPhysicalDeviceSurfacePresentModesKHR(modes)")) {
             details.presentModes.clear();
             return details;
         }
@@ -215,41 +205,20 @@ VulkanSwapchain::SwapchainSupportDetails VulkanSwapchain::QuerySwapchainSupport(
 bool VulkanSwapchain::ChooseSwapSurfaceFormat(
     const std::vector<VkSurfaceFormatKHR>& availableFormats,
     VkFormat requestedFormat,
+    VkColorSpaceKHR requestedColorSpace,
     VkSurfaceFormatKHR& selectedFormat)
 {
-    if (availableFormats.empty()) return false;
-    if (requestedFormat == VK_FORMAT_UNDEFINED) {
-        if (availableFormats.size() == 1 && availableFormats.front().format == VK_FORMAT_UNDEFINED) {
-            selectedFormat = availableFormats.front();
-            selectedFormat.format = VK_FORMAT_B8G8R8A8_UNORM;
+    if (requestedFormat == VK_FORMAT_UNDEFINED) return false;
+    for (const auto& format : availableFormats)
+    {
+        if ((format.format == requestedFormat || format.format == VK_FORMAT_UNDEFINED) &&
+            format.colorSpace == requestedColorSpace)
+        {
+            selectedFormat = {requestedFormat, requestedColorSpace};
             return true;
         }
-
-        const auto it = std::find_if(availableFormats.begin(), availableFormats.end(), [](const VkSurfaceFormatKHR& format) {
-            return format.format == VK_FORMAT_R8G8B8A8_UNORM ||
-                format.format == VK_FORMAT_B8G8R8A8_UNORM ||
-                format.format == VK_FORMAT_R8G8B8A8_SRGB ||
-                format.format == VK_FORMAT_B8G8R8A8_SRGB ||
-                format.format == VK_FORMAT_R16G16B16A16_SFLOAT ||
-                format.format == VK_FORMAT_R32G32B32A32_SFLOAT;
-        });
-        if (it == availableFormats.end()) return false;
-        selectedFormat = *it;
-        return true;
     }
-
-    if (availableFormats.size() == 1 && availableFormats.front().format == VK_FORMAT_UNDEFINED) {
-        selectedFormat = availableFormats.front();
-        selectedFormat.format = requestedFormat;
-        return true;
-    }
-
-    const auto it = std::find_if(availableFormats.begin(), availableFormats.end(), [requestedFormat](const VkSurfaceFormatKHR& format) {
-        return format.format == requestedFormat;
-    });
-    if (it == availableFormats.end()) return false;
-    selectedFormat = *it;
-    return true;
+    return false;
 }
 
 bool VulkanSwapchain::ChoosePresentMode(
@@ -266,10 +235,12 @@ bool VulkanSwapchain::ChoosePresentMode(
 bool VulkanSwapchain::ChooseSwapExtent(
     const VkSurfaceCapabilitiesKHR& capabilities,
     void* windowHandle,
-    VkExtent2D& selectedExtent)
+    VkExtent2D& selectedExtent,
+    InitializationStatus& status)
 {
     if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
         selectedExtent = capabilities.currentExtent;
+        status.retryLater = selectedExtent.width == 0 || selectedExtent.height == 0;
         return selectedExtent.width > 0 && selectedExtent.height > 0;
     } else {
         int width = 0;
@@ -285,7 +256,7 @@ bool VulkanSwapchain::ChooseSwapExtent(
         if (windowHandle == nullptr) return false;
         glfwGetFramebufferSize(static_cast<GLFWwindow*>(windowHandle), &width, &height);
 #endif
-        if (width <= 0 || height <= 0) return false;
+        if (width <= 0 || height <= 0) {status.retryLater = true; return false;}
 
         selectedExtent = {
             static_cast<uint32_t>(width),
@@ -295,7 +266,8 @@ bool VulkanSwapchain::ChooseSwapExtent(
         selectedExtent.width = std::clamp(selectedExtent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
         selectedExtent.height = std::clamp(selectedExtent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
 
-        return selectedExtent.width > 0 && selectedExtent.height > 0;
+        status.retryLater = selectedExtent.width == 0 || selectedExtent.height == 0;
+        return !status.retryLater;
     }
 }
 

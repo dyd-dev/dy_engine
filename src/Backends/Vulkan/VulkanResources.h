@@ -1,25 +1,25 @@
 #pragma once
 
-#include "RHI/Buffer.h"
-#include "RHI/ResourceState.h"
-#include "RHI/Texture.h"
+#include "dyf/RHI/Buffer.h"
+#include "dyf/RHI/ResourceState.h"
+#include "dyf/RHI/Texture.h"
 #include "VulkanContext.h"
 
 #include <vector>
 
-namespace dy::Backends
+namespace dyf::Backends
 {
 	struct VulkanObjectDeleter;
 
-	class VulkanBuffer final : public dy::RHI::Buffer
+	class VulkanBuffer final : public dyf::RHI::Buffer
 	{
 	public:
-		VulkanBuffer(const VulkanContext& context, const dy::RHI::BufferDesc& desc);
+		VulkanBuffer(const VulkanContext& context, const dyf::RHI::BufferDesc& desc);
 
 		[[nodiscard]] VkBuffer GetHandle() const { return m_buffer; }
-		[[nodiscard]] bool IsStateAllowed(dy::RHI::ResourceState state) const;
-		[[nodiscard]] dy::RHI::ResourceState GetState() const { return m_state; }
-		void SetState(dy::RHI::ResourceState state) { m_state = state; }
+		[[nodiscard]] bool IsStateAllowed(dyf::RHI::ResourceState state) const;
+		[[nodiscard]] dyf::RHI::ResourceState GetState() const { return m_state; }
+		void SetState(dyf::RHI::ResourceState state) { m_state = state; }
 
 	private:
 		friend struct VulkanObjectDeleter;
@@ -29,26 +29,26 @@ namespace dy::Backends
 		VkDevice m_device = VK_NULL_HANDLE;
 		VkBuffer m_buffer = VK_NULL_HANDLE;
 		VkDeviceMemory m_memory = VK_NULL_HANDLE;
-		dy::RHI::ResourceState m_state = dy::RHI::ResourceState::Undefined;
+		dyf::RHI::ResourceState m_state = dyf::RHI::ResourceState::Undefined;
 	};
 
-	class VulkanTexture final : public dy::RHI::Texture
+	class VulkanTexture final : public dyf::RHI::Texture
 	{
 	public:
-		VulkanTexture(const VulkanContext& context, const dy::RHI::TextureDesc& desc);
-		VulkanTexture(const dy::RHI::TextureDesc& desc, VkImage image, VkImageView imageView);
+		VulkanTexture(const VulkanContext& context, const dyf::RHI::TextureDesc& desc);
+		VulkanTexture(const dyf::RHI::TextureDesc& desc, VkImage image, VkImageView imageView);
 
 		[[nodiscard]] VkImage GetImage() const { return m_image; }
 		[[nodiscard]] VkImageView GetImageView() const { return m_imageView; }
 		[[nodiscard]] VkImageAspectFlags GetAspectMask() const { return m_aspectMask; }
 		[[nodiscard]] bool IsSwapchainImage() const { return !m_ownsImage; }
-		[[nodiscard]] bool IsStateAllowed(dy::RHI::ResourceState state) const;
-		[[nodiscard]] dy::RHI::ResourceState GetState(uint32_t mipLevel, uint32_t arrayLayer) const;
-		void SetState(uint32_t mipLevel, uint32_t arrayLayer, dy::RHI::ResourceState state);
+		[[nodiscard]] bool IsStateAllowed(dyf::RHI::ResourceState state) const;
+		[[nodiscard]] dyf::RHI::ResourceState GetState(uint32_t mipLevel, uint32_t arrayLayer) const;
+		void SetState(uint32_t mipLevel, uint32_t arrayLayer, dyf::RHI::ResourceState state);
 		[[nodiscard]] VkImageView GetSubresourceView(uint32_t mipLevel, uint32_t arrayLayer);
-		[[nodiscard]] VkImageView GetResourceView(const dy::RHI::TextureSubresourceRange& subresources);
-		[[nodiscard]] VkImageLayout GetBarrierOldLayout(dy::RHI::ResourceState state) const;
-		void MarkPresented() { m_hasPresented = true; }
+		[[nodiscard]] VkImageView GetResourceView(const dyf::RHI::TextureSubresourceRange& subresources, bool sampled = false);
+		[[nodiscard]] VkImageLayout GetBarrierOldLayout(dyf::RHI::ResourceState state) const;
+		void MarkLayoutInitialized() { m_hasKnownLayout = true; }
 
 	private:
 		friend struct VulkanObjectDeleter;
@@ -62,16 +62,17 @@ namespace dy::Backends
 		VkImageAspectFlags m_aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 		struct ResourceView
 		{
-			dy::RHI::TextureSubresourceRange subresources = {};
+			dyf::RHI::TextureSubresourceRange subresources = {};
+			VkImageAspectFlags aspectMask = 0;
 			VkImageView view = VK_NULL_HANDLE;
 		};
 		std::vector<ResourceView> m_resourceViews;
-		std::vector<dy::RHI::ResourceState> m_states;
+		std::vector<dyf::RHI::ResourceState> m_states;
 		bool m_ownsImage = false;
-		bool m_hasPresented = false;
+		bool m_hasKnownLayout = false;
 	};
 
-	[[nodiscard]] VkFormat ToVulkanFormat(dy::RHI::Format format);
-	[[nodiscard]] dy::RHI::Format FromVulkanColorFormat(VkFormat format);
-	[[nodiscard]] VkImageLayout ToVulkanImageLayout(dy::RHI::ResourceState state);
+	[[nodiscard]] VkFormat ToVulkanFormat(dyf::RHI::Format format);
+	[[nodiscard]] dyf::RHI::Format FromVulkanColorFormat(VkFormat format);
+	[[nodiscard]] VkImageLayout ToVulkanImageLayout(dyf::RHI::ResourceState state);
 }

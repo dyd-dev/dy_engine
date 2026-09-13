@@ -1,6 +1,7 @@
 #include "VulkanPipeline.h"
 
 #include "VulkanResources.h"
+#include "RHI/Validation.h"
 
 #include <algorithm>
 #include <array>
@@ -10,85 +11,86 @@
 #include <set>
 #include <stdexcept>
 
-namespace dy::Backends
+namespace dyf::Backends
 {
 	namespace
 	{
-		VkShaderStageFlags ToShaderStages(dy::RHI::ShaderStageFlags stages)
+		VkShaderStageFlags ToShaderStages(dyf::RHI::ShaderStageFlags stages)
 		{
 			VkShaderStageFlags result = 0;
-			if ((stages & dy::RHI::ShaderStageFlags::Vertex) != dy::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_VERTEX_BIT;
-			if ((stages & dy::RHI::ShaderStageFlags::Fragment) != dy::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_FRAGMENT_BIT;
+			if ((stages & dyf::RHI::ShaderStageFlags::Vertex) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_VERTEX_BIT;
+			if ((stages & dyf::RHI::ShaderStageFlags::Fragment) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_FRAGMENT_BIT;
+            if((stages & RHI::ShaderStageFlags::Compute)!=RHI::ShaderStageFlags::None)result|=VK_SHADER_STAGE_COMPUTE_BIT;
 			return result;
 		}
 
-		VkDescriptorType ToDescriptorType(dy::RHI::ResourceBindingType type)
+		VkDescriptorType ToDescriptorType(dyf::RHI::ResourceBindingType type)
 		{
 			switch (type)
 			{
-			case dy::RHI::ResourceBindingType::ConstantBuffer: return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-			case dy::RHI::ResourceBindingType::ReadOnlyStorageBuffer:
-			case dy::RHI::ResourceBindingType::ReadWriteStorageBuffer:
+			case dyf::RHI::ResourceBindingType::ConstantBuffer: return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+			case dyf::RHI::ResourceBindingType::ReadOnlyStorageBuffer:
+			case dyf::RHI::ResourceBindingType::ReadWriteStorageBuffer:
 				return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-			case dy::RHI::ResourceBindingType::SampledTexture: return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-			case dy::RHI::ResourceBindingType::StorageTexture: return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-			case dy::RHI::ResourceBindingType::StaticSampler: return VK_DESCRIPTOR_TYPE_SAMPLER;
+			case dyf::RHI::ResourceBindingType::SampledTexture: return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+			case dyf::RHI::ResourceBindingType::StorageTexture: return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+			case dyf::RHI::ResourceBindingType::StaticSampler: return VK_DESCRIPTOR_TYPE_SAMPLER;
 			default: throw std::runtime_error("Unsupported Vulkan resource binding type");
 			}
 		}
 
-		VkFilter ToFilter(dy::RHI::SamplerFilter filter)
+		VkFilter ToFilter(dyf::RHI::SamplerFilter filter)
 		{
 			switch (filter)
 			{
-			case dy::RHI::SamplerFilter::Nearest: return VK_FILTER_NEAREST;
-			case dy::RHI::SamplerFilter::Linear: return VK_FILTER_LINEAR;
+			case dyf::RHI::SamplerFilter::Nearest: return VK_FILTER_NEAREST;
+			case dyf::RHI::SamplerFilter::Linear: return VK_FILTER_LINEAR;
 			default: throw std::runtime_error("Vulkan sampler filter is undefined");
 			}
 		}
 
-		VkSamplerMipmapMode ToMipmapMode(dy::RHI::SamplerFilter filter)
+		VkSamplerMipmapMode ToMipmapMode(dyf::RHI::SamplerFilter filter)
 		{
 			switch (filter)
 			{
-			case dy::RHI::SamplerFilter::Nearest: return VK_SAMPLER_MIPMAP_MODE_NEAREST;
-			case dy::RHI::SamplerFilter::Linear: return VK_SAMPLER_MIPMAP_MODE_LINEAR;
+			case dyf::RHI::SamplerFilter::Nearest: return VK_SAMPLER_MIPMAP_MODE_NEAREST;
+			case dyf::RHI::SamplerFilter::Linear: return VK_SAMPLER_MIPMAP_MODE_LINEAR;
 			default: throw std::runtime_error("Vulkan sampler mip filter is undefined");
 			}
 		}
 
-		VkSamplerAddressMode ToAddressMode(dy::RHI::SamplerAddressMode mode)
+		VkSamplerAddressMode ToAddressMode(dyf::RHI::SamplerAddressMode mode)
 		{
 			switch (mode)
 			{
-			case dy::RHI::SamplerAddressMode::Repeat: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
-			case dy::RHI::SamplerAddressMode::MirroredRepeat: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
-			case dy::RHI::SamplerAddressMode::ClampToEdge: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-			case dy::RHI::SamplerAddressMode::ClampToBorder: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+			case dyf::RHI::SamplerAddressMode::Repeat: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+			case dyf::RHI::SamplerAddressMode::MirroredRepeat: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+			case dyf::RHI::SamplerAddressMode::ClampToEdge: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+			case dyf::RHI::SamplerAddressMode::ClampToBorder: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
 			default: throw std::runtime_error("Vulkan sampler address mode is undefined");
 			}
 		}
 
-		VkBorderColor ToBorderColor(dy::RHI::SamplerBorderColor color)
+		VkBorderColor ToBorderColor(dyf::RHI::SamplerBorderColor color)
 		{
 			switch (color)
 			{
-			case dy::RHI::SamplerBorderColor::TransparentBlack: return VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
-			case dy::RHI::SamplerBorderColor::OpaqueBlack: return VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
-			case dy::RHI::SamplerBorderColor::OpaqueWhite: return VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+			case dyf::RHI::SamplerBorderColor::TransparentBlack: return VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+			case dyf::RHI::SamplerBorderColor::OpaqueBlack: return VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+			case dyf::RHI::SamplerBorderColor::OpaqueWhite: return VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
 			default: throw std::runtime_error("Vulkan sampler border color is undefined");
 			}
 		}
 
-		VkSampler CreateSampler(const VulkanContext& context, const dy::RHI::SamplerDesc& desc)
+		VkSampler CreateSampler(const VulkanContext& context, const dyf::RHI::SamplerDesc& desc)
 		{
-			const bool usesBorder = desc.addressU == dy::RHI::SamplerAddressMode::ClampToBorder ||
-				desc.addressV == dy::RHI::SamplerAddressMode::ClampToBorder ||
-				desc.addressW == dy::RHI::SamplerAddressMode::ClampToBorder;
+			const bool usesBorder = desc.addressU == dyf::RHI::SamplerAddressMode::ClampToBorder ||
+				desc.addressV == dyf::RHI::SamplerAddressMode::ClampToBorder ||
+				desc.addressW == dyf::RHI::SamplerAddressMode::ClampToBorder;
 			if (desc.maxAnisotropy == 0 ||
 				!std::isfinite(desc.mipLodBias) || !std::isfinite(desc.minLod) || !std::isfinite(desc.maxLod) ||
 				desc.minLod > desc.maxLod ||
-				(usesBorder && desc.borderColor == dy::RHI::SamplerBorderColor::Undefined))
+				(usesBorder && desc.borderColor == dyf::RHI::SamplerBorderColor::Undefined))
 			{
 				throw std::runtime_error("Invalid Vulkan static sampler description");
 			}
@@ -127,82 +129,84 @@ namespace dy::Backends
 			return sampler;
 		}
 
-		VkPrimitiveTopology ToTopology(dy::RHI::PrimitiveTopology topology)
+		VkPrimitiveTopology ToTopology(dyf::RHI::PrimitiveTopology topology)
 		{
 			switch (topology)
 			{
-			case dy::RHI::PrimitiveTopology::PointList: return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
-			case dy::RHI::PrimitiveTopology::LineList: return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
-			case dy::RHI::PrimitiveTopology::TriangleList: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-			case dy::RHI::PrimitiveTopology::TriangleStrip: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+			case dyf::RHI::PrimitiveTopology::PointList: return VK_PRIMITIVE_TOPOLOGY_POINT_LIST;
+			case dyf::RHI::PrimitiveTopology::LineList: return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+			case dyf::RHI::PrimitiveTopology::TriangleList: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+			case dyf::RHI::PrimitiveTopology::TriangleStrip: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
 			default: throw std::runtime_error("Vulkan primitive topology is undefined");
 			}
 		}
 
-		VkPolygonMode ToPolygonMode(dy::RHI::FillMode mode)
+		VkPolygonMode ToPolygonMode(dyf::RHI::FillMode mode)
 		{
 			switch (mode)
 			{
-			case dy::RHI::FillMode::Solid: return VK_POLYGON_MODE_FILL;
-			case dy::RHI::FillMode::Wireframe: return VK_POLYGON_MODE_LINE;
+			case dyf::RHI::FillMode::Solid: return VK_POLYGON_MODE_FILL;
+			case dyf::RHI::FillMode::Wireframe: return VK_POLYGON_MODE_LINE;
 			default: throw std::runtime_error("Vulkan fill mode is undefined");
 			}
 		}
 
-		VkCullModeFlags ToCullMode(dy::RHI::CullMode mode)
+		VkCullModeFlags ToCullMode(dyf::RHI::CullMode mode)
 		{
 			switch (mode)
 			{
-			case dy::RHI::CullMode::None: return VK_CULL_MODE_NONE;
-			case dy::RHI::CullMode::Front: return VK_CULL_MODE_FRONT_BIT;
-			case dy::RHI::CullMode::Back: return VK_CULL_MODE_BACK_BIT;
+			case dyf::RHI::CullMode::None: return VK_CULL_MODE_NONE;
+			case dyf::RHI::CullMode::Front: return VK_CULL_MODE_FRONT_BIT;
+			case dyf::RHI::CullMode::Back: return VK_CULL_MODE_BACK_BIT;
 			default: throw std::runtime_error("Vulkan cull mode is undefined");
 			}
 		}
 
-		VkFrontFace ToFrontFace(dy::RHI::FrontFace face)
+		VkFrontFace ToFrontFace(dyf::RHI::FrontFace face)
 		{
 			switch (face)
 			{
-			case dy::RHI::FrontFace::CounterClockwise: return VK_FRONT_FACE_CLOCKWISE;
-			case dy::RHI::FrontFace::Clockwise: return VK_FRONT_FACE_COUNTER_CLOCKWISE;
+			// 음수 viewport 높이가 RHI의 위쪽 원점 좌표계를 맞춘다.
+			// 앞면 열거값까지 뒤집으면 D3D12와 반대 면을 제거하게 된다.
+			case dyf::RHI::FrontFace::CounterClockwise: return VK_FRONT_FACE_COUNTER_CLOCKWISE;
+			case dyf::RHI::FrontFace::Clockwise: return VK_FRONT_FACE_CLOCKWISE;
 			default: throw std::runtime_error("Vulkan front face is undefined");
 			}
 		}
 
-		VkCompareOp ToCompareOp(dy::RHI::CompareOp op)
+		VkCompareOp ToCompareOp(dyf::RHI::CompareOp op)
 		{
 			switch (op)
 			{
-			case dy::RHI::CompareOp::Never: return VK_COMPARE_OP_NEVER;
-			case dy::RHI::CompareOp::Less: return VK_COMPARE_OP_LESS;
-			case dy::RHI::CompareOp::Equal: return VK_COMPARE_OP_EQUAL;
-			case dy::RHI::CompareOp::LessEqual: return VK_COMPARE_OP_LESS_OR_EQUAL;
-			case dy::RHI::CompareOp::Greater: return VK_COMPARE_OP_GREATER;
-			case dy::RHI::CompareOp::NotEqual: return VK_COMPARE_OP_NOT_EQUAL;
-			case dy::RHI::CompareOp::GreaterEqual: return VK_COMPARE_OP_GREATER_OR_EQUAL;
-			case dy::RHI::CompareOp::Always: return VK_COMPARE_OP_ALWAYS;
+			case dyf::RHI::CompareOp::Never: return VK_COMPARE_OP_NEVER;
+			case dyf::RHI::CompareOp::Less: return VK_COMPARE_OP_LESS;
+			case dyf::RHI::CompareOp::Equal: return VK_COMPARE_OP_EQUAL;
+			case dyf::RHI::CompareOp::LessEqual: return VK_COMPARE_OP_LESS_OR_EQUAL;
+			case dyf::RHI::CompareOp::Greater: return VK_COMPARE_OP_GREATER;
+			case dyf::RHI::CompareOp::NotEqual: return VK_COMPARE_OP_NOT_EQUAL;
+			case dyf::RHI::CompareOp::GreaterEqual: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+			case dyf::RHI::CompareOp::Always: return VK_COMPARE_OP_ALWAYS;
 			default: throw std::runtime_error("Vulkan compare operation is undefined");
 			}
 		}
 
-		VkStencilOp ToStencilOp(dy::RHI::StencilOp op)
+		VkStencilOp ToStencilOp(dyf::RHI::StencilOp op)
 		{
 			switch (op)
 			{
-			case dy::RHI::StencilOp::Keep: return VK_STENCIL_OP_KEEP;
-			case dy::RHI::StencilOp::Zero: return VK_STENCIL_OP_ZERO;
-			case dy::RHI::StencilOp::Replace: return VK_STENCIL_OP_REPLACE;
-			case dy::RHI::StencilOp::IncrementClamp: return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
-			case dy::RHI::StencilOp::DecrementClamp: return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
-			case dy::RHI::StencilOp::Invert: return VK_STENCIL_OP_INVERT;
-			case dy::RHI::StencilOp::IncrementWrap: return VK_STENCIL_OP_INCREMENT_AND_WRAP;
-			case dy::RHI::StencilOp::DecrementWrap: return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+			case dyf::RHI::StencilOp::Keep: return VK_STENCIL_OP_KEEP;
+			case dyf::RHI::StencilOp::Zero: return VK_STENCIL_OP_ZERO;
+			case dyf::RHI::StencilOp::Replace: return VK_STENCIL_OP_REPLACE;
+			case dyf::RHI::StencilOp::IncrementClamp: return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+			case dyf::RHI::StencilOp::DecrementClamp: return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+			case dyf::RHI::StencilOp::Invert: return VK_STENCIL_OP_INVERT;
+			case dyf::RHI::StencilOp::IncrementWrap: return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+			case dyf::RHI::StencilOp::DecrementWrap: return VK_STENCIL_OP_DECREMENT_AND_WRAP;
 			default: throw std::runtime_error("Vulkan stencil operation is undefined");
 			}
 		}
 
-		VkStencilOpState ToStencilState(const dy::RHI::StencilFaceState& state, uint8_t readMask, uint8_t writeMask)
+		VkStencilOpState ToStencilState(const dyf::RHI::StencilFaceState& state, uint8_t readMask, uint8_t writeMask)
 		{
 			VkStencilOpState result{};
 			result.failOp = ToStencilOp(state.failOp);
@@ -214,64 +218,64 @@ namespace dy::Backends
 			return result;
 		}
 
-		VkBlendFactor ToBlendFactor(dy::RHI::BlendFactor factor)
+		VkBlendFactor ToBlendFactor(dyf::RHI::BlendFactor factor)
 		{
 			switch (factor)
 			{
-			case dy::RHI::BlendFactor::Zero: return VK_BLEND_FACTOR_ZERO;
-			case dy::RHI::BlendFactor::One: return VK_BLEND_FACTOR_ONE;
-			case dy::RHI::BlendFactor::SourceColor: return VK_BLEND_FACTOR_SRC_COLOR;
-			case dy::RHI::BlendFactor::OneMinusSourceColor: return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
-			case dy::RHI::BlendFactor::DestinationColor: return VK_BLEND_FACTOR_DST_COLOR;
-			case dy::RHI::BlendFactor::OneMinusDestinationColor: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
-			case dy::RHI::BlendFactor::SourceAlpha: return VK_BLEND_FACTOR_SRC_ALPHA;
-			case dy::RHI::BlendFactor::OneMinusSourceAlpha: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
-			case dy::RHI::BlendFactor::DestinationAlpha: return VK_BLEND_FACTOR_DST_ALPHA;
-			case dy::RHI::BlendFactor::OneMinusDestinationAlpha: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+			case dyf::RHI::BlendFactor::Zero: return VK_BLEND_FACTOR_ZERO;
+			case dyf::RHI::BlendFactor::One: return VK_BLEND_FACTOR_ONE;
+			case dyf::RHI::BlendFactor::SourceColor: return VK_BLEND_FACTOR_SRC_COLOR;
+			case dyf::RHI::BlendFactor::OneMinusSourceColor: return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+			case dyf::RHI::BlendFactor::DestinationColor: return VK_BLEND_FACTOR_DST_COLOR;
+			case dyf::RHI::BlendFactor::OneMinusDestinationColor: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+			case dyf::RHI::BlendFactor::SourceAlpha: return VK_BLEND_FACTOR_SRC_ALPHA;
+			case dyf::RHI::BlendFactor::OneMinusSourceAlpha: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+			case dyf::RHI::BlendFactor::DestinationAlpha: return VK_BLEND_FACTOR_DST_ALPHA;
+			case dyf::RHI::BlendFactor::OneMinusDestinationAlpha: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
 			default: throw std::runtime_error("Vulkan blend factor is undefined");
 			}
 		}
 
-		VkBlendOp ToBlendOp(dy::RHI::BlendOp op)
+		VkBlendOp ToBlendOp(dyf::RHI::BlendOp op)
 		{
 			switch (op)
 			{
-			case dy::RHI::BlendOp::Add: return VK_BLEND_OP_ADD;
-			case dy::RHI::BlendOp::Subtract: return VK_BLEND_OP_SUBTRACT;
-			case dy::RHI::BlendOp::ReverseSubtract: return VK_BLEND_OP_REVERSE_SUBTRACT;
-			case dy::RHI::BlendOp::Min: return VK_BLEND_OP_MIN;
-			case dy::RHI::BlendOp::Max: return VK_BLEND_OP_MAX;
+			case dyf::RHI::BlendOp::Add: return VK_BLEND_OP_ADD;
+			case dyf::RHI::BlendOp::Subtract: return VK_BLEND_OP_SUBTRACT;
+			case dyf::RHI::BlendOp::ReverseSubtract: return VK_BLEND_OP_REVERSE_SUBTRACT;
+			case dyf::RHI::BlendOp::Min: return VK_BLEND_OP_MIN;
+			case dyf::RHI::BlendOp::Max: return VK_BLEND_OP_MAX;
 			default: throw std::runtime_error("Vulkan blend operation is undefined");
 			}
 		}
 
-		VkColorComponentFlags ToColorWriteMask(dy::RHI::ColorWriteMask mask)
+		VkColorComponentFlags ToColorWriteMask(dyf::RHI::ColorWriteMask mask)
 		{
 			const uint8_t value = static_cast<uint8_t>(mask);
 			VkColorComponentFlags result = 0;
-			if ((value & static_cast<uint8_t>(dy::RHI::ColorWriteMask::Red)) != 0) result |= VK_COLOR_COMPONENT_R_BIT;
-			if ((value & static_cast<uint8_t>(dy::RHI::ColorWriteMask::Green)) != 0) result |= VK_COLOR_COMPONENT_G_BIT;
-			if ((value & static_cast<uint8_t>(dy::RHI::ColorWriteMask::Blue)) != 0) result |= VK_COLOR_COMPONENT_B_BIT;
-			if ((value & static_cast<uint8_t>(dy::RHI::ColorWriteMask::Alpha)) != 0) result |= VK_COLOR_COMPONENT_A_BIT;
+			if ((value & static_cast<uint8_t>(dyf::RHI::ColorWriteMask::Red)) != 0) result |= VK_COLOR_COMPONENT_R_BIT;
+			if ((value & static_cast<uint8_t>(dyf::RHI::ColorWriteMask::Green)) != 0) result |= VK_COLOR_COMPONENT_G_BIT;
+			if ((value & static_cast<uint8_t>(dyf::RHI::ColorWriteMask::Blue)) != 0) result |= VK_COLOR_COMPONENT_B_BIT;
+			if ((value & static_cast<uint8_t>(dyf::RHI::ColorWriteMask::Alpha)) != 0) result |= VK_COLOR_COMPONENT_A_BIT;
 			return result;
 		}
 
-		VkVertexInputRate ToInputRate(dy::RHI::VertexStepMode mode)
+		VkVertexInputRate ToInputRate(dyf::RHI::VertexStepMode mode)
 		{
 			switch (mode)
 			{
-			case dy::RHI::VertexStepMode::Vertex: return VK_VERTEX_INPUT_RATE_VERTEX;
-			case dy::RHI::VertexStepMode::Instance: return VK_VERTEX_INPUT_RATE_INSTANCE;
+			case dyf::RHI::VertexStepMode::Vertex: return VK_VERTEX_INPUT_RATE_VERTEX;
+			case dyf::RHI::VertexStepMode::Instance: return VK_VERTEX_INPUT_RATE_INSTANCE;
 			default: throw std::runtime_error("Vulkan vertex step mode is undefined");
 			}
 		}
 	}
 
-	VulkanShader::VulkanShader(const VulkanContext& context, const dy::RHI::ShaderDesc& desc)
-		: dy::RHI::Shader(desc)
+	VulkanShader::VulkanShader(const VulkanContext& context, const dyf::RHI::ShaderDesc& desc)
+		: dyf::RHI::Shader(desc)
 		, m_device(context.device)
 	{
-		if (desc.stage == dy::RHI::ShaderStage::Unknown || desc.entryPoint == nullptr || desc.entryPoint[0] == '\0' ||
+		if (desc.stage == dyf::RHI::ShaderStage::Unknown || desc.entryPoint == nullptr || desc.entryPoint[0] == '\0' ||
 			desc.binary == nullptr || desc.binarySize == 0 || (desc.binarySize % sizeof(uint32_t)) != 0)
 		{
 			throw std::runtime_error("Invalid Vulkan shader description");
@@ -296,8 +300,8 @@ namespace dy::Backends
 		if (m_module != VK_NULL_HANDLE) vkDestroyShaderModule(m_device, m_module, nullptr);
 	}
 
-	VulkanPipeline::VulkanPipeline(const VulkanContext& context, const dy::RHI::GraphicsPipelineDesc& desc)
-		: dy::RHI::Pipeline(desc.layout)
+	VulkanPipeline::VulkanPipeline(const VulkanContext& context, const dyf::RHI::GraphicsPipelineDesc& desc)
+		: dyf::RHI::Pipeline(desc.layout)
 		, m_device(context.device)
 		, m_usesStencil(desc.depthStencil.stencilEnabled)
 		, m_requiresDepthWrite(desc.depthStencil.depthWriteEnabled || desc.depthStencil.stencilEnabled)
@@ -315,12 +319,35 @@ namespace dy::Backends
 		}
 	}
 
+
+VulkanPipeline::VulkanPipeline(const VulkanContext& context,const RHI::ComputePipelineDesc& desc)
+    : RHI::Pipeline(desc.layout,true),m_device(context.device)
+{
+    try
+    {
+        CreateDescriptorLayouts(context,desc.layout);
+        CreatePipelineLayout(desc.layout);
+        const auto* shader=dynamic_cast<const VulkanShader*>(desc.computeShader);
+        if(!shader || shader->GetStage()!=RHI::ShaderStage::Compute)throw std::runtime_error("Invalid compute shader.");
+        VkComputePipelineCreateInfo info{};
+        info.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        info.stage.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        info.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT;
+        info.stage.module=shader->GetModule();
+        info.stage.pName=shader->GetEntryPoint();
+        info.layout=m_pipelineLayout;
+        if(vkCreateComputePipelines(m_device,VK_NULL_HANDLE,1,&info,nullptr,&m_pipeline)!=VK_SUCCESS)
+            throw std::runtime_error("Vulkan compute pipeline creation failed.");
+    }
+    catch(...) {Cleanup();throw;}
+}
+
 	VulkanPipeline::~VulkanPipeline()
 	{
 		Cleanup();
 	}
 
-	void VulkanPipeline::CreateDescriptorLayouts(const VulkanContext& context, const dy::RHI::PipelineLayoutDesc& desc)
+	void VulkanPipeline::CreateDescriptorLayouts(const VulkanContext& context, const dyf::RHI::PipelineLayoutDesc& desc)
 	{
 		if (desc.bindingCount > 0 && desc.bindings == nullptr) throw std::runtime_error("Vulkan pipeline bindings are missing");
 		VkPhysicalDeviceProperties properties{};
@@ -337,7 +364,7 @@ namespace dy::Backends
 		std::set<uint32_t> usedBindings;
 		for (uint32_t i = 0; i < desc.bindingCount; ++i)
 		{
-			const dy::RHI::ResourceBindingLayout& source = desc.bindings[i];
+			const dyf::RHI::ResourceBindingLayout& source = desc.bindings[i];
 			if (source.count == 0 || ToShaderStages(source.stages) == 0 || !usedBindings.insert(source.binding).second)
 			{
 				throw std::runtime_error("Invalid or duplicate Vulkan descriptor binding");
@@ -350,7 +377,7 @@ namespace dy::Backends
 			binding.stageFlags = ToShaderStages(source.stages);
 			bindings.push_back(binding);
 			immutableSamplers.emplace_back();
-			if (source.type == dy::RHI::ResourceBindingType::StaticSampler)
+			if (source.type == dyf::RHI::ResourceBindingType::StaticSampler)
 			{
 				const VkSampler sampler = CreateSampler(context, source.staticSampler);
 				m_staticSamplers.push_back(sampler);
@@ -373,7 +400,7 @@ namespace dy::Backends
 		}
 	}
 
-	void VulkanPipeline::CreatePipelineLayout(const dy::RHI::PipelineLayoutDesc& desc)
+	void VulkanPipeline::CreatePipelineLayout(const dyf::RHI::PipelineLayoutDesc& desc)
 	{
 		VkPushConstantRange range{};
 		if (desc.inlineConstantSize > 0)
@@ -396,7 +423,7 @@ namespace dy::Backends
 		}
 	}
 
-	void VulkanPipeline::CreatePipeline(const dy::RHI::GraphicsPipelineDesc& desc)
+	void VulkanPipeline::CreatePipeline(const dyf::RHI::GraphicsPipelineDesc& desc)
 	{
 		if ((desc.vertexBufferCount > 0 && desc.vertexBuffers == nullptr) ||
 			(desc.vertexAttributeCount > 0 && desc.vertexAttributes == nullptr) ||
@@ -409,8 +436,8 @@ namespace dy::Backends
 		}
 		const VulkanShader* vertexShader = dynamic_cast<const VulkanShader*>(desc.vertexShader);
 		const VulkanShader* fragmentShader = dynamic_cast<const VulkanShader*>(desc.fragmentShader);
-		if (vertexShader == nullptr || vertexShader->GetStage() != dy::RHI::ShaderStage::Vertex ||
-			(desc.fragmentShader != nullptr && (fragmentShader == nullptr || fragmentShader->GetStage() != dy::RHI::ShaderStage::Fragment)))
+		if (vertexShader == nullptr || vertexShader->GetStage() != dyf::RHI::ShaderStage::Vertex ||
+			(desc.fragmentShader != nullptr && (fragmentShader == nullptr || fragmentShader->GetStage() != dyf::RHI::ShaderStage::Fragment)))
 		{
 			throw std::runtime_error("Invalid Vulkan graphics shaders");
 		}
@@ -447,7 +474,7 @@ namespace dy::Backends
 		vertexBindings.reserve(desc.vertexBufferCount);
 		for (uint32_t i = 0; i < desc.vertexBufferCount; ++i)
 		{
-			const dy::RHI::VertexBufferLayout& source = desc.vertexBuffers[i];
+			const dyf::RHI::VertexBufferLayout& source = desc.vertexBuffers[i];
 			if (source.stride == 0 || !usedVertexBindings.insert(source.binding).second)
 			{
 				throw std::runtime_error("Invalid Vulkan vertex buffer layout");
@@ -464,7 +491,7 @@ namespace dy::Backends
 		vertexAttributes.reserve(desc.vertexAttributeCount);
 		for (uint32_t i = 0; i < desc.vertexAttributeCount; ++i)
 		{
-			const dy::RHI::VertexAttribute& source = desc.vertexAttributes[i];
+			const dyf::RHI::VertexAttribute& source = desc.vertexAttributes[i];
 			const VkFormat format = ToVulkanFormat(source.format);
 			if (format == VK_FORMAT_UNDEFINED || usedVertexBindings.count(source.binding) == 0 || !usedLocations.insert(source.location).second)
 			{
@@ -511,12 +538,13 @@ namespace dy::Backends
 
 		VkPipelineDepthStencilStateCreateInfo depthStencil{};
 		depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-		depthStencil.depthTestEnable = desc.depthStencil.depthTestEnabled ? VK_TRUE : VK_FALSE;
+		// 비교 없이 깊이만 쓸 때도 네이티브 깊이 단계를 켜고 항상 통과시킨다.
+		depthStencil.depthTestEnable =
+			desc.depthStencil.depthTestEnabled || desc.depthStencil.depthWriteEnabled
+				? VK_TRUE : VK_FALSE;
 		depthStencil.depthWriteEnable = desc.depthStencil.depthWriteEnabled ? VK_TRUE : VK_FALSE;
-		if (desc.depthStencil.depthTestEnabled || desc.depthStencil.depthWriteEnabled)
-		{
-			depthStencil.depthCompareOp = ToCompareOp(desc.depthStencil.depthCompareOp);
-		}
+		depthStencil.depthCompareOp = desc.depthStencil.depthTestEnabled
+			? ToCompareOp(desc.depthStencil.depthCompareOp) : VK_COMPARE_OP_ALWAYS;
 		depthStencil.stencilTestEnable = desc.depthStencil.stencilEnabled ? VK_TRUE : VK_FALSE;
 		if (desc.depthStencil.stencilEnabled)
 		{
@@ -530,7 +558,7 @@ namespace dy::Backends
 		colorFormats.reserve(desc.colorAttachmentCount);
 		for (uint32_t i = 0; i < desc.colorAttachmentCount; ++i)
 		{
-			const dy::RHI::ColorAttachmentDesc& source = desc.colorAttachments[i];
+			const dyf::RHI::ColorAttachmentDesc& source = desc.colorAttachments[i];
 			const VkFormat format = ToVulkanFormat(source.format);
 			if (format == VK_FORMAT_UNDEFINED) throw std::runtime_error("Invalid Vulkan color attachment format");
 			colorFormats.push_back(format);
@@ -572,7 +600,7 @@ namespace dy::Backends
 		rendering.colorAttachmentCount = static_cast<uint32_t>(colorFormats.size());
 		rendering.pColorAttachmentFormats = colorFormats.empty() ? nullptr : colorFormats.data();
 		rendering.depthAttachmentFormat = depthFormat;
-		rendering.stencilAttachmentFormat = desc.depthStencil.format == dy::RHI::Format::D24_UNORM_S8_UINT ? depthFormat : VK_FORMAT_UNDEFINED;
+		rendering.stencilAttachmentFormat = desc.depthStencil.format == dyf::RHI::Format::D24_UNORM_S8_UINT ? depthFormat : VK_FORMAT_UNDEFINED;
 
 		VkGraphicsPipelineCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -607,14 +635,14 @@ namespace dy::Backends
 		m_staticSamplers.clear();
 	}
 
-	VulkanResourceSet::VulkanResourceSet(const VulkanContext& context, const dy::RHI::ResourceSetDesc& desc)
-		: dy::RHI::ResourceSet(desc)
+	VulkanResourceSet::VulkanResourceSet(const VulkanContext& context, const dyf::RHI::ResourceSetDesc& desc)
+		: dyf::RHI::ResourceSet(desc)
 		, m_device(context.device)
 		, m_pipeline(dynamic_cast<VulkanPipeline*>(desc.pipeline))
 	{
 		if (m_pipeline == nullptr) throw std::runtime_error("Invalid Vulkan resource-set pipeline");
 		if (desc.bindingCount > 0 && desc.bindings == nullptr) throw std::runtime_error("Vulkan resource bindings are missing");
-		const dy::RHI::PipelineLayoutDesc& layout = m_pipeline->GetLayout();
+		const dyf::RHI::PipelineLayoutDesc& layout = m_pipeline->GetLayout();
 		const VkDescriptorSetLayout setLayout = m_pipeline->GetSetLayout();
 		if (setLayout == VK_NULL_HANDLE)
 		{
@@ -677,18 +705,18 @@ namespace dy::Backends
 		std::set<std::pair<uint32_t, uint32_t>> provided;
 		for (uint32_t i = 0; i < desc.bindingCount; ++i)
 		{
-			const dy::RHI::ResourceBinding& source = desc.bindings[i];
-			const dy::RHI::ResourceBindingLayout* bindingLayout = nullptr;
+			const dyf::RHI::ResourceBinding& source = desc.bindings[i];
+			const dyf::RHI::ResourceBindingLayout* bindingLayout = nullptr;
 			for (uint32_t j = 0; j < layout.bindingCount; ++j)
 			{
-				const dy::RHI::ResourceBindingLayout& candidate = layout.bindings[j];
+				const dyf::RHI::ResourceBindingLayout& candidate = layout.bindings[j];
 				if (candidate.binding == source.binding)
 				{
 					bindingLayout = &candidate;
 					break;
 				}
 			}
-			if (bindingLayout == nullptr || bindingLayout->type == dy::RHI::ResourceBindingType::StaticSampler ||
+			if (bindingLayout == nullptr || bindingLayout->type == dyf::RHI::ResourceBindingType::StaticSampler ||
 				source.arrayElement >= bindingLayout->count ||
 				!provided.emplace(source.binding, source.arrayElement).second)
 			{
@@ -702,17 +730,17 @@ namespace dy::Backends
 			write.dstArrayElement = source.arrayElement;
 			write.descriptorCount = 1;
 			write.descriptorType = ToDescriptorType(bindingLayout->type);
-			if (bindingLayout->type == dy::RHI::ResourceBindingType::ConstantBuffer ||
-				bindingLayout->type == dy::RHI::ResourceBindingType::ReadOnlyStorageBuffer ||
-				bindingLayout->type == dy::RHI::ResourceBindingType::ReadWriteStorageBuffer)
+			if (bindingLayout->type == dyf::RHI::ResourceBindingType::ConstantBuffer ||
+				bindingLayout->type == dyf::RHI::ResourceBindingType::ReadOnlyStorageBuffer ||
+				bindingLayout->type == dyf::RHI::ResourceBindingType::ReadWriteStorageBuffer)
 			{
 				VulkanBuffer* buffer = dynamic_cast<VulkanBuffer*>(source.buffer);
-				const dy::RHI::BufferUsage requiredUsage = bindingLayout->type == dy::RHI::ResourceBindingType::ConstantBuffer
-					? dy::RHI::BufferUsage::Constant
-					: dy::RHI::BufferUsage::Storage;
+				const dyf::RHI::BufferUsage requiredUsage = bindingLayout->type == dyf::RHI::ResourceBindingType::ConstantBuffer
+					? dyf::RHI::BufferUsage::Constant
+					: dyf::RHI::BufferUsage::Storage;
 				if (buffer == nullptr || source.texture != nullptr || source.size == 0 ||
 					source.offset > buffer->GetDesc().size || source.size > buffer->GetDesc().size - source.offset ||
-					(buffer->GetDesc().usage & requiredUsage) == dy::RHI::BufferUsage::None ||
+					(buffer->GetDesc().usage & requiredUsage) == dyf::RHI::BufferUsage::None ||
 					source.subresources.firstMipLevel != 0 || source.subresources.mipLevelCount != 0 ||
 					source.subresources.firstArrayLayer != 0 || source.subresources.arrayLayerCount != 0)
 				{
@@ -728,17 +756,19 @@ namespace dy::Backends
 			else
 			{
 				VulkanTexture* texture = dynamic_cast<VulkanTexture*>(source.texture);
-				const bool storageTexture = bindingLayout->type == dy::RHI::ResourceBindingType::StorageTexture;
-				const dy::RHI::TextureUsage requiredUsage = storageTexture
-					? dy::RHI::TextureUsage::Storage
-					: dy::RHI::TextureUsage::ShaderResource;
-				const bool validStorageRange = !storageTexture || source.subresources.mipLevelCount == 1;
-				const VkImageView imageView = texture == nullptr || !validStorageRange
+				const bool storageTexture = bindingLayout->type == dyf::RHI::ResourceBindingType::StorageTexture;
+				const dyf::RHI::TextureUsage requiredUsage = storageTexture
+					? dyf::RHI::TextureUsage::Storage
+					: dyf::RHI::TextureUsage::ShaderResource;
+				uint32_t firstMip = 0, mipCount = 0, firstLayer = 0, layerCount = 0;
+				const bool validRange = texture != nullptr && RHI::ResolveBindingSubresources(
+					texture, source, bindingLayout->type, firstMip, mipCount, firstLayer, layerCount);
+				const VkImageView imageView = !validRange
 					? VK_NULL_HANDLE
-					: texture->GetResourceView(source.subresources);
+					: texture->GetResourceView(source.subresources, !storageTexture);
 				if (texture == nullptr || source.buffer != nullptr || source.offset != 0 || source.size != 0 ||
 					imageView == VK_NULL_HANDLE ||
-					(texture->GetDesc().usage & requiredUsage) == dy::RHI::TextureUsage::None)
+					(texture->GetDesc().usage & requiredUsage) == dyf::RHI::TextureUsage::None)
 				{
 					throw std::runtime_error("Invalid Vulkan texture binding");
 				}
@@ -753,8 +783,8 @@ namespace dy::Backends
 
 		for (uint32_t i = 0; i < layout.bindingCount; ++i)
 		{
-			const dy::RHI::ResourceBindingLayout& binding = layout.bindings[i];
-			if (binding.type == dy::RHI::ResourceBindingType::StaticSampler) continue;
+			const dyf::RHI::ResourceBindingLayout& binding = layout.bindings[i];
+			if (binding.type == dyf::RHI::ResourceBindingType::StaticSampler) continue;
 			for (uint32_t element = 0; element < binding.count; ++element)
 			{
 				if (provided.count({binding.binding, element}) == 0)

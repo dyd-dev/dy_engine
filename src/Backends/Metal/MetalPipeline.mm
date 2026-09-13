@@ -2,12 +2,11 @@
 
 #include "MetalShader.h"
 
-#include <cmath>
 #include <set>
 
 #import <Metal/Metal.h>
 
-namespace dy::Backends
+namespace dyf::Backends
 {
 	namespace
 	{
@@ -40,19 +39,6 @@ namespace dy::Backends
 			case RHI::Format::R32_UINT: return MTLVertexFormatUInt;
 			case RHI::Format::R16_UINT: return MTLVertexFormatUShort;
 			default: return MTLVertexFormatInvalid;
-			}
-		}
-
-		[[nodiscard]] uint32_t VertexFormatSize(RHI::Format format)
-		{
-			switch(format)
-			{
-			case RHI::Format::R32G32_FLOAT: return 8;
-			case RHI::Format::R32G32B32_FLOAT: return 12;
-			case RHI::Format::R32G32B32A32_FLOAT: return 16;
-			case RHI::Format::R32_UINT: return 4;
-			case RHI::Format::R16_UINT: return 2;
-			default: return 0;
 			}
 		}
 
@@ -180,20 +166,6 @@ namespace dy::Backends
 				desc.addressW == RHI::SamplerAddressMode::ClampToBorder;
 		}
 
-		[[nodiscard]] bool IsValidSampler(const RHI::SamplerDesc& desc)
-		{
-			return desc.minFilter != RHI::SamplerFilter::Undefined &&
-				desc.magFilter != RHI::SamplerFilter::Undefined &&
-				desc.mipFilter != RHI::SamplerFilter::Undefined &&
-				desc.addressU != RHI::SamplerAddressMode::Undefined &&
-				desc.addressV != RHI::SamplerAddressMode::Undefined &&
-				desc.addressW != RHI::SamplerAddressMode::Undefined &&
-				(!UsesBorder(desc) || desc.borderColor != RHI::SamplerBorderColor::Undefined) &&
-				desc.maxAnisotropy != 0 && std::isfinite(desc.mipLodBias) &&
-				desc.mipLodBias == 0.0f && std::isfinite(desc.minLod) &&
-				std::isfinite(desc.maxLod) && desc.minLod <= desc.maxLod;
-		}
-
 		[[nodiscard]] bool HasStage(
 			RHI::ShaderStageFlags stages,
 			RHI::ShaderStageFlags stage)
@@ -202,50 +174,42 @@ namespace dy::Backends
 		}
 
 		[[nodiscard]] bool ValidateMetalLayout(
-			const RHI::GraphicsPipelineDesc& desc)
+			const RHI::GraphicsPipelineDesc& desc, id<MTLDevice> device)
 		{
+			if(device == nil) return false;
+			bool appleGpu = false;
+			if(@available(macOS 11.0, *))
+				appleGpu = [device supportsFamily:MTLGPUFamilyApple1];
+			// Metal의 buffer slot 수와 constant 주소공간 인자 수는 서로 다른 한도다.
+			// https://developer.apple.com/metal/capabilities/
+			const uint32_t constantArgumentCount = appleGpu ? 31 : 14;
+			uint32_t vertexConstantArguments = 0;
+			uint32_t fragmentConstantArguments = 0;
 			constexpr uint32_t nativeBufferBindingCount = 31;
 			constexpr uint32_t nativeTextureBindingCount = 128;
 			constexpr uint32_t nativeSamplerBindingCount = 16;
-			std::set<uint32_t> vertexBufferBindings;
+			std::set<uint32_t> vertexBufferSlots;
 			for(uint32_t index = 0; index < desc.vertexBufferCount; ++index)
 			{
 				const RHI::VertexBufferLayout& layout = desc.vertexBuffers[index];
-				if(layout.binding >= nativeBufferBindingCount || layout.stride == 0 ||
-					layout.stepMode == RHI::VertexStepMode::Undefined ||
-					!vertexBufferBindings.insert(layout.binding).second)
+				if(layout.binding >= nativeBufferBindingCount ||
+					(!appleGpu && (layout.stride > 4096 || layout.stride % 4 != 0)))
 				{
 					return false;
 				}
+				vertexBufferSlots.insert(layout.binding);
 			}
 
-			std::set<uint32_t> locations;
 			for(uint32_t index = 0; index < desc.vertexAttributeCount; ++index)
 			{
 				const RHI::VertexAttribute& attribute = desc.vertexAttributes[index];
-				const RHI::VertexBufferLayout* layout = nullptr;
-				for(uint32_t layoutIndex = 0;
-					layoutIndex < desc.vertexBufferCount; ++layoutIndex)
-				{
-					if(desc.vertexBuffers[layoutIndex].binding == attribute.binding)
-					{
-						layout = &desc.vertexBuffers[layoutIndex];
-						break;
-					}
-				}
-				const uint32_t attributeSize = VertexFormatSize(attribute.format);
-				if(layout == nullptr ||
-					ToVertexFormat(attribute.format) == MTLVertexFormatInvalid || attributeSize == 0 ||
-					attribute.location >= 31 || !locations.insert(attribute.location).second ||
-					attribute.offset > layout->stride ||
-					attributeSize > layout->stride - attribute.offset)
+				if((!appleGpu && attribute.offset % 4 != 0) ||
+					ToVertexFormat(attribute.format) == MTLVertexFormatInvalid || attribute.location >= 31)
 				{
 					return false;
 				}
 			}
 
-			std::set<uint32_t> declarations;
-			std::set<uint32_t> vertexBufferSlots = vertexBufferBindings;
 			std::set<uint32_t> fragmentBufferSlots;
 			std::set<uint32_t> vertexTextureSlots;
 			std::set<uint32_t> fragmentTextureSlots;
@@ -256,11 +220,7 @@ namespace dy::Backends
 			for(uint32_t index = 0; index < desc.layout.bindingCount; ++index)
 			{
 				const RHI::ResourceBindingLayout& binding = desc.layout.bindings[index];
-				if(binding.type == RHI::ResourceBindingType::Undefined ||
-					binding.count == 0 ||
-					binding.stages == RHI::ShaderStageFlags::None ||
-					(binding.stages & graphicsStages) != binding.stages ||
-					!declarations.insert(binding.binding).second)
+				if((binding.stages & graphicsStages) != binding.stages)
 				{
 					return false;
 				}
@@ -272,10 +232,12 @@ namespace dy::Backends
 					limit = nativeSamplerBindingCount;
 				if(binding.binding >= limit || binding.count > limit - binding.binding)
 					return false;
-				if(binding.type == RHI::ResourceBindingType::StaticSampler &&
-					!IsValidSampler(binding.staticSampler))
+				if(binding.type == RHI::ResourceBindingType::ConstantBuffer)
 				{
-					return false;
+					if(HasStage(binding.stages, RHI::ShaderStageFlags::Vertex))
+						vertexConstantArguments += binding.count;
+					if(HasStage(binding.stages, RHI::ShaderStageFlags::Fragment))
+						fragmentConstantArguments += binding.count;
 				}
 
 				for(uint32_t element = 0; element < binding.count; ++element)
@@ -309,9 +271,11 @@ namespace dy::Backends
 
 			if(desc.layout.inlineConstantSize != 0)
 			{
-				if(desc.layout.inlineConstantBinding >= nativeBufferBindingCount ||
-					desc.layout.inlineConstantStages == RHI::ShaderStageFlags::None ||
-					(desc.layout.inlineConstantSize % sizeof(uint32_t)) != 0)
+				if(HasStage(desc.layout.inlineConstantStages, RHI::ShaderStageFlags::Vertex))
+					++vertexConstantArguments;
+				if(HasStage(desc.layout.inlineConstantStages, RHI::ShaderStageFlags::Fragment))
+					++fragmentConstantArguments;
+				if(desc.layout.inlineConstantBinding >= nativeBufferBindingCount)
 				{
 					return false;
 				}
@@ -329,9 +293,36 @@ namespace dy::Backends
 					!fragmentBufferSlots.insert(desc.layout.inlineConstantBinding).second)
 					return false;
 			}
-			return true;
+			return vertexConstantArguments <= constantArgumentCount &&
+				fragmentConstantArguments <= constantArgumentCount;
 		}
 	}
+
+    bool MetalPipeline::SupportsSampler(const RHI::SamplerDesc& desc)
+    {
+        return desc.maxAnisotropy <= 16 && desc.mipLodBias == 0.0f;
+    }
+
+    bool MetalPipeline::SupportsLayout(const RHI::PipelineLayoutDesc& desc, void* device)
+    {
+        RHI::GraphicsPipelineDesc graphics;
+        graphics.layout = desc;
+        return ValidateMetalLayout(graphics, (__bridge id<MTLDevice>)device);
+    }
+
+    bool MetalPipeline::SupportsGraphics(const RHI::GraphicsPipelineDesc& desc, void* device)
+    {
+        id<MTLDevice> metalDevice = (__bridge id<MTLDevice>)device;
+        if(metalDevice == nil ||
+            desc.colorAttachmentCount > 8 || !ValidateMetalLayout(desc, metalDevice)) return false;
+        for(uint32_t index = 0; index < desc.colorAttachmentCount; ++index)
+            if(ToPixelFormat(desc.colorAttachments[index].format) == MTLPixelFormatInvalid) return false;
+        if(desc.depthStencil.format != RHI::Format::Unknown &&
+            ToPixelFormat(desc.depthStencil.format) == MTLPixelFormatInvalid) return false;
+        if(desc.depthStencil.format == RHI::Format::D24_UNORM_S8_UINT &&
+            !metalDevice.depth24Stencil8PixelFormatSupported) return false;
+        return true;
+    }
 
 	struct MetalPipeline::Impl
 	{
@@ -371,24 +362,9 @@ namespace dy::Backends
 		auto* fragmentShader = dynamic_cast<MetalShader*>(desc.fragmentShader);
 		if(metalDevice == nil || vertexShader == nullptr ||
 			vertexShader->GetNativeFunction() == nullptr ||
-			vertexShader->GetStage() != RHI::ShaderStage::Vertex ||
 			(desc.fragmentShader != nullptr &&
-				(fragmentShader == nullptr || fragmentShader->GetNativeFunction() == nullptr ||
-					fragmentShader->GetStage() != RHI::ShaderStage::Fragment)) ||
-			(desc.colorAttachmentCount != 0 && fragmentShader == nullptr) ||
-			(desc.vertexBufferCount != 0 && desc.vertexBuffers == nullptr) ||
-			(desc.vertexAttributeCount != 0 && desc.vertexAttributes == nullptr) ||
-			(desc.colorAttachmentCount != 0 && desc.colorAttachments == nullptr) ||
-			desc.colorAttachmentCount > 8 ||
-			(desc.depthStencil.format == RHI::Format::Unknown &&
-				(desc.depthStencil.depthTestEnabled ||
-					desc.depthStencil.depthWriteEnabled ||
-					desc.depthStencil.stencilEnabled)) ||
-			!std::isfinite(desc.raster.depthBiasConstant) ||
-			!std::isfinite(desc.raster.depthBiasSlope) ||
-			!std::isfinite(desc.raster.depthBiasClamp) ||
-			(desc.layout.bindingCount != 0 && desc.layout.bindings == nullptr) ||
-			!ValidateMetalLayout(desc))
+				(fragmentShader == nullptr || fragmentShader->GetNativeFunction() == nullptr)) ||
+			!SupportsGraphics(desc, device))
 		{
 			return;
 		}
@@ -502,16 +478,6 @@ namespace dy::Backends
 			native.blendingEnabled = attachment.blend.enabled;
 			if(attachment.blend.enabled)
 			{
-				if(attachment.blend.sourceColor == RHI::BlendFactor::Undefined ||
-					attachment.blend.destinationColor == RHI::BlendFactor::Undefined ||
-					attachment.blend.colorOp == RHI::BlendOp::Undefined ||
-					attachment.blend.sourceAlpha == RHI::BlendFactor::Undefined ||
-					attachment.blend.destinationAlpha == RHI::BlendFactor::Undefined ||
-					attachment.blend.alphaOp == RHI::BlendOp::Undefined)
-				{
-					descriptorValid = false;
-					break;
-				}
 				native.sourceRGBBlendFactor = ToBlendFactor(attachment.blend.sourceColor);
 				native.destinationRGBBlendFactor = ToBlendFactor(attachment.blend.destinationColor);
 				native.rgbBlendOperation = ToBlendOperation(attachment.blend.colorOp);
@@ -532,8 +498,6 @@ namespace dy::Backends
 			pipelineDesc.depthAttachmentPixelFormat = depthStencilFormat;
 			if(desc.depthStencil.format == RHI::Format::D24_UNORM_S8_UINT)
 				pipelineDesc.stencilAttachmentPixelFormat = depthStencilFormat;
-			else if(desc.depthStencil.stencilEnabled)
-				descriptorValid = false;
 		}
 
 		NSError* error = nil;
@@ -547,11 +511,6 @@ namespace dy::Backends
 
 		if(desc.depthStencil.format != RHI::Format::Unknown)
 		{
-			if(desc.depthStencil.depthTestEnabled &&
-				desc.depthStencil.depthCompareOp == RHI::CompareOp::Undefined)
-			{
-				return;
-			}
 			MTLDepthStencilDescriptor* depthDesc = [MTLDepthStencilDescriptor new];
 			depthDesc.depthCompareFunction = desc.depthStencil.depthTestEnabled
 				? ToCompareFunction(desc.depthStencil.depthCompareOp)
@@ -562,13 +521,6 @@ namespace dy::Backends
 				const auto makeStencil = [](
 					const RHI::StencilFaceState& face) -> MTLStencilDescriptor*
 				{
-					if(face.failOp == RHI::StencilOp::Undefined ||
-						face.depthFailOp == RHI::StencilOp::Undefined ||
-						face.passOp == RHI::StencilOp::Undefined ||
-						face.compareOp == RHI::CompareOp::Undefined)
-					{
-						return nil;
-					}
 					MTLStencilDescriptor* result = [MTLStencilDescriptor new];
 					result.stencilFailureOperation = ToStencilOperation(face.failOp);
 					result.depthFailureOperation = ToStencilOperation(face.depthFailOp);

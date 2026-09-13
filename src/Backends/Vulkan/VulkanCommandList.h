@@ -1,6 +1,6 @@
 #pragma once
 
-#include "RHI/ICommandList.h"
+#include "dyf/RHI/ICommandList.h"
 #include "VulkanContext.h"
 
 #include <map>
@@ -8,7 +8,7 @@
 #include <utility>
 #include <vector>
 
-namespace dy::Backends
+namespace dyf::Backends
 {
 	class VulkanBuffer;
 	class VulkanPipeline;
@@ -18,32 +18,34 @@ namespace dy::Backends
 
 	struct VulkanSubmissionState
 	{
-		std::unordered_map<VulkanBuffer*, dy::RHI::ResourceState> buffers;
-		std::map<std::pair<VulkanTexture*, uint32_t>, dy::RHI::ResourceState> textureSubresources;
+		std::unordered_map<VulkanBuffer*, dyf::RHI::ResourceState> buffers;
+		std::map<std::pair<VulkanTexture*, uint32_t>, dyf::RHI::ResourceState> textureSubresources;
 	};
 
-	class VulkanCommandList final : public dy::RHI::ICommandList
+	class VulkanCommandList final : public dyf::RHI::ICommandList
 	{
 	public:
 		explicit VulkanCommandList(const VulkanContext& context);
 
-		void ResourceBarrier(const dy::RHI::ResourceBarrierDesc* barriers, uint32_t count) override;
-		void BeginRendering(const dy::RHI::RenderingDesc& desc) override;
-		void EndRendering() override;
+		void ResourceBarrierNative(const dyf::RHI::ResourceBarrierDesc* barriers, uint32_t count) override;
+		void BeginRenderingNative(const dyf::RHI::RenderingDesc& desc) override;
+		void EndRenderingNative() override;
 
-		void BindGraphicsPipeline(dy::RHI::PipelineHandle pipelineState) override;
-		void BindResourceSet(dy::RHI::ResourceSetHandle resourceSet) override;
-		void BindVertexBuffer(uint32_t binding, dy::RHI::BufferHandle buffer, uint32_t offset) override;
-		void BindIndexBuffer(dy::RHI::BufferHandle buffer, dy::RHI::Format format, uint32_t offset) override;
-		void SetInlineConstants(uint32_t offset, uint32_t size, const void* data) override;
+		void BindComputePipelineNative(RHI::PipelineHandle) override;
+        void DispatchNative(uint32_t,uint32_t,uint32_t) override;
+        void BindGraphicsPipelineNative(dyf::RHI::PipelineHandle pipelineState) override;
+		void BindResourceSetNative(dyf::RHI::ResourceSetHandle resourceSet) override;
+		void BindVertexBufferNative(uint32_t binding, dyf::RHI::BufferHandle buffer, uint32_t offset) override;
+		void BindIndexBufferNative(dyf::RHI::BufferHandle buffer, dyf::RHI::Format format, uint32_t offset) override;
+		void SetInlineConstantsNative(uint32_t offset, uint32_t size, const void* data) override;
 
-		void SetViewport(const dy::RHI::Viewport& viewport) override;
-		void SetScissor(const dy::RHI::Rect& rect) override;
-		void SetStencilReference(uint32_t reference) override;
+		void SetViewportNative(const dyf::RHI::Viewport& viewport) override;
+		void SetScissorNative(const dyf::RHI::Rect& rect) override;
+		void SetStencilReferenceNative(uint32_t reference) override;
 
-		void DrawInstanced(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
-		void DrawIndexedInstanced(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
-		void Close() override;
+		void DrawInstancedNative(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
+		void DrawIndexedInstancedNative(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
+		bool CloseNative() override;
 
 		[[nodiscard]] bool RecordBufferUpdate(VulkanBuffer& buffer, uint32_t offset, const void* data, uint32_t size);
 		[[nodiscard]] bool RecordTextureUpdate(
@@ -64,8 +66,11 @@ namespace dy::Backends
 		}
 		[[nodiscard]] bool ValidateForSubmit(VulkanSubmissionState& state) const;
 		void CommitResourceStates();
+        uint32_t m_maxComputeGroups[3]={};
 
 	private:
+        void ResetTimestampsNative(RHI::TimestampQueryHandle,uint32_t,uint32_t) override;
+        void WriteTimestampNative(RHI::TimestampQueryHandle,uint32_t) override;
 		friend struct VulkanObjectDeleter;
 
 		~VulkanCommandList() override;
@@ -85,8 +90,8 @@ namespace dy::Backends
 			OperationKind kind = OperationKind::BufferBarrier;
 			VulkanBuffer* buffer = nullptr;
 			VulkanTexture* texture = nullptr;
-			dy::RHI::ResourceState before = dy::RHI::ResourceState::Undefined;
-			dy::RHI::ResourceState after = dy::RHI::ResourceState::Undefined;
+			dyf::RHI::ResourceState before = dyf::RHI::ResourceState::Undefined;
+			dyf::RHI::ResourceState after = dyf::RHI::ResourceState::Undefined;
 			uint32_t mipLevel = 0;
 			uint32_t arrayLayer = 0;
 		};
@@ -104,16 +109,16 @@ namespace dy::Backends
 		};
 
 		[[nodiscard]] bool CreateStagingAllocation(const void* data, uint32_t size, StagingAllocation& allocation);
-		[[nodiscard]] bool RequireBufferState(VulkanBuffer* buffer, dy::RHI::ResourceState state);
+		[[nodiscard]] bool RequireBufferState(VulkanBuffer* buffer, dyf::RHI::ResourceState state);
 		[[nodiscard]] bool RequireTextureState(
 			VulkanTexture* texture,
 			uint32_t mipLevel,
 			uint32_t arrayLayer,
-			dy::RHI::ResourceState state);
+			dyf::RHI::ResourceState state);
 		[[nodiscard]] bool RequireTextureSubresourcesInState(
 			VulkanTexture* texture,
-			const dy::RHI::TextureSubresourceRange& range,
-			dy::RHI::ResourceState state);
+			const dyf::RHI::TextureSubresourceRange& range,
+			dyf::RHI::ResourceState state);
 		[[nodiscard]] bool ValidateDraw(
 			bool indexed,
 			uint32_t vertexCount,
@@ -132,15 +137,15 @@ namespace dy::Backends
 		VulkanTexture* m_depthTexture = nullptr;
 		std::vector<StagingAllocation> m_stagingAllocations;
 		std::vector<Operation> m_operations;
-		std::unordered_map<VulkanBuffer*, dy::RHI::ResourceState> m_bufferStates;
-		std::map<std::pair<VulkanTexture*, uint32_t>, dy::RHI::ResourceState> m_textureStates;
+		std::unordered_map<VulkanBuffer*, dyf::RHI::ResourceState> m_bufferStates;
+		std::map<std::pair<VulkanTexture*, uint32_t>, dyf::RHI::ResourceState> m_textureStates;
 		std::unordered_map<uint32_t, VertexBinding> m_vertexBindings;
 		std::vector<VulkanTexture*> m_referencedSwapchainImages;
-		std::vector<dy::RHI::Format> m_colorFormats;
+		std::vector<dyf::RHI::Format> m_colorFormats;
 		std::vector<uint8_t> m_inlineConstantCoverage;
-		dy::RHI::Format m_indexFormat = dy::RHI::Format::Unknown;
-		dy::RHI::Format m_depthFormat = dy::RHI::Format::Unknown;
-		dy::RHI::ResourceState m_depthState = dy::RHI::ResourceState::Undefined;
+		dyf::RHI::Format m_indexFormat = dyf::RHI::Format::Unknown;
+		dyf::RHI::Format m_depthFormat = dyf::RHI::Format::Unknown;
+		dyf::RHI::ResourceState m_depthState = dyf::RHI::ResourceState::Undefined;
 		uint32_t m_depthMipLevel = 0;
 		uint32_t m_depthArrayLayer = 0;
 		uint32_t m_indexOffset = 0;

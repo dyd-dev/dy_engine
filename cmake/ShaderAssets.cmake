@@ -8,8 +8,7 @@ else()
     set(DY_BACKEND_NORMALIZED NULL)
 endif()
 
-set(DY_SHADER_PUBLIC_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/src/Public")
-set(DY_STOCK_SHADER_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/Graphics/Private/Shaders")
+set(DY_STOCK_SHADER_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src/dyf/Shaders")
 set(DY_STOCK_SHADER_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/stock_shaders")
 set(DY_STOCK_SHADER_EMBED_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake")
 
@@ -35,13 +34,9 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${DY_STOCK_SHADER
 
 # Null has no native shader bytecode. Do not silently select GLSL for this backend.
 if(DY_BACKEND_NORMALIZED STREQUAL "NULL")
-    target_compile_definitions(dy_graphics_assets PRIVATE DY_NO_NATIVE_SHADERS=1)
     return()
 endif()
 
-set(DY_STOCK_SHADER_LAYOUT "${DY_SHADER_PUBLIC_INCLUDE_DIR}/Graphics/ShaderInterop/StockShaderLayout.inc")
-file(GLOB DY_STOCK_SHADER_HELPERS CONFIGURE_DEPENDS "${DY_STOCK_SHADER_SOURCE_DIR}/*.inc" "${DY_STOCK_SHADER_SOURCE_DIR}/Skinning.*")
-list(APPEND DY_STOCK_SHADER_HELPERS "${DY_SHADER_PUBLIC_INCLUDE_DIR}/Graphics/ShaderInterop/LightingTypes.inc")
 set(DY_STOCK_SHADER_HEADERS)
 
 function(dy_embed_stock_shader source stage name symbol)
@@ -63,8 +58,8 @@ function(dy_embed_stock_shader source stage name symbol)
         add_custom_command(
             OUTPUT "${binary}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-            COMMAND "${DY_DXC}" -T "${profile}" -E main ${shader_defines} -I "${DY_STOCK_SHADER_SOURCE_DIR}" -I "${DY_SHADER_PUBLIC_INCLUDE_DIR}" -Fo "${binary}" "${source}"
-            DEPENDS "${source}" "${DY_STOCK_SHADER_LAYOUT}" ${DY_STOCK_SHADER_HELPERS}
+            COMMAND "${DY_DXC}" -T "${profile}" -E main ${shader_defines} -Fo "${binary}" "${source}"
+            DEPENDS "${source}"
             VERBATIM)
     elseif(DY_BACKEND_NORMALIZED STREQUAL "VULKAN")
         if(NOT DY_GLSLC)
@@ -76,8 +71,8 @@ function(dy_embed_stock_shader source stage name symbol)
         add_custom_command(
             OUTPUT "${binary}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-            COMMAND "${DY_GLSLC}" "-fshader-stage=${stage}" ${shader_defines} -I "${DY_STOCK_SHADER_SOURCE_DIR}" -I "${DY_SHADER_PUBLIC_INCLUDE_DIR}" "${source}" -o "${binary}"
-            DEPENDS "${source}" "${DY_STOCK_SHADER_LAYOUT}" ${DY_STOCK_SHADER_HELPERS}
+            COMMAND "${DY_GLSLC}" "-fshader-stage=${stage}" ${shader_defines} "${source}" -o "${binary}"
+            DEPENDS "${source}"
             VERBATIM)
     else()
         message(FATAL_ERROR "No shader compiler configured for ${DY_BACKEND_NORMALIZED}")
@@ -104,8 +99,8 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
     add_custom_command(
         OUTPUT "${air}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-        COMMAND "${DY_XCRUN}" -sdk macosx metal -I "${DY_STOCK_SHADER_SOURCE_DIR}" -I "${DY_SHADER_PUBLIC_INCLUDE_DIR}" -c "${source}" -o "${air}"
-        DEPENDS "${source}" "${DY_STOCK_SHADER_LAYOUT}" ${DY_STOCK_SHADER_HELPERS}
+        COMMAND "${DY_XCRUN}" -sdk macosx metal -c "${source}" -o "${air}"
+        DEPENDS "${source}"
         VERBATIM)
     list(APPEND metal_air_files "${air}")
 
@@ -122,11 +117,11 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
         add_custom_command(
             OUTPUT "${air}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-            COMMAND "${DY_XCRUN}" -sdk macosx metal -I "${DY_STOCK_SHADER_SOURCE_DIR}" -I "${DY_SHADER_PUBLIC_INCLUDE_DIR}"
+            COMMAND "${DY_XCRUN}" -sdk macosx metal
                 "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}"
                 "-DRENDERER_VERTEX_ENTRY=${vertex_entry}"
                 -c "${source}" -o "${air}"
-            DEPENDS "${source}" "${DY_STOCK_SHADER_LAYOUT}" ${DY_STOCK_SHADER_HELPERS}
+            DEPENDS "${source}"
             VERBATIM)
         list(APPEND metal_air_files "${air}")
     endforeach()
@@ -144,11 +139,11 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
         add_custom_command(
             OUTPUT "${air}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-            COMMAND "${DY_XCRUN}" -sdk macosx metal -I "${DY_STOCK_SHADER_SOURCE_DIR}" -I "${DY_SHADER_PUBLIC_INCLUDE_DIR}"
+            COMMAND "${DY_XCRUN}" -sdk macosx metal
                 "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}"
                 "-DRENDERER_FRAGMENT_ENTRY=${fragment_entry}"
                 -c "${source}" -o "${air}"
-            DEPENDS "${source}" "${DY_STOCK_SHADER_LAYOUT}" ${DY_STOCK_SHADER_HELPERS}
+            DEPENDS "${source}"
             VERBATIM)
         list(APPEND metal_air_files "${air}")
     endforeach()
@@ -192,21 +187,52 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
         COMMAND "${CMAKE_COMMAND}" "-DINPUT=${canvas_library}" "-DOUTPUT=${canvas_header}" -DSYMBOL=kCanvasLibrary -P "${DY_STOCK_SHADER_EMBED_SCRIPT}"
         DEPENDS "${DY_STOCK_SHADER_SOURCE_DIR}/canvas.metal" "${DY_STOCK_SHADER_EMBED_SCRIPT}" VERBATIM)
     list(APPEND DY_STOCK_SHADER_HEADERS "${canvas_header}")
-    set(canvas_bundle "#include \"CanvasLibrary.h\"\nnamespace dy::Graphics::Private::generated { inline const StockShaderAssets canvas = {{kCanvasLibrary,kCanvasLibrarySize,\"canvasVertex\"},{kCanvasLibrary,kCanvasLibrarySize,\"canvasFragment\"},{}}; }\n")
 else()
     dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/canvas_vs.${shader_extension}" vert CanvasVertex kCanvasVertex)
     dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/canvas_ps.${shader_extension}" frag CanvasFragment kCanvasFragment)
-    set(canvas_bundle "#include \"CanvasVertex.h\"\n#include \"CanvasFragment.h\"\nnamespace dy::Graphics::Private::generated { inline const StockShaderAssets canvas = {{kCanvasVertex,kCanvasVertexSize,\"main\"},{kCanvasFragment,kCanvasFragmentSize,\"main\"},{}}; }\n")
 endif()
-file(GENERATE OUTPUT "${DY_STOCK_SHADER_GENERATED_DIR}/CanvasShaderBundle.h" CONTENT "${canvas_bundle}")
-
-add_custom_target(dy_stock_shaders DEPENDS ${DY_STOCK_SHADER_HEADERS})
-add_dependencies(dy_graphics_assets dy_stock_shaders)
-target_include_directories(dy_graphics_assets PRIVATE "${DY_STOCK_SHADER_GENERATED_DIR}")
 
 if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
-    set(bundle "#include \"StockMetalLibrary.h\"\nnamespace dy::Graphics::Private::generated {\ninline const StockShaderAssets withShadows = {{kStockMetalLibrary,kStockMetalLibrarySize,\"vertexShader\"},{kStockMetalLibrary,kStockMetalLibrarySize,\"fragmentShader\"},{kStockMetalLibrary,kStockMetalLibrarySize,\"shadowVertexShader\"}};\ninline const StockShaderAssets withoutShadows = {{kStockMetalLibrary,kStockMetalLibrarySize,\"vertexShaderNoShadows\"},{kStockMetalLibrary,kStockMetalLibrarySize,\"fragmentShaderNoShadows\"},{kStockMetalLibrary,kStockMetalLibrarySize,\"shadowVertexShader\"}};\n}\n")
+    set(tone_map_air "${DY_STOCK_SHADER_GENERATED_DIR}/ToneMap.air")
+    set(tone_map_library "${DY_STOCK_SHADER_GENERATED_DIR}/ToneMap.metallib")
+    set(tone_map_header "${DY_STOCK_SHADER_GENERATED_DIR}/ToneMapLibrary.h")
+    add_custom_command(OUTPUT "${tone_map_header}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
+        COMMAND "${DY_XCRUN}" -sdk macosx metal -c "${DY_STOCK_SHADER_SOURCE_DIR}/tone_map.metal" -o "${tone_map_air}"
+        COMMAND "${DY_XCRUN}" -sdk macosx metallib "${tone_map_air}" -o "${tone_map_library}"
+        COMMAND "${CMAKE_COMMAND}" "-DINPUT=${tone_map_library}" "-DOUTPUT=${tone_map_header}" -DSYMBOL=kToneMapLibrary -P "${DY_STOCK_SHADER_EMBED_SCRIPT}"
+        DEPENDS "${DY_STOCK_SHADER_SOURCE_DIR}/tone_map.metal" "${DY_STOCK_SHADER_EMBED_SCRIPT}" VERBATIM)
+    list(APPEND DY_STOCK_SHADER_HEADERS "${tone_map_header}")
 else()
-    set(bundle "#include \"StockVertexShader.h\"\n#include \"StockVertexShaderNoShadows.h\"\n#include \"StockFragmentShader.h\"\n#include \"StockFragmentShaderNoShadows.h\"\n#include \"StockShadowVertexShader.h\"\nnamespace dy::Graphics::Private::generated {\ninline const StockShaderAssets withShadows = {{kStockVertexShader,kStockVertexShaderSize,\"main\"},{kStockFragmentShader,kStockFragmentShaderSize,\"main\"},{kStockShadowVertexShader,kStockShadowVertexShaderSize,\"main\"}};\ninline const StockShaderAssets withoutShadows = {{kStockVertexShaderNoShadows,kStockVertexShaderNoShadowsSize,\"main\"},{kStockFragmentShaderNoShadows,kStockFragmentShaderNoShadowsSize,\"main\"},{kStockShadowVertexShader,kStockShadowVertexShaderSize,\"main\"}};\n}\n")
+    dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/tone_map_vs.${shader_extension}" vert ToneMapVertex kToneMapVertex)
+    dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/tone_map_ps.${shader_extension}" frag ToneMapFragment kToneMapFragment)
 endif()
-file(GENERATE OUTPUT "${DY_STOCK_SHADER_GENERATED_DIR}/StockShaderBundle.h" CONTENT "${bundle}")
+
+
+if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
+    set(bindless_air_files)
+    foreach(enable_shadows IN ITEMS 1 0)
+        set(air "${DY_STOCK_SHADER_GENERATED_DIR}/Bindless${enable_shadows}.air")
+        add_custom_command(OUTPUT "${air}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
+            COMMAND "${DY_XCRUN}" -sdk macosx metal
+                -DRENDERER_BINDLESS=1 "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}"
+                "-DRENDERER_FRAGMENT_ENTRY=bindlessFragment${enable_shadows}" -c "${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.metal" -o "${air}"
+            DEPENDS "${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.metal" VERBATIM)
+        list(APPEND bindless_air_files "${air}")
+    endforeach()
+    set(library "${DY_STOCK_SHADER_GENERATED_DIR}/Bindless.metallib")
+    set(header "${DY_STOCK_SHADER_GENERATED_DIR}/BindlessMetalLibrary.h")
+    add_custom_command(OUTPUT "${header}"
+        COMMAND "${DY_XCRUN}" -sdk macosx metallib ${bindless_air_files} -o "${library}"
+        COMMAND "${CMAKE_COMMAND}" "-DINPUT=${library}" "-DOUTPUT=${header}" -DSYMBOL=kBindlessMetalLibrary -P "${DY_STOCK_SHADER_EMBED_SCRIPT}"
+        DEPENDS ${bindless_air_files} "${DY_STOCK_SHADER_EMBED_SCRIPT}" VERBATIM)
+    list(APPEND DY_STOCK_SHADER_HEADERS "${header}")
+else()
+    dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.${shader_extension}" frag BindlessFragment kBindlessFragment -DRENDERER_BINDLESS=1 -DRENDERER_ENABLE_SHADOWS=1)
+    dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.${shader_extension}" frag BindlessFragmentNoShadows kBindlessFragmentNoShadows -DRENDERER_BINDLESS=1 -DRENDERER_ENABLE_SHADOWS=0)
+endif()
+
+add_custom_target(dy_stock_shaders DEPENDS ${DY_STOCK_SHADER_HEADERS})
+add_dependencies(dy_engine dy_stock_shaders)
+target_include_directories(dy_engine PRIVATE "${DY_STOCK_SHADER_GENERATED_DIR}")

@@ -1,9 +1,9 @@
-#include "RHI/RenderGraph.h"
-#include "RHI/ICommandList.h"
+#include "dyf/RHI/RenderGraph.h"
+#include "dyf/RHI/ICommandList.h"
 #include <algorithm>
 #include <cassert>
 
-namespace dy::RHI
+namespace dyf::RHI
 {
 	// ----------------------------------------------------------------------------------
 	// RenderGraphPass Implementation
@@ -30,7 +30,7 @@ namespace dy::RHI
 		return *this;
 	}
 
-	RenderGraphPass& RenderGraphPass::SetExecute(RGPassExecuteCallback callback)
+	RenderGraphPass& RenderGraphPass::SetExecute(std::function<void(RHI::ICommandList*)> callback)
 	{
 		m_executeCallback = std::move(callback);
 		++m_revision;

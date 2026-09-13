@@ -13,12 +13,6 @@ target_include_directories(Engine_Options INTERFACE
 	${PROJECT_SOURCE_DIR}/src/Public
 )
 
-# ===== ===== Compile definition ===== =====
-target_compile_definitions(Engine_Options INTERFACE
-	ENGINE_VERSION="1.0.0"
-	GLFW_INCLUDE_NONE
-)
-
 # ===== ===== SIMD ===== =====
 option(DY_ENABLE_SIMD "Enable dy::Math SIMD code paths when supported by the target CPU." ON)
 option(DY_ENABLE_TRACY "Embed Tracy profiling instrumentation in engine applications." ON)

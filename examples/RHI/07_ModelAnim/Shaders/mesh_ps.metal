@@ -1,13 +1,4 @@
 #include <metal_stdlib>
-#include "StockShaderLayout.inc"
-
-#ifndef RENDERER_ENABLE_SHADOWS
-#error RENDERER_ENABLE_SHADOWS must be defined
-#endif
-
-#ifndef RENDERER_FRAGMENT_ENTRY
-#error RENDERER_FRAGMENT_ENTRY must be defined
-#endif
 
 using namespace metal;
 
@@ -24,9 +15,15 @@ struct DrawConstants
     float4 materialParams;
 };
 
-#define DY_LIGHT_FLOAT4 float4
-#include "LightingTypes.inc"
-#undef DY_LIGHT_FLOAT4
+struct LightingConstants
+{
+    float4 cameraPosition;
+    float4 directionalLightDirection;
+    float4 directionalLightColor;
+    float4 ambientColor;
+    float4 pbrParams;
+    float4 environmentColor;
+};
 
 struct RasterData
 {
@@ -35,25 +32,18 @@ struct RasterData
     float3 worldPosition [[user(locn1)]];
     float3 worldNormal [[user(locn2)]];
     float4 worldTangent [[user(locn3)]];
-#if RENDERER_ENABLE_SHADOWS
-    float4 lightSpacePosition [[user(locn4)]];
-#endif
 };
 
 constant uint kTextureFlagBaseColor =
-    uint(RENDERER_TEXTURE_FLAG_BASE_COLOR);
+    uint(1);
 constant uint kTextureFlagMetallicRoughness =
-    uint(RENDERER_TEXTURE_FLAG_METALLIC_ROUGHNESS);
+    uint(2);
 constant uint kTextureFlagNormal =
-    uint(RENDERER_TEXTURE_FLAG_NORMAL);
+    uint(4);
 constant uint kTextureFlagOcclusion =
-    uint(RENDERER_TEXTURE_FLAG_OCCLUSION);
+    uint(8);
 constant uint kTextureFlagEmissive =
-    uint(RENDERER_TEXTURE_FLAG_EMISSIVE);
-#if RENDERER_ENABLE_SHADOWS
-constant uint kTextureFlagReceiveShadow =
-    uint(RENDERER_TEXTURE_FLAG_RECEIVE_SHADOW);
-#endif
+    uint(16);
 constant float kPi = 3.14159265359f;
 
 inline float DistributionGGX(float3 normal, float3 halfway, float roughness)
@@ -101,12 +91,33 @@ inline float3 FresnelSchlickRoughness(
         pow(saturate(1.0f - cosTheta), 5.0f);
 }
 
-#define DY_LIGHT_ARGUMENT constant RendererLightingConstants& lighting
-#define DY_LIGHT_RSQRT rsqrt
-#define DY_LIGHT_MIX mix
-#define DY_LIGHT_PI kPi
-#define DY_LIGHT_INLINE inline
-#include "LightingMath.inc"
+inline float3 EvaluateDirectLight(
+    float3 normal,
+    float3 viewDir,
+    float3 lightDir,
+    float3 incidentIlluminance,
+    float3 albedo,
+    float metallic,
+    float roughness) {
+    float ndotl = max(dot(normal, lightDir), 0.0);
+    float ndotv = max(dot(normal, viewDir), 0.0);
+    if (ndotl <= 0.0 || ndotv <= 0.0) {
+        return float3(0.0,0.0,0.0);
+    }
+    float3 halfwayVector = viewDir + lightDir;
+    float halfwayLengthSquared = dot(halfwayVector, halfwayVector);
+    if (halfwayLengthSquared <= 0.000001) {
+        return float3(0.0,0.0,0.0);
+    }
+    float3 halfway = halfwayVector * rsqrt(halfwayLengthSquared);
+    float3 f0 = mix(float3(0.04,0.04,0.04), albedo, metallic);
+    float ndf = DistributionGGX(normal, halfway, roughness);
+    float geometry = GeometrySmith(normal, viewDir, lightDir, roughness);
+    float3 fresnel = FresnelSchlick(max(dot(halfway, viewDir), 0.0), f0);
+    float3 specular = (ndf * geometry * fresnel) / max(4.0 * ndotv * ndotl, 0.0001);
+    float3 diffuseWeight = (float3(1.0,1.0,1.0) - fresnel) * (1.0 - metallic);
+    return (diffuseWeight * albedo / kPi + specular) * incidentIlluminance * ndotl;
+}
 
 inline float3 ResolveNormal(
     RasterData input,
@@ -134,81 +145,15 @@ inline float3 ResolveNormal(
     return normalize(tangentBasis * tangentNormal);
 }
 
-#if RENDERER_ENABLE_SHADOWS
-inline float CalculateShadowVisibility(
-    float4 lightSpacePosition,
-    float3 normal,
-    float3 lightDirection,
-    uint textureFlags,
-    constant RendererLightingConstants& lighting,
-    depth2d<float> shadowMap,
-    sampler shadowSampler)
-{
-    if (lighting.directionalLightDirection.w < 0.5f ||
-        (textureFlags & kTextureFlagReceiveShadow) == 0u)
-    {
-        return 1.0f;
-    }
-
-    const float3 ndc = lightSpacePosition.xyz / lightSpacePosition.w;
-    const float2 shadowUv = ndc.xy * float2(0.5f, -0.5f) + 0.5f;
-    if (shadowUv.x < 0.0f || shadowUv.x > 1.0f ||
-        shadowUv.y < 0.0f || shadowUv.y > 1.0f ||
-        ndc.z < 0.0f || ndc.z > 1.0f)
-    {
-        return 1.0f;
-    }
-
-    const float ndotl = max(dot(normal, lightDirection), 0.0f);
-    const float constantBias = max(lighting.shadowParams.x, 0.0f);
-    const float slopeBias =
-        max(lighting.shadowParams.y, 0.0f) * (1.0f - ndotl);
-    const float normalBias =
-        max(lighting.shadowParams.z, 0.0f) * (1.0f - ndotl);
-    const float bias = max(slopeBias, constantBias) + normalBias;
-
-    const float2 texelSize = 1.0f / float2(
-        max(shadowMap.get_width(), 1u),
-        max(shadowMap.get_height(), 1u));
-    const int pcfRadius = int(lighting.shadowParams.w + 0.5f);
-    float visibility = 0.0f;
-    int sampleCount = 0;
-    for (int y = -pcfRadius; y <= pcfRadius; ++y)
-    {
-        for (int x = -pcfRadius; x <= pcfRadius; ++x)
-        {
-            const float sampledDepth = shadowMap.sample(
-                shadowSampler,
-                shadowUv + float2(x, y) * texelSize);
-            visibility +=
-                (ndc.z - bias) > sampledDepth ? 0.0f : 1.0f;
-            ++sampleCount;
-        }
-    }
-
-    visibility /= max(float(sampleCount), 1.0f);
-    return mix(
-        1.0f,
-        visibility,
-        saturate(lighting.cameraPosition.w));
-}
-#endif
-
 inline float4 RunFragmentShader(
     RasterData input,
     constant DrawConstants& drawConstants,
-    constant RendererLightingConstants& lighting,
+    constant LightingConstants& lighting,
     texture2d<float> baseColorTexture,
-#if RENDERER_ENABLE_SHADOWS
-    depth2d<float> shadowMap,
-#endif
     texture2d<float> metallicRoughnessTexture,
     texture2d<float> normalTexture,
     texture2d<float> occlusionTexture,
     texture2d<float> emissiveTexture,
-#if RENDERER_ENABLE_SHADOWS
-    sampler shadowSampler,
-#endif
     sampler materialSampler)
 {
     const uint textureFlags = drawConstants.textureFlags;
@@ -253,75 +198,22 @@ inline float4 RunFragmentShader(
     const float3 viewDirection =
         normalize(lighting.cameraPosition.xyz - input.worldPosition);
 
-    const bool usePointLight =
-        lighting.pointLightColorIntensity.a > 0.0f &&
-        lighting.pointLightPositionRange.w > 0.0f;
     float3 lightDirection =
         normalize(lighting.directionalLightDirection.xyz);
-    float3 radiance =
-        lighting.directionalLightColor.rgb *
-        lighting.directionalLightColor.a;
-
-    if (usePointLight)
-    {
-        const float3 toLight =
-            lighting.pointLightPositionRange.xyz - input.worldPosition;
-        const float distanceToLight = length(toLight);
-        lightDirection = distanceToLight > 0.0001f
-            ? toLight / distanceToLight
-            : float3(0.0f, 0.0f, 1.0f);
-        const float range =
-            max(lighting.pointLightPositionRange.w, 0.0001f);
-        float rangeFade =
-            saturate(1.0f - distanceToLight / range);
-        rangeFade *= rangeFade;
-        const float attenuation = rangeFade / max(
-            1.0f +
-                0.18f * distanceToLight +
-                0.06f * distanceToLight * distanceToLight,
-            0.0001f);
-        radiance =
-            lighting.pointLightColorIntensity.rgb *
-            lighting.pointLightColorIntensity.a *
-            attenuation;
-    }
 
     const float3 halfway =
         normalize(viewDirection + lightDirection);
     const float3 f0 =
         mix(float3(0.04f), albedo, metallic);
-    const float distribution =
-        DistributionGGX(normal, halfway, roughness);
-    const float geometry =
-        GeometrySmith(normal, viewDirection, lightDirection, roughness);
     const float3 fresnel =
         FresnelSchlick(max(dot(halfway, viewDirection), 0.0f), f0);
-    const float3 specular =
-        distribution * geometry * fresnel /
-        max(
-            4.0f *
-                max(dot(normal, viewDirection), 0.0f) *
-                max(dot(normal, lightDirection), 0.0f),
-            0.0001f);
 
     const float3 kS = fresnel;
     const float3 kD =
         (float3(1.0f) - kS) * (1.0f - metallic);
-    const float ndotl =
-        max(dot(normal, lightDirection), 0.0f);
-#if RENDERER_ENABLE_SHADOWS
-    const float shadowVisibility = CalculateShadowVisibility(
-        input.lightSpacePosition,
-        normal,
-        lightDirection,
-        textureFlags,
-        lighting,
-        shadowMap,
-        shadowSampler);
-#else
-    const float shadowVisibility = 1.0f;
-#endif
-    const float3 directLight = EvaluateLights(lighting, input.worldPosition, normal, viewDirection, albedo, metallic, roughness, shadowVisibility);
+    const float3 directLight = EvaluateDirectLight(normal, viewDirection, lightDirection,
+        lighting.directionalLightColor.rgb * max(lighting.directionalLightColor.a, 0.0),
+        albedo, metallic, roughness);
 
     const float3 ambientFresnel = FresnelSchlickRoughness(
         max(dot(normal, viewDirection), 0.0f),
@@ -353,37 +245,25 @@ inline float4 RunFragmentShader(
     return float4(color, drawConstants.baseColor.a);
 }
 
-fragment float4 RENDERER_FRAGMENT_ENTRY(
+fragment float4 fragmentMain(
     RasterData input [[stage_in]],
-    constant DrawConstants& drawConstants [[buffer(RENDERER_BINDING_INLINE_CONSTANTS)]],
-    constant RendererLightingConstants& lighting [[buffer(RENDERER_BINDING_LIGHTING_CONSTANTS)]],
-    texture2d<float> baseColorTexture [[texture(RENDERER_BINDING_BASE_COLOR_TEXTURE)]],
-#if RENDERER_ENABLE_SHADOWS
-    depth2d<float> shadowMap [[texture(RENDERER_BINDING_SHADOW_TEXTURE)]],
-#endif
-    texture2d<float> metallicRoughnessTexture [[texture(RENDERER_BINDING_METALLIC_ROUGHNESS_TEXTURE)]],
-    texture2d<float> normalTexture [[texture(RENDERER_BINDING_NORMAL_TEXTURE)]],
-    texture2d<float> occlusionTexture [[texture(RENDERER_BINDING_OCCLUSION_TEXTURE)]],
-    texture2d<float> emissiveTexture [[texture(RENDERER_BINDING_EMISSIVE_TEXTURE)]],
-#if RENDERER_ENABLE_SHADOWS
-    sampler shadowSampler [[sampler(RENDERER_BINDING_SHADOW_SAMPLER)]],
-#endif
-    sampler materialSampler [[sampler(RENDERER_BINDING_MATERIAL_SAMPLER)]])
+    constant DrawConstants& drawConstants [[buffer(10)]],
+    constant LightingConstants& lighting [[buffer(1)]],
+    texture2d<float> baseColorTexture [[texture(0)]],
+    texture2d<float> metallicRoughnessTexture [[texture(4)]],
+    texture2d<float> normalTexture [[texture(5)]],
+    texture2d<float> occlusionTexture [[texture(6)]],
+    texture2d<float> emissiveTexture [[texture(7)]],
+    sampler materialSampler [[sampler(8)]])
 {
     return RunFragmentShader(
         input,
         drawConstants,
         lighting,
         baseColorTexture,
-#if RENDERER_ENABLE_SHADOWS
-        shadowMap,
-#endif
         metallicRoughnessTexture,
         normalTexture,
         occlusionTexture,
         emissiveTexture,
-#if RENDERER_ENABLE_SHADOWS
-        shadowSampler,
-#endif
         materialSampler);
 }

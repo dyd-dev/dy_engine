@@ -11,7 +11,7 @@ string(REGEX REPLACE "([0-9A-Fa-f][0-9A-Fa-f])" "0x\\1," bytes "${binary}")
 get_filename_component(output_directory "${OUTPUT}" DIRECTORY)
 file(MAKE_DIRECTORY "${output_directory}")
 if(NOT DEFINED NAMESPACE)
-    set(NAMESPACE "dy::Graphics::Private")
+    set(NAMESPACE "")
 endif()
 file(WRITE "${OUTPUT}"
     "#pragma once\n#include <cstddef>\n#include <cstdint>\n\nnamespace ${NAMESPACE}\n{\ninline constexpr uint8_t ${SYMBOL}[] = {${bytes}};\ninline constexpr std::size_t ${SYMBOL}Size = sizeof(${SYMBOL});\n}\n")

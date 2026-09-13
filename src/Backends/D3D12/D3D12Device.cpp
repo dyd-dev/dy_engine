@@ -5,16 +5,17 @@
 #include "D3D12ResourceSet.h"
 #include "D3D12Shader.h"
 #include "D3D12Texture.h"
-#include "RHI/ResourceSet.h"
-#include "RHI/Shader.h"
-#include "RHI/Pipeline.h"
-#include "RHI/Readback.h"
+#include "dyf/RHI/ResourceSet.h"
+#include "dyf/RHI/Shader.h"
+#include "dyf/RHI/Pipeline.h"
+#include "dyf/RHI/Readback.h"
 #include "d3dx12.h"
 
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -25,7 +26,7 @@
 
 using Microsoft::WRL::ComPtr;
 
-namespace dy::Backends
+namespace dyf::Backends
 {
     struct D3D12ObjectDeleter
     {
@@ -36,79 +37,18 @@ namespace dy::Backends
         }
     };
 
-    struct D3D12FrameSlot
-    {
-        uint64_t completionValue = 0;
-    };
-
     struct D3D12SubmissionRecord
     {
         uint64_t completionValue = 0;
         std::vector<std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>> commandLists;
     };
 
-    template<typename Object>
-    struct D3D12RetiredObject
-    {
-        uint64_t completionValue = 0;
-        std::unique_ptr<Object, D3D12ObjectDeleter> object;
-    };
-
-    template<typename Object, typename Interface>
-    bool OwnsObject(
-        const std::vector<std::unique_ptr<Object, D3D12ObjectDeleter>>& liveObjects,
-        const Interface* object)
-    {
-        return std::find_if(
-            liveObjects.begin(),
-            liveObjects.end(),
-            [object](const std::unique_ptr<Object, D3D12ObjectDeleter>& candidate)
-            {
-                return static_cast<const Interface*>(candidate.get()) == object;
-            }) != liveObjects.end();
-    }
-
-    template<typename Object, typename Interface>
-    bool RetireObject(
-        std::vector<std::unique_ptr<Object, D3D12ObjectDeleter>>& liveObjects,
-        Interface* object,
-        uint64_t completionValue,
-        std::vector<D3D12RetiredObject<Object>>& retiredObjects)
-    {
-        const auto found = std::find_if(
-            liveObjects.begin(),
-            liveObjects.end(),
-            [object](const std::unique_ptr<Object, D3D12ObjectDeleter>& candidate)
-            {
-                return static_cast<Interface*>(candidate.get()) == object;
-            });
-        if (found == liveObjects.end()) return false;
-        retiredObjects.push_back({completionValue, nullptr});
-        retiredObjects.back().object = std::move(*found);
-        liveObjects.erase(found);
-        return true;
-    }
-
-    template<typename Object>
-    void ReclaimObjects(
-        std::vector<D3D12RetiredObject<Object>>& objects,
-        uint64_t completedValue)
-    {
-        objects.erase(
-            std::remove_if(
-                objects.begin(),
-                objects.end(),
-                [completedValue](const D3D12RetiredObject<Object>& object)
-                {
-                    return object.completionValue <= completedValue;
-                }),
-            objects.end());
-    }
-
     // 헤더에서 선언만 했던 구조체의 실제 정의
     struct D3D12InternalState
     {
         ComPtr<ID3D12Device> device;
+        D3D12_RESOURCE_BINDING_TIER resourceBindingTier = D3D12_RESOURCE_BINDING_TIER_1;
+        D3D_FEATURE_LEVEL resourceBindingFeatureLevel = D3D_FEATURE_LEVEL_11_0;
         ComPtr<ID3D12InfoQueue> infoQueue; // 디버그 빌드: D3D12 검증 메시지 수집
         ComPtr<ID3D12CommandQueue> commandQueue;
         HWND windowHandle = nullptr;
@@ -120,7 +60,7 @@ namespace dy::Backends
         ComPtr<ID3D12Fence> fence;
         uint64_t nextCompletionValue = 1;
         HANDLE fenceEvent = nullptr;
-        std::vector<D3D12FrameSlot> frames;
+        std::vector<uint64_t> frames;
         std::vector<D3D12SubmissionRecord> submissions;
         std::vector<std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>> activeCommandLists;
         // Keep diagnostic work alive if native submission succeeds but its
@@ -131,11 +71,6 @@ namespace dy::Backends
         std::vector<std::unique_ptr<D3D12Shader, D3D12ObjectDeleter>> liveShaders;
         std::vector<std::unique_ptr<D3D12PipelineState, D3D12ObjectDeleter>> livePipelines;
         std::vector<std::unique_ptr<D3D12ResourceSet, D3D12ObjectDeleter>> liveResourceSets;
-        std::vector<D3D12RetiredObject<D3D12Buffer>> retiredBuffers;
-        std::vector<D3D12RetiredObject<D3D12Texture>> retiredTextures;
-        std::vector<D3D12RetiredObject<D3D12Shader>> retiredShaders;
-        std::vector<D3D12RetiredObject<D3D12PipelineState>> retiredPipelines;
-        std::vector<D3D12RetiredObject<D3D12ResourceSet>> retiredResourceSets;
         uint64_t lastSubmittedValue = 0;
 
         uint32_t nextFrameIndex = 0;
@@ -171,11 +106,6 @@ namespace dy::Backends
                         return submission.completionValue <= completedValue;
                     }),
                 submissions.end());
-            ReclaimObjects(retiredResourceSets, completedValue);
-            ReclaimObjects(retiredPipelines, completedValue);
-            ReclaimObjects(retiredShaders, completedValue);
-            ReclaimObjects(retiredTextures, completedValue);
-            ReclaimObjects(retiredBuffers, completedValue);
             return true;
         }
 
@@ -186,7 +116,7 @@ namespace dy::Backends
         }
     };
 
-    bool D3D12Device::ReadTexture(RHI::TextureHandle texture, RHI::TextureReadback& result)
+    bool D3D12Device::ReadTextureNative(RHI::TextureHandle texture, RHI::TextureReadback& result)
     {
         if(!m_internal || !texture || m_internal->submissionFaulted ||
             !m_internal->activeCommandLists.empty()) return false;
@@ -195,7 +125,6 @@ namespace dy::Backends
         {
             if(!m_internal->swapchainDesc.allowReadback || !m_internal->frameSubmitted) return false;
         }
-        else if(!OwnsObject(m_internal->liveTextures, texture)) return false;
         const auto& desc = texture->GetDesc();
         if(!RHI::IsReadbackFormat(desc.format) || !desc.width || !desc.height ||
             desc.width > UINT32_MAX / 4u) return false;
@@ -243,7 +172,7 @@ namespace dy::Backends
         output.width = desc.width; output.height = desc.height;
         output.rowPitch = desc.width * 4u; output.format = desc.format;
         output.pixels.resize(static_cast<size_t>(bytes));
-        auto barrier = CD3DX12_RESOURCE_BARRIER::Transition(resource, before, D3D12_RESOURCE_STATE_COPY_SOURCE, 0);
+        D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(resource, before, D3D12_RESOURCE_STATE_COPY_SOURCE, 0);
         commands->ResourceBarrier(1, &barrier);
         D3D12_TEXTURE_COPY_LOCATION source{};
         source.pResource = resource; source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
@@ -354,7 +283,7 @@ namespace dy::Backends
         return true;
     }
 
-    // 누적된 D3D12 검증 메시지를 stdout 으로 덤프하고 디바이스 제거 사유를 확인한다.
+    // 누적된 D3D12 검증 오류는 stderr에, 나머지 메시지는 stdout에 출력한다.
     // (디버그 레이어가 켜진 디버그 빌드에서만 메시지가 쌓인다.)
     static void DumpInfoQueue(D3D12InternalState* internal, const char* where)
     {
@@ -366,14 +295,15 @@ namespace dy::Backends
             std::vector<char> bytes(len);
             D3D12_MESSAGE* msg = reinterpret_cast<D3D12_MESSAGE*>(bytes.data());
             if (SUCCEEDED(internal->infoQueue->GetMessage(i, msg, &len)) && msg->pDescription) {
-                std::cout << "[D3D12 " << where << " sev=" << static_cast<int>(msg->Severity)
-                          << " id=" << static_cast<int>(msg->ID) << "] " << msg->pDescription << std::endl;
+                auto& output = msg->Severity <= D3D12_MESSAGE_SEVERITY_ERROR ? std::cerr : std::cout;
+                output << "[D3D12 " << where << " sev=" << static_cast<int>(msg->Severity)
+                       << " id=" << static_cast<int>(msg->ID) << "] " << msg->pDescription << std::endl;
             }
         }
         internal->infoQueue->ClearStoredMessages();
         const HRESULT removedReason = internal->device->GetDeviceRemovedReason();
         if (FAILED(removedReason)) {
-            std::cout << "[D3D12] DEVICE REMOVED reason=0x" << std::hex << static_cast<unsigned>(removedReason) << std::dec << std::endl;
+            std::cerr << "[D3D12] DEVICE REMOVED reason=0x" << std::hex << static_cast<unsigned>(removedReason) << std::dec << std::endl;
         }
     }
 
@@ -386,45 +316,59 @@ namespace dy::Backends
     {
         if (m_internal == nullptr) return;
 
-        if (m_internal->commandQueue != nullptr &&
-            m_internal->fence != nullptr &&
-            m_internal->fenceEvent != nullptr)
+        const bool queueDrained = WaitIdleNative();
+        const bool deviceRemoved = m_internal->device != nullptr &&
+            FAILED(m_internal->device->GetDeviceRemovedReason());
+        if (!queueDrained && !deviceRemoved &&
+            (m_internal->lastSubmittedValue != 0 || m_internal->submissionFaulted))
         {
-            const uint64_t completionValue = m_internal->nextCompletionValue++;
-            if (SUCCEEDED(m_internal->commandQueue->Signal(
-                    m_internal->fence.Get(), completionValue)) &&
-                m_internal->fence->GetCompletedValue() < completionValue &&
-                SUCCEEDED(m_internal->fence->SetEventOnCompletion(
-                    completionValue, m_internal->fenceEvent)))
-            {
-                WaitForSingleObject(m_internal->fenceEvent, INFINITE);
-            }
+            // 제출/표시 완료 신호 실패는 실제 장치 제거와 다르다. 제출 없는 Present도 포함한다.
+            // 완료가 불확실한 큐가 사용하는 자원은 장치와 함께 보존한다.
+            AbandonResources();
+            m_internal = nullptr;
+            return;
         }
 
+        ReleaseResources();
         if (m_internal->fenceEvent != nullptr) CloseHandle(m_internal->fenceEvent);
         delete m_internal;
     }
 
     int D3D12Device::Initialize(const void* windowHandle, const RHI::DeviceDesc& desc)
     {
-        if (windowHandle == nullptr || desc.maxFramesInFlight == 0) return -1;
+        if (desc.maxFramesInFlight == 0) return -1;
         m_internal->windowHandle = static_cast<HWND>(const_cast<void*>(windowHandle));
 
-#if defined(_DEBUG)
-        // 디버그 레이어 활성화(디바이스 생성 전 필수). 이래야 InfoQueue 에 검증 메시지가 쌓인다.
-        // ("그래픽 도구" 선택 기능 미설치 시 D3D12GetDebugInterface 가 실패하므로 조건부 처리.)
+        if(desc.enableValidation)
         {
             ComPtr<ID3D12Debug> debugController;
-            if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)))) {
-                debugController->EnableDebugLayer();
-            }
+            if(FAILED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)))) return -1;
+            debugController->EnableDebugLayer();
         }
-#endif
 
         // 1. 디바이스 생성
-        if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_internal->device)))) {
+        ComPtr<IDXGIFactory1> adapterFactory;
+        ComPtr<IDXGIAdapter1> adapter;
+        if(FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&adapterFactory))) ||
+            FAILED(adapterFactory->EnumAdapters1(desc.adapterIndex,&adapter))) return -1;
+        if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_internal->device)))) {
             return -1;
         }
+
+        D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
+        const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+        D3D12_FEATURE_DATA_FEATURE_LEVELS featureLevels = {};
+        featureLevels.NumFeatureLevels = 2;
+        featureLevels.pFeatureLevelsRequested = levels;
+        if (FAILED(m_internal->device->CheckFeatureSupport(
+                D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options))) ||
+            FAILED(m_internal->device->CheckFeatureSupport(
+                D3D12_FEATURE_FEATURE_LEVELS, &featureLevels, sizeof(featureLevels))))
+        {
+            return -1;
+        }
+        m_internal->resourceBindingTier = options.ResourceBindingTier;
+        m_internal->resourceBindingFeatureLevel = featureLevels.MaxSupportedFeatureLevel;
         
 #if defined(_DEBUG)
         if (SUCCEEDED(m_internal->device.As(&m_internal->infoQueue))) {
@@ -457,13 +401,149 @@ namespace dy::Backends
         return 0;
     }
 
-    bool D3D12Device::CreateSwapchain(const RHI::SwapchainDesc& desc)
+
+uint64_t D3D12Device::GetLastSubmissionNative() const {return m_internal->lastSubmittedValue;}
+uint64_t D3D12Device::GetCompletedSubmissionNative() {uint64_t value=0; return m_internal->CollectCompletedWork(value)?value:0;}
+void D3D12Device::DiscardCommandListNative(RHI::ICommandList* list) {auto& active=m_internal->activeCommandLists; active.erase(std::remove_if(active.begin(),active.end(),[list](const auto& value){return value.get()==list;}),active.end());}
+
+bool D3D12Device::SupportsNative(RHI::Feature feature) const
+{
+    switch(feature)
     {
+    case RHI::Feature::Rasterization:
+    case RHI::Feature::DescriptorIndexing:
+    case RHI::Feature::SamplerLodBias:
+    case RHI::Feature::Wireframe:
+    case RHI::Feature::DepthBiasClamp:
+        return true;
+    default:
+        return false;
+    }
+}
+
+uint64_t D3D12Device::GetLimitNative(RHI::Limit limit) const
+{
+    switch(limit)
+    {
+    case RHI::Limit::InlineConstantBytes:
+        return D3D12_MAX_ROOT_COST * sizeof(uint32_t);
+    case RHI::Limit::Texture2DDimension:
+        return D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;
+    case RHI::Limit::UniformBufferOffsetAlignment:
+        return D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
+    case RHI::Limit::StorageBufferOffsetAlignment:
+        // 정형 버퍼는 이 공통 정렬 외에 자신의 stride 배수여야 한다.
+        return sizeof(uint32_t);
+    case RHI::Limit::UniformBufferBytes:
+        return D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 4u * sizeof(float);
+    case RHI::Limit::StorageBufferBytes:
+        return std::numeric_limits<uint32_t>::max();
+    case RHI::Limit::SamplerAnisotropy:
+        return D3D12_MAX_MAXANISOTROPY;
+    }
+    return 0;
+}
+
+bool D3D12Device::SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc& desc) const
+{
+    if(!m_internal || !m_internal->device) return false;
+    const auto graphicsStages = static_cast<uint32_t>(RHI::ShaderStageFlags::Vertex |
+        RHI::ShaderStageFlags::Fragment);
+    if(desc.inlineConstantSize &&
+        (static_cast<uint32_t>(desc.inlineConstantStages) & ~graphicsStages)) return false;
+    uint64_t rootCost = desc.inlineConstantSize / sizeof(uint32_t);
+    uint64_t descriptorCount = 0;
+    uint64_t samplerCount = 0;
+    uint64_t constantBuffers[2] = {};
+    uint64_t shaderResources[2] = {};
+    uint64_t unorderedAccessViews = 0;
+    for(uint32_t index = 0; index < desc.bindingCount; ++index)
+    {
+        const auto& binding = desc.bindings[index];
+        if(static_cast<uint32_t>(binding.stages) & ~graphicsStages) return false;
+        if(binding.type == RHI::ResourceBindingType::StaticSampler)
+            samplerCount += binding.count;
+        else
+        {
+            // 현재 번역은 binding마다 descriptor table 하나를 사용한다.
+            ++rootCost;
+            descriptorCount += binding.count;
+            for (uint32_t stage = 0; stage < 2; ++stage)
+            {
+                const auto flag = stage == 0 ? RHI::ShaderStageFlags::Vertex : RHI::ShaderStageFlags::Fragment;
+                if ((binding.stages & flag) == RHI::ShaderStageFlags::None) continue;
+                if (binding.type == RHI::ResourceBindingType::ConstantBuffer)
+                    constantBuffers[stage] += binding.count;
+                else if (binding.type == RHI::ResourceBindingType::SampledTexture ||
+                    binding.type == RHI::ResourceBindingType::ReadOnlyStorageBuffer)
+                    shaderResources[stage] += binding.count;
+            }
+            if (binding.type == RHI::ResourceBindingType::ReadWriteStorageBuffer ||
+                binding.type == RHI::ResourceBindingType::StorageTexture)
+                unorderedAccessViews += binding.count;
+        }
+    }
+    // heap의 총 크기와 실제 단계별 바인딩 한도는 다르다.
+    if (m_internal->resourceBindingTier < D3D12_RESOURCE_BINDING_TIER_3)
+    {
+        for (uint64_t count : constantBuffers)
+            if (count > D3D12_COMMONSHADER_CONSTANT_BUFFER_API_SLOT_COUNT) return false;
+        const uint64_t uavLimit = m_internal->resourceBindingTier == D3D12_RESOURCE_BINDING_TIER_1 &&
+            m_internal->resourceBindingFeatureLevel < D3D_FEATURE_LEVEL_11_1
+            ? D3D12_PS_CS_UAV_REGISTER_COUNT : D3D12_UAV_SLOT_COUNT;
+        if (unorderedAccessViews > uavLimit) return false;
+    }
+    if (m_internal->resourceBindingTier == D3D12_RESOURCE_BINDING_TIER_1)
+        for (uint64_t count : shaderResources)
+            if (count > D3D12_COMMONSHADER_INPUT_RESOURCE_SLOT_COUNT) return false;
+    return rootCost <= D3D12_MAX_ROOT_COST &&
+        descriptorCount <= D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_1 &&
+        samplerCount <= D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE;
+}
+bool D3D12Device::IsLostNative() const {return m_internal && (m_internal->submissionFaulted || (m_internal->device && FAILED(m_internal->device->GetDeviceRemovedReason())));}
+bool D3D12Device::WaitIdleNative()
+{
+    if(!m_internal || !m_internal->commandQueue || !m_internal->fence || !m_internal->fenceEvent || m_internal->submissionFaulted) return false;
+    const uint64_t completion = m_internal->nextCompletionValue++;
+    if(FAILED(m_internal->commandQueue->Signal(m_internal->fence.Get(), completion))) return false;
+    if(m_internal->fence->GetCompletedValue() < completion)
+    {
+        if(FAILED(m_internal->fence->SetEventOnCompletion(completion, m_internal->fenceEvent)) ||
+            WaitForSingleObject(m_internal->fenceEvent, INFINITE) != WAIT_OBJECT_0) return false;
+    }
+    return m_internal->CollectCompletedWork();
+}
+void D3D12Device::DestroySwapchainNative()
+{
+    m_internal->backBufferTextures.clear();
+    m_internal->rtvHeap.Reset();
+    m_internal->swapChain.Reset();
+    m_internal->imageCompletionValues.clear();
+    m_internal->swapchainReady = m_internal->frameReady = m_internal->frameSubmitted = false;
+}
+
+    bool D3D12Device::CreateSwapchainNative(const RHI::SwapchainDesc& desc)
+    {
+        m_internal->windowHandle=static_cast<HWND>(const_cast<void*>(desc.window));
         if (m_internal == nullptr || m_internal->device == nullptr ||
             m_internal->commandQueue == nullptr || m_internal->windowHandle == nullptr ||
-            m_internal->swapchainReady || desc.minimumImageCount == 0 ||
-            desc.minimumImageCount > DXGI_MAX_SWAP_CHAIN_BUFFERS)
+            m_internal->swapchainReady ||
+            desc.minimumImageCount > DXGI_MAX_SWAP_CHAIN_BUFFERS ||
+            desc.compositeAlpha != RHI::CompositeAlpha::Opaque)
         {
+            return false;
+        }
+
+        DXGI_COLOR_SPACE_TYPE colorSpace;
+        switch(desc.colorSpace)
+        {
+        case RHI::ColorSpace::Srgb:
+            colorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+            break;
+        case RHI::ColorSpace::LinearSrgb:
+            colorSpace = DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709;
+            break;
+        default:
             return false;
         }
 
@@ -472,11 +552,7 @@ namespace dy::Backends
         DXGI_FORMAT rtvFormat = DXGI_FORMAT_UNKNOWN;
         switch (desc.format)
         {
-        case RHI::Format::Unknown:
-            actualFormat = RHI::Format::R8G8B8A8_UNORM;
-            resourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-            rtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-            break;
+        case RHI::Format::Unknown: return false;
         case RHI::Format::R8G8B8A8_UNORM:
             resourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
             rtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -551,6 +627,8 @@ namespace dy::Backends
         requestedDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
         requestedDesc.SampleDesc.Count = 1;
         requestedDesc.Flags = swapchainFlags;
+        // HWND 출력은 불투명 합성만 지원한다. 요청한 알파 방식을 몰래 대체하지 않는다.
+        requestedDesc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
 
         ComPtr<IDXGISwapChain1> swapchain1;
         ComPtr<IDXGISwapChain3> swapchain3;
@@ -565,6 +643,15 @@ namespace dy::Backends
         {
             return false;
         }
+        // 자동 exclusive fullscreen 전환은 Immediate의 ALLOW_TEARING 계약과
+        // 충돌한다. 창 모드 변경은 호출자가 명시적으로 관리한다.
+        if (FAILED(factory->MakeWindowAssociation(m_internal->windowHandle, DXGI_MWA_NO_ALT_ENTER)))
+            return false;
+
+        UINT colorSpaceSupport = 0;
+        if(FAILED(swapchain3->CheckColorSpaceSupport(colorSpace, &colorSpaceSupport)) ||
+            !(colorSpaceSupport & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT) ||
+            FAILED(swapchain3->SetColorSpace1(colorSpace))) return false;
 
         DXGI_SWAP_CHAIN_DESC1 actualDesc = {};
         if (FAILED(swapchain3->GetDesc1(&actualDesc)) ||
@@ -608,13 +695,21 @@ namespace dy::Backends
         m_internal->activeImageIndex = m_internal->swapChain->GetCurrentBackBufferIndex();
         m_internal->swapchainReady =
             m_internal->activeImageIndex < m_internal->backBufferTextures.size();
+        if (m_internal->swapchainReady && actualDesc.BufferCount > desc.minimumImageCount)
+        {
+            char message[160];
+            std::snprintf(message, sizeof(message),
+                "D3D12: Swapchain minimum image count %u uses %u images to satisfy native requirements.",
+                desc.minimumImageCount, actualDesc.BufferCount);
+		ReportDiagnostic(DiagnosticSeverity::Info, message);
+        }
         return m_internal->swapchainReady;
     }
 
-    bool D3D12Device::BeginFrame()
+    bool D3D12Device::BeginFrameNative()
     {
         if (m_internal == nullptr || !m_internal->swapchainReady ||
-            m_internal->submissionFaulted || m_internal->frameSubmitted ||
+            m_internal->submissionFaulted ||
             m_internal->frames.empty())
         {
             return false;
@@ -669,9 +764,9 @@ namespace dy::Backends
             m_internal->backBufferTextures.front()->GetDesc();
         if (backBufferDesc.width != width || backBufferDesc.height != height)
         {
-            for (const D3D12FrameSlot& frame : m_internal->frames)
+            for (uint64_t completionValue : m_internal->frames)
             {
-                if (frame.completionValue > completedValue) return false;
+                if (completionValue > completedValue) return false;
             }
             for (uint64_t completionValue : m_internal->imageCompletionValues)
             {
@@ -744,7 +839,7 @@ namespace dy::Backends
         const uint32_t imageIndex = m_internal->swapChain->GetCurrentBackBufferIndex();
         if (m_internal->nextFrameIndex >= m_internal->frames.size() ||
             imageIndex >= m_internal->imageCompletionValues.size() ||
-            m_internal->frames[m_internal->nextFrameIndex].completionValue > completedValue ||
+            m_internal->frames[m_internal->nextFrameIndex] > completedValue ||
             m_internal->imageCompletionValues[imageIndex] > completedValue)
         {
             return false;
@@ -756,7 +851,7 @@ namespace dy::Backends
         return true;
     }
 
-    RHI::ICommandList* D3D12Device::AcquireCommandList()
+    RHI::ICommandList* D3D12Device::AcquireCommandListNative()
     {
         if (m_internal == nullptr || m_internal->device == nullptr ||
             m_internal->submissionFaulted)
@@ -774,7 +869,7 @@ namespace dy::Backends
         return result;
     }
 
-    bool D3D12Device::Submit(RHI::ICommandList** cmdLists, uint32_t count)
+    bool D3D12Device::SubmitNative(RHI::ICommandList** cmdLists, uint32_t count)
     {
         if (m_internal == nullptr || cmdLists == nullptr || count == 0)
         {
@@ -847,17 +942,6 @@ namespace dy::Backends
                 }
             }
         }
-        if (submissionValid && frameSubmission)
-        {
-            const auto key = std::make_pair(activeBackBuffer, 0u);
-            const auto found = resourceStates.textureSubresources.find(key);
-            const RHI::ResourceState finalState =
-                found == resourceStates.textureSubresources.end()
-                ? activeBackBuffer->GetState(0, 0)
-                : found->second;
-            if (finalState != RHI::ResourceState::Present)
-                submissionValid = false;
-        }
         if (!submissionValid)
         {
             for (D3D12CommandList* commandList : submittedCommandLists)
@@ -913,45 +997,64 @@ namespace dy::Backends
         }
         m_internal->lastSubmittedValue = submission.completionValue;
 
+        // 프레임을 구성하는 여러 제출의 마지막 완료 값을 유지한다. 마감은 Present가 한다.
+        if (m_internal->frameReady)
+        {
+            m_internal->frames[m_internal->activeFrameIndex] =
+                submission.completionValue;
+        }
         if (frameSubmission)
         {
-            m_internal->frames[m_internal->activeFrameIndex].completionValue =
-                submission.completionValue;
             m_internal->imageCompletionValues[m_internal->activeImageIndex] =
                 submission.completionValue;
-            m_internal->nextFrameIndex =
-                (m_internal->activeFrameIndex + 1) %
-                static_cast<uint32_t>(m_internal->frames.size());
-            m_internal->frameReady = false;
             m_internal->frameSubmitted = true;
         }
         DumpInfoQueue(m_internal, "Submit");
         return true;
     }
 
-    void D3D12Device::Present()
+    bool D3D12Device::PresentNative()
     {
         if (m_internal == nullptr || m_internal->submissionFaulted ||
-            !m_internal->frameSubmitted)
+            !m_internal->frameReady)
         {
-            return;
+            return false;
         }
 
         const HRESULT result = m_internal->swapChain->Present(
             m_internal->presentSyncInterval,
             m_internal->presentFlags);
+        if (SUCCEEDED(result))
+        {
+            // Present도 queue에 backbuffer를 사용하는 작업을 추가한다. draw 제출의
+            // fence만 기다리면 resize가 표시 중인 버퍼를 먼저 해제할 수 있다.
+            const uint64_t completion = m_internal->nextCompletionValue++;
+            if (FAILED(m_internal->commandQueue->Signal(m_internal->fence.Get(), completion)))
+            {
+                m_internal->submissionFaulted = true;
+                m_internal->frameReady = false;
+                m_internal->frameSubmitted = false;
+                ReportDiagnostic(DiagnosticSeverity::Error,
+                    "D3D12: Failed to signal presentation completion; swapchain images cannot be safely reused or resized.");
+                return false;
+            }
+            m_internal->frames[m_internal->activeFrameIndex] = completion;
+            m_internal->imageCompletionValues[m_internal->activeImageIndex] = completion;
+            m_internal->lastSubmittedValue = completion;
+        }
+        // 제출이 없는 프레임도 Present에서 정상적으로 마감한다.
+        m_internal->nextFrameIndex =
+            (m_internal->activeFrameIndex + 1) %
+            static_cast<uint32_t>(m_internal->frames.size());
+        m_internal->frameReady = false;
         m_internal->frameSubmitted = false;
         if (FAILED(result)) m_internal->submissionFaulted = true;
         DumpInfoQueue(m_internal, "Present");
+        return SUCCEEDED(result);
     }
 
     namespace
     {
-        bool HasUsage(RHI::BufferUsage usage, RHI::BufferUsage flag)
-        {
-            return (static_cast<uint32_t>(usage) & static_cast<uint32_t>(flag)) != 0;
-        }
-
         bool HasUsage(RHI::TextureUsage usage, RHI::TextureUsage flag)
         {
             return (static_cast<uint32_t>(usage) & static_cast<uint32_t>(flag)) != 0;
@@ -962,28 +1065,6 @@ namespace dy::Backends
         {
             return range.firstMipLevel == 0 && range.mipLevelCount == 0 &&
                 range.firstArrayLayer == 0 && range.arrayLayerCount == 0;
-        }
-
-        bool ResolveTextureSubresourceRange(
-            const RHI::Texture& texture,
-            const RHI::TextureSubresourceRange& range,
-            uint32_t& mipLevelCount,
-            uint32_t& arrayLayerCount)
-        {
-            if (range.firstMipLevel >= texture.GetDesc().mipLevels ||
-                range.firstArrayLayer >= texture.GetDesc().depthOrArraySize)
-            {
-                return false;
-            }
-            mipLevelCount = range.mipLevelCount == 0
-                ? texture.GetDesc().mipLevels - range.firstMipLevel
-                : range.mipLevelCount;
-            arrayLayerCount = range.arrayLayerCount == 0
-                ? texture.GetDesc().depthOrArraySize - range.firstArrayLayer
-                : range.arrayLayerCount;
-            return mipLevelCount <= texture.GetDesc().mipLevels - range.firstMipLevel &&
-                arrayLayerCount <=
-                    texture.GetDesc().depthOrArraySize - range.firstArrayLayer;
         }
 
         bool HasStage(RHI::ShaderStageFlags stages, RHI::ShaderStageFlags stage)
@@ -1111,6 +1192,20 @@ namespace dy::Backends
             }
         }
 
+        D3D12_BLEND ToAlphaBlendFactor(RHI::BlendFactor factor)
+        {
+            // 색상 계수의 alpha 성분은 해당 alpha 계수와 같다. D3D12의
+            // alpha 항에는 *_COLOR enum을 직접 전달할 수 없다.
+            switch (factor)
+            {
+            case RHI::BlendFactor::SourceColor: return D3D12_BLEND_SRC_ALPHA;
+            case RHI::BlendFactor::OneMinusSourceColor: return D3D12_BLEND_INV_SRC_ALPHA;
+            case RHI::BlendFactor::DestinationColor: return D3D12_BLEND_DEST_ALPHA;
+            case RHI::BlendFactor::OneMinusDestinationColor: return D3D12_BLEND_INV_DEST_ALPHA;
+            default: return ToBlendFactor(factor);
+            }
+        }
+
         D3D12_BLEND_OP ToBlendOp(RHI::BlendOp op)
         {
             switch (op)
@@ -1153,26 +1248,14 @@ namespace dy::Backends
 
         bool ToSamplerFilter(const RHI::SamplerDesc& desc, D3D12_FILTER& filter)
         {
-            if (desc.minFilter == RHI::SamplerFilter::Undefined ||
-                desc.magFilter == RHI::SamplerFilter::Undefined ||
-                desc.mipFilter == RHI::SamplerFilter::Undefined ||
-                desc.maxAnisotropy == 0 ||
-                desc.maxAnisotropy > D3D12_MAX_MAXANISOTROPY ||
-                !std::isfinite(desc.mipLodBias) ||
-                !std::isfinite(desc.minLod) ||
-                !std::isfinite(desc.maxLod) ||
-                desc.minLod > desc.maxLod)
+            if (desc.maxAnisotropy > D3D12_MAX_MAXANISOTROPY ||
+                desc.mipLodBias < D3D12_MIP_LOD_BIAS_MIN ||
+                desc.mipLodBias > D3D12_MIP_LOD_BIAS_MAX)
             {
                 return false;
             }
             if (desc.maxAnisotropy > 1)
             {
-                if (desc.minFilter != RHI::SamplerFilter::Linear ||
-                    desc.magFilter != RHI::SamplerFilter::Linear ||
-                    desc.mipFilter != RHI::SamplerFilter::Linear)
-                {
-                    return false;
-                }
                 filter = D3D12_FILTER_ANISOTROPIC;
                 return true;
             }
@@ -1188,30 +1271,6 @@ namespace dy::Backends
             filter = D3D12_ENCODE_BASIC_FILTER(
                 minFilter, magFilter, mipFilter, D3D12_FILTER_REDUCTION_TYPE_STANDARD);
             return true;
-        }
-
-        uint32_t RegisterNamespace(RHI::ResourceBindingType type)
-        {
-            switch (type)
-            {
-            case RHI::ResourceBindingType::ConstantBuffer: return 0;
-            case RHI::ResourceBindingType::ReadOnlyStorageBuffer:
-            case RHI::ResourceBindingType::SampledTexture:
-                return 1;
-            case RHI::ResourceBindingType::ReadWriteStorageBuffer:
-            case RHI::ResourceBindingType::StorageTexture:
-                return 2;
-            case RHI::ResourceBindingType::StaticSampler: return 3;
-            default: return std::numeric_limits<uint32_t>::max();
-            }
-        }
-
-        bool RangesOverlap(uint32_t firstA, uint32_t countA, uint32_t firstB, uint32_t countB)
-        {
-            const uint64_t endA = static_cast<uint64_t>(firstA) + countA;
-            const uint64_t endB = static_cast<uint64_t>(firstB) + countB;
-            return static_cast<uint64_t>(firstA) < endB &&
-                static_cast<uint64_t>(firstB) < endA;
         }
 
         D3D12_DESCRIPTOR_RANGE_TYPE ToDescriptorRangeType(RHI::ResourceBindingType type)
@@ -1235,7 +1294,6 @@ namespace dy::Backends
             float constant,
             INT& nativeBias)
         {
-            if (!std::isfinite(constant)) return false;
             const double value = static_cast<double>(constant);
             if (std::trunc(value) != value ||
                 value < static_cast<double>(std::numeric_limits<INT>::min()) ||
@@ -1248,36 +1306,51 @@ namespace dy::Backends
         }
     }
 
-    RHI::BufferHandle D3D12Device::CreateBuffer(const RHI::BufferDesc& desc)
+    bool D3D12Device::SupportsSamplerNative(const RHI::SamplerDesc& desc) const
     {
-        if (m_internal == nullptr || m_internal->device == nullptr || desc.size == 0)
-            return nullptr;
-        if ((desc.initialState == RHI::ResourceState::VertexBuffer &&
-                !HasUsage(desc.usage, RHI::BufferUsage::Vertex)) ||
-            (desc.initialState == RHI::ResourceState::IndexBuffer &&
-                !HasUsage(desc.usage, RHI::BufferUsage::Index)) ||
-            (desc.initialState == RHI::ResourceState::ConstantBuffer &&
-                !HasUsage(desc.usage, RHI::BufferUsage::Constant)) ||
-            ((desc.initialState == RHI::ResourceState::ShaderResource ||
-                desc.initialState == RHI::ResourceState::UnorderedAccess) &&
-                !HasUsage(desc.usage, RHI::BufferUsage::Storage)))
+        // 지원 조회와 실제 sampler 변환에 같은 범위 검사를 적용한다. 범위 밖 값은 보정하지 않는다.
+        D3D12_FILTER filter;
+        return ToSamplerFilter(desc, filter);
+    }
+
+    bool D3D12Device::SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc& desc) const
+    {
+        if(!m_internal || !m_internal->device ||
+            desc.colorAttachmentCount > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT ||
+            desc.vertexAttributeCount > D3D12_IA_VERTEX_INPUT_STRUCTURE_ELEMENT_COUNT) return false;
+        INT depthBias = 0;
+        if(!ToDepthBias(desc.raster.depthBiasConstant, depthBias)) return false;
+        const auto supportsFormat = [&](DXGI_FORMAT format, D3D12_FORMAT_SUPPORT1 required) {
+            D3D12_FEATURE_DATA_FORMAT_SUPPORT support = {};
+            support.Format = format;
+            return format != DXGI_FORMAT_UNKNOWN &&
+                SUCCEEDED(m_internal->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+                    &support, sizeof(support))) && (support.Support1 & required) == required;
+        };
+        for(uint32_t index = 0; index < desc.vertexBufferCount; ++index)
+            if(desc.vertexBuffers[index].binding >= D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT ||
+                desc.vertexBuffers[index].stride > D3D12_REQ_MULTI_ELEMENT_STRUCTURE_SIZE_IN_BYTES) return false;
+        for(uint32_t index = 0; index < desc.vertexAttributeCount; ++index)
+            if(!supportsFormat(ToVertexFormat(desc.vertexAttributes[index].format),
+                D3D12_FORMAT_SUPPORT1_IA_VERTEX_BUFFER)) return false;
+        for(uint32_t index = 0; index < desc.colorAttachmentCount; ++index)
         {
-            return nullptr;
+            const auto& attachment = desc.colorAttachments[index];
+            auto required = D3D12_FORMAT_SUPPORT1_RENDER_TARGET;
+            if(attachment.blend.enabled)
+                required = static_cast<D3D12_FORMAT_SUPPORT1>(required | D3D12_FORMAT_SUPPORT1_BLENDABLE);
+            if(!supportsFormat(static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(attachment.format)), required)) return false;
         }
-        switch (desc.initialState)
-        {
-        case RHI::ResourceState::Undefined:
-        case RHI::ResourceState::Common:
-        case RHI::ResourceState::CopyDestination:
-        case RHI::ResourceState::VertexBuffer:
-        case RHI::ResourceState::IndexBuffer:
-        case RHI::ResourceState::ConstantBuffer:
-        case RHI::ResourceState::ShaderResource:
-        case RHI::ResourceState::UnorderedAccess:
-            break;
-        default:
+        if(desc.depthStencil.format != RHI::Format::Unknown &&
+            !supportsFormat(static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(desc.depthStencil.format)),
+                D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL)) return false;
+        return true;
+    }
+
+    RHI::BufferHandle D3D12Device::CreateBufferNative(const RHI::BufferDesc& desc)
+    {
+        if (m_internal == nullptr || m_internal->device == nullptr)
             return nullptr;
-        }
 
         auto buffer = std::unique_ptr<D3D12Buffer, D3D12ObjectDeleter>(
             new D3D12Buffer(m_internal->device.Get(), desc));
@@ -1287,11 +1360,9 @@ namespace dy::Backends
         return result;
     }
 
-    RHI::TextureHandle D3D12Device::CreateTexture(const RHI::TextureDesc& desc)
+    RHI::TextureHandle D3D12Device::CreateTextureNative(const RHI::TextureDesc& desc)
     {
         if (m_internal == nullptr || m_internal->device == nullptr ||
-            desc.width == 0 || desc.height == 0 ||
-            desc.depthOrArraySize == 0 || desc.mipLevels == 0 ||
             desc.depthOrArraySize > std::numeric_limits<UINT16>::max() ||
             desc.mipLevels > std::numeric_limits<UINT16>::max())
         {
@@ -1325,12 +1396,10 @@ namespace dy::Backends
         return result;
     }
 
-    RHI::ShaderHandle D3D12Device::CreateShader(const RHI::ShaderDesc& desc)
+    RHI::ShaderHandle D3D12Device::CreateShaderNative(const RHI::ShaderDesc& desc)
     {
-        if ((desc.stage != RHI::ShaderStage::Vertex &&
-                desc.stage != RHI::ShaderStage::Fragment) ||
-            desc.entryPoint == nullptr || desc.entryPoint[0] == '\0' ||
-            desc.binary == nullptr || desc.binarySize == 0)
+        if (desc.stage != RHI::ShaderStage::Vertex &&
+            desc.stage != RHI::ShaderStage::Fragment)
         {
             return nullptr;
         }
@@ -1341,23 +1410,12 @@ namespace dy::Backends
         return result;
     }
 
-    RHI::PipelineHandle D3D12Device::CreateGraphicsPipeline(
+    RHI::PipelineHandle D3D12Device::CreateGraphicsPipelineNative(
         const RHI::GraphicsPipelineDesc& desc)
     {
         if (m_internal == nullptr || m_internal->device == nullptr ||
-            desc.vertexShader == nullptr ||
-            desc.topology == RHI::PrimitiveTopology::Undefined ||
-            desc.raster.fillMode == RHI::FillMode::Undefined ||
-            desc.raster.cullMode == RHI::CullMode::Undefined ||
-            desc.raster.frontFace == RHI::FrontFace::Undefined ||
-            (desc.vertexBufferCount != 0 && desc.vertexBuffers == nullptr) ||
-            (desc.vertexAttributeCount != 0 && desc.vertexAttributes == nullptr) ||
-            (desc.colorAttachmentCount != 0 && desc.colorAttachments == nullptr) ||
-            (desc.layout.bindingCount != 0 && desc.layout.bindings == nullptr) ||
-            (desc.vertexAttributeCount != 0 && desc.vertexBufferCount == 0) ||
-            !std::isfinite(desc.raster.depthBiasSlope) ||
-            !std::isfinite(desc.raster.depthBiasClamp) ||
-            desc.colorAttachmentCount > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT)
+            !SupportsPipelineLayoutNative(desc.layout) ||
+            !SupportsGraphicsPipelineNative(desc))
         {
             return nullptr;
         }
@@ -1365,96 +1423,10 @@ namespace dy::Backends
         auto* vertexShader = dynamic_cast<D3D12Shader*>(desc.vertexShader);
         auto* fragmentShader = dynamic_cast<D3D12Shader*>(desc.fragmentShader);
         if (vertexShader == nullptr ||
-            !OwnsObject(m_internal->liveShaders, desc.vertexShader) ||
-            vertexShader->GetStage() != RHI::ShaderStage::Vertex ||
             vertexShader->GetBinarySize() == 0 ||
             (desc.fragmentShader != nullptr &&
-                (!OwnsObject(
-                        m_internal->liveShaders, desc.fragmentShader) ||
-                    fragmentShader == nullptr ||
-                    fragmentShader->GetStage() != RHI::ShaderStage::Fragment ||
+                (fragmentShader == nullptr ||
                     fragmentShader->GetBinarySize() == 0)))
-        {
-            return nullptr;
-        }
-
-        if ((desc.depthStencil.depthTestEnabled ||
-                desc.depthStencil.depthWriteEnabled ||
-                desc.depthStencil.stencilEnabled) &&
-            (desc.depthStencil.format != RHI::Format::D32_FLOAT &&
-                desc.depthStencil.format != RHI::Format::D24_UNORM_S8_UINT))
-        {
-            return nullptr;
-        }
-        if (desc.depthStencil.depthTestEnabled &&
-            desc.depthStencil.depthCompareOp == RHI::CompareOp::Undefined)
-        {
-            return nullptr;
-        }
-        if (desc.depthStencil.stencilEnabled &&
-            (desc.depthStencil.format != RHI::Format::D24_UNORM_S8_UINT ||
-                desc.depthStencil.front.failOp == RHI::StencilOp::Undefined ||
-                desc.depthStencil.front.depthFailOp == RHI::StencilOp::Undefined ||
-                desc.depthStencil.front.passOp == RHI::StencilOp::Undefined ||
-                desc.depthStencil.front.compareOp == RHI::CompareOp::Undefined ||
-                desc.depthStencil.back.failOp == RHI::StencilOp::Undefined ||
-                desc.depthStencil.back.depthFailOp == RHI::StencilOp::Undefined ||
-                desc.depthStencil.back.passOp == RHI::StencilOp::Undefined ||
-                desc.depthStencil.back.compareOp == RHI::CompareOp::Undefined))
-        {
-            return nullptr;
-        }
-
-        for (uint32_t index = 0; index < desc.layout.bindingCount; ++index)
-        {
-            const RHI::ResourceBindingLayout& binding = desc.layout.bindings[index];
-            const uint32_t stages = static_cast<uint32_t>(binding.stages);
-            if (binding.type == RHI::ResourceBindingType::Undefined ||
-                binding.count == 0 ||
-                binding.stages == RHI::ShaderStageFlags::None ||
-                (stages & ~static_cast<uint32_t>(
-                    RHI::ShaderStageFlags::Vertex |
-                    RHI::ShaderStageFlags::Fragment)) != 0 ||
-                static_cast<uint64_t>(binding.binding) + binding.count >
-                    static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) + 1)
-            {
-                return nullptr;
-            }
-            for (uint32_t previous = 0; previous < index; ++previous)
-            {
-                const RHI::ResourceBindingLayout& other =
-                    desc.layout.bindings[previous];
-                if ((binding.binding == other.binding) ||
-                        (RegisterNamespace(binding.type) ==
-                            RegisterNamespace(other.type) &&
-                            RangesOverlap(
-                                binding.binding,
-                                binding.count,
-                                other.binding,
-                                other.count)))
-                {
-                    return nullptr;
-                }
-            }
-            if (binding.type == RHI::ResourceBindingType::ConstantBuffer &&
-                desc.layout.inlineConstantSize != 0 &&
-                RangesOverlap(
-                    binding.binding,
-                    binding.count,
-                    desc.layout.inlineConstantBinding,
-                    1))
-            {
-                return nullptr;
-            }
-        }
-
-        if (desc.layout.inlineConstantSize != 0 &&
-            (desc.layout.inlineConstantStages == RHI::ShaderStageFlags::None ||
-                (static_cast<uint32_t>(desc.layout.inlineConstantStages) &
-                    ~static_cast<uint32_t>(
-                        RHI::ShaderStageFlags::Vertex |
-                        RHI::ShaderStageFlags::Fragment)) != 0 ||
-                (desc.layout.inlineConstantSize % 4) != 0))
         {
             return nullptr;
         }
@@ -1486,12 +1458,6 @@ namespace dy::Backends
             }
         }
         const uint32_t rootConstantDwords = desc.layout.inlineConstantSize / 4;
-        if (static_cast<uint64_t>(tableCount) + rootConstantDwords >
-            D3D12_MAX_ROOT_COST)
-        {
-            return nullptr;
-        }
-
         std::vector<CD3DX12_DESCRIPTOR_RANGE1> descriptorRanges;
         std::vector<CD3DX12_ROOT_PARAMETER1> rootParameters;
         std::vector<D3D12PipelineBinding> pipelineBindings;
@@ -1508,20 +1474,7 @@ namespace dy::Backends
             if (binding.type == RHI::ResourceBindingType::StaticSampler)
             {
                 D3D12_FILTER filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-                if (!ToSamplerFilter(binding.staticSampler, filter) ||
-                    binding.staticSampler.addressU == RHI::SamplerAddressMode::Undefined ||
-                    binding.staticSampler.addressV == RHI::SamplerAddressMode::Undefined ||
-                    binding.staticSampler.addressW == RHI::SamplerAddressMode::Undefined)
-                {
-                    return nullptr;
-                }
-                const bool usesBorder =
-                    binding.staticSampler.addressU == RHI::SamplerAddressMode::ClampToBorder ||
-                    binding.staticSampler.addressV == RHI::SamplerAddressMode::ClampToBorder ||
-                    binding.staticSampler.addressW == RHI::SamplerAddressMode::ClampToBorder;
-                if (usesBorder &&
-                    binding.staticSampler.borderColor ==
-                        RHI::SamplerBorderColor::Undefined)
+                if (!ToSamplerFilter(binding.staticSampler, filter))
                 {
                     return nullptr;
                 }
@@ -1620,7 +1573,7 @@ namespace dy::Backends
         {
             if (rootSignatureError != nullptr)
             {
-                std::cout << "[D3D12] root signature: "
+                std::cerr << "[D3D12] root signature: "
                     << static_cast<const char*>(
                         rootSignatureError->GetBufferPointer())
                     << std::endl;
@@ -1643,15 +1596,9 @@ namespace dy::Backends
         for (uint32_t index = 0; index < desc.vertexBufferCount; ++index)
         {
             const RHI::VertexBufferLayout& layout = desc.vertexBuffers[index];
-            if (layout.stride == 0 ||
-                layout.stepMode == RHI::VertexStepMode::Undefined ||
-                layout.binding >= D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT)
+            if (layout.binding >= D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT)
             {
                 return nullptr;
-            }
-            for (const D3D12VertexBinding& previous : vertexBindings)
-            {
-                if (previous.binding == layout.binding) return nullptr;
             }
             vertexBindings.push_back({ layout.binding, layout.stride });
         }
@@ -1669,16 +1616,10 @@ namespace dy::Backends
                 {
                     return layout.binding == attribute.binding;
                 });
-            if (format == DXGI_FORMAT_UNKNOWN ||
-                vertexBinding == desc.vertexBuffers + desc.vertexBufferCount)
+            if (format == DXGI_FORMAT_UNKNOWN)
             {
                 return nullptr;
             }
-            for (const D3D12_INPUT_ELEMENT_DESC& previous : inputElements)
-            {
-                if (previous.SemanticIndex == attribute.location) return nullptr;
-            }
-
             D3D12_INPUT_ELEMENT_DESC element = {};
             element.SemanticName = "TEXCOORD";
             element.SemanticIndex = attribute.location;
@@ -1737,6 +1678,7 @@ namespace dy::Backends
         pipelineDesc.BlendState.IndependentBlendEnable =
             desc.colorAttachmentCount > 1;
         pipelineDesc.NumRenderTargets = desc.colorAttachmentCount;
+        bool alphaFactorsTranslated = false;
         for (uint32_t index = 0; index < desc.colorAttachmentCount; ++index)
         {
             const RHI::ColorAttachmentDesc& attachment =
@@ -1755,23 +1697,17 @@ namespace dy::Backends
                 static_cast<UINT8>(attachment.writeMask);
             if (attachment.blend.enabled)
             {
-                if (attachment.blend.sourceColor == RHI::BlendFactor::Undefined ||
-                    attachment.blend.destinationColor == RHI::BlendFactor::Undefined ||
-                    attachment.blend.colorOp == RHI::BlendOp::Undefined ||
-                    attachment.blend.sourceAlpha == RHI::BlendFactor::Undefined ||
-                    attachment.blend.destinationAlpha == RHI::BlendFactor::Undefined ||
-                    attachment.blend.alphaOp == RHI::BlendOp::Undefined)
-                {
-                    return nullptr;
-                }
                 blend.SrcBlend = ToBlendFactor(attachment.blend.sourceColor);
                 blend.DestBlend =
                     ToBlendFactor(attachment.blend.destinationColor);
                 blend.BlendOp = ToBlendOp(attachment.blend.colorOp);
                 blend.SrcBlendAlpha =
-                    ToBlendFactor(attachment.blend.sourceAlpha);
+                    ToAlphaBlendFactor(attachment.blend.sourceAlpha);
                 blend.DestBlendAlpha =
-                    ToBlendFactor(attachment.blend.destinationAlpha);
+                    ToAlphaBlendFactor(attachment.blend.destinationAlpha);
+                alphaFactorsTranslated = alphaFactorsTranslated ||
+                    blend.SrcBlendAlpha != ToBlendFactor(attachment.blend.sourceAlpha) ||
+                    blend.DestBlendAlpha != ToBlendFactor(attachment.blend.destinationAlpha);
                 blend.BlendOpAlpha = ToBlendOp(attachment.blend.alphaOp);
             }
             else
@@ -1833,7 +1769,7 @@ namespace dy::Backends
                 pipelineDesc.DepthStencilState.FrontFace;
         }
         pipelineDesc.DSVFormat = static_cast<DXGI_FORMAT>(
-            D3D12Texture::ToDxgiDepthStencilFormat(
+            D3D12Texture::ToDxgiFormat(
                 desc.depthStencil.format));
         if (desc.depthStencil.format != RHI::Format::Unknown &&
             pipelineDesc.DSVFormat == DXGI_FORMAT_UNKNOWN)
@@ -1867,21 +1803,21 @@ namespace dy::Backends
                     desc.depthStencil.stencilEnabled));
         D3D12PipelineState* result = pipeline.get();
         m_internal->livePipelines.push_back(std::move(pipeline));
+        if (alphaFactorsTranslated)
+		ReportDiagnostic(DiagnosticSeverity::Info,
+                "D3D12: Alpha blend color factors were translated to equivalent alpha factors.");
         return result;
     }
 
-    RHI::ResourceSetHandle D3D12Device::CreateResourceSet(
+    RHI::ResourceSetHandle D3D12Device::CreateResourceSetNative(
         const RHI::ResourceSetDesc& desc)
     {
-        if (m_internal == nullptr || m_internal->device == nullptr ||
-            desc.pipeline == nullptr ||
-            (desc.bindingCount != 0 && desc.bindings == nullptr))
+        if (m_internal == nullptr || m_internal->device == nullptr)
         {
             return nullptr;
         }
         auto* pipeline = dynamic_cast<D3D12PipelineState*>(desc.pipeline);
         if (pipeline == nullptr ||
-            !OwnsObject(m_internal->livePipelines, desc.pipeline) ||
             desc.bindingCount != pipeline->GetDescriptorCount())
         {
             return nullptr;
@@ -1904,7 +1840,6 @@ namespace dy::Backends
             }
         }
 
-        std::vector<uint8_t> written(pipeline->GetDescriptorCount(), 0);
         std::vector<ID3D12Resource*> resources;
         resources.reserve(desc.bindingCount);
         for (uint32_t index = 0; index < desc.bindingCount; ++index)
@@ -1917,15 +1852,12 @@ namespace dy::Backends
                 {
                     return candidate.layout.binding == binding.binding;
                 });
-            if (slot == pipeline->GetBindings().end() ||
-                binding.arrayElement >= slot->layout.count)
+            if (slot == pipeline->GetBindings().end())
             {
                 return nullptr;
             }
             const uint32_t descriptorIndex =
                 slot->descriptorOffset + binding.arrayElement;
-            if (written[descriptorIndex] != 0) return nullptr;
-            written[descriptorIndex] = 1;
 
             D3D12_CPU_DESCRIPTOR_HANDLE handle =
                 descriptorHeap->GetCPUDescriptorHandleForHeapStart();
@@ -1934,25 +1866,14 @@ namespace dy::Backends
             if (slot->layout.type == RHI::ResourceBindingType::ConstantBuffer)
             {
                 auto* buffer = dynamic_cast<D3D12Buffer*>(binding.buffer);
-                if (buffer == nullptr || binding.texture != nullptr ||
-                    !OwnsObject(m_internal->liveBuffers, binding.buffer) ||
+                if (buffer == nullptr ||
                     !IsDefaultSubresourceRange(binding.subresources) ||
-                    !HasUsage(buffer->GetDesc().usage, RHI::BufferUsage::Constant) ||
-                    (binding.offset % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT) != 0 ||
-                    binding.offset >= buffer->GetDesc().size)
-                {
-                    return nullptr;
-                }
-                const uint32_t requestedSize = binding.size == 0
-                    ? buffer->GetDesc().size - binding.offset
-                    : binding.size;
-                if (requestedSize == 0 ||
-                    requestedSize > buffer->GetDesc().size - binding.offset)
+                    (binding.offset % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT) != 0)
                 {
                     return nullptr;
                 }
                 const uint64_t alignedSize =
-                    (static_cast<uint64_t>(requestedSize) +
+                    (static_cast<uint64_t>(binding.size) +
                         D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT - 1) &
                     ~(static_cast<uint64_t>(
                         D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT) - 1);
@@ -1972,23 +1893,10 @@ namespace dy::Backends
                 RHI::ResourceBindingType::ReadOnlyStorageBuffer)
             {
                 auto* buffer = dynamic_cast<D3D12Buffer*>(binding.buffer);
-                if (buffer == nullptr || binding.texture != nullptr ||
-                    !OwnsObject(m_internal->liveBuffers, binding.buffer) ||
-                    !IsDefaultSubresourceRange(binding.subresources) ||
-                    !HasUsage(buffer->GetDesc().usage, RHI::BufferUsage::Storage) ||
-                    binding.offset >= buffer->GetDesc().size)
+                if (buffer == nullptr || !IsDefaultSubresourceRange(binding.subresources))
                 {
                     return nullptr;
                 }
-                const uint32_t requestedSize = binding.size == 0
-                    ? buffer->GetDesc().size - binding.offset
-                    : binding.size;
-                if (requestedSize == 0 ||
-                    requestedSize > buffer->GetDesc().size - binding.offset)
-                {
-                    return nullptr;
-                }
-
                 D3D12_SHADER_RESOURCE_VIEW_DESC view = {};
                 view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
                 view.Shader4ComponentMapping =
@@ -1996,7 +1904,7 @@ namespace dy::Backends
                 if (buffer->GetDesc().stride != 0)
                 {
                     if ((binding.offset % buffer->GetDesc().stride) != 0 ||
-                        (requestedSize % buffer->GetDesc().stride) != 0)
+                        (binding.size % buffer->GetDesc().stride) != 0)
                     {
                         return nullptr;
                     }
@@ -2004,19 +1912,19 @@ namespace dy::Backends
                     view.Buffer.FirstElement =
                         binding.offset / buffer->GetDesc().stride;
                     view.Buffer.NumElements =
-                        requestedSize / buffer->GetDesc().stride;
+                        binding.size / buffer->GetDesc().stride;
                     view.Buffer.StructureByteStride = buffer->GetDesc().stride;
                 }
                 else
                 {
                     if ((binding.offset % 4) != 0 ||
-                        (requestedSize % 4) != 0)
+                        (binding.size % 4) != 0)
                     {
                         return nullptr;
                     }
                     view.Format = DXGI_FORMAT_R32_TYPELESS;
                     view.Buffer.FirstElement = binding.offset / 4;
-                    view.Buffer.NumElements = requestedSize / 4;
+                    view.Buffer.NumElements = binding.size / 4;
                     view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
                 }
 
@@ -2030,29 +1938,16 @@ namespace dy::Backends
                 RHI::ResourceBindingType::ReadWriteStorageBuffer)
             {
                 auto* buffer = dynamic_cast<D3D12Buffer*>(binding.buffer);
-                if (buffer == nullptr || binding.texture != nullptr ||
-                    !OwnsObject(m_internal->liveBuffers, binding.buffer) ||
-                    !IsDefaultSubresourceRange(binding.subresources) ||
-                    !HasUsage(buffer->GetDesc().usage, RHI::BufferUsage::Storage) ||
-                    binding.offset >= buffer->GetDesc().size)
+                if (buffer == nullptr || !IsDefaultSubresourceRange(binding.subresources))
                 {
                     return nullptr;
                 }
-                const uint32_t requestedSize = binding.size == 0
-                    ? buffer->GetDesc().size - binding.offset
-                    : binding.size;
-                if (requestedSize == 0 ||
-                    requestedSize > buffer->GetDesc().size - binding.offset)
-                {
-                    return nullptr;
-                }
-
                 D3D12_UNORDERED_ACCESS_VIEW_DESC view = {};
                 view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
                 if (buffer->GetDesc().stride != 0)
                 {
                     if ((binding.offset % buffer->GetDesc().stride) != 0 ||
-                        (requestedSize % buffer->GetDesc().stride) != 0)
+                        (binding.size % buffer->GetDesc().stride) != 0)
                     {
                         return nullptr;
                     }
@@ -2060,19 +1955,19 @@ namespace dy::Backends
                     view.Buffer.FirstElement =
                         binding.offset / buffer->GetDesc().stride;
                     view.Buffer.NumElements =
-                        requestedSize / buffer->GetDesc().stride;
+                        binding.size / buffer->GetDesc().stride;
                     view.Buffer.StructureByteStride = buffer->GetDesc().stride;
                 }
                 else
                 {
                     if ((binding.offset % 4) != 0 ||
-                        (requestedSize % 4) != 0)
+                        (binding.size % 4) != 0)
                     {
                         return nullptr;
                     }
                     view.Format = DXGI_FORMAT_R32_TYPELESS;
                     view.Buffer.FirstElement = binding.offset / 4;
-                    view.Buffer.NumElements = requestedSize / 4;
+                    view.Buffer.NumElements = binding.size / 4;
                     view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
                 }
 
@@ -2086,16 +1981,7 @@ namespace dy::Backends
                 RHI::ResourceBindingType::SampledTexture)
             {
                 auto* texture = dynamic_cast<D3D12Texture*>(binding.texture);
-                if (texture == nullptr || binding.buffer != nullptr ||
-                    (!OwnsObject(
-                            m_internal->liveTextures, binding.texture) &&
-                        !OwnsObject(
-                            m_internal->backBufferTextures,
-                            binding.texture)) ||
-                    binding.offset != 0 || binding.size != 0 ||
-                    !HasUsage(
-                        texture->GetDesc().usage,
-                        RHI::TextureUsage::ShaderResource))
+                if (texture == nullptr || binding.offset != 0 || binding.size != 0)
                 {
                     return nullptr;
                 }
@@ -2108,16 +1994,12 @@ namespace dy::Backends
                 view.Shader4ComponentMapping =
                     D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 if (view.Format == DXGI_FORMAT_UNKNOWN) return nullptr;
-                uint32_t mipLevelCount = 0;
-                uint32_t arrayLayerCount = 0;
-                if (!ResolveTextureSubresourceRange(
-                        *texture,
-                        binding.subresources,
-                        mipLevelCount,
-                        arrayLayerCount))
-                {
-                    return nullptr;
-                }
+                const uint32_t mipLevelCount = binding.subresources.mipLevelCount == 0
+                    ? texture->GetDesc().mipLevels - binding.subresources.firstMipLevel
+                    : binding.subresources.mipLevelCount;
+                const uint32_t arrayLayerCount = binding.subresources.arrayLayerCount == 0
+                    ? texture->GetDesc().depthOrArraySize - binding.subresources.firstArrayLayer
+                    : binding.subresources.arrayLayerCount;
                 if (texture->GetDesc().depthOrArraySize > 1)
                 {
                     view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
@@ -2143,32 +2025,17 @@ namespace dy::Backends
                 RHI::ResourceBindingType::StorageTexture)
             {
                 auto* texture = dynamic_cast<D3D12Texture*>(binding.texture);
-                if (texture == nullptr || binding.buffer != nullptr ||
-                    (!OwnsObject(
-                            m_internal->liveTextures, binding.texture) &&
-                        !OwnsObject(
-                            m_internal->backBufferTextures,
-                            binding.texture)) ||
+                if (texture == nullptr ||
                     binding.offset != 0 || binding.size != 0 ||
-                    binding.subresources.mipLevelCount != 1 ||
-                    !HasUsage(texture->GetDesc().usage, RHI::TextureUsage::Storage) ||
                     RHI::IsSrgbFormat(texture->GetDesc().format) ||
                     texture->GetDesc().format == RHI::Format::D32_FLOAT ||
                     texture->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT)
                 {
                     return nullptr;
                 }
-                uint32_t mipLevelCount = 0;
-                uint32_t arrayLayerCount = 0;
-                if (!ResolveTextureSubresourceRange(
-                        *texture,
-                        binding.subresources,
-                        mipLevelCount,
-                        arrayLayerCount) ||
-                    mipLevelCount != 1)
-                {
-                    return nullptr;
-                }
+                const uint32_t arrayLayerCount = binding.subresources.arrayLayerCount == 0
+                    ? texture->GetDesc().depthOrArraySize - binding.subresources.firstArrayLayer
+                    : binding.subresources.arrayLayerCount;
 
                 auto* resource = static_cast<ID3D12Resource*>(
                     texture->GetNativeResource());
@@ -2200,9 +2067,6 @@ namespace dy::Backends
                 return nullptr;
             }
         }
-        if (std::find(written.begin(), written.end(), 0) != written.end())
-            return nullptr;
-
         auto resourceSet = std::unique_ptr<D3D12ResourceSet, D3D12ObjectDeleter>(
             new D3D12ResourceSet(
                 desc,
@@ -2214,67 +2078,47 @@ namespace dy::Backends
         return result;
     }
 
-    void D3D12Device::DestroyBuffer(RHI::BufferHandle buffer)
+    void D3D12Device::DestroyBufferNative(RHI::BufferHandle buffer)
     {
-        if (m_internal != nullptr && RetireObject(
-                m_internal->liveBuffers,
-                buffer,
-                m_internal->lastSubmittedValue,
-                m_internal->retiredBuffers))
-        {
-            m_internal->CollectCompletedWork();
-        }
+        if(!m_internal) return;
+        auto& objects = m_internal->liveBuffers;
+        objects.erase(std::remove_if(objects.begin(), objects.end(),
+            [buffer](const auto& object) { return object.get() == buffer; }), objects.end());
     }
 
-    void D3D12Device::DestroyTexture(RHI::TextureHandle texture)
+    void D3D12Device::DestroyTextureNative(RHI::TextureHandle texture)
     {
-        if (m_internal != nullptr && RetireObject(
-                m_internal->liveTextures,
-                texture,
-                m_internal->lastSubmittedValue,
-                m_internal->retiredTextures))
-        {
-            m_internal->CollectCompletedWork();
-        }
+        if(!m_internal) return;
+        auto& objects = m_internal->liveTextures;
+        objects.erase(std::remove_if(objects.begin(), objects.end(),
+            [texture](const auto& object) { return object.get() == texture; }), objects.end());
     }
 
-    void D3D12Device::DestroyShader(RHI::ShaderHandle shader)
+    void D3D12Device::DestroyShaderNative(RHI::ShaderHandle shader)
     {
-        if (m_internal != nullptr && RetireObject(
-                m_internal->liveShaders,
-                shader,
-                m_internal->lastSubmittedValue,
-                m_internal->retiredShaders))
-        {
-            m_internal->CollectCompletedWork();
-        }
+        if(!m_internal) return;
+        auto& objects = m_internal->liveShaders;
+        objects.erase(std::remove_if(objects.begin(), objects.end(),
+            [shader](const auto& object) { return object.get() == shader; }), objects.end());
     }
 
-    void D3D12Device::DestroyPipeline(RHI::PipelineHandle pipeline)
+    void D3D12Device::DestroyPipelineNative(RHI::PipelineHandle pipeline)
     {
-        if (m_internal != nullptr && RetireObject(
-                m_internal->livePipelines,
-                pipeline,
-                m_internal->lastSubmittedValue,
-                m_internal->retiredPipelines))
-        {
-            m_internal->CollectCompletedWork();
-        }
+        if(!m_internal) return;
+        auto& objects = m_internal->livePipelines;
+        objects.erase(std::remove_if(objects.begin(), objects.end(),
+            [pipeline](const auto& object) { return object.get() == pipeline; }), objects.end());
     }
 
-    void D3D12Device::DestroyResourceSet(RHI::ResourceSetHandle resourceSet)
+    void D3D12Device::DestroyResourceSetNative(RHI::ResourceSetHandle resourceSet)
     {
-        if (m_internal != nullptr && RetireObject(
-                m_internal->liveResourceSets,
-                resourceSet,
-                m_internal->lastSubmittedValue,
-                m_internal->retiredResourceSets))
-        {
-            m_internal->CollectCompletedWork();
-        }
+        if(!m_internal) return;
+        auto& objects = m_internal->liveResourceSets;
+        objects.erase(std::remove_if(objects.begin(), objects.end(),
+            [resourceSet](const auto& object) { return object.get() == resourceSet; }), objects.end());
     }
 
-    bool D3D12Device::UpdateBuffer(
+    bool D3D12Device::UpdateBufferNative(
         RHI::ICommandList& commandList,
         RHI::BufferHandle buffer,
         uint32_t offset,
@@ -2294,12 +2138,11 @@ namespace dy::Backends
             });
         return d3dCommandList != nullptr && d3dBuffer != nullptr &&
             owned != m_internal->activeCommandLists.end() &&
-            OwnsObject(m_internal->liveBuffers, buffer) &&
             d3dCommandList->RecordBufferUpload(
                 d3dBuffer, offset, data, size);
     }
 
-    bool D3D12Device::UpdateTexture(
+    bool D3D12Device::UpdateTextureNative(
         RHI::ICommandList& commandList,
         RHI::TextureHandle texture,
         uint32_t mipLevel,
@@ -2322,8 +2165,6 @@ namespace dy::Backends
             });
         return d3dCommandList != nullptr && d3dTexture != nullptr &&
             owned != m_internal->activeCommandLists.end() &&
-            (OwnsObject(m_internal->liveTextures, texture) ||
-                OwnsObject(m_internal->backBufferTextures, texture)) &&
             d3dCommandList->RecordTextureUpload(
                 d3dTexture,
                 mipLevel,
@@ -2334,7 +2175,7 @@ namespace dy::Backends
                 slicePitch);
     }
 
-    RHI::TextureHandle D3D12Device::GetBackBuffer() {
+    RHI::TextureHandle D3D12Device::GetBackBufferNative() {
         if (m_internal == nullptr || !m_internal->swapchainReady ||
             m_internal->backBufferTextures.empty())
         {

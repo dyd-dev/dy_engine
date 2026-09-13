@@ -14,6 +14,7 @@ target_link_libraries(dy_backend_vulkan PRIVATE
 	glfw
 )
 target_compile_definitions(dy_backend_vulkan PRIVATE GLFW_INCLUDE_NONE)
+target_include_directories(dy_backend_vulkan PRIVATE "${PROJECT_SOURCE_DIR}/src")
 
 # The Vulkan Backend is an object library, so the final engine target still links
 # Vulkan privately without exporting Vulkan headers to users.

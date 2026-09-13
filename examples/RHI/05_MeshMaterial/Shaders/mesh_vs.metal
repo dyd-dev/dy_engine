@@ -1,88 +1,46 @@
 #include <metal_stdlib>
-#include "StockShaderLayout.inc"
-
-#ifndef RENDERER_ENABLE_SHADOWS
-#error RENDERER_ENABLE_SHADOWS must be defined
-#endif
-
-#ifndef RENDERER_VERTEX_ENTRY
-#error RENDERER_VERTEX_ENTRY must be defined
-#endif
-
 using namespace metal;
-#include "Skinning.metal"
-
 struct DrawConstants
 {
     float4x4 viewProjectionMatrix;
     float4x4 modelMatrix;
-    uint textureFlags;
-    uint padding0;
-    uint padding1;
-    uint padding2;
-    float4 emissiveColor;
     float4 baseColor;
-    float4 materialParams;
+    float metallic;
+    float roughness;
+    uint useBaseColorTexture;
 };
 
-#if RENDERER_ENABLE_SHADOWS
-struct ShadowMatrix
-{
-    float4x4 lightViewProjectionMatrix;
-};
-#endif
-
-struct MeshVertex
+struct VertexInput
 {
     float3 position [[attribute(0)]];
     float3 normal [[attribute(1)]];
     float2 uv [[attribute(2)]];
-    float4 tangent [[attribute(3)]];
 };
-
 struct RasterData
 {
     float4 position [[position]];
-    float2 uv [[user(locn0)]];
-    float3 worldPosition [[user(locn1)]];
-    float3 worldNormal [[user(locn2)]];
-    float4 worldTangent [[user(locn3)]];
-#if RENDERER_ENABLE_SHADOWS
-    float4 lightSpacePosition [[user(locn4)]];
-#endif
+    float3 worldPosition [[user(locn0)]];
+    float3 worldNormal [[user(locn1)]];
+    float2 uv [[user(locn2)]];
 };
 
-vertex RasterData RENDERER_VERTEX_ENTRY(
-    MeshVertex input [[stage_in]],
-    uint vertexId [[vertex_id]],
-    const device SkinInfluence* skinInfluences [[buffer(RENDERER_BINDING_SKIN_INFLUENCES)]],
-    const device SkinJointMatrices* skinPalette [[buffer(RENDERER_BINDING_SKIN_PALETTE)]],
-#if RENDERER_ENABLE_SHADOWS
-    constant ShadowMatrix& shadowMatrix [[buffer(RENDERER_BINDING_SHADOW_MATRIX)]],
-#endif
-    constant DrawConstants& drawConstants [[buffer(RENDERER_BINDING_INLINE_CONSTANTS)]])
+// 비균일 배율을 포함한 법선 변환이며 특이 행렬에서는 단위행렬을 사용한다.
+inline float3x3 MeshNormalMatrix(float4x4 matrix)
 {
-    float4x4 skin, skinNormal;
-    LoadSkinning(skinInfluences, skinPalette, vertexId, drawConstants.padding0, drawConstants.padding1, skin, skinNormal);
-    const float4x4 world = drawConstants.modelMatrix * skin;
-    const float4 worldPosition = world * float4(input.position, 1.0f);
-    const float4x4 normal = SkinNormalMatrix(world, skinNormal);
-    const float3x3 normalMatrix = float3x3(
-        normal[0].xyz,
-        normal[1].xyz,
-        normal[2].xyz);
+    float3 a = matrix[0].xyz, b = matrix[1].xyz, c = matrix[2].xyz;
+    float determinant = dot(a, cross(b, c));
+    if(abs(determinant) <= 0.00000001f) return float3x3(1.0f);
+    return float3x3(cross(b, c) / determinant, cross(c, a) / determinant, cross(a, b) / determinant);
+}
 
+vertex RasterData vertexMain(VertexInput input [[stage_in]],
+    constant DrawConstants& draw [[buffer(10)]])
+{
+    float4 world = draw.modelMatrix * float4(input.position, 1.0f);
     RasterData output;
-    output.position = drawConstants.viewProjectionMatrix * worldPosition;
+    output.position = draw.viewProjectionMatrix * world;
+    output.worldPosition = world.xyz;
+    output.worldNormal = normalize(MeshNormalMatrix(draw.modelMatrix) * input.normal);
     output.uv = input.uv;
-    output.worldPosition = worldPosition.xyz;
-    output.worldNormal = normalize(normalMatrix * input.normal);
-    const float3x3 linear(world[0].xyz, world[1].xyz, world[2].xyz);
-    float3 tangent = linear * input.tangent.xyz;
-    tangent = normalize(tangent - output.worldNormal * dot(output.worldNormal, tangent));
-    output.worldTangent = float4(tangent, determinant(linear) < 0.0 ? -input.tangent.w : input.tangent.w);
-#if RENDERER_ENABLE_SHADOWS
-    output.lightSpacePosition = shadowMatrix.lightViewProjectionMatrix * worldPosition;
-#endif
     return output;
 }

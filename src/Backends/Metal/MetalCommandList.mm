@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <unordered_map>
@@ -14,7 +15,7 @@
 
 #import <Metal/Metal.h>
 
-namespace dy::Backends
+namespace dyf::Backends
 {
 	namespace
 	{
@@ -456,7 +457,7 @@ namespace dy::Backends
 		m_impl->usesBackBuffer = false;
 	}
 
-	void MetalCommandList::ResourceBarrier(
+	void MetalCommandList::ResourceBarrierNative(
 		const RHI::ResourceBarrierDesc* barriers,
 		uint32_t count)
 	{
@@ -544,7 +545,7 @@ namespace dy::Backends
 		}
 	}
 
-	void MetalCommandList::BeginRendering(const RHI::RenderingDesc& desc)
+	void MetalCommandList::BeginRenderingNative(const RHI::RenderingDesc& desc)
 	{
 		if(m_impl->closed || m_impl->rendering ||
 			(desc.colorAttachmentCount != 0 && desc.colorAttachments == nullptr) ||
@@ -729,7 +730,7 @@ namespace dy::Backends
 		m_impl->rendering = true;
 	}
 
-	void MetalCommandList::EndRendering()
+	void MetalCommandList::EndRenderingNative()
 	{
 		if(m_impl->closed || !m_impl->rendering)
 		{
@@ -740,7 +741,7 @@ namespace dy::Backends
 		m_impl->rendering = false;
 	}
 
-	void MetalCommandList::BindGraphicsPipeline(RHI::PipelineHandle pipelineState)
+	void MetalCommandList::BindGraphicsPipelineNative(RHI::PipelineHandle pipelineState)
 	{
 		auto* pipeline = dynamic_cast<MetalPipeline*>(pipelineState);
 		if(m_impl->closed || !m_impl->rendering || pipeline == nullptr ||
@@ -795,7 +796,7 @@ namespace dy::Backends
 		}
 	}
 
-	void MetalCommandList::BindResourceSet(RHI::ResourceSetHandle resourceSet)
+	void MetalCommandList::BindResourceSetNative(RHI::ResourceSetHandle resourceSet)
 	{
 		auto* set = dynamic_cast<MetalResourceSet*>(resourceSet);
 		if(m_impl->closed || !m_impl->rendering || m_impl->pipeline == nullptr ||
@@ -876,7 +877,7 @@ namespace dy::Backends
 		m_impl->resourceSet = set;
 	}
 
-	void MetalCommandList::BindVertexBuffer(
+	void MetalCommandList::BindVertexBufferNative(
 		uint32_t binding,
 		RHI::BufferHandle buffer,
 		uint32_t offset)
@@ -912,7 +913,7 @@ namespace dy::Backends
 		[m_impl->renderEncoder useResource:native usage:MTLResourceUsageRead];
 	}
 
-	void MetalCommandList::BindIndexBuffer(
+	void MetalCommandList::BindIndexBufferNative(
 		RHI::BufferHandle buffer,
 		RHI::Format format,
 		uint32_t offset)
@@ -937,7 +938,7 @@ namespace dy::Backends
 		[m_impl->renderEncoder useResource:NativeBuffer(metalBuffer) usage:MTLResourceUsageRead];
 	}
 
-	void MetalCommandList::SetInlineConstants(
+	void MetalCommandList::SetInlineConstantsNative(
 		uint32_t offset,
 		uint32_t size,
 		const void* data)
@@ -979,7 +980,7 @@ namespace dy::Backends
 #endif
 	}
 
-	void MetalCommandList::SetViewport(const RHI::Viewport& viewport)
+	void MetalCommandList::SetViewportNative(const RHI::Viewport& viewport)
 	{
 		if(m_impl->closed || !m_impl->rendering ||
 			!std::isfinite(viewport.x) || !std::isfinite(viewport.y) ||
@@ -999,7 +1000,7 @@ namespace dy::Backends
 		m_impl->viewportSet = true;
 	}
 
-	void MetalCommandList::SetScissor(const RHI::Rect& rect)
+	void MetalCommandList::SetScissorNative(const RHI::Rect& rect)
 	{
 		if(m_impl->closed || !m_impl->rendering || rect.x < 0 || rect.y < 0 ||
 			rect.width == 0 || rect.height == 0 ||
@@ -1018,7 +1019,7 @@ namespace dy::Backends
 		m_impl->scissorSet = true;
 	}
 
-	void MetalCommandList::SetStencilReference(uint32_t reference)
+	void MetalCommandList::SetStencilReferenceNative(uint32_t reference)
 	{
 		if(m_impl->closed || !m_impl->rendering ||
 			reference > std::numeric_limits<uint8_t>::max())
@@ -1079,7 +1080,7 @@ namespace dy::Backends
 		}
 	}
 
-	void MetalCommandList::DrawInstanced(
+	void MetalCommandList::DrawInstancedNative(
 		uint32_t vertexCount,
 		uint32_t instanceCount,
 		uint32_t startVertex,
@@ -1099,7 +1100,7 @@ namespace dy::Backends
 			baseInstance:startInstance];
 	}
 
-	void MetalCommandList::DrawIndexedInstanced(
+	void MetalCommandList::DrawIndexedInstancedNative(
 		uint32_t indexCount,
 		uint32_t instanceCount,
 		uint32_t firstIndex,
@@ -1130,7 +1131,7 @@ namespace dy::Backends
 			baseInstance:firstInstance];
 	}
 
-	void MetalCommandList::Close()
+	bool MetalCommandList::CloseNative()
 	{
 		if(m_impl->closed) Invalidate(m_impl);
 		if(m_impl->rendering)
@@ -1141,7 +1142,9 @@ namespace dy::Backends
 		}
 		EndBlitEncoding(m_impl);
 		m_impl->closed = true;
-	}
+
+        return m_impl->valid;
+    }
 
 	bool MetalCommandList::RecordBufferUpdate(
 		MetalBuffer* buffer,
@@ -1151,11 +1154,18 @@ namespace dy::Backends
 	{
 		if(m_impl->closed || m_impl->rendering || buffer == nullptr ||
 			NativeBuffer(buffer) == nil || data == nullptr ||
-			size == 0 || offset > buffer->GetDesc().size || size > buffer->GetDesc().size - offset ||
-			!EnsureBlitEncoder(m_impl))
+			size == 0 || offset > buffer->GetDesc().size || size > buffer->GetDesc().size - offset)
 		{
 			return false;
 		}
+		if(offset % 4u != 0 || size % 4u != 0)
+		{
+			std::fprintf(stderr,
+				"dyf::RHI [error]: Metal buffer copy requires 4-byte offset and size alignment (offset=%u, size=%u); the native copy was not issued.\n",
+				offset, size);
+			return false;
+		}
+		if(!EnsureBlitEncoder(m_impl)) return false;
 
 		id<MTLBuffer> staging = [m_impl->commandQueue.device newBufferWithBytes:data
 			length:size options:MTLResourceStorageModeShared];
@@ -1198,8 +1208,11 @@ namespace dy::Backends
 		if(pixelSize == 0 || mipWidth > std::numeric_limits<uint32_t>::max() / pixelSize)
 			return false;
 		const uint32_t tightRowPitch = mipWidth * pixelSize;
-		if(rowPitch < tightRowPitch || mipHeight > std::numeric_limits<uint32_t>::max() / rowPitch ||
-			slicePitch < rowPitch * mipHeight || dataSize < slicePitch)
+		const uint64_t requiredSourceBytes =
+			static_cast<uint64_t>(rowPitch) * (mipHeight - 1u) + tightRowPitch;
+		if(rowPitch < tightRowPitch ||
+			slicePitch < static_cast<uint64_t>(rowPitch) * mipHeight ||
+			dataSize < requiredSourceBytes)
 		{
 			return false;
 		}
@@ -1219,6 +1232,7 @@ namespace dy::Backends
 		if(staging == nil) return false;
 		auto* destination = static_cast<uint8_t*>(staging.contents);
 		const auto* source = static_cast<const uint8_t*>(data);
+		// 입력 행 사이의 패딩만 건너뛴다. 마지막 행 뒤의 패딩은 요구하거나 읽지 않는다.
 		for(uint32_t row = 0; row < mipHeight; ++row)
 			std::memcpy(destination + static_cast<size_t>(row) * tightRowPitch,
 				source + static_cast<size_t>(row) * rowPitch, tightRowPitch);

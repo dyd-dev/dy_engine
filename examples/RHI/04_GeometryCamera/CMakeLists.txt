@@ -16,12 +16,10 @@ dy_compile_shader(RhiGeometryCamera vertex vert
     HLSL "${shader_dir}/mesh_vs.hlsl"
     METAL "${shader_dir}/mesh_vs.metal"
     METAL_ENTRY vertexMain
-    DEFINES RENDERER_ENABLE_SHADOWS=0 RENDERER_VERTEX_ENTRY=vertexMain
-    INCLUDE_DIRS "${shader_dir}")
+)
 dy_compile_shader(RhiGeometryCamera fragment frag
     GLSL "${shader_dir}/mesh_ps.glsl"
     HLSL "${shader_dir}/mesh_ps.hlsl"
     METAL "${shader_dir}/mesh_ps.metal"
     METAL_ENTRY fragmentMain
-    DEFINES RENDERER_ENABLE_SHADOWS=0 RENDERER_FRAGMENT_ENTRY=fragmentMain
-    INCLUDE_DIRS "${shader_dir}")
+)

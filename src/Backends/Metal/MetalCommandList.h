@@ -6,9 +6,9 @@
 #include <utility>
 #include <vector>
 
-#include "RHI/ICommandList.h"
+#include "dyf/RHI/ICommandList.h"
 
-namespace dy::Backends
+namespace dyf::Backends
 {
 	class MetalBuffer;
 	class MetalTexture;
@@ -25,44 +25,44 @@ namespace dy::Backends
 	public:
 		explicit MetalCommandList(void* commandQueue);
 
-		void ResourceBarrier(
+		void ResourceBarrierNative(
 			const RHI::ResourceBarrierDesc* barriers,
 			uint32_t count) override;
-		void BeginRendering(const RHI::RenderingDesc& desc) override;
-		void EndRendering() override;
+		void BeginRenderingNative(const RHI::RenderingDesc& desc) override;
+		void EndRenderingNative() override;
 
-		void BindGraphicsPipeline(RHI::PipelineHandle pipelineState) override;
-		void BindResourceSet(RHI::ResourceSetHandle resourceSet) override;
-		void BindVertexBuffer(
+		void BindGraphicsPipelineNative(RHI::PipelineHandle pipelineState) override;
+		void BindResourceSetNative(RHI::ResourceSetHandle resourceSet) override;
+		void BindVertexBufferNative(
 			uint32_t binding,
 			RHI::BufferHandle buffer,
 			uint32_t offset) override;
-		void BindIndexBuffer(
+		void BindIndexBufferNative(
 			RHI::BufferHandle buffer,
 			RHI::Format format,
 			uint32_t offset) override;
-		void SetInlineConstants(
+		void SetInlineConstantsNative(
 			uint32_t offset,
 			uint32_t size,
 			const void* data) override;
 
-		void SetViewport(const RHI::Viewport& viewport) override;
-		void SetScissor(const RHI::Rect& rect) override;
-		void SetStencilReference(uint32_t reference) override;
+		void SetViewportNative(const RHI::Viewport& viewport) override;
+		void SetScissorNative(const RHI::Rect& rect) override;
+		void SetStencilReferenceNative(uint32_t reference) override;
 
-		void DrawInstanced(
+		void DrawInstancedNative(
 			uint32_t vertexCount,
 			uint32_t instanceCount,
 			uint32_t startVertex,
 			uint32_t startInstance) override;
-		void DrawIndexedInstanced(
+		void DrawIndexedInstancedNative(
 			uint32_t indexCount,
 			uint32_t instanceCount,
 			uint32_t firstIndex,
 			int32_t vertexOffset,
 			uint32_t firstInstance) override;
 
-		void Close() override;
+		bool CloseNative() override;
 
 		[[nodiscard]] bool Begin();
 		void Reset();

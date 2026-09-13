@@ -23,5 +23,3 @@ dy_compile_shader(RhiText fragment frag
     METAL "${shader_dir}/canvas.metal"
     METAL_ENTRY canvasFragment
     INCLUDE_DIRS "${shader_dir}")
-set(DY_EXAMPLE_FONT "" CACHE FILEPATH "TrueType font for the text example.")
-target_compile_definitions(RhiText PRIVATE DY_EXAMPLE_FONT="${DY_EXAMPLE_FONT}")

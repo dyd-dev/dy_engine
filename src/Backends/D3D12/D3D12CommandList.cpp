@@ -15,7 +15,7 @@
 
 using Microsoft::WRL::ComPtr;
 
-namespace dy::Backends
+namespace dyf::Backends
 {
     namespace
     {
@@ -217,6 +217,7 @@ namespace dy::Backends
         std::unordered_map<D3D12Buffer*, RHI::ResourceState> bufferStates;
         std::map<std::pair<D3D12Texture*, uint32_t>, RHI::ResourceState>
             textureStates;
+        std::map<uint32_t, D3D12_VERTEX_BUFFER_VIEW> vertexBufferViews;
         std::vector<uint8_t> inlineConstantCoverage;
         bool rendering = false;
         bool closed = false;
@@ -358,7 +359,7 @@ namespace dy::Backends
         delete m_internal;
     }
 
-    void D3D12CommandList::ResourceBarrier(
+    void D3D12CommandList::ResourceBarrierNative(
         const RHI::ResourceBarrierDesc* barriers,
         uint32_t count)
     {
@@ -594,7 +595,7 @@ namespace dy::Backends
         }
     }
 
-    void D3D12CommandList::BeginRendering(const RHI::RenderingDesc& desc)
+    void D3D12CommandList::BeginRenderingNative(const RHI::RenderingDesc& desc)
     {
         if (!CanRecord(m_internal) || m_internal->rendering ||
             (desc.colorAttachmentCount != 0 && desc.colorAttachments == nullptr) ||
@@ -844,7 +845,7 @@ namespace dy::Backends
         m_internal->rendering = true;
     }
 
-    void D3D12CommandList::EndRendering()
+    void D3D12CommandList::EndRenderingNative()
     {
         if (!CanRecord(m_internal) || !m_internal->rendering)
         {
@@ -864,7 +865,7 @@ namespace dy::Backends
         m_internal->rendering = false;
     }
 
-    void D3D12CommandList::BindGraphicsPipeline(RHI::PipelineHandle pipelineState)
+    void D3D12CommandList::BindGraphicsPipelineNative(RHI::PipelineHandle pipelineState)
     {
         if (!CanRecord(m_internal) || !m_internal->rendering ||
             pipelineState == nullptr)
@@ -904,11 +905,22 @@ namespace dy::Backends
             pipeline->GetNativeRootSignature());
         m_internal->commandList->IASetPrimitiveTopology(
             static_cast<D3D12_PRIMITIVE_TOPOLOGY>(pipeline->GetPrimitiveTopology()));
+        // RHI의 stride는 파이프라인 상태다. D3D12는 VB view에 보관하므로
+        // 같은 버퍼를 유지한 채 PSO를 바꿔도 새 레이아웃을 적용한다.
+        for (auto& [binding, view] : m_internal->vertexBufferViews)
+        {
+            const uint32_t stride = pipeline->GetVertexStride(binding);
+            if (stride != 0 && view.StrideInBytes != stride)
+            {
+                view.StrideInBytes = stride;
+                m_internal->commandList->IASetVertexBuffers(binding, 1, &view);
+            }
+        }
         RetainObject(m_internal->retainedObjects, pipeline->GetNativePipelineState());
         RetainObject(m_internal->retainedObjects, pipeline->GetNativeRootSignature());
     }
 
-    void D3D12CommandList::BindResourceSet(RHI::ResourceSetHandle resourceSet)
+    void D3D12CommandList::BindResourceSetNative(RHI::ResourceSetHandle resourceSet)
     {
         if (!CanRecord(m_internal) || !m_internal->rendering ||
             resourceSet == nullptr ||
@@ -1014,7 +1026,7 @@ namespace dy::Backends
             RetainObject(m_internal->retainedObjects, set->GetNativeResource(index));
     }
 
-    void D3D12CommandList::BindVertexBuffer(
+    void D3D12CommandList::BindVertexBufferNative(
         uint32_t binding,
         RHI::BufferHandle buffer,
         uint32_t offset)
@@ -1061,10 +1073,11 @@ namespace dy::Backends
         view.SizeInBytes = buffer->GetDesc().size - offset;
         view.StrideInBytes = stride;
         m_internal->commandList->IASetVertexBuffers(binding, 1, &view);
+        m_internal->vertexBufferViews[binding] = view;
         RetainObject(m_internal->retainedObjects, resource);
     }
 
-    void D3D12CommandList::BindIndexBuffer(
+    void D3D12CommandList::BindIndexBufferNative(
         RHI::BufferHandle buffer,
         RHI::Format format,
         uint32_t offset)
@@ -1115,7 +1128,7 @@ namespace dy::Backends
         RetainObject(m_internal->retainedObjects, resource);
     }
 
-    void D3D12CommandList::SetInlineConstants(
+    void D3D12CommandList::SetInlineConstantsNative(
         uint32_t offset,
         uint32_t size,
         const void* data)
@@ -1144,7 +1157,7 @@ namespace dy::Backends
             1);
     }
 
-    void D3D12CommandList::SetStencilReference(uint32_t reference)
+    void D3D12CommandList::SetStencilReferenceNative(uint32_t reference)
     {
         if (!CanRecord(m_internal) || !m_internal->rendering ||
             reference > std::numeric_limits<UINT8>::max())
@@ -1156,7 +1169,7 @@ namespace dy::Backends
         m_internal->stencilReferenceSet = true;
     }
 
-    void D3D12CommandList::SetViewport(const RHI::Viewport& viewport)
+    void D3D12CommandList::SetViewportNative(const RHI::Viewport& viewport)
     {
         if (!CanRecord(m_internal) || !m_internal->rendering ||
             !std::isfinite(viewport.x) || !std::isfinite(viewport.y) ||
@@ -1182,7 +1195,7 @@ namespace dy::Backends
         m_internal->viewportSet = true;
     }
 
-    void D3D12CommandList::SetScissor(const RHI::Rect& rect)
+    void D3D12CommandList::SetScissorNative(const RHI::Rect& rect)
     {
         const int64_t right = static_cast<int64_t>(rect.x) + rect.width;
         const int64_t bottom = static_cast<int64_t>(rect.y) + rect.height;
@@ -1203,7 +1216,7 @@ namespace dy::Backends
         m_internal->scissorSet = true;
     }
 
-    void D3D12CommandList::DrawInstanced(
+    void D3D12CommandList::DrawInstancedNative(
         uint32_t vertexCount,
         uint32_t instanceCount,
         uint32_t startVertex,
@@ -1220,7 +1233,7 @@ namespace dy::Backends
             vertexCount, instanceCount, startVertex, startInstance);
     }
 
-    void D3D12CommandList::DrawIndexedInstanced(
+    void D3D12CommandList::DrawIndexedInstancedNative(
         uint32_t indexCount,
         uint32_t instanceCount,
         uint32_t firstIndex,
@@ -1238,20 +1251,22 @@ namespace dy::Backends
             indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
     }
 
-    void D3D12CommandList::Close()
+    bool D3D12CommandList::CloseNative()
     {
-        if (m_internal == nullptr || m_internal->closed) return;
+        if (m_internal == nullptr || m_internal->closed) return m_internal && m_internal->closed && !m_internal->recordingFailed;
         if (m_internal->rendering || m_internal->commandList == nullptr)
         {
             RejectRecording(m_internal);
-            return;
+            return m_internal && m_internal->closed && !m_internal->recordingFailed;
         }
         if (FAILED(m_internal->commandList->Close()))
         {
             RejectRecording(m_internal);
-            return;
+            return m_internal && m_internal->closed && !m_internal->recordingFailed;
         }
         m_internal->closed = true;
+
+        return m_internal && m_internal->closed && !m_internal->recordingFailed;
     }
 
     void* D3D12CommandList::GetNativeList()
@@ -1377,7 +1392,7 @@ namespace dy::Backends
         }
         const uint64_t requiredSourceSize =
             static_cast<uint64_t>(rowCount - 1) * rowPitch + rowSize;
-        if (requiredSourceSize > slicePitch || slicePitch > dataSize)
+        if (requiredSourceSize > slicePitch || requiredSourceSize > dataSize)
             return false;
 
         D3D12_HEAP_PROPERTIES heapProperties = {};
