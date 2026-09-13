@@ -7,12 +7,18 @@
 #include <functional>
 #include <unordered_map>
 
+namespace dy::Core
+{
+	class ThreadPool;
+}
+
 namespace dy::RHI
 {
 	class ITexture;
 	class IBuffer;
 	class IPipelineState;
 	class ICommandList;
+	class IDevice;
 }
 
 namespace dy::Graphics
@@ -119,6 +125,12 @@ namespace dy::Graphics
 		RGPassExecuteCallback m_executeCallback;
 	};
 
+	// 의존성 분석을 통해 병렬 실행 가능한 패스들의 그룹 (Stage / Layer)
+	struct RGExecutionStage
+	{
+		std::vector<uint32_t> passIndices; // 동일 깊이에 있어 서로 의존성이 없는 패스 인덱스 목록
+	};
+
 	class RenderGraph
 	{
 	public:
@@ -143,22 +155,29 @@ namespace dy::Graphics
 		// 4. 단일 스레드 실행
 		void Execute(RHI::ICommandList* commandList);
 
-		// 5. 초기화 / 재사용
+		// 5. 멀티스레드 병렬 실행 (Kahn 알고리즘 기반 Stage별 병렬 녹화 및 일괄 제출)
+		void ExecuteParallel(RHI::IDevice* device, Core::ThreadPool* threadPool);
+
+		// 6. 초기화 / 재사용
 		void Reset();
 
 		// 디버깅 및 정보 조회 API
 		[[nodiscard]] bool IsCompiled() const;
 		[[nodiscard]] const std::vector<uint32_t>& GetExecutionOrderIndices() const { return m_executionOrder; }
+		[[nodiscard]] const std::vector<RGExecutionStage>& GetExecutionStages() const { return m_executionStages; }
 		[[nodiscard]] std::vector<std::string> GetExecutionOrderNames() const;
 		[[nodiscard]] const RenderGraphPass* GetPass(uint32_t index) const;
 		[[nodiscard]] const RGResourceDesc* GetResourceDesc(RGResourceHandle handle) const;
 
 	private:
+		void ExecutePassWithBarriers(uint32_t passIndex, RHI::ICommandList* commandList) const;
+
 		std::vector<RGResourceDesc> m_resources;
 		std::unordered_map<std::string, RGResourceHandle> m_resourceNameToHandle;
 
 		std::vector<std::unique_ptr<RenderGraphPass>> m_passes;
 		std::vector<uint32_t> m_executionOrder; // 위상 정렬된 패스 인덱스 순서
+		std::vector<RGExecutionStage> m_executionStages; // 병렬 실행 단계별 패스 목록
 		std::vector<uint64_t> m_compiledRevisions;
 		bool m_compiled = false;
 	};

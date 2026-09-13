@@ -19,7 +19,9 @@ namespace dy::Backends
         id<CAMetalDrawable> currentDrawable = nil;
         uint32_t            frameIndex      = 0;
 
+        static constexpr uint32_t kMaxWorkerThreads = 16;
         MetalCommandList*   commandList     = nullptr;
+        MetalCommandList*   workerCommandLists[kMaxWorkerThreads] = {};
         MetalTexture*       backBufferTex   = nullptr;  // cached; not owned by Renderer
 
         RHI::DescriptorIndex        nextDescriptorIndex = 0;
@@ -32,6 +34,11 @@ namespace dy::Backends
     MetalDevice::~MetalDevice()
     {
         delete m_impl->backBufferTex;
+        for(uint32_t t = 0; t < Impl::kMaxWorkerThreads; ++t)
+        {
+            delete m_impl->workerCommandLists[t];
+            m_impl->workerCommandLists[t] = nullptr;
+        }
         delete m_impl->commandList;
         delete m_impl;
     }
@@ -54,6 +61,12 @@ namespace dy::Backends
         m_impl->commandList = new MetalCommandList(
             (__bridge void*)m_impl->commandQueue
         );
+        for(uint32_t t = 0; t < Impl::kMaxWorkerThreads; ++t)
+        {
+            m_impl->workerCommandLists[t] = new MetalCommandList(
+                (__bridge void*)m_impl->commandQueue
+            );
+        }
 
         return 0;
     }
@@ -87,14 +100,57 @@ namespace dy::Backends
         return m_impl->commandList;
     }
 
+    RHI::ICommandList* MetalDevice::AcquireWorkerCommandList(uint32_t threadIndex)
+    {
+        if(threadIndex >= Impl::kMaxWorkerThreads) threadIndex = threadIndex % Impl::kMaxWorkerThreads;
+        if(m_impl->workerCommandLists[threadIndex] != nullptr)
+        {
+            return m_impl->workerCommandLists[threadIndex];
+        }
+        return m_impl->commandList;
+    }
+
+    void MetalDevice::ResetCommandLists()
+    {
+        m_impl->commandList->Begin((__bridge void*)m_impl->currentDrawable);
+        for(uint32_t i = 0; i < m_impl->textures.size(); i++)
+        {
+            if(m_impl->textures[i] != nullptr)
+            {
+                auto* metalTex = static_cast<MetalTexture*>(m_impl->textures[i]);
+                m_impl->commandList->SetNativeTexture(metalTex->GetNativeTexture(), i);
+            }
+        }
+
+        for(uint32_t t = 0; t < Impl::kMaxWorkerThreads; ++t)
+        {
+            if(m_impl->workerCommandLists[t])
+            {
+                m_impl->workerCommandLists[t]->Begin((__bridge void*)m_impl->currentDrawable);
+                for(uint32_t i = 0; i < m_impl->textures.size(); i++)
+                {
+                    if(m_impl->textures[i] != nullptr)
+                    {
+                        auto* metalTex = static_cast<MetalTexture*>(m_impl->textures[i]);
+                        m_impl->workerCommandLists[t]->SetNativeTexture(metalTex->GetNativeTexture(), i);
+                    }
+                }
+            }
+        }
+    }
+
     void MetalDevice::Submit(RHI::ICommandList** cmdLists, uint32_t count)
     {
         for(uint32_t i = 0; i < count; i++)
         {
+            if(cmdLists[i] == nullptr) continue;
             auto* metalCmdList = static_cast<MetalCommandList*>(cmdLists[i]);
             id<MTLCommandBuffer> cmdBuffer = (__bridge id<MTLCommandBuffer>)
                 metalCmdList->GetNativeCommandBuffer();
-            [cmdBuffer commit];
+            if(cmdBuffer)
+            {
+                [cmdBuffer commit];
+            }
         }
     }
 
@@ -158,7 +214,15 @@ namespace dy::Backends
         m_impl->textures[index] = texture;
 
         auto* metalTex = static_cast<MetalTexture*>(texture);
-        m_impl->commandList->SetNativeTexture(metalTex->GetNativeTexture(), index);
+        id<MTLTexture> nativeTex = metalTex ? (__bridge id<MTLTexture>)metalTex->GetNativeTexture() : nil;
+        m_impl->commandList->SetNativeTexture((__bridge void*)nativeTex, index);
+        for(uint32_t t = 0; t < Impl::kMaxWorkerThreads; ++t)
+        {
+            if(m_impl->workerCommandLists[t])
+            {
+                m_impl->workerCommandLists[t]->SetNativeTexture((__bridge void*)nativeTex, index);
+            }
+        }
     }
 
     RHI::ITexture* MetalDevice::GetBackBuffer()

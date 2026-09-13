@@ -1,5 +1,7 @@
 #include "Graphics/RenderGraph.h"
 #include "RHI/ICommandList.h"
+#include "RHI/IDevice.h"
+#include "Core/ThreadPool.h"
 #include <algorithm>
 #include <cassert>
 
@@ -224,41 +226,52 @@ namespace dy::Graphics
 			}
 		}
 
-		// 2. Kahn's Algorithm 기반 위상 정렬
-		std::vector<uint32_t> zeroInDegreeQueue;
+		// 2. Kahn's Algorithm 기반 위상 정렬 및 병렬 Stage 분할
+		m_executionOrder.clear();
+		m_executionStages.clear();
+		m_executionOrder.reserve(numPasses);
+
+		std::vector<uint32_t> currentStage;
 		for (uint32_t i = 0; i < static_cast<uint32_t>(numPasses); ++i)
 		{
 			if (inDegree[i] == 0)
 			{
-				zeroInDegreeQueue.push_back(i);
+				currentStage.push_back(i);
 			}
 		}
 
-		m_executionOrder.reserve(numPasses);
-
-		while (!zeroInDegreeQueue.empty())
+		while (!currentStage.empty())
 		{
-			// 선언 순서(작은 인덱스)를 우선하여 선택
-			auto minIt = std::min_element(zeroInDegreeQueue.begin(), zeroInDegreeQueue.end());
-			uint32_t u = *minIt;
-			zeroInDegreeQueue.erase(minIt);
+			// 선언 순서대로 정렬하여 일관된 순서 유지
+			std::sort(currentStage.begin(), currentStage.end());
 
-			m_executionOrder.push_back(u);
+			RGExecutionStage stage;
+			stage.passIndices = currentStage;
+			m_executionStages.push_back(stage);
 
-			for (uint32_t v : adjList[u])
+			std::vector<uint32_t> nextStage;
+			for (uint32_t u : currentStage)
 			{
-				inDegree[v]--;
-				if (inDegree[v] == 0)
+				m_executionOrder.push_back(u);
+
+				for (uint32_t v : adjList[u])
 				{
-					zeroInDegreeQueue.push_back(v);
+					inDegree[v]--;
+					if (inDegree[v] == 0)
+					{
+						nextStage.push_back(v);
+					}
 				}
 			}
+
+			currentStage = std::move(nextStage);
 		}
 
 		// 정렬된 패스의 수가 전체 패스 수와 다르면 순환 의존성(Cycle) 존재
 		if (m_executionOrder.size() != numPasses)
 		{
 			m_executionOrder.clear();
+			m_executionStages.clear();
 			m_compiled = false;
 			return false;
 		}
@@ -276,6 +289,38 @@ namespace dy::Graphics
 		return true;
 	}
 
+	void RenderGraph::ExecutePassWithBarriers(uint32_t passIndex, RHI::ICommandList* commandList) const
+	{
+		if (passIndex >= m_passes.size()) return;
+		const auto& pass = m_passes[passIndex];
+
+		// 멀티 플랫폼 정석 3대 리소스 배리어 (Texture, Buffer, Global) 방출
+		if (commandList != nullptr)
+		{
+			for (const auto& barrier : pass->GetBarriers())
+			{
+				const RGResourceDesc* resDesc = GetResourceDesc(barrier.resourceHandle);
+
+				if (barrier.type == RGBarrierType::Texture)
+				{
+					RHI::ITexture* texPtr = resDesc ? resDesc->texturePtr : nullptr;
+					commandList->TextureBarrier(texPtr, static_cast<uint32_t>(barrier.beforeAccess), static_cast<uint32_t>(barrier.afterAccess));
+				}
+				else if (barrier.type == RGBarrierType::Buffer)
+				{
+					RHI::IBuffer* bufPtr = resDesc ? resDesc->bufferPtr : nullptr;
+					commandList->BufferBarrier(bufPtr, static_cast<uint32_t>(barrier.beforeAccess), static_cast<uint32_t>(barrier.afterAccess));
+				}
+				else if (barrier.type == RGBarrierType::Global)
+				{
+					commandList->GlobalBarrier(static_cast<uint32_t>(barrier.beforeAccess), static_cast<uint32_t>(barrier.afterAccess));
+				}
+			}
+		}
+
+		pass->Execute(commandList);
+	}
+
 	void RenderGraph::Execute(RHI::ICommandList* commandList)
 	{
 		if (!IsCompiled())
@@ -288,36 +333,95 @@ namespace dy::Graphics
 
 		for (uint32_t passIndex : m_executionOrder)
 		{
-			if (passIndex < m_passes.size())
+			ExecutePassWithBarriers(passIndex, commandList);
+		}
+	}
+
+	void RenderGraph::ExecuteParallel(RHI::IDevice* device, Core::ThreadPool* threadPool)
+	{
+		if (!IsCompiled())
+		{
+			if (!Compile())
 			{
-				const auto& pass = m_passes[passIndex];
+				return;
+			}
+		}
 
-				// 멀티 플랫폼 정석 3대 리소스 배리어 (Texture, Buffer, Global) 방출
-				if (commandList != nullptr)
+		// 스레드 풀이 없거나 가용 스레드가 1개 이하인 경우 단일 스레드로 안전하게 폴백
+		if (threadPool == nullptr || threadPool->GetThreadCount() <= 1)
+		{
+			RHI::ICommandList* mainCmd = device ? device->AcquireCommandList() : nullptr;
+			Execute(mainCmd);
+			if (device && mainCmd)
+			{
+				mainCmd->Close();
+				RHI::ICommandList* submitList[] = { mainCmd };
+				device->Submit(submitList, 1);
+			}
+			return;
+		}
+
+		if (device)
+		{
+			device->ResetCommandLists();
+		}
+
+		std::vector<RHI::ICommandList*> stageCmdLists;
+
+		for (const auto& stage : m_executionStages)
+		{
+			if (stage.passIndices.empty()) continue;
+
+			if (stage.passIndices.size() == 1)
+			{
+				// 하이브리드 최적화: Stage 내 패스가 1개뿐인 경우 스레드 풀 오버헤드 없이 메인 스레드에서 직접 녹화
+				uint32_t passIdx = stage.passIndices[0];
+				RHI::ICommandList* cmdList = device ? device->AcquireWorkerCommandList(passIdx) : nullptr;
+				ExecutePassWithBarriers(passIdx, cmdList);
+				if (cmdList)
 				{
-					for (const auto& barrier : pass->GetBarriers())
-					{
-						const RGResourceDesc* resDesc = GetResourceDesc(barrier.resourceHandle);
+					cmdList->Close();
+					stageCmdLists.push_back(cmdList);
+				}
+			}
+			else
+			{
+				// Stage 내 패스가 2개 이상인 경우 워커 스레드 풀에서 병렬 녹화
+				const size_t passCount = stage.passIndices.size();
+				std::vector<RHI::ICommandList*> parallelCmds(passCount, nullptr);
 
-						if (barrier.type == RGBarrierType::Texture)
+				for (size_t i = 0; i < passCount; ++i)
+				{
+					uint32_t passIdx = stage.passIndices[i];
+					RHI::ICommandList* workerCmd = device ? device->AcquireWorkerCommandList(passIdx) : nullptr;
+					parallelCmds[i] = workerCmd;
+
+					threadPool->Enqueue([this, passIdx, workerCmd]() {
+						ExecutePassWithBarriers(passIdx, workerCmd);
+						if (workerCmd)
 						{
-							RHI::ITexture* texPtr = resDesc ? resDesc->texturePtr : nullptr;
-							commandList->TextureBarrier(texPtr, static_cast<uint32_t>(barrier.beforeAccess), static_cast<uint32_t>(barrier.afterAccess));
+							workerCmd->Close();
 						}
-						else if (barrier.type == RGBarrierType::Buffer)
-						{
-							RHI::IBuffer* bufPtr = resDesc ? resDesc->bufferPtr : nullptr;
-							commandList->BufferBarrier(bufPtr, static_cast<uint32_t>(barrier.beforeAccess), static_cast<uint32_t>(barrier.afterAccess));
-						}
-						else if (barrier.type == RGBarrierType::Global)
-						{
-							commandList->GlobalBarrier(static_cast<uint32_t>(barrier.beforeAccess), static_cast<uint32_t>(barrier.afterAccess));
-						}
-					}
+					});
 				}
 
-				pass->Execute(commandList);
+				// 해당 Stage의 모든 병렬 패스 녹화 완료 대기
+				threadPool->WaitAll();
+
+				for (auto* cmd : parallelCmds)
+				{
+					if (cmd)
+					{
+						stageCmdLists.push_back(cmd);
+					}
+				}
 			}
+		}
+
+		// 모든 Stage의 녹화가 완료된 커맨드리스트들을 GPU 큐에 순서대로 일괄 제출
+		if (device && !stageCmdLists.empty())
+		{
+			device->Submit(stageCmdLists.data(), static_cast<uint32_t>(stageCmdLists.size()));
 		}
 	}
 
@@ -328,6 +432,7 @@ namespace dy::Graphics
 		m_passes.clear();
 		m_compiledRevisions.clear();
 		m_executionOrder.clear();
+		m_executionStages.clear();
 		m_compiled = false;
 	}
 

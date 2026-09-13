@@ -71,6 +71,14 @@ namespace dy::RHI
 		[[nodiscard]] virtual uint32_t GetCurrentFrameIndex() const = 0;
 		[[nodiscard]] virtual RHI::ICommandList* AcquireCommandList()	= 0;
 
+		// 멀티스레드 병렬 패스 녹화용 워커 커맨드리스트 발급 인터페이스
+		[[nodiscard]] virtual RHI::ICommandList* AcquireWorkerCommandList(uint32_t threadIndex)
+		{
+			(void)threadIndex;
+			return AcquireCommandList();
+		}
+		virtual void ResetCommandLists() {}
+
 		virtual void Submit(ICommandList** cmdLists, uint32_t count) = 0;
 		virtual void Present() = 0;
 

@@ -16,6 +16,8 @@ public:
   uint32_t GetCurrentFrameIndex() const override;
 
   RHI::ICommandList *AcquireCommandList() override;
+  RHI::ICommandList *AcquireWorkerCommandList(uint32_t threadIndex) override;
+  void ResetCommandLists() override;
   void Submit(RHI::ICommandList **cmdLists, uint32_t count) override;
   void Present() override;
 

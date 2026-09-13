@@ -11,6 +11,7 @@ endif()
 # main target
 add_library(${PROJECT_NAME} STATIC
 	"src/RHI/IDevice.cpp"
+	"src/Core/ThreadPool.cpp"
 	"src/Graphics/Renderer.cpp"
 	"src/Graphics/RenderPath.cpp"
 	"src/Graphics/ProfilerHud.cpp"

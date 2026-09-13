@@ -17,6 +17,8 @@ public:
 	void BeginFrame() override;
 	uint32_t GetCurrentFrameIndex() const override;
 	dy::RHI::ICommandList* AcquireCommandList() override;
+	dy::RHI::ICommandList* AcquireWorkerCommandList(uint32_t threadIndex) override;
+	void ResetCommandLists() override;
 	void Submit(dy::RHI::ICommandList** cmdLists, uint32_t count) override;
 	void Present() override;
 

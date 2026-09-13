@@ -57,6 +57,8 @@ namespace dy::Backends
         uint32_t dsvDescriptorSize = 0;
 
         D3D12CommandList* commandLists[2] = { nullptr, nullptr };
+        static constexpr uint32_t kMaxWorkerThreads = 16;
+        D3D12CommandList* workerCommandLists[2][kMaxWorkerThreads] = {};
         D3D12Texture* backBufferTextures[2] = { nullptr, nullptr };
         
         ComPtr<ID3D12CommandAllocator> commandAllocators[2];
@@ -97,6 +99,10 @@ namespace dy::Backends
         for (int i = 0; i < 2; ++i) {
             delete m_internal->commandLists[i];
             delete m_internal->backBufferTextures[i];
+            for (uint32_t t = 0; t < D3D12InternalState::kMaxWorkerThreads; ++t) {
+                delete m_internal->workerCommandLists[i][t];
+                m_internal->workerCommandLists[i][t] = nullptr;
+            }
         }
         delete m_internal;
     }
@@ -268,12 +274,51 @@ namespace dy::Backends
     }
 
     void D3D12Device::BeginFrame() { 
-        m_internal->commandLists[m_internal->frameIndex]->Reset();
+        ResetCommandLists();
     }
     uint32_t D3D12Device::GetCurrentFrameIndex() const { return m_internal->frameIndex; }
 
     RHI::ICommandList* D3D12Device::AcquireCommandList() { 
         return m_internal->commandLists[m_internal->frameIndex];
+    }
+
+    RHI::ICommandList* D3D12Device::AcquireWorkerCommandList(uint32_t threadIndex) {
+        if (threadIndex >= D3D12InternalState::kMaxWorkerThreads) {
+            threadIndex = threadIndex % D3D12InternalState::kMaxWorkerThreads;
+        }
+
+        const uint32_t frameIdx = m_internal->frameIndex;
+        if (m_internal->workerCommandLists[frameIdx][threadIndex] == nullptr) {
+            D3D12_CPU_DESCRIPTOR_HANDLE currentRtv = m_internal->rtvHeap->GetCPUDescriptorHandleForHeapStart();
+            currentRtv.ptr += frameIdx * m_internal->rtvDescriptorSize;
+            D3D12_CPU_DESCRIPTOR_HANDLE dsvHandle = m_internal->dsvHeap->GetCPUDescriptorHandleForHeapStart();
+
+            auto* workerCmd = new D3D12CommandList(
+                m_internal->device.Get(),
+                m_internal->renderTargets[frameIdx].Get(),
+                currentRtv.ptr,
+                m_internal->globalDescriptorHeap.Get(),
+                m_internal->srvDescriptorSize
+            );
+            workerCmd->SetDepthStencilView(dsvHandle.ptr);
+            workerCmd->SetBackBufferTexture(m_internal->backBufferTextures[frameIdx]);
+            workerCmd->Reset();
+            m_internal->workerCommandLists[frameIdx][threadIndex] = workerCmd;
+        }
+
+        return m_internal->workerCommandLists[frameIdx][threadIndex];
+    }
+
+    void D3D12Device::ResetCommandLists() {
+        const uint32_t frameIdx = m_internal->frameIndex;
+        if (m_internal->commandLists[frameIdx]) {
+            m_internal->commandLists[frameIdx]->Reset();
+        }
+        for (uint32_t t = 0; t < D3D12InternalState::kMaxWorkerThreads; ++t) {
+            if (m_internal->workerCommandLists[frameIdx][t]) {
+                m_internal->workerCommandLists[frameIdx][t]->Reset();
+            }
+        }
     }
     void D3D12Device::Submit(RHI::ICommandList** cmdLists, uint32_t count) {
 		if (count == 0) return;

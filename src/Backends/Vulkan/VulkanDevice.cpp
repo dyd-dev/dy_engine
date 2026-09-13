@@ -847,6 +847,8 @@ struct VulkanDevice::Impl
 	void BeginFrame();
 	uint32_t GetCurrentFrameIndex() const { return m_currentFrameIndex; }
 	dy::RHI::ICommandList* AcquireCommandList() { return m_commandList; }
+	dy::RHI::ICommandList* AcquireWorkerCommandList(uint32_t threadIndex);
+	void ResetCommandLists();
 	void Submit(dy::RHI::ICommandList** cmdLists, uint32_t count);
 	void Present();
 	[[nodiscard]] bool SupportsGpuTimestamps() const { return m_gpuTimestampsSupported; }
@@ -902,7 +904,7 @@ private:
 	bool CreateGpuTimestampQueryPools();
 	bool CreateFallbackTexture();
 	bool CreateDrawConstantBuffers();
-	bool UploadDrawConstants(const VulkanCommandList& commandList);
+	bool UploadDrawConstants(const VulkanCommandList& commandList, uint32_t baseDrawSlot = 0u);
 	void DestroyDrawConstantBuffers();
 	void CollectRetiredBuffers();
 	void DestroyAllRetiredBuffers();
@@ -931,11 +933,12 @@ private:
 	};
 
 	bool RecordCommandBuffer(const VulkanCommandList& commandList);
-	bool RecordComputeDispatch(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList, uint32_t dispatchIndex);
+	bool RecordCommandBuffers(dy::RHI::ICommandList** cmdLists, uint32_t count);
+	bool RecordComputeDispatch(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList, uint32_t dispatchIndex, uint32_t baseDispatchSlot = 0u);
 	bool RecordBufferBarrier(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList, uint32_t barrierIndex);
 	bool RecordColorClear(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList, uint32_t clearIndex);
 	bool RecordDepthClear(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList, uint32_t clearIndex);
-	bool RecordGraphicsPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList, uint32_t firstDraw, uint32_t drawCount);
+	bool RecordGraphicsPass(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList, uint32_t firstDraw, uint32_t drawCount, uint32_t baseDrawSlot = 0u);
 	bool ResolveGraphicsTarget(
 		const VulkanCommandList& commandList,
 		const VulkanCommandList::DrawCall& drawCall,
@@ -945,7 +948,7 @@ private:
 		VkPipelineLayout pipelineLayout,
 		const VulkanCommandList::DrawCall& drawCall,
 		uint32_t drawConstantSlot);
-	bool UpdateComputeDescriptorSets(const VulkanCommandList& commandList);
+	bool UpdateComputeDescriptorSets(const VulkanCommandList& commandList, uint32_t baseDispatchSlot = 0u);
 	bool ApplyBindlessDescriptorSet(uint32_t frameIndex);
 	void RecordDebugEventsAt(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList, uint32_t eventIndex);
 	void RecordGpuTimestampEventsAt(VkCommandBuffer commandBuffer, const VulkanCommandList& commandList, uint32_t eventIndex);
@@ -1060,6 +1063,8 @@ private:
 	bool m_drawCapacityErrorReported = false;
 	dy::RHI::DescriptorIndex m_nextDescriptorIndex = 0;
 	VulkanCommandList* m_commandList = nullptr;
+	static constexpr uint32_t kMaxWorkerThreads = 16;
+	std::array<VulkanCommandList*, kMaxWorkerThreads> m_workerCommandLists = {};
 	dy::RHI::ITexture* m_backBuffer = nullptr;
 	dy::RHI::ITexture* m_fallbackTexture = nullptr;
 	dy::RHI::ITexture* m_depthTexture = nullptr;
@@ -1087,6 +1092,16 @@ uint32_t VulkanDevice::GetCurrentFrameIndex() const
 dy::RHI::ICommandList* VulkanDevice::AcquireCommandList()
 {
 	return m_impl->AcquireCommandList();
+}
+
+dy::RHI::ICommandList* VulkanDevice::AcquireWorkerCommandList(uint32_t threadIndex)
+{
+	return m_impl->AcquireWorkerCommandList(threadIndex);
+}
+
+void VulkanDevice::ResetCommandLists()
+{
+	m_impl->ResetCommandLists();
 }
 
 void VulkanDevice::Submit(dy::RHI::ICommandList** cmdLists, uint32_t count)
@@ -1628,13 +1643,38 @@ void VulkanDevice::Impl::DestroyAllRetiredBuffers()
 	m_retiredBuffers.clear();
 }
 
+dy::RHI::ICommandList* VulkanDevice::Impl::AcquireWorkerCommandList(uint32_t threadIndex)
+{
+	if (threadIndex >= kMaxWorkerThreads) threadIndex = threadIndex % kMaxWorkerThreads;
+	if (m_workerCommandLists[threadIndex] == nullptr)
+	{
+		m_workerCommandLists[threadIndex] = new VulkanCommandList();
+		m_workerCommandLists[threadIndex]->Begin(m_maxColorAttachments, m_maxDrawsPerFrame);
+		m_workerCommandLists[threadIndex]->SetGpuTimestampScopeCapacity(m_gpuTimestampsSupported ? 32u : 0u);
+	}
+	return m_workerCommandLists[threadIndex];
+}
+
+void VulkanDevice::Impl::ResetCommandLists()
+{
+	if (m_commandList != nullptr)
+	{
+		m_commandList->Begin(m_maxColorAttachments, m_maxDrawsPerFrame);
+	}
+	for (auto* workerCmd : m_workerCommandLists)
+	{
+		if (workerCmd != nullptr)
+		{
+			workerCmd->Begin(m_maxColorAttachments, m_maxDrawsPerFrame);
+		}
+	}
+}
+
 void VulkanDevice::Impl::BeginFrame() {
 	m_frameReady = false;
 	m_frameSubmitted = false;
 	m_imageAcquired = false;
-	if (m_commandList != nullptr) {
-		m_commandList->Begin(m_maxColorAttachments, m_maxDrawsPerFrame);
-	}
+	ResetCommandLists();
 
 	if (m_deviceLost || !m_context.device || m_swapchain.GetHandle() == VK_NULL_HANDLE) return;
 
@@ -1755,29 +1795,45 @@ void VulkanDevice::Impl::Submit(dy::RHI::ICommandList** cmdLists, uint32_t count
 		return;
 	}
 
-	VulkanCommandList* vulkanCmd = static_cast<VulkanCommandList*>(cmdLists[0]);
-	if (vulkanCmd->m_drawCalls.size() > m_maxDrawsPerFrame) {
+	uint32_t totalDrawCalls = 0u;
+	for (uint32_t i = 0; i < count; ++i)
+	{
+		if (cmdLists[i] == nullptr) continue;
+		VulkanCommandList* vulkanCmd = static_cast<VulkanCommandList*>(cmdLists[i]);
+		totalDrawCalls += static_cast<uint32_t>(vulkanCmd->m_drawCalls.size());
+	}
+	if (totalDrawCalls > m_maxDrawsPerFrame) {
 		SDL_Log("Vulkan draw count exceeds maxDrawsPerFrame.");
 		m_frameReady = false;
 		return;
 	}
-	if(!UploadDrawConstants(*vulkanCmd))
+
+	uint32_t currentDrawSlot = 0u;
+	uint32_t currentDispatchSlot = 0u;
+	for (uint32_t i = 0; i < count; ++i)
 	{
-		if(!m_drawCapacityErrorReported) SDL_Log("Failed to upload Vulkan draw constants.");
-		m_frameReady = false;
-		return;
-	}
-	if (!UpdateComputeDescriptorSets(*vulkanCmd)) {
-		SDL_Log("Failed to update Vulkan compute descriptor sets.");
-		m_frameReady = false;
-		return;
+		if (cmdLists[i] == nullptr) continue;
+		VulkanCommandList* vulkanCmd = static_cast<VulkanCommandList*>(cmdLists[i]);
+		if(!UploadDrawConstants(*vulkanCmd, currentDrawSlot))
+		{
+			if(!m_drawCapacityErrorReported) SDL_Log("Failed to upload Vulkan draw constants.");
+			m_frameReady = false;
+			return;
+		}
+		currentDrawSlot += static_cast<uint32_t>(vulkanCmd->m_drawCalls.size());
+		if (!UpdateComputeDescriptorSets(*vulkanCmd, currentDispatchSlot)) {
+			SDL_Log("Failed to update Vulkan compute descriptor sets.");
+			m_frameReady = false;
+			return;
+		}
+		currentDispatchSlot += static_cast<uint32_t>(vulkanCmd->m_computeDispatches.size());
 	}
 	if(!AcquireFrameImage())
 	{
 		m_frameReady = false;
 		return;
 	}
-	if(!RecordCommandBuffer(*vulkanCmd))
+	if(!RecordCommandBuffers(cmdLists, count))
 	{
 		SDL_Log("Failed to record Vulkan command buffer; acquired frame will be recovered.");
 		const VkResult discardResult = vkResetCommandBuffer(
@@ -2322,7 +2378,9 @@ void VulkanDevice::Impl::RecordGpuTimestampEventsAt(
 	}
 }
 
-bool VulkanDevice::Impl::RecordCommandBuffer(const VulkanCommandList& commandList) {
+bool VulkanDevice::Impl::RecordCommandBuffers(dy::RHI::ICommandList** cmdLists, uint32_t count) {
+	if (cmdLists == nullptr || count == 0u) return false;
+
 	m_recordedImageLayouts.clear();
 	m_recordedSwapchainLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 	const auto fail = [this]()
@@ -2344,94 +2402,119 @@ bool VulkanDevice::Impl::RecordCommandBuffer(const VulkanCommandList& commandLis
 		m_gpuTimestampQueryCounts[m_currentFrameIndex] = 0;
 	}
 
-	for(size_t workIndex = 0u; workIndex < commandList.m_workItems.size();)
+	uint32_t baseDrawSlot = 0u;
+	uint32_t baseDispatchSlot = 0u;
+	for (uint32_t cmdIdx = 0u; cmdIdx < count; ++cmdIdx)
 	{
-		const VulkanCommandList::WorkItem& work = commandList.m_workItems[workIndex];
-		if(work.type == VulkanCommandList::WorkType::DebugEvent)
-		{
-			RecordDebugEventsAt(commandBuffer, commandList, work.index);
-			++workIndex;
-			continue;
-		}
-		if(work.type == VulkanCommandList::WorkType::GpuTimestamp)
-		{
-			if(m_gpuTimestampsSupported) RecordGpuTimestampEventsAt(commandBuffer, commandList, work.index);
-			++workIndex;
-			continue;
-		}
-		if(work.type == VulkanCommandList::WorkType::Dispatch)
-		{
-			if(!RecordComputeDispatch(commandBuffer, commandList, work.index)) return fail();
-			++workIndex;
-			continue;
-		}
-		if(work.type == VulkanCommandList::WorkType::BufferBarrier)
-		{
-			if(!RecordBufferBarrier(commandBuffer, commandList, work.index)) return fail();
-			++workIndex;
-			continue;
-		}
-		if(work.type == VulkanCommandList::WorkType::ClearColor)
-		{
-			if(!RecordColorClear(commandBuffer, commandList, work.index)) return fail();
-			++workIndex;
-			continue;
-		}
-		if(work.type == VulkanCommandList::WorkType::ClearDepth)
-		{
-			if(!RecordDepthClear(commandBuffer, commandList, work.index)) return fail();
-			++workIndex;
-			continue;
-		}
+		if (cmdLists[cmdIdx] == nullptr) continue;
+		const VulkanCommandList& commandList = *static_cast<const VulkanCommandList*>(cmdLists[cmdIdx]);
 
-		if(work.index >= commandList.m_drawCalls.size()) return fail();
-		const uint32_t firstDraw = work.index;
-		const VulkanCommandList::DrawCall& first = commandList.m_drawCalls[firstDraw];
-		uint32_t drawCount = 1u;
-		while(workIndex + drawCount < commandList.m_workItems.size())
+		for(size_t workIndex = 0u; workIndex < commandList.m_workItems.size();)
 		{
-			const VulkanCommandList::WorkItem& nextWork = commandList.m_workItems[workIndex + drawCount];
-			if(nextWork.type != VulkanCommandList::WorkType::Draw || nextWork.index != firstDraw + drawCount) break;
-			const VulkanCommandList::DrawCall& next = commandList.m_drawCalls[nextWork.index];
-			bool sameTargets = first.renderTargetsValid
-				&& next.renderTargetsValid
-				&& next.renderTargetCount == first.renderTargetCount
-				&& next.depthStencil == first.depthStencil
-				&& first.renderTargetOffset <= commandList.m_renderTargets.size()
-				&& next.renderTargetOffset <= commandList.m_renderTargets.size()
-				&& first.renderTargetCount <= commandList.m_renderTargets.size() - first.renderTargetOffset
-				&& next.renderTargetCount <= commandList.m_renderTargets.size() - next.renderTargetOffset;
-			for(uint32_t targetIndex = 0u; sameTargets && targetIndex < first.renderTargetCount; ++targetIndex)
+			const VulkanCommandList::WorkItem& work = commandList.m_workItems[workIndex];
+			if(work.type == VulkanCommandList::WorkType::DebugEvent)
 			{
-				sameTargets = commandList.m_renderTargets[first.renderTargetOffset + targetIndex]
-					== commandList.m_renderTargets[next.renderTargetOffset + targetIndex];
+				RecordDebugEventsAt(commandBuffer, commandList, work.index);
+				++workIndex;
+				continue;
 			}
-			if(!sameTargets) break;
-			++drawCount;
+			if(work.type == VulkanCommandList::WorkType::GpuTimestamp)
+			{
+				if(m_gpuTimestampsSupported) RecordGpuTimestampEventsAt(commandBuffer, commandList, work.index);
+				++workIndex;
+				continue;
+			}
+			if(work.type == VulkanCommandList::WorkType::Dispatch)
+			{
+				if(!RecordComputeDispatch(commandBuffer, commandList, work.index, baseDispatchSlot)) return fail();
+				++workIndex;
+				continue;
+			}
+			if(work.type == VulkanCommandList::WorkType::BufferBarrier)
+			{
+				if(!RecordBufferBarrier(commandBuffer, commandList, work.index)) return fail();
+				++workIndex;
+				continue;
+			}
+			if(work.type == VulkanCommandList::WorkType::ClearColor)
+			{
+				if(!RecordColorClear(commandBuffer, commandList, work.index)) return fail();
+				++workIndex;
+				continue;
+			}
+			if(work.type == VulkanCommandList::WorkType::ClearDepth)
+			{
+				if(!RecordDepthClear(commandBuffer, commandList, work.index)) return fail();
+				++workIndex;
+				continue;
+			}
+
+			if(work.index >= commandList.m_drawCalls.size()) return fail();
+			const uint32_t firstDraw = work.index;
+			const VulkanCommandList::DrawCall& first = commandList.m_drawCalls[firstDraw];
+			uint32_t drawCount = 1u;
+			while(workIndex + drawCount < commandList.m_workItems.size())
+			{
+				const VulkanCommandList::WorkItem& nextWork = commandList.m_workItems[workIndex + drawCount];
+				if(nextWork.type != VulkanCommandList::WorkType::Draw || nextWork.index != firstDraw + drawCount) break;
+				const VulkanCommandList::DrawCall& next = commandList.m_drawCalls[nextWork.index];
+				bool sameTargets = first.renderTargetsValid
+					&& next.renderTargetsValid
+					&& next.renderTargetCount == first.renderTargetCount
+					&& next.depthStencil == first.depthStencil
+					&& first.renderTargetOffset <= commandList.m_renderTargets.size()
+					&& next.renderTargetOffset <= commandList.m_renderTargets.size()
+					&& first.renderTargetCount <= commandList.m_renderTargets.size() - first.renderTargetOffset
+					&& next.renderTargetCount <= commandList.m_renderTargets.size() - next.renderTargetOffset;
+				for(uint32_t targetIndex = 0u; sameTargets && targetIndex < first.renderTargetCount; ++targetIndex)
+				{
+					sameTargets = commandList.m_renderTargets[first.renderTargetOffset + targetIndex]
+						== commandList.m_renderTargets[next.renderTargetOffset + targetIndex];
+				}
+				if(!sameTargets) break;
+				++drawCount;
+			}
+			if(!RecordGraphicsPass(commandBuffer, commandList, firstDraw, drawCount, baseDrawSlot)) return fail();
+			workIndex += drawCount;
 		}
-		if(!RecordGraphicsPass(commandBuffer, commandList, firstDraw, drawCount)) return fail();
-		workIndex += drawCount;
+		baseDrawSlot += static_cast<uint32_t>(commandList.m_drawCalls.size());
+		baseDispatchSlot += static_cast<uint32_t>(commandList.m_computeDispatches.size());
 	}
-	const bool rendersToSwapchain = std::any_of(
-		commandList.m_drawCalls.begin(),
-		commandList.m_drawCalls.end(),
-		[this, &commandList](const VulkanCommandList::DrawCall& drawCall)
-		{
-			if(!drawCall.renderTargetsValid) return false;
-			if(drawCall.renderTargetCount == 0u) return drawCall.depthStencil == nullptr;
-			if(drawCall.renderTargetOffset > commandList.m_renderTargets.size()
-				|| drawCall.renderTargetCount > commandList.m_renderTargets.size() - drawCall.renderTargetOffset) return false;
-			for(uint32_t targetIndex = 0u; targetIndex < drawCall.renderTargetCount; ++targetIndex)
+
+	bool rendersToSwapchain = false;
+	for (uint32_t cmdIdx = 0u; cmdIdx < count; ++cmdIdx)
+	{
+		if (cmdLists[cmdIdx] == nullptr) continue;
+		const VulkanCommandList& commandList = *static_cast<const VulkanCommandList*>(cmdLists[cmdIdx]);
+
+		const bool cmdRendersToSwapchain = std::any_of(
+			commandList.m_drawCalls.begin(),
+			commandList.m_drawCalls.end(),
+			[this, &commandList](const VulkanCommandList::DrawCall& drawCall)
 			{
-				dy::RHI::ITexture* renderTarget =
-					commandList.m_renderTargets[drawCall.renderTargetOffset + targetIndex];
-				if(renderTarget == nullptr || renderTarget == m_backBuffer) return true;
-			}
-			return false;
-		}) || std::any_of(
-		commandList.m_colorClears.begin(),
-		commandList.m_colorClears.end(),
-		[this](const VulkanCommandList::ColorClear& clear) { return clear.texture == m_backBuffer; });
+				if(!drawCall.renderTargetsValid) return false;
+				if(drawCall.renderTargetCount == 0u) return drawCall.depthStencil == nullptr;
+				if(drawCall.renderTargetOffset > commandList.m_renderTargets.size()
+					|| drawCall.renderTargetCount > commandList.m_renderTargets.size() - drawCall.renderTargetOffset) return false;
+				for(uint32_t targetIndex = 0u; targetIndex < drawCall.renderTargetCount; ++targetIndex)
+				{
+					dy::RHI::ITexture* renderTarget =
+						commandList.m_renderTargets[drawCall.renderTargetOffset + targetIndex];
+					if(renderTarget == nullptr || renderTarget == m_backBuffer) return true;
+				}
+				return false;
+			}) || std::any_of(
+			commandList.m_colorClears.begin(),
+			commandList.m_colorClears.end(),
+			[this](const VulkanCommandList::ColorClear& clear) { return clear.texture == m_backBuffer; });
+
+		if(cmdRendersToSwapchain)
+		{
+			rendersToSwapchain = true;
+			break;
+		}
+	}
+
 	if(!rendersToSwapchain)
 	{
 		const auto& images = m_swapchain.GetImages();
@@ -2476,10 +2559,16 @@ bool VulkanDevice::Impl::RecordCommandBuffer(const VulkanCommandList& commandLis
 	return true;
 }
 
+bool VulkanDevice::Impl::RecordCommandBuffer(const VulkanCommandList& commandList) {
+	dy::RHI::ICommandList* listPtr = const_cast<VulkanCommandList*>(&commandList);
+	return RecordCommandBuffers(&listPtr, 1u);
+}
+
 bool VulkanDevice::Impl::RecordComputeDispatch(
 	VkCommandBuffer commandBuffer,
 	const VulkanCommandList& commandList,
-	uint32_t dispatchIndex)
+	uint32_t dispatchIndex,
+	uint32_t baseDispatchSlot)
 {
 	if(dispatchIndex >= commandList.m_computeDispatches.size()) return false;
 	const VulkanCommandList::ComputeDispatch& dispatch = commandList.m_computeDispatches[dispatchIndex];
@@ -2490,7 +2579,7 @@ bool VulkanDevice::Impl::RecordComputeDispatch(
 		|| dispatch.threadGroupCountY == 0u
 		|| dispatch.threadGroupCountZ == 0u
 		|| dispatch.inlineConstantSize > pipelineState->GetInlineConstantSize()) return false;
-	const VkDescriptorSet descriptorSet = pipelineState->GetDescriptorSet(m_currentFrameIndex, dispatchIndex);
+	const VkDescriptorSet descriptorSet = pipelineState->GetDescriptorSet(m_currentFrameIndex, baseDispatchSlot + dispatchIndex);
 	if(descriptorSet == VK_NULL_HANDLE) return false;
 	vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineState->GetPipeline());
 	vkCmdBindDescriptorSets(
@@ -2673,7 +2762,8 @@ bool VulkanDevice::Impl::RecordGraphicsPass(
 	VkCommandBuffer commandBuffer,
 	const VulkanCommandList& commandList,
 	uint32_t firstDraw,
-	uint32_t drawCount) {
+	uint32_t drawCount,
+	uint32_t baseDrawSlot) {
 	if(drawCount == 0u || firstDraw >= commandList.m_drawCalls.size()) return true;
 	const VulkanCommandList::DrawCall& passDraw = commandList.m_drawCalls[firstDraw];
 	RenderingTarget& target = m_renderingTargetScratch;
@@ -2755,7 +2845,7 @@ bool VulkanDevice::Impl::RecordGraphicsPass(
 			currentBindlessDescriptorSet = VK_NULL_HANDLE;
 		}
 
-		if (!PushDrawDescriptors(commandBuffer, pipeline->GetLayout(), drawCall, drawIndex)) return false;
+		if (!PushDrawDescriptors(commandBuffer, pipeline->GetLayout(), drawCall, baseDrawSlot + drawIndex)) return false;
 		const VkDescriptorSet bindlessDescriptorSet = m_currentFrameIndex < m_bindlessDescriptorSets.size()
 			? m_bindlessDescriptorSets[m_currentFrameIndex]
 			: VK_NULL_HANDLE;
@@ -3201,14 +3291,14 @@ bool VulkanDevice::Impl::CreateDrawConstantBuffers()
 	return true;
 }
 
-bool VulkanDevice::Impl::UploadDrawConstants(const VulkanCommandList& commandList)
+bool VulkanDevice::Impl::UploadDrawConstants(const VulkanCommandList& commandList, uint32_t baseDrawSlot)
 {
-	if(commandList.m_drawCalls.size() > m_descriptorCapacityPerFrame)
+	if(baseDrawSlot + commandList.m_drawCalls.size() > m_descriptorCapacityPerFrame)
 	{
 		if(!m_drawCapacityErrorReported)
 		{
 			SDL_Log("Vulkan draw capacity exceeded: requested=%zu capacity=%u.",
-				commandList.m_drawCalls.size(),
+				baseDrawSlot + commandList.m_drawCalls.size(),
 				m_descriptorCapacityPerFrame);
 			m_drawCapacityErrorReported = true;
 		}
@@ -3231,7 +3321,7 @@ bool VulkanDevice::Impl::UploadDrawConstants(const VulkanCommandList& commandLis
 				drawCall.pushConstants.data() + firstVertexOffset,
 				sizeof(firstVertex));
 		}
-		uint8_t* constants = frame.mapped + static_cast<size_t>(m_drawConstantStride) * drawIndex;
+		uint8_t* constants = frame.mapped + static_cast<size_t>(m_drawConstantStride) * (baseDrawSlot + drawIndex);
 		if(!PrepareVulkanDrawConstants(
 			drawCall.pushConstants.data(),
 			drawCall.pushConstantSize,
@@ -3425,13 +3515,13 @@ bool VulkanDevice::Impl::ApplyBindlessDescriptorSet(uint32_t frameIndex) {
 	return true;
 }
 
-bool VulkanDevice::Impl::UpdateComputeDescriptorSets(const VulkanCommandList& commandList)
+bool VulkanDevice::Impl::UpdateComputeDescriptorSets(const VulkanCommandList& commandList, uint32_t baseDispatchSlot)
 {
-	if(commandList.m_computeDispatches.size() > m_descriptorCapacityPerFrame)
+	if(baseDispatchSlot + commandList.m_computeDispatches.size() > m_descriptorCapacityPerFrame)
 	{
 		SDL_Log(
 			"Vulkan compute descriptor capacity exceeded: requested=%zu capacity=%u.",
-			commandList.m_computeDispatches.size(),
+			baseDispatchSlot + commandList.m_computeDispatches.size(),
 			m_descriptorCapacityPerFrame);
 		return false;
 	}
@@ -3441,8 +3531,8 @@ bool VulkanDevice::Impl::UpdateComputeDescriptorSets(const VulkanCommandList& co
 		VulkanComputePipelineState* pipelineState =
 			dynamic_cast<VulkanComputePipelineState*>(dispatch.pipelineState);
 		if(pipelineState == nullptr
-			|| !pipelineState->EnsureDescriptorSets(m_currentFrameIndex, dispatchIndex + 1u)) return false;
-		const VkDescriptorSet descriptorSet = pipelineState->GetDescriptorSet(m_currentFrameIndex, dispatchIndex);
+			|| !pipelineState->EnsureDescriptorSets(m_currentFrameIndex, baseDispatchSlot + dispatchIndex + 1u)) return false;
+		const VkDescriptorSet descriptorSet = pipelineState->GetDescriptorSet(m_currentFrameIndex, baseDispatchSlot + dispatchIndex);
 		if(descriptorSet == VK_NULL_HANDLE) return false;
 
 		const uint32_t storageBufferCount = pipelineState->GetStorageBufferCount();
@@ -3796,6 +3886,12 @@ void VulkanDevice::Impl::DestroyDeviceResources() {
 
 	delete m_commandList;
 	m_commandList = nullptr;
+
+	for (auto*& workerCmd : m_workerCommandLists)
+	{
+		delete workerCmd;
+		workerCmd = nullptr;
+	}
 
 	if (m_context.device != VK_NULL_HANDLE) {
 		DestroyDrawConstantBuffers();
