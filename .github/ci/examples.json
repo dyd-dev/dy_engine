@@ -1,0 +1,79 @@
+{
+  "version": 1,
+  "examples": {
+    "examples/01_HelloWindow": {
+      "kind": "window",
+      "seconds": 2,
+      "coverage": "window responsiveness and graceful close"
+    },
+    "examples/02_HelloRenderer": {
+      "kind": "visible",
+      "seconds": 3,
+      "coverage": "unmodified triangle example remains visibly rendered",
+      "warmup": 1
+    },
+    "examples/03_Cube": {
+      "kind": "visible",
+      "seconds": 3,
+      "coverage": "unmodified cube example remains visibly rendered",
+      "warmup": 1
+    },
+    "examples/04_TexturedCube": {
+      "kind": "visible",
+      "seconds": 3,
+      "coverage": "original textured example visible; exact sampling checked by separate GPU probe",
+      "warmup": 1
+    },
+    "examples/05_LoadModel": {
+      "kind": "visible",
+      "seconds": 3,
+      "coverage": "original default model example visible; loader semantics checked by independent CPU checks",
+      "warmup": 5
+    },
+    "examples/06_ShadowCube": {
+      "kind": "visible",
+      "seconds": 3,
+      "coverage": "original shadow example visible; does not claim shadow on/off equivalence",
+      "warmup": 1
+    },
+    "examples/07_RenderPath": {
+      "kind": "visible",
+      "seconds": 3,
+      "cases": [
+        {
+          "name": "per-draw",
+          "arguments": [
+            "--per-draw",
+            "--count=64"
+          ]
+        },
+        {
+          "name": "batched",
+          "arguments": [
+            "--batched",
+            "--count=64"
+          ]
+        },
+        {
+          "name": "bindless",
+          "arguments": [
+            "--bindless",
+            "--count=64"
+          ]
+        }
+      ],
+      "coverage": "existing public CLI binding modes render; no source time or benchmark changes",
+      "warmup": 5
+    },
+    "examples/08_LightingLab": {
+      "kind": "visible",
+      "seconds": 3,
+      "coverage": "original lighting example visibly renders; no forced feature toggles",
+      "warmup": 1
+    },
+    "examples/RenderGraph": {
+      "kind": "render-graph",
+      "coverage": "original printed callback execution order"
+    }
+  }
+}

@@ -1,3 +1,4 @@
+dy_example_support(BUILD_ONLY metal REASON "Metal shaders are not implemented")
 set(EXAMPLE_NAME "TexturedCube")
 
 add_executable(${EXAMPLE_NAME}
@@ -19,9 +20,3 @@ set_source_files_properties(
 )
 
 dy_setup_example(${EXAMPLE_NAME})
-
-add_custom_command(TARGET ${EXAMPLE_NAME} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        "${CMAKE_CURRENT_SOURCE_DIR}/Textures"
-        "$<TARGET_FILE_DIR:${EXAMPLE_NAME}>/Textures"
-    VERBATIM)

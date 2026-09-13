@@ -1,3 +1,4 @@
+dy_example_support(BUILD_ONLY metal REASON "Metal shaders are not implemented")
 set(EXAMPLE_NAME "ShadowCube")
 
 add_executable(${EXAMPLE_NAME}

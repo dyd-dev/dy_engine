@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 project(dy_engine CXX)
 
 # add module path
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 if(USE_METAL AND APPLE)
 	enable_language(OBJCXX)
@@ -33,12 +33,19 @@ add_library(${PROJECT_NAME} STATIC
 include(Engine_Options)
 target_link_libraries(${PROJECT_NAME} PUBLIC Engine_Options)
 
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    include(CiChecks)
+endif()
 include(Dependencies)
 include(BuildOptions)
 
 # Only add the executable if this is the main project being built (not when included as a subdirectory in another project)
-if(CMAKE_PROJECT_NAME  STREQUAL PROJECT_NAME)
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
 	add_subdirectory(examples)
+    if(DY_CI)
+        enable_testing()
+        add_subdirectory(.github/ci)
+    endif()
 endif()
 
 # ===== Configuration Messages =====

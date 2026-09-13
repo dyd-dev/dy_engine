@@ -1,3 +1,4 @@
+dy_example_support(KIND window)
 set(EXAMPLE_NAME "HelloWindow")
 
 add_executable(${EXAMPLE_NAME}

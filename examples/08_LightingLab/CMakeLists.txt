@@ -1,3 +1,4 @@
+dy_example_support(APIS vulkan REASON "HDR LightingLab currently supports Vulkan only")
 set(EXAMPLE_NAME "LightingLab")
 
 add_executable(${EXAMPLE_NAME}
