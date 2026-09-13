@@ -20,6 +20,8 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 
+import selection
+
 
 ROOT = Path(__file__).resolve().parents[2]
 APIS = ('vulkan', 'd3d12', 'metal', 'null')
@@ -63,21 +65,14 @@ def push_updates(text):
     return list(updates.items())
 
 
-def documentation_only(paths):
-    # Only known prose paths qualify; new build/config formats must not silently bypass CI.
-    return bool(paths) and all(
-        (p.startswith('docs/') or '/' not in p) and Path(p).suffix.lower() in ('.md', '.rst')
-        for p in paths)
-
-
 def changed_paths(root, revision, base):
     if not base or set(base) == {'0'}:
-        return []  # New remote branch has no established checked baseline.
+        return None  # Unknown baseline must differ from a known empty change set.
     try:
         base = resolve_commit(root, base)
     except CiError:
-        return []
-    output = subprocess.check_output(['git', '-C', str(root), 'diff', '--name-only', '-z', base, revision])
+        return None
+    output = subprocess.check_output(['git', '-C', str(root), 'diff', '--no-renames', '--name-only', '-z', base, revision])
     return [x.decode('utf-8', errors='strict') for x in output.split(b'\0') if x]
 
 
@@ -223,7 +218,7 @@ class Report:
             case = ET.SubElement(suite, 'testcase', name=result['name'], time=str(result['seconds']))
             if result['status'] in ('FAIL', 'BLOCKED'):
                 ET.SubElement(case, 'failure', type=result['status']).text = result['message']
-            elif result['status'] == 'UNSUPPORTED':
+            elif result['status'] in ('UNSUPPORTED', 'SKIPPED'):
                 ET.SubElement(case, 'skipped').text = result['message']
         ET.ElementTree(suite).write(self.directory / 'junit.xml', encoding='utf-8', xml_declaration=True)
         summary = [f'Commit: `{self.revision}` / API: `{self.api}` / Source: `{self.source_mode}`',
@@ -352,11 +347,16 @@ def configure(root, build, api, config, report, env, *, clang=False, sanitize=Fa
     return build
 
 
-def build_targets(root, build, config, report, env):
-    report.command('build-' + config, ['cmake', '--build', str(build), '--config', config, '--parallel', '4'], root, env=env)
+def build_targets(root, build, config, report, env, targets=None):
+    command = ['cmake', '--build', str(build), '--config', config, '--parallel', '4']
+    if targets is not None:
+        if not targets:
+            raise CiError('Refusing an empty target list that would build everything', 'BLOCKED')
+        command.extend(['--target', *targets])
+    report.command('build-' + config, command, root, env=env)
 
 
-def read_inventory(build, config):
+def read_inventory(build, config, verify=True):
     try:
         manifest = json.loads((build / f'ci-manifest-{config}.json').read_text(encoding='utf-8-sig'))
         programs = json.loads((build / f'ci-programs-{config}.json').read_text(encoding='utf-8-sig'))
@@ -364,6 +364,12 @@ def read_inventory(build, config):
         raise CiError(f'Missing or invalid CMake inventory: {error}', 'BLOCKED') from error
     if manifest.get('version') != 1 or not isinstance(manifest.get('targets'), list) or not isinstance(programs, list):
         raise CiError('Unsupported CMake inventory format', 'BLOCKED')
+    if verify:
+        verify_artifacts(build, manifest, programs)
+    return manifest, programs
+
+
+def verify_artifacts(build, manifest, programs):
     names = set()
     for target in manifest['targets'] + programs:
         name = target['name']
@@ -374,7 +380,6 @@ def read_inventory(build, config):
             path = Path(raw).resolve()
             if not path.is_relative_to(build.resolve()) or not path.is_file() or not path.stat().st_size:
                 raise CiError(f'Missing or out-of-build artifact: {raw}')
-    return manifest, programs
 
 
 
@@ -436,7 +441,7 @@ def runtime_checks(root, build, config, manifest, programs, report, env):
         for case in profile.get('cases', [dict(name='default', arguments=[])]):
             jobs.append((target, case['name'], case.get('arguments', []), profile))
     probes = {program['kind']: program for program in programs if program['kind'] in ('rhi-smoke', 'gpu-probe')}
-    if manifest['api'] != 'null':
+    if manifest['api'] != 'null' and manifest.get('gpu_checks', True):
         for kind in ('rhi-smoke', 'gpu-probe'):
             if kind not in probes:
                 raise CiError('Missing independent GPU test executable: ' + kind, 'BLOCKED')
@@ -488,6 +493,13 @@ def build_name(phase, api, config):
     return f'{phase}-external-{api}-{config}'
 
 
+def read_impact(path, revision):
+    data = json.loads(Path(path).read_text(encoding='utf-8'))
+    if data.get('version') != 1 or data.get('revision') != revision or 'paths' not in data:
+        raise CiError('Selection evidence does not match this revision', 'BLOCKED')
+    return selection.plan(data['paths'])
+
+
 def run_phase(args):
     root = args.root.resolve()
     revision = args.revision or git(root, 'rev-parse', 'HEAD')
@@ -500,17 +512,43 @@ def run_phase(args):
     try:
         if not before:
             raise CiError('No framework source/examples found', 'BLOCKED')
+        impact = read_impact(args.changes_file, revision) if args.changes_file else None
+        if impact and (args.api not in impact['apis'] or (args.phase == 'cpu' and not impact['cpu'])):
+            raise CiError(impact['reason'], 'SKIPPED')
         env = setup_environment(root)
         if args.api not in native_apis() + ['null']:
             raise CiError(f'{args.api} is unavailable on {sys.platform}', 'BLOCKED')
         configure(root, build, args.api, args.config, report, env,
                   clang=args.phase == 'cpu', sanitize=args.phase == 'cpu', dependencies=args.dependencies)
-        build_targets(root, build, args.config, report, env)
-        manifest, programs = read_inventory(build, args.config)
+        if impact:
+            manifest, programs = read_inventory(build, args.config, verify=False)
+            manifest, programs = selection.select(root, manifest, programs, impact, args.phase)
+            names = [t['name'] for t in manifest['targets'] + programs]
+            for name in names:
+                if not re.fullmatch(r'[A-Za-z0-9_.+-]+', name):
+                    raise CiError('Invalid selected target name', 'BLOCKED')
+            selection_path = report.directory / 'selection.json'
+            selection_path.write_text(json.dumps(dict(impact, targets=names,
+                                                      mode=manifest['selection_mode'],
+                                                      reason=manifest['selection_reason']), indent=2), encoding='utf-8')
+            report.add('selection', 'PASS' if names else 'SKIPPED',
+                       manifest['selection_reason'] + '; targets=' + ', '.join(names), log=selection_path)
+            if not names:
+                if manifest['selection_mode'] == 'all':
+                    raise CiError('No check targets discovered for a required full check', 'BLOCKED')
+                for item in manifest.get('unsupported', []):
+                    report.add(item['directory'], 'UNSUPPORTED', item['reason'])
+                raise CiError('No affected targets for this API/phase', 'SKIPPED')
+            build_targets(root, build, args.config, report, env, targets=names)
+            verify_artifacts(build, manifest, programs)
+        else:
+            build_targets(root, build, args.config, report, env)
+            manifest, programs = read_inventory(build, args.config)
         report.compiler = manifest.get('compiler')
         report.add('artifact-inventory', 'PASS', f'{len(manifest["targets"])} examples, {len(programs)} check programs')
         if args.phase == 'cpu':
-            cpu_checks(root, build, args.config, programs, report, env, args.fuzz_seconds, args.seed)
+            if programs or not impact:
+                cpu_checks(root, build, args.config, programs, report, env, args.fuzz_seconds, args.seed)
             for target in manifest['targets']:
                 if target['kind'] == 'cpu':
                     report.command('cpu-example-' + target['name'], [target['binary']], Path(target['binary']).parent, timeout=120, env=env)
@@ -518,7 +556,7 @@ def run_phase(args):
             runtime_checks(root, build, args.config, manifest, programs, report, env)
     except CiError as error:
         report.add(args.phase, error.status, str(error))
-        code = 2 if error.status == 'BLOCKED' else 1
+        code = 0 if error.status == 'SKIPPED' else 2 if error.status == 'BLOCKED' else 1
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
         report.add(args.phase, 'BLOCKED', str(error))
         code = 2
@@ -535,9 +573,7 @@ def run_phase(args):
 def full(args):
     root = args.root.resolve()
     revision = resolve_commit(root, args.revision)
-    if documentation_only(changed_paths(root, revision, args.base)):
-        print(f'[PASS] {revision}: documentation-only change; heavy checks not required')
-        return 0
+    paths = changed_paths(root, revision, args.base)
     cache = root / 'build-ci/push'
     cache.mkdir(parents=True, exist_ok=True)
     lock = cache / 'active.lock'
@@ -550,15 +586,29 @@ def full(args):
         script = source / '.github/ci/ci.py'
         if not script.is_file():
             raise CiError('The pushed commit does not contain the CI runner; no working-copy fallback is allowed', 'BLOCKED')
+        raw_changes, selected = cache / 'changes.json', cache / 'selection.json'
+        raw_changes.write_text(json.dumps(dict(version=1, revision=revision, paths=paths)), encoding='utf-8')
+        # The pushed runner owns the selection rules, never an uncommitted working-copy rule.
+        planned = subprocess.run([sys.executable, '-B', str(script), 'changes', '--revision', revision,
+                                  '--changes-file', str(raw_changes), '--output', str(selected)])
+        if planned.returncode:
+            raise CiError('The pushed runner could not select checks', 'BLOCKED')
+        impact = json.loads(selected.read_text(encoding='utf-8'))
+        if impact['mode'] == 'none':
+            print('[SKIPPED] ' + impact['reason'])
+            return 0
         env = setup_environment(root)
-        apis = native_apis() if args.api == 'auto' else [args.api]
-        phases = [('cpu', 'null', 'Debug')]
+        apis = [api for api in (native_apis() if args.api == 'auto' else [args.api]) if api in impact['apis']]
+        phases = [('cpu', 'null', 'Debug')] if impact['cpu'] else []
+        if not phases and not apis:
+            print('[SKIPPED] Changed backend is unavailable on this host; remote CI must verify it')
         for api in apis:
             phases.extend((('build', api, 'Debug'), ('build', api, 'Release'), ('runtime', api, 'Debug')))
         for phase, api, config in phases:
             command = [sys.executable, '-B', str(script), 'run', '--phase', phase, '--api', api,
                        '--config', config, '--root', str(source), '--revision', revision,
                        '--build-dir', str(cache / 'builds' / build_name('build' if phase == 'runtime' else phase, api, config)),
+                       '--changes-file', str(selected),
                        '--fuzz-seconds', str(args.fuzz_seconds), '--seed', str(args.seed)]
             # Never inject the user's build/_deps into a pushed revision: CMake must honor that tree's GIT_TAGs.
             result = subprocess.run(command, env=env)
@@ -587,13 +637,20 @@ def pre_push(args):
 
 
 def changes(args):
-    revision = resolve_commit(args.root, args.revision)
-    heavy = not documentation_only(changed_paths(args.root, revision, args.base))
-    line = 'heavy=' + str(heavy).lower()
-    print(line)
-    if os.environ.get('GITHUB_OUTPUT'):
-        with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-            output.write(line + '\n')
+    revision = args.revision if args.changes_file else resolve_commit(args.root, args.revision)
+    impact = (read_impact(args.changes_file, revision) if args.changes_file
+              else selection.plan(changed_paths(args.root, revision, args.base)))
+    if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(dict(impact, revision=revision), indent=2), encoding='utf-8')
+    outputs = dict(selection.github_outputs(impact), selection=dict(impact, revision=revision))
+    for name, value in outputs.items():
+        line = name + '=' + json.dumps(value, separators=(',', ':'))
+        print(line)
+        if os.environ.get('GITHUB_OUTPUT'):
+            with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+                output.write(line + '\n')
+    print('Selection: ' + impact['reason'])
     return 0
 
 
@@ -677,6 +734,7 @@ def main(argv=None):
         command.add_argument('--fuzz-seconds', type=float, default=3)
         command.add_argument('--seed', type=int, default=1729)
         if name == 'run':
+            command.add_argument('--changes-file', type=Path, help='Revision-bound push selection evidence, generated automatically')
             command.add_argument('--dependencies', type=Path, help='Explicit working-copy verification only; never used by pre-push')
             command.add_argument('--phase', choices=('build', 'cpu', 'runtime'), required=True)
             command.add_argument('--config', choices=('Debug', 'Release'), default='Debug')
@@ -690,6 +748,8 @@ def main(argv=None):
     command.add_argument('--root', type=Path, default=ROOT)
     command.add_argument('--revision', required=True)
     command.add_argument('--base')
+    command.add_argument('--changes-file', type=Path)
+    command.add_argument('--output', type=Path)
     args = parser.parse_args(argv)
     if hasattr(args, 'fuzz_seconds') and not (0 <= args.fuzz_seconds <= 60):
         parser.error('--fuzz-seconds must be finite and between 0 and 60')

@@ -121,10 +121,72 @@ class CiTests(unittest.TestCase):
             self.assertEqual((snapshot / 'code.cpp').read_text(), 'dirty\n')
             self.assertTrue((root / 'secret-untracked').exists())
 
-    def test_document_changes_are_narrowly_classified(self):
-        self.assertTrue(self.ci.documentation_only(['README.md', 'docs/design.md']))
-        for files in ([], ['CMakeLists.txt'], ['src/README.md', 'src/RHI/IDevice.h'], ['.github/ci/README.md']):
-            self.assertFalse(self.ci.documentation_only(files))
+    def test_selection_evidence_must_match_revision_and_docs_need_no_toolchain(self):
+        import json
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'src').mkdir()
+            (root / 'src/a.cpp').write_text('int a;')
+            evidence = root / 'selection.json'
+            evidence.write_text(json.dumps(dict(version=1, revision='fixture', paths=['README.md'])))
+            with self.assertRaises(self.ci.CiError) as error:
+                self.ci.read_impact(evidence, 'another-commit')
+            self.assertEqual(error.exception.status, 'BLOCKED')
+            with mock.patch.object(self.ci, 'setup_environment') as setup:
+                code = self.ci.main(['run', '--phase', 'runtime', '--api', 'vulkan',
+                                     '--root', str(root), '--revision', 'fixture', '--changes-file', str(evidence)])
+            self.assertEqual(code, 0)
+            setup.assert_not_called()
+
+    def test_real_push_docs_skip_and_changed_example_cannot_be_hidden_by_dirty_rules(self):
+        import json
+        with tempfile.TemporaryDirectory() as folder:
+            root, remote = Path(folder) / 'repo', Path(folder) / 'remote.git'
+            root.mkdir()
+            env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1')
+            def git(*args, check=True):
+                return subprocess.run(['git', '-C', str(root), '-c', 'user.name=CI Fixture',
+                                       '-c', 'user.email=ci@example.invalid', *args], env=env,
+                                      capture_output=True, text=True, check=check)
+            git('init', '-q')
+            subprocess.run(['git', 'init', '--bare', '-q', str(remote)], env=env, check=True)
+            scripts = root / '.github/ci'
+            scripts.mkdir(parents=True)
+            for name in ('ci.py', 'selection.py'):
+                (scripts / name).write_bytes(SCRIPT.with_name(name).read_bytes())
+            (root / 'examples/Cube').mkdir(parents=True)
+            (root / 'examples/Cube/main.cpp').write_text('int main() {}')
+            (root / 'README.md').write_text('first')
+            git('add', '.')
+            git('commit', '-qm', 'initial')
+            first = git('rev-parse', 'HEAD').stdout.strip()
+            git('push', str(remote), 'HEAD:refs/heads/main')
+            self.assertIsNone(self.ci.changed_paths(root, first, '0' * 40))
+            self.assertEqual(self.ci.changed_paths(root, first, first), [])
+            installed = subprocess.run([sys.executable, '-B', str(scripts / 'ci.py'), 'install-hook',
+                                        '--root', str(root)], capture_output=True, text=True, env=env)
+            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+            (root / 'README.md').write_text('docs only')
+            git('add', 'README.md')
+            git('commit', '-qm', 'docs')
+            pushed = git('push', str(remote), 'HEAD:refs/heads/main')
+            self.assertIn('[SKIPPED]', pushed.stdout)
+            self.assertFalse((root / 'build-ci/push/builds').exists())
+            base = git('rev-parse', 'HEAD').stdout.strip()
+            git('mv', 'examples/Cube/main.cpp', 'examples/Cube/renamed.cpp')
+            git('commit', '-qm', 'rename source')
+            tip = git('rev-parse', 'HEAD').stdout.strip()
+            self.assertEqual(set(self.ci.changed_paths(root, tip, base)),
+                             {'examples/Cube/main.cpp', 'examples/Cube/renamed.cpp'})
+            (scripts / 'selection.py').write_text('def plan(paths): return {"mode": "none"}\n')
+            pushed = git('push', str(remote), 'HEAD:refs/heads/main', check=False)
+            self.assertNotEqual(pushed.returncode, 0)  # No product CMake exists in this fixture.
+            evidence = json.loads((root / 'build-ci/push/selection.json').read_text())
+            self.assertEqual(evidence['mode'], 'related')
+            self.assertEqual(evidence['revision'], tip)
+            actual = subprocess.check_output(['git', '--git-dir', str(remote), 'rev-parse',
+                                              'refs/heads/main'], text=True).strip()
+            self.assertEqual(actual, base)
 
     def test_commit_does_not_run_checks_and_failed_push_preserves_old_hook(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -141,6 +203,7 @@ class CiTests(unittest.TestCase):
             ci_dir = root / '.github/ci'
             ci_dir.mkdir(parents=True)
             (ci_dir / 'ci.py').write_bytes(SCRIPT.read_bytes())
+            (ci_dir / 'selection.py').write_bytes(SCRIPT.with_name('selection.py').read_bytes())
             (root / 'README.md').write_text('fixture', encoding='utf-8')
             git('add', '.')
             git('commit', '-qm', 'fixture initial')

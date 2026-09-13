@@ -2,6 +2,22 @@
 
 2026-09-13, 브랜치 `CI`, 기준 HEAD `aaf323657f61ac4334cfa45b6a7a1cee6bb5017b`. 아래 실행은 미커밋 작업 폴더를 명시한 `run`으로 수행했다. 현재 저장소를 stage/commit/push하지 않았으며 원격 Actions 실행이나 runner 등록을 완료했다는 뜻은 아니다.
 
+## 자동 선택 추가 검증
+
+기준 커밋 `8707de5` 이후 CI에 자동 선택을 추가했다. 제품·예제 구현은 변경하지 않았다.
+
+- Windows 검사 28개 통과(대화형 GUI 검사 1개는 기본 생략). 별도 임시 Git 저장소에서 문서만 바꾼 실제 push는 빌드 없이 통과하고 예제 소스 변경 push는 검사 실패 시 전송을 차단함을 확인했다.
+- Linux에서도 최종 검사 28개 통과(대화형 GUI 검사 1개는 기본 생략). actionlint로 workflow 형식을 검증했다.
+- 미커밋 선택 규칙을 검사 생략으로 바꿔도, 전송할 커밋의 선택 규칙을 사용하여 우회되지 않음을 확인했다.
+- 이름 변경의 이전·새 경로, 새 브랜치/비교 기준 없음, 백엔드별 선택, 공유 자산·CPU 검사 연결, 불명확한 입력의 전체 검사 전환을 검증했다.
+- 실제 임시 CMake 프로젝트에서 연결한 오브젝트 라이브러리와 자산 원본을 수집했다. 다른 예제에 문법 오류를 넣어도 선택한 타깃만 빌드되어 성공했다.
+- 실제 저장소에서는 Cube 소스 변경을 모사한 커밋 ID/경로 입력으로 Cube만 선택했다. Linux Xvfb 소프트웨어 Vulkan에서 Cube만 빌드·실행하여 PASS, 제품 소스·셰이더 141개 무변경을 확인했다. 이는 실제 저장소를 push했다는 뜻은 아니다.
+- Windows에서도 Cube만 선택·빌드했지만 창의 전면 상태가 확보되지 않아 실행 관찰은 BLOCKED였다. 이를 PASS로 처리하지 않았다.
+
+선택 결과: `build-ci/external-linux/ci-logs/selection.json`. 기존 D3D12 링크 오류와 Metal 관찰 미구현은 수정하지 않았다. 원격 Actions 실행은 아직 수행하지 않았다.
+
+자동 선택 작업의 추가 파일은 `selection.py`, `test_selection.py`다. 수정 파일은 `.github/ci/ci.py`, `.github/ci/test_ci.py`, `.github/ci/CMakeLists.txt`, `cmake/ExampleSupport.cmake`, `.github/workflows/ci.yml`, 루트와 CI의 `README.md`, 이 검증 기록이다. 예제 CMake와 src/에는 변경이 없다.
+
 ## 백엔드 복구 후 현재 상태
 
 사용자 요청으로 D3D12Device.cpp, MetalDevice.mm, VulkanDevice.cpp, IDevice.cpp, Window.h를 HEAD로 복구하고 파일 내용을 비교했다. 추가 요청에 따라 src/Backends 폴더 전체를 HEAD로 복구하여 D3D12·Metal·Null·Vulkan의 CMake 변경과 줄바꿈 차이까지 제거했다. 백엔드 폴더 밖의 CI 구성은 남아 있다. 아래 빌드·실행 결과는 복구 이전 기록이며 현재 백엔드의 통과 증거가 아니다. 복구 후 재검증 결과는 다음 절에 기록한다. 독립 GPU 검사에 자원 카운터 의존이 남아 있으므로 D3D12/Metal에서는 해당 판정이 실패할 수 있다.

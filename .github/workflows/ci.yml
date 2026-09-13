@@ -18,11 +18,17 @@ jobs:
     timeout-minutes: 10
     outputs:
       heavy: ${{ steps.changes.outputs.heavy }}
+      cpu: ${{ steps.changes.outputs.cpu }}
+      runtime: ${{ steps.changes.outputs.runtime }}
+      consumer: ${{ steps.changes.outputs.consumer }}
+      selection: ${{ steps.changes.outputs.selection }}
+      build_matrix: ${{ steps.changes.outputs.build_matrix }}
+      runtime_matrix: ${{ steps.changes.outputs.runtime_matrix }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
-      - name: Detect documentation-only changes
+      - name: Select checks from the pushed changes
         id: changes
         env:
           CI_BEFORE: ${{ github.event.before }}
@@ -31,6 +37,7 @@ jobs:
       - name: Check the checker behavior
         run: |
           python -B -m unittest discover -s .github/ci -p 'test_ci.py'
+          python -B -m unittest discover -s .github/ci -p 'test_selection.py'
           python -B -m unittest discover -s .github/ci -p 'test_discovery.py'
           python -B -m unittest discover -s .github/ci -p 'test_external_contracts.py'
           python -B -m unittest discover -s .github/ci -p 'test_observe.py'
@@ -43,19 +50,14 @@ jobs:
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - {platform: Windows, os: windows-2022, api: vulkan, config: Debug}
-          - {platform: Windows, os: windows-2022, api: vulkan, config: Release}
-          - {platform: Ubuntu, os: ubuntu-24.04, api: vulkan, config: Debug}
-          - {platform: Ubuntu, os: ubuntu-24.04, api: vulkan, config: Release}
-          - {platform: Windows, os: windows-2022, api: d3d12, config: Debug}
-          - {platform: Windows, os: windows-2022, api: d3d12, config: Release}
-          - {platform: macOS, os: macos-15, api: metal, config: Debug}
-          - {platform: macOS, os: macos-15, api: metal, config: Release}
-          - {platform: Ubuntu, os: ubuntu-24.04, api: 'null', config: Release}
+      matrix: ${{ fromJSON(needs.discovery.outputs.build_matrix) }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Read automatic push selection
+        env:
+          CI_SELECTION: ${{ needs.discovery.outputs.selection }}
+        shell: bash
+        run: python -c 'import os; from pathlib import Path; Path("ci-selection.json").write_text(os.environ["CI_SELECTION"], encoding="utf-8")'
       - uses: ./.github/actions/setup-ci
         with:
           api: ${{ matrix.api }}
@@ -64,10 +66,10 @@ jobs:
         env:
           CI_API: ${{ matrix.api }}
           CI_CONFIG: ${{ matrix.config }}
-        run: python -B .github/ci/ci.py run --phase build --api "$CI_API" --config "$CI_CONFIG" --build-dir build/ci-build
+        run: python -B .github/ci/ci.py run --phase build --api "$CI_API" --config "$CI_CONFIG" --build-dir build/ci-build --changes-file ci-selection.json
         shell: bash
       - name: Verify external consumer isolation
-        if: matrix.api == 'null'
+        if: matrix.api == 'null' && needs.discovery.outputs.consumer == 'true'
         run: python -B .github/ci/test_consumer.py --build-dir build/ci-consumer --dependencies build/ci-build/_deps
       - name: Verify native observation and failure handling
         if: runner.os == 'Linux' && matrix.api == 'vulkan' && matrix.config == 'Debug'
@@ -78,7 +80,7 @@ jobs:
         if: runner.os == 'Linux' && matrix.api == 'vulkan' && matrix.config == 'Debug'
         env:
           VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.json
-        run: xvfb-run -a -s '-screen 0 1920x1080x24' python -B .github/ci/ci.py run --phase runtime --api vulkan --build-dir build/ci-build
+        run: xvfb-run -a -s '-screen 0 1920x1080x24' python -B .github/ci/ci.py run --phase runtime --api vulkan --build-dir build/ci-build --changes-file ci-selection.json
       - name: Save diagnostics
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -94,7 +96,7 @@ jobs:
   cpu:
     name: CPU Checks / ${{ matrix.os }}
     needs: discovery
-    if: needs.discovery.outputs.heavy == 'true'
+    if: needs.discovery.outputs.cpu == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -103,12 +105,17 @@ jobs:
         os: [ubuntu-24.04, windows-2022, macos-15]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Read automatic push selection
+        env:
+          CI_SELECTION: ${{ needs.discovery.outputs.selection }}
+        shell: bash
+        run: python -c 'import os; from pathlib import Path; Path("ci-selection.json").write_text(os.environ["CI_SELECTION"], encoding="utf-8")'
       - uses: ./.github/actions/setup-ci
         with:
           api: 'null'
           clang: 'true'
       - name: Run boundary, functional and bounded fuzz checks
-        run: python -B .github/ci/ci.py run --phase cpu --api null --build-dir build/ci-cpu --fuzz-seconds 3
+        run: python -B .github/ci/ci.py run --phase cpu --api null --build-dir build/ci-cpu --changes-file ci-selection.json --fuzz-seconds 3
       - name: Save diagnostics and replay inputs
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -121,20 +128,21 @@ jobs:
     name: Example Behavior / ${{ matrix.api }}
     needs: discovery
     # Never route code from a fork repository onto the project's physical GPU machines.
-    if: needs.discovery.outputs.heavy == 'true' && github.repository == 'dyd-dev/dy_engine'
+    if: needs.discovery.outputs.runtime == 'true' && github.repository == 'dyd-dev/dy_engine'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - {api: vulkan, runner: dy-ci-windows-gpu}
-          - {api: d3d12, runner: dy-ci-windows-gpu}
-          - {api: metal, runner: dy-ci-macos-metal}
+      matrix: ${{ fromJSON(needs.discovery.outputs.runtime_matrix) }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           persist-credentials: false
+      - name: Read automatic push selection
+        env:
+          CI_SELECTION: ${{ needs.discovery.outputs.selection }}
+        shell: bash
+        run: python -c 'import os; from pathlib import Path; Path("ci-selection.json").write_text(os.environ["CI_SELECTION"], encoding="utf-8")'
       - uses: ./.github/actions/setup-ci
         with:
           api: ${{ matrix.api }}
@@ -142,7 +150,7 @@ jobs:
       - name: Observe official examples and verify public API output on a physical GPU
         env:
           CI_API: ${{ matrix.api }}
-        run: python -B .github/ci/ci.py run --phase runtime --api "$CI_API" --build-dir build/ci-runtime
+        run: python -B .github/ci/ci.py run --phase runtime --api "$CI_API" --build-dir build/ci-runtime --changes-file ci-selection.json
         shell: bash
       - name: Save execution evidence
         if: always()
@@ -163,6 +171,8 @@ jobs:
         env:
           DISCOVERY: ${{ needs.discovery.result }}
           HEAVY: ${{ needs.discovery.outputs.heavy }}
+          EXPECT_CPU: ${{ needs.discovery.outputs.cpu }}
+          EXPECT_RUNTIME: ${{ needs.discovery.outputs.runtime }}
           BUILD: ${{ needs.build.result }}
           CPU: ${{ needs.cpu.result }}
           RUNTIME: ${{ needs.runtime.result }}
@@ -170,8 +180,8 @@ jobs:
           test "$DISCOVERY" = success
           if [ "$HEAVY" = true ]; then
             test "$BUILD" = success
-            test "$CPU" = success
-            test "$RUNTIME" = success
+            if [ "$EXPECT_CPU" = true ]; then test "$CPU" = success; else test "$CPU" = skipped; fi
+            if [ "$EXPECT_RUNTIME" = true ]; then test "$RUNTIME" = success; else test "$RUNTIME" = skipped; fi
           elif [ "$HEAVY" != false ]; then
             exit 1
           fi
