@@ -1,10 +1,10 @@
 # 프레임워크 개발자용 push CI
 
-공식 예제는 배포하는 원본 소스 그대로 실행합니다. 검사 코드는 `.github/ci`에 두고 예제의 창·출력과 별도 공개 API 테스트의 결과를 확인합니다. 실측 결과는 [검증 기록](VALIDATION.md)을 참고하십시오.
+공식 예제는 배포하는 원본 소스 그대로 실행합니다. 검사 코드는 `.github/ci`에 두고 예제의 창·출력과 별도 공개 API 테스트의 결과를 확인합니다.
 
 ## 자동 실행 범위
 
-- 명시적으로 설치한 로컬 `pre-push`: 전송할 커밋을 검사하고 실패하면 push를 차단합니다.
+- 로컬에서는 push를 막는 CI hook을 사용하지 않습니다. 작업 브랜치의 push는 먼저 완료됩니다.
 - GitHub Actions: 모든 브랜치의 `push`에서 이미 전송된 커밋을 검사합니다.
 - 커밋·저장·스테이징·PR·예약 실행에는 연결하지 않습니다.
 - 소비자 프로젝트에는 공식 예제와 검사 실행기를 자동 등록하지 않습니다. 라이브러리 빌드가 hook을 설치하지 않습니다.
@@ -13,7 +13,7 @@
 ## push 변경에 따른 자동 선택
 
 push 전 원격 커밋과 전송할 커밋의 최종 차이로 선택합니다. 개발자가 검사 대상 목록을 지정하지 않습니다.
-로컬 hook과 GitHub Actions가 같은 선택 규칙을 사용하며, 로컬에서도 실제 전송할 커밋에 들어 있는 선택 규칙을 실행합니다.
+자동 검사는 GitHub Actions에서 실행합니다. 기존 로컬 검사 명령은 수동 진단용으로 남아 있지만 hook으로 연결하지 않습니다.
 
 | 변경 | 자동 선택 |
 |---|---|
@@ -33,18 +33,23 @@ GitHub에서는 변경에 해당하는 백엔드 작업만 등록합니다. 예�
 대상이 없는 작업에도 도구 준비·CMake 설정 비용은 들 수 있습니다. 문서 변경에도 변경 판정과 CI 자체 검사 작업은 실행하지만 제품 검사는 생략합니다.
 선택하지 않은 항목은 `SKIPPED`로 기록하며 실제 기능 검증 통과로 표시하지 않습니다.
 
-`ci-logs/selection.json`에 선택 근거와 타깃 목록을 남깁니다. `--changes-file`은 hook/Actions가 생성한 커밋 ID와 변경 경로를 전달하는 내부 입력이며,
+`ci-logs/selection.json`에 선택 근거와 타깃 목록을 남깁니다. `--changes-file`은 Actions가 생성한 커밋 ID와 변경 경로를 전달하는 내부 입력이며,
 커밋 ID가 맞지 않으면 `BLOCKED`입니다. 일반 `run` 명령은 이 입력이 없으면 기존처럼 전체를 검사합니다.
 선택 과정은 백엔드·예제 소스와 그 성공 판정 조건을 수정하지 않습니다.
+
+## push 이후 결과 확인과 main 병합 제한
+
+작업 브랜치 push → GitHub Actions에서 자동 선택·검사 → 결과 기록 순서입니다. 실패한 원격 커밋을 자동으로 삭제하거나 되돌리지 않습니다. 수정 후 다시 push하면 재검사합니다.
+
+저장소 Actions에서 해당 실행의 실패한 작업·단계 로그를 확인합니다. 실행의 Artifacts에는 상세 로그·선택 이유·화면 캡처·CPU 실패 입력이 남습니다. 실행 환경을 확보하지 못한 BLOCKED는 기능 오류와 구분합니다.
+
+main 병합을 막으려면 관리자가 main 대상 규칙에 PR 필수와 **Require status checks to pass → CI Required**를 설정해야 합니다. 실제 규칙 적용 여부는 저장소 설정에서 확인해야 하며, workflow 파일만으로 병합 차단이 설정되지는 않습니다.
 
 ## 사용
 
 Python 3.10+, CMake 3.20+가 필요합니다. CPU 검사는 Ninja와 Clang을 사용합니다. Windows GPU 빌드는 Visual Studio 2022 C++/Windows SDK, Vulkan은 Vulkan SDK 1.4가 필요합니다. LLVM이 PATH에 없으면 `DY_CI_LLVM`에 설치 루트(bin의 부모)를 지정합니다.
 
 ```sh
-# 이 저장소에만 pre-push 설치 (기존 hook 보존)
-python -B .github/ci/ci.py install-hook
-
 # 작업 폴더를 수동 검증: 커밋하거나 push하지 않음
 python -B .github/ci/ci.py run --phase cpu --api null
 python -B .github/ci/ci.py run --phase runtime --api vulkan
@@ -59,9 +64,9 @@ python -B .github/ci/ci.py replay --case <case.json>
 
 `The pushed commit does not contain the CI runner; no working-copy fallback is allowed`는 검사할 커밋에 CI 파일들이 아직 없다는 뜻입니다. 개발 중에는 `run`으로 검증합니다. `full`/hook이 미커밋 파일로 대신 통과하도록 우회하지 않습니다.
 
-`full`은 `build-ci/push/source`에 커밋을 동기화하고 동일 파일의 수정 시간을 보존합니다. CPU 검사 후 네이티브 API별 Debug/Release 빌드와 Debug 실행을 검사하며 Debug 빌드를 재사용합니다. Windows auto는 Vulkan/D3D12, Linux는 Vulkan, macOS는 Metal입니다. 의존성은 검사할 커밋의 CMake GIT_TAG를 따릅니다. `run --dependencies build/_deps`는 개발 중 기존 의존성 소스 재사용용이며 자동 pre-push에는 주입하지 않습니다.
+`full`은 `build-ci/push/source`에 커밋을 동기화하고 동일 파일의 수정 시간을 보존합니다. CPU 검사 후 네이티브 API별 Debug/Release 빌드와 Debug 실행을 검사하며 Debug 빌드를 재사용합니다. Windows auto는 Vulkan/D3D12, Linux는 Vulkan, macOS는 Metal입니다. 의존성은 검사할 커밋의 CMake GIT_TAG를 따릅니다. `run --dependencies build/_deps`는 개발 중 기존 의존성 소스 재사용용이며 `full`에는 주입하지 않습니다.
 
-삭제-only push는 검사하지 않고 같은 커밋은 중복 검사하지 않습니다. 알려진 문서만 바뀐 경우에만 무거운 검사를 생략합니다. 기존 `core.hooksPath`는 변경하지 않습니다. 사용자 지정 hook에서는 `ci.py pre-push --root <저장소>`로 Git의 stdin을 그대로 전달해야 합니다. 기존 hook도 stdin을 소비하면 같은 내용을 각각 전달해야 합니다.
+`install-hook`/`pre-push`는 이전 방식의 명령이며 현재 운영 방식에서는 설치하거나 연결하지 않습니다. 다른 개발자 PC에 이전 dy_engine pre-push가 설치돼 있다면 해당 hook도 해제해야 합니다. clone만으로 hook이 설치되지는 않습니다.
 
 ## 실제 검사 내용
 

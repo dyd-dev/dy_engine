@@ -184,7 +184,7 @@ cmake --build build/directx --config Release
 
 ## 프레임워크 개발자 CI
 
-자동 검사는 명시적으로 설치한 로컬 `pre-push`와 모든 브랜치의 GitHub `push`에만 연결합니다. 소비자 프로젝트에는 예제나 CI 검사를 자동 등록하지 않습니다.
+자동 검사는 모든 브랜치의 GitHub `push` 이후 Actions에서 실행합니다. 로컬 pre-push로 전송을 막지 않으며, 실패한 작업 브랜치는 수정 후 다시 push합니다. main 병합 차단에는 관리자가 `CI Required`를 필수 상태 검사로 지정해야 합니다. 소비자 프로젝트에는 예제나 CI 검사를 자동 등록하지 않습니다.
 
 push 전후의 변경 파일과 CMake 의존 관계로 필요한 예제·백엔드를 자동 선택합니다. 알려진 문서만 바뀌면 제품 검사를 생략하고, 공통 코드 변경이나 영향 범위가 불명확한 경우에는 전체 검사합니다.
 
@@ -197,7 +197,7 @@ python -B .github/ci/ci.py run --phase runtime --api vulkan
 
 지원 범위는 각 예제 CMake, 외부 관찰 조건은 `.github/ci/examples.json`에 선언합니다. 검증할 수 없는 경우를 성공으로 취급하지 않습니다. 현재 macOS 외부 관찰은 미구현으로 Metal runtime은 BLOCKED입니다.
 
-[사용법과 환경](.github/ci/README.md) · [실측 결과](.github/ci/VALIDATION.md)
+[CI 사용법](.github/ci/README.md)
 
 ## 실행 방법
 
