@@ -448,8 +448,8 @@ namespace dyf::Backends
                 {
                     if (barrier.before != RHI::ResourceState::UnorderedAccess)
                     {
-                        RejectRecording(m_internal);
-                        return;
+                        // Legacy D3D12 copies are synchronous; repeated read states need no barrier.
+                        continue;
                     }
                     D3D12_RESOURCE_BARRIER nativeBarrier = {};
                     nativeBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -523,8 +523,9 @@ namespace dyf::Backends
             {
                 if (barrier.before != RHI::ResourceState::UnorderedAccess)
                 {
-                    RejectRecording(m_internal);
-                    return;
+                    // Legacy copy and output-merger accesses already preserve dependent ordering.
+                    // Read-only states likewise need no native transition to the same state.
+                    continue;
                 }
                 D3D12_RESOURCE_BARRIER nativeBarrier = {};
                 nativeBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;

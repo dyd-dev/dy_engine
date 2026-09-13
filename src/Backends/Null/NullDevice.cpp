@@ -233,9 +233,7 @@ namespace dyf::Backends
 				{
 					const RHI::ResourceBarrierDesc& barrier = barriers[index];
 					if((barrier.buffer == nullptr) == (barrier.texture == nullptr) ||
-						barrier.after == RHI::ResourceState::Undefined ||
-						(barrier.before == barrier.after &&
-							barrier.before != RHI::ResourceState::UnorderedAccess))
+						barrier.after == RHI::ResourceState::Undefined)
 					{
 						Invalidate();
 						continue;

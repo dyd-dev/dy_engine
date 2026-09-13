@@ -104,7 +104,7 @@ namespace dyf::Backends
         uint64_t GetLastSubmission() const {return m_lastSubmission;}
         uint64_t GetCompletedSubmission() {CollectCompletedSubmissions(); return m_submissionFaulted?0:m_completedSubmission;}
         void DiscardCommandList(RHI::ICommandList* list) {auto& active=m_acquiredCommandLists;active.erase(std::remove_if(active.begin(),active.end(),[list](const auto& value){return value.get()==list;}),active.end());}
-        void WaitForShutdown() { if(m_context.device != VK_NULL_HANDLE) vkDeviceWaitIdle(m_context.device); }
+        VkResult WaitForShutdown() { return m_context.device == VK_NULL_HANDLE ? VK_SUCCESS : vkDeviceWaitIdle(m_context.device); }
         bool WaitIdle() { if(m_context.device == VK_NULL_HANDLE || vkDeviceWaitIdle(m_context.device) != VK_SUCCESS) return false; CollectCompletedSubmissions(); return !m_submissionFaulted; }
         void ClearSwapchain() { DestroyCurrentSwapchain(); DestroyRetiredSwapchains(); m_hasSwapchainDesc = false; }
 
@@ -221,7 +221,18 @@ namespace dyf::Backends
 	{
 	}
 
-	VulkanDevice::~VulkanDevice() { m_impl->WaitForShutdown(); ReleaseResources(); }
+	VulkanDevice::~VulkanDevice()
+	{
+		const VkResult result = m_impl->WaitForShutdown();
+		if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST)
+		{
+			LogVulkanFailure("vkDeviceWaitIdle(shutdown)", result);
+			AbandonResources();
+			(void)m_impl.release();
+			return;
+		}
+		ReleaseResources();
+	}
 
 
 uint64_t VulkanDevice::GetLastSubmissionNative() const {return m_impl->GetLastSubmission();}
@@ -1600,7 +1611,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 	{
 		if (m_context.device != VK_NULL_HANDLE)
 		{
-			vkDeviceWaitIdle(m_context.device);
+			// 소유 장치의 소멸자가 큐 완료 또는 실제 DEVICE_LOST를 확인한 뒤에만 호출된다.
 			CollectCompletedSubmissions();
 			for (SubmissionRecord& submission : m_submissions)
 			{

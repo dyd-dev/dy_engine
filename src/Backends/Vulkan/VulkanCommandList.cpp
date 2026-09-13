@@ -238,20 +238,16 @@ namespace dyf::Backends
 			const dyf::RHI::ResourceBarrierDesc& source = barriers[i];
 			const bool unorderedAccessBarrier = source.before == dyf::RHI::ResourceState::UnorderedAccess &&
 				source.after == dyf::RHI::ResourceState::UnorderedAccess;
-            // 스왑체인 최초 획득 시에만 Undefined 네이티브 레이아웃을 RHI Present로 맞춘다.
-            const auto* initialImage=dynamic_cast<VulkanTexture*>(source.texture);
-            const bool initialPresentation=initialImage && source.before==RHI::ResourceState::Present &&
-                source.after==RHI::ResourceState::Present &&
-                initialImage->GetBarrierOldLayout(source.before)==VK_IMAGE_LAYOUT_UNDEFINED;
 			if ((source.buffer == nullptr) == (source.texture == nullptr) ||
-				source.after == dyf::RHI::ResourceState::Undefined ||
-				(source.before == source.after && !unorderedAccessBarrier && !initialPresentation))
+				source.after == dyf::RHI::ResourceState::Undefined)
 			{
 				Fail();
 				return;
 			}
 			StateInfo before = GetStateInfo(source.before);
 			StateInfo after = GetStateInfo(source.after);
+			// 같은 상태도 복사/attachment 쓰기 사이의 메모리 의존성을 기록한다.
+			// 이미지 레이아웃은 유지하고 해당 상태의 stage/access 범위를 사용한다.
 			if (unorderedAccessBarrier)
 			{
 				before.access = VK_ACCESS_2_SHADER_WRITE_BIT;

@@ -466,15 +466,15 @@ namespace dyf::Backends
 			Invalidate(m_impl);
 			return;
 		}
+		// Device-created resources use tracked hazards on this MTLCommandQueue.
+		// End the blit pass so a following pass observes writes even without a state change.
 		if(count != 0) EndBlitEncoding(m_impl);
 
 		for(uint32_t index = 0; index < count; ++index)
 		{
 			const RHI::ResourceBarrierDesc& barrier = barriers[index];
 			if((barrier.buffer == nullptr) == (barrier.texture == nullptr) ||
-				barrier.after == RHI::ResourceState::Undefined ||
-				(barrier.before == barrier.after &&
-					barrier.before != RHI::ResourceState::UnorderedAccess))
+				barrier.after == RHI::ResourceState::Undefined)
 			{
 				Invalidate(m_impl);
 				continue;

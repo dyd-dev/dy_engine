@@ -89,6 +89,8 @@ namespace dyf::RHI
 
 	private:
 		friend class IDevice;
+        friend class RenderGraph;
+        friend class RenderGraphPass;
         friend class RecordedCommandList;
         static ICommandList* CreateRecorded();
         using StateMap=std::map<std::tuple<uintptr_t,uint32_t,uint32_t>,ResourceState>;

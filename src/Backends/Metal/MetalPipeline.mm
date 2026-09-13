@@ -316,7 +316,15 @@ namespace dyf::Backends
         if(metalDevice == nil ||
             desc.colorAttachmentCount > 8 || !ValidateMetalLayout(desc, metalDevice)) return false;
         for(uint32_t index = 0; index < desc.colorAttachmentCount; ++index)
-            if(ToPixelFormat(desc.colorAttachments[index].format) == MTLPixelFormatInvalid) return false;
+        {
+            const auto& attachment = desc.colorAttachments[index];
+            if(ToPixelFormat(attachment.format) == MTLPixelFormatInvalid) return false;
+            // Apple의 포맷별 기능표에서 정수 타깃은 Color를 지원하지만 Blend는 지원하지 않는다.
+            // https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf
+            if(attachment.blend.enabled &&
+                (attachment.format == RHI::Format::R16_UINT ||
+                    attachment.format == RHI::Format::R32_UINT)) return false;
+        }
         if(desc.depthStencil.format != RHI::Format::Unknown &&
             ToPixelFormat(desc.depthStencil.format) == MTLPixelFormatInvalid) return false;
         if(desc.depthStencil.format == RHI::Format::D24_UNORM_S8_UINT &&
