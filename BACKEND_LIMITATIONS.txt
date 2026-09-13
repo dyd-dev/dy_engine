@@ -1,0 +1,21 @@
+- [공통] 현재 단일 그래픽 큐를 노출하며, 동일 명령 목록의 동시 기록과 프레임/스왑체인 변경 중 병렬 기록은 보장하지 않음.
+- [공통] 텍스처는 2D/2D 배열만 지원. depthOrArraySize는 배열 레이어 수이며 3D, cube, MSAA 선택 API는 없음.
+- [공통] IndirectDraw/IndirectDispatch, Mesh/Task shader, RayQuery/RayTracingPipeline은 현재 미구현.
+- [공통] ReadTexture는 동기식 진단용이며 mip 0/layer 0의 RGBA8/BGRA8 계열만 지원. 스왑체인은 allowReadback 설정 후 Submit과 Present 사이에 읽음.
+- [공통] Supports(desc)는 설정/장치 한도 검사이며 메모리 부족이나 셰이더 오류까지 보장하지 않음. 바인딩 정렬/크기 한도는 GetLimit으로 조회(업로드 정렬 조회는 없음).
+- [공통] 겹치는 쓰기는 명시적 배리어가 필요. RenderGraph는 패스 경계만 처리하며 callback 내부의 반복 업로드/dispatch는 호출자가 동기화.
+- [Vulkan] Compute/Timestamp는 선택된 장치와 그래픽 큐의 지원 여부에 따름.
+- [Vulkan] UpdateTexture의 D32_FLOAT/D24_UNORM_S8_UINT 데이터 업로드는 현재 미지원.
+- [Vulkan] 정수 텍스처의 ClampToBorder 샘플링은 현재 float border color 구현과 맞지 않아 정상 동작을 보장하지 못함.
+- [Vulkan] StaticSampler만 선언한 compute layout도 현재 빈 ResourceSet을 명시적으로 바인딩해야 함.
+- [Vulkan] 스왑체인 포맷/표시 모드/이미지 수/합성 방식은 surface 지원 범위로 제한.
+- [D3D12] Compute/Timestamp와 소수 depthBiasConstant는 현재 미지원.
+- [D3D12] ConstantBuffer offset은 256바이트 정렬. StorageBuffer는 4바이트 정렬과 구조화 stride 조건을 함께 만족해야 함.
+- [D3D12] Inline constants와 descriptor table은 root signature의 64 DWORD 예산을 공유.
+- [D3D12] Mailbox와 Opaque 이외 스왑체인 합성은 미지원. 이미지 수는 최소 2개이며 Immediate는 tearing 지원 필요.
+- [Metal] Compute/Timestamp와 0이 아닌 sampler mipLodBias는 현재 미지원.
+- [Metal] UpdateBuffer offset/size는 모두 4바이트 배수. 6바이트 uint16_t 인덱스 업로드는 현재 직접 지원하지 않음.
+- [Metal] D24_UNORM_S8_UINT 데이터 업로드는 현재 미지원.
+- [Metal] R16_UINT/R32_UINT 렌더 타깃의 블렌딩은 미지원. D24S8은 장치 지원 필요.
+- [Metal] 스왑체인은 최대 3개 이미지. Mailbox, Postmultiplied/Inherit 합성은 미지원.
+- [Null] GPU 렌더링/Compute/Timestamp/픽셀 readback을 수행하지 않는 CPU 계약 검증용 백엔드.
