@@ -10,13 +10,7 @@ target_compile_features(Engine_Options INTERFACE cxx_std_17)
 
 # ===== ===== Include ===== =====
 target_include_directories(Engine_Options INTERFACE
-	${PROJECT_SOURCE_DIR}/src
-)
-
-# ===== ===== Compile definition ===== =====
-target_compile_definitions(Engine_Options INTERFACE
-	ENGINE_VERSION="1.0.0"
-	GLFW_INCLUDE_NONE
+	${PROJECT_SOURCE_DIR}/src/Public
 )
 
 # ===== ===== SIMD ===== =====
