@@ -1063,7 +1063,7 @@ private:
 	bool m_drawCapacityErrorReported = false;
 	dy::RHI::DescriptorIndex m_nextDescriptorIndex = 0;
 	VulkanCommandList* m_commandList = nullptr;
-	static constexpr uint32_t kMaxWorkerThreads = 16;
+	static constexpr uint32_t kMaxWorkerThreads = 64;
 	std::array<VulkanCommandList*, kMaxWorkerThreads> m_workerCommandLists = {};
 	dy::RHI::ITexture* m_backBuffer = nullptr;
 	dy::RHI::ITexture* m_fallbackTexture = nullptr;

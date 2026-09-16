@@ -475,12 +475,13 @@ namespace
 	{
 	public:
 		void PrepareResources(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context) override;
-		void RecordSkinningPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context) override;
-		void RecordMainPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context) override;
-		void RecordShadowPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context) override
+		void RecordSkinningPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context, RHI::ICommandList* commandList = nullptr) override;
+		void RecordMainPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context, RHI::ICommandList* commandList = nullptr) override;
+		void RecordShadowPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context, RHI::ICommandList* commandList = nullptr) override
 		{
 			if(device == nullptr || !ShouldRecordShadow(context)) return;
-			if(auto* commandList = device->AcquireCommandList()) RecordShadowDraws(commandList, scene, context);
+			if(commandList == nullptr) commandList = device->AcquireCommandList();
+			if(commandList) RecordShadowDraws(commandList, scene, context);
 		}
 		void Shutdown(RHI::IDevice* device) override;
 
@@ -841,11 +842,12 @@ namespace
 		}
 	}
 
-	void PerDrawBindPath::RecordMainPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context)
+	void PerDrawBindPath::RecordMainPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context, RHI::ICommandList* commandList)
 	{
 		DY_PROFILE_CPU_ZONE_NAMED("PerDrawBind::RecordMainPass");
-		RHI::ICommandList* commandList = device->AcquireCommandList();
-		RHI::ITexture* backBuffer = context.mainColorTarget != nullptr ? context.mainColorTarget : device->GetBackBuffer();
+		const bool externalCommandList = (commandList != nullptr);
+		if(commandList == nullptr) commandList = device ? device->AcquireCommandList() : nullptr;
+		RHI::ITexture* backBuffer = context.mainColorTarget != nullptr ? context.mainColorTarget : (device ? device->GetBackBuffer() : nullptr);
 		if(commandList == nullptr || backBuffer == nullptr || context.pipeline == nullptr) return;
 
 		if(ShouldRecordShadow(context) && !context.shadowPassRecorded)
@@ -937,16 +939,17 @@ namespace
 		{
 			context.profilerHud->Record(commandList, context.profilerHudPipeline, context.lightingBuffer, context.shadowMatrixBuffer);
 		}
-		if(!context.deferSubmit) SubmitMainPass(device, commandList);
+		if(!context.deferSubmit && !externalCommandList) SubmitMainPass(device, commandList);
 	}
 
 	void PerDrawBindPath::RecordSkinningPass(
 		const Scene&,
 		RHI::IDevice* device,
-		const RenderPathContext& context)
+		const RenderPathContext& context,
+		RHI::ICommandList* commandList)
 	{
 		if(!m_computeSkinningEnabled || device == nullptr || context.skinningPipeline == nullptr) return;
-		RHI::ICommandList* commandList = device->AcquireCommandList();
+		if(commandList == nullptr) commandList = device->AcquireCommandList();
 		if(commandList == nullptr) return;
 		commandList->BindComputePipeline(context.skinningPipeline);
 		RecordComputeSkinning(commandList);
@@ -1066,11 +1069,12 @@ namespace
 	public:
 		explicit BatchedGeometryPath(RendererBindingMode bindingMode) : m_bindingMode(bindingMode) {}
 		void PrepareResources(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context) override;
-		void RecordMainPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context) override;
-		void RecordShadowPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context) override
+		void RecordMainPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context, RHI::ICommandList* commandList = nullptr) override;
+		void RecordShadowPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context, RHI::ICommandList* commandList = nullptr) override
 		{
 			if(device == nullptr || !ShouldRecordShadow(context)) return;
-			if(auto* commandList = device->AcquireCommandList()) RecordShadowDraws(commandList, scene, context);
+			if(commandList == nullptr) commandList = device->AcquireCommandList();
+			if(commandList) RecordShadowDraws(commandList, scene, context);
 		}
 		void Shutdown(RHI::IDevice* device) override;
 
@@ -1164,13 +1168,14 @@ namespace
 		}
 	}
 
-	void BatchedGeometryPath::RecordMainPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context)
+	void BatchedGeometryPath::RecordMainPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context, RHI::ICommandList* commandList)
 	{
 		DY_PROFILE_CPU_ZONE_NAMED("BatchedBind::RecordMainPass");
 		if(m_vertexBuffer == nullptr || m_indexBuffer == nullptr || m_meshRanges.empty()) return;
 
-		RHI::ICommandList* commandList = device->AcquireCommandList();
-		RHI::ITexture* backBuffer = context.mainColorTarget != nullptr ? context.mainColorTarget : device->GetBackBuffer();
+		const bool externalCommandList = (commandList != nullptr);
+		if(commandList == nullptr) commandList = device ? device->AcquireCommandList() : nullptr;
+		RHI::ITexture* backBuffer = context.mainColorTarget != nullptr ? context.mainColorTarget : (device ? device->GetBackBuffer() : nullptr);
 		if(commandList == nullptr || backBuffer == nullptr || context.pipeline == nullptr) return;
 
 		if(ShouldRecordShadow(context) && !context.shadowPassRecorded)
@@ -1225,7 +1230,7 @@ namespace
 		{
 			context.profilerHud->Record(commandList, context.profilerHudPipeline, context.lightingBuffer, context.shadowMatrixBuffer);
 		}
-		if(!context.deferSubmit) SubmitMainPass(device, commandList);
+		if(!context.deferSubmit && !externalCommandList) SubmitMainPass(device, commandList);
 	}
 
 	void BatchedGeometryPath::Shutdown(RHI::IDevice* device)

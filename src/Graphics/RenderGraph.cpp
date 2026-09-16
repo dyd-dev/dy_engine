@@ -367,6 +367,7 @@ namespace dy::Graphics
 		}
 
 		std::vector<RHI::ICommandList*> stageCmdLists;
+		uint32_t slotIdx = 0;
 
 		for (const auto& stage : m_executionStages)
 		{
@@ -376,7 +377,8 @@ namespace dy::Graphics
 			{
 				// 하이브리드 최적화: Stage 내 패스가 1개뿐인 경우 스레드 풀 오버헤드 없이 메인 스레드에서 직접 녹화
 				uint32_t passIdx = stage.passIndices[0];
-				RHI::ICommandList* cmdList = device ? device->AcquireWorkerCommandList(passIdx) : nullptr;
+				uint32_t cmdSlot = slotIdx++;
+				RHI::ICommandList* cmdList = device ? device->AcquireWorkerCommandList(cmdSlot) : nullptr;
 				ExecutePassWithBarriers(passIdx, cmdList);
 				if (cmdList)
 				{
@@ -393,7 +395,8 @@ namespace dy::Graphics
 				for (size_t i = 0; i < passCount; ++i)
 				{
 					uint32_t passIdx = stage.passIndices[i];
-					RHI::ICommandList* workerCmd = device ? device->AcquireWorkerCommandList(passIdx) : nullptr;
+					uint32_t cmdSlot = slotIdx++;
+					RHI::ICommandList* workerCmd = device ? device->AcquireWorkerCommandList(cmdSlot) : nullptr;
 					parallelCmds[i] = workerCmd;
 
 					threadPool->Enqueue([this, passIdx, workerCmd]() {

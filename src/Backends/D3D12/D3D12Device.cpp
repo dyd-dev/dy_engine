@@ -57,7 +57,7 @@ namespace dy::Backends
         uint32_t dsvDescriptorSize = 0;
 
         D3D12CommandList* commandLists[2] = { nullptr, nullptr };
-        static constexpr uint32_t kMaxWorkerThreads = 16;
+        static constexpr uint32_t kMaxWorkerThreads = 64;
         D3D12CommandList* workerCommandLists[2][kMaxWorkerThreads] = {};
         D3D12Texture* backBufferTextures[2] = { nullptr, nullptr };
         
@@ -301,7 +301,6 @@ namespace dy::Backends
                 m_internal->srvDescriptorSize
             );
             workerCmd->SetDepthStencilView(dsvHandle.ptr);
-            workerCmd->SetBackBufferTexture(m_internal->backBufferTextures[frameIdx]);
             workerCmd->Reset();
             m_internal->workerCommandLists[frameIdx][threadIndex] = workerCmd;
         }

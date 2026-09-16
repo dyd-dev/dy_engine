@@ -19,7 +19,7 @@ namespace dy::Backends
         id<CAMetalDrawable> currentDrawable = nil;
         uint32_t            frameIndex      = 0;
 
-        static constexpr uint32_t kMaxWorkerThreads = 16;
+        static constexpr uint32_t kMaxWorkerThreads = 64;
         MetalCommandList*   commandList     = nullptr;
         MetalCommandList*   workerCommandLists[kMaxWorkerThreads] = {};
         MetalTexture*       backBufferTex   = nullptr;  // cached; not owned by Renderer
@@ -103,6 +103,10 @@ namespace dy::Backends
     RHI::ICommandList* MetalDevice::AcquireWorkerCommandList(uint32_t threadIndex)
     {
         if(threadIndex >= Impl::kMaxWorkerThreads) threadIndex = threadIndex % Impl::kMaxWorkerThreads;
+        if(m_impl->workerCommandLists[threadIndex] == nullptr && m_impl->commandQueue != nil)
+        {
+            m_impl->workerCommandLists[threadIndex] = new MetalCommandList((__bridge void*)m_impl->commandQueue);
+        }
         if(m_impl->workerCommandLists[threadIndex] != nullptr)
         {
             return m_impl->workerCommandLists[threadIndex];

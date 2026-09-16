@@ -19,6 +19,7 @@
 namespace dy::RHI
 {
 	class IBuffer;
+	class ICommandList;
 	class IDevice;
 	class IPipelineState;
 	class ITexture;
@@ -89,13 +90,13 @@ namespace dy::Graphics
 
 		// 씬 지오메트리/드로우 리소스를 GPU 에 준비한다(전략별 레이아웃).
 		virtual void PrepareResources(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context) = 0;
-		virtual void RecordShadowPass(const Scene&, RHI::IDevice*, const RenderPathContext&) {}
-		virtual void RecordSkinningPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context)
+		virtual void RecordShadowPass(const Scene&, RHI::IDevice*, const RenderPathContext&, RHI::ICommandList* = nullptr) {}
+		virtual void RecordSkinningPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context, RHI::ICommandList* commandList = nullptr)
 		{
-			(void)scene; (void)device; (void)context;
+			(void)scene; (void)device; (void)context; (void)commandList;
 		}
 		// 메인 포워드 패스의 드로우 명령을 기록/제출한다.
-		virtual void RecordMainPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context) = 0;
+		virtual void RecordMainPass(const Scene& scene, RHI::IDevice* device, const RenderPathContext& context, RHI::ICommandList* commandList = nullptr) = 0;
 		// 보유한 GPU 리소스를 해제한다.
 		virtual void Shutdown(RHI::IDevice* device) = 0;
 	};

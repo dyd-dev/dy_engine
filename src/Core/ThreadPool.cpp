@@ -1,5 +1,6 @@
 #include "Core/ThreadPool.h"
 #include <algorithm>
+#include <iostream>
 
 namespace dy::Core
 {
@@ -82,8 +83,13 @@ namespace dy::Core
 			{
 				task();
 			}
+			catch (const std::exception& e)
+			{
+				std::cerr << "[ThreadPool] Task failed with exception: " << e.what() << '\n';
+			}
 			catch (...)
 			{
+				std::cerr << "[ThreadPool] Task failed with unknown exception.\n";
 			}
 
 			{

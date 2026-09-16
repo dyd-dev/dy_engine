@@ -7,6 +7,11 @@
 #include "Graphics/Mesh.h"
 #include "Graphics/ShadowMath.h" // ShadowMapDesc
 
+namespace dy::Core
+{
+	class ThreadPool;
+}
+
 namespace dy::Graphics
 {
 	enum class RendererBindingMode : uint32_t
@@ -106,6 +111,7 @@ namespace dy::Graphics
 		// backbuffer and never requires the external Tracy viewer.
 		bool enableProfilerHud = true;
 		bool profilerHudStartsExpanded = false;
-
+		bool enableParallelRenderGraph = false;
+		Core::ThreadPool* threadPool = nullptr;
 	};
 }

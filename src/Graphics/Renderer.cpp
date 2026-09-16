@@ -448,15 +448,15 @@ void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 		if(pass.kind == RenderPassKind::Skinning && pass.work == RenderPassWork::Compute)
 		{
 			m_renderGraph.AddPass("Skinning").Write(geometry, RGResourceAccess::UnorderedAccess)
-				.SetExecute([&](RHI::ICommandList*) { m_path->RecordSkinningPass(scene, device, context); });
+				.SetExecute([&](RHI::ICommandList* cmd) { m_path->RecordSkinningPass(scene, device, context, cmd); });
 		}
 		else if(pass.kind == RenderPassKind::Shadow && pass.work == RenderPassWork::Graphics
 			&& context.shadowDepth != nullptr && context.shadowPipeline != nullptr)
 		{
 			m_renderGraph.AddPass("Shadow").Read(geometry, RGResourceAccess::ShaderRead)
 				.Write(shadow, RGResourceAccess::DepthWrite)
-				.SetExecute([&](RHI::ICommandList*) {
-					m_path->RecordShadowPass(scene, device, context);
+				.SetExecute([&](RHI::ICommandList* cmd) {
+					m_path->RecordShadowPass(scene, device, context, cmd);
 					context.shadowPassRecorded = true;
 				});
 		}
@@ -466,17 +466,24 @@ void Renderer::Render(const Scene& scene, RHI::IDevice* device)
 			mainPass.Read(geometry, RGResourceAccess::ShaderRead).Write(mainColor, RGResourceAccess::RenderTarget);
 			if(context.shadowDepth != nullptr) mainPass.Read(shadow, RGResourceAccess::ShaderRead);
 			if(context.depthStencil != nullptr) mainPass.Write(depth, RGResourceAccess::DepthWrite);
-			mainPass.SetExecute([&](RHI::ICommandList*) { m_path->RecordMainPass(scene, device, context); });
+			mainPass.SetExecute([&](RHI::ICommandList* cmd) { m_path->RecordMainPass(scene, device, context, cmd); });
 		}
 	}
 	if(context.deferSubmit)
 	{
 		m_renderGraph.AddPass("ToneMap").Read(mainColor, RGResourceAccess::ShaderRead)
 			.Write(backBuffer, RGResourceAccess::RenderTarget)
-			.SetExecute([&](RHI::ICommandList*) { RecordToneMapPass(device); });
+			.SetExecute([&](RHI::ICommandList* cmd) { RecordToneMapPass(device, cmd); });
 	}
 	if(!m_renderGraph.Compile()) throw std::runtime_error("Renderer RenderGraph contains invalid dependencies.");
-	m_renderGraph.Execute(nullptr);
+	if(m_config.enableParallelRenderGraph && m_config.threadPool != nullptr)
+	{
+		m_renderGraph.ExecuteParallel(device, m_config.threadPool);
+	}
+	else
+	{
+		m_renderGraph.Execute(nullptr);
+	}
 	// Callbacks borrow this Render call's context; do not retain them past it.
 	m_renderGraph.Reset();
 	m_lastCpuRenderMilliseconds = std::chrono::duration<double, std::milli>(
@@ -684,10 +691,11 @@ void Renderer::EnsureHdrColorTarget(RHI::IDevice* device)
 	m_hdrColorTarget = device->CreateTexture(hdrDesc);
 }
 
-void Renderer::RecordToneMapPass(RHI::IDevice* device)
+void Renderer::RecordToneMapPass(RHI::IDevice* device, RHI::ICommandList* commandList)
 {
 	if(device == nullptr || m_hdrColorTarget == nullptr || m_toneMapPipeline == nullptr) return;
-	RHI::ICommandList* commandList = device->AcquireCommandList();
+	const bool externalCommandList = (commandList != nullptr);
+	if(commandList == nullptr) commandList = device->AcquireCommandList();
 	RHI::ITexture* backBuffer = device->GetBackBuffer();
 	if(commandList == nullptr || backBuffer == nullptr) return;
 	commandList->SetRenderTargets(1u, &backBuffer, nullptr);
@@ -703,9 +711,12 @@ void Renderer::RecordToneMapPass(RHI::IDevice* device)
 	commandList->SetInlineConstants(sizeof(constants), &constants);
 	commandList->DrawInstanced(3u, 1u, 0u, 0u);
 	if(m_config.enableProfilerHud) m_profilerHud.Record(commandList, m_profilerHudPipeline, m_lightingBuffer, m_shadowMatrixBuffer);
-	commandList->Close();
-	RHI::ICommandList* commandLists[] = { commandList };
-	device->Submit(commandLists, 1u);
+	if(!externalCommandList)
+	{
+		commandList->Close();
+		RHI::ICommandList* commandLists[] = { commandList };
+		device->Submit(commandLists, 1u);
+	}
 }
 
 void Renderer::EnsureShadowDepthTarget(RHI::IDevice* device)

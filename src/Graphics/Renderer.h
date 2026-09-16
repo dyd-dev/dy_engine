@@ -52,7 +52,7 @@ namespace dy::Graphics
 		void EnsureDepthStencilTarget(RHI::IDevice* device);
 		void EnsureHdrColorTarget(RHI::IDevice* device);
 		void EnsureShadowDepthTarget(RHI::IDevice* device);
-		void RecordToneMapPass(RHI::IDevice* device);
+		void RecordToneMapPass(RHI::IDevice* device, RHI::ICommandList* commandList = nullptr);
 		void EnsureMaterialStateCapacity(std::size_t materialCount);
 		void UpdateMaterialStates(const Scene& scene);
 		void UpdateLightingBuffer(const Scene& scene, RHI::IDevice* device);
