@@ -47,7 +47,9 @@ main 병합을 막으려면 관리자가 main 대상 규칙에 PR 필수와 **Re
 
 ## 사용
 
-Python 3.10+, CMake 3.20+가 필요합니다. CPU 검사는 Ninja와 Clang을 사용합니다. Windows GPU 빌드는 Visual Studio 2022 C++/Windows SDK, Vulkan은 Vulkan SDK 1.4가 필요합니다. LLVM이 PATH에 없으면 `DY_CI_LLVM`에 설치 루트(bin의 부모)를 지정합니다.
+Python 3.10+, CMake 3.20+가 필요합니다. Windows CPU 검사는 Visual Studio 2022 MSVC/ASan, Linux/macOS는 Ninja와 Clang을 사용합니다. Windows GPU 빌드는 Visual Studio 2022 C++/Windows SDK와 Vulkan SDK 1.4가 필요합니다. D3D12 셰이더도 SDK에 포함된 DXC로 컴파일합니다. LLVM이 PATH에 없으면 `DY_CI_LLVM`에 설치 루트(bin의 부모)를 지정합니다.
+
+로컬 Windows 검증 환경의 Clang 21.1.8/ASan 조합에서 예외 메시지를 읽는 최소 프로그램도 충돌이 재현되어 MSVC/ASan을 사용합니다. sanitizer와 잘못된 입력의 실패 판정은 유지합니다.
 
 ```sh
 # 작업 폴더를 수동 검증: 커밋하거나 push하지 않음
@@ -73,13 +75,12 @@ python -B .github/ci/ci.py replay --case <case.json>
 | 구분 | 성공 조건 |
 |---|---|
 | 빌드 | 지원 선언에 맞는 예제·셰이더·검사 실행 파일이 빌드되고 존재함 |
-| 원본 HelloWindow | 창 응답, 다른 시점의 실제 클라이언트 화면 2장, 정상 닫기 |
-| 원본 그래픽 예제 | 위 조건 + HUD 밖의 장면 영역에 배경과 다른 내용이 존재함 |
-| 원본 RenderPath | 기존 per-draw/batched/bindless CLI 각각 장면이 보임 |
-| 원본 RenderGraph | 기존 출력의 실제 콜백 Shadow → MainForward → PostProcessing 순서 |
+| 원본 dyf/RHI/advanced 그래픽 예제 | 창 응답, 서로 다른 시점의 실제 화면 2장, 지정 영역의 장면, 정상 닫기 |
+| 비교 예제 | InstancingBatching·ResourceReuse·BindlessMaterials·RenderGraph의 기존 두 모드 각각 장면이 보임 |
+| 기능 안내 예제 | 장치 기능 조회 출력과 선언한 종료 코드 77을 확인하고 UNSUPPORTED로 기록 |
 | 별도 GPU 검사 | Clear 빨강, 삼각형 빨강/배경 파랑, 깊이 순서 초록/빨강, 텍스처 RGBW가 지정 좌표에서 일치함 |
-| GPU 자원 검사 | 공개 생성/해제 카운터 균형, 버퍼 map/unmap, 정상 종료 |
-| 별도 CPU 검사 | 옵션·애니메이션·모델 로더·RenderGraph 기대 결과, 경계 입력, 재현 가능한 변이 입력 |
+| GPU 자원 검사 | 버퍼 생성·업로드·제출·완료·해제와 정상 종료. 제거된 공개 할당 카운터 검사는 UNSUPPORTED |
+| 별도 CPU 검사 | 애니메이션·모델 로더·RenderGraph 기대 결과, 경계 입력, 재현 가능한 변이 입력 |
 | 검사 자체 | 잘못된 픽셀·빈 장면·강제 종료·증거 부족·제품 소스 변경이 성공으로 처리되지 않음 |
 | 소비자 분리 | 실제 외부 프로젝트가 엔진에 링크해 실행되고 CI/예제가 자동 등록되지 않음 |
 
@@ -91,9 +92,11 @@ CPU sanitizer는 Windows에서 ASan, Linux/macOS의 지원 Clang에서는 ASan+U
 
 Windows는 로그인된 대화형 화면이 필요합니다. 실행한 프로세스의 창만 관찰하고 닫습니다. 창이 가려지거나 전면 창 확보에 실패하면 `BLOCKED`입니다. 같은 화면에서 GPU 검사를 동시에 실행하지 마십시오. 전용 runner의 로그인 세션을 사용하십시오.
 
+Windows 창 활성화가 처음에 실패하면 별도 숨김 프로세스에서 재시도하고 2초로 제한합니다. 다른 앱이 응답하지 않아도 주 검사기의 timeout과 정리가 계속 동작합니다. 소유권·전면·가림·desktop 검증을 통과한 클라이언트 영역만 저장합니다.
+
 Linux는 창 관리자가 없는 전용 X11/Xvfb 화면을 지원합니다.
 
-`examples.json`의 `warmup`은 첫 응답 이후 캡처를 시작하기 전의 외부 대기 시간입니다. 모델 로딩/기존 벤치마크가 무거운 LoadModel·RenderPath는 5초, 다른 렌더 예제는 1초를 기다린 뒤 3초를 관찰합니다. 프로그램의 시간·코드·기능을 바꾸지 않습니다. 느린 runner에서 첫 화면이 늦으면 로그와 캡처를 확인하여 이 값을 조정해야 합니다.
+`examples.json`의 `warmup`은 첫 응답 이후 캡처를 시작하기 전의 외부 대기 시간입니다. ModelAnim은 5초, 다른 렌더 예제는 1초를 기다린 뒤 3초를 관찰합니다. 프로그램의 시간·코드·기능을 바꾸지 않습니다. 느린 runner에서 첫 화면이 늦으면 로그와 캡처를 확인하여 이 값을 조정해야 합니다.
 
 ```sh
 VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json \
@@ -112,9 +115,13 @@ python -B .github/ci/ci.py run --phase runtime --api vulkan
 
 ## 예제·검사 추가
 
-`examples/*/CMakeLists.txt`를 자동 발견합니다. API 지원 범위는 CMake, 외부 관찰 조건만 `.github/ci/examples.json`에 작성합니다. 새 예제의 프로필이 없으면 빌드는 발견하지만 runtime은 `BLOCKED`로 알립니다. 소스 코드를 보고 성공 의미를 자동 추측하지 않습니다.
+dyf/RHI의 중첩 CMake 예제와 advanced의 예제 디렉터리를 자동 등록하고, 실제 CMake 하위 트리의 실행 타깃을 모아 `ci-manifest-*.json`을 생성합니다. CI는 Model 확장을 켜 ModelAnim도 포함합니다. API 지원 범위는 CMake, 외부 관찰 조건만 `.github/ci/examples.json`에 작성합니다. 새 예제의 프로필이 없으면 빌드는 발견하지만 runtime은 `BLOCKED`로 알립니다. 소스 코드를 보고 성공 의미를 자동 추측하지 않습니다.
 
-일반 예제는 `add_executable`과 `dy_setup_example(target)`을 사용합니다. 예외만 `dy_example_support(KIND cpu)`, `APIS vulkan`, `BUILD_ONLY metal REASON "..."` 등으로 선언합니다. 지원 API의 셰이더가 없거나 `_vs/_ps/_cs` 단계가 불명확하면 실패합니다. Models/Textures는 변경·삭제까지 실행 폴더에 동기화합니다.
+공식 예제는 `examples/dyf`, `examples/RHI`, `examples/advanced`의 46개로 교체했습니다. 이전 9개 예제의 옵션 파서와 콘솔 RenderGraph 출력 전용 검사는 제거했습니다. 현재 RenderGraph는 `advanced/21_RenderGraph`의 두 실행 모드와 별도 CPU 검사로 확인합니다.
+
+일반 예제는 `add_executable`과 `target_link_libraries(... PRIVATE dy_engine)`을 사용합니다. 셰이더는 `dy_compile_shader`에 언어별 소스와 단계를 지정하면 CI 의존성·산출물에도 등록됩니다. Models/Assets/Textures는 변경·삭제까지 실행 폴더에 동기화합니다. 수동 CMake CI 구성에는 `-DDY_CI=ON -DDY_EXTEND_MODEL=ON`을 함께 지정합니다(`ci.py`는 자동 지정).
+
+실제 기능 미지원으로 종료 77을 사용하는 그래픽 예제는 `unsupported_markers`에 정확한 진단 문구를 선언합니다. 종료 코드와 문구가 모두 일치할 때만 UNSUPPORTED이며, 강제 종료·driver 오류·환경 BLOCKED는 이 분기로 성공 처리하지 않습니다.
 
 정밀 기능 검사가 필요하면 공개 API를 사용하는 작은 검사에 입력과 기대 결과를 작성합니다. CPU `*Checks.cpp`는 CMake가 자동 발견합니다. 공통 CLI는 `--list-scenarios`, `--all`, `--scenario NAME --seed UINT --seconds 0..60 --case-dir DIR`, `--replay FILE`입니다. 변이 검사는 영역별 기본 3초, 최대 60초이며 실제 실패 입력과 바이너리/소스 지문을 저장합니다. 재현 시 지문이 다르면 `BLOCKED`입니다.
 

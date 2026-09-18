@@ -61,7 +61,7 @@ runs:
         echo "LD_LIBRARY_PATH=$sdk/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
         echo "$sdk/bin" >> "$GITHUB_PATH"
     - name: Windows Vulkan SDK
-      if: runner.os == 'Windows' && inputs.api == 'vulkan'
+      if: runner.os == 'Windows' && (inputs.api == 'vulkan' || inputs.api == 'd3d12')
       shell: pwsh
       run: |
         $sdk = Join-Path $env:RUNNER_TEMP 'dy-ci-vulkan-1.4.341.1'

@@ -36,18 +36,31 @@ def check_observation(profile, observed):
         return dict(status=status, message=message, checks=checks, coverage=profile.get('coverage', profile.get('kind')))
     def require(condition, name, **data):
         checks.append(dict(name=name, passed=bool(condition), **data))
+    output = observed.get('output', '')
+    unsupported = profile.get('unsupported_markers', [])
+    if (observed.get('status') in ('PASS', 'FAIL') and observed.get('exit_code') == 77
+            and not observed.get('forced_termination') and not observed.get('forced_kill')
+            and not GPU_ERROR.search(output) and isinstance(unsupported, list)
+            and any(isinstance(marker, str) and marker and marker in output for marker in unsupported)):
+        require(True, 'declared-feature-exclusion', exit_code=77)
+        return result('UNSUPPORTED', 'Example reported an explicitly declared unsupported backend feature')
     if observed.get('status') != 'PASS':
         return result(observed.get('status', 'BLOCKED'), observed.get('message', 'No observation'))
-    if observed.get('forced_termination') or observed.get('forced_kill') or observed.get('exit_code') != 0:
+    kind = profile.get('kind')
+    expected_exit = 77 if kind == 'capability' else 0
+    if observed.get('forced_termination') or observed.get('forced_kill') or observed.get('exit_code') != expected_exit:
         return result('FAIL', 'Abnormal exit or forced termination is not a successful run')
-    output = observed.get('output', '')
     if GPU_ERROR.search(output):
         return result('FAIL', 'Captured diagnostic output reports a graphics or sanitizer error')
-    kind = profile.get('kind')
-    if kind == 'render-graph':
-        callbacks = re.findall(r'-> Executing \[([^\]]+)\]', output)
-        require('[VERIFICATION PASSED]' in output and callbacks ==
-                ['ShadowPass', 'MainForwardPass', 'PostProcessingPass'], 'actual-callback-order', actual=callbacks)
+    if kind == 'capability':
+        markers = profile.get('markers')
+        if profile.get('expected_exit') != 77 or not isinstance(markers, list) or not markers:
+            return result('BLOCKED', 'Capability checks require authored exit 77 and diagnostic markers')
+        for marker in markers:
+            require(isinstance(marker, str) and bool(marker) and marker in output, 'capability-diagnostic', expected=marker)
+        if not all(check['passed'] for check in checks):
+            return result('FAIL', 'Missing capability or unsupported-feature diagnostic')
+        return result('UNSUPPORTED', 'Capability query completed; this example explicitly does not implement the feature')
     elif kind in ('window', 'visible', 'pixels'):
         if not observed.get('window_observed') or observed.get('observed_seconds', 0) < profile.get('seconds', 3) * 0.9:
             return result('BLOCKED', 'Required responsive window observation was not completed')

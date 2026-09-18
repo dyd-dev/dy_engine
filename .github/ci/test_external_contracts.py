@@ -6,6 +6,21 @@ import checks as contracts
 
 
 class ExternalContractTests(unittest.TestCase):
+    def test_capability_exit_requires_declared_code_and_output(self):
+        profile = dict(kind='capability', expected_exit=77, markers=['Supports(', 'not implemented'])
+        observed = dict(status='PASS', exit_code=77, output='Supports(RayQuery) = false; not implemented')
+        self.assertEqual(contracts.check_observation(profile, observed)['status'], 'UNSUPPORTED')
+        for change in ({'exit_code': 0}, {'exit_code': 1}, {'output': ''}, {'forced_kill': True}):
+            self.assertEqual(contracts.check_observation(profile, dict(observed, **change))['status'], 'FAIL')
+
+    def test_graphics_feature_exclusion_requires_exact_diagnostic(self):
+        profile = dict(kind='visible', unsupported_markers=['Unsupported: no Compute implementation'])
+        observed = dict(status='FAIL', exit_code=77, output='Unsupported: no Compute implementation')
+        self.assertEqual(contracts.check_observation(profile, observed)['status'], 'UNSUPPORTED')
+        for change in ({'exit_code': 1}, {'output': 'different failure'}, {'forced_kill': True},
+                       {'output': observed['output'] + '\nValidation Error'}, {'status': 'BLOCKED'}):
+            self.assertNotEqual(contracts.check_observation(profile, dict(observed, **change))['status'], 'UNSUPPORTED')
+
     def observation(self, folder, color=(255, 0, 0), *, shape=False):
         path = Path(folder) / 'frame.ppm'
         pixels = bytearray(bytes(color) * (100 * 80))
@@ -48,14 +63,14 @@ class ExternalContractTests(unittest.TestCase):
         self.assertEqual(contracts.check_observation({'kind': 'visible'},
                          {'status': 'BLOCKED', 'message': 'no display'})['status'], 'BLOCKED')
 
-    def test_callback_order_is_observed_from_original_console_output(self):
+    def test_removed_example_profile_cannot_pass_on_legacy_output(self):
         profile = {'kind': 'render-graph'}
         observed = {'status': 'PASS', 'exit_code': 0, 'output':
                     '[VERIFICATION PASSED]\n-> Executing [ShadowPass]\n'
                     '-> Executing [MainForwardPass]\n-> Executing [PostProcessingPass]\n'}
-        self.assertEqual(contracts.check_observation(profile, observed)['status'], 'PASS')
+        self.assertEqual(contracts.check_observation(profile, observed)['status'], 'BLOCKED')
         observed['output'] = '[VERIFICATION PASSED]'
-        self.assertEqual(contracts.check_observation(profile, observed)['status'], 'FAIL')
+        self.assertEqual(contracts.check_observation(profile, observed)['status'], 'BLOCKED')
 
 
 if __name__ == '__main__':

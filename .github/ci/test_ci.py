@@ -52,6 +52,23 @@ class CiTests(unittest.TestCase):
                 status = self.ci.main(['run', '--phase', 'runtime', '--root', str(root), '--revision', 'fixture'])
             self.assertEqual(status, 2)
 
+    def test_cpu_keeps_sanitizer_with_native_windows_compiler(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'src').mkdir()
+            (root / 'src/main.cpp').write_text('int main() {}')
+            for platform in ('win32', 'linux'):
+                with (mock.patch.object(self.ci.sys, 'platform', platform),
+                      mock.patch.object(self.ci, 'setup_environment', return_value={}),
+                      mock.patch.object(self.ci, 'configure') as configure,
+                      mock.patch.object(self.ci, 'build_targets'),
+                      mock.patch.object(self.ci, 'cpu_checks'),
+                      mock.patch.object(self.ci, 'read_inventory', return_value=(dict(targets=[]), []))):
+                    status = self.ci.main(['run', '--phase', 'cpu', '--root', str(root), '--revision', 'fixture'])
+                self.assertEqual(status, 0)
+                self.assertTrue(configure.call_args.kwargs['sanitize'])
+                self.assertEqual(configure.call_args.kwargs['clang'], platform != 'win32')
+
     def test_external_runtime_cache_is_not_old_instrumented_cache(self):
         self.assertEqual(self.ci.build_name('runtime', 'vulkan', 'Debug'), 'runtime-external-vulkan-Debug')
 
@@ -60,20 +77,20 @@ class CiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / '.github/ci').mkdir(parents=True)
-            profiles = {'version': 1, 'examples': {'examples/first': {'kind': 'render-graph'},
-                                                  'examples/second': {'kind': 'render-graph'}}}
+            profile = {'kind': 'capability', 'expected_exit': 77, 'markers': ['Feature unavailable']}
+            profiles = {'version': 1, 'examples': {'examples/first': profile, 'examples/second': profile}}
             (root / '.github/ci/examples.json').write_text(json.dumps(profiles), encoding='utf-8')
             targets = [dict(name=name, directory='examples/' + name, kind='cpu', runtime=True,
                             binary=str(root / name)) for name in ('first', 'second')]
             report = self.ci.Report(root / 'logs', 'fixture', 'null')
-            good = ('[VERIFICATION PASSED]\n-> Executing [ShadowPass]\n'
-                    '-> Executing [MainForwardPass]\n-> Executing [PostProcessingPass]\n')
-            with mock.patch.object(report, 'command', side_effect=['no callbacks', good]):
+            results = [types.SimpleNamespace(returncode=77, stdout=output)
+                       for output in ('missing diagnostic', 'Feature unavailable')]
+            with mock.patch.object(self.ci.subprocess, 'run', side_effect=results):
                 with self.assertRaises(self.ci.CiError) as failure:
                     self.ci.runtime_checks(root, root, 'Debug',
                                           dict(api='null', targets=targets, unsupported=[]), [], report, {})
             self.assertEqual(failure.exception.status, 'FAIL')
-            self.assertEqual([result['status'] for result in report.results], ['FAIL', 'PASS'])
+            self.assertEqual([result['status'] for result in report.results], ['FAIL', 'UNSUPPORTED'])
             self.assertEqual(len(list((root / 'logs').rglob('checks.json'))), 2)
 
     def test_push_deletion_dedup_and_invalid_input(self):

@@ -45,28 +45,33 @@ function(check_directory directory)
 endfunction()
 check_directory("${CMAKE_SOURCE_DIR}")
 get_target_property(includes Engine_Options INTERFACE_INCLUDE_DIRECTORIES)
-if(NOT "@ROOT@/src" IN_LIST includes)
+if(NOT "@ROOT@/src/Public" IN_LIST includes)
     message(FATAL_ERROR "Engine public include directory resolves to consumer project")
 endif()
 file(WRITE "${CMAKE_BINARY_DIR}/consumer-isolation.txt"
      "PASS: no framework examples, check targets or CI instrumentation; engine headers resolve correctly.\\n")
 '''.replace('@ROOT@', root.as_posix())
     (source / 'CMakeLists.txt').write_text(cmake, encoding='utf-8')
-    (source / 'main.cpp').write_text('''#include "Graphics/Scene.h"
+    (source / 'main.cpp').write_text('''#include "dyf/Scene.h"
 #include <iostream>
 int main()
 {
-    dy::Graphics::Scene scene;
-    const auto material = scene.CreateMaterial(dy::Graphics::MaterialDesc{});
-    if (!dy::IsValid(material) || scene.GetMaterialCount() != 1 || scene.GetEntityCount() != 0
-        || scene.IsValidModelInstance(dy::ModelInstanceID::Invalid)) return 1;
-    std::cout << "DY_CONSUMER_PASS materials=1 entities=0\\n";
+    dyf::EntityHandle entity;
+    {
+        dyf::Scene scene;
+        entity = scene.Add(dyf::CreateCubeMesh());
+        if (!entity || scene.Materials().size() != 1 || scene.Meshes().size() != 1
+            || scene.GetEntityCount() != 1 || !entity.SetPosition({1, 2, 3})
+            || scene.GetEntity(dyf::EntityID::Invalid)) return 1;
+    }
+    if (entity) return 1;
+    std::cout << "DY_CONSUMER_PASS materials=1 entities=1 expired_handle=ok\\n";
     return 0;
 }
 ''', encoding='utf-8')
     env = ci.setup_environment(root)
     options = ['-DDY_ENABLE_TRACY=OFF', '-DUSE_VULKAN=OFF', '-DUSE_D3D12=OFF', '-DUSE_METAL=OFF']
-    for name in ('glfw', 'stb', 'fastgltf', 'ufbx'):
+    for name in ('glfw', 'stb'):
         dependency = args.dependencies.resolve() / (name + '-src')
         if not dependency.is_dir():
             parser.error(f'Missing dependency checkout: {dependency}')
@@ -90,7 +95,7 @@ int main()
                                            '--target', 'consumer', '--parallel', '2'], source, env=env)
             binary = Path((build / 'consumer-Debug.txt').read_text(encoding='utf-8'))
             output = report.command('run-' + mode, [binary], binary.parent, timeout=30, env=env)
-            if 'DY_CONSUMER_PASS materials=1 entities=0' not in output:
+            if 'DY_CONSUMER_PASS materials=1 entities=1 expired_handle=ok' not in output:
                 raise ci.CiError('Missing consumer runtime evidence')
             evidence = build / 'consumer-isolation.txt'
             evidence.write_text(evidence.read_text(encoding='utf-8') +

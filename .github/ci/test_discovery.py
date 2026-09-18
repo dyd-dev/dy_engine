@@ -11,6 +11,46 @@ MODULE = Path(__file__).resolve().parents[2] / "cmake" / "ExampleSupport.cmake"
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_registered_nested_examples_follow_add_rename_remove(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'examples').mkdir()
+            (root / 'CMakeLists.txt').write_text(
+                'cmake_minimum_required(VERSION 3.20)\nproject(Nested CXX)\n'
+                f'include("{MODULE.as_posix()}")\nadd_subdirectory(examples)\n', encoding='utf-8')
+            (root / 'examples/CMakeLists.txt').write_text(
+                'file(GLOB_RECURSE files CONFIGURE_DEPENDS "*/CMakeLists.txt")\n'
+                'foreach(file IN LISTS files)\n'
+                'get_filename_component(directory "${file}" DIRECTORY)\n'
+                'add_subdirectory("${directory}")\nendforeach()\n'
+                'dy_write_example_manifest()\n', encoding='utf-8')
+
+            def add(directory, target):
+                path = root / 'examples' / directory
+                path.mkdir(parents=True)
+                (path / 'main.cpp').write_text('int main() {}\n', encoding='utf-8')
+                (path / 'CMakeLists.txt').write_text(
+                    f'add_executable({target} main.cpp)\n', encoding='utf-8')
+                return path
+
+            def inventory(vulkan='ON'):
+                result = subprocess.run(['cmake', '-S', str(root), '-B', str(root / 'build'),
+                                         '-DDY_CI=ON', '-DUSE_VULKAN=' + vulkan], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                manifest = json.loads(next((root / 'build').glob('ci-manifest-*.json')).read_text())
+                return {t['name']: t['directory'] for t in manifest['targets']}
+
+            add('dyf/01_First', 'First')
+            self.assertEqual(inventory(), {'First': 'examples/dyf/01_First'})
+            self.assertEqual(inventory('OFF'), {'First': 'examples/dyf/01_First'})
+            second = add('advanced/group/02_Second', 'Second')
+            self.assertEqual(inventory()['Second'], 'examples/advanced/group/02_Second')
+            renamed = second.with_name('03_Renamed')
+            second.rename(renamed)
+            self.assertEqual(inventory()['Second'], 'examples/advanced/group/03_Renamed')
+            shutil.rmtree(root / 'examples/dyf')
+            self.assertEqual(inventory(), {'Second': 'examples/advanced/group/03_Renamed'})
+
     def test_non_render_and_null_examples_need_no_shaders(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

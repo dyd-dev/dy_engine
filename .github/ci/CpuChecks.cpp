@@ -1,15 +1,10 @@
-#include "Graphics/Animation.h"
-#include "Graphics/Mesh.h"
-#include "Graphics/RenderGraph.h"
-#include "Graphics/Scene.h"
+#include "dyf/Extends/Model/ModelScene.h"
+#include "dyf/RHI/Buffer.h"
+#include "dyf/RHI/ICommandList.h"
+#include "dyf/RHI/IDevice.h"
+#include "dyf/RHI/RenderGraph.h"
 
-#ifndef DY_CI_HAS_OPTIONS
-	#define DY_CI_HAS_OPTIONS 1
-#endif
 
-#if DY_CI_HAS_OPTIONS
-	#include "LoadModelOptions.h"
-#endif
 
 #include <algorithm>
 #include <array>
@@ -24,6 +19,7 @@
 #include <iterator>
 #include <limits>
 #include <locale>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -34,8 +30,8 @@
 #include <utility>
 #include <vector>
 
-using namespace dy;
-using namespace dy::Graphics;
+using namespace dyf;
+using namespace dyf::RHI;
 
 namespace
 {
@@ -196,9 +192,6 @@ namespace
 	bool IsScenario(std::string_view scenario)
 	{
 		return
-#if DY_CI_HAS_OPTIONS
-			scenario == "Options" ||
-#endif
 			scenario == "Animation"
 			|| scenario == "ModelImport" || scenario == "RenderGraph";
 	}
@@ -376,195 +369,6 @@ namespace
 		return { 0u };
 	}
 
-#if DY_CI_HAS_OPTIONS
-	void RunOptionsFixed(Runner& runner)
-	{
-		Examples::LoadModelOptions options;
-		std::string error;
-		const char* defaults[] = { "LoadModel" };
-		runner.Require(Examples::ParseLoadModelOptions(1, defaults, options, error), "default options rejected");
-		runner.Require(options.modelPath.empty() && options.clipIndex == 0u && options.loop && !options.paused
-			&& options.timeScale == 1.0f && options.smokeSeconds == 0.0f, "wrong default options");
-
-		const char* valid[] = { "LoadModel", "duck.gltf", "--clip=2", "--paused",
-			"--timescale=-0.5", "--loop=0", "--smoke-seconds=3e0" };
-		runner.Require(Examples::ParseLoadModelOptions(7, valid, options, error), "valid options rejected");
-		runner.Require(options.modelPath == "duck.gltf" && options.clipIndex == 2u && options.paused
-			&& !options.loop && options.timeScale == -0.5f && options.smokeSeconds == 3.0f,
-			"valid option values changed");
-
-		for(const char* value : { "--clip=-1", "--clip=4294967296", "--clip=1x",
-			"--timescale=nan", "--timescale=inf", "--timescale=-inf", "--timescale=1e39",
-			"--timescale=1e-9999", "--timescale=+1", "--timescale= 1", "--timescale=1 ",
-			"--timescale=1,5", "--timescale=0x1p2", "--loop=2", "--smoke-seconds=-1",
-			"--smoke-seconds=nan", "--unknown=1", "" })
-		{
-			const char* args[] = { "LoadModel", value };
-			runner.Require(!Examples::ParseLoadModelOptions(2, args, options, error),
-				std::string("invalid option accepted: ") + value);
-			runner.Require(!error.empty(), "invalid option has no diagnostic");
-		}
-		const char* tiny[] = { "LoadModel", "--timescale=1e-40" };
-		runner.Require(Examples::ParseLoadModelOptions(2, tiny, options, error) && options.timeScale > 0.0f,
-			"representable subnormal value rejected");
-		const char* zero[] = { "LoadModel", "--smoke-seconds=0e100" };
-		runner.Require(Examples::ParseLoadModelOptions(2, zero, options, error) && options.smokeSeconds == 0.0f,
-			"zero smoke duration rejected");
-		const char* multiple[] = { "LoadModel", "a.gltf", "b.gltf" };
-		runner.Require(!Examples::ParseLoadModelOptions(3, multiple, options, error), "multiple model paths accepted");
-		runner.Require(!error.empty(), "multiple model paths have no diagnostic");
-		runner.Require(!Examples::ParseLoadModelOptions(1, nullptr, options, error), "null argument array accepted");
-		runner.Require(!Examples::ParseLoadModelOptions(-1, nullptr, options, error), "negative argument count accepted");
-		const char* nullElement[] = { "LoadModel", nullptr };
-		runner.Require(!Examples::ParseLoadModelOptions(2, nullElement, options, error), "null argument accepted");
-	}
-
-	struct OptionArg
-	{
-		bool present = true;
-		std::string value;
-	};
-
-	struct OptionCase
-	{
-		std::vector<OptionArg> arguments;
-		bool success = false;
-		Examples::LoadModelOptions expected;
-	};
-
-	std::vector<uint8_t> EncodeOptionCase(const OptionCase& value)
-	{
-		ByteWriter writer;
-		writer.U8(1u);
-		writer.U8(static_cast<uint8_t>(value.arguments.size()));
-		for(const OptionArg& argument : value.arguments)
-		{
-			writer.U8(argument.present ? 1u : 0u);
-			if(argument.present) writer.String(argument.value);
-		}
-		writer.U8(value.success ? 1u : 0u);
-		writer.String(value.expected.modelPath);
-		writer.U32(value.expected.clipIndex);
-		writer.F32(value.expected.timeScale);
-		writer.F32(value.expected.smokeSeconds);
-		writer.U8(value.expected.paused ? 1u : 0u);
-		writer.U8(value.expected.loop ? 1u : 0u);
-		return writer.Take();
-	}
-
-	OptionCase DecodeOptionCase(const std::vector<uint8_t>& payload)
-	{
-		ByteReader reader(payload);
-		if(reader.U8() != 1u) throw InfraError("unknown Options case kind");
-		const uint8_t count = reader.U8();
-		if(count == 0u || count > 16u) throw InfraError("invalid Options argument count");
-		OptionCase value;
-		for(uint8_t index = 0u; index < count; ++index)
-		{
-			const uint8_t present = reader.U8();
-			if(present > 1u) throw InfraError("invalid Options argument tag");
-			value.arguments.push_back(OptionArg{ present != 0u, present != 0u ? reader.String(1024u) : std::string{} });
-		}
-		const uint8_t success = reader.U8();
-		if(success > 1u) throw InfraError("invalid Options result tag");
-		value.success = success != 0u;
-		value.expected.modelPath = reader.String(1024u);
-		value.expected.clipIndex = reader.U32();
-		value.expected.timeScale = reader.F32();
-		value.expected.smokeSeconds = reader.F32();
-		const uint8_t paused = reader.U8();
-		const uint8_t loop = reader.U8();
-		if(paused > 1u || loop > 1u) throw InfraError("invalid Options boolean");
-		value.expected.paused = paused != 0u;
-		value.expected.loop = loop != 0u;
-		reader.Finish();
-		if(!std::isfinite(value.expected.timeScale) || !std::isfinite(value.expected.smokeSeconds)
-			|| (value.success && value.expected.smokeSeconds < 0.0f))
-			throw InfraError("invalid Options expected values");
-		return value;
-	}
-
-	void RunOptionCase(const std::vector<uint8_t>& payload, Runner& runner)
-	{
-		const OptionCase value = DecodeOptionCase(payload);
-		std::vector<const char*> arguments;
-		arguments.reserve(value.arguments.size());
-		for(const OptionArg& argument : value.arguments)
-			arguments.push_back(argument.present ? argument.value.c_str() : nullptr);
-		Examples::LoadModelOptions actual;
-		actual.modelPath = "stale";
-		actual.clipIndex = 99u;
-		std::string error = "stale";
-		const bool success = Examples::ParseLoadModelOptions(
-			static_cast<int>(arguments.size()), arguments.data(), actual, error);
-		runner.Require(success == value.success, "Options parse result differs from case expectation");
-		if(success)
-		{
-			const bool valuesMatch = actual.modelPath == value.expected.modelPath
-				&& actual.clipIndex == value.expected.clipIndex
-				&& actual.timeScale == value.expected.timeScale
-				&& actual.smokeSeconds == value.expected.smokeSeconds
-				&& actual.paused == value.expected.paused
-				&& actual.loop == value.expected.loop;
-			runner.Require(valuesMatch,
-				"Options parsed values differ from case expectation: timeScale="
-					+ std::to_string(actual.timeScale) + " expected=" + std::to_string(value.expected.timeScale)
-					+ " clip=" + std::to_string(actual.clipIndex) + " expected=" + std::to_string(value.expected.clipIndex)
-					+ " smoke=" + std::to_string(actual.smokeSeconds) + " expected=" + std::to_string(value.expected.smokeSeconds));
-		}
-		runner.Require(success ? error.empty() : !error.empty(), "Options diagnostic state differs from result");
-	}
-
-	OptionCase GenerateOptionCase(std::mt19937_64& random)
-	{
-		OptionCase value;
-		value.arguments.push_back({ true, "LoadModel" });
-		const uint64_t kind = random() % 3u;
-		if(kind == 0u)
-		{
-			value.success = true;
-			value.expected = {};
-			if((random() & 1u) != 0u)
-			{
-				value.arguments.push_back({ true, "fixture-" + std::to_string(random() % 1000u) + ".gltf" });
-				value.expected.modelPath = value.arguments.back().value;
-			}
-			value.expected.clipIndex = static_cast<uint32_t>(random());
-			value.arguments.push_back({ true, "--clip=" + std::to_string(value.expected.clipIndex) });
-			if((random() & 1u) != 0u)
-			{
-				value.arguments.push_back({ true, "--paused" });
-				value.expected.paused = true;
-			}
-			const int timeScale = static_cast<int>(random() % 201u) - 100;
-			value.expected.timeScale = static_cast<float>(timeScale);
-			value.arguments.push_back({ true, "--timescale=" + std::to_string(timeScale) });
-			value.expected.loop = (random() & 1u) != 0u;
-			value.arguments.push_back({ true, std::string("--loop=") + (value.expected.loop ? "1" : "0") });
-			const uint32_t smoke = static_cast<uint32_t>(random() % 10000u);
-			value.expected.smokeSeconds = static_cast<float>(smoke);
-			value.arguments.push_back({ true, "--smoke-seconds=" + std::to_string(smoke) });
-		}
-		else
-		{
-			static const std::array<const char*, 18> invalid = {
-				"--clip=-1", "--clip=4294967296", "--clip=1x", "--clip=",
-				"--timescale=nan", "--timescale=inf", "--timescale=-inf", "--timescale=1e999",
-				"--timescale=1e-9999", "--timescale=+1", "--timescale= 1", "--timescale=1 ",
-				"--timescale=1,5", "--timescale=0x1p2", "--loop=2", "--smoke-seconds=-1",
-				"--unknown=1", ""
-			};
-			value.success = false;
-			value.expected = {};
-			if(kind == 1u)
-			{
-				value.arguments.push_back({ true, invalid[random() % invalid.size()] });
-			}
-			else value.arguments.push_back({ false, {} });
-		}
-		return value;
-	}
-#endif
 
 	void RunAnimationFixed(Runner& runner)
 	{
@@ -580,26 +384,26 @@ namespace
 		clip.duration = 1.0f;
 		clip.tracks.push_back(track);
 		instance.clips.push_back(clip);
-		Scene scene;
+		ModelScene scene;
 		const ModelInstanceID id = scene.CreateModelInstance(std::move(instance));
 		runner.Require(IsValid(id) && scene.PlayAnimation(id, 0u, true), "animation could not start");
-		runner.Require(scene.UpdateAnimations(0.25f).Succeeded(), "animation update failed");
+		runner.Require(scene.UpdateAnimations(0.25f), "animation update failed");
 		runner.Require(Near(scene.GetModelInstance(id).localPose[0].translation.x, 0.5f), "linear interpolation failed");
-		runner.Require(scene.SetAnimationPaused(id, true) && scene.UpdateAnimations(0.5f).Succeeded(), "pause failed");
+		runner.Require(scene.SetAnimationPaused(id, true) && scene.UpdateAnimations(0.5f), "pause failed");
 		runner.Require(Near(scene.GetModelInstance(id).playback.time, 0.25f), "paused animation advanced");
-		runner.Require(scene.SetAnimationPaused(id, false) && scene.UpdateAnimations(1.0f).Succeeded(), "resume failed");
+		runner.Require(scene.SetAnimationPaused(id, false) && scene.UpdateAnimations(1.0f), "resume failed");
 		runner.Require(Near(scene.GetModelInstance(id).playback.time, 0.25f), "animation did not loop");
-		runner.Require(scene.PlayAnimation(id, 0u, false) && scene.UpdateAnimations(2.0f).Succeeded(), "non-looping update failed");
+		runner.Require(scene.PlayAnimation(id, 0u, false) && scene.UpdateAnimations(2.0f), "non-looping update failed");
 		runner.Require(Near(scene.GetModelInstance(id).localPose[0].translation.x, 2.0f)
 			&& Near(scene.GetModelInstance(id).playback.time, 1.0f)
 			&& !scene.GetModelInstance(id).playback.playing, "non-looping animation did not clamp and stop");
 		runner.Require(scene.PlayAnimation(id, 0u, false) && scene.SetAnimationSpeed(id, -1.0f)
-			&& scene.UpdateAnimations(0.25f).Succeeded(), "negative playback failed");
+			&& scene.UpdateAnimations(0.25f), "negative playback failed");
 		runner.Require(Near(scene.GetModelInstance(id).playback.time, 0.0f)
 			&& !scene.GetModelInstance(id).playback.playing, "negative playback did not clamp at zero");
 		runner.Require(!scene.PlayAnimation(id, 99u), "invalid animation clip accepted");
 		runner.Require(!scene.SetAnimationSpeed(id, std::numeric_limits<float>::infinity()), "infinite speed accepted");
-		runner.Require(!scene.UpdateAnimations(std::numeric_limits<float>::quiet_NaN()).Succeeded(), "NaN delta accepted");
+		runner.Require(!scene.UpdateAnimations(std::numeric_limits<float>::quiet_NaN()), "NaN delta accepted");
 
 		std::vector<NodeTransform> pose(1u);
 		runner.Require(SampleAnimationClip(clip, -2.0f, pose)
@@ -765,29 +569,29 @@ namespace
 				&& std::isfinite(material.material.normalScale) && std::isfinite(material.material.occlusionStrength),
 				"imported material data is not finite");
 			for(uint32_t texture : material.textureIndices)
-				runner.Require(texture == kInvalidAnimationIndex || texture < model.textures.size(),
+				runner.Require(texture == UINT32_MAX || texture < model.textures.size(),
 					"imported material texture is out of range");
 		}
 		for(const ModelMesh& part : model.meshes)
 		{
 			runner.Require(part.materialIndex < model.materials.size(), "imported mesh material is out of range");
-			runner.Require(part.nodeIndex == kInvalidAnimationIndex || part.nodeIndex < model.nodes.size(),
+			runner.Require(part.nodeIndex == UINT32_MAX || part.nodeIndex < model.nodes.size(),
 				"imported mesh node is out of range");
-			runner.Require(part.skinIndex == kInvalidAnimationIndex || part.skinIndex < model.skins.size(),
+			runner.Require(part.skinIndex == UINT32_MAX || part.skinIndex < model.skins.size(),
 				"imported mesh skin is out of range");
-			runner.Require(part.mesh.skinInfluences.empty()
-				|| part.mesh.skinInfluences.size() == part.mesh.vertices.size(),
+			runner.Require(part.skinInfluences.empty()
+				|| part.skinInfluences.size() == part.mesh.vertices.size(),
 				"imported skin influence count differs from vertex count");
 			for(uint32_t index : part.mesh.indices)
 				runner.Require(index < part.mesh.vertices.size(), "imported vertex index is out of range");
 			for(const Vertex& vertex : part.mesh.vertices)
 				runner.Require(Finite(vertex.position) && Finite(vertex.normal) && Finite(vertex.uv)
 					&& Finite(vertex.color) && Finite(vertex.tangent), "imported vertex data is not finite");
-			for(const SkinInfluence& influence : part.mesh.skinInfluences)
+			for(const SkinInfluence& influence : part.skinInfluences)
 			{
 				runner.Require(Finite(influence.weights) && std::isfinite(influence.dqBlendWeight),
 					"imported skin influence is not finite");
-				if(part.skinIndex != kInvalidAnimationIndex)
+				if(part.skinIndex != UINT32_MAX)
 				{
 					const size_t jointCount = model.skins[part.skinIndex].jointNodeIndices.size();
 					for(size_t slot = 0u; slot < influence.jointIndices.size(); ++slot)
@@ -836,21 +640,17 @@ namespace
 		}
 	}
 
-	class NullBuffer final : public std::streambuf
-	{
-		int overflow(int value) override { return value; }
-	};
-
-	class SilenceCerr final
+	class CaptureCerr final
 	{
 	public:
-		SilenceCerr()
+		CaptureCerr()
 			: m_previous(std::cerr.rdbuf(&m_sink))
 		{
 		}
-		~SilenceCerr() { std::cerr.rdbuf(m_previous); }
+		~CaptureCerr() { std::cerr.rdbuf(m_previous); }
+		std::string Text() const { return m_sink.str(); }
 	private:
-		NullBuffer m_sink;
+		std::stringbuf m_sink;
 		std::streambuf* m_previous = nullptr;
 	};
 
@@ -904,28 +704,29 @@ namespace
 		ModelData model;
 		model.meshes.push_back(ModelMesh{});
 		model.materials.push_back(ModelMaterialInfo{});
-		model.textures.push_back(TextureAsset{});
+		model.textures.push_back(Image{});
 		model.nodes.push_back(ModelNode{});
 		model.skins.push_back(ModelSkin{});
 		model.animations.push_back(AnimationClip{});
-		ModelLoadResult result;
+		bool success = false;
+		std::string diagnostics;
 		{
-			SilenceCerr silence;
-			result = LoadModelDetailed(path.string(), model, options);
+			CaptureCerr capture;
+			success = LoadModel(path.string(), model, options);
+			diagnostics = capture.Text();
 		}
 		if(requireSuccess)
 		{
-			runner.Require(result.success, "valid model fixture was rejected: " + path.filename().string());
+			runner.Require(success, "valid model fixture was rejected: " + path.filename().string());
 			runner.Require(!model.meshes.empty() && !model.meshes[0].mesh.vertices.empty(),
 				"valid model fixture has no geometry: " + path.filename().string());
 			ValidateModel(model, runner);
 			return;
 		}
-		runner.Require(!result.success, "malformed model fixture was accepted: " + path.filename().string());
+		runner.Require(!success, "malformed model fixture was accepted: " + path.filename().string());
 		runner.Require(EmptyModel(model), "rejected model left stale output");
-		runner.Require(std::any_of(result.diagnostics.begin(), result.diagnostics.end(), [](const ModelLoadDiagnostic& diagnostic) {
-			return diagnostic.severity == ModelDiagnosticSeverity::Error && !diagnostic.message.empty();
-		}), "rejected model has no useful error diagnostic");
+		runner.Require(diagnostics.find(path.string() + ": ") != std::string::npos,
+			"rejected model has no useful error diagnostic");
 	}
 
 	void CheckFuzzLoad(const std::filesystem::path& path, Runner& runner)
@@ -933,24 +734,25 @@ namespace
 		ModelData model;
 		model.meshes.push_back(ModelMesh{});
 		model.materials.push_back(ModelMaterialInfo{});
-		model.textures.push_back(TextureAsset{});
+		model.textures.push_back(Image{});
 		model.nodes.push_back(ModelNode{});
 		model.skins.push_back(ModelSkin{});
 		model.animations.push_back(AnimationClip{});
-		ModelLoadResult result;
+		bool success = false;
+		std::string diagnostics;
 		{
-			SilenceCerr silence;
-			result = LoadModelDetailed(path.string(), model);
+			CaptureCerr capture;
+			success = LoadModel(path.string(), model);
+			diagnostics = capture.Text();
 		}
-		if(result.success)
+		if(success)
 		{
 			ValidateModel(model, runner);
 			return;
 		}
 		runner.Require(EmptyModel(model), "rejected mutated model left stale output");
-		runner.Require(std::any_of(result.diagnostics.begin(), result.diagnostics.end(), [](const ModelLoadDiagnostic& diagnostic) {
-			return diagnostic.severity == ModelDiagnosticSeverity::Error && !diagnostic.message.empty();
-		}), "rejected mutated model has no useful error diagnostic");
+		runner.Require(diagnostics.find(path.string() + ": ") != std::string::npos,
+			"rejected mutated model has no useful error diagnostic");
 	}
 
 	const std::string& BaseObj()
@@ -961,10 +763,6 @@ namespace
 
 	void RunModelFixed(const std::filesystem::path& directory, Runner& runner)
 	{
-#if DY_CI_HAS_OPTIONS
-		const std::filesystem::path duck = std::filesystem::path(DY_CI_MODEL_DIR) / "Duck/glTF/Duck.gltf";
-		CheckLoadResult(duck, true, runner);
-#endif
 
 		const std::filesystem::path obj = directory / "fixed-valid.obj";
 		WriteText(obj, BaseObj());
@@ -1092,49 +890,103 @@ namespace
 		CheckFuzzLoad(path, runner);
 	}
 
+	void ExecuteGraph(RenderGraph& graph, IDevice& device, Runner& runner)
+	{
+		ICommandList* commands = device.AcquireCommandList();
+		if(commands == nullptr) throw InfraError("could not acquire CPU graph command list");
+		runner.Require(graph.Execute(commands), "compiled graph failed to record");
+		runner.Require(commands->Close(), "graph command list failed to close");
+		runner.Require(device.Submit(&commands, 1u), "graph resource states failed at submission");
+		device.DestroyCommandList(commands);
+	}
+
 	void RunRenderGraphFixed(Runner& runner)
 	{
+		std::unique_ptr<IDevice> device(IDevice::Create(DeviceDesc{}));
+		if(!device) throw InfraError("could not create CPU graph device");
+		const auto texture = device->CreateTexture({ 1u, 1u, 1u, 1u, Format::R8G8B8A8_UNORM,
+			TextureUsage::ShaderResource | TextureUsage::RenderTarget });
+		const auto buffer = device->CreateBuffer({ 16u, 4u, BufferUsage::Storage, ResourceState::Undefined });
+		if(!texture || !buffer) throw InfraError("could not create CPU graph resources");
 		RenderGraph graph;
-		auto a = graph.ImportTexture("A", nullptr);
-		auto b = graph.ImportBuffer("B", nullptr);
-		runner.Require(graph.ImportTexture("A", nullptr) == a, "duplicate resource name changed its handle");
+		auto a = graph.ImportTexture("A", texture, ResourceState::Undefined, ResourceState::ShaderResource);
+		auto b = graph.ImportBuffer("B", buffer, ResourceState::Undefined, ResourceState::UnorderedAccess);
+		runner.Require(a.IsValid() && b.IsValid(), "valid resource import failed");
+		runner.Require(graph.ImportTexture("A", texture, ResourceState::Undefined, ResourceState::ShaderResource) == a,
+			"duplicate resource name changed its handle");
+		runner.Require(graph.ImportTexture("Alias", texture, ResourceState::Undefined, ResourceState::ShaderResource) == a,
+			"resource alias changed its handle");
+		runner.Require(!graph.ImportTexture("Null", nullptr, ResourceState::Undefined, ResourceState::ShaderResource).IsValid(),
+			"null graph resource accepted");
+		runner.Require(!graph.ImportTexture("Conflict", texture, ResourceState::Common, ResourceState::ShaderResource).IsValid(),
+			"conflicting alias boundary states accepted");
+		runner.Require(!graph.ImportBuffer("A", buffer, ResourceState::Undefined, ResourceState::UnorderedAccess).IsValid(),
+			"conflicting resource name accepted");
+		runner.Require(!graph.ImportTexture("Undefined final", texture, ResourceState::Undefined, ResourceState::Undefined).IsValid(),
+			"undefined graph final state accepted");
 		std::vector<std::string> executed;
-		graph.AddPass("Consumer").Read(a, RGResourceAccess::ShaderRead)
-			.Write(b, RGResourceAccess::UnorderedAccess)
-			.SetExecute([&](auto*) { executed.push_back("Consumer"); });
-		graph.AddPass("Producer").Write(a, RGResourceAccess::RenderTarget)
-			.Write(a, RGResourceAccess::RenderTarget)
+		graph.AddPass("Producer").Write(a, ResourceState::RenderTarget)
+			.Write(a, ResourceState::RenderTarget)
 			.SetExecute([&](auto*) { executed.push_back("Producer"); });
-		graph.Execute(nullptr);
+		graph.AddPass("Consumer").Read(a, ResourceState::ShaderResource)
+			.Write(b, ResourceState::UnorderedAccess)
+			.SetExecute([&](auto*) { executed.push_back("Consumer"); });
+		ICommandList* uncompiled = device->AcquireCommandList();
+		if(!uncompiled) throw InfraError("could not acquire CPU graph command list");
+		runner.Require(!graph.Execute(uncompiled) && executed.empty(), "uncompiled graph executed callbacks");
+		device->DestroyCommandList(uncompiled);
+		runner.Require(graph.Compile(), "producer-consumer graph did not compile");
+		runner.Require(!graph.Execute(nullptr), "null graph command list accepted");
+		ExecuteGraph(graph, *device, runner);
 		runner.Require(executed == std::vector<std::string>{ "Producer", "Consumer" },
 			"producer did not execute before consumer");
+		ICommandList* repeated = device->AcquireCommandList();
+		if(!repeated) throw InfraError("could not acquire repeated graph command list");
+		runner.Require(graph.Execute(repeated) && repeated->Close(), "repeated graph failed to record");
+		runner.Require(!device->Submit(&repeated, 1u), "graph execution ignored its initial resource states");
+		device->DestroyCommandList(repeated);
 
 		graph.Reset();
-		a = graph.ImportTexture("A", nullptr);
-		graph.AddPass("Write1").Write(a, RGResourceAccess::RenderTarget);
-		graph.AddPass("Read1").Read(a, RGResourceAccess::ShaderRead);
-		graph.AddPass("Write2").Write(a, RGResourceAccess::RenderTarget);
+		a = graph.ImportTexture("A", texture, ResourceState::ShaderResource, ResourceState::ShaderResource);
+		graph.AddPass("Read1").Read(a, ResourceState::ShaderResource).SetExecute([](auto*) {});
+		graph.AddPass("Write1").Write(a, ResourceState::RenderTarget).SetExecute([](auto*) {});
+		graph.AddPass("Write2").Write(a, ResourceState::RenderTarget).SetExecute([](auto*) {});
 		runner.Require(graph.Compile() && graph.GetExecutionOrderNames()
-			== std::vector<std::string>{ "Write1", "Read1", "Write2" },
+			== std::vector<std::string>{ "Read1", "Write1", "Write2" },
 			"read did not precede the next overwrite");
+		ExecuteGraph(graph, *device, runner);
 
 		graph.Reset();
-		a = graph.ImportTexture("A", nullptr);
-		b = graph.ImportTexture("B", nullptr);
-		auto& first = graph.AddPass("First").Write(a, RGResourceAccess::RenderTarget);
-		graph.AddPass("Second").Read(a, RGResourceAccess::ShaderRead).Write(b, RGResourceAccess::RenderTarget);
+		a = graph.ImportTexture("A", texture, ResourceState::ShaderResource, ResourceState::ShaderResource);
+		b = graph.ImportBuffer("B", buffer, ResourceState::UnorderedAccess, ResourceState::UnorderedAccess);
+		auto& first = graph.AddPass("First").Write(a, ResourceState::RenderTarget).SetExecute([](auto*) {});
+		graph.AddPass("Second").Read(a, ResourceState::ShaderResource)
+			.Write(b, ResourceState::UnorderedAccess).SetExecute([](auto*) {});
 		runner.Require(graph.Compile(), "valid graph did not compile");
-		first.Read(b, RGResourceAccess::ShaderRead);
-		runner.Require(!graph.IsCompiled() && !graph.Compile(), "compiled graph mutation did not expose a cycle");
+		first.Read(b, ResourceState::ShaderResource);
+		runner.Require(!graph.IsCompiled(), "compiled graph mutation did not invalidate its plan");
+		// Reads use previous contents, so a later writer does not create a backward dependency.
+		runner.Require(graph.Compile() && graph.GetExecutionOrderNames() == std::vector<std::string>{ "First", "Second" },
+			"external read was incorrectly treated as a dependency cycle");
+		ExecuteGraph(graph, *device, runner);
+		first.Read(a, ResourceState::ShaderResource);
+		runner.Require(!graph.IsCompiled() && !graph.Compile(), "conflicting state mutation compiled");
 
 		graph.Reset();
-		graph.AddPass("Invalid").Read({ 999u }, RGResourceAccess::ShaderRead);
+		graph.AddPass("Stale").Read(a, ResourceState::ShaderResource).SetExecute([](auto*) {});
+		runner.Require(!graph.Compile(), "resource handle survived graph reset");
+		graph.Reset();
+		graph.AddPass("Invalid").Read({ UINT64_MAX }, ResourceState::ShaderResource).SetExecute([](auto*) {});
 		runner.Require(!graph.Compile(), "out-of-range graph resource accepted");
 		graph.Reset();
-		graph.AddPass("Invalid sentinel").Write({}, RGResourceAccess::RenderTarget);
+		graph.AddPass("Invalid sentinel").Write({}, ResourceState::RenderTarget).SetExecute([](auto*) {});
 		runner.Require(!graph.Compile(), "invalid graph resource sentinel accepted");
 		graph.Reset();
+		graph.AddPass("Missing callback");
+		runner.Require(!graph.Compile(), "graph pass without a callback compiled");
+		graph.Reset();
 		runner.Require(graph.Compile() && graph.GetExecutionOrderNames().empty(), "empty graph did not compile");
+		ExecuteGraph(graph, *device, runner);
 	}
 
 	struct Edge
@@ -1205,6 +1057,8 @@ namespace
 		}
 		reader.Finish();
 
+		std::unique_ptr<IDevice> device(IDevice::Create(DeviceDesc{}));
+		if(!device) throw InfraError("could not create CPU graph device");
 		RenderGraph graph;
 		std::vector<RenderGraphPass*> passes;
 		std::vector<uint32_t> executed;
@@ -1217,18 +1071,17 @@ namespace
 		}
 		for(size_t edgeIndex = 0u; edgeIndex < edges.size(); ++edgeIndex)
 		{
-			const auto resource = graph.ImportTexture("E" + std::to_string(edgeIndex), nullptr);
-			passes[edges[edgeIndex].from]->Write(resource, RGResourceAccess::RenderTarget);
-			passes[edges[edgeIndex].to]->Read(resource, RGResourceAccess::ShaderRead);
+			const auto buffer = device->CreateBuffer({ 16u, 4u, BufferUsage::Storage, ResourceState::ShaderResource });
+			if(!buffer) throw InfraError("could not create generated graph resource");
+			const auto resource = graph.ImportBuffer("E" + std::to_string(edgeIndex), buffer,
+				ResourceState::ShaderResource, ResourceState::ShaderResource);
+			runner.Require(resource.IsValid(), "generated graph resource import failed");
+			passes[edges[edgeIndex].from]->Write(resource, ResourceState::UnorderedAccess);
+			passes[edges[edgeIndex].to]->Read(resource, ResourceState::ShaderResource);
 		}
 		const bool compiled = graph.Compile();
-		if(kind == 2u)
-		{
-			runner.Require(!compiled && !graph.IsCompiled() && graph.GetExecutionOrderIndices().empty(),
-				"cyclic RenderGraph case compiled");
-			return;
-		}
-		runner.Require(compiled && graph.IsCompiled(), "DAG RenderGraph case failed to compile");
+		// Both DAG-shaped and cyclic declarations use the contents preceding each registered pass.
+		runner.Require(compiled && graph.IsCompiled(), "ordered RenderGraph case failed to compile");
 		const auto& order = graph.GetExecutionOrderIndices();
 		runner.Require(order.size() == count, "RenderGraph execution order lost a pass");
 		std::vector<uint32_t> position(count, count);
@@ -1239,8 +1092,9 @@ namespace
 			position[order[index]] = index;
 		}
 		for(const Edge edge : edges)
-			runner.Require(position[edge.from] < position[edge.to], "RenderGraph consumer precedes its producer");
-		graph.Execute(nullptr);
+			runner.Require(position[std::min(edge.from, edge.to)] < position[std::max(edge.from, edge.to)],
+				"RenderGraph RAW/WAR dependency violated registration order");
+		ExecuteGraph(graph, *device, runner);
 		runner.Require(executed == order, "RenderGraph execution differs from compiled order");
 	}
 
@@ -1254,18 +1108,12 @@ namespace
 			if(data.scenario == "Animation") RunAnimationFixed(runner);
 			else if(data.scenario == "ModelImport") RunModelFixed(caseDirectory, runner);
 			else if(data.scenario == "RenderGraph") RunRenderGraphFixed(runner);
-#if DY_CI_HAS_OPTIONS
-			else if(data.scenario == "Options") RunOptionsFixed(runner);
-#endif
 			else throw InfraError("unknown scenario");
 			return;
 		}
 		if(data.scenario == "Animation") RunAnimationCase(data.payload, runner);
 		else if(data.scenario == "ModelImport") RunModelCase(data.payload, caseDirectory, runner);
 		else if(data.scenario == "RenderGraph") RunGraphCase(data.payload, runner);
-#if DY_CI_HAS_OPTIONS
-		else if(data.scenario == "Options") RunOptionCase(data.payload, runner);
-#endif
 		else throw InfraError("unknown scenario");
 	}
 
@@ -1274,9 +1122,6 @@ namespace
 		if(scenario == "Animation") return GenerateAnimationCase(random);
 		if(scenario == "ModelImport") return GenerateModelCase(random);
 		if(scenario == "RenderGraph") return GenerateGraphCase(random);
-#if DY_CI_HAS_OPTIONS
-		if(scenario == "Options") return EncodeOptionCase(GenerateOptionCase(random));
-#endif
 		throw InfraError("unknown scenario");
 	}
 
@@ -1370,11 +1215,7 @@ namespace
 		}
 		if(haveScenario == arguments.all || !haveSeed || !haveSeconds || !haveCaseDirectory
 			|| (haveScenario && !IsScenario(arguments.scenario)))
-#if DY_CI_HAS_OPTIONS
-			throw InfraError("expected (--scenario {Options|Animation|ModelImport|RenderGraph} | --all) --seed UINT --seconds FLOAT --case-dir DIR");
-#else
 			throw InfraError("expected (--scenario {Animation|ModelImport|RenderGraph} | --all) --seed UINT --seconds FLOAT --case-dir DIR");
-#endif
 		return arguments;
 	}
 }
@@ -1390,9 +1231,6 @@ int main(int argc, char** argv)
 		if(arguments.listScenarios)
 		{
 			std::cout
-#if DY_CI_HAS_OPTIONS
-				<< "Options\n"
-#endif
 				<< "Animation\nModelImport\nRenderGraph\n";
 			return 0;
 		}
@@ -1420,9 +1258,6 @@ int main(int argc, char** argv)
 		if(directoryError) throw InfraError("could not create case directory: " + directoryError.message());
 		const std::vector<std::string> scenarios = arguments.all
 			? std::vector<std::string>{
-#if DY_CI_HAS_OPTIONS
-				"Options",
-#endif
 				"Animation", "ModelImport", "RenderGraph" }
 			: std::vector<std::string>{ arguments.scenario };
 		for(const std::string& selectedScenario : scenarios)

@@ -21,12 +21,17 @@ class Windows:
                               'macOS capture permissions and window ownership are not implemented')
         self.u = ctypes.WinDLL('user32', use_last_error=True)
         self.g = ctypes.WinDLL('gdi32', use_last_error=True)
+        self.k = ctypes.WinDLL('kernel32', use_last_error=True)
+        self.k.GetCurrentThreadId.argtypes = []
+        self.k.GetCurrentThreadId.restype = w.DWORD
         self.enum_proc = ctypes.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
         signatures = {
             'EnumWindows': ([self.enum_proc, w.LPARAM], w.BOOL),
             'GetWindowThreadProcessId': ([w.HWND, ctypes.POINTER(w.DWORD)], w.DWORD),
             'IsWindowVisible': ([w.HWND], w.BOOL), 'IsIconic': ([w.HWND], w.BOOL),
             'GetForegroundWindow': ([], w.HWND), 'SetForegroundWindow': ([w.HWND], w.BOOL),
+            'BringWindowToTop': ([w.HWND], w.BOOL),
+            'AttachThreadInput': ([w.DWORD, w.DWORD, w.BOOL], w.BOOL),
             'GetClientRect': ([w.HWND, ctypes.POINTER(w.RECT)], w.BOOL),
             'GetWindowRect': ([w.HWND, ctypes.POINTER(w.RECT)], w.BOOL),
             'ClientToScreen': ([w.HWND, ctypes.POINTER(w.POINT)], w.BOOL),
@@ -67,7 +72,7 @@ class Windows:
                                                         ctypes.byref(needed)):
                     raise Unavailable('Cannot identify the interactive Windows desktop')
                 return buffer.value
-            thread_id = ctypes.WinDLL('kernel32').GetCurrentThreadId()
+            thread_id = self.k.GetCurrentThreadId()
             if name(desktop) != name(self.u.GetThreadDesktop(thread_id)):
                 raise Unavailable('Observer is not on the current interactive Windows desktop')
         finally:
@@ -94,8 +99,44 @@ class Windows:
         return None
 
     def activate(self, hwnd, pid):
-        if self.pid(hwnd) == pid:
-            self.u.SetForegroundWindow(hwnd)
+        if self.pid(hwnd) != pid:
+            return
+        self.u.SetForegroundWindow(hwnd)
+        if self.u.GetForegroundWindow() == hwnd:
+            return
+        # An attached input queue can block inside SetForegroundWindow. Isolate that
+        # fallback so an unresponsive foreground application cannot stall observation.
+        try:
+            subprocess.run([sys.executable, '-B', str(Path(__file__).resolve()),
+                            '--activate-owned-window', str(hwnd), str(pid)],
+                           timeout=2, check=True, capture_output=True, text=True,
+                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        except subprocess.TimeoutExpired as error:
+            raise Unavailable('Owned example activation helper timed out after 2 seconds') from error
+        except (OSError, subprocess.CalledProcessError) as error:
+            detail = getattr(error, 'stderr', None) or str(error)
+            raise Unavailable(f'Owned example activation helper failed: {detail.strip()}') from error
+
+    def _activate_attached(self, hwnd, pid):
+        if self.pid(hwnd) != pid:
+            return False
+        foreground = self.u.GetForegroundWindow()
+        if foreground == hwnd:
+            return True
+        foreground_thread = self.u.GetWindowThreadProcessId(foreground, None) if foreground else 0
+        current_thread = self.k.GetCurrentThreadId()
+        attached = False
+        try:
+            if foreground_thread and foreground_thread != current_thread:
+                attached = bool(self.u.AttachThreadInput(current_thread, foreground_thread, True))
+            # The HWND may have been destroyed and reused while obtaining foreground access.
+            if self.pid(hwnd) == pid:
+                self.u.BringWindowToTop(hwnd)
+                self.u.SetForegroundWindow(hwnd)
+        finally:
+            if attached:
+                self.u.AttachThreadInput(current_thread, foreground_thread, False)
+        return self.pid(hwnd) == pid and self.u.GetForegroundWindow() == hwnd
 
     def finish(self):
         pass
@@ -464,7 +505,20 @@ def observe(binary: Path, arguments: list[str], cwd: Path, env: dict, directory:
                             closed_at = now
                     time.sleep(0.05)
             except Unavailable as error:
-                result.update(status='BLOCKED', message=str(error))
+                code = process.poll() if process is not None else None
+                if code is None and process is not None:
+                    try:
+                        code = process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
+                if code is None:
+                    result.update(status='BLOCKED', message=str(error))
+                else:
+                    # Finite examples can exit while activation/capture checks their HWND.
+                    result.update(status='PASS' if code == 0 else 'FAIL', exit_code=code,
+                                  natural_exit=closed_at is None,
+                                  message='Process exited naturally; graphical coverage requires caller checks'
+                                  if code == 0 else f'Process exited with code {code}')
             except OSError as error:
                 result.update(status='FAIL', message=f'Example launch/observation failed: {error}')
             finally:
@@ -491,3 +545,21 @@ def observe(binary: Path, arguments: list[str], cwd: Path, env: dict, directory:
     finally:
         desktop.finish()
     return result
+
+
+if __name__ == '__main__':
+    try:
+        if len(sys.argv) != 4 or sys.argv[1] != '--activate-owned-window':
+            raise ValueError('Usage: observe.py --activate-owned-window HWND PID')
+        hwnd, pid = map(int, sys.argv[2:])
+        if not (0 < hwnd < 1 << (ctypes.sizeof(w.HWND) * 8) and 0 < pid <= 0xffffffff):
+            raise ValueError('Invalid owned window handle or process ID')
+        desktop = Windows()  # Recheck the helper's interactive input desktop.
+        try:
+            if not desktop._activate_attached(hwnd, pid):
+                raise Unavailable('Owned example window did not become foreground')
+        finally:
+            desktop.finish()
+    except (Unavailable, OSError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        sys.exit(2)

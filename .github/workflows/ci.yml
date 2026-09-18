@@ -113,7 +113,7 @@ jobs:
       - uses: ./.github/actions/setup-ci
         with:
           api: 'null'
-          clang: 'true'
+          clang: ${{ runner.os != 'Windows' }}
       - name: Run boundary, functional and bounded fuzz checks
         run: python -B .github/ci/ci.py run --phase cpu --api null --build-dir build/ci-cpu --changes-file ci-selection.json --fuzz-seconds 3
       - name: Save diagnostics and replay inputs

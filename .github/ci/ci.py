@@ -255,6 +255,8 @@ def setup_environment(root):
                         key, separator, value = line.partition('=')
                         if separator and key and not key.startswith('='):
                             env[key] = value
+                    if env.get('VCToolsInstallDir'):
+                        paths.append(str(Path(env['VCToolsInstallDir']) / 'bin/Hostx64/x64'))
                 paths.append(str(Path(install) / 'Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja'))
         sdk_root = Path(env.get('WindowsSdkDir', 'C:/Program Files (x86)/Windows Kits/10'))
         compilers = sorted(sdk_root.glob('bin/*/x64/fxc.exe'), reverse=True)
@@ -281,8 +283,10 @@ def setup_environment(root):
             paths.extend(str(p) for p in (binary_dir.parent / 'lib/clang').glob('*/lib/windows'))
             break
     # Windows environment variables are case-insensitive, but Python dict keys are not.
-    path_key = next((key for key in env if key.upper() == 'PATH'), 'PATH')
-    inherited_path = env.pop(path_key, '')
+    inherited_path = ''
+    for key in list(env):
+        if key.upper() == 'PATH':
+            inherited_path = env.pop(key)
     env['PATH'] = os.pathsep.join(paths + [inherited_path])
     return env
 
@@ -302,7 +306,7 @@ def configure(root, build, api, config, report, env, *, clang=False, sanitize=Fa
         if sdk and not any((Path(sdk) / folder / 'vulkan/vulkan.h').is_file() for folder in ('Include', 'include')):
             raise CiError('VULKAN_SDK does not contain Vulkan headers', 'BLOCKED')
     if api == 'd3d12':
-        tool('fxc', env)
+        tool('dxc', env)
     if api == 'metal':
         tool('xcrun', env)
     if sys.platform.startswith('linux'):
@@ -310,6 +314,7 @@ def configure(root, build, api, config, report, env, *, clang=False, sanitize=Fa
         if subprocess.run([pkg_config, '--exists', 'x11', 'xrandr', 'xinerama', 'xcursor', 'xi'], env=env).returncode:
             raise CiError('X11 development dependencies are missing', 'BLOCKED')
     options = ['cmake', '-S', str(root), '-B', str(build), '-DDY_CI=ON', '-DDY_ENABLE_TRACY=OFF', '-DBUILD_SHARED_LIBS=OFF',
+               '-DDY_EXTEND_MODEL=ON',
                '-DUSE_VULKAN=OFF', '-DUSE_D3D12=OFF', '-DUSE_METAL=OFF',
                '-DDY_CI_SANITIZERS=' + ('ON' if sanitize else 'OFF'),
                # Binary dependency directories must not be shared across compilers/configs/sanitizers.
@@ -445,9 +450,11 @@ def runtime_checks(root, build, config, manifest, programs, report, env):
         for kind in ('rhi-smoke', 'gpu-probe'):
             if kind not in probes:
                 raise CiError('Missing independent GPU test executable: ' + kind, 'BLOCKED')
-        common = dict(kind='pixels', seconds=2, tolerance=10,
-                      markers=['backend=' + manifest['api'], 'resource_balance=ok', 'shutdown=ok'],
+        common = dict(kind='pixels', seconds=2, warmup=1, tolerance=10,
+                      markers=['backend=' + manifest['api'], 'resource_lifecycle=ok', 'shutdown=ok'],
                       coverage='independent public API expected pixels; not an official example result')
+        report.add('resource-allocation-counters', 'UNSUPPORTED',
+                   'The current public RHI has no allocation counters; lifecycle checks do not prove leak balance')
         jobs.append((probes['rhi-smoke'], 'clear', [], dict(common, pixels=[[.1,.1,255,0,0],[.5,.5,255,0,0],[.9,.9,255,0,0]])))
         for case, pixels in (
                 ('triangle', [[.5,.5,255,0,0],[.1,.1,0,0,255]]),
@@ -462,7 +469,13 @@ def runtime_checks(root, build, config, manifest, programs, report, env):
             binary = Path(target['binary'])
             evidence = report.directory / 'observations' / (name + '-' + uuid.uuid4().hex)
             evidence.mkdir(parents=True)
-            if target.get('kind') == 'cpu':
+            if profile.get('kind') == 'capability':
+                completed = subprocess.run([str(binary), *arguments], cwd=binary.parent, env=env,
+                                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120,
+                                           encoding='utf-8', errors='replace')
+                (evidence / 'process.log').write_text(completed.stdout, encoding='utf-8')
+                observed = dict(status='PASS', exit_code=completed.returncode, output=completed.stdout)
+            elif target.get('kind') == 'cpu':
                 output = report.command('run-' + name, [binary, *arguments], binary.parent, timeout=120, env=env)
                 observed = dict(status='PASS', exit_code=0, output=output)
             else:
@@ -477,8 +490,11 @@ def runtime_checks(root, build, config, manifest, programs, report, env):
             check_path = evidence / 'checks.json'
             check_path.write_text(json.dumps(result, indent=2), encoding='utf-8')
             report.add('behavior-' + name, result['status'], result['message'], observed.get('observed_seconds', 0), check_path)
-            if result['status'] != 'PASS':
+            if result['status'] not in ('PASS', 'UNSUPPORTED'):
                 failures.append(result['status'])
+        except subprocess.TimeoutExpired:
+            report.add('behavior-' + name, 'FAIL', 'Console example exceeded 120 seconds')
+            failures.append('FAIL')
         except CiError as error:
             report.add('behavior-' + name, error.status, str(error))
             failures.append(error.status)
@@ -519,7 +535,8 @@ def run_phase(args):
         if args.api not in native_apis() + ['null']:
             raise CiError(f'{args.api} is unavailable on {sys.platform}', 'BLOCKED')
         configure(root, build, args.api, args.config, report, env,
-                  clang=args.phase == 'cpu', sanitize=args.phase == 'cpu', dependencies=args.dependencies)
+                  clang=args.phase == 'cpu' and sys.platform != 'win32',
+                  sanitize=args.phase == 'cpu', dependencies=args.dependencies)
         if impact:
             manifest, programs = read_inventory(build, args.config, verify=False)
             manifest, programs = selection.select(root, manifest, programs, impact, args.phase)
