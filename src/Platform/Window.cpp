@@ -19,7 +19,7 @@ Window::Window(unsigned int width, unsigned int height)
 
 Window::Window(unsigned int width, unsigned int height, const char* title)
 {
-	if(!width || !height || width > static_cast<unsigned>(std::numeric_limits<int>::max()) || height > static_cast<unsigned>(std::numeric_limits<int>::max()))
+	if(!width || !height || width > static_cast<unsigned>((std::numeric_limits<int>::max)()) || height > static_cast<unsigned>((std::numeric_limits<int>::max)()))
     { std::fprintf(stderr, "dyf: invalid window dimensions.\n"); return; }
     if(windowCount == 0 && !glfwInit())
     { std::fprintf(stderr, "dyf: failed to initialize GLFW.\n"); return; }

@@ -39,6 +39,9 @@ target_include_directories(${PROJECT_NAME} PRIVATE "${PROJECT_SOURCE_DIR}/src")
 
 option(DY_EXTEND_MODEL "Build the optional Model extension." OFF)
 
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    include(CiChecks)
+endif()
 include(Dependencies)
 include(BuildOptions)
 
@@ -50,11 +53,16 @@ if(DY_EXTEND_MODEL)
 endif()
 
 # Only add the executable if this is the main project being built (not when included as a subdirectory in another project)
-if(CMAKE_PROJECT_NAME  STREQUAL PROJECT_NAME)
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
 	option(DY_BUILD_EXAMPLES "Build the self-contained dyf and RHI examples." OFF)
-	if(DY_BUILD_EXAMPLES)
+	if(DY_BUILD_EXAMPLES OR DY_CI)
 		add_subdirectory(examples)
 	endif()
+    if(DY_CI)
+        include(ExampleSupport)
+        enable_testing()
+        add_subdirectory(.github/ci)
+    endif()
 endif()
 
 # ===== Configuration Messages =====

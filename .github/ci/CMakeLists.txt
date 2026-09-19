@@ -1,0 +1,49 @@
+# Each *Checks.cpp is a standalone check runner with --list-scenarios/--scenario/--replay.
+file(GLOB check_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*Checks.cpp")
+set(programs)
+foreach(source IN LISTS check_sources)
+    get_filename_component(stem "${source}" NAME_WE)
+    set(target "Ci${stem}")
+    add_executable(${target} "${source}")
+    target_link_libraries(${target} PRIVATE dy_engine)
+    set(unsupported "[]")
+    if(stem STREQUAL "CpuChecks")
+        target_link_libraries(${target} PRIVATE dyf::Model)
+    endif()
+    add_test(NAME ${target} COMMAND ${target} --all --seed 1729 --seconds 0 --case-dir "${CMAKE_CURRENT_BINARY_DIR}/cases")
+    set_tests_properties(${target} PROPERTIES LABELS cpu TIMEOUT 120)
+    dy_target_input_json(${target} input_json)
+    list(APPEND programs "{\"name\":\"${target}\",\"kind\":\"cpu-check\",\"binary\":\"$<TARGET_FILE:${target}>\",\"unsupported\":${unsupported},${input_json}}")
+endforeach()
+
+if(USE_VULKAN OR USE_D3D12 OR USE_METAL)
+    if(USE_VULKAN)
+        set(DY_SUPPORT_API vulkan)
+    elseif(USE_D3D12)
+        set(DY_SUPPORT_API d3d12)
+    else()
+        set(DY_SUPPORT_API metal)
+    endif()
+    add_executable(CiRhiSmoke RhiSmoke.cpp)
+    target_link_libraries(CiRhiSmoke PRIVATE dy_engine)
+    target_compile_definitions(CiRhiSmoke PRIVATE DY_CI_BACKEND="${DY_SUPPORT_API}")
+    dy_target_input_json(CiRhiSmoke input_json)
+    list(APPEND programs "{\"name\":\"CiRhiSmoke\",\"kind\":\"rhi-smoke\",\"binary\":\"$<TARGET_FILE:CiRhiSmoke>\",${input_json}}")
+    add_executable(CiRenderProbe RenderProbe.cpp)
+    target_link_libraries(CiRenderProbe PRIVATE dy_engine)
+    target_compile_definitions(CiRenderProbe PRIVATE DY_CI_BACKEND="${DY_SUPPORT_API}")
+    include(CompileShaders)
+    dy_compile_shader(CiRenderProbe probe_vertex vert
+        GLSL "${CMAKE_CURRENT_SOURCE_DIR}/shaders/probe_vs.glsl"
+        HLSL "${CMAKE_CURRENT_SOURCE_DIR}/shaders/probe_vs.hlsl"
+        METAL "${CMAKE_CURRENT_SOURCE_DIR}/shaders/probe_vs.metal" METAL_ENTRY main0)
+    dy_compile_shader(CiRenderProbe probe_fragment frag
+        GLSL "${CMAKE_CURRENT_SOURCE_DIR}/shaders/probe_ps.glsl"
+        HLSL "${CMAKE_CURRENT_SOURCE_DIR}/shaders/probe_ps.hlsl"
+        METAL "${CMAKE_CURRENT_SOURCE_DIR}/shaders/probe_ps.metal" METAL_ENTRY main0)
+    dy_target_input_json(CiRenderProbe input_json)
+    list(APPEND programs "{\"name\":\"CiRenderProbe\",\"kind\":\"gpu-probe\",\"binary\":\"$<TARGET_FILE:CiRenderProbe>\",${input_json}}")
+endif()
+
+list(JOIN programs ",\n" programs)
+file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/ci-programs-$<CONFIG>.json" CONTENT "[${programs}]\n")
