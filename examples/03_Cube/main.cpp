@@ -1,10 +1,13 @@
 // 03_Cube — CreateCubeMesh + perspective camera + directional light.
+#include <algorithm>
+#include <cmath>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
 
 #include "Platform/Window.h"
+#include "Platform/Time.h"
 #include "RHI/IDevice.h"
 #include "Graphics/Renderer.h"
 #include "Graphics/Scene.h"
@@ -34,7 +37,7 @@ int main()
 {
 	try
 	{
-		Platform::Window window(1280, 720, "Cube");
+		Platform::Window window(1280, 720, "Cube - WASD move | RMB look | Wheel speed | Esc quit");
 		std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(window.GetHandle()));
 		if(!device) return -1;
 
@@ -109,9 +112,44 @@ int main()
 		disc.color = Math::float3(0.45f, 0.8f, 1.0f);
 		[[maybe_unused]] const DiscAreaLightID discId = scene.CreateDiscAreaLight(disc);
 
+		const auto initialForward = Math::Normalize(camera.target - camera.eye);
+		float yaw = std::atan2(initialForward.y, initialForward.x);
+		float pitch = std::asin(initialForward.z);
+		float moveSpeed = 2.5f;
+		Platform::Time time;
 		while(window.IsRunning())
 		{
-			window.PollEvents();
+			Platform::Window::PollEvents();
+			const auto& input = window.GetInput();
+			if(input.WasPressed(Platform::Key::Escape)) window.RequestClose();
+			if(!window.IsRunning()) break;
+
+			const auto size = window.GetFramebufferSize();
+			const bool active = window.HasFocus() && !window.IsMinimized() && size.width > 0 && size.height > 0;
+			const float delta = static_cast<float>((std::min)(time.Tick(!active), 0.1));
+			window.SetCursorMode(active && input.IsDown(Platform::MouseButton::Right)
+				? Platform::CursorMode::Locked : Platform::CursorMode::Normal);
+			if(!active)
+			{
+				Platform::Window::WaitEvents();
+				continue;
+			}
+
+			if(input.IsDown(Platform::MouseButton::Right))
+			{
+				const auto mouse = input.GetCursorDelta();
+				yaw -= static_cast<float>(mouse.x) * 0.003f;
+				pitch = std::clamp(pitch - static_cast<float>(mouse.y) * 0.003f, -1.5f, 1.5f);
+			}
+			const Math::float3 forward(std::cos(pitch) * std::cos(yaw), std::cos(pitch) * std::sin(yaw), std::sin(pitch));
+			const auto right = Math::Normalize(Math::Cross(forward, camera.up));
+			const float forwardAxis = (input.IsDown(Platform::Key::W) ? 1.0f : 0.0f) - (input.IsDown(Platform::Key::S) ? 1.0f : 0.0f);
+			const float rightAxis = (input.IsDown(Platform::Key::D) ? 1.0f : 0.0f) - (input.IsDown(Platform::Key::A) ? 1.0f : 0.0f);
+			moveSpeed = std::clamp(moveSpeed + static_cast<float>(input.GetScrollDelta().y) * 0.5f, 0.25f, 20.0f);
+			camera.eye = camera.eye + Math::Normalize(forward * forwardAxis + right * rightAxis) * (moveSpeed * delta);
+			camera.target = camera.eye + forward;
+			camera.aspect = static_cast<float>(size.width) / static_cast<float>(size.height);
+			renderer.SetCamera(camera);
 			device->BeginFrame();
 			renderer.Render(scene, device.get());
 			device->Present();

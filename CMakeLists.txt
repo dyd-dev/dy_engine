@@ -27,6 +27,7 @@ add_library(${PROJECT_NAME} STATIC
 	"src/Graphics/UfbxModelLoader.cpp"
 	"src/Graphics/ShadowMath.cpp"
 	"src/Platform/Window.cpp"
+	"src/Platform/Input.cpp"
 )
 
 # global options
