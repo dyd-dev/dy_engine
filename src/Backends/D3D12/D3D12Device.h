@@ -1,45 +1,71 @@
 #pragma once
-#include "RHI/IDevice.h"
 
-namespace dy::Backends {
-// Pimpl (Pointer to Implementation) 패턴
-// DX12의 실제 객체들(ComPtr 등)을 이 구조체 안에 숨길 예정입니다.
-struct D3D12InternalState;
+#include "dyf/RHI/IDevice.h"
 
-class D3D12Device : public RHI::IDevice {
-public:
-  D3D12Device();
-  ~D3D12Device() override;
+namespace dyf::Backends
+{
+    struct D3D12InternalState;
 
-  // --- IDevice Interface Overrides ---
-  void BeginFrame() override;
-  uint32_t GetCurrentFrameIndex() const override;
+    class D3D12Device final : public RHI::IDevice
+    {
+    public:
+        D3D12Device();
+        ~D3D12Device() override;
 
-  RHI::ICommandList *AcquireCommandList() override;
-  void Submit(RHI::ICommandList **cmdLists, uint32_t count) override;
-  void Present() override;
+        void DestroySwapchainNative() override;
+        bool WaitIdleNative() override;
+        bool IsLostNative() const override;
+        bool SupportsNative(RHI::Feature) const override;
+        uint64_t GetLimitNative(RHI::Limit) const override;
+        bool SupportsSamplerNative(const RHI::SamplerDesc&) const override;
+        bool SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc&) const override;
+        bool SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc&) const override;
+        uint64_t GetCompletedSubmissionNative() override;
+        uint64_t GetLastSubmissionNative() const override;
 
-  RHI::IBuffer *CreateBuffer(const RHI::BufferDesc &desc) override;
-  RHI::ITexture *CreateTexture(const RHI::TextureDesc &desc) override;
-  bool UpdateTexture(RHI::ITexture *texture, const void *data, uint32_t rowPitch) override;
-  RHI::IPipelineState *CreateGraphicsPipeline(const RHI::GraphicsPipelineDesc &desc) override;
+        bool CreateSwapchainNative(const RHI::SwapchainDesc& desc) override;
+        bool BeginFrameNative() override;
+        RHI::ICommandList* AcquireCommandListNative() override;
+        void DiscardCommandListNative(RHI::ICommandList*) override;
+        bool SubmitNative(RHI::ICommandList** commandLists, uint32_t count) override;
+        bool PresentNative() override;
+        RHI::TextureHandle GetBackBufferNative() override;
+        bool ReadTextureNative(RHI::TextureHandle texture, RHI::TextureReadback& result) override;
 
-  [[nodiscard]] RHI::DescriptorIndex AllocateDescriptorSlot() override;
-  void UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::ITexture *texture) override;
-  void UpdateDescriptorSlot(RHI::DescriptorIndex index, RHI::IBuffer *buffer) override;
+        RHI::BufferHandle CreateBufferNative(const RHI::BufferDesc& desc) override;
+        RHI::TextureHandle CreateTextureNative(const RHI::TextureDesc& desc) override;
+        RHI::ShaderHandle CreateShaderNative(const RHI::ShaderDesc& desc) override;
+        RHI::PipelineHandle CreateGraphicsPipelineNative(
+            const RHI::GraphicsPipelineDesc& desc) override;
+        RHI::ResourceSetHandle CreateResourceSetNative(
+            const RHI::ResourceSetDesc& desc) override;
 
-  void DestroyBuffer(RHI::IBuffer *buffer) override;
-  void DestroyTexture(RHI::ITexture *texture) override;
-  void DestroyPipelineState(RHI::IPipelineState *pipeline) override;
+        void DestroyBufferNative(RHI::BufferHandle buffer) override;
+        void DestroyTextureNative(RHI::TextureHandle texture) override;
+        void DestroyShaderNative(RHI::ShaderHandle shader) override;
+        void DestroyPipelineNative(RHI::PipelineHandle pipeline) override;
+        void DestroyResourceSetNative(RHI::ResourceSetHandle resourceSet) override;
 
-  RHI::ITexture *GetBackBuffer() override;
+        bool UpdateBufferNative(
+            RHI::ICommandList& commandList,
+            RHI::BufferHandle buffer,
+            uint32_t offset,
+            const void* data,
+            uint32_t size) override;
+        bool UpdateTextureNative(
+            RHI::ICommandList& commandList,
+            RHI::TextureHandle texture,
+            uint32_t mipLevel,
+            uint32_t arrayLayer,
+            const void* data,
+            uint32_t dataSize,
+            uint32_t rowPitch,
+            uint32_t slicePitch) override;
 
-  [[nodiscard]] bool RequiresExplicitShadowPass() const override { return true; }
+    protected:
+        int Initialize(const void* windowHandle, const RHI::DeviceDesc& desc) override;
 
-protected:
-  int Initialize(const void *windowHandle, const RHI::DeviceDesc& desc) override;
-
-private:
-  D3D12InternalState *m_internal; // DX12 관련 모든 변수는 이 안에 들어갑니다.
-};
-} // namespace dy::Backends
+    private:
+        D3D12InternalState* m_internal = nullptr;
+    };
+}

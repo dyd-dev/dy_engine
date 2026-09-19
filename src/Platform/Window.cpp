@@ -1,5 +1,6 @@
-#include "Window.h"
-#include <stdexcept>
+#include "dyf/Platform/Window.h"
+#include <cstdio>
+#include <limits>
 #include <GLFW/glfw3.h>
 // Expose native window handles for RHI Device initialization
 #if defined(_WIN32)
@@ -9,65 +10,49 @@
 #endif
 #include <GLFW/glfw3native.h>
 
-using namespace dy::Platform;
+using namespace dyf::Platform;
 
-namespace
-{
-	bool g_f11Pressed = false;
-
-	void OnKey(GLFWwindow*, int key, int, int action, int)
-	{
-		if(key == GLFW_KEY_F11 && action == GLFW_PRESS)
-		{
-			g_f11Pressed = true;
-		}
-	}
-}
+namespace { unsigned int windowCount = 0; }
 
 Window::Window(unsigned int width, unsigned int height)
 	: Window(width, height, "New Window") {}
 
 Window::Window(unsigned int width, unsigned int height, const char* title)
 {
-	if(!glfwInit()) throw std::runtime_error("Failed to initialize GLFW.");
+	if(!width || !height || width > static_cast<unsigned>(std::numeric_limits<int>::max()) || height > static_cast<unsigned>(std::numeric_limits<int>::max()))
+    { std::fprintf(stderr, "dyf: invalid window dimensions.\n"); return; }
+    if(windowCount == 0 && !glfwInit())
+    { std::fprintf(stderr, "dyf: failed to initialize GLFW.\n"); return; }
 	
 	// Tell GLFW to NOT create an OpenGL context
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
-	m_window = glfwCreateWindow(width, height, title, nullptr, nullptr);
+	m_window = glfwCreateWindow(width, height, title ? title : "New Window", nullptr, nullptr);
 	if(!m_window)
 	{
-		glfwTerminate();
-		throw std::runtime_error("Failed to create GLFW window.");
+		if(windowCount == 0) glfwTerminate();
+		std::fprintf(stderr, "dyf: failed to create GLFW window.\n");
+		return;
 	}
-
-	glfwSetKeyCallback(m_window, OnKey);
+    ++windowCount;
 }
 
 Window::~Window()
 {
-	if(m_window) glfwDestroyWindow(m_window);
-	glfwTerminate();
+	if(m_window)
+    {
+        glfwDestroyWindow(m_window);
+        if(--windowCount == 0) glfwTerminate();
+    }
 }
 
-bool Window::IsRunning() const { return !glfwWindowShouldClose(m_window); }
+bool Window::IsRunning() const { return m_window && !glfwWindowShouldClose(m_window); }
 
-void Window::PollEvents() const { glfwPollEvents(); }
-
-void Window::Resize(unsigned int width, unsigned int height) const
-{
-	glfwSetWindowSize(m_window, static_cast<int>(width), static_cast<int>(height));
-}
-
-bool Window::ConsumeKeyPress(Key key)
-{
-	if(key != Key::F11 || !g_f11Pressed) return false;
-	g_f11Pressed = false;
-	return true;
-}
+void Window::PollEvents() const { if(m_window) glfwPollEvents(); }
 
 void* Window::GetHandle() const
 {
+    if(!m_window) return nullptr;
 #if defined(_WIN32)
 	return static_cast<void*>(glfwGetWin32Window(m_window));
 #elif defined(__APPLE__)
