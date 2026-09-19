@@ -1,62 +1,71 @@
 #pragma once
-#include "RHI/IDevice.h"
+
+#include "dyf/RHI/IDevice.h"
+
 #include <memory>
-#include <vector>
 
-namespace dy::Backends
+namespace dyf::Backends
 {
+	class VulkanDevice final : public dyf::RHI::IDevice
+	{
+	public:
+		struct Impl;
 
-class VulkanDevice : public dy::RHI::IDevice
-{
-public:
-	struct Impl;
+		VulkanDevice();
+		~VulkanDevice() override;
 
-	VulkanDevice();
-	~VulkanDevice() override;
+		void DestroySwapchainNative() override;
+        bool WaitIdleNative() override;
+        bool IsLostNative() const override;
+        bool SupportsNative(RHI::Feature) const override;
+        uint64_t GetLimitNative(RHI::Limit) const override;
+        bool SupportsSamplerNative(const RHI::SamplerDesc&) const override;
+        bool SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc&) const override;
+        bool SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc&) const override;
+        uint64_t GetCompletedSubmissionNative() override;
+        uint64_t GetLastSubmissionNative() const override; bool CreateSwapchainNative(const dyf::RHI::SwapchainDesc& desc) override;
+		[[nodiscard]] bool BeginFrameNative() override;
+		[[nodiscard]] dyf::RHI::ICommandList* AcquireCommandListNative() override;
+        void DiscardCommandListNative(RHI::ICommandList*) override;
+		[[nodiscard]] bool SubmitNative(dyf::RHI::ICommandList** commandLists, uint32_t count) override;
+		bool PresentNative() override;
 
-	void BeginFrame() override;
-	uint32_t GetCurrentFrameIndex() const override;
-	dy::RHI::ICommandList* AcquireCommandList() override;
-	void Submit(dy::RHI::ICommandList** cmdLists, uint32_t count) override;
-	void Present() override;
+		[[nodiscard]] dyf::RHI::TextureHandle GetBackBufferNative() override;
+		bool ReadTextureNative(dyf::RHI::TextureHandle texture, dyf::RHI::TextureReadback& result) override;
 
-	dy::RHI::IBuffer* CreateBuffer(const dy::RHI::BufferDesc& desc) override;
-	dy::RHI::ITexture* CreateTexture(const dy::RHI::TextureDesc& desc) override;
-	bool UpdateTexture(dy::RHI::ITexture* texture, const void* rgba8Pixels, uint32_t rowPitch) override;
-	dy::RHI::IPipelineState* CreateGraphicsPipeline(const dy::RHI::GraphicsPipelineDesc& desc) override;
-	dy::RHI::IPipelineState* CreateComputePipeline(const dy::RHI::ComputePipelineDesc& desc) override;
-	[[nodiscard]] dy::RHI::DescriptorIndex AllocateDescriptorSlot() override;
-	void UpdateDescriptorSlot(dy::RHI::DescriptorIndex index, dy::RHI::ITexture* texture) override;
-	void UpdateDescriptorSlot(dy::RHI::DescriptorIndex, dy::RHI::IBuffer*) override {}
+		[[nodiscard]] dyf::RHI::BufferHandle CreateBufferNative(const dyf::RHI::BufferDesc& desc) override;
+		[[nodiscard]] dyf::RHI::TextureHandle CreateTextureNative(const dyf::RHI::TextureDesc& desc) override;
+		[[nodiscard]] dyf::RHI::ShaderHandle CreateShaderNative(const dyf::RHI::ShaderDesc& desc) override;
+		[[nodiscard]] dyf::RHI::PipelineHandle CreateComputePipelineNative(const RHI::ComputePipelineDesc&) override;
+        RHI::PipelineHandle CreateGraphicsPipelineNative(const dyf::RHI::GraphicsPipelineDesc& desc) override;
+		[[nodiscard]] dyf::RHI::ResourceSetHandle CreateResourceSetNative(const dyf::RHI::ResourceSetDesc& desc) override;
 
-	void DestroyBuffer(dy::RHI::IBuffer* buffer) override;
-	void DestroyTexture(dy::RHI::ITexture* texture) override;
-	void DestroyPipelineState(dy::RHI::IPipelineState* pipeline) override;
+		void DestroyBufferNative(dyf::RHI::BufferHandle buffer) override;
+		void DestroyTextureNative(dyf::RHI::TextureHandle texture) override;
+		void DestroyShaderNative(dyf::RHI::ShaderHandle shader) override;
+		void DestroyPipelineNative(dyf::RHI::PipelineHandle pipeline) override;
+		void DestroyResourceSetNative(dyf::RHI::ResourceSetHandle resourceSet) override;
 
-	[[nodiscard]] dy::RHI::ITexture* GetBackBuffer() override;
-	
-	[[nodiscard]] bool RequiresExplicitShadowPass() const override { return true; }
-	[[nodiscard]] bool SupportsGpuTimestamps() const override;
-	[[nodiscard]] uint32_t GetMaxGpuTimestampScopes() const override;
-	[[nodiscard]] bool TryGetLastGpuTimestamp(const char* name, dy::RHI::GpuTimestampResult& result) const override;
+		bool UpdateBufferNative(dyf::RHI::ICommandList& commandList, dyf::RHI::BufferHandle buffer, uint32_t offset, const void* data, uint32_t size) override;
+		bool UpdateTextureNative(
+			dyf::RHI::ICommandList& commandList,
+			dyf::RHI::TextureHandle texture,
+			uint32_t mipLevel,
+			uint32_t arrayLayer,
+			const void* data,
+			uint32_t dataSize,
+			uint32_t rowPitch,
+			uint32_t slicePitch) override;
 
-	[[nodiscard]] bool RequiresClipSpaceYFlip() const override { return true; }
-	[[nodiscard]] bool SupportsShadowAtlas() const override { return true; }
-	[[nodiscard]] bool SupportsSkinningStorageBindings() const override;
-	[[nodiscard]] bool SupportsComputeSkinning() const override;
-	[[nodiscard]] uint32_t GetValidationErrorCount() const;
-	[[nodiscard]] uint32_t GetValidationVuidCount() const;
-	[[nodiscard]] bool IsValidationCaptureEnabled() const;
-	[[nodiscard]] bool IsDeviceLost() const;
-	[[nodiscard]] bool ReadbackTextureRGBA32Float(
-		dy::RHI::ITexture* texture,
-		std::vector<float>& outPixels);
+	protected:
+		int Initialize(const void* windowHandle, const dyf::RHI::DeviceDesc& desc) override;
 
-protected:
-	int Initialize(const void* windowHandle, const dy::RHI::DeviceDesc& desc) override;
-
-private:
-	std::unique_ptr<Impl> m_impl;
-};
-
+	private:
+        RHI::TimestampQueryHandle CreateTimestampQueryNative(const RHI::TimestampQueryDesc&) override;
+        void DestroyTimestampQueryNative(RHI::TimestampQueryHandle) override;
+        bool ReadTimestampsNative(RHI::TimestampQueryHandle,uint32_t,uint32_t,uint64_t*) override;
+        double GetTimestampPeriodNative() const override;
+        uint32_t GetTimestampValidBitsNative() const override;
+		std::unique_ptr<Impl> m_impl;
+	};
 }

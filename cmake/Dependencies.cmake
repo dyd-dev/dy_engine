@@ -96,24 +96,4 @@ FetchContent_MakeAvailable(stb)
 target_link_libraries(${PROJECT_NAME} PRIVATE glfw)
 target_compile_definitions(${PROJECT_NAME} PRIVATE GLFW_INCLUDE_NONE)
 
-target_include_directories(${PROJECT_NAME} PUBLIC ${stb_SOURCE_DIR})
-
-# fastgltf 자동 다운로드 설정
-FetchContent_Declare(
-    fastgltf
-    GIT_REPOSITORY "https://github.com/spnda/fastgltf.git"
-    GIT_TAG "v0.9.0" # 최신 버전
-)
-FetchContent_MakeAvailable(fastgltf)
-target_link_libraries(${PROJECT_NAME} PUBLIC fastgltf::fastgltf)
-
-# ufbx 자동 다운로드 설정
-FetchContent_Declare(
-    ufbx
-    GIT_REPOSITORY "https://github.com/ufbx/ufbx.git"
-    GIT_TAG "fcc5d6ba444cfd3eb80677dba5e37e493941abe5"
-)
-FetchContent_MakeAvailable(ufbx)
-target_include_directories(${PROJECT_NAME} PUBLIC ${ufbx_SOURCE_DIR})
-set_source_files_properties("${ufbx_SOURCE_DIR}/ufbx.c" PROPERTIES LANGUAGE CXX)
-target_sources(${PROJECT_NAME} PRIVATE "${ufbx_SOURCE_DIR}/ufbx.c")
+target_include_directories(${PROJECT_NAME} PRIVATE ${stb_SOURCE_DIR})

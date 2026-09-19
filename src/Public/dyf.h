@@ -1,0 +1,20 @@
+#pragma once
+
+// 기본 API의 진입점이다. 선택 확장은 별도 헤더로 포함한다.
+#include "dyf/Camera.h"
+#include "dyf/Canvas.h"
+#include "dyf/Font.h"
+#include "dyf/Image.h"
+#include "dyf/Light.h"
+#include "dyf/Material.h"
+#include "dyf/Mesh.h"
+#include "dyf/Renderer.h"
+#include "dyf/RendererConfig.h"
+#include "dyf/Scene.h"
+#include "dyf/Types.h"
+#include "dyf/Utf8.h"
+#include "dyf/Math/Math.h"
+#include "dyf/Platform/Input.h"
+#include "dyf/Platform/Profiler.h"
+#include "dyf/Platform/Time.h"
+#include "dyf/Platform/Window.h"
