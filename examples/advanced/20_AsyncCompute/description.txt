@@ -1,0 +1,1 @@
+현재는 Compute 지원과 단일 큐 제약을 안내하며 graphics와 compute의 GPU 중첩 실행을 하지 않습니다.
