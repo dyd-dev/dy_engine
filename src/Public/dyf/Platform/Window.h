@@ -1,9 +1,14 @@
 #pragma once
+#include "dyf/Platform/Input.h"
 struct GLFWwindow;
 
 namespace dyf::Platform
 {
-	enum class Key { F11 };
+	struct WindowSize { int width = 0, height = 0; };
+	struct ContentScale { float x = 1, y = 1; };
+	enum class CursorMode { Normal, Hidden, Locked };
+
+	// Window creation, destruction, event processing and access are main-thread only.
 	class Window
 	{
 	public:
@@ -11,19 +16,32 @@ namespace dyf::Platform
 
 		Window(unsigned int width, unsigned int height);
 		Window(unsigned int width, unsigned int height, const char *title);
-
 		Window(const Window&) = delete;
 		Window& operator=(const Window&) = delete;
 
 		bool IsRunning() const;
-		void PollEvents() const;
+		void RequestClose() const;
+		// Call once per application frame, even when rendering multiple windows.
+		static void PollEvents();
+		// Wait without publishing input. Call PollEvents afterwards to read the events.
+		static void WaitEvents(double timeoutSeconds = 0.1);
+		void Resize(unsigned int width, unsigned int height) const;
+		[[nodiscard]] WindowSize GetSize() const;
+		[[nodiscard]] WindowSize GetFramebufferSize() const;
+		[[nodiscard]] ContentScale GetContentScale() const;
+		[[nodiscard]] bool HasFocus() const;
+		[[nodiscard]] bool IsMinimized() const;
+		[[nodiscard]] const Input& GetInput() const { return m_input; }
+		void SetCursorMode(CursorMode mode);
+		[[nodiscard]] CursorMode GetCursorMode() const;
+		// Consume the selected window's profiler shortcut without consuming input snapshots.
+		[[nodiscard]] static bool ConsumeKeyPress(Key key, const void* nativeWindow);
 
 		void* GetHandle() const;
-        // Consume this window's pending profiler toggle; other windows keep their events.
-        static bool ConsumeKeyPress(Key key, const void* nativeWindow);
 
 	private:
 		struct GLFWwindow* m_window = nullptr;
+		Input m_input;
         bool m_profilerToggle = false;
 	};
 }
