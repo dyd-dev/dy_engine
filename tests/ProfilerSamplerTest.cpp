@@ -1,6 +1,7 @@
 #include <cmath>
+#include <limits>
 
-#include "Graphics/ProfilerSampler.h"
+#include "dyf/Platform/ProfilerSampler.h"
 
 namespace
 {
@@ -14,7 +15,7 @@ namespace
 
 int main()
 {
-	using namespace dy::Graphics;
+	using namespace dyf::Platform;
 
 	ProfilerSampler sampler(200.0, 1000.0);
 	ProfilerTimingSnapshot snapshot = {};
@@ -47,5 +48,21 @@ int main()
 	CHECK(snapshot.frameMaximumMilliseconds < 17.0);
 	CHECK(!snapshot.hasGpuMain && !snapshot.hasGpuShadow);
 
+    sampler.Reset();
+    const double nan=std::numeric_limits<double>::quiet_NaN();
+    CHECK(!sampler.AddSample({nan,0,0,0,false,false},snapshot));
+    CHECK(!sampler.AddSample({-1,0,0,0,false,false},snapshot));
+    CHECK(!sampler.AddSample({0,0,0,0,false,false},snapshot));
+    CHECK(!sampler.AddSample({100,nan,nan,-1,true,true},snapshot));
+    CHECK(sampler.AddSample({100,4,6,2,true,true},snapshot));
+    CHECK(snapshot.frameCount==2);
+    CHECK(Near(snapshot.cpuRenderAverageMilliseconds,2,0.001));
+    CHECK(Near(snapshot.gpuMainAverageMilliseconds,6,0.001));
+    CHECK(Near(snapshot.gpuShadowAverageMilliseconds,2,0.001));
+    CHECK(!sampler.AddSample({100,1,0,0,false,false},snapshot));
+    CHECK(!sampler.AddSample({1000,1,0,0,false,false},snapshot));
+    CHECK(!sampler.AddSample({100,1,0,0,false,false},snapshot));
+    CHECK(sampler.AddSample({100,1,0,0,false,false},snapshot));
+    CHECK(snapshot.frameCount==2 && snapshot.frameMaximumMilliseconds==100);
 	return 0;
 }

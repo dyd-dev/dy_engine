@@ -1,5 +1,9 @@
-#include "Window.h"
-#include <stdexcept>
+#include "dyf/Platform/Window.h"
+#include "dyf/Platform/RenderDocCapture.h"
+#include <cstdio>
+#include <limits>
+#include <algorithm>
+#include <vector>
 #include <GLFW/glfw3.h>
 // Expose native window handles for RHI Device initialization
 #if defined(_WIN32)
@@ -9,78 +13,68 @@
 #endif
 #include <GLFW/glfw3native.h>
 
-using namespace dy::Platform;
+using namespace dyf::Platform;
 
-namespace
-{
-	bool g_f11Pressed = false;
-	bool g_f12Pressed = false;
-
-	void OnKey(GLFWwindow*, int key, int, int action, int)
-	{
-		if(key == GLFW_KEY_F11 && action == GLFW_PRESS)
-		{
-			g_f11Pressed = true;
-		}
-		else if(key == GLFW_KEY_F12 && action == GLFW_PRESS)
-		{
-			g_f12Pressed = true;
-		}
-	}
-}
+namespace { unsigned int windowCount = 0; std::vector<Window*> windows; }
 
 Window::Window(unsigned int width, unsigned int height)
 	: Window(width, height, "New Window") {}
 
 Window::Window(unsigned int width, unsigned int height, const char* title)
 {
-	if(!glfwInit()) throw std::runtime_error("Failed to initialize GLFW.");
+	if(!width || !height || width > static_cast<unsigned>((std::numeric_limits<int>::max)()) || height > static_cast<unsigned>((std::numeric_limits<int>::max)()))
+    { std::fprintf(stderr, "dyf: invalid window dimensions.\n"); return; }
+    if(windowCount == 0 && !glfwInit())
+    { std::fprintf(stderr, "dyf: failed to initialize GLFW.\n"); return; }
 	
 	// Tell GLFW to NOT create an OpenGL context
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
-	m_window = glfwCreateWindow(width, height, title, nullptr, nullptr);
+	m_window = glfwCreateWindow(width, height, title ? title : "New Window", nullptr, nullptr);
 	if(!m_window)
 	{
-		glfwTerminate();
-		throw std::runtime_error("Failed to create GLFW window.");
+		if(windowCount == 0) glfwTerminate();
+		std::fprintf(stderr, "dyf: failed to create GLFW window.\n");
+		return;
 	}
-
-	glfwSetKeyCallback(m_window, OnKey);
+    ++windowCount;
+    windows.push_back(this);
+    glfwSetWindowUserPointer(m_window, this);
+    (void)RenderDocCapture::Initialize();
+    glfwSetKeyCallback(m_window, [](GLFWwindow* window, int key, int, int action, int) {
+        if(key == GLFW_KEY_F11 && action == GLFW_PRESS)
+            static_cast<Window*>(glfwGetWindowUserPointer(window))->m_profilerToggle = true;
+        if(key == GLFW_KEY_F12 && action == GLFW_PRESS)
+            (void)RenderDocCapture::TriggerNextFrame();
+    });
 }
 
 Window::~Window()
 {
-	if(m_window) glfwDestroyWindow(m_window);
-	glfwTerminate();
+	if(m_window)
+    {
+		glfwDestroyWindow(m_window);
+        windows.erase(std::remove(windows.begin(),windows.end(),this),windows.end());
+        if(--windowCount == 0) glfwTerminate();
+    }
 }
 
-bool Window::IsRunning() const { return !glfwWindowShouldClose(m_window); }
+bool Window::IsRunning() const { return m_window && !glfwWindowShouldClose(m_window); }
 
-void Window::PollEvents() const { glfwPollEvents(); }
-
-void Window::Resize(unsigned int width, unsigned int height) const
+bool Window::ConsumeKeyPress(Key key, const void* nativeWindow)
 {
-	glfwSetWindowSize(m_window, static_cast<int>(width), static_cast<int>(height));
+    if(key != Key::F11) return false;
+    for(auto* window : windows)
+        if(window->GetHandle() == nativeWindow && window->m_profilerToggle)
+        { window->m_profilerToggle = false; return true; }
+    return false;
 }
 
-bool Window::ConsumeKeyPress(Key key)
-{
-	if(key == Key::F11 && g_f11Pressed)
-	{
-		g_f11Pressed = false;
-		return true;
-	}
-	if(key == Key::F12 && g_f12Pressed)
-	{
-		g_f12Pressed = false;
-		return true;
-	}
-	return false;
-}
+void Window::PollEvents() const { if(m_window) glfwPollEvents(); }
 
 void* Window::GetHandle() const
 {
+    if(!m_window) return nullptr;
 #if defined(_WIN32)
 	return static_cast<void*>(glfwGetWin32Window(m_window));
 #elif defined(__APPLE__)

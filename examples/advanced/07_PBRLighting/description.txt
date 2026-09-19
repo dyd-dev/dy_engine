@@ -1,0 +1,1 @@
+절차적 구 표면에서 GGX·Smith·Schlick 기반 PBR과 Lambert 조명 및 거칠기·금속성을 비교합니다.

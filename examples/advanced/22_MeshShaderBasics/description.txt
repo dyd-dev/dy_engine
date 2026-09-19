@@ -1,0 +1,1 @@
+현재는 mesh/task 지원 조회와 누락 shader stage·pipeline·dispatch API를 안내합니다.

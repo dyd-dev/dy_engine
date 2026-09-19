@@ -1,4 +1,4 @@
-#include "Platform/RenderDocCapture.h"
+#include "dyf/Platform/RenderDocCapture.h"
 
 #include <iostream>
 #include <mutex>
@@ -15,7 +15,7 @@
 	#endif
 #endif
 
-namespace dy::Platform
+namespace dyf::Platform
 {
 namespace
 {
