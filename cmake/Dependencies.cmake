@@ -76,7 +76,12 @@ if(DY_ENABLE_TRACY)
     FetchContent_MakeAvailable(tracy)
     target_link_libraries(Engine_Options INTERFACE Tracy::TracyClient)
     target_compile_definitions(Engine_Options INTERFACE DY_TRACY_ENABLED=1)
+    if(DY_TRACY_RAW_PLOTS)
+        target_compile_definitions(Engine_Options INTERFACE DY_TRACY_RAW_PLOTS_ENABLED=1)
+    endif()
 endif()
+
+include(Profiling)
 
 FetchContent_Declare(
 	glfw
@@ -96,24 +101,4 @@ FetchContent_MakeAvailable(stb)
 target_link_libraries(${PROJECT_NAME} PRIVATE glfw)
 target_compile_definitions(${PROJECT_NAME} PRIVATE GLFW_INCLUDE_NONE)
 
-target_include_directories(${PROJECT_NAME} PUBLIC ${stb_SOURCE_DIR})
-
-# fastgltf 자동 다운로드 설정
-FetchContent_Declare(
-    fastgltf
-    GIT_REPOSITORY "https://github.com/spnda/fastgltf.git"
-    GIT_TAG "v0.9.0" # 최신 버전
-)
-FetchContent_MakeAvailable(fastgltf)
-target_link_libraries(${PROJECT_NAME} PUBLIC fastgltf::fastgltf)
-
-# ufbx 자동 다운로드 설정
-FetchContent_Declare(
-    ufbx
-    GIT_REPOSITORY "https://github.com/ufbx/ufbx.git"
-    GIT_TAG "fcc5d6ba444cfd3eb80677dba5e37e493941abe5"
-)
-FetchContent_MakeAvailable(ufbx)
-target_include_directories(${PROJECT_NAME} PUBLIC ${ufbx_SOURCE_DIR})
-set_source_files_properties("${ufbx_SOURCE_DIR}/ufbx.c" PROPERTIES LANGUAGE CXX)
-target_sources(${PROJECT_NAME} PRIVATE "${ufbx_SOURCE_DIR}/ufbx.c")
+target_include_directories(${PROJECT_NAME} PRIVATE ${stb_SOURCE_DIR})

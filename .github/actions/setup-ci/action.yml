@@ -1,0 +1,84 @@
+name: CI toolchain
+description: Install the SDK/compiler needed by the selected backend.
+inputs:
+  api:
+    description: vulkan, d3d12, metal or null
+    required: true
+  clang:
+    description: Install LLVM for the independent CPU sanitizer build
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Linux dependencies
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ninja-build xorg-dev pkg-config
+        if [ '${{ inputs.clang }}' = true ]; then
+          sudo apt-get install -y clang
+        fi
+        if [ '${{ inputs.api }}' = vulkan ]; then
+          sudo apt-get install -y mesa-vulkan-drivers xvfb xauth
+        fi
+    - name: Windows LLVM
+      if: runner.os == 'Windows' && inputs.clang == 'true'
+      shell: pwsh
+      run: |
+        $llvm = Join-Path $env:RUNNER_TEMP 'dy-ci-llvm-21.1.8'
+        if (-not (Test-Path "$llvm/bin/clang-cl.exe")) {
+          $installer = Join-Path $env:RUNNER_TEMP 'llvm-21.1.8.exe'
+          Invoke-WebRequest 'https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/LLVM-21.1.8-win64.exe' -OutFile $installer
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne '7a5386c26497db1691f320121e5b113364dd0274b98e55f15f4dbc00c0450113') { throw 'LLVM checksum mismatch' }
+          $process = Start-Process $installer -ArgumentList @('/S', "/D=$llvm") -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) { throw "LLVM installation failed: $($process.ExitCode)" }
+        }
+        "DY_CI_LLVM=$llvm" >> $env:GITHUB_ENV
+        "$llvm/bin" >> $env:GITHUB_PATH
+        Get-ChildItem "$llvm/lib/clang/*/lib/windows" -Directory | ForEach-Object { $_.FullName >> $env:GITHUB_PATH }
+    - name: macOS LLVM
+      if: runner.os == 'macOS' && inputs.clang == 'true'
+      shell: bash
+      run: |
+        brew list llvm >/dev/null 2>&1 || brew install llvm
+        echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+        echo "DY_CI_LLVM=$(brew --prefix llvm)" >> "$GITHUB_ENV"
+    - name: Linux Vulkan SDK
+      if: runner.os == 'Linux' && inputs.api == 'vulkan'
+      shell: bash
+      run: |
+        sdk="$RUNNER_TEMP/vulkan/1.4.341.1/x86_64"
+        if [ ! -x "$sdk/bin/glslc" ]; then
+          archive="$RUNNER_TEMP/vulkansdk.tar.xz"
+          curl --fail --location --retry 3 'https://sdk.lunarg.com/sdk/download/1.4.341.1/linux/vulkansdk-linux-x86_64-1.4.341.1.tar.xz' -o "$archive"
+          echo "3bf0f762afb6c79bc6a9d9fb5998745ccff928800a29619b501ed9de7fd9789b  $archive" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/vulkan"
+          tar -xf "$archive" -C "$RUNNER_TEMP/vulkan"
+        fi
+        echo "VULKAN_SDK=$sdk" >> "$GITHUB_ENV"
+        echo "VK_LAYER_PATH=$sdk/share/vulkan/explicit_layer.d" >> "$GITHUB_ENV"
+        echo "LD_LIBRARY_PATH=$sdk/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+        echo "$sdk/bin" >> "$GITHUB_PATH"
+    - name: Windows Vulkan SDK
+      if: runner.os == 'Windows' && (inputs.api == 'vulkan' || inputs.api == 'd3d12')
+      shell: pwsh
+      run: |
+        $sdk = Join-Path $env:RUNNER_TEMP 'dy-ci-vulkan-1.4.341.1'
+        if (-not (Test-Path "$sdk/Bin/glslc.exe")) {
+          $installer = Join-Path $env:RUNNER_TEMP 'vulkansdk.exe'
+          Invoke-WebRequest 'https://sdk.lunarg.com/sdk/download/1.4.341.1/windows/vulkansdk-windows-X64-1.4.341.1.exe' -OutFile $installer
+          if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne 'bcf2d75aa9556889ab974858666e20b3655b6055a0db704ccb47279ff33b5bfe') { throw 'Vulkan SDK checksum mismatch' }
+          $process = Start-Process $installer -ArgumentList @('--root', "`"$sdk`"", '--accept-licenses', '--default-answer', '--confirm-command', 'install', 'copy_only=1') -Wait -PassThru -WindowStyle Hidden
+          if ($process.ExitCode -ne 0) { throw "Vulkan SDK installation failed: $($process.ExitCode)" }
+        }
+        "VULKAN_SDK=$sdk" >> $env:GITHUB_ENV
+        "$sdk/Bin" >> $env:GITHUB_PATH
+    - name: Tool versions
+      shell: bash
+      run: |
+        cmake --version
+        python --version
+        if [ '${{ inputs.clang }}' = true ]; then
+          if [ "$RUNNER_OS" = Windows ]; then clang-cl --version; else clang++ --version; fi
+        fi

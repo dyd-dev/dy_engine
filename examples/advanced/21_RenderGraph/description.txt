@@ -1,0 +1,1 @@
+같은 두 색상 패스를 수동 배리어 또는 명시적 초기·최종 상태의 RenderGraph Compile 및 const Execute로 기록하여 동일 상태 쓰기 의존성과 그림의 일치를 확인한다.

@@ -10,18 +10,15 @@ target_compile_features(Engine_Options INTERFACE cxx_std_17)
 
 # ===== ===== Include ===== =====
 target_include_directories(Engine_Options INTERFACE
-	${CMAKE_SOURCE_DIR}/src
-)
-
-# ===== ===== Compile definition ===== =====
-target_compile_definitions(Engine_Options INTERFACE
-	ENGINE_VERSION="1.0.0"
-	GLFW_INCLUDE_NONE
+	${PROJECT_SOURCE_DIR}/src/Public
 )
 
 # ===== ===== SIMD ===== =====
 option(DY_ENABLE_SIMD "Enable dy::Math SIMD code paths when supported by the target CPU." ON)
 option(DY_ENABLE_TRACY "Embed Tracy profiling instrumentation in engine applications." ON)
+option(DY_TRACY_RAW_PLOTS "Publish per-frame Tracy plots in addition to 5 Hz averages." OFF)
+option(DY_ENABLE_RENDERDOC "Enable capture controls for an already injected RenderDoc API." OFF)
+option(DY_ENABLE_PIX "Enable D3D12 PIX events using WinPixEventRuntime (MSVC)." ${MSVC})
 
 if(DY_ENABLE_SIMD)
 	target_compile_definitions(Engine_Options INTERFACE DY_SIMD_ENABLED=1)

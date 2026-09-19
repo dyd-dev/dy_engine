@@ -6,8 +6,9 @@
 #define VK_USE_PLATFORM_WIN32_KHR
 #endif
 #include <vulkan/vulkan.h>
+#include <vector>
 
-namespace dy::Backends
+namespace dyf::Backends
 {
 
 struct VulkanContext {
@@ -17,6 +18,7 @@ struct VulkanContext {
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     VkQueue graphicsQueue = VK_NULL_HANDLE;
     VkQueue presentQueue = VK_NULL_HANDLE;
+    bool debugUtilsEnabled = false;
 
     struct QueueFamilyIndices {
         uint32_t graphicsFamily = UINT32_MAX;

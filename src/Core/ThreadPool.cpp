@@ -1,105 +1,80 @@
-#include "Core/ThreadPool.h"
+#include "dyf/Core/ThreadPool.h"
 #include <algorithm>
-#include <iostream>
+#include <stdexcept>
 
-namespace dy::Core
+namespace dyf::Core
 {
-	ThreadPool::ThreadPool(uint32_t threadCount)
-	{
-		if (threadCount == 0)
-		{
-			uint32_t hardwareThreads = std::thread::hardware_concurrency();
-			// 하드웨어 스레드가 0을 반환할 수 있으므로 최소 2개, 일반적으로 4개 이상으로 안전하게 설정
-			threadCount = hardwareThreads > 0 ? hardwareThreads : 4;
-		}
+namespace { thread_local const ThreadPool* currentPool = nullptr; }
 
-		m_workers.reserve(threadCount);
-		for (uint32_t i = 0; i < threadCount; ++i)
-		{
-			m_workers.emplace_back(&ThreadPool::WorkerLoop, this);
-		}
-	}
+ThreadPool::ThreadPool(uint32_t threadCount)
+{
+    if(!threadCount) threadCount = (std::max)(1u, std::thread::hardware_concurrency());
+    m_workers.reserve(threadCount);
+    try
+    {
+        for(uint32_t i = 0; i < threadCount; ++i)
+            m_workers.emplace_back([this] { WorkerLoop(); });
+    }
+    catch(...)
+    {
+        { std::lock_guard<std::mutex> lock(m_mutex); m_stopping = true; }
+        m_ready.notify_all();
+        for(auto& worker : m_workers) worker.join();
+        throw;
+    }
+}
 
-	ThreadPool::~ThreadPool()
-	{
-		{
-			std::unique_lock<std::mutex> lock(m_queueMutex);
-			m_stop.store(true, std::memory_order_release);
-		}
-		m_workerCv.notify_all();
+ThreadPool::~ThreadPool()
+{
+    { std::lock_guard<std::mutex> lock(m_mutex); m_stopping = true; }
+    m_ready.notify_all();
+    for(auto& worker : m_workers) worker.join();
+}
 
-		for (std::thread& worker : m_workers)
-		{
-			if (worker.joinable())
-			{
-				worker.join();
-			}
-		}
-	}
+std::future<void> ThreadPool::Enqueue(std::function<void()> task)
+{
+    if(!task) throw std::invalid_argument("ThreadPool requires a callable task.");
+    std::packaged_task<void()> pending(std::move(task));
+    auto result = pending.get_future();
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if(m_stopping) throw std::runtime_error("ThreadPool is stopping.");
+        m_tasks.push_back(std::move(pending));
+    }
+    m_ready.notify_one();
+    return result;
+}
 
-	void ThreadPool::Enqueue(std::function<void()> task)
-	{
-		if (!task) return;
+bool ThreadPool::IsWorkerThread() const { return currentPool == this; }
 
-		{
-			std::unique_lock<std::mutex> lock(m_queueMutex);
-			if (m_stop.load(std::memory_order_acquire)) return;
-			m_tasks.push(std::move(task));
-		}
-		m_workerCv.notify_one();
-	}
+void ThreadPool::WaitAll()
+{
+    if(IsWorkerThread()) throw std::logic_error("A ThreadPool worker cannot wait for its own pool.");
+    std::unique_lock<std::mutex> lock(m_mutex);
+    m_idle.wait(lock, [this] { return m_tasks.empty() && m_active == 0; });
+}
 
-	void ThreadPool::WaitAll()
-	{
-		std::unique_lock<std::mutex> lock(m_queueMutex);
-		m_waitCv.wait(lock, [this]() {
-			return m_tasks.empty() && m_busyWorkers.load(std::memory_order_acquire) == 0;
-		});
-	}
-
-	void ThreadPool::WorkerLoop()
-	{
-		while (true)
-		{
-			std::function<void()> task;
-			{
-				std::unique_lock<std::mutex> lock(m_queueMutex);
-				m_workerCv.wait(lock, [this]() {
-					return m_stop.load(std::memory_order_acquire) || !m_tasks.empty();
-				});
-
-				if (m_stop.load(std::memory_order_acquire) && m_tasks.empty())
-				{
-					return;
-				}
-
-				task = std::move(m_tasks.front());
-				m_tasks.pop();
-				m_busyWorkers.fetch_add(1, std::memory_order_acq_rel);
-			}
-
-			// 작업 실행 (예외 발생 시에도 카운터가 정상 감소하도록 보호)
-			try
-			{
-				task();
-			}
-			catch (const std::exception& e)
-			{
-				std::cerr << "[ThreadPool] Task failed with exception: " << e.what() << '\n';
-			}
-			catch (...)
-			{
-				std::cerr << "[ThreadPool] Task failed with unknown exception.\n";
-			}
-
-			{
-				std::unique_lock<std::mutex> lock(m_queueMutex);
-				m_busyWorkers.fetch_sub(1, std::memory_order_acq_rel);
-				if (m_tasks.empty() && m_busyWorkers.load(std::memory_order_acquire) == 0)
-				{
-					m_waitCv.notify_all();
-				}
-			}
-		}
-	}
+void ThreadPool::WorkerLoop()
+{
+    currentPool = this;
+    for(;;)
+    {
+        std::packaged_task<void()> task;
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            m_ready.wait(lock, [this] { return m_stopping || !m_tasks.empty(); });
+            if(m_tasks.empty()) break;
+            task = std::move(m_tasks.front());
+            m_tasks.pop_front();
+            ++m_active;
+        }
+        task();
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            --m_active;
+            if(m_tasks.empty() && !m_active) m_idle.notify_all();
+        }
+    }
+    currentPool = nullptr;
+}
 }
