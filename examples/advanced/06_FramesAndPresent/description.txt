@@ -1,0 +1,1 @@
+완료 Fence를 기다린 뒤 프레임별 명령 목록을 재사용하고 --flight 및 Fifo/Immediate/Mailbox에 따른 CPU 대기와 표시 간격을 비교한다.
