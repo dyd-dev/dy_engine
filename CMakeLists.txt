@@ -31,6 +31,7 @@ add_library(${PROJECT_NAME} STATIC
 	"src/dyf/TextureCache.cpp"
 	"src/dyf/Scene.cpp"
 	"src/Platform/Window.cpp"
+	"src/Platform/Input.cpp"
 )
 
 # global options
@@ -43,6 +44,11 @@ target_include_directories(${PROJECT_NAME} BEFORE PUBLIC "${PROJECT_SOURCE_DIR}/
 target_include_directories(${PROJECT_NAME} PRIVATE "${PROJECT_SOURCE_DIR}/src")
 
 option(DY_EXTEND_MODEL "Build the optional Model extension." OFF)
+option(DY_EXTEND_IMGUI "Build the optional Dear ImGui extension." OFF)
+option(DY_BUILD_EDITOR "Build the native dy_engine scene editor." OFF)
+if(DY_BUILD_EDITOR)
+	set(DY_EXTEND_IMGUI ON)
+endif()
 
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     include(CiChecks)
@@ -55,6 +61,12 @@ include(ShaderAssets)
 
 if(DY_EXTEND_MODEL)
 	add_subdirectory(src/Extend/Model)
+endif()
+if(DY_EXTEND_IMGUI)
+	add_subdirectory(src/Extend/ImGui)
+endif()
+if(DY_BUILD_EDITOR)
+	add_subdirectory(tools/Editor)
 endif()
 
 # Only add the executable if this is the main project being built (not when included as a subdirectory in another project)

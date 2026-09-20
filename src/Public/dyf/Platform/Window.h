@@ -1,9 +1,9 @@
 #pragma once
+#include "dyf/Platform/Input.h"
 struct GLFWwindow;
 
 namespace dyf::Platform
 {
-	enum class Key { F11 };
 	class Window
 	{
 	public:
@@ -19,11 +19,12 @@ namespace dyf::Platform
 		void PollEvents() const;
 
 		void* GetHandle() const;
-        // Consume this window's pending profiler toggle; other windows keep their events.
-        static bool ConsumeKeyPress(Key key, const void* nativeWindow);
+		// GLFW backend integration only. GetHandle remains the RHI native-window handle.
+		GLFWwindow* GetGlfwHandle() const { return m_window; }
+		const Input& GetInput() const { return m_input; }
 
 	private:
 		struct GLFWwindow* m_window = nullptr;
-        bool m_profilerToggle = false;
+		Input m_input;
 	};
 }

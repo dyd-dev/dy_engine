@@ -13,11 +13,13 @@ bool Renderer::PreparePostProcess(RHI::TextureHandle output)
 {
     using namespace RHI;
     if(!output)return false;
+    if(tonePipeline && toneColorFormat!=output->GetDesc().format)
+    {device->DestroyPipeline(tonePipeline);tonePipeline=nullptr;}
     if(!tonePipeline)
     {
         const auto shaders=DefaultShaders();
-        toneVertexShader=device->CreateShader(ShaderDescription(ToneVertex,shaders.toneMapVertex));
-        toneFragmentShader=device->CreateShader(ShaderDescription(ToneFragment,shaders.toneMapFragment));
+        if(!toneVertexShader) toneVertexShader=device->CreateShader(ShaderDescription(ToneVertex,shaders.toneMapVertex));
+        if(!toneFragmentShader) toneFragmentShader=device->CreateShader(ShaderDescription(ToneFragment,shaders.toneMapFragment));
         if(!toneVertexShader || !toneFragmentShader)return false;
         SamplerDesc sampler;
         sampler.minFilter=sampler.magFilter=sampler.mipFilter=SamplerFilter::Nearest;
@@ -33,6 +35,7 @@ bool Renderer::PreparePostProcess(RHI::TextureHandle output)
         desc.layout={bindings.data(),static_cast<uint32_t>(bindings.size()),16,ShaderStageFlags::Fragment,15};
         tonePipeline=device->CreateGraphicsPipeline(desc);
         if(!tonePipeline)return false;
+        toneColorFormat=output->GetDesc().format;
     }
     if(hdrTarget && (hdrTarget->GetDesc().width!=output->GetDesc().width || hdrTarget->GetDesc().height!=output->GetDesc().height))
     {device->DestroyTexture(hdrTarget);hdrTarget=nullptr;}

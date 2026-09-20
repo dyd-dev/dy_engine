@@ -19,7 +19,6 @@
 #include <exception>
 #include "ShaderLayout.h"
 #include "dyf/Platform/Profiler.h"
-#include "dyf/Platform/Window.h"
 #include <chrono>
 #include "dyf/Camera.h"
 #include "dyf/Scene.h"
@@ -216,6 +215,9 @@ void Renderer::SwapResources(Renderer& other)
     swap(shadowPipeline,other.shadowPipeline);
     swap(canvasPipeline,other.canvasPipeline);
     swap(tonePipeline,other.tonePipeline);
+    swap(meshColorFormat,other.meshColorFormat);
+    swap(toneColorFormat,other.toneColorFormat);
+    swap(meshCompositeAlpha,other.meshCompositeAlpha);
     swap(depthStencilTarget,other.depthStencilTarget);
     swap(shadowDepthTarget,other.shadowDepthTarget);
     swap(hdrTarget,other.hdrTarget);
@@ -390,23 +392,31 @@ bool Renderer::UsesBindlessMaterials() const
     return device->Supports(MeshLayout(true, bindings));
 }
 
-bool Renderer::InitializeMesh()
+bool Renderer::InitializeMesh(RHI::TextureHandle output,bool compositeAlpha)
 {
+    if(!output) output=device->GetBackBuffer();
+    if(!output) return false;
+    const auto colorFormat=config.enableHdrRendering ? RHI::Format::R16G16B16A16_FLOAT : output->GetDesc().format;
     const bool shadows = config.lighting.enabled && config.lighting.shadows;
-    if(pipeline != nullptr) return true;
+    if(pipeline != nullptr && meshColorFormat==colorFormat && meshCompositeAlpha==compositeAlpha) return true;
     RHI::IDevice* nativeDevice = device;
     const auto stockShaders = DefaultShaders(shadows,UsesBindlessMaterials());
 
-	vertexShader = nativeDevice->CreateShader(ShaderDescription(MeshVertex,stockShaders.meshVertex));
-	fragmentShader = nativeDevice->CreateShader(ShaderDescription(MeshFragment,stockShaders.meshFragment));
-	if(shadows)
+	if(!vertexShader) vertexShader = nativeDevice->CreateShader(ShaderDescription(MeshVertex,stockShaders.meshVertex));
+	if(!fragmentShader) fragmentShader = nativeDevice->CreateShader(ShaderDescription(MeshFragment,stockShaders.meshFragment));
+	if(shadows && !shadowVertexShader)
 	{
 		shadowVertexShader = nativeDevice->CreateShader(ShaderDescription(ShadowVertex,stockShaders.shadowVertex));
 	}
 	if(vertexShader == nullptr || fragmentShader == nullptr ||
 		(shadows && shadowVertexShader == nullptr)) return false;
-	if(!BuildPipelineStates(nativeDevice) || !CreateDefaultMaterialTextures(nativeDevice)) return false;
-	return EnsureDepthStencilTarget(nativeDevice);
+    nativeDevice->DestroyPipeline(pipeline);pipeline=nullptr;
+    nativeDevice->DestroyPipeline(shadowPipeline);shadowPipeline=nullptr;
+	if(!BuildPipelineStates(nativeDevice,colorFormat,compositeAlpha)) return false;
+    meshColorFormat=colorFormat;
+    meshCompositeAlpha=compositeAlpha;
+    if(!defaultMaterialTextures[0] && !CreateDefaultMaterialTextures(nativeDevice)) return false;
+	return EnsureDepthStencilTarget(nativeDevice,output);
 }
 
 void Renderer::Shutdown()
@@ -424,19 +434,34 @@ void Renderer::Shutdown()
     lightingBuffer=shadowMatrixBuffer=nullptr;
     for(auto* value:{pipeline,shadowPipeline,canvasPipeline,tonePipeline})if(value)device->DestroyPipeline(value);
     pipeline=shadowPipeline=canvasPipeline=tonePipeline=nullptr;
+    meshColorFormat=toneColorFormat=RHI::Format::Unknown;
+    meshCompositeAlpha=false;
     for(auto* shader:{vertexShader,fragmentShader,shadowVertexShader,canvasVertexShader,canvasFragmentShader,toneVertexShader,toneFragmentShader})
         if(shader)device->DestroyShader(shader);
     vertexShader=fragmentShader=shadowVertexShader=canvasVertexShader=canvasFragmentShader=toneVertexShader=toneFragmentShader=nullptr;
 }
 
-bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, const Canvas* overlay, Image* readback, const std::vector<RendererDrawDesc>* draws)
+bool Renderer::RenderToTexture(const Scene& scene,const Camera& camera,RHI::TextureHandle target,RHI::ResourceState before)
+{
+    if(!target) return RendererFailure("RenderToTexture requires a target.");
+    const auto& desc=target->GetDesc();
+    const auto usage=RHI::TextureUsage::RenderTarget|RHI::TextureUsage::ShaderResource;
+    if(!desc.width || !desc.height || desc.depthOrArraySize!=1 || desc.mipLevels!=1 ||
+        (desc.usage&usage)!=usage || !RHI::IsReadbackFormat(desc.format))
+        return RendererFailure("RenderToTexture requires a single-mip 2D RGBA/BGRA8 renderable sampled texture.");
+    if(before!=RHI::ResourceState::Undefined && before!=RHI::ResourceState::ShaderResource &&
+        before!=RHI::ResourceState::RenderTarget)
+        return RendererFailure("RenderToTexture before state must be Undefined, ShaderResource or RenderTarget.");
+    return RenderScene(scene,&camera,nullptr,nullptr,nullptr,target,before);
+}
+
+bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, const Canvas* overlay, Image* readback,
+    const std::vector<RendererDrawDesc>* draws,RHI::TextureHandle selectedOutput,RHI::ResourceState before)
 {
     try
     {
         DY_PROFILE_CPU_ZONE_NAMED("Renderer::RenderScene");
         if(!ApplySettings())return false;
-        if(Platform::Window::ConsumeKeyPress(Platform::Key::F11,windowHandle))
-            config.profilerStartsExpanded = !config.profilerStartsExpanded;
         if(draws && draws->size() != scene.GetEntityCount()) return RendererFailure("Draw input count must match the scene.");
         if(draws) for(const auto& draw : *draws)
             if(draw.inlineConstants.size() != shaderSources.additionalConstantBytes)
@@ -444,23 +469,26 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
         const auto cpuStart=std::chrono::steady_clock::now();
         if(readback && !config.allowReadback) return RendererFailure("Renderer readback was not enabled.");
         RHI::IDevice* nativeDevice = device;
-        if(!nativeDevice->BeginFrame()){if(nativeDevice->IsLost())return RendererFailure("RHI device was lost.");if(readback)*readback={};return true;}
+        if(!selectedOutput && !nativeDevice->BeginFrame()){if(nativeDevice->IsLost())return RendererFailure("RHI device was lost.");if(readback)*readback={};return true;}
+        auto* output=selectedOutput ? selectedOutput : nativeDevice->GetBackBuffer();
+        if(!output) return RendererFailure("Scene output is unavailable.");
+        const auto after=selectedOutput ? RHI::ResourceState::ShaderResource : RHI::ResourceState::Present;
         Camera defaultCamera;
-        const auto& targetDesc = nativeDevice->GetBackBuffer()->GetDesc();
+        const auto& targetDesc = output->GetDesc();
         if(!selectedCamera) defaultCamera.SetPerspective(targetDesc.width / static_cast<float>(targetDesc.height));
         const Camera& camera = selectedCamera ? *selectedCamera : defaultCamera;
         ShadowData shadows;
         BuildShadows(shadows,scene,camera);
-        if(!InitializeMesh()) return RendererFailure("Mesh pipeline creation failed.");
+        if(!InitializeMesh(output,selectedOutput!=nullptr)) return RendererFailure("Mesh pipeline creation failed.");
 
 
         if(!SyncTextures(scene, nativeDevice)) return RendererFailure("Scene texture upload failed.");
         materialStates.resize(scene.Materials().size());
         UpdateMaterialStates(scene);
-        if(!EnsureDepthStencilTarget(nativeDevice) || !EnsureShadowDepthTarget(nativeDevice,shadows.columns,shadows.rows,shadows.resolution))
+        if(!EnsureDepthStencilTarget(nativeDevice,output) || !EnsureShadowDepthTarget(nativeDevice,shadows.columns,shadows.rows,shadows.resolution))
             return RendererFailure("Scene depth target creation failed.");
 
-        if(config.enableHdrRendering && !PreparePostProcess(nativeDevice->GetBackBuffer()))
+        if(config.enableHdrRendering && !PreparePostProcess(output))
             return RendererFailure("HDR pass creation failed.");
         if(!PrepareGeometry(scene, nativeDevice)) return RendererFailure("Mesh upload failed.");
 
@@ -495,12 +523,14 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
         if(previousShadowMatrixBuffer != nullptr) nativeDevice->DestroyBuffer(previousShadowMatrixBuffer);
 
         RHI::TimestampQueryHandle shadowQuery = nullptr, mainQuery = nullptr;
-        shadowQuery=BeginGpuSample(0);
-        mainQuery=BeginGpuSample(1);
+        if(!selectedOutput)
+        {
+            shadowQuery=BeginGpuSample(0);
+            mainQuery=BeginGpuSample(1);
+        }
         using State = RHI::ResourceState;
         RHI::RenderGraph graph;
-        auto* output = nativeDevice->GetBackBuffer();
-        const auto backBuffer = graph.ImportTexture("BackBuffer", output, State::Present, State::Present);
+        const auto backBuffer = graph.ImportTexture("Output", output, before, after);
         const auto depth = graph.ImportTexture("Depth", depthStencilTarget, depthStencilState, State::DepthWrite);
         const auto color = config.enableHdrRendering
             ? graph.ImportTexture("HDR", hdrTarget, hdrState, State::ShaderResource) : backBuffer;
@@ -527,7 +557,7 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
         mainPass.Write(color, State::RenderTarget).Write(depth, State::DepthWrite);
         if(shadowDepthTarget) mainPass.Read(shadow, State::ShaderResource);
         mainPass.SetExecute([&](RHI::ICommandList* commands) {
-            require(RecordMainPass(scene, camera, *commands, draws, mainQuery));
+            require(RecordMainPass(scene, camera, *commands, draws, mainQuery, output));
         });
         if(config.enableHdrRendering)
             graph.AddPass("ToneMap").Read(color, State::ShaderResource).Write(backBuffer, State::RenderTarget)
@@ -543,8 +573,8 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
             .SetExecute([&](RHI::ICommandList* commands) {
                 const double cpuMs = std::chrono::duration<double,std::milli>(
                     std::chrono::steady_clock::now()-cpuStart).count();
-                RecordProfilerFrame(cpuMs, scene.GetEntityCount());
-                if(config.enableProfilerHud)
+                if(!selectedOutput) RecordProfilerFrame(cpuMs, scene.GetEntityCount());
+                if(config.enableProfilerHud && !selectedOutput)
                 {
                     commands->BeginDebugEvent("Profiler HUD");
                     auto hud = BuildProfilerOverlay(output->GetDesc().width, output->GetDesc().height,
@@ -583,8 +613,8 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
             ? RHI::ResourceState::ShaderResource
             : RHI::ResourceState::Undefined;
         if(readback && !CaptureFrame(*readback))return false;
-        if(!nativeDevice->Present()) return RendererFailure("Scene presentation failed.");
-        DY_PROFILE_FRAME_MARK();
+        if(!selectedOutput && !nativeDevice->Present()) return RendererFailure("Scene presentation failed.");
+        if(!selectedOutput) DY_PROFILE_FRAME_MARK();
         return true;
     }
     catch(const std::exception& error)
@@ -648,10 +678,9 @@ RHI::PipelineLayoutDesc Renderer::MeshLayout(bool bindless, std::vector<RHI::Res
         vertexAndFragment,10u};
 }
 
-bool Renderer::BuildPipelineStates(RHI::IDevice* device)
+bool Renderer::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorFormat,bool compositeAlpha)
 {
-	RHI::TextureHandle backBuffer = device->GetBackBuffer();
-	if(backBuffer == nullptr || backBuffer->GetDesc().format == RHI::Format::Unknown ||
+	if(colorFormat == RHI::Format::Unknown ||
 		vertexShader == nullptr || fragmentShader == nullptr) return false;
 
 	const RHI::VertexBufferLayout vertexBuffer = {
@@ -667,9 +696,9 @@ bool Renderer::BuildPipelineStates(RHI::IDevice* device)
 	}};
 
 	const RHI::ColorAttachmentDesc colorAttachment = {
-		config.enableHdrRendering ? RHI::Format::R16G16B16A16_FLOAT : RHI::Format::B8G8R8A8_UNORM,
+		colorFormat,
 		{ true, RHI::BlendFactor::SourceAlpha, RHI::BlendFactor::OneMinusSourceAlpha, RHI::BlendOp::Add,
-			RHI::BlendFactor::One, RHI::BlendFactor::Zero, RHI::BlendOp::Add },
+			RHI::BlendFactor::One, compositeAlpha ? RHI::BlendFactor::OneMinusSourceAlpha : RHI::BlendFactor::Zero, RHI::BlendOp::Add },
 		RHI::ColorWriteMask::All
 	};
 
@@ -793,10 +822,10 @@ bool Renderer::CreateDefaultMaterialTextures(RHI::IDevice* device)
 	return submitted && !uploadFailed;
 }
 
-bool Renderer::EnsureDepthStencilTarget(RHI::IDevice* device)
+bool Renderer::EnsureDepthStencilTarget(RHI::IDevice* device,RHI::TextureHandle output)
 {
 	if(device == nullptr) return false;
-	RHI::TextureHandle backBuffer = device->GetBackBuffer();
+	RHI::TextureHandle backBuffer = output ? output : device->GetBackBuffer();
 	if(backBuffer == nullptr || backBuffer->GetDesc().width == 0u || backBuffer->GetDesc().height == 0u)
 		return false;
 
@@ -956,7 +985,7 @@ bool Renderer::UpdateLightingBuffer(
 	constants.pbrParams = Math::float4(
 		0.04f,
 		0.25f,
-		config.enableHdrRendering ? -1.0f : 1.0f,
+		config.enableHdrRendering ? -1.0f : (RHI::IsSrgbFormat(meshColorFormat) ? 0.0f : 1.0f),
 		config.exposure);
 	constants.environmentColor = Math::float4(
 		config.lighting.environment.specularColor.x,

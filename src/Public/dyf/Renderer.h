@@ -73,6 +73,14 @@ public:
     [[nodiscard]] bool Render(const Scene&, const Canvas& overlay, Image* readback = nullptr);
     [[nodiscard]] bool Render(const Scene&, const Camera&, const Canvas& overlay, Image* readback = nullptr);
 
+    // Caller-owned RGBA/BGRA8 RenderTarget | ShaderResource texture. Submits rendering
+    // and leaves the texture in ShaderResource. Does not acquire or present a frame.
+    // Pass Undefined for a new texture, its actual state on later calls. The caller
+    // retains the texture. Profiler HUD/Canvas overlays belong to the window render path.
+    // Prefer SRGB targets for Gui::RegisterTexture: UNORM output already carries display gamma.
+    [[nodiscard]] bool RenderToTexture(const Scene&, const Camera&, RHI::TextureHandle target,
+        RHI::ResourceState before);
+
     // RHI를 직접 조합하는 확장만 사용하는 입력이다. 배열 순서는 Scene의 객체 ID 순서다.
     [[nodiscard]] bool Render(const Scene&, const Camera&, const std::vector<RendererDrawDesc>&,
         const Canvas* overlay = nullptr, Image* readback = nullptr);
@@ -133,14 +141,15 @@ private:
     static RendererShaderDesc DefaultShaders(bool shadows = false, bool bindless = false);
     bool CaptureFrame(Image&);
     bool Initialize();
-    bool InitializeMesh();
+    bool InitializeMesh(RHI::TextureHandle output = nullptr,bool compositeAlpha = false);
     bool UsesBindlessMaterials() const;
     RHI::PipelineLayoutDesc MeshLayout(bool bindless, std::vector<RHI::ResourceBindingLayout>& bindings) const;
     void Shutdown();
-    bool RenderScene(const Scene&,const Camera*,const Canvas*,Image*,const std::vector<RendererDrawDesc>* = nullptr);
-    bool BuildPipelineStates(RHI::IDevice*);
+    bool RenderScene(const Scene&,const Camera*,const Canvas*,Image*,const std::vector<RendererDrawDesc>* = nullptr,
+        RHI::TextureHandle output = nullptr, RHI::ResourceState before = RHI::ResourceState::Present);
+    bool BuildPipelineStates(RHI::IDevice*,RHI::Format colorFormat,bool compositeAlpha);
     bool CreateDefaultMaterialTextures(RHI::IDevice*);
-    bool EnsureDepthStencilTarget(RHI::IDevice*);
+    bool EnsureDepthStencilTarget(RHI::IDevice*,RHI::TextureHandle output = nullptr);
     bool EnsureShadowDepthTarget(RHI::IDevice*,uint32_t columns,uint32_t rows,uint32_t resolution);
     void UpdateMaterialStates(const Scene&);
     bool UpdateLightingBuffer(const Scene&,const Camera&,RHI::IDevice*,RHI::ICommandList&);
@@ -156,7 +165,7 @@ private:
     bool RecordShadowPass(const Scene&,const Camera&,const ShadowData&,RHI::ICommandList&,
         const std::vector<RendererDrawDesc>*,RHI::TimestampQueryHandle);
     bool RecordMainPass(const Scene&,const Camera&,RHI::ICommandList&,
-        const std::vector<RendererDrawDesc>*,RHI::TimestampQueryHandle);
+        const std::vector<RendererDrawDesc>*,RHI::TimestampQueryHandle,RHI::TextureHandle output);
     void DestroyMeshState(RHI::IDevice*,SceneMeshState&);
     void ReleaseGeometry(RHI::IDevice*);
     bool SyncTextures(const Scene&,RHI::IDevice*);
@@ -185,6 +194,8 @@ private:
     RHI::ShaderHandle toneVertexShader=nullptr,toneFragmentShader=nullptr;
     RHI::PipelineHandle pipeline=nullptr,shadowPipeline=nullptr;
     RHI::PipelineHandle canvasPipeline=nullptr,tonePipeline=nullptr;
+    RHI::Format meshColorFormat=RHI::Format::Unknown,toneColorFormat=RHI::Format::Unknown;
+    bool meshCompositeAlpha=false;
     RHI::TextureHandle depthStencilTarget=nullptr,shadowDepthTarget=nullptr,hdrTarget=nullptr;
     std::array<RHI::TextureHandle,3> defaultMaterialTextures={};
     RHI::ResourceState depthStencilState=RHI::ResourceState::Undefined;

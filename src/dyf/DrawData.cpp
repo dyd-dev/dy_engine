@@ -412,12 +412,12 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 
 bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
 	RHI::ICommandList& commands, const std::vector<RendererDrawDesc>* draws,
-	RHI::TimestampQueryHandle mainQuery)
+	RHI::TimestampQueryHandle mainQuery, RHI::TextureHandle output)
 {
 	if(device == nullptr || pipeline == nullptr) return false;
 	std::vector<RHI::ResourceSetHandle> materialSets;
 	if(!CreateMaterialResourceSets(scene, commands, draws, materialSets)) return false;
-	auto* target = config.enableHdrRendering ? hdrTarget : device->GetBackBuffer();
+	auto* target = config.enableHdrRendering ? hdrTarget : output;
 	if(!target) { DestroyResourceSets(device, materialSets); return false; }
 	const auto viewProjection = camera.projection * camera.view;
 	if(mainQuery) { commands.ResetTimestamps(mainQuery, 0, 2); commands.WriteTimestamp(mainQuery, 0); }
@@ -431,6 +431,13 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
 	color.clearColor[1] = config.clearColor.y;
 	color.clearColor[2] = config.clearColor.z;
 	color.clearColor[3] = config.clearColor.w;
+    // clearColor is a display color, matching the existing window/Canvas path.
+    if(RHI::IsSrgbFormat(target->GetDesc().format))
+        for(uint32_t channel=0;channel<3;++channel)
+        {
+            const float value=color.clearColor[channel];
+            color.clearColor[channel]=value<=0.04045f ? value/12.92f : std::pow((value+0.055f)/1.055f,2.4f);
+        }
 	RHI::DepthStencilAttachment depth;
 	depth.texture = depthStencilTarget;
 	depth.state = RHI::ResourceState::DepthWrite;
