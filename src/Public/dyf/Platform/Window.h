@@ -34,12 +34,18 @@ namespace dyf::Platform
 		[[nodiscard]] const Input& GetInput() const { return m_input; }
 		void SetCursorMode(CursorMode mode);
 		[[nodiscard]] CursorMode GetCursorMode() const;
-		// Consume the selected window's profiler shortcut without consuming input snapshots.
+		[[nodiscard]] bool IsRawMouseMotionSupported() const;
+		// Opt-in flag; GLFW delivers raw motion only while CursorMode::Locked.
+		// Unsupported enable returns false and leaves ordinary mouse input available.
+		bool SetRawMouseMotion(bool enabled);
+		[[nodiscard]] bool IsRawMouseMotionEnabled() const;
+		// Consume this window's profiler shortcut without consuming input snapshots.
 		[[nodiscard]] static bool ConsumeKeyPress(Key key, const void* nativeWindow);
 
 		void* GetHandle() const;
 
 	private:
+		void ResetCursorDelta();
 		struct GLFWwindow* m_window = nullptr;
 		Input m_input;
         bool m_profilerToggle = false;

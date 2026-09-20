@@ -54,39 +54,44 @@ Window::Window(unsigned int width, unsigned int height, const char* title)
     windows.push_back(this);
     glfwSetWindowUserPointer(m_window, this);
     (void)RenderDocCapture::Initialize();
-	glfwSetKeyCallback(m_window, [](GLFWwindow* handle, int key, int, int action, int)
+	glfwSetKeyCallback(m_window, [](GLFWwindow* handle, int key, int scan, int action, int mods)
 	{
 		auto& input = static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input;
-		if(action != GLFW_REPEAT) input.OnButton(Input::Index(static_cast<Key>(key)), action == GLFW_PRESS);
+		InputEvent event; event.type = InputEventType::Key; event.code = key; event.scancode = scan;
+        event.action = static_cast<InputAction>(action); event.modifiers = mods;
+        input.OnEvent(event);
         if(key == GLFW_KEY_F11 && action == GLFW_PRESS)
             static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_profilerToggle = true;
         if(key == GLFW_KEY_F12 && action == GLFW_PRESS) (void)RenderDocCapture::TriggerNextFrame();
 	});
-	glfwSetMouseButtonCallback(m_window, [](GLFWwindow* handle, int button, int action, int)
+	glfwSetMouseButtonCallback(m_window, [](GLFWwindow* handle, int button, int action, int mods)
 	{
 		auto& input = static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input;
-		input.OnButton(Input::Index(static_cast<MouseButton>(button)), action == GLFW_PRESS);
+		InputEvent event; event.type = InputEventType::MouseButton; event.code = button;
+		event.action = static_cast<InputAction>(action); event.modifiers = mods;
+		input.OnEvent(event);
 	});
 	glfwSetCursorPosCallback(m_window, [](GLFWwindow* handle, double x, double y)
 	{
-		static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input.OnCursor(x, y);
+		InputEvent event; event.type = InputEventType::Cursor; event.x = x; event.y = y;
+		static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input.OnEvent(event);
 	});
 	glfwSetScrollCallback(m_window, [](GLFWwindow* handle, double x, double y)
 	{
-		auto& scroll = static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input.m_pending.scroll;
-		scroll.x += x;
-		scroll.y += y;
+		InputEvent event; event.type = InputEventType::Scroll; event.x = x; event.y = y;
+		static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input.OnEvent(event);
+	});
+	glfwSetCharCallback(m_window, [](GLFWwindow* handle, unsigned int codepoint)
+	{
+		InputEvent event; event.type = InputEventType::Text; event.codepoint = codepoint;
+		static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input.OnEvent(event);
 	});
 	glfwSetWindowFocusCallback(m_window, [](GLFWwindow* handle, int focused)
 	{
-		auto& input = static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input;
-		if(!focused) input.OnFocusLost();
-		else
-		{
-			input.m_pending.delta = {};
-			input.m_hasCursorPosition = false;
-		}
+		InputEvent event; event.type = InputEventType::Focus; event.focused = focused != 0;
+		static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input.OnEvent(event);
 	});
+	m_input.m_pending.focused = HasFocus();
 	glfwGetCursorPos(m_window, &m_input.m_pending.position.x, &m_input.m_pending.position.y);
 	m_input.m_hasCursorPosition = true;
 	m_input.PublishFrame();
@@ -163,6 +168,11 @@ void Window::SetCursorMode(CursorMode mode)
 	}
 	if(glfwGetInputMode(m_window, GLFW_CURSOR) == nativeMode) return;
 	glfwSetInputMode(m_window, GLFW_CURSOR, nativeMode);
+	ResetCursorDelta();
+}
+
+void Window::ResetCursorDelta()
+{
 	glfwGetCursorPos(m_window, &m_input.m_pending.position.x, &m_input.m_pending.position.y);
 	m_input.m_hasCursorPosition = true;
 	m_input.m_pending.delta = {};
@@ -178,6 +188,23 @@ CursorMode Window::GetCursorMode() const
 	case GLFW_CURSOR_HIDDEN: return CursorMode::Hidden;
 	default: return CursorMode::Normal;
 	}
+}
+
+bool Window::IsRawMouseMotionSupported() const { return glfwRawMouseMotionSupported() == GLFW_TRUE; }
+
+bool Window::SetRawMouseMotion(bool enabled)
+{
+    if(!m_window) return false;
+	if(!IsRawMouseMotionSupported()) return !enabled;
+	if(IsRawMouseMotionEnabled() == enabled) return true;
+	glfwSetInputMode(m_window, GLFW_RAW_MOUSE_MOTION, enabled ? GLFW_TRUE : GLFW_FALSE);
+	ResetCursorDelta();
+	return IsRawMouseMotionEnabled() == enabled;
+}
+
+bool Window::IsRawMouseMotionEnabled() const
+{
+	return m_window && glfwGetInputMode(m_window, GLFW_RAW_MOUSE_MOTION) == GLFW_TRUE;
 }
 
 bool Window::ConsumeKeyPress(Key key, const void* nativeWindow)
