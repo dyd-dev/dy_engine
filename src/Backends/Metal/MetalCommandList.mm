@@ -222,6 +222,7 @@ namespace dyf::Backends
 		id<MTLCommandBuffer> commandBuffer = nil;
 		id<MTLRenderCommandEncoder> renderEncoder = nil;
 		id<MTLBlitCommandEncoder> blitEncoder = nil;
+		MTLRenderPassDescriptor* resumePass = nil;
 		NSMutableArray<id<MTLResource>>* retainedResources = nil;
 
 		std::vector<MetalOperation> operations;
@@ -244,6 +245,9 @@ namespace dyf::Backends
 		uint32_t indexOffset = 0;
 		uint32_t renderWidth = 0;
 		uint32_t renderHeight = 0;
+		RHI::Viewport viewport = {};
+		RHI::Rect scissor = {};
+		uint32_t stencilReference = 0;
 		bool rendering = false;
 		bool stencilConfigured = false;
 		bool viewportSet = false;
@@ -424,10 +428,12 @@ namespace dyf::Backends
 		EndRenderEncoding(m_impl);
 		EndBlitEncoding(m_impl);
 #if !__has_feature(objc_arc)
+		[m_impl->resumePass release];
 		[m_impl->retainedResources release];
 		[m_impl->commandBuffer release];
 #endif
 		m_impl->retainedResources = nil;
+		m_impl->resumePass = nil;
 		m_impl->commandBuffer = nil;
 		m_impl->operations.clear();
 		m_impl->bufferStates.clear();
@@ -726,6 +732,25 @@ namespace dyf::Backends
 			}
 		}
 
+		if(valid)
+		{
+			m_impl->resumePass = [pass copy];
+			for(uint32_t index = 0; index < desc.colorAttachmentCount; ++index)
+			{
+				m_impl->resumePass.colorAttachments[index].loadAction = MTLLoadActionLoad;
+				pass.colorAttachments[index].storeAction = MTLStoreActionStore;
+			}
+			if(desc.depthStencilAttachment != nullptr)
+			{
+				m_impl->resumePass.depthAttachment.loadAction = MTLLoadActionLoad;
+				pass.depthAttachment.storeAction = MTLStoreActionStore;
+				if(m_impl->stencilConfigured)
+				{
+					m_impl->resumePass.stencilAttachment.loadAction = MTLLoadActionLoad;
+					pass.stencilAttachment.storeAction = MTLStoreActionStore;
+				}
+			}
+		}
 		id<MTLRenderCommandEncoder> encoder = valid
 			? [m_impl->commandBuffer renderCommandEncoderWithDescriptor:pass] : nil;
 #if !__has_feature(objc_arc)
@@ -802,7 +827,8 @@ namespace dyf::Backends
 		{
 			id<MTLSamplerState> sampler =
 				(__bridge id<MTLSamplerState>)binding.sampler;
-			if(HasStage(binding.stages, RHI::ShaderStageFlags::Vertex))
+			if(HasStage(binding.stages, RHI::ShaderStageFlags::Vertex) ||
+				HasStage(binding.stages, RHI::ShaderStageFlags::Domain))
 				[encoder setVertexSamplerState:sampler atIndex:binding.index];
 			if(HasStage(binding.stages, RHI::ShaderStageFlags::Fragment))
 				[encoder setFragmentSamplerState:sampler atIndex:binding.index];
@@ -850,7 +876,8 @@ namespace dyf::Backends
 					return;
 				}
 				id<MTLBuffer> native = NativeBuffer(buffer);
-				if(HasStage(declaration->stages, RHI::ShaderStageFlags::Vertex))
+				if(HasStage(declaration->stages, RHI::ShaderStageFlags::Vertex) ||
+					HasStage(declaration->stages, RHI::ShaderStageFlags::Domain))
 					[encoder setVertexBuffer:native offset:binding.offset atIndex:nativeIndex];
 				if(HasStage(declaration->stages, RHI::ShaderStageFlags::Fragment))
 					[encoder setFragmentBuffer:native offset:binding.offset atIndex:nativeIndex];
@@ -877,7 +904,8 @@ namespace dyf::Backends
 				return;
 			}
 			id<MTLTexture> native = (__bridge id<MTLTexture>)binding.nativeTexture;
-			if(HasStage(binding.stages, RHI::ShaderStageFlags::Vertex))
+			if(HasStage(binding.stages, RHI::ShaderStageFlags::Vertex) ||
+				HasStage(binding.stages, RHI::ShaderStageFlags::Domain))
 				[encoder setVertexTexture:native atIndex:binding.index];
 			if(HasStage(binding.stages, RHI::ShaderStageFlags::Fragment))
 				[encoder setFragmentTexture:native atIndex:binding.index];
@@ -981,7 +1009,8 @@ namespace dyf::Backends
 		}
 		RetainResource(m_impl, constants);
 		const RHI::PipelineLayoutDesc& layout = m_impl->pipeline->GetLayout();
-		if(HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Vertex))
+		if(HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Vertex) ||
+			HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Domain))
 			[m_impl->renderEncoder setVertexBuffer:constants
 				offset:0 atIndex:layout.inlineConstantBinding];
 		if(HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Fragment))
@@ -1011,6 +1040,7 @@ namespace dyf::Backends
 			viewport.minDepth, viewport.maxDepth};
 		[m_impl->renderEncoder setViewport:native];
 		m_impl->viewportSet = true;
+		m_impl->viewport = viewport;
 	}
 
 	void MetalCommandList::SetScissorNative(const RHI::Rect& rect)
@@ -1030,6 +1060,7 @@ namespace dyf::Backends
 			rect.width, rect.height};
 		[m_impl->renderEncoder setScissorRect:native];
 		m_impl->scissorSet = true;
+		m_impl->scissor = rect;
 	}
 
 	void MetalCommandList::SetStencilReferenceNative(uint32_t reference)
@@ -1042,6 +1073,7 @@ namespace dyf::Backends
 		}
 		[m_impl->renderEncoder setStencilReferenceValue:reference];
 		m_impl->stencilReferenceSet = true;
+		m_impl->stencilReference = reference;
 	}
 
 	namespace
@@ -1105,6 +1137,137 @@ namespace dyf::Backends
 			Invalidate(m_impl);
 			return;
 		}
+		if(m_impl->pipeline->IsTessellated())
+		{
+			const auto& desc = m_impl->pipeline->GetDesc();
+			if(desc.patchControlPoints == 0 || vertexCount % desc.patchControlPoints != 0 ||
+				startVertex % desc.patchControlPoints != 0)
+			{
+				Invalidate(m_impl);
+				return;
+			}
+			const uint32_t patchCount = vertexCount / desc.patchControlPoints;
+			const uint32_t factorCount = desc.tessellation.domain == RHI::TessellationDomain::Quad ? 6u : 4u;
+			const uint64_t factorStride = uint64_t(factorCount) * sizeof(uint16_t);
+			const uint64_t factorBytes = factorStride * patchCount * instanceCount;
+			if(factorBytes == 0 || factorBytes > std::numeric_limits<NSUInteger>::max() ||
+				m_impl->resumePass == nil)
+			{
+				Invalidate(m_impl);
+				return;
+			}
+			id<MTLBuffer> factorBuffer = [m_impl->commandQueue.device
+				newBufferWithLength:static_cast<NSUInteger>(factorBytes)
+				options:MTLResourceStorageModeShared];
+			if(factorBuffer == nil)
+			{
+				Invalidate(m_impl);
+				return;
+			}
+			RetainResource(m_impl, factorBuffer);
+
+			MetalPipeline* pipeline = m_impl->pipeline;
+			MetalResourceSet* resourceSet = m_impl->resourceSet;
+			const auto vertexBindings = m_impl->vertexBindings;
+			const auto inlineConstants = m_impl->inlineConstants;
+			EndRenderEncoding(m_impl);
+
+			id<MTLComputeCommandEncoder> compute = [m_impl->commandBuffer computeCommandEncoder];
+			id<MTLComputePipelineState> hull =
+				(__bridge id<MTLComputePipelineState>)pipeline->GetNativeHullPipeline();
+			if(compute == nil || hull == nil)
+			{
+				Invalidate(m_impl);
+#if !__has_feature(objc_arc)
+				[factorBuffer release];
+#endif
+				return;
+			}
+			[compute setComputePipelineState:hull];
+			for(const auto& [binding, value] : vertexBindings)
+				[compute setBuffer:NativeBuffer(value.buffer) offset:value.offset atIndex:binding];
+			if(resourceSet != nullptr)
+			{
+				const auto& layout = pipeline->GetLayout();
+				for(uint32_t index = 0; index < resourceSet->GetBindingCount(); ++index)
+				{
+					const auto& binding = resourceSet->GetBindings()[index];
+					const auto* declaration = FindLayoutBinding(layout, binding.binding);
+					if(declaration == nullptr ||
+						(!HasStage(declaration->stages, RHI::ShaderStageFlags::Vertex) &&
+						 !HasStage(declaration->stages, RHI::ShaderStageFlags::Hull))) continue;
+					if(binding.buffer != nullptr)
+						[compute setBuffer:NativeBuffer(dynamic_cast<MetalBuffer*>(binding.buffer))
+							offset:binding.offset atIndex:binding.binding + binding.arrayElement];
+				}
+				for(const MetalTextureBinding& binding : resourceSet->GetTextureBindings())
+					if(HasStage(binding.stages, RHI::ShaderStageFlags::Vertex) ||
+						HasStage(binding.stages, RHI::ShaderStageFlags::Hull))
+						[compute setTexture:(__bridge id<MTLTexture>)binding.nativeTexture atIndex:binding.index];
+			}
+			for(const MetalStaticSamplerBinding& binding : pipeline->GetStaticSamplerBindings())
+				if(HasStage(binding.stages, RHI::ShaderStageFlags::Vertex) ||
+					HasStage(binding.stages, RHI::ShaderStageFlags::Hull))
+					[compute setSamplerState:(__bridge id<MTLSamplerState>)binding.sampler atIndex:binding.index];
+			if(!inlineConstants.empty() &&
+				(HasStage(pipeline->GetLayout().inlineConstantStages, RHI::ShaderStageFlags::Vertex) ||
+				 HasStage(pipeline->GetLayout().inlineConstantStages, RHI::ShaderStageFlags::Hull)))
+			{
+				[compute setBytes:inlineConstants.data() length:inlineConstants.size()
+					atIndex:pipeline->GetLayout().inlineConstantBinding];
+			}
+			[compute setBuffer:factorBuffer offset:0 atIndex:MetalPipeline::TessellationFactorBufferIndex];
+			const NSUInteger threadCount = static_cast<NSUInteger>(patchCount) * instanceCount;
+			const NSUInteger width = std::min(threadCount, hull.threadExecutionWidth);
+			[compute dispatchThreads:MTLSizeMake(threadCount, 1, 1)
+				threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+			[compute endEncoding];
+
+			id<MTLRenderCommandEncoder> resumed =
+				[m_impl->commandBuffer renderCommandEncoderWithDescriptor:m_impl->resumePass];
+			if(resumed == nil)
+			{
+				Invalidate(m_impl);
+#if !__has_feature(objc_arc)
+				[factorBuffer release];
+#endif
+				return;
+			}
+#if !__has_feature(objc_arc)
+			[resumed retain];
+#endif
+			m_impl->renderEncoder = resumed;
+			BindGraphicsPipelineNative(pipeline);
+			if(resourceSet != nullptr) BindResourceSetNative(resourceSet);
+			for(const auto& [binding, value] : vertexBindings)
+				BindVertexBufferNative(binding, value.buffer, value.offset);
+			if(!inlineConstants.empty())
+				SetInlineConstantsNative(0, static_cast<uint32_t>(inlineConstants.size()), inlineConstants.data());
+			SetViewportNative(m_impl->viewport);
+			SetScissorNative(m_impl->scissor);
+			if(desc.depthStencil.stencilEnabled) SetStencilReferenceNative(m_impl->stencilReference);
+			if(!m_impl->valid)
+			{
+#if !__has_feature(objc_arc)
+				[factorBuffer release];
+#endif
+				return;
+			}
+			[m_impl->renderEncoder setTessellationFactorBuffer:factorBuffer
+				offset:0 instanceStride:static_cast<NSUInteger>(factorStride * patchCount)];
+			[m_impl->renderEncoder
+				drawPatches:desc.patchControlPoints
+				patchStart:startVertex / desc.patchControlPoints
+				patchCount:patchCount
+				patchIndexBuffer:nil
+				patchIndexBufferOffset:0
+				instanceCount:instanceCount
+				baseInstance:startInstance];
+#if !__has_feature(objc_arc)
+			[factorBuffer release];
+#endif
+			return;
+		}
 		[m_impl->renderEncoder
 			drawPrimitives:static_cast<MTLPrimitiveType>(m_impl->pipeline->GetNativePrimitiveType())
 			vertexStart:startVertex
@@ -1120,6 +1283,13 @@ namespace dyf::Backends
 		int32_t vertexOffset,
 		uint32_t firstInstance)
 	{
+		if(m_impl->pipeline != nullptr && m_impl->pipeline->IsTessellated())
+		{
+			// Metal의 control-point index 형식은 파이프라인 상태이므로 현재 공통 API는
+			// 비인덱스 패치만 허용한다. D3D12/Vulkan의 인덱스 패치는 그대로 지원된다.
+			Invalidate(m_impl);
+			return;
+		}
 		const uint32_t indexSize = FormatSize(m_impl->indexFormat);
 		const uint64_t nativeOffset = static_cast<uint64_t>(m_impl->indexOffset) +
 			static_cast<uint64_t>(firstIndex) * indexSize;

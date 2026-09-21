@@ -29,10 +29,13 @@ namespace dyf::Backends
 		[[nodiscard]] const RHI::GraphicsPipelineDesc& GetDesc() const;
 		[[nodiscard]] void* GetNativePipeline() const;
 		[[nodiscard]] void* GetNativeDepthStencil() const;
+		[[nodiscard]] void* GetNativeHullPipeline() const;
 		[[nodiscard]] uint32_t GetNativePrimitiveType() const;
 		[[nodiscard]] uint32_t GetNativeCullMode() const;
 		[[nodiscard]] uint32_t GetNativeFrontFace() const;
 		[[nodiscard]] uint32_t GetNativeFillMode() const;
+		[[nodiscard]] bool IsTessellated() const;
+		static constexpr uint32_t TessellationFactorBufferIndex = 30;
 		[[nodiscard]] const std::vector<MetalStaticSamplerBinding>&
 			GetStaticSamplerBindings() const;
 

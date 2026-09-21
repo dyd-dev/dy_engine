@@ -42,8 +42,12 @@ bool IDevice::Supports(const PipelineLayoutDesc& desc) const
 bool IDevice::Supports(const GraphicsPipelineDesc& desc) const
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
-    if(!Reference(desc.vertexShader) || (desc.fragmentShader && !Reference(desc.fragmentShader))) return false;
+    if(!Reference(desc.vertexShader) || (desc.hullShader && !Reference(desc.hullShader)) ||
+        (desc.domainShader && !Reference(desc.domainShader)) ||
+        (desc.fragmentShader && !Reference(desc.fragmentShader))) return false;
     if(!Supports(desc.layout) || !ValidateGraphicsPipelineDesc(desc)) return false;
+    if(desc.hullShader && (!Supports(Feature::Tessellation) ||
+        desc.patchControlPoints > GetLimit(Limit::TessellationPatchControlPoints))) return false;
     if(desc.raster.fillMode == FillMode::Wireframe && !Supports(Feature::Wireframe)) return false;
     if(desc.raster.depthBiasClamp != 0 && !Supports(Feature::DepthBiasClamp)) return false;
     if(std::trunc(desc.raster.depthBiasConstant) != desc.raster.depthBiasConstant &&
@@ -445,7 +449,10 @@ TextureHandle IDevice::CreateTexture(const TextureDesc& desc)
 ShaderHandle IDevice::CreateShader(const ShaderDesc& desc)
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
-    if((desc.stage==ShaderStage::Compute && !Supports(Feature::Compute)) || desc.stage == ShaderStage::Unknown || desc.stage>ShaderStage::Compute || !desc.binary || !desc.binarySize || !desc.entryPoint || !*desc.entryPoint) return nullptr;
+    const bool validStage = desc.stage == ShaderStage::Vertex || desc.stage == ShaderStage::Hull ||
+        desc.stage == ShaderStage::Domain || desc.stage == ShaderStage::Fragment || desc.stage == ShaderStage::Compute;
+    if((desc.stage==ShaderStage::Compute && !Supports(Feature::Compute)) || !validStage ||
+        !desc.binary || !desc.binarySize || !desc.entryPoint || !*desc.entryPoint) return nullptr;
     auto* shader = CreateShaderNative(desc);
     if(!shader) ReportDiagnostic(DiagnosticSeverity::Error,"CreateShader: native shader creation failed; no substitute shader was selected.");
     Track(shader, [](IDevice& device, void* handle) { device.DestroyShaderNative(static_cast<ShaderHandle>(handle)); });
@@ -477,8 +484,10 @@ PipelineHandle IDevice::CreateComputePipeline(const ComputePipelineDesc& desc)
 PipelineHandle IDevice::CreateGraphicsPipeline(const GraphicsPipelineDesc& desc)
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
-    auto vertex = Reference(desc.vertexShader), fragment = Reference(desc.fragmentShader);
-    if(!vertex || (desc.fragmentShader && !fragment) || !Supports(desc))
+    auto vertex = Reference(desc.vertexShader), hull = Reference(desc.hullShader);
+    auto domain = Reference(desc.domainShader), fragment = Reference(desc.fragmentShader);
+    if(!vertex || (desc.hullShader && !hull) || (desc.domainShader && !domain) ||
+        (desc.fragmentShader && !fragment) || !Supports(desc))
     {ReportDiagnostic(DiagnosticSeverity::Error,"CreateGraphicsPipeline: unsupported description or device limit. Query Supports(desc) before creation.");return nullptr;}
     auto* pipeline = CreateGraphicsPipelineNative(desc);
     if(!pipeline) ReportDiagnostic(DiagnosticSeverity::Error,"CreateGraphicsPipeline: native creation failed; no fallback pipeline was substituted.");
@@ -498,7 +507,7 @@ PipelineHandle IDevice::CreateGraphicsPipeline(const GraphicsPipelineDesc& desc)
     Track(pipeline, [](IDevice& device, void* handle) {
         device.DestroyPipelineNative(static_cast<PipelineHandle>(handle));
         --device.m_allocationCounters.pipelines.live; ++device.m_allocationCounters.pipelines.destroyed;
-    }, {vertex, fragment});
+    }, {vertex, hull, domain, fragment});
     return pipeline;
 }
 

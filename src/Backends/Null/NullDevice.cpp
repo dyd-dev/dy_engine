@@ -1113,7 +1113,8 @@ bool NullDevice::SupportsNative(RHI::Feature feature) const
     case RHI::Feature::SamplerLodBias:
     case RHI::Feature::FractionalDepthBias:
     case RHI::Feature::Wireframe:
-    case RHI::Feature::DepthBiasClamp: return true;
+    case RHI::Feature::DepthBiasClamp:
+    case RHI::Feature::Tessellation: return true;
     default: return false;
     }
 }
@@ -1126,6 +1127,7 @@ uint64_t NullDevice::GetLimitNative(RHI::Limit limit) const
     case RHI::Limit::Texture2DDimension:
     case RHI::Limit::UniformBufferBytes:
     case RHI::Limit::StorageBufferBytes:
+    case RHI::Limit::TessellationPatchControlPoints:
     case RHI::Limit::SamplerAnisotropy: return UINT32_MAX;
     case RHI::Limit::UniformBufferOffsetAlignment:
     case RHI::Limit::StorageBufferOffsetAlignment: return 1;

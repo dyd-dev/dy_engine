@@ -166,6 +166,19 @@ namespace dyf::Backends
 				desc.addressW == RHI::SamplerAddressMode::ClampToBorder;
 		}
 
+		[[nodiscard]] MTLTessellationPartitionMode ToPartitionMode(
+			RHI::TessellationPartitioning mode)
+		{
+			switch(mode)
+			{
+			case RHI::TessellationPartitioning::Integer: return MTLTessellationPartitionModeInteger;
+			case RHI::TessellationPartitioning::FractionalEven: return MTLTessellationPartitionModeFractionalEven;
+			case RHI::TessellationPartitioning::FractionalOdd: return MTLTessellationPartitionModeFractionalOdd;
+			case RHI::TessellationPartitioning::PowerOfTwo: return MTLTessellationPartitionModePow2;
+			}
+			return MTLTessellationPartitionModeInteger;
+		}
+
 		[[nodiscard]] bool HasStage(
 			RHI::ShaderStageFlags stages,
 			RHI::ShaderStageFlags stage)
@@ -184,6 +197,8 @@ namespace dyf::Backends
 			// https://developer.apple.com/metal/capabilities/
 			const uint32_t constantArgumentCount = appleGpu ? 31 : 14;
 			uint32_t vertexConstantArguments = 0;
+			uint32_t hullConstantArguments = 0;
+			uint32_t domainConstantArguments = 0;
 			uint32_t fragmentConstantArguments = 0;
 			constexpr uint32_t nativeBufferBindingCount = 31;
 			constexpr uint32_t nativeTextureBindingCount = 128;
@@ -193,6 +208,7 @@ namespace dyf::Backends
 			{
 				const RHI::VertexBufferLayout& layout = desc.vertexBuffers[index];
 				if(layout.binding >= nativeBufferBindingCount ||
+					(desc.hullShader != nullptr && layout.binding == MetalPipeline::TessellationFactorBufferIndex) ||
 					(!appleGpu && (layout.stride > 4096 || layout.stride % 4 != 0)))
 				{
 					return false;
@@ -216,6 +232,7 @@ namespace dyf::Backends
 			std::set<uint32_t> vertexSamplerSlots;
 			std::set<uint32_t> fragmentSamplerSlots;
 			constexpr auto graphicsStages = RHI::ShaderStageFlags::Vertex |
+				RHI::ShaderStageFlags::Hull | RHI::ShaderStageFlags::Domain |
 				RHI::ShaderStageFlags::Fragment;
 			for(uint32_t index = 0; index < desc.layout.bindingCount; ++index)
 			{
@@ -232,10 +249,23 @@ namespace dyf::Backends
 					limit = nativeSamplerBindingCount;
 				if(binding.binding >= limit || binding.count > limit - binding.binding)
 					return false;
+				if(desc.hullShader != nullptr &&
+					(binding.type == RHI::ResourceBindingType::ConstantBuffer ||
+					 binding.type == RHI::ResourceBindingType::ReadOnlyStorageBuffer ||
+					 binding.type == RHI::ResourceBindingType::ReadWriteStorageBuffer) &&
+					(HasStage(binding.stages, RHI::ShaderStageFlags::Vertex) ||
+					 HasStage(binding.stages, RHI::ShaderStageFlags::Hull)) &&
+					binding.binding <= MetalPipeline::TessellationFactorBufferIndex &&
+					binding.count > MetalPipeline::TessellationFactorBufferIndex - binding.binding)
+					return false;
 				if(binding.type == RHI::ResourceBindingType::ConstantBuffer)
 				{
 					if(HasStage(binding.stages, RHI::ShaderStageFlags::Vertex))
 						vertexConstantArguments += binding.count;
+					if(HasStage(binding.stages, RHI::ShaderStageFlags::Hull))
+						hullConstantArguments += binding.count;
+					if(HasStage(binding.stages, RHI::ShaderStageFlags::Domain))
+						domainConstantArguments += binding.count;
 					if(HasStage(binding.stages, RHI::ShaderStageFlags::Fragment))
 						fragmentConstantArguments += binding.count;
 				}
@@ -273,12 +303,20 @@ namespace dyf::Backends
 			{
 				if(HasStage(desc.layout.inlineConstantStages, RHI::ShaderStageFlags::Vertex))
 					++vertexConstantArguments;
+				if(HasStage(desc.layout.inlineConstantStages, RHI::ShaderStageFlags::Hull))
+					++hullConstantArguments;
+				if(HasStage(desc.layout.inlineConstantStages, RHI::ShaderStageFlags::Domain))
+					++domainConstantArguments;
 				if(HasStage(desc.layout.inlineConstantStages, RHI::ShaderStageFlags::Fragment))
 					++fragmentConstantArguments;
 				if(desc.layout.inlineConstantBinding >= nativeBufferBindingCount)
 				{
 					return false;
 				}
+				if(desc.hullShader != nullptr &&
+					desc.layout.inlineConstantBinding == MetalPipeline::TessellationFactorBufferIndex &&
+					(HasStage(desc.layout.inlineConstantStages, RHI::ShaderStageFlags::Vertex) ||
+					 HasStage(desc.layout.inlineConstantStages, RHI::ShaderStageFlags::Hull))) return false;
 				if((desc.layout.inlineConstantStages & graphicsStages) !=
 					desc.layout.inlineConstantStages)
 				{
@@ -294,6 +332,8 @@ namespace dyf::Backends
 					return false;
 			}
 			return vertexConstantArguments <= constantArgumentCount &&
+				hullConstantArguments <= constantArgumentCount &&
+				domainConstantArguments <= constantArgumentCount &&
 				fragmentConstantArguments <= constantArgumentCount;
 		}
 	}
@@ -335,6 +375,7 @@ namespace dyf::Backends
 	struct MetalPipeline::Impl
 	{
 		id<MTLRenderPipelineState> pipelineState = nil;
+		id<MTLComputePipelineState> hullPipelineState = nil;
 		id<MTLDepthStencilState> depthStencilState = nil;
 		MTLPrimitiveType primitiveType = MTLPrimitiveTypeTriangle;
 		MTLCullMode cullMode = MTLCullModeNone;
@@ -367,9 +408,15 @@ namespace dyf::Backends
 
 		id<MTLDevice> metalDevice = (__bridge id<MTLDevice>)device;
 		auto* vertexShader = dynamic_cast<MetalShader*>(desc.vertexShader);
+		auto* hullShader = dynamic_cast<MetalShader*>(desc.hullShader);
+		auto* domainShader = dynamic_cast<MetalShader*>(desc.domainShader);
 		auto* fragmentShader = dynamic_cast<MetalShader*>(desc.fragmentShader);
 		if(metalDevice == nil || vertexShader == nullptr ||
 			vertexShader->GetNativeFunction() == nullptr ||
+			(desc.hullShader != nullptr &&
+				(hullShader == nullptr || hullShader->GetNativeFunction() == nullptr)) ||
+			(desc.domainShader != nullptr &&
+				(domainShader == nullptr || domainShader->GetNativeFunction() == nullptr)) ||
 			(desc.fragmentShader != nullptr &&
 				(fragmentShader == nullptr || fragmentShader->GetNativeFunction() == nullptr)) ||
 			!SupportsGraphics(desc, device))
@@ -383,6 +430,7 @@ namespace dyf::Backends
 		case RHI::PrimitiveTopology::LineList: m_impl->primitiveType = MTLPrimitiveTypeLine; break;
 		case RHI::PrimitiveTopology::TriangleList: m_impl->primitiveType = MTLPrimitiveTypeTriangle; break;
 		case RHI::PrimitiveTopology::TriangleStrip: m_impl->primitiveType = MTLPrimitiveTypeTriangleStrip; break;
+		case RHI::PrimitiveTopology::PatchList: m_impl->primitiveType = MTLPrimitiveTypeTriangle; break;
 		default: return;
 		}
 
@@ -445,10 +493,22 @@ namespace dyf::Backends
 		}
 
 		MTLRenderPipelineDescriptor* pipelineDesc = [MTLRenderPipelineDescriptor new];
-		pipelineDesc.vertexFunction =
-			(__bridge id<MTLFunction>)vertexShader->GetNativeFunction();
+		pipelineDesc.vertexFunction = (__bridge id<MTLFunction>)(domainShader == nullptr
+			? vertexShader->GetNativeFunction() : domainShader->GetNativeFunction());
 		pipelineDesc.fragmentFunction = fragmentShader == nullptr
 			? nil : (__bridge id<MTLFunction>)fragmentShader->GetNativeFunction();
+		if(domainShader != nullptr)
+		{
+			pipelineDesc.maxTessellationFactor = desc.tessellation.maxFactor;
+			pipelineDesc.tessellationFactorScaleEnabled = NO;
+			pipelineDesc.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
+			pipelineDesc.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatchAndPerInstance;
+			pipelineDesc.tessellationOutputWindingOrder =
+				desc.tessellation.outputWinding == RHI::FrontFace::Clockwise
+				? MTLWindingClockwise : MTLWindingCounterClockwise;
+			pipelineDesc.tessellationPartitionMode = ToPartitionMode(desc.tessellation.partitioning);
+			pipelineDesc.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
+		}
 
 		if(!m_vertexAttributes.empty())
 		{
@@ -459,7 +519,10 @@ namespace dyf::Backends
 				vertexDesc.layouts[layout.binding].stepRate = 1;
 				vertexDesc.layouts[layout.binding].stepFunction =
 					layout.stepMode == RHI::VertexStepMode::Instance
-					? MTLVertexStepFunctionPerInstance : MTLVertexStepFunctionPerVertex;
+					? MTLVertexStepFunctionPerInstance
+					: domainShader != nullptr
+						? MTLVertexStepFunctionPerPatchControlPoint
+						: MTLVertexStepFunctionPerVertex;
 			}
 			for(const RHI::VertexAttribute& attribute : m_vertexAttributes)
 			{
@@ -516,6 +579,12 @@ namespace dyf::Backends
 		[pipelineDesc release];
 #endif
 		if(m_impl->pipelineState == nil) return;
+		if(hullShader != nullptr)
+		{
+			m_impl->hullPipelineState = [metalDevice newComputePipelineStateWithFunction:
+				(__bridge id<MTLFunction>)hullShader->GetNativeFunction() error:&error];
+			if(m_impl->hullPipelineState == nil) return;
+		}
 
 		if(desc.depthStencil.format != RHI::Format::Unknown)
 		{
@@ -585,9 +654,11 @@ namespace dyf::Backends
 		m_impl->staticSamplers.clear();
 #if !__has_feature(objc_arc)
 		[m_impl->depthStencilState release];
+		[m_impl->hullPipelineState release];
 		[m_impl->pipelineState release];
 #endif
 		m_impl->depthStencilState = nil;
+		m_impl->hullPipelineState = nil;
 		m_impl->pipelineState = nil;
 		delete m_impl;
 	}
@@ -600,6 +671,10 @@ namespace dyf::Backends
 	void* MetalPipeline::GetNativeDepthStencil() const
 	{
 		return m_impl == nullptr ? nullptr : (__bridge void*)m_impl->depthStencilState;
+	}
+	void* MetalPipeline::GetNativeHullPipeline() const
+	{
+		return m_impl == nullptr ? nullptr : (__bridge void*)m_impl->hullPipelineState;
 	}
 	uint32_t MetalPipeline::GetNativePrimitiveType() const
 	{
@@ -616,6 +691,10 @@ namespace dyf::Backends
 	uint32_t MetalPipeline::GetNativeFillMode() const
 	{
 		return m_impl == nullptr ? 0 : static_cast<uint32_t>(m_impl->fillMode);
+	}
+	bool MetalPipeline::IsTessellated() const
+	{
+		return m_desc.hullShader != nullptr && m_desc.domainShader != nullptr;
 	}
 
 	const std::vector<MetalStaticSamplerBinding>&

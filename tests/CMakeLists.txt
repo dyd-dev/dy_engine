@@ -33,4 +33,8 @@ if(DY_BUILD_TESTS)
     target_link_libraries(RenderGraphTests PRIVATE dy_engine)
     add_test(NAME RenderGraphContracts COMMAND RenderGraphTests)
     set_tests_properties(RenderGraphContracts PROPERTIES TIMEOUT 60)
+
+    add_executable(TessellationTests TessellationTests.cpp)
+    target_link_libraries(TessellationTests PRIVATE dy_engine)
+    add_test(NAME TessellationContracts COMMAND TessellationTests)
 endif()
