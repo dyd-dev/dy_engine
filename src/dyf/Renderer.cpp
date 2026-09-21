@@ -19,6 +19,7 @@
 #include <exception>
 #include "ShaderLayout.h"
 #include "dyf/Platform/Profiler.h"
+#include "dyf/Platform/Window.h"
 #include <chrono>
 #include "dyf/Camera.h"
 #include "dyf/Scene.h"
@@ -432,6 +433,8 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
     {
         DY_PROFILE_CPU_ZONE_NAMED("Renderer::RenderScene");
         if(!ApplySettings())return false;
+        if(Platform::Window::ConsumeKeyPress(Platform::Key::F11,windowHandle))
+            config.profilerStartsExpanded = !config.profilerStartsExpanded;
         if(draws && draws->size() != scene.GetEntityCount()) return RendererFailure("Draw input count must match the scene.");
         if(draws) for(const auto& draw : *draws)
             if(draw.inlineConstants.size() != shaderSources.additionalConstantBytes)
@@ -490,11 +493,8 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
         if(previousShadowMatrixBuffer != nullptr) nativeDevice->DestroyBuffer(previousShadowMatrixBuffer);
 
         RHI::TimestampQueryHandle shadowQuery = nullptr, mainQuery = nullptr;
-        if(config.enableProfilerHud)
-        {
-            shadowQuery=BeginGpuSample(0);
-            mainQuery=BeginGpuSample(1);
-        }
+        shadowQuery=BeginGpuSample(0);
+        mainQuery=BeginGpuSample(1);
         // 장면과 후처리를 같은 명령 목록에 순서대로 기록한다.
         RHI::ResourceScope frameResources(*nativeDevice);
         auto* commands = frameResources.Keep(nativeDevice->AcquireCommandList());
@@ -502,12 +502,17 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
         auto* output = nativeDevice->GetBackBuffer();
         if(drawn && config.enableHdrRendering) drawn = RecordToneMap(*commands, output, config.exposure);
         if(drawn && overlay) drawn = RecordCanvas(*overlay, *commands, output, true);
-        if(drawn && config.enableProfilerHud)
+        if(drawn)
         {
             const double cpuMs = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-cpuStart).count();
             RecordProfilerFrame(cpuMs, scene.GetEntityCount());
+        }
+        if(drawn && config.enableProfilerHud)
+        {
+            commands->BeginDebugEvent("Profiler HUD");
             auto hud = BuildProfilerOverlay(output->GetDesc().width, output->GetDesc().height, config.profilerStartsExpanded);
             drawn = RecordCanvas(hud, *commands, output, true);
+            commands->EndDebugEvent();
         }
         if(commands && mainQuery) commands->WriteTimestamp(mainQuery, 1);
         RHI::FenceHandle completion;
@@ -522,6 +527,7 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
             : RHI::ResourceState::Undefined;
         if(readback && !CaptureFrame(*readback))return false;
         if(!nativeDevice->Present()) return RendererFailure("Scene presentation failed.");
+        DY_PROFILE_FRAME_MARK();
         return true;
     }
     catch(const std::exception& error)

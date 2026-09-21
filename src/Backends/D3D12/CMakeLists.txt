@@ -16,6 +16,10 @@ add_library(${BACKEND_NAME} OBJECT
 target_link_libraries(${BACKEND_NAME} PRIVATE
 	dy_engine_options
 )
+if(DY_ENABLE_PIX)
+    target_link_libraries(${BACKEND_NAME} PRIVATE WinPixEventRuntime::WinPixEventRuntime)
+    target_compile_definitions(${BACKEND_NAME} PRIVATE USE_PIX)
+endif()
 
 target_link_libraries(${PROJECT_NAME} PRIVATE d3d12 dxgi dxguid)
 

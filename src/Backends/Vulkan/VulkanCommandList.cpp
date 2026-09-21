@@ -12,6 +12,34 @@
 
 namespace dyf::Backends
 {
+    void VulkanCommandList::BeginDebugEventNative(const char* name,const RHI::DebugLabelColor& color)
+    {
+        if(!m_context.debugUtilsEnabled) return;
+        auto function=reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(vkGetDeviceProcAddr(m_context.device,"vkCmdBeginDebugUtilsLabelEXT"));
+        if(function)
+        {
+            VkDebugUtilsLabelEXT label{};label.sType=VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+            label.pLabelName=name;label.color[0]=color.r;label.color[1]=color.g;label.color[2]=color.b;label.color[3]=color.a;
+            function(m_commandBuffer,&label);
+        }
+    }
+    void VulkanCommandList::EndDebugEventNative()
+    {
+        if(!m_context.debugUtilsEnabled) return;
+        auto function=reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(vkGetDeviceProcAddr(m_context.device,"vkCmdEndDebugUtilsLabelEXT"));
+        if(function) function(m_commandBuffer);
+    }
+    void VulkanCommandList::InsertDebugMarkerNative(const char* name,const RHI::DebugLabelColor& color)
+    {
+        if(!m_context.debugUtilsEnabled) return;
+        auto function=reinterpret_cast<PFN_vkCmdInsertDebugUtilsLabelEXT>(vkGetDeviceProcAddr(m_context.device,"vkCmdInsertDebugUtilsLabelEXT"));
+        if(function)
+        {
+            VkDebugUtilsLabelEXT label{};label.sType=VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+            label.pLabelName=name;label.color[0]=color.r;label.color[1]=color.g;label.color[2]=color.b;label.color[3]=color.a;
+            function(m_commandBuffer,&label);
+        }
+    }
     void VulkanCommandList::ResetTimestampsNative(RHI::TimestampQueryHandle query,uint32_t first,uint32_t count)
     {vkCmdResetQueryPool(m_commandBuffer,static_cast<VulkanTimestampQuery*>(query)->pool,first,count);}
     void VulkanCommandList::WriteTimestampNative(RHI::TimestampQueryHandle query,uint32_t index)

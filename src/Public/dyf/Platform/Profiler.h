@@ -6,11 +6,19 @@
 #include <tracy/Tracy.hpp>
 #define DY_PROFILE_CPU_ZONE() ZoneScoped
 #define DY_PROFILE_CPU_ZONE_NAMED(name) ZoneScopedN(name)
+#define DY_PROFILE_FRAME_MARK() FrameMark
 #define DY_PROFILE_GPU_MILLISECONDS(name, value) TracyPlot(name, value)
 #define DY_PROFILE_RESOURCE_COUNT(name, value) TracyPlot(name, static_cast<double>(value))
+#if defined(DY_TRACY_RAW_PLOTS_ENABLED)
+#define DY_PROFILE_RAW_VALUE(name, value) TracyPlot(name, value)
+#else
+#define DY_PROFILE_RAW_VALUE(name, value) do { (void)sizeof(name); (void)(value); } while(false)
+#endif
 #else
 #define DY_PROFILE_CPU_ZONE() ((void)0)
 #define DY_PROFILE_CPU_ZONE_NAMED(name) ((void)sizeof(name))
+#define DY_PROFILE_FRAME_MARK() ((void)0)
 #define DY_PROFILE_GPU_MILLISECONDS(name, value) do { (void)sizeof(name); (void)(value); } while(false)
 #define DY_PROFILE_RESOURCE_COUNT(name, value) do { (void)sizeof(name); (void)(value); } while(false)
+#define DY_PROFILE_RAW_VALUE(name, value) do { (void)sizeof(name); (void)(value); } while(false)
 #endif

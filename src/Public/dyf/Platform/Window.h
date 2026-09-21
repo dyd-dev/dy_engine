@@ -3,6 +3,7 @@ struct GLFWwindow;
 
 namespace dyf::Platform
 {
+	enum class Key { F11 };
 	class Window
 	{
 	public:
@@ -18,8 +19,11 @@ namespace dyf::Platform
 		void PollEvents() const;
 
 		void* GetHandle() const;
+        // Consume this window's pending profiler toggle; other windows keep their events.
+        static bool ConsumeKeyPress(Key key, const void* nativeWindow);
 
 	private:
 		struct GLFWwindow* m_window = nullptr;
+        bool m_profilerToggle = false;
 	};
 }

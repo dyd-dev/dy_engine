@@ -1,0 +1,603 @@
+{
+  "version": 1,
+  "examples": {
+    "examples/dyf/01_Primitives": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "points, lines, rectangles and circles remain visibly rendered"
+    },
+    "examples/dyf/02_Image": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default image and tinted image remain visibly rendered"
+    },
+    "examples/dyf/03_Viewport": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "two viewport panels and clipped primitives remain visibly rendered"
+    },
+    "examples/dyf/04_GeometryCamera": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "camera-projected triangle remains visibly rendered"
+    },
+    "examples/dyf/05_MeshMaterial": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "textured and metallic cubes remain visibly rendered"
+    },
+    "examples/dyf/06_Light": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default five-light scene with requested shadows remains visibly rendered"
+    },
+    "examples/dyf/07_ModelAnim": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 5,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default Fox model remains visibly rendered during animation playback"
+    },
+    "examples/dyf/08_Scene": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "three transformed scene objects remain visibly rendered"
+    },
+    "examples/dyf/09_Text": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default font text and clipped text remain visibly rendered"
+    },
+    "examples/RHI/01_Primitives": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "points, lines, rectangles and circles remain visibly rendered"
+    },
+    "examples/RHI/02_Image": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default image and tinted image remain visibly rendered"
+    },
+    "examples/RHI/03_Viewport": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "two viewport panels and clipped primitives remain visibly rendered"
+    },
+    "examples/RHI/04_GeometryCamera": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "camera-projected triangle remains visibly rendered"
+    },
+    "examples/RHI/05_MeshMaterial": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "textured and metallic cubes remain visibly rendered"
+    },
+    "examples/RHI/06_Light": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default five-light scene with requested shadows remains visibly rendered"
+    },
+    "examples/RHI/07_ModelAnim": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 5,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default Fox model remains visibly rendered during animation playback"
+    },
+    "examples/RHI/08_Scene": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "three transformed scene objects remain visibly rendered"
+    },
+    "examples/RHI/09_Text": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default font text and clipped text remain visibly rendered"
+    },
+    "examples/advanced/01_Profiling": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default profiling workload remains visibly rendered; reported timings are not performance assertions"
+    },
+    "examples/advanced/02_DepthReverseZ": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default conventional-depth scene remains visibly rendered"
+    },
+    "examples/advanced/03_DepthSampling": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default split raw and linear depth view remains visibly rendered"
+    },
+    "examples/advanced/04_StencilMask": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default stencil mask remains visibly rendered on the supported depth-stencil format",
+      "unsupported_markers": [
+        "UNSUPPORTED: stencil requires D24_UNORM_S8_UINT; current RHI has no D32S8/S8 alternative (including Apple Silicon)."
+      ]
+    },
+    "examples/advanced/05_ResourceBarriers": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default offscreen render and sampled display remain visibly rendered"
+    },
+    "examples/advanced/06_FramesAndPresent": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default FIFO presentation with two frames in flight remains visibly rendered"
+    },
+    "examples/advanced/07_PBRLighting": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default PBR lighting remains visibly rendered"
+    },
+    "examples/advanced/08_ShadowMapping": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default directional shadow scene remains visibly rendered"
+    },
+    "examples/advanced/09_ClusteredLighting": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default compute-backed clustered lighting remains visibly rendered",
+      "unsupported_markers": [
+        "Unsupported: this RHI backend has no Compute dispatch/storage-buffer implementation. Use the Vulkan backend. No CPU fallback is substituted."
+      ]
+    },
+    "examples/advanced/10_DeferredLighting": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default lit deferred scene remains visibly rendered"
+    },
+    "examples/advanced/11_HDRPostProcess": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default ACES tone mapping and bloom remain visibly rendered"
+    },
+    "examples/advanced/12_TemporalAA": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default moving pattern with temporal antialiasing remains visibly rendered"
+    },
+    "examples/advanced/13_VolumetricFog": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "default procedural volumetric fog scene remains visibly rendered"
+    },
+    "examples/advanced/14_InstancingBatching": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "public draws and instanced modes remain visibly rendered; no timing or image-equivalence assertion",
+      "cases": [
+        {
+          "name": "draws",
+          "arguments": [
+            "--mode",
+            "draws"
+          ]
+        },
+        {
+          "name": "instanced",
+          "arguments": [
+            "--mode",
+            "instanced"
+          ]
+        }
+      ]
+    },
+    "examples/advanced/15_ResourceReuse": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "public create and reuse modes remain visibly rendered; no timing or allocation-count assertion",
+      "cases": [
+        {
+          "name": "create",
+          "arguments": [
+            "--mode",
+            "create"
+          ]
+        },
+        {
+          "name": "reuse",
+          "arguments": [
+            "--mode",
+            "reuse"
+          ]
+        }
+      ]
+    },
+    "examples/advanced/16_BindlessMaterials": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "public material and fixed texture-array modes remain visibly rendered; does not claim full bindless support",
+      "cases": [
+        {
+          "name": "material",
+          "arguments": [
+            "--mode",
+            "material"
+          ]
+        },
+        {
+          "name": "array",
+          "arguments": [
+            "--mode",
+            "array"
+          ]
+        }
+      ]
+    },
+    "examples/advanced/17_IndirectDrawing": {
+      "kind": "capability",
+      "expected_exit": 77,
+      "markers": [
+        "Supports(IndirectDraw)",
+        "Supports(IndirectDispatch)",
+        "종료 코드 77"
+      ],
+      "coverage": "backend capability report and explicit unavailable-example exit; GPU rendering is not implemented"
+    },
+    "examples/advanced/18_GPUCulling": {
+      "kind": "capability",
+      "expected_exit": 77,
+      "markers": [
+        "Supports(Compute)",
+        "Supports(IndirectDraw)",
+        "종료 코드 77"
+      ],
+      "coverage": "backend capability report and explicit unavailable-example exit; GPU rendering is not implemented"
+    },
+    "examples/advanced/19_MultithreadRecording": {
+      "kind": "capability",
+      "expected_exit": 77,
+      "markers": [
+        "Supports(Rasterization)",
+        "Supports(Compute)",
+        "종료 코드 77"
+      ],
+      "coverage": "backend capability report and explicit unavailable-example exit; GPU rendering is not implemented"
+    },
+    "examples/advanced/20_AsyncCompute": {
+      "kind": "capability",
+      "expected_exit": 77,
+      "markers": [
+        "Supports(Compute)",
+        "Supports(TimestampQuery)",
+        "종료 코드 77"
+      ],
+      "coverage": "backend capability report and explicit unavailable-example exit; GPU rendering is not implemented"
+    },
+    "examples/advanced/21_RenderGraph": {
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.05,
+        0.05,
+        0.95,
+        0.95
+      ],
+      "coverage": "manual barriers and compiled RenderGraph both remain visibly rendered; no image-equivalence assertion",
+      "cases": [
+        {
+          "name": "manual",
+          "arguments": [
+            "--mode",
+            "manual"
+          ]
+        },
+        {
+          "name": "graph",
+          "arguments": [
+            "--mode",
+            "graph"
+          ]
+        }
+      ]
+    },
+    "examples/advanced/22_MeshShaderBasics": {
+      "kind": "capability",
+      "expected_exit": 77,
+      "markers": [
+        "Supports(MeshShader)",
+        "Supports(TaskShader)",
+        "종료 코드 77"
+      ],
+      "coverage": "backend capability report and explicit unavailable-example exit; GPU rendering is not implemented"
+    },
+    "examples/advanced/23_MeshletCullingLOD": {
+      "kind": "capability",
+      "expected_exit": 77,
+      "markers": [
+        "Supports(MeshShader)",
+        "Supports(IndirectDraw)",
+        "종료 코드 77"
+      ],
+      "coverage": "backend capability report and explicit unavailable-example exit; GPU rendering is not implemented"
+    },
+    "examples/advanced/24_AccelerationStructures": {
+      "kind": "capability",
+      "expected_exit": 77,
+      "markers": [
+        "Supports(RayQuery)",
+        "Supports(RayTracingPipeline)",
+        "종료 코드 77"
+      ],
+      "coverage": "backend capability report and explicit unavailable-example exit; GPU rendering is not implemented"
+    },
+    "examples/advanced/25_RayQueryShadows": {
+      "kind": "capability",
+      "expected_exit": 77,
+      "markers": [
+        "Supports(RayQuery)",
+        "종료 코드 77"
+      ],
+      "coverage": "backend capability report and explicit unavailable-example exit; GPU rendering is not implemented"
+    },
+    "examples/advanced/26_RayTracingReflections": {
+      "kind": "capability",
+      "expected_exit": 77,
+      "markers": [
+        "Supports(RayTracingPipeline)",
+        "종료 코드 77"
+      ],
+      "coverage": "backend capability report and explicit unavailable-example exit; GPU rendering is not implemented"
+    },
+    "examples/advanced/27_RayTracingDenoising": {
+      "kind": "capability",
+      "expected_exit": 77,
+      "markers": [
+        "Supports(Compute)",
+        "Supports(RayTracingPipeline)",
+        "종료 코드 77"
+      ],
+      "coverage": "backend capability report and explicit unavailable-example exit; GPU rendering is not implemented"
+    },
+    "examples/advanced/28_HybridRendering": {
+      "kind": "capability",
+      "expected_exit": 77,
+      "markers": [
+        "Supports(RayQuery)",
+        "Supports(RayTracingPipeline)",
+        "종료 코드 77"
+      ],
+      "coverage": "backend capability report and explicit unavailable-example exit; GPU rendering is not implemented"
+    }
+  }
+}

@@ -5,6 +5,7 @@
 #include "D3D12ResourceSet.h"
 #include "D3D12Shader.h"
 #include "D3D12Texture.h"
+#include "D3D12Query.h"
 #include "dyf/RHI/ResourceSet.h"
 #include "dyf/RHI/Shader.h"
 #include "dyf/RHI/Pipeline.h"
@@ -51,6 +52,7 @@ namespace dyf::Backends
         D3D_FEATURE_LEVEL resourceBindingFeatureLevel = D3D_FEATURE_LEVEL_11_0;
         ComPtr<ID3D12InfoQueue> infoQueue; // 디버그 빌드: D3D12 검증 메시지 수집
         ComPtr<ID3D12CommandQueue> commandQueue;
+        uint64_t timestampFrequency = 0;
         HWND windowHandle = nullptr;
         ComPtr<IDXGISwapChain3> swapChain;
         ComPtr<ID3D12DescriptorHeap> rtvHeap;
@@ -398,6 +400,8 @@ namespace dyf::Backends
         if (m_internal->fenceEvent == nullptr) return -1;
 
         m_internal->frames.resize(desc.maxFramesInFlight);
+        if(FAILED(m_internal->commandQueue->GetTimestampFrequency(&m_internal->timestampFrequency)))
+            m_internal->timestampFrequency = 0;
         return 0;
     }
 
@@ -406,8 +410,57 @@ uint64_t D3D12Device::GetLastSubmissionNative() const {return m_internal->lastSu
 uint64_t D3D12Device::GetCompletedSubmissionNative() {uint64_t value=0; return m_internal->CollectCompletedWork(value)?value:0;}
 void D3D12Device::DiscardCommandListNative(RHI::ICommandList* list) {auto& active=m_internal->activeCommandLists; active.erase(std::remove_if(active.begin(),active.end(),[list](const auto& value){return value.get()==list;}),active.end());}
 
+RHI::TimestampQueryHandle D3D12Device::CreateTimestampQueryNative(const RHI::TimestampQueryDesc& desc)
+{
+    auto query = std::make_unique<D3D12TimestampQuery>(desc.count, m_internal->fence.Get());
+    D3D12_QUERY_HEAP_DESC heap{};
+    heap.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    heap.Count = desc.count;
+    if(FAILED(m_internal->device->CreateQueryHeap(&heap, IID_PPV_ARGS(&query->heap)))) return nullptr;
+    D3D12_HEAP_PROPERTIES properties{};
+    properties.Type = D3D12_HEAP_TYPE_READBACK;
+    properties.CreationNodeMask = properties.VisibleNodeMask = 1;
+    D3D12_RESOURCE_DESC buffer{};
+    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    buffer.Width = uint64_t(desc.count) * sizeof(uint64_t);
+    buffer.Height = 1;
+    buffer.DepthOrArraySize = buffer.MipLevels = 1;
+    buffer.SampleDesc.Count = 1;
+    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    if(FAILED(m_internal->device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE,
+        &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&query->readback)))) return nullptr;
+    return query.release();
+}
+void D3D12Device::DestroyTimestampQueryNative(RHI::TimestampQueryHandle query)
+{
+    delete static_cast<D3D12TimestampQuery*>(query);
+}
+bool D3D12Device::ReadTimestampsNative(RHI::TimestampQueryHandle handle, uint32_t first,
+    uint32_t count, uint64_t* ticks)
+{
+    if(m_internal->submissionFaulted || IsLostNative()) return false;
+    auto& query = *static_cast<D3D12TimestampQuery*>(handle);
+    for(uint32_t index = first; index < first + count; ++index)
+        if(!query.completions[index] || query.InFlight(index)) return false;
+    const D3D12_RANGE readRange{SIZE_T(first) * sizeof(uint64_t), SIZE_T(first + count) * sizeof(uint64_t)};
+    void* mapped = nullptr;
+    if(FAILED(query.readback->Map(0, &readRange, &mapped))) return false;
+    std::memcpy(ticks, static_cast<const uint64_t*>(mapped) + first, count * sizeof(uint64_t));
+    const D3D12_RANGE noWrites{0, 0};
+    query.readback->Unmap(0, &noWrites);
+    return true;
+}
+double D3D12Device::GetTimestampPeriodNative() const
+{
+    return m_internal->timestampFrequency ? 1e9 / double(m_internal->timestampFrequency) : 0;
+}
+uint32_t D3D12Device::GetTimestampValidBitsNative() const
+{
+    return m_internal->timestampFrequency ? 64 : 0;
+}
 bool D3D12Device::SupportsNative(RHI::Feature feature) const
 {
+    if(feature == RHI::Feature::TimestampQuery) return m_internal->timestampFrequency != 0;
     switch(feature)
     {
     case RHI::Feature::Rasterization:
@@ -984,6 +1037,8 @@ void D3D12Device::DestroySwapchainNative()
                 m_internal->fence.Get(), submission.completionValue)))
         {
             submission.completionValue = std::numeric_limits<uint64_t>::max();
+            for(const auto& commandList : submission.commandLists)
+                commandList->MarkTimestampsSubmitted(UINT64_MAX);
             m_internal->lastSubmittedValue = submission.completionValue;
             m_internal->submissionFaulted = true;
             if (frameSubmission) m_internal->frameReady = false;
@@ -993,6 +1048,7 @@ void D3D12Device::DestroySwapchainNative()
         for (const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& commandList :
             submission.commandLists)
         {
+            commandList->MarkTimestampsSubmitted(submission.completionValue);
             commandList->CommitResourceStates();
         }
         m_internal->lastSubmittedValue = submission.completionValue;
