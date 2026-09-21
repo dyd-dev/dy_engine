@@ -4,6 +4,7 @@
 #include "D3D12PipelineState.h"
 #include "D3D12ResourceSet.h"
 #include "D3D12Texture.h"
+#include "D3D12Query.h"
 #include "d3dx12.h"
 
 #include <algorithm>
@@ -12,6 +13,9 @@
 #include <d3d12.h>
 #include <limits>
 #include <wrl.h>
+#if defined(USE_PIX)
+#include <pix3.h>
+#endif
 
 using Microsoft::WRL::ComPtr;
 
@@ -225,6 +229,8 @@ namespace dyf::Backends
         bool viewportSet = false;
         bool scissorSet = false;
         bool stencilReferenceSet = false;
+        struct TimestampOperation { D3D12TimestampQuery* query; uint32_t index; bool write; };
+        std::vector<TimestampOperation> timestamps;
     };
 
     namespace
@@ -359,6 +365,60 @@ namespace dyf::Backends
         delete m_internal;
     }
 
+    void D3D12CommandList::ResetTimestampsNative(RHI::TimestampQueryHandle handle, uint32_t first, uint32_t count)
+    {
+        auto* query = dynamic_cast<D3D12TimestampQuery*>(handle);
+        if(!CanRecord(m_internal) || m_internal->rendering || !query)
+        { RejectRecording(m_internal); return; }
+        for(uint32_t index = first; index < first + count; ++index)
+        {
+            if(query->InFlight(index)) { RejectRecording(m_internal); return; }
+            m_internal->timestamps.push_back({query, index, false});
+        }
+    }
+    void D3D12CommandList::WriteTimestampNative(RHI::TimestampQueryHandle handle, uint32_t index)
+    {
+        auto* query = dynamic_cast<D3D12TimestampQuery*>(handle);
+        if(!CanRecord(m_internal) || !query || query->InFlight(index))
+        { RejectRecording(m_internal); return; }
+        m_internal->commandList->EndQuery(query->heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, index);
+        // Resolve only a query that was actually written, never unwritten slots in the heap.
+        m_internal->commandList->ResolveQueryData(query->heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+            index, 1, query->readback.Get(), uint64_t(index) * sizeof(uint64_t));
+        m_internal->timestamps.push_back({query, index, true});
+    }
+    void D3D12CommandList::MarkTimestampsSubmitted(uint64_t completion)
+    {
+        for(const auto& operation : m_internal->timestamps)
+            operation.query->completions[operation.index] = operation.write ? completion : 0;
+    }
+    void D3D12CommandList::BeginDebugEventNative(const char* name, const RHI::DebugLabelColor& color)
+    {
+        if(!CanRecord(m_internal)) { RejectRecording(m_internal); return; }
+#if defined(USE_PIX)
+        const auto channel = [](float value) { return UINT8(std::clamp(value, 0.0f, 1.0f) * 255); };
+        PIXBeginEvent(m_internal->commandList.Get(), PIX_COLOR(channel(color.r), channel(color.g), channel(color.b)), "%s", name);
+#else
+        (void)name; (void)color;
+#endif
+    }
+    void D3D12CommandList::EndDebugEventNative()
+    {
+        if(!CanRecord(m_internal)) { RejectRecording(m_internal); return; }
+#if defined(USE_PIX)
+        PIXEndEvent(m_internal->commandList.Get());
+#endif
+    }
+    void D3D12CommandList::InsertDebugMarkerNative(const char* name, const RHI::DebugLabelColor& color)
+    {
+        if(!CanRecord(m_internal)) { RejectRecording(m_internal); return; }
+#if defined(USE_PIX)
+        const auto channel = [](float value) { return UINT8(std::clamp(value, 0.0f, 1.0f) * 255); };
+        PIXSetMarker(m_internal->commandList.Get(), PIX_COLOR(channel(color.r), channel(color.g), channel(color.b)), "%s", name);
+#else
+        (void)name; (void)color;
+#endif
+    }
     void D3D12CommandList::ResourceBarrierNative(
         const RHI::ResourceBarrierDesc* barriers,
         uint32_t count)

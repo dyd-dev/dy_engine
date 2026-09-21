@@ -17,6 +17,7 @@
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1295,6 +1296,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
             return std::any_of(available.begin(),available.end(),[&](const auto& e){return std::strcmp(e.extensionName,name)==0;});
         };
         std::vector<const char*> extensions;
+        m_context.debugUtilsEnabled=supported(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        if(m_context.debugUtilsEnabled)extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
         if(supported(VK_KHR_SURFACE_EXTENSION_NAME))extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
 #if defined(_WIN32)
         if(supported("VK_KHR_win32_surface"))extensions.push_back("VK_KHR_win32_surface");

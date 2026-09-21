@@ -36,6 +36,9 @@ namespace dyf::RHI
         bool enableValidation = false;
 	};
 
+    struct ResourceCounter { uint64_t live = 0, created = 0, destroyed = 0; };
+    struct ResourceAllocationCounters { ResourceCounter buffers, textures, pipelines; };
+
 	class IDevice
 	{
 	public:
@@ -45,6 +48,9 @@ namespace dyf::RHI
 
 		[[nodiscard]] static IDevice* Create(const DeviceDesc& desc);
 		[[nodiscard]] bool Supports(Feature) const;
+        // Counts device-created resources, including resources retained by pending GPU work.
+        // Swapchain-owned images are excluded.
+        [[nodiscard]] ResourceAllocationCounters GetResourceAllocationCounters() const;
         // 설정의 공통 규칙과 장치 한도를 검사한다. 셰이더는 이 장치에서 생성한 핸들을 사용한다.
         // 조회는 자원을 생성하지 않으며, 이후 생성 시 메모리·셰이더 오류까지 보장하지는 않는다.
         [[nodiscard]] bool Supports(const PipelineLayoutDesc&) const;
@@ -182,6 +188,7 @@ namespace dyf::RHI
 	private:
 		friend class ICommandList;
 		mutable std::recursive_mutex m_resourceMutex;
+        ResourceAllocationCounters m_allocationCounters;
 		bool m_nativeResourcesAlive = true;
 		std::unordered_set<ICommandList*> m_recordedCommands;
         std::unordered_set<ICommandList*> m_userCommands;

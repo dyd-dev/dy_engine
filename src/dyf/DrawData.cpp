@@ -340,6 +340,7 @@ bool Renderer::RecordSceneDraws(const Scene& scene, const Camera& camera, const 
 	std::vector<RHI::ResourceSetHandle> shadowSets;
 	if(drawShadows)
 	{
+		commands.BeginDebugEvent("Shadow");
 		shadowSets.resize(draws ? scene.GetEntityCount() : 1, nullptr);
 		for(uint32_t i = 0; i < shadowSets.size(); ++i)
 		{
@@ -430,7 +431,9 @@ bool Renderer::RecordSceneDraws(const Scene& scene, const Camera& camera, const 
 		commands.ResourceBarrier(&ready, 1);
 	}
 	if(shadowQuery) commands.WriteTimestamp(shadowQuery, 1);
+	if(drawShadows) commands.EndDebugEvent();
 	if(mainQuery) { commands.ResetTimestamps(mainQuery, 0, 2); commands.WriteTimestamp(mainQuery, 0); }
+	commands.BeginDebugEvent("MainForward");
 
 	std::array<RHI::ResourceBarrierDesc, 3> barriers;
 	uint32_t barrierCount = 0;
@@ -499,6 +502,7 @@ bool Renderer::RecordSceneDraws(const Scene& scene, const Camera& camera, const 
 	const RHI::ResourceBarrierDesc after = {nullptr, target, RHI::ResourceState::RenderTarget,
 		config.enableHdrRendering ? RHI::ResourceState::ShaderResource : RHI::ResourceState::Present, {}};
 	commands.ResourceBarrier(&after, 1);
+	commands.EndDebugEvent();
 	DestroyResourceSets(device, materialSets);
 	DestroyResourceSets(device, shadowSets);
 	return true;

@@ -1,5 +1,7 @@
 #include "dyf/RHI.h"
 #include "dyf/Platform/Window.h"
+#include "dyf/Platform/Profiler.h"
+#include "dyf/Platform/RenderDocCapture.h"
 #include "vertex.h"
 #include "fragment.h"
 #include <algorithm>
@@ -61,7 +63,7 @@ void Statistics(const char* name,std::vector<double> samples) {
 }
 int main(int argc,char** argv) try {
     for(int i=1;i<argc;++i)if(std::string(argv[i])=="--help") {
-        std::cout<<"Profiling: --work 0..2048 --flight 1..4; GPU timestamp is optional, CPU timings always measured.\nCommon: --frames N --capture path.ppm --validation\n";return 0;
+        std::cout<<"Profiling: --work 0..2048 --flight 1..4; GPU timestamp is optional, CPU timings always measured.\nCommon: --frames N --capture path.ppm --validation\nF12 requests RenderDoc capture when the API is injected; PIX/RenderDoc show the Profiling pass event.\n";return 0;
     }
     const auto options=Parse(argc,argv);
     dyf::Platform::Window window(800,600,"Advanced / Profiling");
@@ -107,6 +109,9 @@ int main(int argc,char** argv) try {
         if(!device.BeginFrame()){Check(!device.IsLost(),"Device lost");std::this_thread::sleep_for(std::chrono::milliseconds(1));continue;}
         auto* target=device.GetBackBuffer();auto* commands=lists[slot];
         const auto recordStart=std::chrono::steady_clock::now();
+        DY_PROFILE_CPU_ZONE_NAMED("AdvancedProfiling::Record");
+        commands->BeginDebugEvent("Profiling pass");
+        commands->InsertDebugMarker("Timestamp begin");
         if(query){commands->ResetTimestamps(query,slot*2,2);commands->WriteTimestamp(query,slot*2);}
         ResourceBarrierDesc begin{nullptr,target,ResourceState::Present,ResourceState::RenderTarget,{}};commands->ResourceBarrier(&begin,1);
         ColorAttachment color;color.texture=target;color.loadOp=LoadOp::Clear;color.storeOp=StoreOp::Store;color.clearColor[3]=1;
@@ -117,11 +122,13 @@ int main(int argc,char** argv) try {
         commands->DrawInstanced(3,1,0,0);commands->EndRendering();
         ResourceBarrierDesc end{nullptr,target,ResourceState::RenderTarget,ResourceState::Present,{}};commands->ResourceBarrier(&end,1);
         if(query)commands->WriteTimestamp(query,slot*2+1);
+        commands->EndDebugEvent();
         Check(commands->Close(),"Close failed");const auto submitStart=std::chrono::steady_clock::now();
         Check(device.Submit({&commands,1,nullptr,0},fences[slot]),"Submit failed");
         const auto submitEnd=std::chrono::steady_clock::now();
         if(!options.capture.empty() && frame+1==options.frames)SaveCapture(device,target,options.capture);
         Check(device.Present(),"Present failed");
+        DY_PROFILE_FRAME_MARK();
         recordMs.push_back(milliseconds(recordStart,submitStart));submitMs.push_back(milliseconds(submitStart,submitEnd));
         const auto frameEnd=std::chrono::steady_clock::now();
         frameMs.push_back(milliseconds(frameStart,frameEnd));frameStart=frameEnd;++frame;

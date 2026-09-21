@@ -170,6 +170,12 @@ void IDevice::Track(void* handle, void (*destroy)(IDevice&, void*),
     m_resources.emplace(handle, std::move(reference));
 }
 
+ResourceAllocationCounters IDevice::GetResourceAllocationCounters() const
+{
+    std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+    return m_allocationCounters;
+}
+
 void IDevice::AbandonResources()
 {
     m_nativeResourcesAlive = false;
@@ -266,6 +272,7 @@ bool IDevice::ResetCommandList(ICommandList* commands)
     commands->m_stateOperations.clear();
     commands->m_references.clear();
     commands->m_recordingClosed=commands->m_recordingFailed=false;
+    commands->m_debugEventDepth=0;
     commands->m_rendering=commands->m_viewport=commands->m_scissor=false;
     commands->m_pipeline=nullptr;
     commands->m_indexBuffer=nullptr;
@@ -336,7 +343,11 @@ BufferHandle IDevice::CreateBuffer(const BufferDesc& desc)
     if(!desc.size || desc.usage == BufferUsage::None || !IsBufferStateAllowed(desc, desc.initialState)) return nullptr;
     auto* buffer = CreateBufferNative(desc);
     if(!buffer) ReportDiagnostic(DiagnosticSeverity::Error,"CreateBuffer: native size, usage or initial-state constraints (or allocation failure) prevented creation.");
-    Track(buffer, [](IDevice& device, void* handle) { device.DestroyBufferNative(static_cast<BufferHandle>(handle)); });
+    if(buffer) { ++m_allocationCounters.buffers.live; ++m_allocationCounters.buffers.created; }
+    Track(buffer, [](IDevice& device, void* handle) {
+        device.DestroyBufferNative(static_cast<BufferHandle>(handle));
+        --device.m_allocationCounters.buffers.live; ++device.m_allocationCounters.buffers.destroyed;
+    });
     if(buffer)m_resourceStates[{reinterpret_cast<uintptr_t>(buffer),0,0}]=desc.initialState;
     return buffer;
 }
@@ -350,7 +361,11 @@ TextureHandle IDevice::CreateTexture(const TextureDesc& desc)
         || !FormatSize(desc.format) || desc.usage == TextureUsage::None) return nullptr;
     auto* texture = CreateTextureNative(desc);
     if(!texture) ReportDiagnostic(DiagnosticSeverity::Error,"CreateTexture: native format, extent or usage constraints (or allocation failure) prevented creation; no format was substituted.");
-    Track(texture, [](IDevice& device, void* handle) { device.DestroyTextureNative(static_cast<TextureHandle>(handle)); });
+    if(texture) { ++m_allocationCounters.textures.live; ++m_allocationCounters.textures.created; }
+    Track(texture, [](IDevice& device, void* handle) {
+        device.DestroyTextureNative(static_cast<TextureHandle>(handle));
+        --device.m_allocationCounters.textures.live; ++device.m_allocationCounters.textures.destroyed;
+    });
     if(texture)for(uint32_t layer=0;layer<desc.depthOrArraySize;++layer)for(uint32_t mip=0;mip<desc.mipLevels;++mip)
         m_resourceStates[{reinterpret_cast<uintptr_t>(texture),mip,layer}]=ResourceState::Undefined;
     return texture;
@@ -380,7 +395,11 @@ PipelineHandle IDevice::CreateComputePipeline(const ComputePipelineDesc& desc)
         if(desc.layout.bindings[i].stages!=ShaderStageFlags::Compute)return nullptr;
     auto* pipeline=CreateComputePipelineNative(desc);
     if(!pipeline) ReportDiagnostic(DiagnosticSeverity::Error,"CreateComputePipeline: native creation failed; no substitute pipeline was selected.");
-    Track(pipeline,[](IDevice& device,void* handle){device.DestroyPipelineNative(static_cast<PipelineHandle>(handle));},{shader});
+    if(pipeline) { ++m_allocationCounters.pipelines.live; ++m_allocationCounters.pipelines.created; }
+    Track(pipeline,[](IDevice& device,void* handle){
+        device.DestroyPipelineNative(static_cast<PipelineHandle>(handle));
+        --device.m_allocationCounters.pipelines.live; ++device.m_allocationCounters.pipelines.destroyed;
+    },{shader});
     return pipeline;
 }
 
@@ -404,7 +423,11 @@ PipelineHandle IDevice::CreateGraphicsPipeline(const GraphicsPipelineDesc& desc)
             pipeline->m_colorFormats.push_back(desc.colorAttachments[i].format);
         pipeline->m_depthStencilFormat=desc.depthStencil.format;
     }
-    Track(pipeline, [](IDevice& device, void* handle) { device.DestroyPipelineNative(static_cast<PipelineHandle>(handle)); }, {vertex, fragment});
+    if(pipeline) { ++m_allocationCounters.pipelines.live; ++m_allocationCounters.pipelines.created; }
+    Track(pipeline, [](IDevice& device, void* handle) {
+        device.DestroyPipelineNative(static_cast<PipelineHandle>(handle));
+        --device.m_allocationCounters.pipelines.live; ++device.m_allocationCounters.pipelines.destroyed;
+    }, {vertex, fragment});
     return pipeline;
 }
 
