@@ -1,3 +1,6 @@
+find_package(Threads REQUIRED)
+target_link_libraries(${PROJECT_NAME} PUBLIC Threads::Threads)
+
 if(DY_ENABLE_RENDERDOC)
     if(APPLE)
         message(FATAL_ERROR "RenderDoc does not support Metal; use Xcode GPU Capture.")
@@ -17,6 +20,8 @@ if(USE_D3D12 AND WIN32 AND DY_ENABLE_PIX)
     if(NOT MSVC)
         message(FATAL_ERROR "DY_ENABLE_PIX requires the Microsoft C++ compiler supported by WinPixEventRuntime. Use MSVC, or DY_ENABLE_PIX=OFF for D3D12 rendering/timestamps without PIX events.")
     endif()
+    message(STATUS "Download and Configure WinPixEventRuntime...")
+
     FetchContent_Declare(winpixeventruntime
         URL "https://www.nuget.org/api/v2/package/WinPixEventRuntime/1.0.240308001"
         URL_HASH "SHA256=726acc93d6968e2146261a1e415521747d50ad69894c2b42b5d0d4c29fd66ec4")

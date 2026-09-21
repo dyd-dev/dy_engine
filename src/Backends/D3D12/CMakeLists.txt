@@ -14,7 +14,7 @@ add_library(${BACKEND_NAME} OBJECT
 )
 
 target_link_libraries(${BACKEND_NAME} PRIVATE
-	dy_engine_options
+	Engine_Options
 )
 if(DY_ENABLE_PIX)
     target_link_libraries(${BACKEND_NAME} PRIVATE WinPixEventRuntime::WinPixEventRuntime)

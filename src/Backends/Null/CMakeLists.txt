@@ -6,7 +6,7 @@ add_library(${BACKEND_NAME} OBJECT
 )
 target_include_directories(${BACKEND_NAME} BEFORE PRIVATE "${PROJECT_SOURCE_DIR}/src/Public" "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(${BACKEND_NAME} PRIVATE
-	dy_engine_options
+	Engine_Options
 )
 
 target_sources(${PROJECT_NAME} PRIVATE $<TARGET_OBJECTS:${BACKEND_NAME}>)

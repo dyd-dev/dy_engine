@@ -1,6 +1,6 @@
 if(DY_BUILD_PROFILING_TESTS)
     add_executable(ProfilerSamplerTests ProfilerSamplerTest.cpp ../src/dyf/ProfilerSampler.cpp)
-    target_link_libraries(ProfilerSamplerTests PRIVATE dy_engine_options)
+    target_link_libraries(ProfilerSamplerTests PRIVATE Engine_Options)
     add_test(NAME ProfilingSampler COMMAND ProfilerSamplerTests)
 
     add_executable(ProfilingTests ProfilingTests.cpp)

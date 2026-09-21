@@ -26,7 +26,7 @@ set_source_files_properties(
 )
 
 target_link_libraries(${BACKEND_NAME} PRIVATE
-    dy_engine_options
+    Engine_Options
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE

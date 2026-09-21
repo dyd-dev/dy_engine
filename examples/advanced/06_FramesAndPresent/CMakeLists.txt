@@ -5,7 +5,6 @@ set(DY_ENGINE_SOURCE_DIR "${engine_default}" CACHE PATH "dy_engine source direct
 if(NOT TARGET dy_engine)
     add_subdirectory("${DY_ENGINE_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/dy_engine" EXCLUDE_FROM_ALL)
 endif()
-include("${DY_ENGINE_SOURCE_DIR}/cmake/CompileShaders.cmake")
 add_executable(AdvancedFramesAndPresent main.cpp)
 target_link_libraries(AdvancedFramesAndPresent PRIVATE dy_engine)
 dy_compile_shader(AdvancedFramesAndPresent vertex vert

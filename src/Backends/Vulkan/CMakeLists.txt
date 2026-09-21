@@ -9,7 +9,7 @@ add_library(dy_backend_vulkan OBJECT
 find_package(Vulkan REQUIRED)
 
 target_link_libraries(dy_backend_vulkan PRIVATE
-	dy_engine_options
+	Engine_Options
 	Vulkan::Vulkan
 	glfw
 )

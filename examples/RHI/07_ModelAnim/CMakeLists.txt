@@ -7,7 +7,6 @@ if(NOT TARGET dy_engine)
     option(DY_EXTEND_MODEL "Build the optional Model extension." ON)
     add_subdirectory("${DY_ENGINE_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/dy_engine" EXCLUDE_FROM_ALL)
 endif()
-include("${DY_ENGINE_SOURCE_DIR}/cmake/CompileShaders.cmake")
 
 if(NOT TARGET dyf::Model)
     message(FATAL_ERROR "07_ModelAnim requires DY_EXTEND_MODEL=ON.")
