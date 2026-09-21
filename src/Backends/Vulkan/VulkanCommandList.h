@@ -26,6 +26,9 @@ namespace dyf::Backends
 	{
 	public:
 		explicit VulkanCommandList(const VulkanContext& context);
+        void BeginDebugEventNative(const char*,const RHI::DebugLabelColor&) override;
+        void EndDebugEventNative() override;
+        void InsertDebugMarkerNative(const char*,const RHI::DebugLabelColor&) override;
 
 		void ResourceBarrierNative(const dyf::RHI::ResourceBarrierDesc* barriers, uint32_t count) override;
 		void BeginRenderingNative(const dyf::RHI::RenderingDesc& desc) override;

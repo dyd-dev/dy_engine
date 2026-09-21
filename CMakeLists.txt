@@ -24,6 +24,8 @@ add_library(${PROJECT_NAME} STATIC
     "src/dyf/PostProcess.cpp"
     "src/dyf/Lighting.cpp"
     "src/dyf/Profiler.cpp"
+    "src/dyf/ProfilerSampler.cpp"
+    "src/Platform/RenderDocCapture.cpp"
 	"src/dyf/DrawData.cpp"
 	"src/dyf/TextureCache.cpp"
 	"src/dyf/Scene.cpp"
@@ -39,6 +41,9 @@ target_include_directories(${PROJECT_NAME} PRIVATE "${PROJECT_SOURCE_DIR}/src")
 
 option(DY_EXTEND_MODEL "Build the optional Model extension." OFF)
 
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+    include(CiChecks)
+endif()
 include(Dependencies)
 include(BuildOptions)
 
@@ -50,11 +55,21 @@ if(DY_EXTEND_MODEL)
 endif()
 
 # Only add the executable if this is the main project being built (not when included as a subdirectory in another project)
-if(CMAKE_PROJECT_NAME  STREQUAL PROJECT_NAME)
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
 	option(DY_BUILD_EXAMPLES "Build the self-contained dyf and RHI examples." OFF)
-	if(DY_BUILD_EXAMPLES)
+	if(DY_BUILD_EXAMPLES OR DY_CI)
 		add_subdirectory(examples)
 	endif()
+    if(DY_CI)
+        include(ExampleSupport)
+        enable_testing()
+        add_subdirectory(.github/ci)
+    endif()
+    option(DY_BUILD_PROFILING_TESTS "Build profiling contract tests." ${DY_CI})
+    if(DY_BUILD_PROFILING_TESTS)
+        enable_testing()
+        add_subdirectory(tests)
+    endif()
 endif()
 
 # ===== Configuration Messages =====

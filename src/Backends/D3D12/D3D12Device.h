@@ -16,6 +16,11 @@ namespace dyf::Backends
         bool WaitIdleNative() override;
         bool IsLostNative() const override;
         bool SupportsNative(RHI::Feature) const override;
+        RHI::TimestampQueryHandle CreateTimestampQueryNative(const RHI::TimestampQueryDesc&) override;
+        void DestroyTimestampQueryNative(RHI::TimestampQueryHandle) override;
+        bool ReadTimestampsNative(RHI::TimestampQueryHandle, uint32_t, uint32_t, uint64_t*) override;
+        double GetTimestampPeriodNative() const override;
+        uint32_t GetTimestampValidBitsNative() const override;
         uint64_t GetLimitNative(RHI::Limit) const override;
         bool SupportsSamplerNative(const RHI::SamplerDesc&) const override;
         bool SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc&) const override;

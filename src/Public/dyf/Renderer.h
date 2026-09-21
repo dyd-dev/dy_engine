@@ -7,6 +7,7 @@
 #include <map>
 #include <vector>
 #include "dyf/RendererConfig.h"
+#include "dyf/Platform/ProfilerSampler.h"
 #include "dyf/Material.h"
 #include "dyf/RHI/ResourceHandles.h"
 #include "dyf/RHI/ResourceState.h"
@@ -196,7 +197,12 @@ private:
     std::array<double,2> m_gpuMilliseconds={-1,-1};
     std::chrono::steady_clock::time_point m_previous={};
     std::array<float,120> m_history={};
+    std::array<float,120> m_cpuHistory={},m_gpuHistory={};
+    std::array<uint8_t,120> m_gpuHistoryValid={};
+    float m_graphScaleMilliseconds=33.33f;
     uint32_t m_cursor=0,m_count=0,m_entities=0;
     double m_cpuMilliseconds=0;
+    Platform::ProfilerSampler m_profilerSampler;
+    Platform::ProfilerTimingSnapshot m_profilerSnapshot;
 };
 }

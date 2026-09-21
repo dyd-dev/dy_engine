@@ -18,6 +18,7 @@ struct VulkanContext {
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     VkQueue graphicsQueue = VK_NULL_HANDLE;
     VkQueue presentQueue = VK_NULL_HANDLE;
+    bool debugUtilsEnabled = false;
 
     struct QueueFamilyIndices {
         uint32_t graphicsFamily = UINT32_MAX;

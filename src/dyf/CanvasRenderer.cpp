@@ -1,5 +1,6 @@
 #include "dyf/Image.h"
 #include "dyf/Renderer.h"
+#include "dyf/Platform/Profiler.h"
 #include "dyf/Canvas.h"
 
 #include "dyf/RHI/Buffer.h"
@@ -161,6 +162,7 @@ bool Renderer::RenderCanvas(const Canvas& canvas, Image* readback)
     if(!recorded || !closed || !submitted) {std::fprintf(stderr,"dyf: Canvas command assembly/submission failed.\n");return false;}
     if(readback && !CaptureFrame(*readback))return false;
     if(!device->Present()) {std::fprintf(stderr,"dyf: Canvas presentation failed.\n");return false;}
+    DY_PROFILE_FRAME_MARK();
     return true;
 }
 

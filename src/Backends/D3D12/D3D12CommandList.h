@@ -26,6 +26,12 @@ namespace dyf::Backends
     {
     public:
         explicit D3D12CommandList(void* nativeDevice);
+        void ResetTimestampsNative(RHI::TimestampQueryHandle, uint32_t, uint32_t) override;
+        void WriteTimestampNative(RHI::TimestampQueryHandle, uint32_t) override;
+        void MarkTimestampsSubmitted(uint64_t completion);
+        void BeginDebugEventNative(const char*, const RHI::DebugLabelColor&) override;
+        void EndDebugEventNative() override;
+        void InsertDebugMarkerNative(const char*, const RHI::DebugLabelColor&) override;
 
         void ResourceBarrierNative(const RHI::ResourceBarrierDesc* barriers, uint32_t count) override;
         void BeginRenderingNative(const RHI::RenderingDesc& desc) override;

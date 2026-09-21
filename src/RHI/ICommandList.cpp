@@ -1,9 +1,32 @@
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/IDevice.h"
 #include "RHI/Validation.h"
+#include <string>
 
 namespace dyf::RHI
 {
+void ICommandList::BeginDebugEvent(const char* name, const DebugLabelColor& color)
+{
+    if(!CanRecordCommands()) return;
+    if(!name || !*name || !std::isfinite(color.r) || !std::isfinite(color.g) ||
+        !std::isfinite(color.b) || !std::isfinite(color.a)) { m_recordingFailed = true; return; }
+    ++m_debugEventDepth;
+    BeginDebugEventNative(name, color);
+}
+void ICommandList::EndDebugEvent()
+{
+    if(!CanRecordCommands()) return;
+    if(!m_debugEventDepth) { m_recordingFailed = true; return; }
+    --m_debugEventDepth;
+    EndDebugEventNative();
+}
+void ICommandList::InsertDebugMarker(const char* name, const DebugLabelColor& color)
+{
+    if(!CanRecordCommands()) return;
+    if(!name || !*name || !std::isfinite(color.r) || !std::isfinite(color.g) ||
+        !std::isfinite(color.b) || !std::isfinite(color.a)) { m_recordingFailed = true; return; }
+    InsertDebugMarkerNative(name, color);
+}
 void ICommandList::ResetTimestamps(TimestampQueryHandle query,uint32_t first,uint32_t count)
 {
     if(!Track(query)) return;
@@ -301,6 +324,7 @@ void ICommandList::DrawIndexedInstanced(uint32_t indices, uint32_t instances, ui
 bool ICommandList::Close()
 {
     if(m_recordingClosed) { m_recordingFailed = true; return false; }
+    if(m_debugEventDepth) m_recordingFailed = true;
     const bool nativeClosed = CloseNative();
     m_recordingClosed = true;
     m_recordingFailed = m_recordingFailed || !nativeClosed;
@@ -314,6 +338,12 @@ namespace dyf::RHI
 {
 class RecordedCommandList final : public ICommandList
 {
+    void BeginDebugEventNative(const char* name, const DebugLabelColor& color) override
+    { m_commands.push_back([name=std::string(name),color](ICommandList& n) { n.BeginDebugEventNative(name.c_str(),color); return true; }); }
+    void EndDebugEventNative() override
+    { m_commands.push_back([](ICommandList& n) { n.EndDebugEventNative(); return true; }); }
+    void InsertDebugMarkerNative(const char* name, const DebugLabelColor& color) override
+    { m_commands.push_back([name=std::string(name),color](ICommandList& n) { n.InsertDebugMarkerNative(name.c_str(),color); return true; }); }
     void ResourceBarrierNative(const ResourceBarrierDesc* values, uint32_t count) override
     {
         std::vector<ResourceBarrierDesc> copy;

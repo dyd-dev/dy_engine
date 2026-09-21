@@ -1,0 +1,27 @@
+add_executable(ProfilerSamplerTests ProfilerSamplerTest.cpp ../src/dyf/ProfilerSampler.cpp)
+target_link_libraries(ProfilerSamplerTests PRIVATE dy_engine_options)
+add_test(NAME ProfilingSampler COMMAND ProfilerSamplerTests)
+
+add_executable(ProfilingTests ProfilingTests.cpp)
+target_link_libraries(ProfilingTests PRIVATE dy_engine)
+if(USE_D3D12)
+    target_compile_definitions(ProfilingTests PRIVATE DY_TEST_D3D12)
+endif()
+add_test(NAME ProfilingContracts COMMAND ProfilingTests)
+set_tests_properties(ProfilingContracts PROPERTIES TIMEOUT 30)
+
+add_executable(RenderDocCaptureTests RenderDocCaptureTests.cpp)
+target_link_libraries(RenderDocCaptureTests PRIVATE dy_engine ${CMAKE_DL_LIBS})
+add_test(NAME RenderDocAbsent COMMAND RenderDocCaptureTests --absent)
+if(DY_ENABLE_RENDERDOC)
+    add_library(RenderDocTestProvider SHARED RenderDocTestProvider.cpp)
+    target_include_directories(RenderDocTestProvider PRIVATE "${DY_RENDERDOC_INCLUDE_DIR}")
+    set_target_properties(RenderDocTestProvider PROPERTIES OUTPUT_NAME renderdoc
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/renderdoc-stub"
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/renderdoc-stub")
+    if(WIN32)
+        set_target_properties(RenderDocTestProvider PROPERTIES PREFIX "")
+    endif()
+    add_dependencies(RenderDocCaptureTests RenderDocTestProvider)
+    add_test(NAME RenderDocInjected COMMAND RenderDocCaptureTests "$<TARGET_FILE:RenderDocTestProvider>")
+endif()

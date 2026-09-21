@@ -76,7 +76,12 @@ if(DY_ENABLE_TRACY)
     FetchContent_MakeAvailable(tracy)
     target_link_libraries(Engine_Options INTERFACE Tracy::TracyClient)
     target_compile_definitions(Engine_Options INTERFACE DY_TRACY_ENABLED=1)
+    if(DY_TRACY_RAW_PLOTS)
+        target_compile_definitions(Engine_Options INTERFACE DY_TRACY_RAW_PLOTS_ENABLED=1)
+    endif()
 endif()
+
+include(Profiling)
 
 FetchContent_Declare(
 	glfw

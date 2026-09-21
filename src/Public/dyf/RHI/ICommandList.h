@@ -15,10 +15,15 @@
 
 namespace dyf::RHI
 {
+	struct DebugLabelColor { float r = 0.3f, g = 0.6f, b = 1.0f, a = 1.0f; };
 	class IDevice;
 	class ICommandList
 	{
 	public:
+        // Labels are copied when recorded. Unsupported native capture tools treat them as no-ops.
+        void BeginDebugEvent(const char* name, const DebugLabelColor& color = {});
+        void EndDebugEvent();
+        void InsertDebugMarker(const char* name, const DebugLabelColor& color = {});
         void ResetTimestamps(TimestampQueryHandle,uint32_t first,uint32_t count);
         void WriteTimestamp(TimestampQueryHandle,uint32_t index);
 		void ResourceBarrier(const ResourceBarrierDesc* barriers, uint32_t count);
@@ -58,6 +63,9 @@ namespace dyf::RHI
 		bool Close();
 
 	protected:
+        virtual void BeginDebugEventNative(const char*, const DebugLabelColor&) {}
+        virtual void EndDebugEventNative() {}
+        virtual void InsertDebugMarkerNative(const char*, const DebugLabelColor&) {}
         virtual void ResetTimestampsNative(TimestampQueryHandle,uint32_t,uint32_t) {m_recordingFailed=true;}
         virtual void WriteTimestampNative(TimestampQueryHandle,uint32_t) {m_recordingFailed=true;}
 		virtual ~ICommandList();
@@ -100,6 +108,7 @@ namespace dyf::RHI
         uint64_t m_completion=0;
         uint64_t m_imageGeneration=0;
         bool m_rendering=false, m_viewport=false, m_scissor=false;
+        uint32_t m_debugEventDepth = 0;
         PipelineHandle m_pipeline=nullptr;
         BufferHandle m_indexBuffer=nullptr;
         ResourceSetHandle m_resourceSet=nullptr;
