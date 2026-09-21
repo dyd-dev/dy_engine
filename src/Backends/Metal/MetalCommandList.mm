@@ -457,6 +457,19 @@ namespace dyf::Backends
 		m_impl->usesBackBuffer = false;
 	}
 
+    bool MetalCommandList::ReplayNative(const std::vector<std::function<bool(ICommandList&)>>& commands)
+    {
+        @autoreleasepool { return ICommandList::ReplayNative(commands); }
+    }
+
+    void MetalCommandList::GlobalBarrierNative()
+    {
+        // The public RHI places this outside rendering. All resources use tracked
+        // hazards on one MTLCommandQueue; ending the current encoder creates the
+        // native pass boundary, including resources outside the RenderGraph.
+        EndBlitEncoding(m_impl);
+    }
+
 	void MetalCommandList::ResourceBarrierNative(
 		const RHI::ResourceBarrierDesc* barriers,
 		uint32_t count)

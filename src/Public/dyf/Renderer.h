@@ -153,15 +153,17 @@ private:
     // 메시·텍스처 업로드와 draw에 필요한 RHI 호출을 cpp 파일별로 나눈 멤버 함수다.
     bool PrepareGeometry(const Scene&,RHI::IDevice*);
     bool CreateMaterialResourceSets(const Scene&,RHI::ICommandList&,const std::vector<RendererDrawDesc>*,std::vector<RHI::ResourceSetHandle>&);
-    bool RecordSceneDraws(const Scene&,const Camera&,const ShadowData&,RHI::ICommandList&,
-        const std::vector<RendererDrawDesc>*,RHI::TimestampQueryHandle shadowQuery,RHI::TimestampQueryHandle mainQuery);
+    bool RecordShadowPass(const Scene&,const Camera&,const ShadowData&,RHI::ICommandList&,
+        const std::vector<RendererDrawDesc>*,RHI::TimestampQueryHandle);
+    bool RecordMainPass(const Scene&,const Camera&,RHI::ICommandList&,
+        const std::vector<RendererDrawDesc>*,RHI::TimestampQueryHandle);
     void DestroyMeshState(RHI::IDevice*,SceneMeshState&);
     void ReleaseGeometry(RHI::IDevice*);
     bool SyncTextures(const Scene&,RHI::IDevice*);
     void ReleaseTextures(RHI::IDevice*);
     RHI::TextureHandle ResolveTexture(const Image&) const;
     bool InitializeCanvas(RHI::Format);
-    bool RecordCanvas(const Canvas&,RHI::ICommandList&,RHI::TextureHandle,bool overlay);
+    bool RecordCanvas(const Canvas&,RHI::ICommandList&,RHI::TextureHandle,bool overlay,bool graphManagedTarget = false);
     bool RenderCanvas(const Canvas&,Image*);
     bool PreparePostProcess(RHI::TextureHandle);
     bool RecordToneMap(RHI::ICommandList&,RHI::TextureHandle,float exposure);

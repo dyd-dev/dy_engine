@@ -1,4 +1,5 @@
 #pragma once
+#include <mutex>
 
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/ResourceState.h"
@@ -67,6 +68,7 @@ namespace dyf::Backends
 			VkImageView view = VK_NULL_HANDLE;
 		};
 		std::vector<ResourceView> m_resourceViews;
+        std::mutex m_viewMutex;
 		std::vector<dyf::RHI::ResourceState> m_states;
 		bool m_ownsImage = false;
 		bool m_hasKnownLayout = false;

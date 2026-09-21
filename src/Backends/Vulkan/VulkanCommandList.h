@@ -31,6 +31,7 @@ namespace dyf::Backends
         void InsertDebugMarkerNative(const char*,const RHI::DebugLabelColor&) override;
 
 		void ResourceBarrierNative(const dyf::RHI::ResourceBarrierDesc* barriers, uint32_t count) override;
+        void GlobalBarrierNative() override;
 		void BeginRenderingNative(const dyf::RHI::RenderingDesc& desc) override;
 		void EndRenderingNative() override;
 

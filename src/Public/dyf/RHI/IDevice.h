@@ -16,6 +16,8 @@
 #include "Feature.h"
 #include "Query.h"
 
+namespace dyf::Core { class ThreadPool; }
+
 namespace dyf::RHI
 {
 	class ICommandList;
@@ -70,7 +72,16 @@ namespace dyf::RHI
 
         // 성공하면 Present까지 같은 backbuffer를 사용한다. 중간에 여러 번 Submit할 수 있다.
 		[[nodiscard]] bool BeginFrame();
+		// Each acquired list is independent and may be recorded by one worker thread.
+		// Join recording before Submit/Reset/Destroy. Keep shared resources alive and
+		// immutable; serialize frame/swapchain lifetime changes with recording.
 		[[nodiscard]] ICommandList* AcquireCommandList();
+        // Translate closed lists into independent native command buffers before Submit.
+        // Only native recording runs on workers; allocation, validation and submission
+        // remain owned by the common RHI. Join before changing lists/device lifetime.
+        // Resources and frame/swapchain state must remain unchanged during this call.
+        [[nodiscard]] bool PrepareCommandLists(ICommandList* const* commandLists, uint32_t count,
+            Core::ThreadPool* pool = nullptr);
         [[nodiscard]] bool ResetCommandList(ICommandList*);
         void DestroyCommandList(ICommandList*);
 

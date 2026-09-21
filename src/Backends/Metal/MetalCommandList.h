@@ -24,6 +24,8 @@ namespace dyf::Backends
 	{
 	public:
 		explicit MetalCommandList(void* commandQueue);
+        bool ReplayNative(const std::vector<std::function<bool(ICommandList&)>>& commands) override;
+        void GlobalBarrierNative() override;
 
 		void ResourceBarrierNative(
 			const RHI::ResourceBarrierDesc* barriers,

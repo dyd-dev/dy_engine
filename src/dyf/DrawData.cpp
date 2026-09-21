@@ -327,18 +327,11 @@ bool Renderer::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 	return submitted && !uploadFailed;
 }
 
-bool Renderer::RecordSceneDraws(const Scene& scene, const Camera& camera, const ShadowData& shadows,
+bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const ShadowData& shadows,
 	RHI::ICommandList& commands, const std::vector<RendererDrawDesc>* draws,
-	RHI::TimestampQueryHandle shadowQuery, RHI::TimestampQueryHandle mainQuery)
+	RHI::TimestampQueryHandle shadowQuery)
 {
-	if(device == nullptr || pipeline == nullptr) return false;
-	std::vector<RHI::ResourceSetHandle> materialSets;
-	if(!CreateMaterialResourceSets(scene, commands, draws, materialSets)) return false;
-
-	const bool drawShadows = shadowPipeline && shadows.viewCount && shadowDepthTarget &&
-		shadowMatrixBuffer && shadowDepthTarget->GetDesc().width;
 	std::vector<RHI::ResourceSetHandle> shadowSets;
-	if(drawShadows)
 	{
 		commands.BeginDebugEvent("Shadow");
 		shadowSets.resize(draws ? scene.GetEntityCount() : 1, nullptr);
@@ -354,30 +347,14 @@ bool Renderer::RecordSceneDraws(const Scene& scene, const Camera& camera, const 
 			shadowSets[i] = device->CreateResourceSet({shadowPipeline, bindings.data(), static_cast<uint32_t>(bindings.size())});
 			if(!shadowSets[i])
 			{
-				DestroyResourceSets(device, materialSets);
 				DestroyResourceSets(device, shadowSets);
 				return false;
 			}
 		}
 	}
-	auto* target = config.enableHdrRendering ? hdrTarget : device->GetBackBuffer();
-	if(!target)
-	{
-		DestroyResourceSets(device, materialSets);
-		DestroyResourceSets(device, shadowSets);
-		return false;
-	}
 	const auto viewProjection = camera.projection * camera.view;
 	if(shadowQuery) { commands.ResetTimestamps(shadowQuery, 0, 2); commands.WriteTimestamp(shadowQuery, 0); }
-	if(drawShadows)
 	{
-		if(shadowDepthState != RHI::ResourceState::DepthWrite)
-		{
-			const RHI::ResourceBarrierDesc barrier = {
-				nullptr, shadowDepthTarget, shadowDepthState, RHI::ResourceState::DepthWrite, {}
-			};
-			commands.ResourceBarrier(&barrier, 1);
-		}
 		RHI::DepthStencilAttachment depth;
 		depth.texture = shadowDepthTarget;
 		depth.state = RHI::ResourceState::DepthWrite;
@@ -425,25 +402,26 @@ bool Renderer::RecordSceneDraws(const Scene& scene, const Camera& camera, const 
 			}
 		}
 		commands.EndRendering();
-		const RHI::ResourceBarrierDesc ready = {
-			nullptr, shadowDepthTarget, RHI::ResourceState::DepthWrite, RHI::ResourceState::ShaderResource, {}
-		};
-		commands.ResourceBarrier(&ready, 1);
+
 	}
 	if(shadowQuery) commands.WriteTimestamp(shadowQuery, 1);
-	if(drawShadows) commands.EndDebugEvent();
+	commands.EndDebugEvent();
+	DestroyResourceSets(device, shadowSets);
+	return true;
+}
+
+bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
+	RHI::ICommandList& commands, const std::vector<RendererDrawDesc>* draws,
+	RHI::TimestampQueryHandle mainQuery)
+{
+	if(device == nullptr || pipeline == nullptr) return false;
+	std::vector<RHI::ResourceSetHandle> materialSets;
+	if(!CreateMaterialResourceSets(scene, commands, draws, materialSets)) return false;
+	auto* target = config.enableHdrRendering ? hdrTarget : device->GetBackBuffer();
+	if(!target) { DestroyResourceSets(device, materialSets); return false; }
+	const auto viewProjection = camera.projection * camera.view;
 	if(mainQuery) { commands.ResetTimestamps(mainQuery, 0, 2); commands.WriteTimestamp(mainQuery, 0); }
 	commands.BeginDebugEvent("MainForward");
-
-	std::array<RHI::ResourceBarrierDesc, 3> barriers;
-	uint32_t barrierCount = 0;
-	barriers[barrierCount++] = {nullptr, target,
-		config.enableHdrRendering ? hdrState : RHI::ResourceState::Present, RHI::ResourceState::RenderTarget, {}};
-	if(depthStencilTarget && depthStencilState != RHI::ResourceState::DepthWrite)
-		barriers[barrierCount++] = {nullptr, depthStencilTarget, depthStencilState, RHI::ResourceState::DepthWrite, {}};
-	if(shadowDepthTarget && !drawShadows && shadowDepthState != RHI::ResourceState::ShaderResource)
-		barriers[barrierCount++] = {nullptr, shadowDepthTarget, shadowDepthState, RHI::ResourceState::ShaderResource, {}};
-	commands.ResourceBarrier(barriers.data(), barrierCount);
 
 	RHI::ColorAttachment color;
 	color.texture = target;
@@ -499,12 +477,8 @@ bool Renderer::RecordSceneDraws(const Scene& scene, const Camera& camera, const 
 		commands.DrawIndexedInstanced(mesh.indexCount, 1, 0, 0, 0);
 	}
 	commands.EndRendering();
-	const RHI::ResourceBarrierDesc after = {nullptr, target, RHI::ResourceState::RenderTarget,
-		config.enableHdrRendering ? RHI::ResourceState::ShaderResource : RHI::ResourceState::Present, {}};
-	commands.ResourceBarrier(&after, 1);
 	commands.EndDebugEvent();
 	DestroyResourceSets(device, materialSets);
-	DestroyResourceSets(device, shadowSets);
 	return true;
 }
 

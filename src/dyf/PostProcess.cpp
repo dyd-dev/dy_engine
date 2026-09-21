@@ -54,8 +54,6 @@ bool Renderer::RecordToneMap(RHI::ICommandList& commands,RHI::TextureHandle outp
     ResourceBinding image;image.binding=0;image.texture=hdrTarget;
     auto* set=device->CreateResourceSet({tonePipeline,&image,1});
     if(!set)return false;
-    const ResourceBarrierDesc before{nullptr,output,ResourceState::Present,ResourceState::RenderTarget,{}};
-    commands.ResourceBarrier(&before,1);
     ColorAttachment color; color.texture=output;color.loadOp=LoadOp::Discard;color.storeOp=StoreOp::Store;
     commands.BeginRendering({&color,1,nullptr});
     commands.BindGraphicsPipeline(tonePipeline);
@@ -66,8 +64,6 @@ bool Renderer::RecordToneMap(RHI::ICommandList& commands,RHI::TextureHandle outp
     commands.SetInlineConstants(0,sizeof(settings),settings);
     commands.DrawInstanced(3,1,0,0);
     commands.EndRendering();
-    const ResourceBarrierDesc after{nullptr,output,ResourceState::RenderTarget,ResourceState::Present,{}};
-    commands.ResourceBarrier(&after,1);
     device->DestroyResourceSet(set);
     return true;
 }

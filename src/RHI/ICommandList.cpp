@@ -44,6 +44,7 @@ ICommandList::~ICommandList()
     if(m_owner)
     {
         std::lock_guard<std::recursive_mutex> lock(m_owner->m_resourceMutex);
+        if(m_preparedNative) m_owner->DiscardCommandListNative(m_preparedNative);
         m_owner->m_recordedCommands.erase(this);
         m_references.clear();
         m_owner = nullptr;
@@ -56,13 +57,31 @@ bool ICommandList::CanRecordCommands()
     return !m_recordingFailed;
 }
 
+bool ICommandList::ReplayNative(const std::vector<std::function<bool(ICommandList&)>>& commands)
+{
+    for(const auto& record : commands)
+        if(!record(*this)) return false;
+    return !m_recordingFailed && CloseNative();
+}
+
+void ICommandList::GlobalBarrier()
+{
+    if(!CanRecordCommands()) return;
+    if(m_rendering) { m_recordingFailed = true; return; }
+    GlobalBarrierNative();
+}
+
 bool ICommandList::Track(const void* handle)
 {
     if(!CanRecordCommands()) return false;
-    auto reference = m_owner->Reference(handle);
-    if(!reference) { m_recordingFailed = true; return false; }
+    // References recorded before Destroy* retain the object until this list ends.
     for(const auto& existing : m_references)
         if(existing.get() == handle) return true;
+    // Resource ownership and swapchain generation are one synchronized snapshot.
+    // The command list itself remains exclusively owned by its recording thread.
+    std::lock_guard<std::recursive_mutex> lock(m_owner->m_resourceMutex);
+    auto reference = m_owner->Reference(handle);
+    if(!reference) { m_recordingFailed = true; return false; }
     if(m_owner->m_borrowedTextures.count(handle)) m_imageGeneration=m_owner->m_imageGeneration;
     m_references.push_back(std::move(reference));
     return true;
@@ -338,6 +357,8 @@ namespace dyf::RHI
 {
 class RecordedCommandList final : public ICommandList
 {
+    void GlobalBarrierNative() override
+    { m_commands.push_back([](ICommandList& native) { native.GlobalBarrierNative(); return true; }); }
     void BeginDebugEventNative(const char* name, const DebugLabelColor& color) override
     { m_commands.push_back([name=std::string(name),color](ICommandList& n) { n.BeginDebugEventNative(name.c_str(),color); return true; }); }
     void EndDebugEventNative() override

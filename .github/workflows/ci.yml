@@ -71,14 +71,14 @@ jobs:
       - name: Verify external consumer isolation
         if: matrix.api == 'null' && needs.discovery.outputs.consumer == 'true'
         run: python -B .github/ci/test_consumer.py --build-dir build/ci-consumer --dependencies build/ci-build/_deps
-      - name: Verify profiling contracts on the Null backend
+      - name: Verify profiling and RenderGraph contracts on the Null backend
         if: matrix.api == 'null'
         env:
           CI_CONFIG: ${{ matrix.config }}
         shell: bash
         run: |
-          cmake --build build/ci-build --config "$CI_CONFIG" --target ProfilerSamplerTests ProfilingTests RenderDocCaptureTests
-          ctest --test-dir build/ci-build --build-config "$CI_CONFIG" --output-on-failure --no-tests=error -R '^(ProfilingSampler|ProfilingContracts|RenderDocAbsent|RenderDocInjected)$'
+          cmake --build build/ci-build --config "$CI_CONFIG" --target ProfilerSamplerTests ProfilingTests RenderDocCaptureTests RenderGraphTests
+          ctest --test-dir build/ci-build --build-config "$CI_CONFIG" --output-on-failure --no-tests=error -R '^(ProfilingSampler|ProfilingContracts|RenderDocAbsent|RenderDocInjected|RenderGraphContracts)$'
       - name: Verify native observation and failure handling
         if: runner.os == 'Linux' && matrix.api == 'vulkan' && matrix.config == 'Debug'
         env:

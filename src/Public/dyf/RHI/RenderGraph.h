@@ -8,9 +8,17 @@
 #include <vector>
 #include "Barrier.h"
 
+namespace dyf::Core { class ThreadPool; }
+
 namespace dyf::RHI
 {
     class ICommandList;
+    class IDevice;
+
+    struct RGExecutionStage
+    {
+        std::vector<uint32_t> passIndices;
+    };
 
     struct RGResourceHandle
     {
@@ -41,6 +49,10 @@ namespace dyf::RHI
         RenderGraphPass& Read(RGResourceHandle resource, ResourceState state);
         RenderGraphPass& Write(RGResourceHandle resource, ResourceState state);
         RenderGraphPass& SetPipeline(PipelineHandle pipeline);
+        // All earlier passes precede this pass and all later passes follow it.
+        // Emits a queue-wide memory barrier, including resources outside this graph.
+        // Resource states/layouts are unchanged; declare graph uses for state transitions.
+        RenderGraphPass& GlobalBarrier();
         // callback은 rendering을 직접 시작/종료한다. graphics 상수/바인딩은 rendering 안에서 설정한다.
         // 선언한 리소스의 상태와 실행 중인 그래프는 callback에서 바꾸지 않는다.
         RenderGraphPass& SetExecute(std::function<void(ICommandList*)> callback);
@@ -52,6 +64,7 @@ namespace dyf::RHI
         [[nodiscard]] const std::vector<RGResourceBinding>& GetReads() const { return m_reads; }
         [[nodiscard]] const std::vector<RGResourceBinding>& GetWrites() const { return m_writes; }
         [[nodiscard]] bool HasExecuteCallback() const { return static_cast<bool>(m_executeCallback); }
+        [[nodiscard]] bool HasGlobalBarrier() const { return m_globalBarrier; }
         [[nodiscard]] bool Execute(ICommandList* commandList) const;
 
     private:
@@ -62,6 +75,7 @@ namespace dyf::RHI
         std::vector<RGResourceBinding> m_reads;
         std::vector<RGResourceBinding> m_writes;
         std::function<void(ICommandList*)> m_executeCallback;
+        bool m_globalBarrier = false;
     };
 
     class RenderGraph
@@ -88,12 +102,25 @@ namespace dyf::RHI
         // Compile 이후 수정하지 않은 계획만 기록한다. 성공은 GPU 제출 성공을 뜻하지 않는다.
         // 실패한 commandList는 Reset/Destroy한다. callback 예외는 기록 실패 표시 후 전파한다.
         // Execute는 그래프 상태를 갱신하지 않는다. 재실행 시 initialState를 다시 만족해야 한다.
-        // 현재 단일 스레드 기록용이다. 구성/Compile/Reset과 Execute를 동시에 호출하지 않는다.
+        // 구성/Compile/Reset과 실행을 동시에 호출하지 않는다.
         [[nodiscard]] bool Execute(ICommandList* commandList) const;
+        // 의존성이 없는 패스의 RHI 명령과 각 목록의 네이티브 명령을 병렬 기록한다.
+        // 성공 시 비어 있던 commandLists에 닫힌 목록을 제출 순서대로 반환한다.
+        // 호출자는 목록을 순서대로 한 번에 Submit하고 DestroyCommandList로 해제한다.
+        // GPU 완료까지의 자원 보유와 완료 펜스는 기존 IDevice::Submit 계약을 따른다.
+        // 실패 시 출력은 비어 있으며 모든 작업 합류/목록 폐기 후 callback 예외를 전파한다.
+        // pool=nullptr/1 worker 또는 같은 pool의 worker에서 호출하면 현재 스레드에서 기록한다.
+        // callback의 공유 데이터는 호출자가 동기화한다. callback에서 Submit/Present,
+        // 목록 Close/Reset/Destroy 또는 그래프를 변경하지 않는다. 첫 callback 전에
+        // 모든 import/pipeline을 보유하며 소유 핸들 해제 후에도 기록된 참조는 유지한다.
+        // 반환 전에 네이티브 기록까지 완료한다. GPU 제출은 호출자가 수행한다.
+        [[nodiscard]] bool ExecuteParallel(IDevice* device, Core::ThreadPool* pool,
+            std::vector<ICommandList*>& commandLists) const;
         void Reset();
 
         [[nodiscard]] bool IsCompiled() const;
         [[nodiscard]] const std::vector<uint32_t>& GetExecutionOrderIndices() const { return m_executionOrder; }
+        [[nodiscard]] const std::vector<RGExecutionStage>& GetExecutionStages() const { return m_executionStages; }
         [[nodiscard]] std::vector<std::string> GetExecutionOrderNames() const;
         [[nodiscard]] const RenderGraphPass* GetPass(uint32_t index) const;
 
@@ -108,11 +135,15 @@ namespace dyf::RHI
         };
         RGResourceHandle Import(const std::string& name, BufferHandle buffer, TextureHandle texture,
             ResourceState initialState, ResourceState finalState);
+        bool RequireResource(ICommandList* commands, const Resource& resource, ResourceState state) const;
+        bool RecordBoundary(ICommandList* commands) const;
+        bool RecordPass(ICommandList* commands, uint32_t pass) const;
         std::vector<Resource> m_resources;
         std::unordered_map<std::string, RGResourceHandle> m_resourceNameToHandle;
         std::unordered_map<uint64_t, uint32_t> m_resourceIndices;
         std::vector<std::unique_ptr<RenderGraphPass>> m_passes;
         std::vector<uint32_t> m_executionOrder;
+        std::vector<RGExecutionStage> m_executionStages;
         std::vector<std::vector<ResourceBarrierDesc>> m_passBarriers;
         std::vector<ResourceBarrierDesc> m_finalBarriers;
         std::vector<uint64_t> m_compiledRevisions;

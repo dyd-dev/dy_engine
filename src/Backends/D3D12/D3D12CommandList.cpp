@@ -419,6 +419,14 @@ namespace dyf::Backends
         (void)name; (void)color;
 #endif
     }
+    void D3D12CommandList::GlobalBarrierNative()
+    {
+        D3D12_RESOURCE_BARRIER barrier = {};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        barrier.UAV.pResource = nullptr;
+        m_internal->commandList->ResourceBarrier(1, &barrier);
+    }
+
     void D3D12CommandList::ResourceBarrierNative(
         const RHI::ResourceBarrierDesc* barriers,
         uint32_t count)

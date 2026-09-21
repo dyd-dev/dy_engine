@@ -422,6 +422,48 @@ def cpu_checks(root, build, config, programs, report, env, seconds, seed):
                 raise
 
 
+def observe_headless_comparison(binary, profile, env, evidence):
+    """Run the authored modes to completion and preserve their own GPU readback files."""
+    cases = profile.get('cases')
+    if not isinstance(cases, list) or len(cases) < 2:
+        raise CiError('Headless comparison requires at least two authored cases', 'BLOCKED')
+    names = set()
+    for case in cases:
+        if not isinstance(case, dict):
+            raise CiError('Invalid headless comparison case', 'BLOCKED')
+        name, arguments = case.get('name'), case.get('arguments')
+        if (not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+', name)
+                or name in ('.', '..') or name in names or not isinstance(arguments, list)
+                or not all(isinstance(arg, str) for arg in arguments)
+                or any(arg == '--capture' or arg.startswith('--capture=') for arg in arguments)):
+            raise CiError('Invalid headless comparison case or capture override', 'BLOCKED')
+        names.add(name)
+    runs = []
+    for case in cases:
+        folder = evidence / case['name']
+        folder.mkdir()
+        capture = (folder / 'readback.ppm').resolve()
+        command = [str(binary), *case['arguments'], '--capture', str(capture)]
+        (folder / 'command.json').write_text(json.dumps(command, indent=2), encoding='utf-8')
+        try:
+            completed = subprocess.run(command, cwd=binary.parent, env=env,
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120,
+                                       encoding='utf-8', errors='replace')
+            run = dict(name=case['name'], exit_code=completed.returncode, output=completed.stdout,
+                       capture=str(capture), forced_termination=False)
+        except subprocess.TimeoutExpired as error:
+            output = error.stdout or ''
+            if isinstance(output, bytes):
+                output = output.decode('utf-8', errors='replace')
+            run = dict(name=case['name'], exit_code=None, output=output,
+                       capture=str(capture), forced_termination=True)
+        (folder / 'process.log').write_text(run['output'], encoding='utf-8')
+        runs.append(run)
+    return dict(status='PASS', exit_code=next((run['exit_code'] for run in runs if run['exit_code'] != 0), 0),
+                forced_termination=any(run['forced_termination'] for run in runs), runs=runs,
+                output='\n'.join(run['output'] for run in runs))
+
+
 def runtime_checks(root, build, config, manifest, programs, report, env):
     from checks import check_observation
     from observe import observe
@@ -443,8 +485,11 @@ def runtime_checks(root, build, config, manifest, programs, report, env):
             report.add(target['name'], 'BLOCKED', 'Official example has no external check profile; add .github/ci/examples.json entry')
             failures.append('BLOCKED')
             continue
-        for case in profile.get('cases', [dict(name='default', arguments=[])]):
-            jobs.append((target, case['name'], case.get('arguments', []), profile))
+        if profile.get('kind') == 'headless-compare':
+            jobs.append((target, 'comparison', [], profile))
+        else:
+            for case in profile.get('cases', [dict(name='default', arguments=[])]):
+                jobs.append((target, case['name'], case.get('arguments', []), profile))
     probes = {program['kind']: program for program in programs if program['kind'] in ('rhi-smoke', 'gpu-probe')}
     if manifest['api'] != 'null' and manifest.get('gpu_checks', True):
         for kind in ('rhi-smoke', 'gpu-probe'):
@@ -469,7 +514,9 @@ def runtime_checks(root, build, config, manifest, programs, report, env):
             binary = Path(target['binary'])
             evidence = report.directory / 'observations' / (name + '-' + uuid.uuid4().hex)
             evidence.mkdir(parents=True)
-            if profile.get('kind') == 'capability':
+            if profile.get('kind') == 'headless-compare':
+                observed = observe_headless_comparison(binary, profile, env, evidence)
+            elif profile.get('kind') == 'capability':
                 completed = subprocess.run([str(binary), *arguments], cwd=binary.parent, env=env,
                                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120,
                                            encoding='utf-8', errors='replace')

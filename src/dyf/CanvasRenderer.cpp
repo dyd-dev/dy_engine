@@ -48,7 +48,7 @@ bool Renderer::InitializeCanvas(RHI::Format format)
     canvasPipeline=device->CreateGraphicsPipeline(desc);
     return canvasPipeline!=nullptr;
 }
-bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList, RHI::TextureHandle target, bool overlay)
+bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList, RHI::TextureHandle target, bool overlay, bool graphManagedTarget)
 {
     using namespace RHI;
     if(!canvas.IsValid()) {std::fprintf(stderr,"dyf: Invalid canvas dimensions.\n");return false;}
@@ -99,7 +99,7 @@ bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList
     if(prepared)
     {
         const ResourceBarrierDesc before{nullptr,target,ResourceState::Present,ResourceState::RenderTarget,{}};
-        commandList.ResourceBarrier(&before,1);
+        if(!graphManagedTarget) commandList.ResourceBarrier(&before,1);
         ColorAttachment color; color.texture=target;color.loadOp=overlay ? LoadOp::Load : LoadOp::Clear;color.storeOp=StoreOp::Store;
         color.clearColor[0]=canvas.clearColor.x;
         color.clearColor[1]=canvas.clearColor.y;
@@ -137,7 +137,8 @@ bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList
             }
         }
         commandList.EndRendering();
-        const ResourceBarrierDesc after{nullptr,target,ResourceState::RenderTarget,ResourceState::Present,{}};commandList.ResourceBarrier(&after,1);
+        const ResourceBarrierDesc after{nullptr,target,ResourceState::RenderTarget,ResourceState::Present,{}};
+        if(!graphManagedTarget) commandList.ResourceBarrier(&after,1);
     }
     for(auto* set:sets)device->DestroyResourceSet(set);
     for(auto* texture:textures)device->DestroyTexture(texture);

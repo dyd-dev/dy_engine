@@ -219,6 +219,8 @@ namespace dyf::Backends
 		class NullCommandList final : public RHI::ICommandList
 		{
 		public:
+            // This backend applies submitted operations synchronously in queue order.
+            void GlobalBarrierNative() override {}
 			void ResourceBarrierNative(
 				const RHI::ResourceBarrierDesc* barriers,
 				uint32_t count) override

@@ -248,6 +248,16 @@ namespace dyf::Backends
 		if (m_commandPool != VK_NULL_HANDLE) vkDestroyCommandPool(m_context.device, m_commandPool, nullptr);
 	}
 
+    void VulkanCommandList::GlobalBarrierNative()
+    {
+        VkMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        vkCmdPipelineBarrier(m_commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+            VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+    }
+
 	void VulkanCommandList::ResourceBarrierNative(const dyf::RHI::ResourceBarrierDesc* barriers, uint32_t count)
 	{
 		if (m_closed || m_rendering || (count > 0 && barriers == nullptr))

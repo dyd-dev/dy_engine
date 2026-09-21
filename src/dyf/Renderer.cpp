@@ -26,6 +26,8 @@
 #include "dyf/Math/Math.h"
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/ICommandList.h"
+#include "dyf/RHI/RenderGraph.h"
+#include <stdexcept>
 #include "dyf/RHI/IDevice.h"
 #include "dyf/RHI/Pipeline.h"
 #include "dyf/RHI/ResourceScope.h"
@@ -495,28 +497,83 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
         RHI::TimestampQueryHandle shadowQuery = nullptr, mainQuery = nullptr;
         shadowQuery=BeginGpuSample(0);
         mainQuery=BeginGpuSample(1);
-        // 장면과 후처리를 같은 명령 목록에 순서대로 기록한다.
-        RHI::ResourceScope frameResources(*nativeDevice);
-        auto* commands = frameResources.Keep(nativeDevice->AcquireCommandList());
-        bool drawn = commands && RecordSceneDraws(scene, camera, shadows, *commands, draws, shadowQuery, mainQuery);
+        using State = RHI::ResourceState;
+        RHI::RenderGraph graph;
         auto* output = nativeDevice->GetBackBuffer();
-        if(drawn && config.enableHdrRendering) drawn = RecordToneMap(*commands, output, config.exposure);
-        if(drawn && overlay) drawn = RecordCanvas(*overlay, *commands, output, true);
-        if(drawn)
+        const auto backBuffer = graph.ImportTexture("BackBuffer", output, State::Present, State::Present);
+        const auto depth = graph.ImportTexture("Depth", depthStencilTarget, depthStencilState, State::DepthWrite);
+        const auto color = config.enableHdrRendering
+            ? graph.ImportTexture("HDR", hdrTarget, hdrState, State::ShaderResource) : backBuffer;
+        const auto shadow = shadowDepthTarget
+            ? graph.ImportTexture("ShadowDepth", shadowDepthTarget, shadowDepthState, State::ShaderResource)
+            : RHI::RGResourceHandle{};
+        const bool drawShadows = shadowPipeline && shadows.viewCount && shadowDepthTarget &&
+            shadowMatrixBuffer && shadowDepthTarget->GetDesc().width;
+        const auto require = [](bool success) {
+            if(!success) throw std::runtime_error("Renderer pass recording failed.");
+        };
+        auto& shadowPass = graph.AddPass("Shadow");
+        if(drawShadows) shadowPass.Write(shadow, State::DepthWrite);
+        shadowPass.SetExecute([&](RHI::ICommandList* commands) {
+            if(drawShadows) require(RecordShadowPass(scene, camera, shadows, *commands, draws, shadowQuery));
+            else if(shadowQuery)
+            {
+                commands->ResetTimestamps(shadowQuery, 0, 2);
+                commands->WriteTimestamp(shadowQuery, 0);
+                commands->WriteTimestamp(shadowQuery, 1);
+            }
+        });
+        auto& mainPass = graph.AddPass("MainForward");
+        mainPass.Write(color, State::RenderTarget).Write(depth, State::DepthWrite);
+        if(shadowDepthTarget) mainPass.Read(shadow, State::ShaderResource);
+        mainPass.SetExecute([&](RHI::ICommandList* commands) {
+            require(RecordMainPass(scene, camera, *commands, draws, mainQuery));
+        });
+        if(config.enableHdrRendering)
+            graph.AddPass("ToneMap").Read(color, State::ShaderResource).Write(backBuffer, State::RenderTarget)
+                .SetExecute([&](RHI::ICommandList* commands) {
+                    require(RecordToneMap(*commands, output, config.exposure));
+                });
+        if(overlay)
+            graph.AddPass("Overlay").Write(backBuffer, State::RenderTarget)
+                .SetExecute([&](RHI::ICommandList* commands) {
+                    require(RecordCanvas(*overlay, *commands, output, true, true));
+                });
+        graph.AddPass("Profiler HUD").Write(backBuffer, State::RenderTarget)
+            .SetExecute([&](RHI::ICommandList* commands) {
+                const double cpuMs = std::chrono::duration<double,std::milli>(
+                    std::chrono::steady_clock::now()-cpuStart).count();
+                RecordProfilerFrame(cpuMs, scene.GetEntityCount());
+                if(config.enableProfilerHud)
+                {
+                    commands->BeginDebugEvent("Profiler HUD");
+                    auto hud = BuildProfilerOverlay(output->GetDesc().width, output->GetDesc().height,
+                        config.profilerStartsExpanded);
+                    require(RecordCanvas(hud, *commands, output, true, true));
+                    commands->EndDebugEvent();
+                }
+                if(mainQuery) commands->WriteTimestamp(mainQuery, 1);
+            });
+        if(!graph.Compile()) return RendererFailure("Scene RenderGraph compilation failed.");
+        struct FrameCommands
         {
-            const double cpuMs = std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-cpuStart).count();
-            RecordProfilerFrame(cpuMs, scene.GetEntityCount());
-        }
-        if(drawn && config.enableProfilerHud)
+            RHI::IDevice& device;
+            std::vector<RHI::ICommandList*> lists;
+            ~FrameCommands() { for(auto* commands : lists) device.DestroyCommandList(commands); }
+        } frame{*nativeDevice, {}};
+        bool drawn;
+        if(config.enableParallelRenderGraph && config.threadPool)
+            drawn = graph.ExecuteParallel(nativeDevice, config.threadPool, frame.lists);
+        else
         {
-            commands->BeginDebugEvent("Profiler HUD");
-            auto hud = BuildProfilerOverlay(output->GetDesc().width, output->GetDesc().height, config.profilerStartsExpanded);
-            drawn = RecordCanvas(hud, *commands, output, true);
-            commands->EndDebugEvent();
+            frame.lists.reserve(1);
+            auto* commands = nativeDevice->AcquireCommandList();
+            frame.lists.push_back(commands);
+            drawn = commands && graph.Execute(commands) && commands->Close();
         }
-        if(commands && mainQuery) commands->WriteTimestamp(mainQuery, 1);
         RHI::FenceHandle completion;
-        drawn = drawn && commands->Close() && nativeDevice->Submit({&commands,1,nullptr,0}, completion);
+        drawn = drawn && nativeDevice->Submit({frame.lists.data(),
+            static_cast<uint32_t>(frame.lists.size()), nullptr, 0}, completion);
         if(shadowQuery)SubmittedGpuSample(shadowQuery,completion);
         if(mainQuery)SubmittedGpuSample(mainQuery,completion);
         if(!drawn)return RendererFailure("Scene draw submission failed.");

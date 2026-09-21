@@ -341,6 +341,8 @@ namespace dyf::Backends
 
 	VkImageView VulkanTexture::GetResourceView(const dyf::RHI::TextureSubresourceRange& subresources, bool sampled)
 	{
+        // Different recording workers can request attachment views of one texture.
+        std::lock_guard<std::mutex> lock(m_viewMutex);
 		if (subresources.firstMipLevel >= GetDesc().mipLevels || subresources.firstArrayLayer >= GetDesc().depthOrArraySize) return VK_NULL_HANDLE;
 		const uint32_t mipLevelCount = subresources.mipLevelCount == 0
 			? GetDesc().mipLevels - subresources.firstMipLevel

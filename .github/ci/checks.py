@@ -61,6 +61,52 @@ def check_observation(profile, observed):
         if not all(check['passed'] for check in checks):
             return result('FAIL', 'Missing capability or unsupported-feature diagnostic')
         return result('UNSUPPORTED', 'Capability query completed; this example explicitly does not implement the feature')
+    elif kind == 'headless-compare':
+        cases, markers, dimensions, points = (profile.get(field) for field in ('cases', 'markers', 'dimensions', 'pixels'))
+        if (not isinstance(cases, list) or len(cases) < 2
+                or not all(isinstance(case, dict) and isinstance(case.get('name'), str)
+                           and isinstance(case.get('markers', []), list)
+                           and all(isinstance(marker, str) and marker for marker in case.get('markers', [])) for case in cases)
+                or len({case['name'] for case in cases}) != len(cases)
+                or not isinstance(markers, list) or not markers
+                or not all(isinstance(marker, str) and marker for marker in markers)
+                or not isinstance(dimensions, list) or len(dimensions) != 2
+                or not all(isinstance(value, int) and 1 <= value <= 16384 for value in dimensions)
+                or not isinstance(points, list) or not points):
+            return result('BLOCKED', 'Headless comparison requires authored cases, markers, dimensions and pixels')
+        for point in points:
+            if (not isinstance(point, list) or len(point) != 5
+                    or not all(isinstance(value, (int, float)) for value in point)
+                    or not 0 <= point[0] < 1 or not 0 <= point[1] < 1
+                    or not all(isinstance(channel, int) and 0 <= channel <= 255 for channel in point[2:])):
+                return result('BLOCKED', 'Invalid expected headless pixel specification')
+        runs = observed.get('runs')
+        if (not isinstance(runs, list) or not all(isinstance(run, dict) for run in runs)
+                or [run.get('name') for run in runs] != [case['name'] for case in cases]):
+            return result('FAIL', 'Missing or reordered headless execution evidence')
+        frames = []
+        for case, run in zip(cases, runs):
+            name = case['name']
+            require(run.get('exit_code') == 0 and not run.get('forced_termination') and not run.get('forced_kill'),
+                    'headless-exit-' + name)
+            run_output = run.get('output', '')
+            require(not GPU_ERROR.search(run_output), 'headless-diagnostics-' + name)
+            for marker in [*markers, *case.get('markers', [])]:
+                require(isinstance(marker, str) and bool(marker) and marker in run_output,
+                        'headless-output-' + name, expected=marker)
+            try:
+                frame = read_ppm(run['capture'])
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                return result('FAIL', 'Missing or invalid GPU readback capture: ' + str(error))
+            frames.append(frame)
+            require(list(frame[:2]) == dimensions, 'headless-dimensions-' + name,
+                    expected=dimensions, actual=list(frame[:2]))
+            for point in points:
+                actual = rgb(frame, int(point[0] * frame[0]), int(point[1] * frame[1]))
+                require(actual == tuple(point[2:]), 'headless-pixel-' + name + '-' + str(point[:2]),
+                        expected=point[2:], actual=actual)
+        require(len({str(Path(run['capture']).resolve()) for run in runs}) == len(runs), 'distinct-readback-files')
+        require(all(frame == frames[0] for frame in frames[1:]), 'identical-mode-readbacks')
     elif kind in ('window', 'visible', 'pixels'):
         if not observed.get('window_observed') or observed.get('observed_seconds', 0) < profile.get('seconds', 3) * 0.9:
             return result('BLOCKED', 'Required responsive window observation was not completed')

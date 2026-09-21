@@ -4,6 +4,8 @@
 
 #include "dyf/Math/Math.h"
 
+namespace dyf::Core { class ThreadPool; }
+
 namespace dyf
 {
 	// 그림자 품질을 선택한다. 해상도와 필터 등 구현 값은 Renderer가 정한다.
@@ -43,5 +45,9 @@ namespace dyf
 		// Scene/Mesh 렌더링의 HUD다. Canvas만 Render하는 경로에는 표시하지 않는다.
 		bool enableProfilerHud = true;
 		bool profilerStartsExpanded = false;
+        // The caller owns the pool and keeps it alive until Render returns.
+        // Disabled or null uses the same graph with serial recording.
+        bool enableParallelRenderGraph = false;
+        Core::ThreadPool* threadPool = nullptr;
 	};
 }

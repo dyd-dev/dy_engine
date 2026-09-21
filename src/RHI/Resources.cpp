@@ -2,6 +2,7 @@
 #include "dyf/RHI/ICommandList.h"
 #include "RHI/Validation.h"
 #include "dyf/RHI/Readback.h"
+#include "dyf/Core/ThreadPool.h"
 #include <chrono>
 #include <thread>
 #include <cstdio>
@@ -268,6 +269,11 @@ bool IDevice::ResetCommandList(ICommandList* commands)
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
     if(!commands || !m_userCommands.count(commands) ||
         (commands->m_completion && commands->m_completion>GetCompletedSubmissionNative())) return false;
+    if(commands->m_preparedNative)
+    {
+        DiscardCommandListNative(commands->m_preparedNative);
+        commands->m_preparedNative = nullptr;
+    }
     commands->m_commands.clear();
     commands->m_stateOperations.clear();
     commands->m_references.clear();
@@ -288,6 +294,76 @@ void IDevice::DestroyCommandList(ICommandList* commands)
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
     if(commands && m_userCommands.erase(commands)) delete commands;
 }
+
+bool IDevice::PrepareCommandLists(ICommandList* const* commands, uint32_t count, Core::ThreadPool* pool)
+{
+    if(!commands || !count) return false;
+    struct Work { ICommandList* source; ICommandList* native; };
+    std::vector<Work> work;
+    work.reserve(count);
+    const auto discard = [&] {
+        std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+        for(const auto& item : work) DiscardCommandListNative(item.native);
+    };
+    try
+    {
+        {
+            std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+            const uint64_t completed = GetCompletedSubmissionNative();
+            for(uint32_t i = 0; i < count; ++i)
+            {
+                if(!commands[i] || !m_userCommands.count(commands[i]) ||
+                    !commands[i]->m_recordingClosed || commands[i]->m_recordingFailed ||
+                    commands[i]->m_completion > completed) return false;
+                for(uint32_t j = 0; j < i; ++j) if(commands[i] == commands[j]) return false;
+            }
+            // Native pools/allocators are allocated under the device lock. Each list
+            // has its own recording storage; workers never mutate the ownership sets.
+            for(uint32_t i = 0; i < count; ++i)
+            {
+                if(commands[i]->m_preparedNative) continue;
+                auto* native = AcquireCommandListNative();
+                if(!native) { discard(); return false; }
+                work.push_back({commands[i], native});
+                native->m_owner = this;
+                m_recordedCommands.insert(native);
+                native->m_references = commands[i]->m_references;
+            }
+        }
+        std::vector<uint8_t> recorded(work.size(), 0);
+        const auto record = [&](size_t i) {
+            recorded[i] = work[i].native->ReplayNative(work[i].source->m_commands);
+        };
+        if(pool && pool->GetThreadCount() > 1 && !pool->IsWorkerThread() && work.size() > 1)
+        {
+            std::vector<std::future<void>> pending;
+            pending.reserve(work.size());
+            std::exception_ptr failure;
+            try
+            {
+                for(size_t i = 0; i < work.size(); ++i)
+                    pending.push_back(pool->Enqueue([&, i] { record(i); }));
+            }
+            catch(...) { failure = std::current_exception(); }
+            for(auto& job : pending)
+                try { job.get(); }
+                catch(...) { if(!failure) failure = std::current_exception(); }
+            if(failure) std::rethrow_exception(failure);
+        }
+        else for(size_t i = 0; i < work.size(); ++i) record(i);
+        for(auto success : recorded)
+            if(!success)
+            {
+                ReportDiagnostic(DiagnosticSeverity::Error, "PrepareCommandLists: native recording failed.");
+                discard();
+                return false;
+            }
+        for(const auto& item : work) item.source->m_preparedNative = item.native;
+        return true;
+    }
+    catch(...) { discard(); throw; }
+}
+
 bool IDevice::Submit(ICommandList** commands, uint32_t count)
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
@@ -308,20 +384,15 @@ bool IDevice::Submit(ICommandList** commands, uint32_t count)
             ReportDiagnostic(DiagnosticSeverity::Error, "Submit: resource state mismatch. Barrier.before must match the current state (Undefined is not a wildcard); bound resources must still have the required state at draw/dispatch.");
             return false;
         }
-    std::vector<ICommandList*> native;
-    const auto discard=[&] {for(auto* list:native) DiscardCommandListNative(list);};
+    std::vector<ICommandList*> native(count);
+    if(!PrepareCommandLists(commands, count)) return false;
     for(uint32_t i=0;i<count;++i)
     {
-        auto* list=AcquireCommandListNative();
-        if(!list) {discard();return false;}
-        list->m_owner=this;
-        list->m_references=commands[i]->m_references;
-        m_recordedCommands.insert(list);
-        native.push_back(list);
-        for(const auto& record:commands[i]->m_commands)
-            if(!record(*list)) {ReportDiagnostic(DiagnosticSeverity::Error,"Submit: native command recording rejected a recorded operation.");discard();return false;}
-        if(!list->CloseNative()) {ReportDiagnostic(DiagnosticSeverity::Error,"Submit: native command validation failed.");discard();return false;}
+        native[i]=commands[i]->m_preparedNative;
+        // SubmitNative takes ownership and may destroy a failed native list.
+        commands[i]->m_preparedNative=nullptr;
     }
+    const auto discard=[&] {for(auto* list:native) DiscardCommandListNative(list);};
     if(!SubmitNative(native.data(),count))
     {
         ReportDiagnostic(DiagnosticSeverity::Error,"Submit: native submission failed.");

@@ -27,6 +27,10 @@ namespace dyf::RHI
         void ResetTimestamps(TimestampQueryHandle,uint32_t first,uint32_t count);
         void WriteTimestamp(TimestampQueryHandle,uint32_t index);
 		void ResourceBarrier(const ResourceBarrierDesc* barriers, uint32_t count);
+        // Outside rendering: order earlier resource accesses before subsequent ones
+        // on this device's queue, including resources not imported into a graph.
+        // Preserves states/layouts; transitions and cross-queue/CPU waits are separate.
+        void GlobalBarrier();
 		void BeginRendering(const RenderingDesc& desc);
 		void EndRendering();
 
@@ -63,6 +67,7 @@ namespace dyf::RHI
 		bool Close();
 
 	protected:
+        virtual bool ReplayNative(const std::vector<std::function<bool(ICommandList&)>>& commands);
         virtual void BeginDebugEventNative(const char*, const DebugLabelColor&) {}
         virtual void EndDebugEventNative() {}
         virtual void InsertDebugMarkerNative(const char*, const DebugLabelColor&) {}
@@ -70,6 +75,7 @@ namespace dyf::RHI
         virtual void WriteTimestampNative(TimestampQueryHandle,uint32_t) {m_recordingFailed=true;}
 		virtual ~ICommandList();
 		virtual void ResourceBarrierNative(const ResourceBarrierDesc* barriers, uint32_t count) = 0;
+        virtual void GlobalBarrierNative() = 0;
 		virtual void BeginRenderingNative(const RenderingDesc& desc) = 0;
 		virtual void EndRenderingNative() = 0;
 		virtual void BindGraphicsPipelineNative(PipelineHandle pipeline) = 0;
@@ -105,6 +111,7 @@ namespace dyf::RHI
         std::vector<std::function<bool(StateMap&)>> m_stateOperations;
         void RequireState(const void*,uint32_t mip,uint32_t layer,ResourceState);
         std::vector<std::function<bool(ICommandList&)>> m_commands;
+        ICommandList* m_preparedNative = nullptr;
         uint64_t m_completion=0;
         uint64_t m_imageGeneration=0;
         bool m_rendering=false, m_viewport=false, m_scissor=false;
