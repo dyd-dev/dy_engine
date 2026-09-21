@@ -70,7 +70,7 @@ Layer 2. RHI
 └─ IDevice · ICommandList · Resources · Backends(Vulkan/D3D12/Metal/Null)
 
 Layer 1. Foundation
-└─ Math(SIMD) · Platform · Core · Job/Task 기반
+└─ Math(SIMD) · Platform(윈도우·스레드 풀·프로파일링)
 
 Cross-Cutting
 └─ frame indexing · double/triple buffering · thread-local command recording

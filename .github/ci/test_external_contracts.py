@@ -6,6 +6,41 @@ import checks as contracts
 
 
 class ExternalContractTests(unittest.TestCase):
+    def headless(self, folder):
+        profile = dict(kind='headless-compare', markers=['gpu readback ok'], dimensions=[3, 1],
+                       pixels=[[0, 0, 255, 0, 0], [0.34, 0, 0, 255, 0]],
+                       cases=[dict(name=name, markers=['mode=' + name]) for name in ('serial', 'parallel')])
+        runs = []
+        for name in ('serial', 'parallel'):
+            capture = Path(folder) / (name + '.ppm')
+            capture.write_bytes(b'P6\n3 1\n255\n' + bytes((255, 0, 0, 0, 255, 0, 0, 0, 255)))
+            runs.append(dict(name=name, exit_code=0, output='gpu readback ok mode=' + name, capture=capture))
+        return profile, dict(status='PASS', exit_code=0, output='gpu readback ok', runs=runs)
+
+    def test_headless_requires_actual_equal_pixels_and_both_successful_runs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            profile, observed = self.headless(folder)
+            self.assertEqual(contracts.check_observation(profile, observed)['status'], 'PASS')
+            for change in ({'exit_code': 77}, {'forced_termination': True}, {'runs': observed['runs'][:1]}):
+                self.assertEqual(contracts.check_observation(profile, dict(observed, **change))['status'], 'FAIL')
+            for change in ({'exit_code': 1}, {'output': ''}, {'forced_termination': True},
+                           {'output': 'gpu readback ok mode=parallel\nVUID-example'},
+                           {'capture': Path(folder) / 'missing.ppm'}, {'capture': observed['runs'][0]['capture']}):
+                runs = [observed['runs'][0], dict(observed['runs'][1], **change)]
+                self.assertEqual(contracts.check_observation(profile, dict(observed, runs=runs))['status'], 'FAIL')
+            # Only the unsampled last pixel differs: full equality must still fail.
+            changed = Path(observed['runs'][1]['capture'])
+            changed.write_bytes(changed.read_bytes()[:-1] + b'\x80')
+            self.assertEqual(contracts.check_observation(profile, observed)['status'], 'FAIL')
+
+    def test_headless_rejects_identically_wrong_pixels_and_invalid_captures(self):
+        with tempfile.TemporaryDirectory() as folder:
+            profile, observed = self.headless(folder)
+            for data in (b'P6\n3 1\n255\n' + bytes(9), b'not a PPM', b'P6\n3 1\n255\n' + bytes(8)):
+                for run in observed['runs']:
+                    Path(run['capture']).write_bytes(data)
+                self.assertEqual(contracts.check_observation(profile, observed)['status'], 'FAIL')
+
     def test_capability_exit_requires_declared_code_and_output(self):
         profile = dict(kind='capability', expected_exit=77, markers=['Supports(', 'not implemented'])
         observed = dict(status='PASS', exit_code=77, output='Supports(RayQuery) = false; not implemented')

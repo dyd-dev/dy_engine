@@ -10,6 +10,7 @@ endif()
 
 # main target
 add_library(${PROJECT_NAME} STATIC
+	"src/Platform/ThreadPool.cpp"
 	"src/RHI/IDevice.cpp"
 	"src/RHI/ICommandList.cpp"
 	"src/RHI/Resources.cpp"
@@ -36,6 +37,8 @@ add_library(${PROJECT_NAME} STATIC
 include(Engine_Options)
 add_library(dy_engine_options ALIAS Engine_Options)
 target_link_libraries(${PROJECT_NAME} PUBLIC Engine_Options)
+find_package(Threads REQUIRED)
+target_link_libraries(${PROJECT_NAME} PUBLIC Threads::Threads)
 target_include_directories(${PROJECT_NAME} BEFORE PUBLIC "${PROJECT_SOURCE_DIR}/src/Public")
 target_include_directories(${PROJECT_NAME} PRIVATE "${PROJECT_SOURCE_DIR}/src")
 
@@ -66,7 +69,8 @@ if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
         add_subdirectory(.github/ci)
     endif()
     option(DY_BUILD_PROFILING_TESTS "Build profiling contract tests." ${DY_CI})
-    if(DY_BUILD_PROFILING_TESTS)
+    option(DY_BUILD_TESTS "Build RHI contract tests (Null backend requires no GPU)." ${DY_CI})
+    if(DY_BUILD_PROFILING_TESTS OR DY_BUILD_TESTS)
         enable_testing()
         add_subdirectory(tests)
     endif()

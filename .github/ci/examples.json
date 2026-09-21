@@ -484,14 +484,26 @@
       "coverage": "backend capability report and explicit unavailable-example exit; GPU rendering is not implemented"
     },
     "examples/advanced/19_MultithreadRecording": {
-      "kind": "capability",
-      "expected_exit": 77,
+      "kind": "headless-compare",
       "markers": [
-        "Supports(Rasterization)",
-        "Supports(Compute)",
-        "종료 코드 77"
+        "GPU readback matches both recorded texture uploads.",
+        "CPU recording and CPU native replay/submission are measured separately."
       ],
-      "coverage": "backend capability report and explicit unavailable-example exit; GPU rendering is not implemented"
+      "dimensions": [512, 256],
+      "pixels": [[0.125, 0.25, 78, 64, 0], [0.375, 0.75, 206, 192, 0], [0.625, 0.25, 78, 135, 113], [0.875, 0.75, 206, 7, 113]],
+      "coverage": "headless serial and parallel CPU recording both complete GPU uploads and fences; independent expected pixels and complete readback equality; no native recording or GPU speedup assertion",
+      "cases": [
+        {
+          "name": "serial",
+          "arguments": ["--mode", "serial", "--frames", "3", "--validation"],
+          "markers": ["mode=serial frames=3 workers=1", "command_lists=3"]
+        },
+        {
+          "name": "parallel",
+          "arguments": ["--mode", "parallel", "--workers", "4", "--frames", "3", "--validation"],
+          "markers": ["mode=parallel frames=3 workers=4", "command_lists=15"]
+        }
+      ]
     },
     "examples/advanced/20_AsyncCompute": {
       "kind": "capability",

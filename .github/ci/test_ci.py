@@ -93,6 +93,67 @@ class CiTests(unittest.TestCase):
             self.assertEqual([result['status'] for result in report.results], ['FAIL', 'UNSUPPORTED'])
             self.assertEqual(len(list((root / 'logs').rglob('checks.json'))), 2)
 
+    def test_headless_runtime_runs_both_modes_and_compares_saved_pixels_without_a_window(self):
+        import json
+        import observe
+        for mismatch in (False, True):
+            with self.subTest(mismatch=mismatch), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                (root / '.github/ci').mkdir(parents=True)
+                profile = dict(kind='headless-compare', markers=['gpu ok'], dimensions=[3, 1],
+                               pixels=[[0, 0, 255, 0, 0]],
+                               cases=[dict(name=name, arguments=['--mode', name, '--frames', '3'])
+                                      for name in ('serial', 'parallel')])
+                (root / '.github/ci/examples.json').write_text(json.dumps(
+                    dict(version=1, examples={'examples/headless': profile})), encoding='utf-8')
+                target = dict(name='Headless', directory='examples/headless', kind='render', runtime=True,
+                              binary=str(root / 'example'))
+                report = self.ci.Report(root / 'logs', 'fixture', 'vulkan')
+                def run(command, **kwargs):
+                    self.assertEqual(command[1:2], ['--mode'])
+                    capture = Path(command[command.index('--capture') + 1])
+                    last = 128 if mismatch and command[2] == 'parallel' else 255
+                    capture.write_bytes(b'P6\n3 1\n255\n' + bytes((255, 0, 0, 0, 255, 0, 0, 0, last)))
+                    return types.SimpleNamespace(returncode=0, stdout='gpu ok')
+                with (mock.patch.object(self.ci.subprocess, 'run', side_effect=run) as process,
+                      mock.patch.object(observe, 'observe') as window):
+                    arguments = (root, root, 'Debug', dict(api='vulkan', gpu_checks=False, targets=[target], unsupported=[]),
+                                 [], report, {})
+                    if mismatch:
+                        with self.assertRaises(self.ci.CiError) as error:
+                            self.ci.runtime_checks(*arguments)
+                        self.assertEqual(error.exception.status, 'FAIL')
+                    else:
+                        self.ci.runtime_checks(*arguments)
+                    self.assertEqual(process.call_count, 2)
+                    window.assert_not_called()
+                self.assertEqual(report.results[-1]['status'], 'FAIL' if mismatch else 'PASS')
+                self.assertEqual(len(list((root / 'logs').rglob('readback.ppm'))), 2)
+                self.assertEqual(len(list((root / 'logs').rglob('process.log'))), 2)
+
+    def test_headless_timeout_keeps_diagnostics_and_runs_remaining_case(self):
+        import checks
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            profile = dict(kind='headless-compare', cases=[dict(name=name, arguments=[]) for name in ('serial', 'parallel')])
+            timeout = subprocess.TimeoutExpired(['example'], 120, output=b'partial diagnostic')
+            with mock.patch.object(self.ci.subprocess, 'run', side_effect=[timeout, types.SimpleNamespace(returncode=0, stdout='done')]) as process:
+                result = self.ci.observe_headless_comparison(root / 'example', profile, {}, root)
+            self.assertEqual(process.call_count, 2)
+            self.assertTrue(result['forced_termination'])
+            self.assertEqual((root / 'serial/process.log').read_text(), 'partial diagnostic')
+            self.assertEqual(checks.check_observation(profile, result)['status'], 'FAIL')
+
+    def test_headless_profile_cannot_override_generated_capture_path(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            profile = dict(cases=[dict(name='serial', arguments=['--capture', 'stale.ppm']),
+                                 dict(name='parallel', arguments=[])])
+            with mock.patch.object(self.ci.subprocess, 'run') as process:
+                with self.assertRaises(self.ci.CiError):
+                    self.ci.observe_headless_comparison(root / 'example', profile, {}, root)
+                process.assert_not_called()
+
     def test_push_deletion_dedup_and_invalid_input(self):
         zero, sha = '0' * 40, 'a' * 40
         lines = f'refs/heads/a {sha} refs/heads/a {zero}\nrefs/heads/b {sha} refs/heads/b {zero}\n(delete) {zero} refs/heads/deleted {sha}\n'

@@ -70,6 +70,9 @@ namespace dyf::RHI
 
         // 성공하면 Present까지 같은 backbuffer를 사용한다. 중간에 여러 번 Submit할 수 있다.
 		[[nodiscard]] bool BeginFrame();
+		// Each acquired list is independent and may be recorded by one worker thread.
+		// Join recording before Submit/Reset/Destroy. Keep shared resources alive and
+		// immutable; serialize frame/swapchain lifetime changes with recording.
 		[[nodiscard]] ICommandList* AcquireCommandList();
         [[nodiscard]] bool ResetCommandList(ICommandList*);
         void DestroyCommandList(ICommandList*);

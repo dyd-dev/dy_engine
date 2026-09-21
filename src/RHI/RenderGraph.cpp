@@ -1,5 +1,7 @@
 #include "dyf/RHI/RenderGraph.h"
 #include "dyf/RHI/ICommandList.h"
+#include "dyf/RHI/IDevice.h"
+#include "dyf/Platform/ThreadPool.h"
 #include "RHI/Validation.h"
 
 #include <atomic>
@@ -56,6 +58,13 @@ namespace dyf::RHI
     RenderGraphPass& RenderGraphPass::SetExecute(std::function<void(ICommandList*)> callback)
     {
         m_executeCallback = std::move(callback);
+        ++m_revision;
+        return *this;
+    }
+
+    RenderGraphPass& RenderGraphPass::GlobalBarrier()
+    {
+        m_globalBarrier = true;
         ++m_revision;
         return *this;
     }
@@ -153,6 +162,7 @@ namespace dyf::RHI
         m_compiled = false;
         m_compiledRevisions.clear();
         m_executionOrder.clear();
+        m_executionStages.clear();
         m_passBarriers.clear();
         m_finalBarriers.clear();
         const uint32_t passCount = static_cast<uint32_t>(m_passes.size());
@@ -163,11 +173,25 @@ namespace dyf::RHI
         std::vector<ResourceState> states;
         for(const auto& resource : m_resources) states.push_back(resource.initialState);
         m_passBarriers.resize(passCount);
+        uint32_t lastGlobal = noPass;
 
         // 모든 import는 외부 내용을 가진다. 뒤쪽 writer가 앞선 read의 생산자라고 추측하지 않는다.
         for(uint32_t pass = 0; pass < passCount; ++pass)
         {
             if(!m_passes[pass]->HasExecuteCallback()) return Fail("every pass needs an execute callback.");
+            if(lastGlobal != noPass) edges[lastGlobal].push_back(pass);
+            if(m_passes[pass]->HasGlobalBarrier())
+            {
+                const uint32_t first = lastGlobal == noPass ? 0 : lastGlobal + 1;
+                for(uint32_t previous = first; previous < pass; ++previous) edges[previous].push_back(pass);
+                lastGlobal = pass;
+                for(uint32_t index = 0; index < m_resources.size(); ++index)
+                {
+                    if(states[index] == ResourceState::Undefined) continue;
+                    const auto& resource = m_resources[index];
+                    m_passBarriers[pass].push_back({resource.buffer, resource.texture, states[index], states[index], {}});
+                }
+            }
             struct Use { ResourceState state; bool write; };
             std::map<uint32_t, Use> uses;
             const auto collect = [&](const std::vector<RGResourceBinding>& bindings, bool write) {
@@ -217,6 +241,7 @@ namespace dyf::RHI
         }
 
         std::vector<uint32_t> inDegree(passCount, 0);
+        std::vector<uint32_t> stageIndices(passCount, 0);
         for(auto& successors : edges)
         {
             std::sort(successors.begin(), successors.end());
@@ -230,7 +255,14 @@ namespace dyf::RHI
             const uint32_t pass = ready.top();
             ready.pop();
             m_executionOrder.push_back(pass);
-            for(uint32_t next : edges[pass]) if(--inDegree[next] == 0) ready.push(next);
+            const uint32_t stage = stageIndices[pass];
+            if(m_executionStages.size() <= stage) m_executionStages.resize(size_t(stage) + 1);
+            m_executionStages[stage].passIndices.push_back(pass);
+            for(uint32_t next : edges[pass])
+            {
+                stageIndices[next] = (std::max)(stageIndices[next], stage + 1);
+                if(--inDegree[next] == 0) ready.push(next);
+            }
         }
         if(m_executionOrder.size() != passCount) return Fail("resource dependencies contain a cycle.");
         for(const auto& pass : m_passes) m_compiledRevisions.push_back(pass->GetRevision());
@@ -246,6 +278,44 @@ namespace dyf::RHI
         return true;
     }
 
+    bool RenderGraph::RequireResource(ICommandList* commands, const Resource& resource, ResourceState state) const
+    {
+        if(!commands->Track(resource.buffer ? static_cast<const void*>(resource.buffer) : resource.texture))
+            return Fail("an imported resource is no longer owned by the command list's device.");
+        if(resource.buffer) commands->RequireState(resource.buffer, 0, 0, state);
+        else
+        {
+            const auto& desc = resource.texture->GetDesc();
+            for(uint32_t layer = 0; layer < desc.depthOrArraySize; ++layer)
+                for(uint32_t mip = 0; mip < desc.mipLevels; ++mip)
+                    commands->RequireState(resource.texture, mip, layer, state);
+        }
+        return true;
+    }
+
+    bool RenderGraph::RecordBoundary(ICommandList* commands) const
+    {
+        // 모든 리소스를 먼저 검증/보유한다. 상태가 같아 배리어가 없어도 경계 계약은 검사한다.
+        for(const auto& resource : m_resources)
+            if(!RequireResource(commands, resource, resource.initialState)) return false;
+        for(const auto& pass : m_passes)
+            if(pass->GetPipeline() && !commands->Track(pass->GetPipeline()))
+                return Fail("a pipeline is no longer owned by the command list's device.");
+        return true;
+    }
+
+    bool RenderGraph::RecordPass(ICommandList* commands, uint32_t pass) const
+    {
+        const auto& barriers = m_passBarriers[pass];
+        commands->ResourceBarrier(barriers.data(), static_cast<uint32_t>(barriers.size()));
+        if(!m_passes[pass]->Execute(commands)) return false;
+        for(const auto& binding : m_passes[pass]->GetReads())
+            if(!RequireResource(commands, m_resources[m_resourceIndices.at(binding.handle.id)], binding.state)) return false;
+        for(const auto& binding : m_passes[pass]->GetWrites())
+            if(!RequireResource(commands, m_resources[m_resourceIndices.at(binding.handle.id)], binding.state)) return false;
+        return commands->CanRecordCommands();
+    }
+
     bool RenderGraph::Execute(ICommandList* commands) const
     {
         if(!commands) return Fail("a command list is required.");
@@ -254,38 +324,81 @@ namespace dyf::RHI
             commands->m_recordingFailed = true;
             return Fail("Compile must succeed before recording on an open command list outside rendering.");
         }
-        const auto require = [&](const Resource& resource, ResourceState state) {
-            if(resource.buffer) commands->RequireState(resource.buffer, 0, 0, state);
-            else
-            {
-                const auto& desc = resource.texture->GetDesc();
-                for(uint32_t layer = 0; layer < desc.depthOrArraySize; ++layer)
-                    for(uint32_t mip = 0; mip < desc.mipLevels; ++mip)
-                        commands->RequireState(resource.texture, mip, layer, state);
-            }
-        };
-        // 모든 리소스를 먼저 검증/보유한다. 상태가 같아 배리어가 없어도 경계 계약은 검사한다.
-        for(const auto& resource : m_resources)
-        {
-            if(!commands->Track(resource.buffer ? static_cast<const void*>(resource.buffer) : resource.texture))
-                return Fail("an imported resource is no longer owned by the command list's device.");
-            require(resource, resource.initialState);
-        }
-        for(const auto& pass : m_passes)
-            if(pass->GetPipeline() && !commands->Track(pass->GetPipeline()))
-                return Fail("a pipeline is no longer owned by the command list's device.");
+        if(!RecordBoundary(commands)) return false;
         for(uint32_t pass : m_executionOrder)
-        {
-            const auto& barriers = m_passBarriers[pass];
-            commands->ResourceBarrier(barriers.data(), static_cast<uint32_t>(barriers.size()));
-            if(!m_passes[pass]->Execute(commands)) return false;
-            for(const auto& binding : m_passes[pass]->GetReads())
-                require(m_resources[m_resourceIndices.at(binding.handle.id)], binding.state);
-            for(const auto& binding : m_passes[pass]->GetWrites())
-                require(m_resources[m_resourceIndices.at(binding.handle.id)], binding.state);
-        }
+            if(!RecordPass(commands, pass)) return false;
         commands->ResourceBarrier(m_finalBarriers.data(), static_cast<uint32_t>(m_finalBarriers.size()));
         return commands->CanRecordCommands();
+    }
+
+    bool RenderGraph::ExecuteParallel(IDevice* device, Platform::ThreadPool* pool,
+        std::vector<ICommandList*>& commandLists) const
+    {
+        if(!device || !commandLists.empty() || !IsCompiled())
+            return Fail("parallel recording requires a device, an empty output and an unchanged compiled graph.");
+        struct Recording
+        {
+            IDevice& device;
+            std::vector<ICommandList*> lists;
+            ~Recording() { for(auto* list : lists) device.DestroyCommandList(list); }
+            ICommandList* Acquire()
+            {
+                auto* list = device.AcquireCommandList();
+                try { lists.push_back(list); }
+                catch(...) { device.DestroyCommandList(list); throw; }
+                return list;
+            }
+        } recording{*device, {}};
+        // Keep the existing GPU order: stage scheduling only changes CPU recording.
+        // Grouping submissions by stage could move a reader before its state transition.
+        recording.lists.reserve(m_passes.size() + 2);
+        auto* boundary = recording.Acquire();
+        if(!boundary || !RecordBoundary(boundary) || !boundary->Close()) return false;
+        std::vector<ICommandList*> passes(m_passes.size(), nullptr);
+        for(uint32_t pass : m_executionOrder)
+        {
+            if(!(passes[pass] = recording.Acquire())) return false;
+            passes[pass]->m_references = boundary->m_references;
+            passes[pass]->m_imageGeneration = boundary->m_imageGeneration;
+        }
+        auto* final = recording.Acquire();
+        if(!final) return false;
+        final->m_references = boundary->m_references;
+        final->m_imageGeneration = boundary->m_imageGeneration;
+        std::vector<uint8_t> recorded(m_passes.size(), 0);
+        const auto record = [&](uint32_t pass) {
+            recorded[pass] = RecordPass(passes[pass], pass) && passes[pass]->Close();
+        };
+        const bool parallel = pool && pool->GetThreadCount() > 1 && !pool->IsWorkerThread();
+        for(const auto& stage : m_executionStages)
+        {
+            if(!parallel || stage.passIndices.size() == 1)
+            {
+                for(uint32_t pass : stage.passIndices) record(pass);
+            }
+            else
+            {
+                std::vector<std::future<void>> pending;
+                pending.reserve(stage.passIndices.size());
+                std::exception_ptr failure;
+                try
+                {
+                    for(uint32_t pass : stage.passIndices)
+                        pending.push_back(pool->Enqueue([&, pass] { record(pass); }));
+                }
+                catch(...) { failure = std::current_exception(); }
+                // Even queue/allocation failures must join previously accepted jobs.
+                for(auto& job : pending)
+                    try { job.get(); }
+                    catch(...) { if(!failure) failure = std::current_exception(); }
+                if(failure) std::rethrow_exception(failure);
+            }
+            for(uint32_t pass : stage.passIndices) if(!recorded[pass]) return false;
+        }
+        final->ResourceBarrier(m_finalBarriers.data(), static_cast<uint32_t>(m_finalBarriers.size()));
+        if(!final->Close()) return false;
+        commandLists.swap(recording.lists);
+        return true;
     }
 
     void RenderGraph::Reset()
@@ -296,6 +409,7 @@ namespace dyf::RHI
         m_passes.clear();
         m_compiledRevisions.clear();
         m_executionOrder.clear();
+        m_executionStages.clear();
         m_passBarriers.clear();
         m_finalBarriers.clear();
         m_compiled = false;

@@ -59,10 +59,14 @@ bool ICommandList::CanRecordCommands()
 bool ICommandList::Track(const void* handle)
 {
     if(!CanRecordCommands()) return false;
-    auto reference = m_owner->Reference(handle);
-    if(!reference) { m_recordingFailed = true; return false; }
+    // References recorded before Destroy* retain the object until this list ends.
     for(const auto& existing : m_references)
         if(existing.get() == handle) return true;
+    // Resource ownership and swapchain generation are one synchronized snapshot.
+    // The command list itself remains exclusively owned by its recording thread.
+    std::lock_guard<std::recursive_mutex> lock(m_owner->m_resourceMutex);
+    auto reference = m_owner->Reference(handle);
+    if(!reference) { m_recordingFailed = true; return false; }
     if(m_owner->m_borrowedTextures.count(handle)) m_imageGeneration=m_owner->m_imageGeneration;
     m_references.push_back(std::move(reference));
     return true;
