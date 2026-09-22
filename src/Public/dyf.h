@@ -15,6 +15,7 @@
 #include "dyf/Utf8.h"
 #include "dyf/Math/Math.h"
 #include "dyf/Platform/Input.h"
+#include "dyf/Platform/Log.h"
 #include "dyf/Platform/Profiler.h"
 #include "dyf/Platform/Time.h"
 #include "dyf/Platform/Window.h"

@@ -1,3 +1,4 @@
+#include "dyf/Platform/Log.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/RHI/ICommandList.h"
 #include "RHI/Validation.h"
@@ -12,9 +13,9 @@ IDevice::~IDevice() = default;
 
 void IDevice::ReportDiagnostic(DiagnosticSeverity severity, const char* message) const
 {
-    std::fprintf(stderr, "dyf::RHI [%s]: %s\n",
-        severity == DiagnosticSeverity::Error ? "error" :
-        severity == DiagnosticSeverity::Warning ? "warning" : "info", message);
+    const auto level = severity == DiagnosticSeverity::Error ? Platform::LogLevel::Error :
+        severity == DiagnosticSeverity::Warning ? Platform::LogLevel::Warning : Platform::LogLevel::Info;
+    Platform::Log::Write(level, "RHI", message ? message : "");
 }
 
 uint64_t IDevice::GetLimit(Limit limit) const { return GetLimitNative(limit); }
@@ -135,14 +136,14 @@ bool IDevice::BeginFrame()
 bool IDevice::Present()
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
-    if(!m_frameActive) {std::fprintf(stderr,"dyf::RHI: Present requires an active frame.\n");return false;}
+    if(!m_frameActive) {dyf::Platform::Log::Writef(dyf::Platform::LogLevel::Error, "RHI", __FILE__, __LINE__, "dyf::RHI: Present requires an active frame.");return false;}
     auto* backBuffer = GetBackBuffer();
     const auto state = m_resourceStates.find({reinterpret_cast<uintptr_t>(backBuffer),0,0});
     if(!backBuffer || state == m_resourceStates.end() || state->second != ResourceState::Present)
-    {std::fprintf(stderr,"dyf::RHI: Submit the backbuffer transition to Present before presenting.\n");return false;}
+    {dyf::Platform::Log::Writef(dyf::Platform::LogLevel::Error, "RHI", __FILE__, __LINE__, "dyf::RHI: Submit the backbuffer transition to Present before presenting.");return false;}
     const bool presented = PresentNative();
     m_frameActive = false;
-    if(!presented || IsLostNative()) {std::fprintf(stderr,"dyf::RHI: Presentation failed.\n");return false;}
+    if(!presented || IsLostNative()) {dyf::Platform::Log::Writef(dyf::Platform::LogLevel::Error, "RHI", __FILE__, __LINE__, "dyf::RHI: Presentation failed.");return false;}
     return true;
 }
 
@@ -473,7 +474,7 @@ bool IDevice::UpdateBuffer(ICommandList& commands, BufferHandle buffer, uint32_t
     commands.RequireState(buffer,0,0,ResourceState::CopyDestination);
     commands.m_commands.push_back([this,buffer,offset,bytes=std::move(bytes)](ICommandList& native) {
         if(UpdateBufferNative(native,buffer,offset,bytes.data(),static_cast<uint32_t>(bytes.size())))return true;
-        std::fprintf(stderr,"dyf::RHI [error]: Submit: UpdateBuffer failed (offset=%u, size=%zu, bufferSize=%u).\n",
+        dyf::Platform::Log::Writef(dyf::Platform::LogLevel::Error, "RHI", __FILE__, __LINE__, "dyf::RHI [error]: Submit: UpdateBuffer failed (offset=%u, size=%zu, bufferSize=%u).",
             offset,bytes.size(),buffer->GetDesc().size);
         return false;
     });
@@ -499,7 +500,7 @@ bool IDevice::UpdateTexture(ICommandList& commands, TextureHandle texture, uint3
     commands.RequireState(texture,mip,layer,ResourceState::CopyDestination);
     commands.m_commands.push_back([this,texture,mip,layer,rowPitch,slicePitch,bytes=std::move(bytes)](ICommandList& native) {
         if(UpdateTextureNative(native,texture,mip,layer,bytes.data(),static_cast<uint32_t>(bytes.size()),rowPitch,slicePitch))return true;
-        std::fprintf(stderr,"dyf::RHI [error]: Submit: UpdateTexture failed (mip=%u, layer=%u, size=%zu, rowPitch=%u, slicePitch=%u).\n",
+        dyf::Platform::Log::Writef(dyf::Platform::LogLevel::Error, "RHI", __FILE__, __LINE__, "dyf::RHI [error]: Submit: UpdateTexture failed (mip=%u, layer=%u, size=%zu, rowPitch=%u, slicePitch=%u).",
             mip,layer,bytes.size(),rowPitch,slicePitch);
         return false;
     });

@@ -1,3 +1,4 @@
+#include "dyf/Platform/Log.h"
 #include "dyf/RHI/RenderGraph.h"
 #include "dyf/RHI/ICommandList.h"
 #include "RHI/Validation.h"
@@ -14,7 +15,7 @@ namespace dyf::RHI
 
         bool Fail(const char* message)
         {
-            std::fprintf(stderr, "dyf::RHI [error]: RenderGraph: %s\n", message);
+            dyf::Platform::Log::Writef(dyf::Platform::LogLevel::Error, "RenderGraph", __FILE__, __LINE__, "dyf::RHI [error]: RenderGraph: %s", message);
             return false;
         }
 

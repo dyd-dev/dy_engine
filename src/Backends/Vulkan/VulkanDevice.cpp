@@ -1,5 +1,6 @@
 #include "VulkanDevice.h"
 #include "VulkanQuery.h"
+#include "dyf/Platform/Log.h"
 
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/ICommandList.h"
@@ -17,6 +18,7 @@
 #include <GLFW/glfw3.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -47,8 +49,18 @@ namespace dyf::Backends
 
 		void LogVulkanFailure(const char* operation, VkResult result)
 		{
-			std::fprintf(stderr, "%s failed (VkResult %d)\n", operation, static_cast<int>(result));
+			Platform::Log::Writef(Platform::LogLevel::Error, "Vulkan", __FILE__, __LINE__, "%s failed (VkResult %d, deviceLost=%s)", operation, static_cast<int>(result), result == VK_ERROR_DEVICE_LOST ? "true" : "false");
 		}
+
+        VKAPI_ATTR VkBool32 VKAPI_CALL ValidationMessage(
+            VkDebugUtilsMessageSeverityFlagBitsEXT severity, VkDebugUtilsMessageTypeFlagsEXT,
+            const VkDebugUtilsMessengerCallbackDataEXT* data, void*)
+        {
+            const auto level = (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)
+                ? Platform::LogLevel::Error : Platform::LogLevel::Warning;
+            Platform::Log::Write(level, "Vulkan.Validation", data && data->pMessage ? data->pMessage : "Unknown validation message");
+            return VK_FALSE;
+        }
 
 		bool ValidationLayerAvailable()
 		{
@@ -162,6 +174,7 @@ namespace dyf::Backends
 		uint32_t m_maxFramesInFlight = 0;
         uint32_t m_adapterIndex=0;
         bool m_enableValidation=false;
+        VkDebugUtilsMessengerEXT m_debugMessenger = VK_NULL_HANDLE;
 
 		std::vector<VkSemaphore> m_imageAvailableSemaphores;
 		std::vector<VkSemaphore> m_renderFinishedSemaphores;
@@ -529,7 +542,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		}
 		else if (m_hasSwapchainDesc)
 		{
-			std::fprintf(stderr, "Vulkan swapchain recreation cannot satisfy the requested configuration.\n");
+			Platform::Log::Writef(Platform::LogLevel::Error, "Vulkan", __FILE__, __LINE__, "Vulkan swapchain recreation cannot satisfy the requested configuration.");
 			m_submissionFaulted = true;
 		}
 		return false;
@@ -607,7 +620,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		}
 		catch (const std::exception& exception)
 		{
-			std::fprintf(stderr, "Vulkan swapchain creation failed: %s\n", exception.what());
+			Platform::Log::Writef(Platform::LogLevel::Error, "Vulkan", __FILE__, __LINE__, "Vulkan swapchain creation failed: %s", exception.what());
 			m_submissionFaulted = true;
 			if (oldSwapchainRetired) m_recreationOldSwapchain = VK_NULL_HANDLE;
 			DestroyCurrentSwapchain();
@@ -731,7 +744,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		}
 		catch (const std::exception& exception)
 		{
-			std::fprintf(stderr, "Vulkan command-list acquisition failed: %s\n", exception.what());
+			Platform::Log::Writef(Platform::LogLevel::Error, "Vulkan", __FILE__, __LINE__, "Vulkan command-list acquisition failed: %s", exception.what());
 			return nullptr;
 		}
 	}
@@ -1094,7 +1107,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		}
 		catch (const std::exception& exception)
 		{
-			std::fprintf(stderr, "Vulkan buffer creation failed: %s\n", exception.what());
+			Platform::Log::Writef(Platform::LogLevel::Error, "Vulkan", __FILE__, __LINE__, "Vulkan buffer creation failed: %s", exception.what());
 			return nullptr;
 		}
 	}
@@ -1112,7 +1125,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		}
 		catch (const std::exception& exception)
 		{
-			std::fprintf(stderr, "Vulkan texture creation failed: %s\n", exception.what());
+			Platform::Log::Writef(Platform::LogLevel::Error, "Vulkan", __FILE__, __LINE__, "Vulkan texture creation failed: %s", exception.what());
 			return nullptr;
 		}
 	}
@@ -1130,7 +1143,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		}
 		catch (const std::exception& exception)
 		{
-			std::fprintf(stderr, "Vulkan shader creation failed: %s\n", exception.what());
+			Platform::Log::Writef(Platform::LogLevel::Error, "Vulkan", __FILE__, __LINE__, "Vulkan shader creation failed: %s", exception.what());
 			return nullptr;
 		}
 	}
@@ -1153,7 +1166,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		}
 		catch (const std::exception& exception)
 		{
-			std::fprintf(stderr, "Vulkan pipeline creation failed: %s\n", exception.what());
+			Platform::Log::Writef(Platform::LogLevel::Error, "Vulkan", __FILE__, __LINE__, "Vulkan pipeline creation failed: %s", exception.what());
 			return nullptr;
 		}
 	}
@@ -1185,7 +1198,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		}
 		catch (const std::exception& exception)
 		{
-			std::fprintf(stderr, "Vulkan resource-set creation failed: %s\n", exception.what());
+			Platform::Log::Writef(Platform::LogLevel::Error, "Vulkan", __FILE__, __LINE__, "Vulkan resource-set creation failed: %s", exception.what());
 			return nullptr;
 		}
 	}
@@ -1304,6 +1317,15 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 #endif
         if(supported(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME))
             extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
+        const bool captureValidation = m_enableValidation && supported(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        if (captureValidation) extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        if (m_enableValidation && !captureValidation)
+            Platform::Log::Write(Platform::LogLevel::Warning, "Vulkan", "Validation log capture unavailable: VK_EXT_debug_utils is missing");
+        VkDebugUtilsMessengerCreateInfoEXT debugInfo{};
+        debugInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+        debugInfo.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+        debugInfo.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+        debugInfo.pfnUserCallback = ValidationMessage;
         const uint32_t extensionCount=static_cast<uint32_t>(extensions.size());
 
 		std::vector<const char*> layers;
@@ -1319,6 +1341,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 		VkInstanceCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+        info.pNext = captureValidation ? &debugInfo : nullptr;
 		info.pApplicationInfo = &application;
 		info.enabledExtensionCount = extensionCount;
 		info.ppEnabledExtensionNames = extensions.data();
@@ -1326,6 +1349,17 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		info.ppEnabledLayerNames = layers.empty() ? nullptr : layers.data();
 		const VkResult result = vkCreateInstance(&info, nullptr, &m_context.instance);
 		if (result != VK_SUCCESS) LogVulkanFailure("vkCreateInstance", result);
+        if (result == VK_SUCCESS && captureValidation)
+        {
+            const auto createMessenger = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(vkGetInstanceProcAddr(m_context.instance, "vkCreateDebugUtilsMessengerEXT"));
+            if (createMessenger)
+            {
+                const auto captureResult = createMessenger(m_context.instance, &debugInfo, nullptr, &m_debugMessenger);
+                if (captureResult != VK_SUCCESS) LogVulkanFailure("vkCreateDebugUtilsMessengerEXT", captureResult);
+            }
+            if (m_debugMessenger == VK_NULL_HANDLE)
+                Platform::Log::Write(Platform::LogLevel::Warning, "Vulkan", "Validation log capture is not active");
+        }
 		return result == VK_SUCCESS;
 	}
 
@@ -1383,6 +1417,11 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 			if (!indices.IsComplete()) continue;
 
+            Platform::Log::Writef(Platform::LogLevel::Info, "Vulkan", nullptr, 0,
+                "GPU=%s vendor=%u device=%u driverVersionRaw=%u api=%u.%u.%u validation=%s capture=%s",
+                properties.deviceName, properties.vendorID, properties.deviceID, properties.driverVersion,
+                VK_API_VERSION_MAJOR(properties.apiVersion), VK_API_VERSION_MINOR(properties.apiVersion), VK_API_VERSION_PATCH(properties.apiVersion),
+                m_enableValidation ? "on" : "off", m_debugMessenger != VK_NULL_HANDLE ? "on" : "off");
 			m_context.physicalDevice = device;
 			m_context.queueIndices = indices;
 			return true;
@@ -1652,6 +1691,12 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		}
 		if (m_context.instance != VK_NULL_HANDLE)
 		{
+            if (m_debugMessenger != VK_NULL_HANDLE)
+            {
+                const auto destroyMessenger = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(vkGetInstanceProcAddr(m_context.instance, "vkDestroyDebugUtilsMessengerEXT"));
+                if (destroyMessenger) destroyMessenger(m_context.instance, m_debugMessenger, nullptr);
+                m_debugMessenger = VK_NULL_HANDLE;
+            }
 			vkDestroyInstance(m_context.instance, nullptr);
 			m_context.instance = VK_NULL_HANDLE;
 		}

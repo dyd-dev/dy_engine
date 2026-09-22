@@ -28,6 +28,8 @@ add_library(${PROJECT_NAME} STATIC
 	"src/dyf/TextureCache.cpp"
 	"src/dyf/Scene.cpp"
 	"src/Platform/Window.cpp"
+    "src/Platform/Log.cpp"
+    "src/Platform/LogSession.cpp"
 )
 
 # global options
