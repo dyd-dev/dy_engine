@@ -36,5 +36,33 @@ if(DY_BUILD_TESTS)
 
     add_executable(TessellationTests TessellationTests.cpp)
     target_link_libraries(TessellationTests PRIVATE dy_engine)
+    if(USE_D3D12 OR USE_METAL OR USE_VULKAN)
+        include(CompileShaders)
+        set(tessellation_shader_dir "${CMAKE_CURRENT_SOURCE_DIR}/Shaders/Tessellation")
+        foreach(shader IN ITEMS vertex hull domain fragment)
+            if(shader STREQUAL "vertex")
+                set(stage vert)
+                set(metal_entry vertexMain)
+            elseif(shader STREQUAL "fragment")
+                set(stage frag)
+                set(metal_entry fragmentMain)
+            else()
+                set(stage "${shader}")
+                if(shader STREQUAL "hull")
+                    set(metal_entry hullMain)
+                else()
+                    set(metal_entry domainMain)
+                endif()
+            endif()
+            dy_compile_shader(TessellationTests "tess_${shader}" "${stage}"
+                GLSL "${tessellation_shader_dir}/${shader}.glsl"
+                HLSL "${tessellation_shader_dir}/${shader}.hlsl"
+                METAL "${tessellation_shader_dir}/${shader}.metal"
+                METAL_ENTRY "${metal_entry}"
+                INCLUDE_DIRS "${tessellation_shader_dir}")
+        endforeach()
+        target_compile_definitions(TessellationTests PRIVATE DY_TEST_NATIVE_SHADERS=1)
+    endif()
     add_test(NAME TessellationContracts COMMAND TessellationTests)
+    set_tests_properties(TessellationContracts PROPERTIES TIMEOUT 30)
 endif()

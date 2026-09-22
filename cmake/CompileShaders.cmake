@@ -55,7 +55,7 @@ function(dy_compile_shader target name stage)
             COMMAND "${DY_DXC}" -T "${profile}" -E "${entry}" ${includes} -Fo "${binary}" "${SHADER_HLSL}"
             DEPENDS ${dependencies} VERBATIM)
     elseif(USE_METAL)
-        find_program(DY_XCRUN NAMES xcrun REQUIRED)
+        include(MetalToolchain)
         if(NOT SHADER_METAL_ENTRY)
             message(FATAL_ERROR "A Metal entry point is required for ${target}/${name}")
         endif()
@@ -63,9 +63,9 @@ function(dy_compile_shader target name stage)
         add_custom_command(OUTPUT "${binary}"
             BYPRODUCTS "${directory}/${name}.air"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${directory}"
-            COMMAND "${DY_XCRUN}" -sdk macosx metal ${includes}
+            COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal ${includes}
                 -c "${SHADER_METAL}" -o "${directory}/${name}.air"
-            COMMAND "${DY_XCRUN}" -sdk macosx metallib "${directory}/${name}.air" -o "${binary}"
+            COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metallib "${directory}/${name}.air" -o "${binary}"
             DEPENDS ${dependencies} VERBATIM)
     else()
         # Null validates commands; it has no native shader language or pixels.

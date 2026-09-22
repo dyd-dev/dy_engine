@@ -138,8 +138,8 @@ function(dy_example_shaders target)
                     set(command "${DY_FXC}" /nologo /enable_unbounded_descriptor_tables /E main /T "${hlsl_stage}"
                         /I "${CMAKE_SOURCE_DIR}/src" "${input}" /Fo "${offline}")
                 else()
-                    find_program(DY_XCRUN NAMES xcrun REQUIRED)
-                    set(command "${DY_XCRUN}" -sdk macosx metal -c "${input}" -I "${CMAKE_SOURCE_DIR}/src" -o "${offline}")
+                    include(MetalToolchain)
+                    set(command "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal -c "${input}" -I "${CMAKE_SOURCE_DIR}/src" -o "${offline}")
                 endif()
                 add_custom_command(OUTPUT "${offline}"
                     COMMAND "${CMAKE_COMMAND}" -E make_directory "${offline_dir}"

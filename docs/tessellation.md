@@ -28,3 +28,14 @@ recognizes `_hs` and `_ds` file names.
 Metal temporarily ends and resumes the render encoder around the Hull compute pass. Attachments,
 pipeline state, resources, inline constants, viewport, scissor, and stencil reference are restored
 before the Domain stage runs.
+
+## Build and validation
+
+On Xcode versions that install Metal as a downloadable component, CMake queries the installed
+Metal Toolchain identifier and passes it to `xcrun` explicitly. This avoids the Xcode 26/27 case
+where selecting the macOS SDK can otherwise fall back to the placeholder compiler.
+
+`TessellationContracts` uses native GLSL, HLSL, and Metal shader sources when a real backend is
+selected. It creates a three-control-point patch pipeline, renders to an offscreen RGBA8 texture,
+submits the work, and verifies a tessellated pixel through readback. The Null backend keeps the
+descriptor-validation version of the same test.
