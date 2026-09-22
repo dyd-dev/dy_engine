@@ -1,0 +1,527 @@
+[
+  {
+    "slug": "quickstart",
+    "title": "빠른 시작",
+    "summary": "CMake로 엔진을 연결하고 Canvas 도형을 그립니다. 공개 헤더와 현재 빌드 설정을 기준으로 작성한 첫 실행 안내입니다.",
+    "sections": [
+      {
+        "id": "requirements",
+        "title": "요구 사항과 백엔드 선택",
+        "paragraphs": [
+          "엔진은 CMake 3.20 이상과 C++17을 사용합니다. `dy_engine`은 정적 라이브러리이며, 링크하면 공개 헤더 경로와 C++17 요구 사항이 소비자 타깃에 전달됩니다. GLFW와 stb를 FetchContent로 가져오므로 첫 구성에는 Git과 의존성 다운로드가 가능한 환경이 필요할 수 있습니다. 기본값이 ON인 Tracy와 Model 확장의 fastgltf·ufbx도 함께 가져옵니다.",
+          "Apple에서는 Metal, Linux에서는 Vulkan을 자동 선택합니다. 이 플랫폼에서는 `USE_*` 값을 전달해도 해당 백엔드로 설정됩니다. Windows에서는 `USE_D3D12` 또는 `USE_VULKAN` 중 하나를 켜며, 둘 다 켜거나 Metal을 요청하면 구성이 실패합니다. Windows에서 두 옵션을 모두 끄면 Null 백엔드가 빌드됩니다. Null은 명령 검증용이며 화면에 렌더링된 픽셀을 만들지 않습니다."
+        ],
+        "table": {
+          "headings": [
+            "백엔드",
+            "구성 인자",
+            "빌드에 필요한 도구"
+          ],
+          "rows": [
+            [
+              "D3D12",
+              "Windows: -DUSE_D3D12=ON",
+              "Windows, Direct3D 12 개발 환경, PATH 또는 Vulkan SDK의 Bin에서 찾을 수 있는 dxc"
+            ],
+            [
+              "Vulkan",
+              "Linux: 자동 선택 / Windows: -DUSE_VULKAN=ON",
+              "CMake가 찾을 수 있는 Vulkan SDK/라이브러리와 glslc"
+            ],
+            [
+              "Metal",
+              "Apple: 자동 선택",
+              "macOS, Objective-C++ 도구 체인, metal/metallib를 실행할 수 있는 xcrun"
+            ],
+            [
+              "Null",
+              "Windows: -DUSE_D3D12=OFF -DUSE_VULKAN=OFF",
+              "네이티브 셰이더 컴파일러 불필요; GLFW 의존성은 유지"
+            ]
+          ]
+        }
+      },
+      {
+        "id": "build",
+        "title": "기존 예제 빌드",
+        "paragraphs": [
+          "아래 명령은 작업 폴더를 `D:/dev`로 두고 D3D12 예제를 별도 빌드 폴더에 생성합니다. `dxc`가 PATH 또는 Vulkan SDK의 Bin 경로에서 발견되어야 합니다. CMake 생성기는 설치된 도구 체인에 맞게 선택할 수 있습니다.",
+          "`DyfPrimitives`와 `RhiPrimitives`의 실행 파일 위치는 생성기와 구성에 따라 달라집니다. Visual Studio의 Release 빌드는 각각 `<빌드 폴더>/examples/dyf/01_Primitives/Release/DyfPrimitives.exe`와 `<빌드 폴더>/examples/RHI/01_Primitives/Release/RhiPrimitives.exe`를 생성합니다. Ninja 같은 단일 구성 생성기는 `Release/` 하위 폴더를 사용하지 않으며, 구성 시 `-DCMAKE_BUILD_TYPE=Release`를 지정합니다."
+        ],
+        "code": "cmake -S D:/dev/dy_engine -B D:/dev/dy_engine_build_d3d12 -DUSE_D3D12=ON -DDY_BUILD_EXAMPLES=ON -DDY_ENABLE_TRACY=OFF\ncmake --build D:/dev/dy_engine_build_d3d12 --config Release --target DyfPrimitives RhiPrimitives",
+        "language": "PowerShell"
+      },
+      {
+        "id": "options",
+        "title": "자주 사용하는 CMake 설정",
+        "paragraphs": [
+          "`DY_BUILD_EXAMPLES`는 기본값이 ON이지만, 예제는 엔진을 최상위 프로젝트로 구성할 때만 추가됩니다. 앱에서 `add_subdirectory`로 엔진을 포함하면 예제 실행 파일은 추가되지 않습니다. Linux에서는 `DY_LINUX_WINDOW_SYSTEM=AUTO`가 X11 개발 패키지를 먼저 확인한 뒤 Wayland로 넘어갑니다.",
+          "Tracy를 끄더라도 Renderer의 프로파일러 표시와 RHI timestamp 기능을 함께 끄지는 않습니다. RenderDoc 연동을 켜려면 `renderdoc_app.h`를 찾을 수 있어야 하며, 필요하면 `DY_RENDERDOC_ROOT`를 지정합니다. F12 캡처는 RenderDoc이 이미 앱에 주입된 경우에만 동작합니다. Apple에서는 RenderDoc 연동을 켤 수 없으며 Xcode GPU Capture를 사용합니다."
+        ],
+        "table": {
+          "headings": [
+            "설정",
+            "기본값",
+            "효과"
+          ],
+          "rows": [
+            [
+              "DY_BUILD_EXAMPLES",
+              "ON",
+              "최상위 빌드에서 dyf/RHI/advanced 예제 타깃 생성"
+            ],
+            [
+              "DY_EXTEND_MODEL",
+              "ON",
+              "dy_extend_model 및 dyf::Model 타깃, 모델 로더와 변형 셰이더 추가"
+            ],
+            [
+              "DY_ENABLE_SIMD",
+              "ON",
+              "지원 CPU에서 수학 SIMD 경로 사용"
+            ],
+            [
+              "DY_ENABLE_TRACY",
+              "ON",
+              "Tracy 클라이언트와 프로파일링 계측 포함"
+            ],
+            [
+              "DY_TRACY_RAW_PLOTS",
+              "OFF",
+              "Tracy 계측이 켜졌을 때 프레임별 원시 측정값도 전송"
+            ],
+            [
+              "DY_ENABLE_RENDERDOC",
+              "OFF",
+              "Windows/Linux 앱에 이미 주입된 RenderDoc의 캡처 API 사용"
+            ],
+            [
+              "DY_ENABLE_PIX",
+              "MSVC: ON / 그 외: OFF",
+              "Windows D3D12의 PIX 이벤트 계측; 활성화하려면 MSVC 필요"
+            ],
+            [
+              "DY_LINUX_WINDOW_SYSTEM",
+              "AUTO",
+              "Linux GLFW에 AUTO, X11, WAYLAND 선택"
+            ]
+          ]
+        }
+      },
+      {
+        "id": "application",
+        "title": "앱의 CMakeLists.txt에서 연결",
+        "paragraphs": [
+          "아래 파일과 `quickstart-canvas.cpp`를 같은 앱 폴더에 둡니다. 공개 진입점은 `<dyf.h>`입니다. CMake의 `dy_engine` 타깃을 링크하면 `src/Public` 경로가 전달되므로 내부 구현 폴더를 include 경로에 추가할 필요가 없습니다.",
+          "Windows 앱은 구성할 때 `-DUSE_D3D12=ON`처럼 사용할 백엔드를 지정합니다. 예를 들어 `cmake -S D:/dev/dy_canvas_app -B D:/dev/dy_canvas_app_build -DUSE_D3D12=ON -DDY_ENABLE_TRACY=OFF`로 구성하고 `cmake --build D:/dev/dy_canvas_app_build --config Release`로 빌드합니다. Apple의 Metal과 Linux의 Vulkan은 자동 선택되므로 백엔드 인자가 필요하지 않습니다."
+        ],
+        "code": "cmake_minimum_required(VERSION 3.20)\nproject(DyCanvasApp LANGUAGES CXX)\n\nadd_subdirectory(D:/dev/dy_engine \"${CMAKE_CURRENT_BINARY_DIR}/dy_engine\" EXCLUDE_FROM_ALL)\nadd_executable(DyCanvasApp quickstart-canvas.cpp)\ntarget_link_libraries(DyCanvasApp PRIVATE dy_engine)",
+        "language": "CMake"
+      },
+      {
+        "id": "canvas-example",
+        "title": "Canvas로 도형 그리기",
+        "paragraphs": [
+          "[Window](api:dyf::Platform::Window)를 먼저 만들고 [Renderer](api:dyf::Renderer)를 생성합니다. 창 생성은 `GetHandle()`의 null 여부, 렌더러 생성은 반환된 `unique_ptr`로 검사합니다. 아래 코드는 문서의 `examples/quickstart-canvas.cpp`에도 제공됩니다.",
+          "[Canvas](api:dyf::Canvas)는 CPU의 도형·이미지·글자 명령을 보관하고 `Renderer::Render`가 GPU 작업을 수행합니다. 정적인 도형은 한 번 기록한 목록을 재사용할 수 있습니다. 움직이는 도형은 매 프레임 `Clear` 후 새 명령을 추가합니다. Canvas 색의 RGB는 화면의 sRGB 값이고 알파는 0~1의 불투명도입니다."
+        ],
+        "code": "#include <dyf.h>\n#include <cstdio>\n#include <exception>\n\nint main()\n{\n    try\n    {\n        constexpr uint32_t width = 640, height = 480;\n        dyf::Platform::Window window(width, height, \"dy_engine / Canvas\");\n        if (!window.GetHandle()) return 1;\n\n        // 창은 렌더러보다 오래 살아 있어야 한다.\n        auto renderer = dyf::Renderer::Create(window.GetHandle());\n        if (!renderer) return 1;\n\n        dyf::Canvas canvas(width, height);\n        if (!canvas.IsValid()) return 1;\n        canvas.Clear({0.04f, 0.06f, 0.10f, 1.0f});\n        canvas.FillRect({80, 100, 220, 140}, {0.10f, 0.65f, 0.95f, 1.0f});\n        canvas.FillCircle({430, 230}, 70.0f, {1.0f, 0.65f, 0.15f, 1.0f});\n        canvas.Line({80, 340}, {540, 340}, {1, 1, 1, 1}, 3.0f);\n\n        while (window.IsRunning())\n        {\n            window.PollEvents();\n            if (!window.IsRunning()) break;\n            // 같은 CPU 명령 목록을 여러 프레임에서 다시 그릴 수 있다.\n            if (!renderer->Render(canvas)) return 1;\n        }\n        return 0;\n    }\n    catch (const std::exception& error)\n    {\n        std::fprintf(stderr, \"%s\\n\", error.what());\n        return 1;\n    }\n}\n",
+        "language": "C++"
+      },
+      {
+        "id": "next",
+        "title": "다음 예제 찾기",
+        "paragraphs": [
+          "`examples/dyf`와 `examples/RHI`는 같은 주제를 두 API 계층으로 제공합니다. 각각의 예제 폴더도 독립적인 CMake 프로젝트입니다. 모델·애니메이션 예제는 `DY_EXTEND_MODEL=ON`으로 활성화합니다.",
+          "`Renderer::Render`의 false는 실패입니다. 프레임을 확보할 수 없어 표시를 생략한 경우에는 true를 반환할 수 있으므로 true를 항상 새 화면이 표시되었다는 뜻으로 해석하지 않습니다."
+        ],
+        "table": {
+          "headings": [
+            "주제 폴더",
+            "dyf 타깃",
+            "RHI 타깃"
+          ],
+          "rows": [
+            [
+              "01_Primitives",
+              "DyfPrimitives",
+              "RhiPrimitives"
+            ],
+            [
+              "02_Image",
+              "DyfImage",
+              "RhiImage"
+            ],
+            [
+              "03_Viewport",
+              "DyfViewport",
+              "RhiViewport"
+            ],
+            [
+              "04_GeometryCamera",
+              "DyfGeometryCamera",
+              "RhiGeometryCamera"
+            ],
+            [
+              "05_MeshMaterial",
+              "DyfMeshMaterial",
+              "RhiMeshMaterial"
+            ],
+            [
+              "06_Light",
+              "DyfLight",
+              "RhiLight"
+            ],
+            [
+              "07_ModelAnim",
+              "DyfModelAnim",
+              "RhiModelAnim"
+            ],
+            [
+              "08_Scene",
+              "DyfScene",
+              "RhiScene"
+            ],
+            [
+              "09_Text",
+              "DyfText",
+              "RhiText"
+            ]
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "slug": "modules",
+    "title": "모듈과 API 계층",
+    "summary": "dyf, 공개 RHI, 선택 Model 확장의 역할과 소유권을 구분하고 목적에 맞는 진입점을 선택합니다.",
+    "sections": [
+      {
+        "id": "entrypoints",
+        "title": "세 가지 진입점",
+        "paragraphs": [
+          "dy_engine의 소비자용 헤더는 `src/Public` 아래에 있습니다. 기본 API는 `<dyf.h>`, 저수준 그래픽 API는 `<dyf/RHI.h>`, 선택 모델 확장은 `<dyf/Extends/Model.h>`로 포함합니다. 필요한 개별 공개 헤더만 포함할 수도 있습니다.",
+          "네이티브 백엔드는 CMake 구성 시 하나를 선택합니다. 실행 중 [IDevice](api:dyf::RHI::IDevice)를 생성할 때 백엔드를 지정하는 인자는 없습니다."
+        ],
+        "table": {
+          "headings": [
+            "계층",
+            "주요 역할",
+            "CMake 링크 타깃"
+          ],
+          "rows": [
+            [
+              "dyf",
+              "CPU 장면·이미지·Canvas 입력과 기본 렌더링",
+              "dy_engine"
+            ],
+            [
+              "dyf::RHI",
+              "장치, GPU 자원, 파이프라인, 명령, 동기화의 명시적 제어",
+              "dy_engine"
+            ],
+            [
+              "Model 확장",
+              "파일 로딩, 모델 인스턴스, 애니메이션, 스키닝",
+              "dyf::Model (DY_EXTEND_MODEL=ON)"
+            ]
+          ]
+        }
+      },
+      {
+        "id": "frontend",
+        "title": "dyf: 입력과 렌더링",
+        "paragraphs": [
+          "[Scene](api:dyf::Scene)은 CPU 장면을, [Canvas](api:dyf::Canvas)는 CPU 2D 명령을 소유합니다. [Renderer](api:dyf::Renderer)는 이 입력을 공개 RHI 자원과 명령으로 조합하고 GPU 자원을 소유합니다. Scene에 GPU 핸들을 넣지 않습니다.",
+          "3D 장면은 메시·재질·광원을 Scene에 추가하고 카메라와 함께 그립니다. 메시만 받는 `Render` 오버로드에는 기본 광원이 적용되며, Scene 오버로드는 등록된 광원만 사용합니다. 조명 설정과 환경 설정의 영향은 별도로 적용됩니다. Canvas는 독립 화면 또는 Scene 위의 오버레이로 그릴 수 있습니다."
+        ],
+        "table": {
+          "headings": [
+            "공개 헤더",
+            "대표 API",
+            "용도"
+          ],
+          "rows": [
+            [
+              "dyf/Renderer.h · RendererConfig.h",
+              "Renderer, RendererConfig",
+              "렌더링과 지연 적용되는 설정"
+            ],
+            [
+              "dyf/Scene.h · Mesh.h · Material.h",
+              "Scene, MeshData, MaterialDesc",
+              "장면과 표면 입력"
+            ],
+            [
+              "dyf/Camera.h · Light.h",
+              "Camera, 광원 형식",
+              "시점, 투영, 장면 광원"
+            ],
+            [
+              "dyf/Canvas.h · Image.h · Font.h",
+              "Canvas, Image, Font",
+              "2D 도형, 이미지, UTF-8 텍스트"
+            ],
+            [
+              "dyf/Platform/Window.h",
+              "Platform::Window",
+              "창 수명과 이벤트 처리"
+            ],
+            [
+              "dyf/Math/Math.h · Types.h · Utf8.h",
+              "벡터·행렬, ID, UTF-8 도구",
+              "공통 값과 연산"
+            ]
+          ]
+        }
+      },
+      {
+        "id": "rhi",
+        "title": "RHI: 자원과 명령",
+        "paragraphs": [
+          "RHI를 사용하면 버퍼·텍스처·셰이더·파이프라인의 생성과 파괴, 자원 상태 전이, 렌더링 구간, 제출과 표시를 앱이 지정합니다. 백엔드마다 네이티브 표현이 달라도 공개 선언과 검증 규칙은 공유합니다.",
+          "[ResourceScope](api:dyf::RHI::ResourceScope)는 명시적으로 전달한 자원의 파괴를 자동화합니다. [RenderGraph](api:dyf::RHI::RenderGraph)는 가져온 자원의 패스 의존성과 배리어를 계산합니다. 두 도구 모두 GPU 자원 할당과 프레임 제출을 대신 수행하지 않습니다.",
+          "지원 여부는 장치의 `Supports` 및 `GetLimit`로 조회합니다. 해당 조회는 자원을 생성하지 않으며, 이후 실제 생성에서 발생할 메모리 부족이나 셰이더 오류까지 보장하지 않습니다. 생성과 제출의 반환값도 검사합니다."
+        ]
+      },
+      {
+        "id": "ownership",
+        "title": "값, 핸들, 객체 수명",
+        "table": {
+          "headings": [
+            "객체",
+            "소유와 수명 규칙"
+          ],
+          "rows": [
+            [
+              "Image",
+              "RGBA8 CPU 픽셀 저장소를 공유한다. 복사해도 GPU 자원을 만들지 않는다."
+            ],
+            [
+              "Scene / EntityHandle",
+              "Scene이 데이터 소유. EntityHandle은 Scene 소멸 후 만료한다."
+            ],
+            [
+              "Canvas",
+              "기록된 이미지의 공유 저장소 수명을 유지한다. Canvas 자체는 복사 불가, 이동 가능."
+            ],
+            [
+              "Renderer",
+              "자신의 GPU 자원을 소유한다. 외부 IDevice를 받았다면 장치가 Renderer보다 오래 살아 있어야 한다."
+            ],
+            [
+              "RHI 자원 핸들",
+              "생성한 장치의 Destroy 함수나 ResourceScope로 반환한다. backbuffer는 스왑체인 소유."
+            ],
+            [
+              "ModelRenderer",
+              "모델 변형 GPU 자원을 소유하며, 참조하는 Renderer보다 먼저 소멸해야 한다."
+            ]
+          ]
+        },
+        "paragraphs": [
+          "`Window → IDevice → ResourceScope` 또는 `Window → Renderer → ModelRenderer` 순서로 생성하면 일반적인 지역 변수의 역순 소멸을 수명 관리에 활용할 수 있습니다. `ModelRenderer`가 없는 기본 렌더링에는 Model 확장이 필요하지 않습니다."
+        ]
+      },
+      {
+        "id": "choose",
+        "title": "어디에서 시작할지 결정하기",
+        "paragraphs": [
+          "2D 화면이나 일반적인 3D 장면은 dyf로 시작합니다. 직접 셰이더 바인딩, GPU 상태, 제출 시점을 관리하려면 RHI 예제를 참고합니다. 모델 파일과 애니메이션이 필요하면 Model 확장을 추가합니다.",
+          "장면 입력을 재사용하면서 일부 정점 처리를 확장하려면 `RendererShaderDesc`와 `RendererDrawDesc` 경계를 검토할 수 있습니다. 이 경로는 Scene의 객체 ID 순서와 기본 정점/상수 레이아웃을 맞춰야 하므로 해당 API의 요구 사항을 먼저 확인합니다."
+        ]
+      }
+    ]
+  },
+  {
+    "slug": "rhi-lifecycle",
+    "title": "RHI 프레임과 자원 수명",
+    "summary": "명령 기록에서 제출·표시까지의 순서, 배리어, 소유권, 완료 대기와 읽기 회수 규칙을 설명합니다.",
+    "sections": [
+      {
+        "id": "ownership",
+        "title": "장치와 자원 소유",
+        "paragraphs": [
+          "[IDevice](api:dyf::RHI::IDevice)의 `Create`는 소유권이 있는 포인터를 반환하므로 `std::unique_ptr<IDevice>`에 보관할 수 있습니다. 자원 핸들은 생성한 장치의 `DestroyBuffer`, `DestroyTexture` 등 대응 함수로 해제합니다. 명령 목록은 `delete` 대신 `DestroyCommandList`를 사용합니다.",
+          "[ResourceScope](api:dyf::RHI::ResourceScope)의 `Keep`은 한 번만 소유권을 전달받으며 null 핸들이면 예외를 던집니다. scope는 장치보다 먼저 파괴되어야 합니다. 동일 핸들을 여러 scope에 등록하거나 직접 파괴한 뒤 scope에도 남겨 두지 않습니다.",
+          "`GetBackBuffer()`는 스왑체인 소유 텍스처를 빌려줍니다. `Keep`이나 `DestroyTexture`로 소유권을 가져오지 않고 매 프레임 다시 조회합니다. 제출된 명령과 참조 자원은 GPU 작업 완료까지 내부적으로 보유되므로 프레임용 ResourceScope는 제출 후 범위를 벗어나도 됩니다."
+        ]
+      },
+      {
+        "id": "sequence",
+        "title": "프레임 호출 순서",
+        "table": {
+          "headings": [
+            "단계",
+            "호출과 조건"
+          ],
+          "rows": [
+            [
+              "1. 확보",
+              "BeginFrame 성공 후 GetBackBuffer로 현재 표시 대상을 얻는다."
+            ],
+            [
+              "2. 기록",
+              "AcquireCommandList 후 Present → RenderTarget 배리어를 기록한다."
+            ],
+            [
+              "3. 렌더링",
+              "BeginRendering, draw에 필요한 바인딩·viewport·scissor, EndRendering 순서로 기록한다."
+            ],
+            [
+              "4. 종료 상태",
+              "backbuffer를 RenderTarget → Present로 전이한다."
+            ],
+            [
+              "5. 제출",
+              "Close 성공 후 Submit한다. Submit은 프레임을 끝내지 않는다."
+            ],
+            [
+              "6. 표시",
+              "Present가 표시 요청과 프레임 종료를 담당한다."
+            ]
+          ]
+        },
+        "paragraphs": [
+          "`BeginFrame` 성공부터 `Present`까지 같은 backbuffer를 사용하며 여러 번 Submit할 수 있습니다. 프레임 확보에 실패하면 해당 반복에서는 backbuffer에 명령을 기록하지 않습니다. `IsLost()`도 확인하여 장치 손실과 일시적 프레임 생략을 구분합니다.",
+          "`Present`는 resize 때문에 실제 표시를 생략하고 재생성을 예약한 경우에도 true를 반환할 수 있습니다. 상태 오류는 프레임을 유지합니다. 네이티브 표시 요청의 실제 실패는 프레임을 끝내고 false를 반환하며 원인을 stderr로 출력합니다.",
+          "일부 명령 기록 함수는 void를 반환합니다. 기록 오류는 `Close()`의 반환값으로 확인하고, 상태 의존성이나 네이티브 제출 오류는 `Submit()`에서도 확인합니다."
+        ]
+      },
+      {
+        "id": "states",
+        "title": "자원 상태와 배리어",
+        "paragraphs": [
+          "[ResourceBarrierDesc](api:dyf::RHI::ResourceBarrierDesc)의 `before`는 실제 현재 상태와 일치해야 합니다. `Undefined`는 최초 상태이며 현재 상태를 무시하는 값이 아닙니다. 텍스처의 상태는 대상 mip/layer 범위에 맞춰 관리합니다.",
+          "`before == after` 배리어도 Undefined를 제외하면 유효합니다. 동일 상태를 유지하며 앞선 접근과 뒤따르는 접근 사이의 메모리 의존성을 표현합니다. 연속된 쓰기 등 의존성을 상태 이름이 같다는 이유만으로 생략하지 않습니다.",
+          "`UpdateBuffer`와 `UpdateTexture`는 입력 바이트를 호출 중 복사하지만 GPU 복사 자체는 명령 목록에 기록됩니다. 반환 후 원본 CPU 메모리는 바꿀 수 있으며, GPU에서 읽으려면 적절한 상태 전이와 Submit이 필요합니다.",
+          "graphics의 정점·인덱스·ResourceSet 바인딩은 rendering 구간 안에서 설정하며 `EndRendering`에서 해제됩니다. ResourceSet은 현재 파이프라인용이어야 하므로 파이프라인 교체 후 다시 바인딩합니다. compute의 ResourceSet은 rendering 밖에서 `BindComputePipeline` 뒤에 설정합니다."
+        ]
+      },
+      {
+        "id": "example",
+        "title": "최소 예제: backbuffer 지우기",
+        "paragraphs": [
+          "이 예제는 공개 RHI만으로 프레임을 확보하고 화면을 지웁니다. draw를 하지 않으므로 사용자 셰이더나 파이프라인이 필요하지 않습니다. 파일은 `examples/quickstart-rhi.cpp`이며, 빠른 시작의 CMake 예제에서 소스 파일명과 실행 파일 타깃을 변경해 빌드할 수 있습니다.",
+          "실제 화면 확인에는 네이티브 백엔드를 선택합니다. Null에서는 명령 흐름만 검증하며, 명시적인 초기 폭과 높이를 지정합니다."
+        ],
+        "code": "#include <dyf/Platform/Window.h>\n#include <dyf/RHI.h>\n#include <chrono>\n#include <cstdio>\n#include <exception>\n#include <memory>\n#include <thread>\n\nint main()\n{\n    try\n    {\n        constexpr uint32_t width = 640, height = 480;\n        dyf::Platform::Window window(width, height, \"dy_engine / RHI clear\");\n        if (!window.GetHandle()) return 1;\n\n        // IDevice::Create는 소유권이 있는 포인터를 반환한다.\n        std::unique_ptr<dyf::RHI::IDevice> device(\n            dyf::RHI::IDevice::Create(dyf::RHI::DeviceDesc{}));\n        if (!device) return 1;\n\n        dyf::RHI::SwapchainDesc swapchain;\n        swapchain.window = window.GetHandle();\n        swapchain.format = dyf::RHI::Format::B8G8R8A8_UNORM;\n        // 네이티브 창은 0으로 크기를 유도하고, Null 검증은 명시 크기를 요구한다.\n        if (!device->Supports(dyf::RHI::Feature::Rasterization))\n        {\n            swapchain.initialWidth = width;\n            swapchain.initialHeight = height;\n        }\n        if (!device->CreateSwapchain(swapchain)) return 1;\n\n        while (window.IsRunning())\n        {\n            window.PollEvents();\n            if (!window.IsRunning()) break;\n            if (!device->BeginFrame())\n            {\n                if (device->IsLost()) return 1;\n                std::this_thread::sleep_for(std::chrono::milliseconds(16));\n                continue;\n            }\n\n            // ResourceScope는 device보다 먼저 파괴된다.\n            dyf::RHI::ResourceScope frameResources(*device);\n            auto* commands = frameResources.Keep(device->AcquireCommandList());\n            auto* backBuffer = device->GetBackBuffer();\n            if (!backBuffer) return 1; // 스왑체인 소유이므로 Keep/DestroyTexture 금지.\n\n            const dyf::RHI::ResourceBarrierDesc begin{\n                nullptr, backBuffer, dyf::RHI::ResourceState::Present,\n                dyf::RHI::ResourceState::RenderTarget, {}};\n            commands->ResourceBarrier(&begin, 1);\n\n            dyf::RHI::ColorAttachment color;\n            color.texture = backBuffer;\n            color.loadOp = dyf::RHI::LoadOp::Clear;\n            color.storeOp = dyf::RHI::StoreOp::Store;\n            color.clearColor[0] = 0.04f;\n            color.clearColor[1] = 0.06f;\n            color.clearColor[2] = 0.10f;\n            color.clearColor[3] = 1.0f;\n            commands->BeginRendering({&color, 1, nullptr});\n            commands->EndRendering();\n\n            const dyf::RHI::ResourceBarrierDesc end{\n                nullptr, backBuffer, dyf::RHI::ResourceState::RenderTarget,\n                dyf::RHI::ResourceState::Present, {}};\n            commands->ResourceBarrier(&end, 1);\n\n            // 기록 실패는 Close, 제출 실패는 Submit에서 확인한다.\n            if (!commands->Close()) return 1;\n            if (!device->Submit(&commands, 1)) return 1;\n            if (!device->Present()) return 1;\n        }\n        return device->WaitIdle() ? 0 : 1;\n    }\n    catch (const std::exception& error)\n    {\n        // ResourceScope::Keep(nullptr)도 예외로 보고된다.\n        std::fprintf(stderr, \"%s\\n\", error.what());\n        return 1;\n    }\n}\n",
+        "language": "C++"
+      },
+      {
+        "id": "completion",
+        "title": "완료 확인과 명령 목록 재사용",
+        "paragraphs": [
+          "`Submit(const SubmitDesc&, FenceHandle&)`으로 완료 핸들을 받을 수 있습니다. `IsComplete`는 완료 여부를 조회하고 `Wait`는 지정한 나노초 동안 대기합니다. `SubmitDesc::waits`는 제출 사이의 완료 의존성을 지정합니다.",
+          "GPU 작업 중인 명령 목록은 Reset하거나 다시 Submit할 수 없습니다. 재사용하려면 완료를 확인한 다음 `ResetCommandList`를 호출합니다. 새 목록을 획득하고 제출 후 Destroy하는 방식도 가능합니다.",
+          "`WaitIdle`은 장치 전체 작업의 완료가 필요한 정리 또는 진단 시점에 사용할 수 있습니다. 매 프레임 대기하지 않아도 제출된 자원의 내부 수명은 유지됩니다. 진단은 stderr를 확인하고, 실패 이후 동일 명령 목록을 그대로 제출하지 않습니다."
+        ]
+      },
+      {
+        "id": "readback",
+        "title": "화면 읽기와 RenderGraph 연결",
+        "paragraphs": [
+          "`ReadTexture`는 mip 0/layer 0의 RGBA8 또는 BGRA8 텍스처를 동기적으로 읽는 진단 API입니다. 먼저 기록된 작업을 Submit해야 합니다. 스왑체인 이미지는 `allowReadback=true`로 생성하고 Submit 뒤, Present 전에 읽습니다. 지원하지 않는 형식이나 Null에서는 false를 반환하며 자원 상태는 보존됩니다.",
+          "[RenderGraph](api:dyf::RHI::RenderGraph)는 앱이 생성한 자원을 Import하고 패스의 Read/Write 상태를 선언한 뒤 Compile → Execute 순서로 사용합니다. Execute 성공은 명령 기록 성공이며 GPU 제출 성공을 뜻하지 않습니다. 이후 Close와 Submit을 호출합니다.",
+          "그래프의 initial/final 상태는 실제 실행 경계와 일치해야 합니다. 같은 그래프를 재실행해도 상태를 자동 갱신하지 않으므로 initialState를 다시 만족시킵니다. callback은 rendering을 직접 시작·종료하며 그래프가 관리하는 자원 상태를 임의로 바꾸지 않습니다."
+        ]
+      }
+    ]
+  },
+  {
+    "slug": "model-extension",
+    "title": "확장: Model",
+    "summary": "선택 모듈을 빌드하고 모델 파일을 읽어 장면 인스턴스와 애니메이션으로 연결합니다.",
+    "sections": [
+      {
+        "id": "enable",
+        "title": "확장 활성화",
+        "paragraphs": [
+          "`DY_EXTEND_MODEL`은 기본값이 ON이며 정적 라이브러리 `dy_extend_model`과 별칭 `dyf::Model`을 생성합니다. 이 타깃은 `dy_engine`을 PUBLIC 링크합니다. 모델 로딩에 필요한 fastgltf와 ufbx도 확장이 켜졌을 때만 가져옵니다. 필요하지 않으면 `-DDY_EXTEND_MODEL=OFF`로 끌 수 있습니다.",
+          "소스에는 `<dyf.h>`와 `<dyf/Extends/Model.h>`를 포함합니다. `<dyf.h>`만 포함하면 선택 확장은 노출되지 않습니다. 아래는 앱 CMake에서 엔진을 추가하기 전에 옵션을 설정하는 예입니다."
+        ],
+        "code": "set(DY_EXTEND_MODEL ON CACHE BOOL \"Build model support\")\nadd_subdirectory(D:/dev/dy_engine \"${CMAKE_CURRENT_BINARY_DIR}/dy_engine\" EXCLUDE_FROM_ALL)\nadd_executable(ModelApp main.cpp)\ntarget_link_libraries(ModelApp PRIVATE dyf::Model)",
+        "language": "CMake"
+      },
+      {
+        "id": "loading",
+        "title": "CPU 데이터와 장면 인스턴스",
+        "paragraphs": [
+          "`LoadModel`은 `.gltf`, `.glb`, `.fbx`, `.obj` 파일을 [ModelData](api:dyf::ModelData)로 읽습니다. 파일 확장자는 대소문자를 구분하지 않습니다. glTF/GLB는 fastgltf, FBX/OBJ는 ufbx 경로를 사용합니다. 지원하지 않는 확장자나 로딩 실패 시 false를 반환하고 출력 모델을 비웁니다.",
+          "`LoadMesh`는 모델 메시를 합친 단일 `MeshData`를 얻는 편의 함수입니다. 재질 출력은 첫 번째 재질이므로 여러 재질, 노드 계층, 스킨과 애니메이션을 유지해야 할 때는 ModelData 또는 ModelScene 경로를 사용합니다.",
+          "[ModelScene](api:dyf::ModelScene)은 Scene을 확장하여 모델 자산과 인스턴스, 포즈를 관리합니다. `AddModelToScene`은 파일을 읽어 장면에 인스턴스를 추가합니다. 같은 자산을 여러 번 배치하려면 `LoadModelAsset`으로 자산 ID를 받고 `InstantiateModel`로 인스턴스를 추가할 수 있습니다.",
+          "[ModelSceneDesc](api:dyf::ModelSceneDesc)의 `path`는 실행 시 작업 폴더 기준의 경로 또는 절대 경로입니다. 기본값 `normalize=true`, `normalizedSize=1.6f`를 사용하거나, normalize를 끄고 transform에 크기와 회전을 지정합니다. 아래 함수는 모델을 추가하고 클립이 있으면 첫 애니메이션을 시작합니다."
+        ],
+        "code": "#include <dyf.h>\n#include <dyf/Extends/Model.h>\n#include <string>\n\nbool AddAnimatedModel(dyf::ModelScene& scene, const std::string& path,\n                      dyf::ModelInstanceID& instance)\n{\n    dyf::ModelSceneDesc desc;\n    desc.path = path;\n    instance = dyf::ModelInstanceID::Invalid;\n    if (!dyf::AddModelToScene(scene, desc, &instance)) return false;\n\n    const auto* model = scene.TryGetModelInstance(instance);\n    if (!model) return false;\n    if (!model->clips.empty() && !scene.PlayAnimation(instance, 0)) return false;\n    return true;\n}",
+        "language": "C++"
+      },
+      {
+        "id": "playback",
+        "title": "애니메이션 갱신과 렌더링",
+        "paragraphs": [
+          "새 인스턴스는 기본 자세로 생성되며 자동 재생되지 않습니다. `PlayAnimation(instance, clipIndex, loop)`으로 시작합니다. 키 시간, 클립 duration, 재생 time과 `UpdateAnimations`의 deltaSeconds는 모두 초 단위입니다. speed는 시간 배율입니다.",
+          "`ModelScene::UpdateAnimations`는 자체 시계를 읽지 않습니다. 앱의 `std::chrono::steady_clock`이나 고정 시간 간격으로 경과 초를 전달합니다. 실패하면 false와 stderr 진단을 제공하며 다른 인스턴스 갱신은 계속합니다.",
+          "[ModelRenderer](api:dyf::ModelRenderer)는 기본 Renderer를 참조하고 모델 변형 GPU 자원을 소유합니다. Renderer가 ModelRenderer보다 오래 살아 있어야 합니다. 아래 코드는 창, Renderer, 카메라와 모델이 준비된 뒤 호출할 수 있는 루프입니다. Scene의 광원은 앱이 추가합니다."
+        ],
+        "code": "#include <dyf.h>\n#include <dyf/Extends/Model.h>\n#include <chrono>\n\nbool RunModelLoop(dyf::Platform::Window& window, dyf::Renderer& renderer,\n                  dyf::ModelScene& scene, const dyf::Camera& camera)\n{\n    dyf::ModelRenderer modelRenderer(renderer);\n    auto previous = std::chrono::steady_clock::now();\n    while (window.IsRunning())\n    {\n        window.PollEvents();\n        if (!window.IsRunning()) break;\n        const auto now = std::chrono::steady_clock::now();\n        const float deltaSeconds = std::chrono::duration<float>(now - previous).count();\n        previous = now;\n        if (!scene.UpdateAnimations(deltaSeconds)) return false;\n        if (!modelRenderer.Render(scene, camera)) return false;\n    }\n    return true;\n}",
+        "language": "C++"
+      },
+      {
+        "id": "controls",
+        "title": "재생, 모프와 스키닝 제어",
+        "paragraphs": [
+          "`SetAnimationPaused`, `SetAnimationSpeed`, `SetAnimationLoop`로 재생을 조정하고 `GetAnimationPlayback`으로 상태를 읽습니다. 유효성 확인에는 `IsValidModelInstance` 또는 `TryGetModelInstance`를 사용합니다. 인덱스 기반 Get 함수는 유효한 ID가 전제입니다.",
+          "`SetMorphWeight`는 인스턴스·노드·타깃의 모프 가중치를 덮어쓰며 `ClearMorphWeightOverride`로 수동 덮어쓰기를 제거합니다. CPU에서 직접 평가하려면 `SampleAnimationClip`, `BuildGlobalNodeMatrices`, `BuildSkinPalette`, `EvaluateMorphTargets`, `SkinVertex`의 입력 배열과 반환값을 확인합니다.",
+          "기본 실행 방식은 `SkinningExecutionMode::VertexShader`입니다. `ComputePreSkin` 선택은 `Feature::Compute` 지원 여부를 검사하며, 현재 내장 Compute 스키닝 셰이더는 Vulkan 빌드에서만 생성됩니다. 다른 백엔드에서 기본 Compute 셰이더가 제공된다고 가정하지 않습니다.",
+          "`ModelRenderer::SetShaders`는 모델 변형 단계의 셰이더 바이트와 진입점을 복사합니다. 일반 조명·후처리 등은 Renderer의 설정을 따릅니다. ModelRenderer는 각 Render 후 기존 정점 설정을 복원하므로 같은 Renderer로 일반 Scene도 그릴 수 있습니다. `GetGpuMilliseconds`는 마지막 완료된 Compute 스키닝 측정값이며 없으면 -1입니다."
+        ]
+      },
+      {
+        "id": "limits",
+        "title": "입력 제한과 파일 경로",
+        "paragraphs": [
+          "[ModelLoadOptions](api:dyf::ModelLoadOptions)는 파일·파서 입력·디코딩 데이터 크기와 노드·스킨·애니메이션 개수의 상한을 둡니다. 제한을 넘는 자산은 로딩 실패로 처리하므로 false와 stderr 진단을 확인합니다. `flipV`의 기본값은 false입니다.",
+          "`maxParserInputBytes`는 fastgltf의 파서 입력 payload 제한입니다. fastgltf의 전체 힙 사용량을 제한하는 설정은 아닙니다. `maxParserBytes`는 할당 훅이 있는 ufbx에서 실제 파서 힙 한도로 사용됩니다.",
+          "예제 모델의 상대 경로와 텍스처 파일은 실행 작업 폴더에 맞춰 준비합니다. 엔진의 `examples/dyf/07_ModelAnim`과 `examples/RHI/07_ModelAnim`에는 모델 파일과 해당 예제의 CMake 자산 복사 설정이 있습니다."
+        ],
+        "table": {
+          "headings": [
+            "필드",
+            "기본값"
+          ],
+          "rows": [
+            [
+              "maxSourceBytes / maxParserInputBytes / maxParserBytes / maxDecodedBytes",
+              "각각 512 MiB"
+            ],
+            [
+              "maxTextures",
+              "4096"
+            ],
+            [
+              "maxMorphTargetsPerMesh",
+              "256"
+            ],
+            [
+              "maxNodes / maxNodeDepth",
+              "65536 / 256"
+            ],
+            [
+              "maxJointsPerSkin",
+              "4096"
+            ],
+            [
+              "maxAnimationKeys",
+              "10000000"
+            ],
+            [
+              "fbxBakeRate / fbxConstantTrackTolerance",
+              "30.0 / 0.00001"
+            ]
+          ]
+        }
+      }
+    ]
+  }
+]

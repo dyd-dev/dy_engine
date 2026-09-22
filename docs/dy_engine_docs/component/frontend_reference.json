@@ -1,0 +1,1418 @@
+{
+  "dyf::Renderer": {
+    "summary": "Scene·MeshData·Canvas의 CPU 입력을 GPU 명령으로 구성하고 창에 표시하는 렌더러입니다.",
+    "remarks": [
+      "`Create`로 생성하며 복사할 수 없습니다. 렌더러가 만든 GPU 자원은 렌더러가 소유합니다.",
+      "설정 변경은 다음 `Render`에서 적용됩니다. 설정 요청 성공과 실제 GPU 자원 재구성 성공은 구분되므로 `Render`의 반환값도 확인합니다.",
+      "MeshData 편의 오버로드는 기본 방향광을 추가합니다. Scene 오버로드는 장면에 등록한 광원만 사용합니다."
+    ],
+    "members": {
+      "Create": {
+        "summary": "창 핸들과 선택적 설정으로 렌더러를 생성합니다.",
+        "returns": "성공하면 `std::unique_ptr<Renderer>`, 창·설정·장치·스왑체인 초기화 실패 시 `nullptr`입니다.",
+        "parameters": [
+          [
+            "window",
+            "`Platform::Window::GetHandle()` 등으로 얻은 유효한 창 핸들입니다."
+          ],
+          [
+            "device",
+            "장치를 받는 오버로드에서는 호출자가 소유한 RHI 장치를 사용합니다. 렌더러보다 오래 유지해야 합니다."
+          ]
+        ],
+        "remarks": [
+          "장치를 생략하면 렌더러가 RHI 장치를 생성하고 소유합니다. 외부 장치를 넘기면 그 장치를 빌려 사용합니다.",
+          "오류 원인은 `stderr`로 출력됩니다. 창도 렌더러를 사용하는 동안 유지합니다."
+        ]
+      },
+      "Render": {
+        "summary": "메시, 장면 또는 캔버스를 렌더링하고 선택적으로 화면을 CPU 이미지로 읽습니다.",
+        "returns": "정상 처리와 프레임을 확보하지 못해 생략한 경우는 `true`, 오류는 `false`입니다.",
+        "parameters": [
+          [
+            "readback",
+            "결과를 받을 `Image` 포인터입니다. 생략할 수 있으며 사용할 때는 `allowReadback`을 먼저 켜야 합니다."
+          ],
+          [
+            "overlay",
+            "장면 위에 합성할 Canvas입니다. 배경 지우기 색상은 오버레이 합성에 적용하지 않습니다."
+          ]
+        ],
+        "remarks": [
+          "카메라를 생략하면 기본 시점과 현재 백버퍼의 종횡비를 사용합니다. 직접 넘기는 카메라의 투영은 호출자가 설정합니다.",
+          "프레임 생략 시 전달한 readback 이미지를 빈 값으로 바꿉니다. `true`만으로 새 캡처가 생겼다고 판단하지 말고 `Image::IsValid()`도 확인합니다.",
+          "직접 준비한 draw 배열은 `Scene::GetEntityCount()`와 개수가 같아야 하며 객체 ID 순서로 전달합니다. 각 `inlineConstants`의 크기는 선택한 셰이더의 `additionalConstantBytes`와 같아야 합니다.",
+          "실패 원인은 `stderr`에 출력됩니다."
+        ]
+      },
+      "GetDevice": {
+        "summary": "렌더러가 사용하는 RHI 장치를 반환합니다.",
+        "returns": "내부 소유 또는 외부에서 빌린 `RHI::IDevice`의 참조입니다.",
+        "remarks": [
+          "반환된 장치의 소유권을 넘기지 않습니다."
+        ]
+      },
+      "GetConfig": {
+        "summary": "가장 최근에 요청한 설정을 읽습니다.",
+        "returns": "적용 대기 중인 설정이 있으면 해당 설정, 없으면 현재 적용된 설정의 읽기 전용 참조입니다."
+      },
+      "SetConfig": {
+        "summary": "전체 렌더러 설정을 검증하고 다음 렌더링에 적용하도록 저장합니다.",
+        "returns": "입력이 유효하고 저장되면 `true`, 검증 또는 저장 실패 시 `false`입니다.",
+        "remarks": [
+          "색상 성분은 유한수여야 합니다. 노출·환경광 세기·환경 diffuse/specular 세기는 유한한 0 이상의 값이어야 합니다.",
+          "GPU 자원이나 출력 설정의 실제 재구성 실패는 다음 `Render`에서 보고될 수 있습니다."
+        ]
+      },
+      "SetClearColor": {
+        "summary": "3D 장면의 배경 지우기 색상을 설정합니다.",
+        "returns": "설정 요청이 유효하고 저장되면 `true`입니다.",
+        "remarks": [
+          "Canvas만 렌더링하는 경우의 배경색은 `Canvas::Clear`로 지정합니다."
+        ]
+      },
+      "SetVSync": {
+        "summary": "수직 동기화 설정을 변경합니다.",
+        "returns": "변경 요청이 저장되면 `true`입니다.",
+        "remarks": [
+          "다음 Render에서 스왑체인 출력 설정에 반영됩니다."
+        ]
+      },
+      "GetLighting": {
+        "summary": "가장 최근에 요청한 조명 설정을 읽습니다.",
+        "returns": "`GetConfig().lighting`의 읽기 전용 참조입니다."
+      },
+      "SetLighting": {
+        "summary": "전체 LightingConfig를 교체하도록 요청합니다.",
+        "returns": "설정 검증과 저장에 성공하면 `true`입니다."
+      },
+      "SetLightingEnabled": {
+        "summary": "광원·환경광·그림자의 적용 여부를 설정합니다.",
+        "returns": "설정 요청이 저장되면 `true`입니다."
+      },
+      "SetShadowsEnabled": {
+        "summary": "방향광·점광원·스폿 광원의 그림자 처리를 설정합니다.",
+        "returns": "설정 요청이 저장되면 `true`입니다.",
+        "remarks": [
+          "전체 조명 설정이 켜져 있어야 그림자가 적용됩니다."
+        ]
+      },
+      "SetHdrEnabled": {
+        "summary": "3D 장면의 HDR 렌더링과 톤 매핑 사용 여부를 설정합니다.",
+        "returns": "설정 요청이 저장되면 `true`입니다."
+      },
+      "SetExposure": {
+        "summary": "HDR 톤 매핑에 사용할 노출 값을 설정합니다.",
+        "returns": "유한한 0 이상의 값이 저장되면 `true`, 잘못된 값은 `false`입니다."
+      },
+      "SetProfilerVisible": {
+        "summary": "Scene·Mesh 렌더링에서 프로파일러 HUD 표시를 설정합니다.",
+        "returns": "설정 요청이 저장되면 `true`입니다.",
+        "remarks": [
+          "Canvas만 렌더링하는 경로에는 HUD가 추가되지 않습니다.",
+          "F11은 HUD의 확장 표시를 전환합니다. HUD 표시 여부를 바꾸는 이 설정과는 별개입니다."
+        ]
+      },
+      "SetReadbackEnabled": {
+        "summary": "화면을 Image로 읽는 기능의 허용 여부를 설정합니다.",
+        "returns": "설정 요청이 저장되면 `true`입니다.",
+        "remarks": [
+          "읽기 기능을 끈 상태에서 Render에 readback 포인터를 전달하면 렌더링 호출이 실패합니다."
+        ]
+      },
+      "SetShaders": {
+        "summary": "기본 셰이더의 선택적 교체 입력을 복사해 다음 Render에 적용하도록 저장합니다.",
+        "returns": "단계·바이트·진입점 검증과 복사에 성공하면 `true`, 실패하면 `false`입니다.",
+        "remarks": [
+          "생략한 단계에는 기본 셰이더를 사용합니다. 각 교체 항목은 올바른 셰이더 단계, 비어 있지 않은 바이트와 진입점이 필요합니다.",
+          "입력 바이트와 진입점 문자열을 복사하므로 호출 후 원본 입력 버퍼를 계속 보유할 필요는 없습니다."
+        ]
+      },
+      "GetShaders": {
+        "summary": "현재 또는 적용 대기 중인 사용자 셰이더 교체 입력을 조회합니다.",
+        "returns": "셰이더 설명 값입니다. 바이트와 진입점 포인터는 렌더러 내부 저장소를 가리킵니다.",
+        "remarks": [
+          "셰이더 바이트는 다음 설정 적용까지 유효한 읽기 뷰입니다. 장기간 보관하려면 필요한 데이터를 복사합니다.",
+          "교체하지 않은 단계의 기본 셰이더 바이너리를 반환하는 API는 아닙니다."
+        ]
+      }
+    }
+  },
+  "dyf::RendererShaderDesc": {
+    "summary": "Renderer의 메시·그림자·Canvas·톤 매핑 셰이더를 선택적으로 교체하는 입력입니다.",
+    "remarks": [
+      "사용할 백엔드에 맞는 RHI 셰이더 바이트와 진입점을 제공합니다. 생략한 단계에는 기본 셰이더가 적용됩니다."
+    ],
+    "members": {
+      "vertexBindings": {
+        "summary": "메시 정점 셰이더의 기본 리소스 바인딩 뒤에 추가할 바인딩 레이아웃입니다."
+      },
+      "additionalConstantBytes": {
+        "summary": "기본 draw 상수 192바이트 뒤에 추가할 상수 바이트 수입니다.",
+        "remarks": [
+          "확장 Render 호출에서 각 RendererDrawDesc::inlineConstants의 크기와 같아야 합니다."
+        ]
+      }
+    }
+  },
+  "dyf::RendererDrawDesc": {
+    "summary": "Scene 객체 하나의 draw에 직접 준비한 RHI 정점 입력을 공급합니다.",
+    "remarks": [
+      "Render에 넘기는 배열의 순서는 Scene의 객체 ID 순서입니다. GPU 자원 핸들을 Scene에 저장하지 않습니다."
+    ],
+    "members": {
+      "vertexBuffer": {
+        "summary": "기본 메시 정점 버퍼 대신 사용할 버퍼입니다.",
+        "remarks": [
+          "`nullptr`이면 Scene의 메시를 사용합니다. 형식은 float3 위치, float3 법선, float2 UV, float4 탄젠트의 48바이트 정점입니다."
+        ]
+      },
+      "vertexResources": {
+        "summary": "확장 정점 셰이더 바인딩에 공급할 RHI 리소스입니다."
+      },
+      "inlineConstants": {
+        "summary": "기본 draw 상수 뒤에 전달할 추가 바이트입니다.",
+        "remarks": [
+          "크기는 RendererShaderDesc::additionalConstantBytes와 같아야 합니다."
+        ]
+      }
+    }
+  },
+  "dyf::RendererConfig": {
+    "summary": "렌더러의 화면 출력·조명·HDR·캡처·HUD 기본값을 묶습니다.",
+    "remarks": [
+      "구조체를 기본 생성한 뒤 필요한 필드만 수정해 `Renderer::Create` 또는 `SetConfig`에 전달합니다."
+    ],
+    "members": {
+      "vsync": {
+        "summary": "수직 동기화 사용 여부입니다. 기본값은 true입니다."
+      },
+      "allowReadback": {
+        "summary": "Render 결과를 CPU Image로 읽을 수 있게 합니다. 기본값은 false입니다."
+      },
+      "clearColor": {
+        "summary": "장면 렌더링의 배경색입니다. 기본값은 (0.08, 0.10, 0.14, 1)입니다."
+      },
+      "lighting": {
+        "summary": "광원 적용, 환경광 및 그림자 설정입니다."
+      },
+      "enableHdrRendering": {
+        "summary": "HDR 중간 대상과 톤 매핑을 사용할지 결정합니다. 기본값은 false입니다."
+      },
+      "exposure": {
+        "summary": "HDR 톤 매핑의 노출 값입니다. 기본값은 1이며 유한한 0 이상의 값이어야 합니다."
+      },
+      "enableProfilerHud": {
+        "summary": "Scene·Mesh 렌더링에 성능 HUD를 추가합니다. 기본값은 true입니다. Canvas 전용 경로에는 표시되지 않습니다.",
+        "remarks": [
+          "프레임·CPU·GPU 시간은 기본 200ms 누적 구간의 통계로 갱신합니다. GPU 측정 결과가 없으면 대기 또는 미지원 상태를 표시합니다."
+        ]
+      },
+      "profilerStartsExpanded": {
+        "summary": "프로파일러 HUD의 확장 표시 여부입니다. 기본값은 false이며 해당 창의 F11 입력으로 전환할 수 있습니다."
+      }
+    }
+  },
+  "dyf::LightingConfig": {
+    "summary": "렌더러 전체의 조명 적용 여부, 그림자 품질과 환경광을 지정합니다.",
+    "remarks": [
+      "개별 광원의 위치·방향·색상은 Light 타입에서, 표면의 반응은 MaterialDesc에서 설정합니다."
+    ],
+    "members": {
+      "enabled": {
+        "summary": "false이면 광원·환경광·그림자를 적용하지 않고 재질의 기본색과 발광을 표시합니다."
+      },
+      "shadows": {
+        "summary": "방향광·점광원·스폿 광원의 그림자를 켭니다. 기본값은 false입니다.",
+        "remarks": [
+          "면적광 그림자는 지원하지 않습니다. 개별 광원과 객체의 그림자 설정도 함께 적용됩니다."
+        ]
+      },
+      "shadowQuality": {
+        "summary": "그림자 품질 단계입니다. 기본값은 ShadowQuality::Medium이며 구체적 해상도·필터는 Renderer가 선택합니다."
+      },
+      "ambientColor": {
+        "summary": "환경광 색상입니다. 기본값은 흰색입니다."
+      },
+      "ambientIntensity": {
+        "summary": "환경광 세기입니다. 기본값은 0.035이며 유한한 0 이상의 값이어야 합니다."
+      },
+      "environment": {
+        "summary": "표면에 더하는 diffuse/specular 환경색과 세기입니다."
+      }
+    }
+  },
+  "dyf::EnvironmentDesc": {
+    "summary": "확산·정반사 환경색과 각각의 세기를 지정하는 CPU 설정입니다.",
+    "remarks": [
+      "색상은 기본 흰색, 두 세기는 기본 1입니다. Renderer 설정 검증 시 색상의 유한성과 세기의 유한성·비음수 조건을 확인합니다."
+    ],
+    "members": {
+      "diffuseColor": {
+        "summary": "표면의 확산 환경광 색상입니다."
+      },
+      "diffuseIntensity": {
+        "summary": "확산 환경광 세기입니다."
+      },
+      "specularColor": {
+        "summary": "표면의 정반사 환경광 색상입니다."
+      },
+      "specularIntensity": {
+        "summary": "정반사 환경광 세기입니다."
+      }
+    }
+  },
+  "dyf::Scene": {
+    "summary": "메시·재질·변환과 광원을 소유하는 CPU 장면입니다.",
+    "remarks": [
+      "GPU 자원을 생성하지 않으며 Renderer와 RHI 사용자가 같은 읽기 API로 장면 입력을 얻습니다.",
+      "Scene은 복사할 수 없습니다. EntityHandle과 LightHandle은 Scene의 생존 기간을 늘리지 않으며 Scene 소멸 시 만료됩니다.",
+      "객체 ID는 0부터 GetEntityCount()-1까지입니다. ID 기반 직접 읽기 API를 호출하기 전에 범위를 확인합니다."
+    ],
+    "members": {
+      "Scene": {
+        "summary": "비어 있는 장면을 생성합니다."
+      },
+      "Add": {
+        "summary": "메시와 재질·변환으로 객체를 추가하거나, 전달한 광원 타입의 광원을 추가합니다.",
+        "returns": "메시 오버로드는 EntityHandle, 광원 오버로드는 해당 LightHandle을 반환합니다. 실패하면 빈 핸들입니다.",
+        "parameters": [
+          [
+            "mesh",
+            "정점과 인덱스가 모두 존재해야 하고 모든 인덱스가 정점 배열 범위 안에 있어야 합니다."
+          ],
+          [
+            "material",
+            "장면이 보유할 재질입니다. 생략하면 기본 MaterialDesc를 사용합니다."
+          ],
+          [
+            "transform",
+            "유한한 월드 변환 행렬입니다. 기본값은 항등행렬입니다."
+          ]
+        ],
+        "remarks": [
+          "메시와 재질을 복사해 소유합니다. Image 필드는 Image의 공유 픽셀 저장소 의미를 따릅니다.",
+          "메시 객체를 추가해도 광원은 자동 생성되지 않습니다. 필요한 Light를 별도로 추가합니다.",
+          "유효성 검사 또는 예외로 실패하면 stderr로 원인을 출력합니다."
+        ]
+      },
+      "GetEntityCount": {
+        "summary": "장면의 객체 개수를 조회합니다.",
+        "returns": "등록된 객체의 개수입니다."
+      },
+      "GetEntity": {
+        "summary": "객체 ID에 대응하는 수정용 핸들을 얻습니다.",
+        "returns": "유효한 ID이면 EntityHandle, Invalid 또는 범위 밖 ID이면 빈 핸들입니다."
+      },
+      "GetEntityMesh": {
+        "summary": "객체가 사용하는 메시의 ID를 조회합니다.",
+        "returns": "Meshes 컬렉션에 대응하는 MeshID입니다.",
+        "remarks": [
+          "유효한 객체 ID가 필요합니다. 이 직접 조회는 범위 검사를 하지 않습니다."
+        ]
+      },
+      "GetEntityMaterial": {
+        "summary": "객체가 사용하는 재질의 ID를 조회합니다.",
+        "returns": "Materials 컬렉션에 대응하는 MaterialID입니다.",
+        "remarks": [
+          "유효한 객체 ID가 필요합니다. 이 직접 조회는 범위 검사를 하지 않습니다."
+        ]
+      },
+      "GetTransform": {
+        "summary": "객체의 변환 데이터를 읽습니다.",
+        "returns": "장면 내부 Transform의 읽기 전용 참조입니다.",
+        "remarks": [
+          "유효한 객체 ID가 필요합니다. 장면이 데이터를 소유하므로 변경에는 EntityHandle을 사용합니다."
+        ]
+      },
+      "GetEntityLighting": {
+        "summary": "객체의 그림자 생성·수신 설정을 읽습니다.",
+        "returns": "장면 내부 EntityLightingDesc의 읽기 전용 참조입니다.",
+        "remarks": [
+          "유효한 객체 ID가 필요합니다."
+        ]
+      },
+      "Meshes": {
+        "summary": "장면의 메시 컬렉션을 읽습니다.",
+        "returns": "불변 MeshData를 가리키는 shared_ptr 배열의 읽기 전용 참조입니다.",
+        "remarks": [
+          "shared_ptr를 복사하면 해당 MeshData의 수명을 Scene과 독립적으로 유지할 수 있습니다. 등록한 메시 입력은 변경하지 않습니다."
+        ]
+      },
+      "Materials": {
+        "summary": "장면의 재질 컬렉션을 읽습니다.",
+        "returns": "MaterialDesc 배열의 읽기 전용 참조입니다."
+      },
+      "DirectionalLights": {
+        "summary": "장면에 등록한 방향광을 읽습니다.",
+        "returns": "DirectionalLight 배열의 읽기 전용 참조입니다."
+      },
+      "PointLights": {
+        "summary": "장면에 등록한 점광원을 읽습니다.",
+        "returns": "PointLight 배열의 읽기 전용 참조입니다."
+      },
+      "SpotLights": {
+        "summary": "장면에 등록한 스폿 광원을 읽습니다.",
+        "returns": "SpotLight 배열의 읽기 전용 참조입니다."
+      },
+      "RectAreaLights": {
+        "summary": "장면에 등록한 사각형 면적광을 읽습니다.",
+        "returns": "RectAreaLight 배열의 읽기 전용 참조입니다."
+      },
+      "DiscAreaLights": {
+        "summary": "장면에 등록한 원판 면적광을 읽습니다.",
+        "returns": "DiscAreaLight 배열의 읽기 전용 참조입니다."
+      }
+    }
+  },
+  "dyf::EntityHandle": {
+    "summary": "Scene이 소유하는 객체의 변환·재질·그림자 설정을 수정하는 비소유 핸들입니다.",
+    "remarks": [
+      "기본 생성한 핸들은 비어 있습니다. 소유 Scene이 소멸하면 핸들이 만료됩니다.",
+      "`if (handle)`로 유효성을 확인할 수 있습니다. 실패한 접근은 stderr에 오류를 출력합니다."
+    ],
+    "members": {
+      "operator bool": {
+        "summary": "Scene과 대상 객체가 아직 유효한지 확인합니다.",
+        "returns": "유효하면 true입니다."
+      },
+      "GetTransform": {
+        "summary": "객체의 월드 행렬을 복사해 읽습니다.",
+        "returns": "현재 월드 행렬입니다. 핸들이 유효하지 않으면 항등행렬입니다."
+      },
+      "GetMaterial": {
+        "summary": "객체의 재질을 복사해 읽습니다.",
+        "returns": "현재 MaterialDesc입니다. 핸들이 유효하지 않으면 기본 MaterialDesc입니다."
+      },
+      "SetTransform": {
+        "summary": "객체의 월드 행렬을 교체합니다.",
+        "returns": "핸들이 유효하고 행렬의 모든 성분이 유한하면 true입니다."
+      },
+      "SetPosition": {
+        "summary": "현재 월드 행렬의 평행이동 성분만 교체합니다.",
+        "returns": "핸들과 변경된 행렬이 유효하면 true입니다.",
+        "parameters": [
+          [
+            "position",
+            "새 위치입니다. 기존 회전·스케일 성분은 유지됩니다."
+          ]
+        ]
+      },
+      "SetMaterial": {
+        "summary": "객체가 사용하는 재질 값을 교체합니다.",
+        "returns": "유효한 핸들에서 재질 저장에 성공하면 true입니다."
+      },
+      "GetLighting": {
+        "summary": "객체의 그림자 생성·수신 설정을 복사해 읽습니다.",
+        "returns": "현재 설정입니다. 핸들이 유효하지 않으면 기본 EntityLightingDesc입니다."
+      },
+      "SetLighting": {
+        "summary": "객체의 그림자 생성·수신 설정을 교체합니다.",
+        "returns": "핸들이 유효하면 true입니다.",
+        "remarks": [
+          "인수를 생략하면 기본값인 castShadow=true, receiveShadow=true를 적용합니다."
+        ]
+      }
+    }
+  },
+  "dyf::MeshData": {
+    "summary": "정점 배열과 32비트 인덱스 배열로 이루어진 CPU 메시입니다.",
+    "remarks": [
+      "Scene::Add는 입력을 복사합니다. 정점·인덱스가 비어 있거나 인덱스가 정점 범위를 벗어나면 객체 추가가 실패합니다."
+    ],
+    "members": {
+      "vertices": {
+        "summary": "메시의 Vertex 배열입니다."
+      },
+      "indices": {
+        "summary": "vertices를 참조하는 uint32_t 인덱스 배열입니다."
+      }
+    }
+  },
+  "dyf::Vertex": {
+    "summary": "위치·법선·UV·색상·탄젠트를 보유하는 CPU 정점입니다.",
+    "remarks": [
+      "기본 Renderer는 위치·법선·UV·탄젠트만 GPU 메시 입력으로 업로드합니다."
+    ],
+    "members": {
+      "position": {
+        "summary": "메시 로컬 좌표의 정점 위치입니다."
+      },
+      "normal": {
+        "summary": "정점 법선입니다."
+      },
+      "uv": {
+        "summary": "텍스처 좌표입니다."
+      },
+      "color": {
+        "summary": "CPU 정점 색상입니다. 기본값은 흰색이며 기본 Renderer의 메시 업로드에는 포함되지 않습니다."
+      },
+      "tangent": {
+        "summary": "접선 xyz와 방향 부호 w입니다. 기본값은 (1, 0, 0, 1)입니다."
+      }
+    }
+  },
+  "dyf::MaterialDesc": {
+    "summary": "기본 3D 셰이더의 색상·금속성·거칠기·법선·차폐·발광 입력을 묶는 CPU 재질입니다.",
+    "remarks": [
+      "Image 필드는 CPU 픽셀 저장소를 공유합니다. 재질을 Scene에 넣는 것만으로 GPU 자원을 만들지 않습니다."
+    ],
+    "members": {
+      "baseColor": {
+        "summary": "표면 기본 색상 계수입니다. 기본값은 흰색입니다. 기본 셰이더의 출력 알파는 이 값의 w를 사용합니다."
+      },
+      "baseColorTexture": {
+        "summary": "기본색에 곱할 이미지입니다.",
+        "remarks": [
+          "기본 3D 셰이더는 RGB만 사용하며 텍스처 알파는 불투명도에 반영하지 않습니다."
+        ]
+      },
+      "emissiveColor": {
+        "summary": "발광 색상 계수입니다. 기본값은 검정입니다."
+      },
+      "metallicFactor": {
+        "summary": "금속성 계수입니다. 기본값은 0입니다."
+      },
+      "roughnessFactor": {
+        "summary": "거칠기 계수입니다. 기본값은 0.5입니다."
+      },
+      "normalScale": {
+        "summary": "법선 텍스처의 접선 공간 x·y 성분에 적용하는 배율입니다. 기본값은 1입니다."
+      },
+      "occlusionStrength": {
+        "summary": "환경광 차폐에 적용할 계수입니다. 기본값은 1입니다."
+      },
+      "metallicRoughnessTexture": {
+        "summary": "거칠기에 G 채널, 금속성에 B 채널을 곱하는 이미지입니다."
+      },
+      "normalTexture": {
+        "summary": "접선 공간 법선 이미지입니다."
+      },
+      "occlusionTexture": {
+        "summary": "차폐 계수에 R 채널을 곱하는 이미지입니다."
+      },
+      "emissiveTexture": {
+        "summary": "발광 색상에 RGB를 곱하는 이미지입니다."
+      }
+    }
+  },
+  "dyf::Camera": {
+    "summary": "뷰 행렬·투영 행렬·월드 위치를 함께 보관하는 카메라입니다.",
+    "remarks": [
+      "기본 시점은 (0, -3, 2)에서 원점을 바라보며 Z축을 위로 사용합니다. 기본 투영은 오른손 좌표계, 깊이 0~1의 원근 투영입니다.",
+      "검증에 실패한 설정 함수는 stderr에 오류를 출력하고 기존 상태를 유지합니다."
+    ],
+    "members": {
+      "view": {
+        "summary": "오른손 좌표계의 뷰 행렬입니다."
+      },
+      "projection": {
+        "summary": "오른손 좌표계, 깊이 0~1의 투영 행렬입니다."
+      },
+      "position": {
+        "summary": "카메라의 월드 위치입니다. LookAt 호출은 view와 position을 함께 갱신합니다."
+      },
+      "LookAt": {
+        "summary": "시점·대상·위쪽 방향으로 view와 position을 설정합니다.",
+        "returns": "입력이 유한하고 시선 방향 및 시선과 up의 외적 길이가 충분하면 true, 퇴화한 자세이면 false입니다.",
+        "parameters": [
+          [
+            "eye",
+            "카메라의 월드 위치입니다."
+          ],
+          [
+            "target",
+            "바라볼 위치입니다. 기본값은 원점입니다."
+          ],
+          [
+            "up",
+            "위쪽 방향입니다. 기본값은 Z축입니다."
+          ]
+        ]
+      },
+      "SetPerspective": {
+        "summary": "종횡비와 수직 시야각으로 원근 투영을 설정합니다.",
+        "returns": "입력이 유효하면 true입니다.",
+        "parameters": [
+          [
+            "aspect",
+            "양수인 가로/세로 비율입니다."
+          ],
+          [
+            "fovYRadians",
+            "0보다 크고 π보다 작은 수직 시야각입니다. 단위는 라디안입니다."
+          ],
+          [
+            "nearPlane",
+            "0보다 큰 근거리 평면입니다."
+          ],
+          [
+            "farPlane",
+            "nearPlane보다 큰 원거리 평면입니다."
+          ]
+        ],
+        "remarks": [
+          "모든 입력이 유한해야 합니다."
+        ]
+      },
+      "SetOrthographic": {
+        "summary": "너비와 높이로 직교 투영을 설정합니다.",
+        "returns": "입력이 유한하고 width·height가 양수이며 farPlane이 nearPlane보다 크면 true입니다.",
+        "parameters": [
+          [
+            "width",
+            "투영 범위의 너비입니다."
+          ],
+          [
+            "height",
+            "투영 범위의 높이입니다."
+          ]
+        ]
+      }
+    }
+  },
+  "dyf::Canvas": {
+    "summary": "2D 도형·이미지·UTF-8 텍스트 명령을 CPU에 모아 Renderer에 전달하는 캔버스입니다.",
+    "remarks": [
+      "좌표는 뷰포트 왼쪽 위를 원점으로 하며 x는 오른쪽, y는 아래쪽으로 증가합니다.",
+      "색상과 tint의 RGB는 화면 sRGB 값, 알파는 0~1 불투명도입니다.",
+      "복사는 금지하고 이동은 지원합니다. 이동한 원본은 유효하지 않은 Canvas가 됩니다."
+    ],
+    "members": {
+      "Canvas": {
+        "summary": "지정한 크기로 캔버스를 생성하거나 기존 Canvas를 이동합니다.",
+        "parameters": [
+          [
+            "width",
+            "0보다 큰 캔버스 너비입니다."
+          ],
+          [
+            "height",
+            "0보다 큰 캔버스 높이입니다."
+          ]
+        ],
+        "remarks": [
+          "너비 또는 높이가 0이면 오류를 출력하며 IsValid는 false입니다."
+        ]
+      },
+      "IsValid": {
+        "summary": "캔버스의 너비와 높이가 모두 0이 아닌지 검사합니다.",
+        "returns": "두 차원이 모두 유효하면 true입니다."
+      },
+      "Clear": {
+        "summary": "기록된 그리기 명령을 지우고 배경색을 설정합니다.",
+        "remarks": [
+          "뷰포트를 전체 Canvas 영역으로, 클립을 전체 뷰포트로 되돌립니다.",
+          "장면 오버레이로 렌더링할 때는 기존 장면을 유지하므로 이 배경색으로 지우지 않습니다."
+        ]
+      },
+      "SetViewport": {
+        "summary": "이후 명령의 좌표 원점과 출력 영역을 설정하고 클립을 새 뷰포트 전체로 초기화합니다.",
+        "returns": "모든 값이 유한하고 너비·높이가 양수이면 true, 아니면 기존 상태를 유지하고 false입니다."
+      },
+      "SetClipRect": {
+        "summary": "이후 명령의 잘라낼 영역을 뷰포트 내부 좌표로 지정합니다.",
+        "remarks": [
+          "이미 기록한 명령의 클립은 바뀌지 않습니다."
+        ]
+      },
+      "ResetClipRect": {
+        "summary": "이후 명령의 클립을 현재 뷰포트 전체로 되돌립니다."
+      },
+      "Point": {
+        "summary": "주어진 위치를 중심으로 한 정사각형 점을 기록합니다.",
+        "parameters": [
+          [
+            "size",
+            "점의 한 변 크기입니다. 기본값은 1입니다."
+          ]
+        ]
+      },
+      "Line": {
+        "summary": "두 좌표 사이에 지정한 폭의 선분을 기록합니다.",
+        "remarks": [
+          "폭이 0 이하이면 기록하지 않습니다. 길이가 0이면 같은 폭의 Point로 기록합니다."
+        ]
+      },
+      "Rect": {
+        "summary": "사각형의 네 변을 선분으로 기록합니다."
+      },
+      "FillRect": {
+        "summary": "채운 사각형을 기록합니다.",
+        "remarks": [
+          "너비 또는 높이가 0 이하이면 기록하지 않습니다."
+        ]
+      },
+      "Circle": {
+        "summary": "원의 윤곽선을 기록합니다.",
+        "remarks": [
+          "반지름이 0 이하이면 기록하지 않습니다."
+        ]
+      },
+      "FillCircle": {
+        "summary": "채운 원을 기록합니다.",
+        "remarks": [
+          "반지름이 0 이하이면 기록하지 않습니다."
+        ]
+      },
+      "Image": {
+        "summary": "이미지 전체를 대상 사각형에 배치하고 tint를 곱합니다.",
+        "parameters": [
+          [
+            "image",
+            "유효한 RGBA8 Image입니다."
+          ],
+          [
+            "destination",
+            "배치할 사각형입니다."
+          ],
+          [
+            "tint",
+            "RGB 색상과 알파에 곱할 값입니다. 기본 흰색은 원래 색을 유지합니다."
+          ]
+        ],
+        "remarks": [
+          "이미지 사본이 픽셀 저장소를 공유하여 그리기 명령이 보관된 동안 수명을 유지합니다. 잘못된 이미지이면 오류를 출력하고 기록하지 않습니다."
+        ]
+      },
+      "Text": {
+        "summary": "UTF-8 문자열의 글리프를 준비하고 텍스트 그리기 명령을 기록합니다.",
+        "returns": "글리프 준비와 명령 기록에 성공하면 true, 폰트 아틀라스 부족 또는 처리 오류는 false입니다.",
+        "parameters": [
+          [
+            "font",
+            "글리프를 준비할 Font입니다."
+          ],
+          [
+            "utf8",
+            "UTF-8 문자열입니다. 줄바꿈과 글리프 간 커닝을 처리합니다."
+          ],
+          [
+            "position",
+            "텍스트 시작 위치입니다. 베이스라인 계산에는 폰트 ascent를 사용합니다."
+          ]
+        ],
+        "remarks": [
+          "필요한 글리프를 모두 준비한 뒤 아틀라스 이미지를 공유합니다."
+        ]
+      }
+    }
+  },
+  "dyf::Image": {
+    "summary": "CPU에 저장된 읽기 전용 RGBA8 이미지와 색 공간·파일 출처 정보를 보유합니다.",
+    "remarks": [
+      "Image를 복사하면 픽셀 저장소를 공유합니다. GPU 자원을 만들지 않습니다.",
+      "픽셀을 교체하려면 새 Image를 대입합니다. 이미 Canvas나 Material에 복사한 이미지는 기존 픽셀을 유지합니다."
+    ],
+    "members": {
+      "Image": {
+        "summary": "빈 이미지를 생성하거나 RGBA8 바이트를 받아 이미지를 구성합니다.",
+        "parameters": [
+          [
+            "rgba8",
+            "폭×높이×4바이트인 픽셀 배열입니다."
+          ],
+          [
+            "colorSpace",
+            "기본값은 ColorSpace::Srgb입니다."
+          ]
+        ],
+        "remarks": [
+          "생성자는 크기와 바이트 수의 일치를 검사해 거부하지 않습니다. 사용 전에 IsValid로 확인합니다."
+        ]
+      },
+      "IsValid": {
+        "summary": "폭·높이가 양수이고 픽셀 크기가 정확히 폭×높이×4바이트인지 검사합니다.",
+        "returns": "일치하면 true, 빈 이미지 또는 잘못된 바이트 수이면 false입니다."
+      },
+      "GetWidth": {
+        "summary": "저장한 이미지 너비를 조회합니다.",
+        "returns": "픽셀 단위 너비입니다."
+      },
+      "GetHeight": {
+        "summary": "저장한 이미지 높이를 조회합니다.",
+        "returns": "픽셀 단위 높이입니다."
+      },
+      "GetPixels": {
+        "summary": "RGBA8 픽셀 배열을 읽습니다.",
+        "returns": "공유 픽셀 저장소의 읽기 전용 참조입니다. 기본 생성한 Image는 빈 배열을 반환합니다."
+      },
+      "GetColorSpace": {
+        "summary": "현재 색 공간 표시를 읽습니다.",
+        "returns": "Srgb 또는 Linear입니다."
+      },
+      "SetColorSpace": {
+        "summary": "이 Image의 색 공간 표시를 바꿉니다.",
+        "remarks": [
+          "픽셀 바이트를 변환하는 함수는 아닙니다."
+        ]
+      },
+      "GetSourcePath": {
+        "summary": "파일 출처 경로를 읽습니다.",
+        "returns": "보관된 경로 문자열입니다. 경로가 없으면 빈 문자열입니다."
+      },
+      "SetSourcePath": {
+        "summary": "파일 출처 정보 문자열을 저장합니다.",
+        "remarks": [
+          "이 함수만 호출해 파일을 읽거나 이미지를 디코딩하지 않습니다."
+        ]
+      }
+    }
+  },
+  "dyf::Font": {
+    "summary": "글꼴 파일을 읽고 글리프를 CPU 이미지 아틀라스로 준비하는 폰트입니다.",
+    "remarks": [
+      "`Load`로 생성하며 복사할 수 없습니다. GPU 업로드를 수행하지 않아 Canvas와 RHI에서 함께 사용할 수 있습니다."
+    ],
+    "members": {
+      "Load": {
+        "summary": "파일에서 폰트를 읽고 지정한 크기의 글리프 아틀라스를 준비합니다.",
+        "returns": "성공하면 unique_ptr<Font>, 파일·글꼴·크기 설정 또는 할당 실패 시 nullptr입니다.",
+        "parameters": [
+          [
+            "path",
+            "폰트 파일 경로입니다."
+          ],
+          [
+            "pixelHeight",
+            "유한한 양수인 글자 높이입니다. 기본값은 16입니다."
+          ],
+          [
+            "atlasWidth",
+            "아틀라스 너비입니다. 기본값은 1024이며 최소 3입니다."
+          ],
+          [
+            "atlasHeight",
+            "아틀라스 높이입니다. 기본값은 1024이며 최소 3입니다."
+          ]
+        ],
+        "remarks": [
+          "pixelHeight는 atlasHeight-2를 넘을 수 없습니다. 실패 원인은 stderr에 출력합니다."
+        ]
+      },
+      "GetGlyph": {
+        "summary": "유니코드 코드 포인트의 글리프를 찾거나 아틀라스에 추가합니다.",
+        "returns": "글리프 정보를 출력하면 true, 래스터화나 아틀라스 공간 부족 등으로 실패하면 false입니다.",
+        "parameters": [
+          [
+            "codepoint",
+            "유니코드 코드 포인트입니다."
+          ],
+          [
+            "glyph",
+            "성공 시 글리프 좌표와 메트릭을 받을 값입니다."
+          ]
+        ],
+        "remarks": [
+          "유니코드 범위 밖 값 또는 서로게이트 값은 U+FFFD로 대체합니다.",
+          "아틀라스가 가득 차면 자동 확장하지 않고 실패합니다."
+        ]
+      },
+      "GetKerning": {
+        "summary": "두 코드 포인트 사이의 커닝 보정량을 조회합니다.",
+        "returns": "현재 폰트 크기에 맞춘 픽셀 단위 보정량입니다."
+      },
+      "GetAscent": {
+        "summary": "폰트의 상승 높이를 조회합니다.",
+        "returns": "현재 폰트 크기의 픽셀 단위 ascent입니다."
+      },
+      "GetLineHeight": {
+        "summary": "줄바꿈에 사용할 줄 높이를 조회합니다.",
+        "returns": "ascent·descent·line gap을 반영한 픽셀 단위 높이입니다."
+      },
+      "GetAtlas": {
+        "summary": "지금까지 준비한 글리프를 포함하는 아틀라스 이미지를 읽습니다.",
+        "returns": "Linear 색 공간 RGBA8 Image의 읽기 전용 참조입니다.",
+        "remarks": [
+          "GetGlyph로 필요한 글자를 모두 준비한 뒤 조회·업로드합니다. 변경된 글리프 픽셀은 이 호출에서 새 Image로 반영됩니다.",
+          "이전에 복사한 Image는 이전 아틀라스 픽셀을 계속 유지합니다."
+        ]
+      }
+    }
+  },
+  "dyf::FontGlyph": {
+    "summary": "폰트 아틀라스 안의 글리프 사각형과 배치 메트릭입니다.",
+    "remarks": [
+      "Font::GetGlyph의 출력값입니다. 아틀라스 좌표와 크기는 픽셀 단위입니다."
+    ],
+    "members": {
+      "x": {
+        "summary": "아틀라스에서 글리프 왼쪽 위치입니다."
+      },
+      "y": {
+        "summary": "아틀라스에서 글리프 위쪽 위치입니다."
+      },
+      "width": {
+        "summary": "글리프 비트맵 너비입니다."
+      },
+      "height": {
+        "summary": "글리프 비트맵 높이입니다."
+      },
+      "offsetX": {
+        "summary": "텍스트 펜 위치에서 비트맵까지의 가로 오프셋입니다."
+      },
+      "offsetY": {
+        "summary": "베이스라인에서 비트맵까지의 세로 오프셋입니다."
+      },
+      "advance": {
+        "summary": "다음 글리프를 배치할 때 이동할 가로 거리입니다."
+      }
+    }
+  },
+  "dyf::EntityLightingDesc": {
+    "summary": "객체별 그림자 생성과 수신 여부를 지정합니다.",
+    "remarks": [
+      "기본값은 두 항목 모두 true입니다. 실제 그림자는 Renderer의 전체 그림자 설정과 개별 광원의 설정도 충족해야 합니다."
+    ],
+    "members": {
+      "castShadow": {
+        "summary": "이 객체를 그림자 깊이 패스에 포함할지 결정합니다."
+      },
+      "receiveShadow": {
+        "summary": "이 객체의 표면이 그림자를 받을지 결정합니다."
+      }
+    }
+  },
+  "dyf::DirectionalLight": {
+    "summary": "위치와 거리 감쇠 없이 일정 방향에서 오는 방향광입니다.",
+    "remarks": [
+      "Scene::Add로 등록하고 반환된 LightHandle로 값을 읽거나 교체합니다.",
+      "기본 렌더러는 활성 광원을 priority 내림차순으로 선택하며 내부 셰이더의 수용 개수를 넘는 광원은 해당 렌더링에서 제외합니다."
+    ],
+    "members": {
+      "enabled": {
+        "summary": "광원의 활성 여부입니다. 기본값은 true입니다."
+      },
+      "priority": {
+        "summary": "같은 종류에서 사용할 광원을 선택할 때의 우선순위입니다. 큰 값이 먼저 선택되고 같은 값은 등록 순서를 유지합니다."
+      },
+      "color": {
+        "summary": "광원의 RGB 색상입니다."
+      },
+      "intensity": {
+        "summary": "광원의 세기입니다."
+      },
+      "direction": {
+        "summary": "표면에서 광원 쪽으로 향하는 방향입니다. 스폿 광원의 방출 방향과 구분합니다."
+      },
+      "castShadow": {
+        "summary": "이 광원의 그림자 생성 여부입니다. 렌더러 전체 그림자 설정도 켜야 합니다."
+      },
+      "shadowStrength": {
+        "summary": "이 광원의 그림자 강도입니다."
+      }
+    }
+  },
+  "dyf::PointLight": {
+    "summary": "월드 공간의 한 위치에서 주변으로 빛을 보내는 점광원입니다.",
+    "remarks": [
+      "Scene::Add로 등록하고 반환된 LightHandle로 값을 읽거나 교체합니다.",
+      "기본 렌더러는 활성 광원을 priority 내림차순으로 선택하며 내부 셰이더의 수용 개수를 넘는 광원은 해당 렌더링에서 제외합니다."
+    ],
+    "members": {
+      "enabled": {
+        "summary": "광원의 활성 여부입니다. 기본값은 true입니다."
+      },
+      "priority": {
+        "summary": "같은 종류에서 사용할 광원을 선택할 때의 우선순위입니다. 큰 값이 먼저 선택되고 같은 값은 등록 순서를 유지합니다."
+      },
+      "color": {
+        "summary": "광원의 RGB 색상입니다."
+      },
+      "intensity": {
+        "summary": "광원의 세기입니다."
+      },
+      "position": {
+        "summary": "광원의 월드 위치입니다."
+      },
+      "range": {
+        "summary": "광원이 영향을 미치는 거리 범위입니다. 기본값은 6입니다."
+      },
+      "castShadow": {
+        "summary": "이 광원의 그림자 생성 여부입니다. 렌더러 전체 그림자 설정도 켜야 합니다."
+      },
+      "shadowStrength": {
+        "summary": "이 광원의 그림자 강도입니다."
+      }
+    }
+  },
+  "dyf::SpotLight": {
+    "summary": "위치·방향·범위와 원뿔 각도를 갖는 스폿 광원입니다.",
+    "remarks": [
+      "Scene::Add로 등록하고 반환된 LightHandle로 값을 읽거나 교체합니다.",
+      "기본 렌더러는 활성 광원을 priority 내림차순으로 선택하며 내부 셰이더의 수용 개수를 넘는 광원은 해당 렌더링에서 제외합니다."
+    ],
+    "members": {
+      "enabled": {
+        "summary": "광원의 활성 여부입니다. 기본값은 true입니다."
+      },
+      "priority": {
+        "summary": "같은 종류에서 사용할 광원을 선택할 때의 우선순위입니다. 큰 값이 먼저 선택되고 같은 값은 등록 순서를 유지합니다."
+      },
+      "color": {
+        "summary": "광원의 RGB 색상입니다."
+      },
+      "intensity": {
+        "summary": "광원의 세기입니다."
+      },
+      "position": {
+        "summary": "광원의 월드 위치입니다."
+      },
+      "direction": {
+        "summary": "광원이 빛을 보내는 방향입니다."
+      },
+      "range": {
+        "summary": "광원의 거리 범위입니다."
+      },
+      "innerConeRadians": {
+        "summary": "완전한 밝기 영역의 안쪽 원뿔 각도입니다. 단위는 라디안입니다."
+      },
+      "outerConeRadians": {
+        "summary": "빛의 바깥쪽 원뿔 각도입니다. 단위는 라디안입니다."
+      },
+      "castShadow": {
+        "summary": "이 광원의 그림자 생성 여부입니다. 렌더러 전체 그림자 설정도 켜야 합니다."
+      },
+      "shadowStrength": {
+        "summary": "이 광원의 그림자 강도입니다."
+      }
+    }
+  },
+  "dyf::RectAreaLight": {
+    "summary": "너비와 높이를 갖는 사각형 면적광입니다.",
+    "remarks": [
+      "Scene::Add로 등록하고 반환된 LightHandle로 값을 읽거나 교체합니다.",
+      "기본 렌더러는 활성 광원을 priority 내림차순으로 선택하며 내부 셰이더의 수용 개수를 넘는 광원은 해당 렌더링에서 제외합니다.",
+      "현재 면적광의 그림자는 지원하지 않습니다."
+    ],
+    "members": {
+      "enabled": {
+        "summary": "광원의 활성 여부입니다. 기본값은 true입니다."
+      },
+      "priority": {
+        "summary": "같은 종류에서 사용할 광원을 선택할 때의 우선순위입니다. 큰 값이 먼저 선택되고 같은 값은 등록 순서를 유지합니다."
+      },
+      "color": {
+        "summary": "광원의 RGB 색상입니다."
+      },
+      "intensity": {
+        "summary": "광원의 세기입니다."
+      },
+      "position": {
+        "summary": "광원 중심의 월드 위치입니다."
+      },
+      "direction": {
+        "summary": "광원이 빛을 보내는 방향입니다."
+      },
+      "up": {
+        "summary": "사각형의 위쪽 축을 정하는 방향입니다."
+      },
+      "width": {
+        "summary": "발광 사각형의 너비입니다. 기본값은 1입니다."
+      },
+      "height": {
+        "summary": "발광 사각형의 높이입니다. 기본값은 1입니다."
+      }
+    }
+  },
+  "dyf::DiscAreaLight": {
+    "summary": "반지름을 갖는 원판 면적광입니다.",
+    "remarks": [
+      "Scene::Add로 등록하고 반환된 LightHandle로 값을 읽거나 교체합니다.",
+      "기본 렌더러는 활성 광원을 priority 내림차순으로 선택하며 내부 셰이더의 수용 개수를 넘는 광원은 해당 렌더링에서 제외합니다.",
+      "현재 면적광의 그림자는 지원하지 않습니다."
+    ],
+    "members": {
+      "enabled": {
+        "summary": "광원의 활성 여부입니다. 기본값은 true입니다."
+      },
+      "priority": {
+        "summary": "같은 종류에서 사용할 광원을 선택할 때의 우선순위입니다. 큰 값이 먼저 선택되고 같은 값은 등록 순서를 유지합니다."
+      },
+      "color": {
+        "summary": "광원의 RGB 색상입니다."
+      },
+      "intensity": {
+        "summary": "광원의 세기입니다."
+      },
+      "position": {
+        "summary": "광원 중심의 월드 위치입니다."
+      },
+      "direction": {
+        "summary": "광원이 빛을 보내는 방향입니다."
+      },
+      "up": {
+        "summary": "원판 방향의 기준 축입니다."
+      },
+      "radius": {
+        "summary": "발광 원판의 반지름입니다. 기본값은 0.5입니다."
+      }
+    }
+  },
+  "dyf::LightHandle": {
+    "summary": "Scene이 소유하는 특정 타입의 광원을 읽고 교체하는 비소유 핸들입니다.",
+    "remarks": [
+      "기본 생성한 핸들은 비어 있습니다. 다른 객체나 광원을 추가해도 대상은 유지되며 Scene 소멸 시 만료됩니다.",
+      "공개 구현은 DirectionalLight·PointLight·SpotLight·RectAreaLight·DiscAreaLight에 대해 제공됩니다."
+    ],
+    "members": {
+      "operator bool": {
+        "summary": "소유 Scene과 광원 인덱스가 유효한지 확인합니다.",
+        "returns": "유효하면 true입니다."
+      },
+      "Get": {
+        "summary": "현재 광원 값을 복사합니다.",
+        "returns": "현재 LightType 값입니다. 핸들이 유효하지 않으면 오류를 출력하고 기본값을 반환합니다."
+      },
+      "Set": {
+        "summary": "광원 값을 교체합니다.",
+        "returns": "유효한 핸들이면 true, 만료되었거나 빈 핸들이면 오류를 출력하고 false입니다."
+      }
+    }
+  },
+  "dyf::Platform::Window": {
+    "summary": "GLFW 창의 생성·이벤트 처리·종료 상태와 플랫폼 핸들을 제공하는 창 객체입니다.",
+    "remarks": [
+      "복사할 수 없습니다. 소멸 시 창을 파괴하며 마지막 Window가 소멸하면 GLFW를 종료합니다.",
+      "Renderer를 만들기 전에 GetHandle 반환값을 검사하고, 렌더러가 사용하는 동안 Window를 유지합니다."
+    ],
+    "members": {
+      "Window": {
+        "summary": "너비·높이와 선택적 제목으로 OpenGL 컨텍스트 없는 창을 생성합니다.",
+        "parameters": [
+          [
+            "width",
+            "1 이상이고 int 최댓값 이하인 너비입니다."
+          ],
+          [
+            "height",
+            "1 이상이고 int 최댓값 이하인 높이입니다."
+          ],
+          [
+            "title",
+            "창 제목입니다. 생략하거나 nullptr이면 New Window입니다."
+          ]
+        ],
+        "remarks": [
+          "잘못된 크기나 GLFW 초기화·창 생성 실패 시 stderr에 오류를 출력하고 유효한 핸들 없이 남습니다.",
+          "생성 시 이미 주입된 RenderDoc API를 확인합니다. F11 입력은 창별로 보관하며 F12를 누르면 RenderDoc에 다음 프레임 캡처를 요청합니다."
+        ]
+      },
+      "IsRunning": {
+        "summary": "창이 존재하고 종료 요청이 없는지 확인합니다.",
+        "returns": "유효한 창이 열려 있으면 true입니다."
+      },
+      "PollEvents": {
+        "summary": "창이 유효하면 GLFW 이벤트를 처리합니다.",
+        "remarks": [
+          "예제처럼 반복 루프에서 호출한 뒤 IsRunning으로 종료 상태를 확인합니다."
+        ]
+      },
+      "GetHandle": {
+        "summary": "렌더러와 RHI 초기화에 필요한 플랫폼 창 핸들을 얻습니다.",
+        "returns": "Windows는 HWND, macOS는 Cocoa 창, 그 외 플랫폼은 GLFWwindow 포인터입니다. 창이 없으면 nullptr입니다.",
+        "remarks": [
+          "반환된 포인터로 창 소유권을 넘기지 않습니다."
+        ]
+      },
+      "ConsumeKeyPress": {
+        "summary": "지정한 창의 대기 중인 F11 입력을 한 번 소비합니다.",
+        "returns": "그 창에 대기 중인 F11 입력이 있으면 true를 반환하고 입력을 지웁니다. 일치하는 창이나 입력이 없으면 false입니다.",
+        "parameters": [
+          [
+            "key",
+            "소비할 키이며 현재 Key::F11만 지원합니다."
+          ],
+          [
+            "nativeWindow",
+            "대상 Window의 GetHandle() 반환값입니다."
+          ]
+        ],
+        "remarks": [
+          "다른 창의 입력은 유지합니다. 소비하기 전 여러 번 누른 입력은 하나의 대기 상태로 합쳐집니다.",
+          "PollEvents로 이벤트를 처리한 뒤 사용합니다. 창 생성·파괴·이벤트 처리와 같은 스레드에서 호출합니다."
+        ]
+      }
+    }
+  },
+  "dyf::Rectangle": {
+    "summary": "Canvas 뷰포트·클립·도형·이미지 목적지를 나타내는 사각형 값입니다.",
+    "remarks": [
+      "모든 필드의 기본값은 0입니다. 좌표의 기준은 사용하는 Canvas API에 따릅니다."
+    ],
+    "members": {
+      "x": {
+        "summary": "사각형의 가로 위치입니다."
+      },
+      "y": {
+        "summary": "사각형의 세로 위치입니다."
+      },
+      "width": {
+        "summary": "사각형 너비입니다."
+      },
+      "height": {
+        "summary": "사각형 높이입니다."
+      }
+    }
+  },
+  "dyf::LoadImage": {
+    "summary": "파일 또는 메모리의 인코딩된 이미지를 RGBA8 CPU 이미지로 디코딩합니다.",
+    "remarks": [
+      "실패 원인은 stderr로 출력됩니다. 성공하기 전에는 출력 Image를 교체하지 않습니다.",
+      "파일 오버로드는 성공 시 SourcePath를 입력 경로로 설정합니다. 기본 색 공간은 Srgb입니다."
+    ],
+    "members": {},
+    "returns": "성공하면 true, 파일 읽기·디코딩·크기 제한·할당 실패이면 false입니다.",
+    "parameters": [
+      [
+        "path",
+        "읽을 이미지 파일 경로입니다."
+      ],
+      [
+        "encodedBytes",
+        "메모리에 있는 인코딩된 이미지의 시작 포인터입니다."
+      ],
+      [
+        "encodedSize",
+        "인코딩 입력의 바이트 수입니다. 0보다 크고 int 최댓값 이하이어야 합니다."
+      ],
+      [
+        "image",
+        "성공 시 결과를 받을 Image입니다."
+      ],
+      [
+        "maxDecodedBytes",
+        "메모리 오버로드의 디코딩 결과 바이트 상한입니다. 기본값은 UINT64_MAX입니다."
+      ],
+      [
+        "outLimitExceeded",
+        "선택적 제한 초과 출력입니다. 호출 초기에 false로 설정하며 디코딩 결과 크기가 제한을 넘으면 true입니다."
+      ]
+    ]
+  },
+  "dyf::CreateCubeMesh": {
+    "summary": "원점을 중심으로 하는 정육면체 CPU 메시를 생성합니다.",
+    "remarks": [
+      "각 면의 법선과 UV가 달라 면별 정점을 분리합니다. GPU 자원을 만들지 않습니다."
+    ],
+    "members": {},
+    "returns": "24개 정점과 36개 인덱스로 이루어진 MeshData입니다.",
+    "parameters": [
+      [
+        "size",
+        "정육면체 한 변의 길이입니다. 기본값은 1이며 음수는 0으로 처리합니다."
+      ]
+    ]
+  },
+  "dyf::Platform::Key": {
+    "summary": "Window가 소비할 수 있는 키 입력을 식별합니다.",
+    "remarks": [
+      "현재 공개된 값은 F11뿐입니다. 일반적인 키 상태 조회 API는 아닙니다."
+    ],
+    "members": {
+      "F11": {
+        "summary": "해당 창에서 누른 F11 입력입니다. Renderer는 이 입력으로 프로파일러 HUD의 확장 표시를 전환합니다."
+      }
+    }
+  },
+  "dyf::Platform::ThreadPool": {
+    "summary": "고정된 작업자 스레드에 CPU 작업을 분배하는 스레드 풀입니다.",
+    "remarks": [
+      "복사할 수 없습니다. 소멸 시 대기 중인 작업까지 마친 뒤 모든 작업자에 합류합니다.",
+      "다른 스레드가 Enqueue 또는 WaitAll을 호출하는 동안 소유자는 풀을 유지해야 합니다. 소멸은 풀 작업자 내부가 아닌 외부 소유 스레드에서 수행합니다.",
+      "여러 작업이 공유하는 데이터는 호출자가 동기화합니다."
+    ],
+    "members": {
+      "ThreadPool": {
+        "summary": "지정한 수의 작업자 스레드를 생성합니다.",
+        "parameters": [
+          [
+            "threadCount",
+            "작업자 수입니다. 기본값 0이면 hardware_concurrency()를 사용하며 그 값도 0이면 1개를 생성합니다."
+          ]
+        ],
+        "remarks": [
+          "스레드 생성에 실패하면 이미 생성한 작업자에 합류한 뒤 예외를 전달합니다."
+        ]
+      },
+      "~ThreadPool": {
+        "summary": "새 작업 수락을 중단하고 대기 중인 작업과 실행 중인 작업을 모두 마친 뒤 작업자에 합류합니다.",
+        "remarks": [
+          "풀 작업자 내부에서 소멸시키면 안 됩니다. 작업의 예외는 소멸자에서 전달하지 않으며 각 future로 확인합니다."
+        ]
+      },
+      "Enqueue": {
+        "summary": "호출 가능한 작업 하나를 큐에 추가합니다.",
+        "returns": "작업 완료와 예외를 확인할 std::future<void>입니다.",
+        "parameters": [
+          [
+            "task",
+            "인자와 반환값이 없는 작업입니다. 작업이 참조하는 데이터의 수명은 호출자가 보장합니다."
+          ]
+        ],
+        "remarks": [
+          "작업에서 발생한 예외는 반환한 future의 get()에서 전달됩니다.",
+          "빈 작업은 std::invalid_argument, 종료 중인 풀은 std::runtime_error를 던집니다."
+        ]
+      },
+      "WaitAll": {
+        "summary": "큐가 비고 실행 중인 작업이 없어질 때까지 기다립니다.",
+        "remarks": [
+          "특정 future만 기다리는 동작이 아닙니다. 작업 예외는 전달하지 않으므로 필요한 future에서 get()을 호출합니다.",
+          "이 풀의 작업자에서 호출하면 std::logic_error를 던집니다."
+        ]
+      },
+      "GetThreadCount": {
+        "summary": "풀의 작업자 스레드 수를 조회합니다.",
+        "returns": "생성된 작업자 수입니다. 호출자 스레드는 포함하지 않습니다."
+      },
+      "IsWorkerThread": {
+        "summary": "현재 호출 스레드가 이 풀의 작업자인지 확인합니다.",
+        "returns": "이 풀의 작업자에서 호출하면 true이며 외부 스레드나 다른 풀의 작업자이면 false입니다."
+      }
+    }
+  },
+  "dyf::Platform::ProfilerTimingSample": {
+    "summary": "ProfilerSampler에 전달할 한 프레임의 시간 측정값입니다.",
+    "remarks": [
+      "모든 시간 단위는 밀리초입니다. GPU 값은 각 hasGpu 플래그와 값의 유효성을 함께 검사합니다."
+    ],
+    "members": {
+      "frameMilliseconds": {
+        "summary": "프레임 경과 시간입니다. 유한한 양수만 누적하며 일시정지 임계값 이상의 값은 누적 구간을 초기화합니다."
+      },
+      "cpuRenderMilliseconds": {
+        "summary": "CPU 렌더링 시간입니다. 음수나 비유한 값은 평균 계산에서 0으로 처리합니다."
+      },
+      "gpuMainMilliseconds": {
+        "summary": "GPU 메인 패스 시간입니다. hasGpuMain이 true이고 유한한 0 이상의 값일 때만 GPU 메인 평균에 포함합니다."
+      },
+      "gpuShadowMilliseconds": {
+        "summary": "GPU 그림자 패스 시간입니다. hasGpuShadow가 true이고 유한한 0 이상의 값일 때만 GPU 그림자 평균에 포함합니다."
+      },
+      "hasGpuMain": {
+        "summary": "이 샘플에 사용 가능한 GPU 메인 시간 값이 있는지 나타냅니다. 기본값은 false입니다."
+      },
+      "hasGpuShadow": {
+        "summary": "이 샘플에 사용 가능한 GPU 그림자 시간 값이 있는지 나타냅니다. 기본값은 false입니다."
+      }
+    }
+  },
+  "dyf::Platform::ProfilerTimingSnapshot": {
+    "summary": "ProfilerSampler가 한 누적 구간에서 계산한 프레임·CPU·GPU 통계입니다.",
+    "remarks": [
+      "시간 단위는 밀리초입니다. GPU 유효 샘플 수는 전체 frameCount와 다를 수 있으므로 GPU 평균은 각각의 유효한 샘플만 사용합니다.",
+      "GPU 값은 해당 hasGpu 플래그가 true일 때 사용합니다."
+    ],
+    "members": {
+      "fps": {
+        "summary": "frameCount × 1000 / sampleWindowMilliseconds로 계산한 초당 프레임 수입니다."
+      },
+      "frameAverageMilliseconds": {
+        "summary": "수집한 프레임 경과 시간의 산술 평균입니다."
+      },
+      "frameMaximumMilliseconds": {
+        "summary": "수집한 프레임 경과 시간 중 최댓값입니다."
+      },
+      "cpuRenderAverageMilliseconds": {
+        "summary": "수집한 CPU 렌더링 시간의 합을 전체 frameCount로 나눈 값입니다."
+      },
+      "gpuMainAverageMilliseconds": {
+        "summary": "유효한 GPU 메인 시간 샘플의 평균입니다. 샘플이 없으면 0이며 hasGpuMain은 false입니다."
+      },
+      "gpuShadowAverageMilliseconds": {
+        "summary": "유효한 GPU 그림자 시간 샘플의 평균입니다. 샘플이 없으면 0이며 hasGpuShadow는 false입니다."
+      },
+      "sampleWindowMilliseconds": {
+        "summary": "이번 구간에 실제 누적된 프레임 경과 시간의 합입니다. 설정한 발행 간격과 정확히 같을 필요는 없습니다."
+      },
+      "frameCount": {
+        "summary": "이번 구간에 누적한 유효 프레임 수입니다."
+      },
+      "hasGpuMain": {
+        "summary": "이번 구간에 유효한 GPU 메인 시간 샘플이 하나 이상 있었는지 나타냅니다."
+      },
+      "hasGpuShadow": {
+        "summary": "이번 구간에 유효한 GPU 그림자 시간 샘플이 하나 이상 있었는지 나타냅니다."
+      }
+    }
+  },
+  "dyf::Platform::ProfilerSampler": {
+    "summary": "프레임 측정값을 누적해 일정한 간격으로 통계를 발행합니다.",
+    "remarks": [
+      "내부에서 시계를 읽거나 GPU 측정을 수행하지 않습니다. 호출자가 제공한 시간 값의 합으로 구간을 계산합니다.",
+      "같은 인스턴스에 대한 AddSample과 Reset의 동시 호출은 호출자가 동기화합니다."
+    ],
+    "members": {
+      "ProfilerSampler": {
+        "summary": "통계 발행 간격과 긴 일시정지 판정 시간을 설정합니다.",
+        "parameters": [
+          [
+            "publishIntervalMilliseconds",
+            "발행 간격이며 기본값은 200ms입니다. 유한한 값을 전달하며 1ms 미만은 1ms로 올립니다."
+          ],
+          [
+            "pauseThresholdMilliseconds",
+            "이 값 이상의 프레임은 일시정지로 처리합니다. 기본값은 1000ms이며 발행 간격보다 작은 값은 발행 간격으로 올립니다."
+          ]
+        ]
+      },
+      "AddSample": {
+        "summary": "한 프레임을 누적하고 발행 간격에 도달하면 snapshot을 갱신합니다.",
+        "returns": "새 통계를 snapshot에 기록했으면 true, 아직 구간이 차지 않았거나 샘플을 제외했으면 false입니다.",
+        "parameters": [
+          [
+            "sample",
+            "현재 프레임의 경과 시간과 CPU·선택적 GPU 측정값입니다."
+          ],
+          [
+            "snapshot",
+            "true일 때만 교체하는 출력 통계입니다. false이면 기존 값은 유지됩니다."
+          ]
+        ],
+        "remarks": [
+          "발행 시 내부 누적값을 초기화합니다. 구간 판정에는 0.1ms의 허용 오차가 있습니다.",
+          "프레임 시간이 비유한 값이거나 0 이하이면 기존 누적값을 유지한 채 무시합니다. 일시정지 임계값 이상이면 누적값을 초기화하고 해당 샘플을 무시합니다.",
+          "GPU 평균은 유효한 GPU 샘플만 사용합니다. 측정되지 않은 프레임을 0ms GPU 샘플로 포함하지 않습니다."
+        ]
+      },
+      "Reset": {
+        "summary": "진행 중인 누적 구간의 합계·최댓값·샘플 수를 초기화합니다.",
+        "remarks": [
+          "생성 시 지정한 간격과 임계값은 유지합니다. 외부에 이미 전달한 snapshot은 변경하지 않습니다."
+        ]
+      }
+    }
+  },
+  "dyf::Platform::RenderDocCapture": {
+    "summary": "프로세스에 이미 주입된 RenderDoc API를 이용해 다음 프레임 캡처를 요청합니다.",
+    "remarks": [
+      "RenderDoc을 실행하거나 주입하거나 백그라운드 서비스를 시작하지 않습니다. DY_ENABLE_RENDERDOC 빌드 옵션과 실행 전 RenderDoc 주입이 필요합니다.",
+      "현재 구현은 Windows와 Linux의 주입된 API를 사용합니다. Metal에서는 이 연결을 사용할 수 없습니다."
+    ],
+    "members": {
+      "Initialize": {
+        "summary": "이미 로드된 RenderDoc 모듈에서 API를 한 번 확인합니다.",
+        "returns": "사용 가능한 RenderDoc API를 확보하면 true, 빌드에서 비활성화했거나 API가 주입되지 않았으면 false입니다.",
+        "remarks": [
+          "최초 확인 결과를 프로세스 내에서 재사용합니다. 실패 후 나중에 주입하더라도 다시 탐색하지 않습니다."
+        ]
+      },
+      "IsAvailable": {
+        "summary": "RenderDoc 캡처 API의 사용 가능 여부를 확인합니다.",
+        "returns": "Initialize()와 같은 결과입니다.",
+        "remarks": [
+          "아직 초기화하지 않았다면 최초 확인을 수행합니다."
+        ]
+      },
+      "TriggerNextFrame": {
+        "summary": "RenderDoc에 다음 프레임 캡처를 요청합니다.",
+        "returns": "API가 사용 가능하여 요청을 전달했으면 true, 사용할 수 없으면 false입니다.",
+        "remarks": [
+          "true는 캡처 파일 생성 완료를 뜻하지 않습니다. 캡처 결과는 RenderDoc에서 확인합니다.",
+          "Platform::Window는 F12 입력을 이 함수에 연결합니다."
+        ]
+      }
+    }
+  }
+}
