@@ -21,6 +21,7 @@ namespace dyf::Backends
 			if ((stages & dyf::RHI::ShaderStageFlags::Vertex) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_VERTEX_BIT;
 			if ((stages & dyf::RHI::ShaderStageFlags::Fragment) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_FRAGMENT_BIT;
             if((stages & RHI::ShaderStageFlags::Compute)!=RHI::ShaderStageFlags::None)result|=VK_SHADER_STAGE_COMPUTE_BIT;
+            if((stages & RHI::ShaderStageFlags::Mesh)!=RHI::ShaderStageFlags::None)result|=VK_SHADER_STAGE_MESH_BIT_EXT;
 			return result;
 		}
 
@@ -342,6 +343,25 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& context,const RHI::ComputePi
     catch(...) {Cleanup();throw;}
 }
 
+VulkanPipeline::VulkanPipeline(const VulkanContext& context, const dyf::RHI::MeshPipelineDesc& desc)
+    : dyf::RHI::Pipeline(desc.layout, false, true)
+    , m_device(context.device)
+    , m_usesStencil(desc.depthStencil.stencilEnabled)
+    , m_requiresDepthWrite(desc.depthStencil.depthWriteEnabled || desc.depthStencil.stencilEnabled)
+{
+    try
+    {
+        CreateDescriptorLayouts(context, desc.layout);
+        CreatePipelineLayout(desc.layout);
+        CreatePipeline(desc);
+    }
+    catch (...)
+    {
+        Cleanup();
+        throw;
+    }
+}
+
 	VulkanPipeline::~VulkanPipeline()
 	{
 		Cleanup();
@@ -620,6 +640,144 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& context,const RHI::ComputePi
 		if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &info, nullptr, &m_pipeline) != VK_SUCCESS)
 		{
 			throw std::runtime_error("Failed to create Vulkan graphics pipeline");
+		}
+	}
+
+	void VulkanPipeline::CreatePipeline(const dyf::RHI::MeshPipelineDesc& desc)
+	{
+		const auto* meshShader = dynamic_cast<const VulkanShader*>(desc.meshShader);
+		const auto* fragmentShader = dynamic_cast<const VulkanShader*>(desc.fragmentShader);
+		if (meshShader == nullptr || meshShader->GetStage() != dyf::RHI::ShaderStage::Mesh ||
+			(fragmentShader != nullptr && fragmentShader->GetStage() != dyf::RHI::ShaderStage::Fragment))
+		{
+			throw std::runtime_error("Invalid Vulkan mesh pipeline shaders");
+		}
+
+		m_colorFormats.reserve(desc.colorAttachmentCount);
+		for (uint32_t i = 0; i < desc.colorAttachmentCount; ++i)
+		{
+			m_colorFormats.push_back(desc.colorAttachments[i].format);
+		}
+		m_depthFormat = desc.depthStencil.format;
+
+		std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages{};
+		shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		shaderStages[0].stage = VK_SHADER_STAGE_MESH_BIT_EXT;
+		shaderStages[0].module = meshShader->GetModule();
+		shaderStages[0].pName = meshShader->GetEntryPoint();
+		uint32_t shaderStageCount = 1;
+		if (fragmentShader != nullptr)
+		{
+			shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+			shaderStages[1].module = fragmentShader->GetModule();
+			shaderStages[1].pName = fragmentShader->GetEntryPoint();
+			shaderStageCount = 2;
+		}
+
+		VkPipelineViewportStateCreateInfo viewportState{};
+		viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+		viewportState.viewportCount = 1;
+		viewportState.scissorCount = 1;
+
+		VkPipelineRasterizationStateCreateInfo raster{};
+		raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+		raster.polygonMode = ToPolygonMode(desc.raster.fillMode);
+		raster.cullMode = ToCullMode(desc.raster.cullMode);
+		raster.frontFace = ToFrontFace(desc.raster.frontFace);
+		raster.depthBiasEnable = (desc.raster.depthBiasConstant != 0.0f || desc.raster.depthBiasSlope != 0.0f || desc.raster.depthBiasClamp != 0.0f) ? VK_TRUE : VK_FALSE;
+		raster.depthBiasConstantFactor = desc.raster.depthBiasConstant;
+		raster.depthBiasSlopeFactor = desc.raster.depthBiasSlope;
+		raster.depthBiasClamp = desc.raster.depthBiasClamp;
+		raster.lineWidth = 1.0f;
+
+		VkPipelineMultisampleStateCreateInfo multisample{};
+		multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+		multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+		VkPipelineDepthStencilStateCreateInfo depthStencil{};
+		depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+		depthStencil.depthTestEnable =
+			desc.depthStencil.depthTestEnabled || desc.depthStencil.depthWriteEnabled
+				? VK_TRUE : VK_FALSE;
+		depthStencil.depthWriteEnable = desc.depthStencil.depthWriteEnabled ? VK_TRUE : VK_FALSE;
+		depthStencil.depthCompareOp = desc.depthStencil.depthTestEnabled
+			? ToCompareOp(desc.depthStencil.depthCompareOp) : VK_COMPARE_OP_ALWAYS;
+		depthStencil.stencilTestEnable = desc.depthStencil.stencilEnabled ? VK_TRUE : VK_FALSE;
+		if (desc.depthStencil.stencilEnabled)
+		{
+			depthStencil.front = ToStencilState(desc.depthStencil.front, desc.depthStencil.stencilReadMask, desc.depthStencil.stencilWriteMask);
+			depthStencil.back = ToStencilState(desc.depthStencil.back, desc.depthStencil.stencilReadMask, desc.depthStencil.stencilWriteMask);
+		}
+
+		std::vector<VkPipelineColorBlendAttachmentState> blendAttachments;
+		std::vector<VkFormat> colorFormats;
+		blendAttachments.reserve(desc.colorAttachmentCount);
+		colorFormats.reserve(desc.colorAttachmentCount);
+		for (uint32_t i = 0; i < desc.colorAttachmentCount; ++i)
+		{
+			const dyf::RHI::ColorAttachmentDesc& source = desc.colorAttachments[i];
+			const VkFormat format = ToVulkanFormat(source.format);
+			if (format == VK_FORMAT_UNDEFINED) throw std::runtime_error("Invalid Vulkan color attachment format");
+			colorFormats.push_back(format);
+
+			VkPipelineColorBlendAttachmentState attachment{};
+			attachment.blendEnable = source.blend.enabled ? VK_TRUE : VK_FALSE;
+			if (source.blend.enabled)
+			{
+				attachment.srcColorBlendFactor = ToBlendFactor(source.blend.sourceColor);
+				attachment.dstColorBlendFactor = ToBlendFactor(source.blend.destinationColor);
+				attachment.colorBlendOp = ToBlendOp(source.blend.colorOp);
+				attachment.srcAlphaBlendFactor = ToBlendFactor(source.blend.sourceAlpha);
+				attachment.dstAlphaBlendFactor = ToBlendFactor(source.blend.destinationAlpha);
+				attachment.alphaBlendOp = ToBlendOp(source.blend.alphaOp);
+			}
+			attachment.colorWriteMask = ToColorWriteMask(source.writeMask);
+			blendAttachments.push_back(attachment);
+		}
+
+		VkPipelineColorBlendStateCreateInfo colorBlend{};
+		colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+		colorBlend.attachmentCount = static_cast<uint32_t>(blendAttachments.size());
+		colorBlend.pAttachments = blendAttachments.empty() ? nullptr : blendAttachments.data();
+
+		std::vector<VkDynamicState> dynamicStates = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+		if (desc.depthStencil.stencilEnabled) dynamicStates.push_back(VK_DYNAMIC_STATE_STENCIL_REFERENCE);
+		VkPipelineDynamicStateCreateInfo dynamicState{};
+		dynamicState.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+		dynamicState.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+		dynamicState.pDynamicStates = dynamicStates.data();
+
+		const VkFormat depthFormat = ToVulkanFormat(desc.depthStencil.format);
+		if ((desc.depthStencil.depthTestEnabled || desc.depthStencil.depthWriteEnabled || desc.depthStencil.stencilEnabled) && depthFormat == VK_FORMAT_UNDEFINED)
+		{
+			throw std::runtime_error("Vulkan depth/stencil format is undefined");
+		}
+		VkPipelineRenderingCreateInfo rendering{};
+		rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+		rendering.colorAttachmentCount = static_cast<uint32_t>(colorFormats.size());
+		rendering.pColorAttachmentFormats = colorFormats.empty() ? nullptr : colorFormats.data();
+		rendering.depthAttachmentFormat = depthFormat;
+		rendering.stencilAttachmentFormat = desc.depthStencil.format == dyf::RHI::Format::D24_UNORM_S8_UINT ? depthFormat : VK_FORMAT_UNDEFINED;
+
+		VkGraphicsPipelineCreateInfo info{};
+		info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+		info.pNext = &rendering;
+		info.stageCount = shaderStageCount;
+		info.pStages = shaderStages.data();
+		info.pVertexInputState = nullptr;
+		info.pInputAssemblyState = nullptr;
+		info.pViewportState = &viewportState;
+		info.pRasterizationState = &raster;
+		info.pMultisampleState = &multisample;
+		info.pDepthStencilState = &depthStencil;
+		info.pColorBlendState = &colorBlend;
+		info.pDynamicState = &dynamicState;
+		info.layout = m_pipelineLayout;
+		info.renderPass = VK_NULL_HANDLE;
+		if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &info, nullptr, &m_pipeline) != VK_SUCCESS)
+		{
+			throw std::runtime_error("Failed to create Vulkan mesh graphics pipeline");
 		}
 	}
 

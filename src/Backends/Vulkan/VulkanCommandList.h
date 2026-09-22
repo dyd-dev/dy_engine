@@ -49,6 +49,7 @@ namespace dyf::Backends
 
 		void DrawInstancedNative(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
 		void DrawIndexedInstancedNative(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
+		void DispatchMeshNative(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 		bool CloseNative() override;
 
 		[[nodiscard]] bool RecordBufferUpdate(VulkanBuffer& buffer, uint32_t offset, const void* data, uint32_t size);

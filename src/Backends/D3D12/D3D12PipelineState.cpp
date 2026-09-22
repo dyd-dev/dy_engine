@@ -32,8 +32,9 @@ namespace dyf::Backends
         uint32_t descriptorCount,
         uint32_t primitiveTopology,
         bool stencilEnabled,
-        bool requiresDepthWrite)
-        : RHI::Pipeline(layout)
+        bool requiresDepthWrite,
+        bool isMesh)
+        : RHI::Pipeline(layout, false, isMesh)
         , m_internal(new D3D12PipelineStateInternal())
     {
         m_internal->pipelineState = pipelineState;

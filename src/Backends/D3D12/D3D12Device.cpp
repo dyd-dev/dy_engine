@@ -469,6 +469,19 @@ bool D3D12Device::SupportsNative(RHI::Feature feature) const
     case RHI::Feature::Wireframe:
     case RHI::Feature::DepthBiasClamp:
         return true;
+    case RHI::Feature::MeshShader:
+    {
+        if (!m_internal || !m_internal->device) return false;
+        D3D12_FEATURE_DATA_D3D12_OPTIONS7 options7{};
+        if (SUCCEEDED(m_internal->device->CheckFeatureSupport(
+            D3D12_FEATURE_D3D12_OPTIONS7, &options7, sizeof(options7))))
+        {
+            return options7.MeshShaderTier >= D3D12_MESH_SHADER_TIER_1;
+        }
+        return false;
+    }
+    case RHI::Feature::TaskShader:
+        return false;
     default:
         return false;
     }
@@ -501,14 +514,14 @@ bool D3D12Device::SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc& de
 {
     if(!m_internal || !m_internal->device) return false;
     const auto graphicsStages = static_cast<uint32_t>(RHI::ShaderStageFlags::Vertex |
-        RHI::ShaderStageFlags::Fragment);
+        RHI::ShaderStageFlags::Fragment | RHI::ShaderStageFlags::Mesh);
     if(desc.inlineConstantSize &&
         (static_cast<uint32_t>(desc.inlineConstantStages) & ~graphicsStages)) return false;
     uint64_t rootCost = desc.inlineConstantSize / sizeof(uint32_t);
     uint64_t descriptorCount = 0;
     uint64_t samplerCount = 0;
-    uint64_t constantBuffers[2] = {};
-    uint64_t shaderResources[2] = {};
+    uint64_t constantBuffers[3] = {};
+    uint64_t shaderResources[3] = {};
     uint64_t unorderedAccessViews = 0;
     for(uint32_t index = 0; index < desc.bindingCount; ++index)
     {
@@ -521,9 +534,12 @@ bool D3D12Device::SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc& de
             // 현재 번역은 binding마다 descriptor table 하나를 사용한다.
             ++rootCost;
             descriptorCount += binding.count;
-            for (uint32_t stage = 0; stage < 2; ++stage)
+            constexpr RHI::ShaderStageFlags stageFlags[] = {
+                RHI::ShaderStageFlags::Vertex, RHI::ShaderStageFlags::Fragment, RHI::ShaderStageFlags::Mesh
+            };
+            for (uint32_t stage = 0; stage < 3; ++stage)
             {
-                const auto flag = stage == 0 ? RHI::ShaderStageFlags::Vertex : RHI::ShaderStageFlags::Fragment;
+                const auto flag = stageFlags[stage];
                 if ((binding.stages & flag) == RHI::ShaderStageFlags::None) continue;
                 if (binding.type == RHI::ResourceBindingType::ConstantBuffer)
                     constantBuffers[stage] += binding.count;
@@ -1132,8 +1148,11 @@ void D3D12Device::DestroySwapchainNative()
         {
             const bool vertex = HasStage(stages, RHI::ShaderStageFlags::Vertex);
             const bool fragment = HasStage(stages, RHI::ShaderStageFlags::Fragment);
-            if (vertex && !fragment) return D3D12_SHADER_VISIBILITY_VERTEX;
-            if (fragment && !vertex) return D3D12_SHADER_VISIBILITY_PIXEL;
+            const bool mesh = HasStage(stages, RHI::ShaderStageFlags::Mesh);
+            const uint32_t count = static_cast<uint32_t>(vertex) + static_cast<uint32_t>(fragment) + static_cast<uint32_t>(mesh);
+            if (count == 1 && vertex) return D3D12_SHADER_VISIBILITY_VERTEX;
+            if (count == 1 && fragment) return D3D12_SHADER_VISIBILITY_PIXEL;
+            if (count == 1 && mesh) return D3D12_SHADER_VISIBILITY_MESH;
             return D3D12_SHADER_VISIBILITY_ALL;
         }
 
@@ -1455,7 +1474,8 @@ void D3D12Device::DestroySwapchainNative()
     RHI::ShaderHandle D3D12Device::CreateShaderNative(const RHI::ShaderDesc& desc)
     {
         if (desc.stage != RHI::ShaderStage::Vertex &&
-            desc.stage != RHI::ShaderStage::Fragment)
+            desc.stage != RHI::ShaderStage::Fragment &&
+            desc.stage != RHI::ShaderStage::Mesh)
         {
             return nullptr;
         }
@@ -1861,6 +1881,332 @@ void D3D12Device::DestroySwapchainNative()
         m_internal->livePipelines.push_back(std::move(pipeline));
         if (alphaFactorsTranslated)
 		ReportDiagnostic(DiagnosticSeverity::Info,
+                "D3D12: Alpha blend color factors were translated to equivalent alpha factors.");
+        return result;
+    }
+
+    bool D3D12Device::SupportsMeshPipelineNative(const RHI::MeshPipelineDesc& desc) const
+    {
+        if (m_internal == nullptr || m_internal->device == nullptr ||
+            !Supports(RHI::Feature::MeshShader))
+        {
+            return false;
+        }
+        if (!SupportsPipelineLayoutNative(desc.layout)) return false;
+        for (uint32_t i = 0; i < desc.colorAttachmentCount; ++i)
+        {
+            if (D3D12Texture::ToDxgiFormat(desc.colorAttachments[i].format) == DXGI_FORMAT_UNKNOWN)
+                return false;
+        }
+        if (desc.depthStencil.format != RHI::Format::Unknown &&
+            D3D12Texture::ToDxgiFormat(desc.depthStencil.format) == DXGI_FORMAT_UNKNOWN)
+            return false;
+        return true;
+    }
+
+    RHI::PipelineHandle D3D12Device::CreateMeshPipelineNative(
+        const RHI::MeshPipelineDesc& desc)
+    {
+        if (m_internal == nullptr || m_internal->device == nullptr ||
+            !Supports(RHI::Feature::MeshShader) ||
+            !SupportsPipelineLayoutNative(desc.layout) ||
+            !SupportsMeshPipelineNative(desc))
+        {
+            return nullptr;
+        }
+
+        auto* meshShader = dynamic_cast<D3D12Shader*>(desc.meshShader);
+        auto* fragmentShader = dynamic_cast<D3D12Shader*>(desc.fragmentShader);
+        if (meshShader == nullptr ||
+            meshShader->GetBinarySize() == 0 ||
+            (desc.fragmentShader != nullptr &&
+                (fragmentShader == nullptr ||
+                    fragmentShader->GetBinarySize() == 0)))
+        {
+            return nullptr;
+        }
+
+        uint32_t tableCount = 0;
+        uint32_t descriptorCount = 0;
+        uint32_t staticSamplerCount = 0;
+        for (uint32_t index = 0; index < desc.layout.bindingCount; ++index)
+        {
+            const RHI::ResourceBindingLayout& binding = desc.layout.bindings[index];
+            if (binding.type == RHI::ResourceBindingType::StaticSampler)
+            {
+                if (binding.count > std::numeric_limits<uint32_t>::max() - staticSamplerCount)
+                    return nullptr;
+                staticSamplerCount += binding.count;
+            }
+            else
+            {
+                if (descriptorCount > std::numeric_limits<uint32_t>::max() - binding.count)
+                    return nullptr;
+                descriptorCount += binding.count;
+                ++tableCount;
+            }
+        }
+        const uint32_t rootConstantDwords = desc.layout.inlineConstantSize / 4;
+        std::vector<CD3DX12_DESCRIPTOR_RANGE1> descriptorRanges;
+        std::vector<CD3DX12_ROOT_PARAMETER1> rootParameters;
+        std::vector<D3D12PipelineBinding> pipelineBindings;
+        std::vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers;
+        descriptorRanges.reserve(tableCount);
+        rootParameters.reserve(tableCount + (rootConstantDwords != 0 ? 1u : 0u));
+        pipelineBindings.reserve(tableCount);
+        staticSamplers.reserve(staticSamplerCount);
+
+        uint32_t descriptorOffset = 0;
+        for (uint32_t index = 0; index < desc.layout.bindingCount; ++index)
+        {
+            const RHI::ResourceBindingLayout& binding = desc.layout.bindings[index];
+            if (binding.type == RHI::ResourceBindingType::StaticSampler)
+            {
+                D3D12_FILTER filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+                if (!ToSamplerFilter(binding.staticSampler, filter)) return nullptr;
+                const D3D12_STATIC_BORDER_COLOR borderColor =
+                    binding.staticSampler.borderColor == RHI::SamplerBorderColor::Undefined
+                    ? D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK
+                    : ToBorderColor(binding.staticSampler.borderColor);
+                if (static_cast<int>(borderColor) < 0) return nullptr;
+
+                for (uint32_t arrayIndex = 0; arrayIndex < binding.count; ++arrayIndex)
+                {
+                    D3D12_STATIC_SAMPLER_DESC sampler = {};
+                    sampler.Filter = filter;
+                    sampler.AddressU = ToAddressMode(binding.staticSampler.addressU);
+                    sampler.AddressV = ToAddressMode(binding.staticSampler.addressV);
+                    sampler.AddressW = ToAddressMode(binding.staticSampler.addressW);
+                    sampler.MaxAnisotropy = binding.staticSampler.maxAnisotropy;
+                    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+                    sampler.BorderColor = borderColor;
+                    sampler.MipLODBias = binding.staticSampler.mipLodBias;
+                    sampler.MinLOD = binding.staticSampler.minLod;
+                    sampler.MaxLOD = binding.staticSampler.maxLod;
+                    sampler.ShaderRegister = binding.binding + arrayIndex;
+                    sampler.RegisterSpace = 0;
+                    sampler.ShaderVisibility = ToShaderVisibility(binding.stages);
+                    staticSamplers.push_back(sampler);
+                }
+                continue;
+            }
+
+            descriptorRanges.emplace_back();
+            descriptorRanges.back().Init(
+                ToDescriptorRangeType(binding.type),
+                binding.count,
+                binding.binding,
+                0,
+                D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE |
+                    D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
+                0);
+            rootParameters.emplace_back();
+            rootParameters.back().InitAsDescriptorTable(
+                1,
+                &descriptorRanges.back(),
+                ToShaderVisibility(binding.stages));
+
+            D3D12PipelineBinding pipelineBinding = {};
+            pipelineBinding.layout = binding;
+            pipelineBinding.rootParameter = static_cast<uint32_t>(rootParameters.size() - 1);
+            pipelineBinding.descriptorOffset = descriptorOffset;
+            pipelineBindings.push_back(pipelineBinding);
+            descriptorOffset += binding.count;
+        }
+
+        uint32_t inlineConstantRootParameter = std::numeric_limits<uint32_t>::max();
+        if (rootConstantDwords != 0)
+        {
+            inlineConstantRootParameter = static_cast<uint32_t>(rootParameters.size());
+            rootParameters.emplace_back();
+            rootParameters.back().InitAsConstants(
+                rootConstantDwords,
+                desc.layout.inlineConstantBinding,
+                0,
+                ToShaderVisibility(desc.layout.inlineConstantStages));
+        }
+
+        CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
+        rootSignatureDesc.Init_1_1(
+            static_cast<UINT>(rootParameters.size()),
+            rootParameters.empty() ? nullptr : rootParameters.data(),
+            static_cast<UINT>(staticSamplers.size()),
+            staticSamplers.empty() ? nullptr : staticSamplers.data(),
+            D3D12_ROOT_SIGNATURE_FLAG_NONE);
+
+        ComPtr<ID3DBlob> serializedRootSignature;
+        ComPtr<ID3DBlob> rootSignatureErrors;
+        if (FAILED(D3D12SerializeVersionedRootSignature(
+                &rootSignatureDesc,
+                &serializedRootSignature,
+                &rootSignatureErrors)))
+        {
+            if (rootSignatureErrors != nullptr &&
+                rootSignatureErrors->GetBufferPointer() != nullptr)
+            {
+                DumpInfoQueue(m_internal, "SerializeRootSignature");
+            }
+            return nullptr;
+        }
+
+        ComPtr<ID3D12RootSignature> rootSignature;
+        if (FAILED(m_internal->device->CreateRootSignature(
+                0,
+                serializedRootSignature->GetBufferPointer(),
+                serializedRootSignature->GetBufferSize(),
+                IID_PPV_ARGS(&rootSignature))))
+        {
+            return nullptr;
+        }
+
+#ifndef D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS
+#define D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS static_cast<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE>(25)
+#endif
+
+        struct alignas(void*) MeshPipelineStateStream
+        {
+            CD3DX12_PIPELINE_STATE_STREAM_ROOT_SIGNATURE RootSignature;
+            CD3DX12_PIPELINE_STATE_STREAM_SUBOBJECT<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS> MS;
+            CD3DX12_PIPELINE_STATE_STREAM_PS PS;
+            CD3DX12_PIPELINE_STATE_STREAM_RASTERIZER RasterizerState;
+            CD3DX12_PIPELINE_STATE_STREAM_BLEND_DESC BlendState;
+            CD3DX12_PIPELINE_STATE_STREAM_DEPTH_STENCIL DepthStencilState;
+            CD3DX12_PIPELINE_STATE_STREAM_DEPTH_STENCIL_FORMAT DSVFormat;
+            CD3DX12_PIPELINE_STATE_STREAM_RENDER_TARGET_FORMATS RTVFormats;
+            CD3DX12_PIPELINE_STATE_STREAM_SAMPLE_MASK SampleMask;
+            CD3DX12_PIPELINE_STATE_STREAM_SAMPLE_DESC SampleDesc;
+        } stream{};
+
+        stream.RootSignature = rootSignature.Get();
+        stream.MS = { meshShader->GetBinary(), meshShader->GetBinarySize() };
+        if (fragmentShader != nullptr)
+        {
+            stream.PS = { fragmentShader->GetBinary(), fragmentShader->GetBinarySize() };
+        }
+
+        D3D12_RASTERIZER_DESC rasterDesc = {};
+        rasterDesc.FillMode = ToFillMode(desc.raster.fillMode);
+        rasterDesc.CullMode = ToCullMode(desc.raster.cullMode);
+        rasterDesc.FrontCounterClockwise = desc.raster.frontFace == RHI::FrontFace::CounterClockwise;
+        if (!ToDepthBias(desc.raster.depthBiasConstant, rasterDesc.DepthBias)) return nullptr;
+        rasterDesc.DepthBiasClamp = desc.raster.depthBiasClamp;
+        rasterDesc.SlopeScaledDepthBias = desc.raster.depthBiasSlope;
+        rasterDesc.DepthClipEnable = TRUE;
+        stream.RasterizerState = CD3DX12_RASTERIZER_DESC(rasterDesc);
+
+        D3D12_BLEND_DESC blendDesc = {};
+        blendDesc.AlphaToCoverageEnable = FALSE;
+        blendDesc.IndependentBlendEnable = desc.colorAttachmentCount > 1;
+        D3D12_RT_FORMAT_ARRAY rtvFormats = {};
+        rtvFormats.NumRenderTargets = desc.colorAttachmentCount;
+        bool alphaFactorsTranslated = false;
+        for (uint32_t index = 0; index < desc.colorAttachmentCount; ++index)
+        {
+            const RHI::ColorAttachmentDesc& attachment = desc.colorAttachments[index];
+            const DXGI_FORMAT format = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(attachment.format));
+            if (format == DXGI_FORMAT_UNKNOWN) return nullptr;
+            rtvFormats.RTFormats[index] = format;
+
+            D3D12_RENDER_TARGET_BLEND_DESC& blend = blendDesc.RenderTarget[index];
+            blend.BlendEnable = attachment.blend.enabled;
+            blend.LogicOpEnable = FALSE;
+            blend.LogicOp = D3D12_LOGIC_OP_NOOP;
+            blend.RenderTargetWriteMask = static_cast<UINT8>(attachment.writeMask);
+            if (attachment.blend.enabled)
+            {
+                blend.SrcBlend = ToBlendFactor(attachment.blend.sourceColor);
+                blend.DestBlend = ToBlendFactor(attachment.blend.destinationColor);
+                blend.BlendOp = ToBlendOp(attachment.blend.colorOp);
+                blend.SrcBlendAlpha = ToAlphaBlendFactor(attachment.blend.sourceAlpha);
+                blend.DestBlendAlpha = ToAlphaBlendFactor(attachment.blend.destinationAlpha);
+                if (blend.SrcBlendAlpha != ToBlendFactor(attachment.blend.sourceAlpha) ||
+                    blend.DestBlendAlpha != ToBlendFactor(attachment.blend.destinationAlpha))
+                {
+                    alphaFactorsTranslated = true;
+                }
+                blend.BlendOpAlpha = ToBlendOp(attachment.blend.alphaOp);
+            }
+            else
+            {
+                blend.SrcBlend = D3D12_BLEND_ONE;
+                blend.DestBlend = D3D12_BLEND_ZERO;
+                blend.BlendOp = D3D12_BLEND_OP_ADD;
+                blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+                blend.DestBlendAlpha = D3D12_BLEND_ZERO;
+                blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+            }
+        }
+        stream.BlendState = CD3DX12_BLEND_DESC(blendDesc);
+        stream.RTVFormats = rtvFormats;
+
+        D3D12_DEPTH_STENCIL_DESC depthStencilDesc = {};
+        depthStencilDesc.DepthEnable = desc.depthStencil.depthTestEnabled || desc.depthStencil.depthWriteEnabled;
+        depthStencilDesc.DepthWriteMask = desc.depthStencil.depthWriteEnabled ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+        depthStencilDesc.DepthFunc = desc.depthStencil.depthTestEnabled ? ToCompareOp(desc.depthStencil.depthCompareOp) : D3D12_COMPARISON_FUNC_ALWAYS;
+        depthStencilDesc.StencilEnable = desc.depthStencil.stencilEnabled;
+        depthStencilDesc.StencilReadMask = desc.depthStencil.stencilReadMask;
+        depthStencilDesc.StencilWriteMask = desc.depthStencil.stencilWriteMask;
+        if (desc.depthStencil.stencilEnabled)
+        {
+            depthStencilDesc.FrontFace.StencilFailOp = ToStencilOp(desc.depthStencil.front.failOp);
+            depthStencilDesc.FrontFace.StencilDepthFailOp = ToStencilOp(desc.depthStencil.front.depthFailOp);
+            depthStencilDesc.FrontFace.StencilPassOp = ToStencilOp(desc.depthStencil.front.passOp);
+            depthStencilDesc.FrontFace.StencilFunc = ToCompareOp(desc.depthStencil.front.compareOp);
+            depthStencilDesc.BackFace.StencilFailOp = ToStencilOp(desc.depthStencil.back.failOp);
+            depthStencilDesc.BackFace.StencilDepthFailOp = ToStencilOp(desc.depthStencil.back.depthFailOp);
+            depthStencilDesc.BackFace.StencilPassOp = ToStencilOp(desc.depthStencil.back.passOp);
+            depthStencilDesc.BackFace.StencilFunc = ToCompareOp(desc.depthStencil.back.compareOp);
+        }
+        else
+        {
+            depthStencilDesc.FrontFace = { D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS };
+            depthStencilDesc.BackFace = depthStencilDesc.FrontFace;
+        }
+        stream.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(depthStencilDesc);
+
+        const DXGI_FORMAT dsvFormat = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(desc.depthStencil.format));
+        if (desc.depthStencil.format != RHI::Format::Unknown && dsvFormat == DXGI_FORMAT_UNKNOWN) return nullptr;
+        stream.DSVFormat = dsvFormat;
+
+        stream.SampleMask = UINT_MAX;
+        DXGI_SAMPLE_DESC sampleDesc = { 1, 0 };
+        stream.SampleDesc = sampleDesc;
+
+        ComPtr<ID3D12Device2> device2;
+        if (FAILED(m_internal->device.As(&device2)) || device2 == nullptr)
+        {
+            return nullptr;
+        }
+
+        D3D12_PIPELINE_STATE_STREAM_DESC streamDesc = {
+            sizeof(stream),
+            &stream
+        };
+
+        ComPtr<ID3D12PipelineState> pipelineState;
+        if (FAILED(device2->CreatePipelineState(&streamDesc, IID_PPV_ARGS(&pipelineState))))
+        {
+            DumpInfoQueue(m_internal, "CreateMeshPipeline");
+            return nullptr;
+        }
+
+        auto pipeline = std::unique_ptr<D3D12PipelineState, D3D12ObjectDeleter>(
+            new D3D12PipelineState(
+                desc.layout,
+                pipelineState.Get(),
+                rootSignature.Get(),
+                std::move(pipelineBindings),
+                {},
+                inlineConstantRootParameter,
+                descriptorCount,
+                D3D_PRIMITIVE_TOPOLOGY_UNDEFINED,
+                desc.depthStencil.stencilEnabled,
+                desc.depthStencil.depthWriteEnabled || desc.depthStencil.stencilEnabled,
+                true));
+        D3D12PipelineState* result = pipeline.get();
+        m_internal->livePipelines.push_back(std::move(pipeline));
+        if (alphaFactorsTranslated)
+            ReportDiagnostic(DiagnosticSeverity::Info,
                 "D3D12: Alpha blend color factors were translated to equivalent alpha factors.");
         return result;
     }

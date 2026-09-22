@@ -309,7 +309,7 @@ bool ICommandList::ValidateBindings(bool indexed, bool compute)
         m_recordingFailed=true;
         return false;
     };
-    if(!m_pipeline || m_pipeline->IsCompute()!=compute)
+    if(!m_pipeline || m_pipeline->IsCompute()!=compute || m_pipeline->IsMesh())
         return fail("Draw/Dispatch: bind a pipeline of the matching type before execution.");
     if(!compute)
     {
@@ -335,10 +335,35 @@ bool ICommandList::ValidateBindings(bool indexed, bool compute)
         return fail("Draw/Dispatch: bind a complete ResourceSet for the current pipeline after selecting that pipeline.");
     return !m_resourceSet || RequireResourceSetStates(m_resourceSet);
 }
+bool ICommandList::ValidateMeshBindings()
+{
+    const auto fail=[&](const char* message) {
+        m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,message);
+        m_recordingFailed=true;
+        return false;
+    };
+    if(!m_pipeline || !m_pipeline->IsMesh())
+        return fail("DispatchMesh: bind a mesh pipeline before execution.");
+    if(!m_rendering || m_colorFormats!=m_pipeline->m_colorFormats || m_depthStencilFormat!=m_pipeline->m_depthStencilFormat)
+        return fail("DispatchMesh: rendering attachment formats must match the mesh pipeline.");
+    const auto& layout=m_pipeline->GetLayout();
+    bool requiresSet=false;
+    for(uint32_t i=0;i<layout.bindingCount;++i)
+        if(layout.bindings[i].type!=ResourceBindingType::StaticSampler)requiresSet=true;
+    if(requiresSet && (!m_resourceSet || m_resourceSet->GetPipeline()!=m_pipeline))
+        return fail("DispatchMesh: bind a complete ResourceSet for the current pipeline after selecting that pipeline.");
+    return !m_resourceSet || RequireResourceSetStates(m_resourceSet);
+}
 void ICommandList::DrawInstanced(uint32_t vertices, uint32_t instances, uint32_t firstVertex, uint32_t firstInstance)
 { if(CanRecordCommands() && ValidateBindings(false,false)) DrawInstancedNative(vertices, instances, firstVertex, firstInstance); }
 void ICommandList::DrawIndexedInstanced(uint32_t indices, uint32_t instances, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance)
 { if(CanRecordCommands() && ValidateBindings(true,false)) DrawIndexedInstancedNative(indices, instances, firstIndex, vertexOffset, firstInstance); }
+void ICommandList::DispatchMesh(uint32_t x, uint32_t y, uint32_t z)
+{
+    if(!CanRecordCommands()) return;
+    if(!m_rendering || !m_pipeline || !m_pipeline->IsMesh() || !x || !y || !z) { m_recordingFailed=true; return; }
+    if(ValidateMeshBindings()) DispatchMeshNative(x, y, z);
+}
 
 bool ICommandList::Close()
 {
@@ -447,6 +472,11 @@ class RecordedCommandList final : public ICommandList
     {
         if(!m_rendering || !m_pipeline || !m_indexBuffer || !m_viewport || !m_scissor) {m_recordingFailed=true;return;}
         m_commands.push_back([=](ICommandList& n){n.DrawIndexedInstancedNative(indices,instances,firstIndex,vertexOffset,firstInstance);return true;});
+    }
+    void DispatchMeshNative(uint32_t x,uint32_t y,uint32_t z) override
+    {
+        if(!m_rendering || !m_pipeline || !m_viewport || !m_scissor) {m_recordingFailed=true;return;}
+        m_commands.push_back([=](ICommandList& n){n.DispatchMeshNative(x,y,z);return true;});
     }
     bool CloseNative() override {return !m_rendering && !m_recordingFailed;}
 };

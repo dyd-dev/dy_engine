@@ -21,7 +21,8 @@ namespace dyf::Backends
         uint64_t GetLimitNative(RHI::Limit) const override;
         bool SupportsSamplerNative(const RHI::SamplerDesc&) const override;
         bool SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc&) const override;
-        bool SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc&) const override;
+        bool SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc& desc) const override;
+        bool SupportsMeshPipelineNative(const RHI::MeshPipelineDesc& desc) const override;
         uint64_t GetCompletedSubmissionNative() override;
         uint64_t GetLastSubmissionNative() const override; bool CreateSwapchainNative(const dyf::RHI::SwapchainDesc& desc) override;
 		[[nodiscard]] bool BeginFrameNative() override;
@@ -38,6 +39,7 @@ namespace dyf::Backends
 		[[nodiscard]] dyf::RHI::ShaderHandle CreateShaderNative(const dyf::RHI::ShaderDesc& desc) override;
 		[[nodiscard]] dyf::RHI::PipelineHandle CreateComputePipelineNative(const RHI::ComputePipelineDesc&) override;
         RHI::PipelineHandle CreateGraphicsPipelineNative(const dyf::RHI::GraphicsPipelineDesc& desc) override;
+        [[nodiscard]] dyf::RHI::PipelineHandle CreateMeshPipelineNative(const dyf::RHI::MeshPipelineDesc& desc) override;
 		[[nodiscard]] dyf::RHI::ResourceSetHandle CreateResourceSetNative(const dyf::RHI::ResourceSetDesc& desc) override;
 
 		void DestroyBufferNative(dyf::RHI::BufferHandle buffer) override;

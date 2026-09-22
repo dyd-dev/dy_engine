@@ -64,6 +64,11 @@ namespace dyf::RHI
 			int32_t vertexOffset,
 			uint32_t firstInstance);
 
+		void DispatchMesh(
+			uint32_t threadGroupCountX,
+			uint32_t threadGroupCountY,
+			uint32_t threadGroupCountZ);
+
 		bool Close();
 
 	protected:
@@ -99,6 +104,7 @@ namespace dyf::RHI
 			uint32_t firstIndex,
 			int32_t vertexOffset,
 			uint32_t firstInstance) = 0;
+		virtual void DispatchMeshNative(uint32_t x, uint32_t y, uint32_t z) { (void)x; (void)y; (void)z; m_recordingFailed = true; }
 		virtual bool CloseNative() = 0;
 
 	private:
@@ -123,6 +129,7 @@ namespace dyf::RHI
         std::vector<Format> m_colorFormats;
         Format m_depthStencilFormat=Format::Unknown;
         bool ValidateBindings(bool indexed, bool compute);
+        bool ValidateMeshBindings();
         bool RequireResourceSetStates(ResourceSetHandle);
 		bool Track(const void* handle);
 		bool CanRecordCommands();

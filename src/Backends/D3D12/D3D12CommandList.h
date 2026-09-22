@@ -50,6 +50,7 @@ namespace dyf::Backends
 
         void DrawInstancedNative(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
         void DrawIndexedInstancedNative(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
+        void DispatchMeshNative(uint32_t x, uint32_t y, uint32_t z) override;
 
         bool CloseNative() override;
 

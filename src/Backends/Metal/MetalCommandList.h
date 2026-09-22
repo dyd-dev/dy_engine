@@ -63,6 +63,10 @@ namespace dyf::Backends
 			uint32_t firstIndex,
 			int32_t vertexOffset,
 			uint32_t firstInstance) override;
+		void DispatchMeshNative(
+			uint32_t threadGroupCountX,
+			uint32_t threadGroupCountY,
+			uint32_t threadGroupCountZ) override;
 
 		bool CloseNative() override;
 

@@ -13,7 +13,8 @@ namespace dyf::RHI
 		Unknown,
 		Vertex,
 		Fragment,
-        Compute
+        Compute,
+        Mesh
 	};
 
 	struct ShaderDesc

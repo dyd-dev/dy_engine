@@ -91,6 +91,7 @@ namespace dyf::Backends
 			if ((stages & dyf::RHI::ShaderStageFlags::Vertex) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_VERTEX_BIT;
 			if ((stages & dyf::RHI::ShaderStageFlags::Fragment) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_FRAGMENT_BIT;
             if((stages & RHI::ShaderStageFlags::Compute)!=RHI::ShaderStageFlags::None)result|=VK_SHADER_STAGE_COMPUTE_BIT;
+            if((stages & RHI::ShaderStageFlags::Mesh)!=RHI::ShaderStageFlags::None)result|=VK_SHADER_STAGE_MESH_BIT_EXT;
 			return result;
 		}
 
@@ -876,6 +877,18 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 			return;
 		}
 		vkCmdDrawIndexed(m_commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+	}
+
+	void VulkanCommandList::DispatchMeshNative(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
+	{
+		if (m_closed || !m_rendering || !m_context.vkCmdDrawMeshTasksEXT ||
+			threadGroupCountX == 0 || threadGroupCountY == 0 || threadGroupCountZ == 0 ||
+			!ValidateDraw(false, 0, 1, 0, 0))
+		{
+			Fail();
+			return;
+		}
+		m_context.vkCmdDrawMeshTasksEXT(m_commandBuffer, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
 	}
 
 	bool VulkanCommandList::CloseNative()

@@ -972,17 +972,20 @@ namespace dyf::Backends
         m_internal->commandList->SetPipelineState(pipeline->GetNativePipelineState());
         m_internal->commandList->SetGraphicsRootSignature(
             pipeline->GetNativeRootSignature());
-        m_internal->commandList->IASetPrimitiveTopology(
-            static_cast<D3D12_PRIMITIVE_TOPOLOGY>(pipeline->GetPrimitiveTopology()));
-        // RHI의 stride는 파이프라인 상태다. D3D12는 VB view에 보관하므로
-        // 같은 버퍼를 유지한 채 PSO를 바꿔도 새 레이아웃을 적용한다.
-        for (auto& [binding, view] : m_internal->vertexBufferViews)
+        if (!pipeline->IsMesh())
         {
-            const uint32_t stride = pipeline->GetVertexStride(binding);
-            if (stride != 0 && view.StrideInBytes != stride)
+            m_internal->commandList->IASetPrimitiveTopology(
+                static_cast<D3D12_PRIMITIVE_TOPOLOGY>(pipeline->GetPrimitiveTopology()));
+            // RHI의 stride는 파이프라인 상태다. D3D12는 VB view에 보관하므로
+            // 같은 버퍼를 유지한 채 PSO를 바꿔도 새 레이아웃을 적용한다.
+            for (auto& [binding, view] : m_internal->vertexBufferViews)
             {
-                view.StrideInBytes = stride;
-                m_internal->commandList->IASetVertexBuffers(binding, 1, &view);
+                const uint32_t stride = pipeline->GetVertexStride(binding);
+                if (stride != 0 && view.StrideInBytes != stride)
+                {
+                    view.StrideInBytes = stride;
+                    m_internal->commandList->IASetVertexBuffers(binding, 1, &view);
+                }
             }
         }
         RetainObject(m_internal->retainedObjects, pipeline->GetNativePipelineState());
@@ -1318,6 +1321,24 @@ namespace dyf::Backends
         }
         m_internal->commandList->DrawIndexedInstanced(
             indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+    }
+
+    void D3D12CommandList::DispatchMeshNative(uint32_t x, uint32_t y, uint32_t z)
+    {
+        if (x == 0 || y == 0 || z == 0) return;
+        if (!CanRecord(m_internal) || !m_internal->rendering ||
+            !HasCompleteDrawState(m_internal))
+        {
+            RejectRecording(m_internal);
+            return;
+        }
+        ComPtr<ID3D12GraphicsCommandList6> cmdList6;
+        if (FAILED(m_internal->commandList.As(&cmdList6)) || cmdList6 == nullptr)
+        {
+            RejectRecording(m_internal);
+            return;
+        }
+        cmdList6->DispatchMesh(x, y, z);
     }
 
     bool D3D12CommandList::CloseNative()

@@ -13,7 +13,8 @@ namespace dyf::RHI
 		None = 0,
 		Vertex = 1u << 0u,
 		Fragment = 1u << 1u,
-        Compute = 1u << 2u
+        Compute = 1u << 2u,
+        Mesh = 1u << 5u
 	};
 
 	inline constexpr ShaderStageFlags operator|(ShaderStageFlags left, ShaderStageFlags right)

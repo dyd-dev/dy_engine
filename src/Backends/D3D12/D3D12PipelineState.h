@@ -39,7 +39,8 @@ namespace dyf::Backends
             uint32_t descriptorCount,
             uint32_t primitiveTopology,
             bool stencilEnabled,
-            bool requiresDepthWrite);
+            bool requiresDepthWrite,
+            bool isMesh = false);
 
         ID3D12PipelineState* GetNativePipelineState() const;
         ID3D12RootSignature* GetNativeRootSignature() const;

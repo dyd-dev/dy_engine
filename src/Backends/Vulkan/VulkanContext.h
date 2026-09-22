@@ -25,6 +25,9 @@ struct VulkanContext {
         uint32_t presentFamily = UINT32_MAX;
         bool IsComplete() const { return graphicsFamily != UINT32_MAX && presentFamily != UINT32_MAX; }
     } queueIndices;
+
+    bool meshShaderSupported = false;
+    PFN_vkCmdDrawMeshTasksEXT vkCmdDrawMeshTasksEXT = nullptr;
 };
 
 }
