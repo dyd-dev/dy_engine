@@ -565,6 +565,18 @@ namespace dyf::Backends
 #endif
 			if(m_impl->depthStencilState == nil) return;
 		}
+		else
+		{
+			MTLDepthStencilDescriptor* depthDesc = [MTLDepthStencilDescriptor new];
+			depthDesc.depthCompareFunction = MTLCompareFunctionAlways;
+			depthDesc.depthWriteEnabled = NO;
+			m_impl->depthStencilState =
+				[metalDevice newDepthStencilStateWithDescriptor:depthDesc];
+#if !__has_feature(objc_arc)
+			[depthDesc release];
+#endif
+			if(m_impl->depthStencilState == nil) return;
+		}
 	}
 
 	MetalPipeline::~MetalPipeline()
@@ -842,6 +854,18 @@ namespace dyf::Backends
 					[back release];
 #endif
 				}
+				m_impl->depthStencilState =
+					[metalDevice newDepthStencilStateWithDescriptor:depthDesc];
+#if !__has_feature(objc_arc)
+				[depthDesc release];
+#endif
+				if(m_impl->depthStencilState == nil) return;
+			}
+			else
+			{
+				MTLDepthStencilDescriptor* depthDesc = [MTLDepthStencilDescriptor new];
+				depthDesc.depthCompareFunction = MTLCompareFunctionAlways;
+				depthDesc.depthWriteEnabled = NO;
 				m_impl->depthStencilState =
 					[metalDevice newDepthStencilStateWithDescriptor:depthDesc];
 #if !__has_feature(objc_arc)

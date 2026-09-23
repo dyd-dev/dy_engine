@@ -33,7 +33,9 @@ void meshMain(
     if (tid == 0)
     {
         output.set_primitive_count(1);
-        output.set_index(0, uint3(0, 1, 2));
+        output.set_index(0, 0);
+        output.set_index(1, 1);
+        output.set_index(2, 2);
     }
 }
 

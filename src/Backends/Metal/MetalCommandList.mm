@@ -1157,9 +1157,27 @@ namespace dyf::Backends
 		}
 		if(@available(macOS 13.0, iOS 16.0, *))
 		{
+			if(m_impl->pipeline == nullptr || m_impl->pipeline->GetNativePipeline() == nullptr)
+			{
+				Invalidate(m_impl);
+				return;
+			}
+			id<MTLRenderPipelineState> pipelineState =
+				(__bridge id<MTLRenderPipelineState>)m_impl->pipeline->GetNativePipeline();
+			NSUInteger meshThreads = pipelineState.maxTotalThreadsPerMeshThreadgroup;
+			if(meshThreads == 0)
+			{
+				Invalidate(m_impl);
+				return;
+			}
+			NSUInteger objectThreads = pipelineState.maxTotalThreadsPerObjectThreadgroup;
+			if(objectThreads == 0)
+			{
+				objectThreads = 1;
+			}
 			MTLSize threadgroups = MTLSizeMake(threadGroupCountX, threadGroupCountY, threadGroupCountZ);
-			MTLSize threadsPerObjectThreadgroup = MTLSizeMake(1, 1, 1);
-			MTLSize threadsPerMeshThreadgroup = MTLSizeMake(1, 1, 1);
+			MTLSize threadsPerObjectThreadgroup = MTLSizeMake(objectThreads, 1, 1);
+			MTLSize threadsPerMeshThreadgroup = MTLSizeMake(meshThreads, 1, 1);
 			[m_impl->renderEncoder
 				drawMeshThreadgroups:threadgroups
 				threadsPerObjectThreadgroup:threadsPerObjectThreadgroup

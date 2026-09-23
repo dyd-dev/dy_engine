@@ -27,7 +27,7 @@ namespace dyf::Backends
 			GetBinary(),
 			GetBinarySize(),
 			dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
-			DISPATCH_DATA_DESTRUCTOR_NONE);
+			DISPATCH_DATA_DESTRUCTOR_DEFAULT);
 		if(libraryData == nullptr) return;
 
 		NSError* error = nil;

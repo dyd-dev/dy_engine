@@ -147,8 +147,6 @@ int main(int argc, char** argv)
 
     std::cout << "Mesh pipeline created successfully. Starting render loop.\n";
 
-    const Viewport viewport{0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height), 0.0f, 1.0f};
-    const Rect scissor{0, 0, width, height};
     const float clearColor[4] = {0.08f, 0.10f, 0.15f, 1.0f};
 
     uint32_t currentFrame = 0;
@@ -172,6 +170,10 @@ int main(int argc, char** argv)
         }
 
         auto* target = device->GetBackBuffer();
+        const auto& extent = target->GetDesc();
+        const Viewport viewport{0.0f, 0.0f, static_cast<float>(extent.width), static_cast<float>(extent.height), 0.0f, 1.0f};
+        const Rect scissor{0, 0, extent.width, extent.height};
+
         const ResourceBarrierDesc beginBarrier{nullptr, target, ResourceState::Present, ResourceState::RenderTarget, {}};
         commands->ResourceBarrier(&beginBarrier, 1);
 
