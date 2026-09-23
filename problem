@@ -1,0 +1,13 @@
+dyf geocam, light, model
+rhi geocam
+
+
+개요
+	기존 예제 빌드 >> 프로젝트 빌드
+	dxc가 뭐임?
+	말이 너무 어렵다
+	--target << 이게 뭐임?
+
+	D/dev >> <빌드 폴더>
+
+	Extends >> 확장

@@ -1,0 +1,46 @@
+branch: IMGUI
+
+- 주제와 관련 없는 변경 제거
+	Renderer.cpp: mesh와 tone, format 단어가 들어간 모든 변경
+	Renderer.cpp: null 검사, 과한 bool 검사
+
+	Renderer.h: 동일
+	DrawData.cpp: 동일
+	PostProcess.cpp: 동일
+
+	VulkanDevice.cpp: #include<array> << 한 줄 추가
+
+- 필요한 변경
+	Window.h
+
+- 수정
+	ImGui.h를 Public/dyf/Extends/ImGui에 위치
+	ImGui.cpp와 폴더 불일치
+
+	CMakeLists.txt: DY_BUILD_EDITOR << DY_EXTEND_IMGUI로 통일
+	tools/Editor 대신 현 폴더 구조 이용: Extends / Public / examples
+
+	editor-layout.ini << config 폴더를 만들거나 examples 등에 포함
+
+- 위험
+	ImGui의 GLFW에서 X11/Xatom.h 의존 문제
+	* X11, Wayland는 Linux GUI 표현 방식
+
+feature: profiler
+branch: profiler-renderdoc-metal-examples
+
+- #44의 구현 누락 (원본 #40)
+
+	CPU,GPU,FPS 시간: 약 200ms -> 유지
+	그래프 갱신: 집계 시에만 -> 유지
+	!! BUF/TEX/PSO 자원 수치: 집계 시 저장 값 -> 매 프레임
+
+	#44: Renderer.cpp(L:114-135, L171-173)
+
+
+branch: hull-domain-shaders
+
+
+branch: mesh-shader
+
+
