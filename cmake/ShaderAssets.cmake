@@ -88,10 +88,7 @@ function(dy_embed_stock_shader source stage name symbol)
 endfunction()
 
 if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
-    find_program(DY_XCRUN NAMES xcrun)
-    if(NOT DY_XCRUN)
-        message(FATAL_ERROR "xcrun is required to build the Metal stock shaders")
-    endif()
+    include(MetalToolchain)
 
     set(metal_air_files)
     set(source "${DY_STOCK_SHADER_SOURCE_DIR}/mesh_shadow_vs.metal")
@@ -99,7 +96,7 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
     add_custom_command(
         OUTPUT "${air}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-        COMMAND "${DY_XCRUN}" -sdk macosx metal -c "${source}" -o "${air}"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal -c "${source}" -o "${air}"
         DEPENDS "${source}"
         VERBATIM)
     list(APPEND metal_air_files "${air}")
@@ -117,7 +114,7 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
         add_custom_command(
             OUTPUT "${air}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-            COMMAND "${DY_XCRUN}" -sdk macosx metal
+            COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal
                 "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}"
                 "-DRENDERER_VERTEX_ENTRY=${vertex_entry}"
                 -c "${source}" -o "${air}"
@@ -139,7 +136,7 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
         add_custom_command(
             OUTPUT "${air}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-            COMMAND "${DY_XCRUN}" -sdk macosx metal
+            COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal
                 "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}"
                 "-DRENDERER_FRAGMENT_ENTRY=${fragment_entry}"
                 -c "${source}" -o "${air}"
@@ -151,7 +148,7 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
     set(metal_library "${DY_STOCK_SHADER_GENERATED_DIR}/StockShaders.metallib")
     add_custom_command(
         OUTPUT "${metal_library}"
-        COMMAND "${DY_XCRUN}" -sdk macosx metallib ${metal_air_files} -o "${metal_library}"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metallib ${metal_air_files} -o "${metal_library}"
         DEPENDS ${metal_air_files}
         VERBATIM)
     set(metal_header "${DY_STOCK_SHADER_GENERATED_DIR}/StockMetalLibrary.h")
@@ -182,8 +179,8 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
     set(canvas_header "${DY_STOCK_SHADER_GENERATED_DIR}/CanvasLibrary.h")
     add_custom_command(OUTPUT "${canvas_header}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-        COMMAND "${DY_XCRUN}" -sdk macosx metal -c "${DY_STOCK_SHADER_SOURCE_DIR}/canvas.metal" -o "${canvas_air}"
-        COMMAND "${DY_XCRUN}" -sdk macosx metallib "${canvas_air}" -o "${canvas_library}"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal -c "${DY_STOCK_SHADER_SOURCE_DIR}/canvas.metal" -o "${canvas_air}"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metallib "${canvas_air}" -o "${canvas_library}"
         COMMAND "${CMAKE_COMMAND}" "-DINPUT=${canvas_library}" "-DOUTPUT=${canvas_header}" -DSYMBOL=kCanvasLibrary -P "${DY_STOCK_SHADER_EMBED_SCRIPT}"
         DEPENDS "${DY_STOCK_SHADER_SOURCE_DIR}/canvas.metal" "${DY_STOCK_SHADER_EMBED_SCRIPT}" VERBATIM)
     list(APPEND DY_STOCK_SHADER_HEADERS "${canvas_header}")
@@ -198,8 +195,8 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
     set(tone_map_header "${DY_STOCK_SHADER_GENERATED_DIR}/ToneMapLibrary.h")
     add_custom_command(OUTPUT "${tone_map_header}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-        COMMAND "${DY_XCRUN}" -sdk macosx metal -c "${DY_STOCK_SHADER_SOURCE_DIR}/tone_map.metal" -o "${tone_map_air}"
-        COMMAND "${DY_XCRUN}" -sdk macosx metallib "${tone_map_air}" -o "${tone_map_library}"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal -c "${DY_STOCK_SHADER_SOURCE_DIR}/tone_map.metal" -o "${tone_map_air}"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metallib "${tone_map_air}" -o "${tone_map_library}"
         COMMAND "${CMAKE_COMMAND}" "-DINPUT=${tone_map_library}" "-DOUTPUT=${tone_map_header}" -DSYMBOL=kToneMapLibrary -P "${DY_STOCK_SHADER_EMBED_SCRIPT}"
         DEPENDS "${DY_STOCK_SHADER_SOURCE_DIR}/tone_map.metal" "${DY_STOCK_SHADER_EMBED_SCRIPT}" VERBATIM)
     list(APPEND DY_STOCK_SHADER_HEADERS "${tone_map_header}")
@@ -215,7 +212,7 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
         set(air "${DY_STOCK_SHADER_GENERATED_DIR}/Bindless${enable_shadows}.air")
         add_custom_command(OUTPUT "${air}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-            COMMAND "${DY_XCRUN}" -sdk macosx metal
+            COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal
                 -DRENDERER_BINDLESS=1 "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}"
                 "-DRENDERER_FRAGMENT_ENTRY=bindlessFragment${enable_shadows}" -c "${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.metal" -o "${air}"
             DEPENDS "${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.metal" VERBATIM)
@@ -224,7 +221,7 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
     set(library "${DY_STOCK_SHADER_GENERATED_DIR}/Bindless.metallib")
     set(header "${DY_STOCK_SHADER_GENERATED_DIR}/BindlessMetalLibrary.h")
     add_custom_command(OUTPUT "${header}"
-        COMMAND "${DY_XCRUN}" -sdk macosx metallib ${bindless_air_files} -o "${library}"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metallib ${bindless_air_files} -o "${library}"
         COMMAND "${CMAKE_COMMAND}" "-DINPUT=${library}" "-DOUTPUT=${header}" -DSYMBOL=kBindlessMetalLibrary -P "${DY_STOCK_SHADER_EMBED_SCRIPT}"
         DEPENDS ${bindless_air_files} "${DY_STOCK_SHADER_EMBED_SCRIPT}" VERBATIM)
     list(APPEND DY_STOCK_SHADER_HEADERS "${header}")

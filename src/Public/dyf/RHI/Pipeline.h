@@ -15,7 +15,8 @@ namespace dyf::RHI
 		PointList,
 		LineList,
 		TriangleList,
-		TriangleStrip
+		TriangleStrip,
+		PatchList
 	};
 
 	enum class VertexStepMode : uint8_t
@@ -23,6 +24,20 @@ namespace dyf::RHI
 		Undefined,
 		Vertex,
 		Instance
+	};
+
+	enum class TessellationDomain : uint8_t
+	{
+		Triangle,
+		Quad
+	};
+
+	enum class TessellationPartitioning : uint8_t
+	{
+		Integer,
+		FractionalEven,
+		FractionalOdd,
+		PowerOfTwo
 	};
 
 	struct VertexBufferLayout
@@ -60,6 +75,18 @@ namespace dyf::RHI
 		Undefined,
 		CounterClockwise,
 		Clockwise
+	};
+
+	struct TessellationState
+	{
+		// D3D12/Vulkan에서는 셰이더 선언과 일치해야 하며, Metal 파이프라인 상태에 직접 사용된다.
+		// Metal Hull 함수는 patch-instance마다 한 번 실행되는 kernel 함수이며 half 정밀도
+		// tessellation factor를 buffer(30)에 쓴다(삼각형 4개, 사각형 6개). Domain 함수는
+		// [[patch(triangle|quad, N)]]가 지정된 post-tessellation vertex 함수여야 한다.
+		TessellationDomain domain = TessellationDomain::Triangle;
+		TessellationPartitioning partitioning = TessellationPartitioning::Integer;
+		FrontFace outputWinding = FrontFace::CounterClockwise;
+		uint32_t maxFactor = 64;
 	};
 
 	enum class CompareOp : uint8_t
@@ -196,8 +223,13 @@ namespace dyf::RHI
 	struct GraphicsPipelineDesc
 	{
 		ShaderHandle vertexShader = nullptr;
+		ShaderHandle hullShader = nullptr;
+		ShaderHandle domainShader = nullptr;
 		ShaderHandle fragmentShader = nullptr;
 		PrimitiveTopology topology = PrimitiveTopology::Undefined;
+		// PatchList에서 한 패치를 구성하는 입력 제어점 수다. Hull/Domain 셰이더와 함께 사용한다.
+		uint32_t patchControlPoints = 0;
+		TessellationState tessellation = {};
 		const VertexBufferLayout* vertexBuffers = nullptr;
 		uint32_t vertexBufferCount = 0;
 		const VertexAttribute* vertexAttributes = nullptr;

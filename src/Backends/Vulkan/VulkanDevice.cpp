@@ -96,6 +96,7 @@ namespace dyf::Backends
             case RHI::Feature::Rasterization:
             case RHI::Feature::SamplerLodBias:
             case RHI::Feature::FractionalDepthBias: return true;
+            case RHI::Feature::Tessellation: return supported.tessellationShader == VK_TRUE;
             case RHI::Feature::DescriptorIndexing: return supported.shaderSampledImageArrayDynamicIndexing == VK_TRUE;
             case RHI::Feature::Wireframe: return supported.fillModeNonSolid == VK_TRUE;
             case RHI::Feature::DepthBiasClamp: return supported.depthBiasClamp == VK_TRUE;
@@ -292,6 +293,7 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
             vkGetPhysicalDeviceFeatures(m_impl->Context().physicalDevice, &features);
             return features.samplerAnisotropy ? static_cast<uint64_t>(limits.maxSamplerAnisotropy) : 1;
         }
+        case RHI::Limit::TessellationPatchControlPoints: return limits.maxTessellationPatchSize;
         }
         return 0;
     }
@@ -311,7 +313,7 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
         VkPhysicalDeviceFeatures features{};
         vkGetPhysicalDeviceFeatures(m_impl->Context().physicalDevice,&features);
         // 레이아웃 전체와 각 셰이더 단계의 실제 디스크립터 수를 네이티브 한도와 비교한다.
-        uint64_t counts[4][5]={};
+        uint64_t counts[6][5]={};
         for(uint32_t i=0;i<desc.bindingCount;++i)
         {
             const auto& binding=desc.bindings[i];
@@ -331,19 +333,27 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
             {
                 if((binding.stages&RHI::ShaderStageFlags::Vertex)!=RHI::ShaderStageFlags::None &&
                     !features.vertexPipelineStoresAndAtomics)return false;
+                if((binding.stages&RHI::ShaderStageFlags::Hull)!=RHI::ShaderStageFlags::None &&
+                    !features.vertexPipelineStoresAndAtomics)return false;
+                if((binding.stages&RHI::ShaderStageFlags::Domain)!=RHI::ShaderStageFlags::None &&
+                    !features.vertexPipelineStoresAndAtomics)return false;
                 if((binding.stages&RHI::ShaderStageFlags::Fragment)!=RHI::ShaderStageFlags::None &&
                     !features.fragmentStoresAndAtomics)return false;
             }
             counts[0][kind]+=binding.count;
-            for(uint32_t stage=0;stage<3;++stage)
-                if((static_cast<uint32_t>(binding.stages)&(1u<<stage))!=0) counts[stage+1][kind]+=binding.count;
+            constexpr RHI::ShaderStageFlags stages[] = {
+                RHI::ShaderStageFlags::Vertex, RHI::ShaderStageFlags::Hull,
+                RHI::ShaderStageFlags::Domain, RHI::ShaderStageFlags::Fragment,
+                RHI::ShaderStageFlags::Compute};
+            for(uint32_t stage=0;stage<5;++stage)
+                if((binding.stages&stages[stage])!=RHI::ShaderStageFlags::None) counts[stage+1][kind]+=binding.count;
         }
         const uint64_t totalLimits[]={limits.maxDescriptorSetSamplers,limits.maxDescriptorSetUniformBuffers,
             limits.maxDescriptorSetStorageBuffers,limits.maxDescriptorSetSampledImages,limits.maxDescriptorSetStorageImages};
         const uint64_t stageLimits[]={limits.maxPerStageDescriptorSamplers,limits.maxPerStageDescriptorUniformBuffers,
             limits.maxPerStageDescriptorStorageBuffers,limits.maxPerStageDescriptorSampledImages,limits.maxPerStageDescriptorStorageImages};
         for(uint32_t kind=0;kind<5;++kind) if(counts[0][kind]>totalLimits[kind])return false;
-        for(uint32_t stage=1;stage<4;++stage)
+        for(uint32_t stage=1;stage<6;++stage)
         {
             uint64_t resources=0;
             for(uint32_t kind=0;kind<5;++kind)
@@ -1139,6 +1149,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 	dyf::RHI::PipelineHandle VulkanDevice::Impl::CreateGraphicsPipeline(const dyf::RHI::GraphicsPipelineDesc& desc)
 	{
 		if (std::find(m_shaders.begin(), m_shaders.end(), desc.vertexShader) == m_shaders.end() ||
+			(desc.hullShader != nullptr && std::find(m_shaders.begin(), m_shaders.end(), desc.hullShader) == m_shaders.end()) ||
+			(desc.domainShader != nullptr && std::find(m_shaders.begin(), m_shaders.end(), desc.domainShader) == m_shaders.end()) ||
 			(desc.fragmentShader != nullptr && std::find(m_shaders.begin(), m_shaders.end(), desc.fragmentShader) == m_shaders.end()))
 		{
 			return nullptr;
@@ -1419,6 +1431,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		enabled.samplerAnisotropy = supported.samplerAnisotropy;
 		enabled.fillModeNonSolid = supported.fillModeNonSolid;
 		enabled.depthBiasClamp = supported.depthBiasClamp;
+		enabled.tessellationShader = supported.tessellationShader;
         enabled.independentBlend=supported.independentBlend;
         enabled.vertexPipelineStoresAndAtomics=supported.vertexPipelineStoresAndAtomics;
         enabled.fragmentStoresAndAtomics=supported.fragmentStoresAndAtomics;

@@ -13,7 +13,9 @@ namespace dyf::RHI
 		None = 0,
 		Vertex = 1u << 0u,
 		Fragment = 1u << 1u,
-        Compute = 1u << 2u
+		Compute = 1u << 2u,
+		Hull = 1u << 3u,
+		Domain = 1u << 4u
 	};
 
 	inline constexpr ShaderStageFlags operator|(ShaderStageFlags left, ShaderStageFlags right)
