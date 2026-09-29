@@ -27,12 +27,12 @@ add_library(${PROJECT_NAME} STATIC
     "src/dyf/Profiler.cpp"
     "src/dyf/ProfilerSampler.cpp"
     "src/Platform/RenderDocCapture.cpp"
+    "src/Platform/Log.cpp"
+    "src/Platform/LogSession.cpp"
 	"src/dyf/DrawData.cpp"
 	"src/dyf/TextureCache.cpp"
 	"src/dyf/Scene.cpp"
 	"src/Platform/Window.cpp"
-    "src/Platform/Log.cpp"
-    "src/Platform/LogSession.cpp"
 )
 
 # global options
@@ -51,6 +51,7 @@ if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
 endif()
 include(Dependencies)
 include(BuildOptions)
+include(LogCapture)
 
 # 기본 구현과 내장 셰이더는 같은 엔진 타깃에서 공개 RHI를 사용한다.
 include(ShaderAssets)

@@ -261,7 +261,8 @@ namespace dyf::Platform::LogInternal
     std::string SessionDirectory()
     {
         InitializeSession();
-        return State().directory.u8string();
+        const auto path = State().directory.u8string();
+        return {reinterpret_cast<const char*>(path.data()), path.size()};
     }
     void WriteSession(std::string_view text) noexcept
     {

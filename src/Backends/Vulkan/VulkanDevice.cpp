@@ -1319,8 +1319,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 #endif
         if(supported(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME))
             extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
-        const bool captureValidation = m_enableValidation && supported(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-        if (captureValidation) extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        const bool captureValidation = m_enableValidation && m_context.debugUtilsEnabled;
         if (m_enableValidation && !captureValidation)
             Platform::Log::Write(Platform::LogLevel::Warning, "Vulkan", "Validation log capture unavailable: VK_EXT_debug_utils is missing");
         VkDebugUtilsMessengerCreateInfoEXT debugInfo{};

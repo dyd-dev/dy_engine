@@ -29,9 +29,10 @@ namespace dyf::Platform
         // Automatic on first log, Window creation or Device creation. Settings are read once:
         // DY_LOG_AUTO=0 disables automatic files/monitor; DY_LOG_DIR overrides the log root;
         // DY_LOG_CRASH=0 disables crash monitoring; DY_LOG_MONITOR overrides the helper path.
-        // Native crash monitoring is Windows x64, from initialization onward. Bundle
-        // windows_monitor.exe beside the application. Existing debuggers take precedence.
-        // Only common Log messages go to automatic files; use log_runner for all stdout/stderr.
+        // Native crash monitoring is Windows x64, from initialization onward. CMake's
+        // DY_LOG_CRASH_MONITOR deploys windows_monitor.exe beside applications on MSVC x64.
+        // Keep that helper beside packaged executables. Existing debuggers take precedence.
+        // Only common Log messages go to automatic files; arbitrary stdout/stderr is not captured.
         void Initialize() noexcept;
         std::string GetSessionDirectory();
 
