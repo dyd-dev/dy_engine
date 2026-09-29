@@ -1,5 +1,6 @@
 #include "dyf/ImGui.h"
 #include "dyf/Platform/Window.h"
+#include "dyf/Platform/ActionMap.h"
 #include "dyf/RHI.h"
 #include <imgui.h>
 #include <GLFW/glfw3.h>
@@ -74,18 +75,21 @@ int main(int argc,char** argv)
         ImGui::GetIO().Fonts->AddFontFromFileTTF("C:/Windows/Fonts/malgun.ttf",18,&fontConfig,ImGui::GetIO().Fonts->GetGlyphRangesKorean());
 #endif
     }
-    int clicks=0,appPresses=0,textChanges=0,capturedKeys=0;
+    Platform::ActionMap actions(window.GetInput());
+    actions.BindButton(1,Platform::Key::W);
+    actions.BindButton(2,Platform::MouseButton::Left);
+    int clicks=0,appPresses=0,textChanges=0,capturedKeys=0,actionPresses=0,actionClicks=0;
     float value=0.35f;
     char text[256]="";
     ImVec2 buttonPoint{},textPoint{},sliderPoint{};
     uint64_t receivedEvents=0;
     bool largeMeshVerified=false,mouseCaptureVerified=false,outsideMouseVerified=false;
+    bool sameFrameCaptureVerified=false,heldCaptureVerified=false;
     std::vector<double> cpuTimes,frameTimes,guiTimes,submitTimes;
     GuiStats stats{};
     for(int frame=0;window.IsRunning() && (!maxFrames || frame<maxFrames);++frame)
     {
         const auto frameStart=Clock::now();
-        window.PollEvents();
         if(selfTest)
         {
             auto* h=window.GetGlfwHandle();
@@ -97,12 +101,12 @@ int main(int argc,char** argv)
             if(frame==12 || frame==22 || frame==42 || frame==52) ImGui_ImplGlfw_MouseButtonCallback(h,GLFW_MOUSE_BUTTON_LEFT,GLFW_RELEASE,0);
             if(frame==25) ImGui_ImplGlfw_CharCallback(h,'a');
             if(frame==26) ImGui_ImplGlfw_CharCallback(h,0xD55C);
-            if(frame==30 || frame==50) ImGui_ImplGlfw_KeyCallback(h,GLFW_KEY_W,0,GLFW_PRESS,0);
-            if(frame==32 || frame==52) ImGui_ImplGlfw_KeyCallback(h,GLFW_KEY_W,0,GLFW_RELEASE,0);
+            if(frame==20 || frame==30 || frame==55) ImGui_ImplGlfw_KeyCallback(h,GLFW_KEY_W,0,GLFW_PRESS,0);
+            if(frame==22 || frame==52 || frame==57) ImGui_ImplGlfw_KeyCallback(h,GLFW_KEY_W,0,GLFW_RELEASE,0);
             if(frame==65) glfwSetWindowSize(h,1100,760);
             if(frame==75) glfwSetWindowSize(h,1000,700);
-            window.PollEvents();
         }
+        window.PollEvents();
         const auto& input=window.GetInput();
         receivedEvents+=input.GetEvents().size();
         const auto guiStart=Clock::now();
@@ -113,12 +117,6 @@ int main(int argc,char** argv)
             {
                 if(frame==10) mouseCaptureVerified=gui->WantsMouse();
                 if(frame==50) outsideMouseVerified=!gui->WantsMouse();
-            }
-            // ImGui may spread one poll over several frames. Match capture to its consumed key edge.
-            if(ImGui::IsKeyPressed(ImGuiKey_W,false))
-            {
-                if(gui->WantsKeyboard()) ++capturedKeys;
-                else ++appPresses;
             }
             ImGui::SetNextWindowPos({24,24},ImGuiCond_Always);
             ImGui::SetNextWindowSize({660,580},ImGuiCond_Always);
@@ -153,6 +151,25 @@ int main(int argc,char** argv)
                     list->AddRectFilled({30.f+(i%100)*2,500.f},{31.f+(i%100)*2,501.f},IM_COL32_WHITE);
             }
             ImGui::End();
+            // Widgets can become active in this frame before WantCaptureKeyboard updates.
+            const bool captureKeyboard=gui->WantsKeyboard() || ImGui::IsAnyItemActive();
+            actions.Update({captureKeyboard,gui->WantsMouse()});
+            if(actions.WasPressed(1)) ++actionPresses;
+            if(actions.WasPressed(2)) ++actionClicks;
+            // Match UI shortcuts to ImGui's consumed edge when its event queue spans frames.
+            if(ImGui::IsKeyPressed(ImGuiKey_W,false))
+            {
+                if(captureKeyboard) ++capturedKeys;
+                else ++appPresses;
+            }
+            if(selfTest && frame==20)
+                sameFrameCaptureVerified=input.WasPressed(Platform::Key::W) && !actions.WasPressed(1)
+                    && std::count_if(input.GetEvents().begin(),input.GetEvents().end(),[](const auto& event) {
+                        return event.type==Platform::InputEventType::Key && event.code==GLFW_KEY_W
+                            && event.action==Platform::InputAction::Press;
+                    })==1;
+            if(selfTest && frame==51)
+                heldCaptureVerified=input.IsDown(Platform::Key::W) && !actions.IsDown(1);
             gui->EndFrame();
         }
         double guiMilliseconds=std::chrono::duration<double,std::milli>(Clock::now()-guiStart).count();
@@ -195,9 +212,9 @@ int main(int argc,char** argv)
         }
     }
     if(!device->WaitIdle()) return 1;
-    if(selfTest && (clicks!=1 || std::strcmp(text,"a한")!=0 || textChanges<2 || capturedKeys!=1 || appPresses!=1 || value==0.35f || !largeMeshVerified || !mouseCaptureVerified || !outsideMouseVerified))
+    if(selfTest && (clicks!=1 || std::strcmp(text,"a한")!=0 || textChanges<2 || capturedKeys!=2 || appPresses!=1 || actionPresses!=1 || actionClicks!=1 || !sameFrameCaptureVerified || !heldCaptureVerified || value==0.35f || !largeMeshVerified || !mouseCaptureVerified || !outsideMouseVerified))
     {
-        std::fprintf(stderr,"FAIL clicks=%d text=%s changes=%d captured=%d app=%d value=%f\n",clicks,text,textChanges,capturedKeys,appPresses,value);return 1;
+        std::fprintf(stderr,"FAIL clicks=%d text=%s changes=%d captured=%d app=%d actions=%d/%d same_poll=%d held=%d value=%f\n",clicks,text,textChanges,capturedKeys,appPresses,actionPresses,actionClicks,sameFrameCaptureVerified,heldCaptureVerified,value);return 1;
     }
     if(selfTest)
     {
@@ -209,7 +226,7 @@ int main(int argc,char** argv)
         callback(h,GLFW_KEY_X,0,GLFW_PRESS,0);
         window.PollEvents();
         if(!window.GetInput().WasPressed(Platform::Key::X)) return 1;
-        std::puts("PASS mouse capture inside/outside; Window callbacks restored after Gui destruction.");
+        std::puts("PASS ActionMap keyboard capture; mouse capture inside/outside; Window callbacks restored after Gui destruction.");
     }
     std::sort(cpuTimes.begin(),cpuTimes.end());std::sort(frameTimes.begin(),frameTimes.end());std::sort(guiTimes.begin(),guiTimes.end());
     std::sort(submitTimes.begin(),submitTimes.end());

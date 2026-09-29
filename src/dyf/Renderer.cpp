@@ -19,6 +19,7 @@
 #include <exception>
 #include "ShaderLayout.h"
 #include "dyf/Platform/Profiler.h"
+#include "dyf/Platform/Window.h"
 #include <chrono>
 #include "dyf/Camera.h"
 #include "dyf/Scene.h"
@@ -462,6 +463,8 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
     {
         DY_PROFILE_CPU_ZONE_NAMED("Renderer::RenderScene");
         if(!ApplySettings())return false;
+        if(!selectedOutput && Platform::Window::ConsumeKeyPress(Platform::Key::F11,windowHandle))
+            config.profilerStartsExpanded = !config.profilerStartsExpanded;
         if(draws && draws->size() != scene.GetEntityCount()) return RendererFailure("Draw input count must match the scene.");
         if(draws) for(const auto& draw : *draws)
             if(draw.inlineConstants.size() != shaderSources.additionalConstantBytes)
