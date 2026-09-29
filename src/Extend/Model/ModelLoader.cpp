@@ -3,20 +3,20 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
-#include <iostream>
+#include "dyf/Platform/Log.h"
 #include <utility>
 
 namespace dyf
 {
 	bool ReportModelError(const std::string& path, const std::string& message)
 	{
-		std::cerr << path << ": " << message << std::endl;
+		Platform::Log::Write(Platform::LogLevel::Error, "Model", path + ": " + message, __FILE__, __LINE__);
 		return false;
 	}
 
 	void ReportModelWarning(const std::string& path, const std::string& message)
 	{
-		std::cerr << path << ": " << message << std::endl;
+		Platform::Log::Write(Platform::LogLevel::Warning, "Model", path + ": " + message, __FILE__, __LINE__);
 	}
 }
 
@@ -36,7 +36,7 @@ namespace dyf
 			|| lowerExtension == ".fbx";
 		if(!supportedExtension)
 		{
-			std::cerr << path << ": unsupported model file extension" << std::endl;
+			ReportModelError(path, "unsupported model file extension");
 			outModel = {};
 			return false;
 		}
@@ -45,14 +45,14 @@ namespace dyf
 		const uintmax_t sourceBytes = std::filesystem::file_size(path, fileSizeError);
 		if(fileSizeError)
 		{
-			std::cerr << path << ": failed to query model source file size" << std::endl;
+			ReportModelError(path, "failed to query model source file size");
 			outModel = {};
 			return false;
 		}
 		if(sourceBytes > options.maxSourceBytes)
 		{
-			std::cerr << path << ": model source size " << sourceBytes
-				<< " exceeds limit " << options.maxSourceBytes << std::endl;
+			ReportModelError(path, "model source size " + std::to_string(sourceBytes)
+                + " exceeds limit " + std::to_string(options.maxSourceBytes));
 			outModel = {};
 			return false;
 		}
@@ -63,7 +63,7 @@ namespace dyf
 			: LoadUfbxModel(path, loadedModel, options);
 		if(!loaded)
 		{
-			std::cerr << path << ": model load failed because the asset data is invalid" << std::endl;
+			ReportModelError(path, "model load failed because the asset data is invalid");
 			outModel = {};
 			return false;
 		}
