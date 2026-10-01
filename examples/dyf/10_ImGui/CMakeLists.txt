@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.20)
+project(DyEditor LANGUAGES CXX)
+
+get_filename_component(engine_default "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
+set(DY_ENGINE_SOURCE_DIR "${engine_default}" CACHE PATH "dy_engine source directory.")
+if(NOT TARGET dy_engine)
+    set(DY_EXTEND_IMGUI ON CACHE BOOL "" FORCE)
+    add_subdirectory("${DY_ENGINE_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/dy_engine" EXCLUDE_FROM_ALL)
+endif()
+
+add_executable(DyEditor main.cpp EditorScene.cpp)
+target_link_libraries(DyEditor PRIVATE dy_imgui glfw)
+target_compile_definitions(DyEditor PRIVATE GLFW_INCLUDE_NONE)
+if(MSVC)
+    target_link_options(DyEditor PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
+endif()

@@ -12,7 +12,6 @@ namespace dyf
 bool Renderer::PreparePostProcess(RHI::TextureHandle output)
 {
     using namespace RHI;
-    if(!output)return false;
     if(tonePipeline && toneColorFormat!=output->GetDesc().format)
     {device->DestroyPipeline(tonePipeline);tonePipeline=nullptr;}
     if(!tonePipeline)
@@ -53,7 +52,6 @@ bool Renderer::PreparePostProcess(RHI::TextureHandle output)
 bool Renderer::RecordToneMap(RHI::ICommandList& commands,RHI::TextureHandle output,float exposure)
 {
     using namespace RHI;
-    if(!tonePipeline || !hdrTarget || !output)return false;
     ResourceBinding image;image.binding=0;image.texture=hdrTarget;
     auto* set=device->CreateResourceSet({tonePipeline,&image,1});
     if(!set)return false;

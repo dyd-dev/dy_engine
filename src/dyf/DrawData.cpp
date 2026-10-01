@@ -414,11 +414,9 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
 	RHI::ICommandList& commands, const std::vector<RendererDrawDesc>* draws,
 	RHI::TimestampQueryHandle mainQuery, RHI::TextureHandle output)
 {
-	if(device == nullptr || pipeline == nullptr) return false;
 	std::vector<RHI::ResourceSetHandle> materialSets;
 	if(!CreateMaterialResourceSets(scene, commands, draws, materialSets)) return false;
 	auto* target = config.enableHdrRendering ? hdrTarget : output;
-	if(!target) { DestroyResourceSets(device, materialSets); return false; }
 	const auto viewProjection = camera.projection * camera.view;
 	if(mainQuery) { commands.ResetTimestamps(mainQuery, 0, 2); commands.WriteTimestamp(mainQuery, 0); }
 	commands.BeginDebugEvent("MainForward");

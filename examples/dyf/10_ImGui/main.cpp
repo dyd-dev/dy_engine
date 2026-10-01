@@ -1,6 +1,6 @@
 #include "EditorScene.h"
 #include "dyf/Camera.h"
-#include "dyf/ImGui.h"
+#include "dyf/Extends/ImGui/ImGui.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/Renderer.h"
 #include "dyf/RHI.h"
@@ -451,7 +451,9 @@ int main(int argc,char** argv)
         RendererConfig config;config.clearColor={.025f,.027f,.032f,1};config.enableProfilerHud=false;config.vsync=!selfTest;
         config.allowReadback=selfTest||!capture.empty();config.lighting.shadows=true;config.lighting.ambientIntensity=.12f;
         auto renderer=Renderer::Create(window.GetHandle(),config);if(!renderer)return 1;
-        const auto ini=(project/"editor-layout.ini").u8string(); // The context retains this pointer until Gui destruction.
+        const auto configDirectory=project/"config";
+        fs::create_directories(configDirectory);
+        const auto ini=(configDirectory/"editor-layout.ini").u8string(); // The context retains this pointer until Gui destruction.
         auto& device=renderer->GetDevice();auto gui=Gui::Create(window,device);if(!gui)return 1;
         ImGui::GetIO().ConfigFlags|=ImGuiConfigFlags_DockingEnable|ImGuiConfigFlags_NavEnableKeyboard;
         ImGui::GetIO().IniFilename=selfTest?nullptr:ini.c_str();

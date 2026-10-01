@@ -474,7 +474,6 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
         RHI::IDevice* nativeDevice = device;
         if(!selectedOutput && !nativeDevice->BeginFrame()){if(nativeDevice->IsLost())return RendererFailure("RHI device was lost.");if(readback)*readback={};return true;}
         auto* output=selectedOutput ? selectedOutput : nativeDevice->GetBackBuffer();
-        if(!output) return RendererFailure("Scene output is unavailable.");
         const auto after=selectedOutput ? RHI::ResourceState::ShaderResource : RHI::ResourceState::Present;
         Camera defaultCamera;
         const auto& targetDesc = output->GetDesc();
@@ -576,14 +575,17 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
             .SetExecute([&](RHI::ICommandList* commands) {
                 const double cpuMs = std::chrono::duration<double,std::milli>(
                     std::chrono::steady_clock::now()-cpuStart).count();
-                if(!selectedOutput) RecordProfilerFrame(cpuMs, scene.GetEntityCount());
-                if(config.enableProfilerHud && !selectedOutput)
+                if(!selectedOutput)
                 {
-                    commands->BeginDebugEvent("Profiler HUD");
-                    auto hud = BuildProfilerOverlay(output->GetDesc().width, output->GetDesc().height,
-                        config.profilerStartsExpanded);
-                    require(RecordCanvas(hud, *commands, output, true, true));
-                    commands->EndDebugEvent();
+                    RecordProfilerFrame(cpuMs, scene.GetEntityCount());
+                    if(config.enableProfilerHud)
+                    {
+                        commands->BeginDebugEvent("Profiler HUD");
+                        auto hud = BuildProfilerOverlay(output->GetDesc().width, output->GetDesc().height,
+                            config.profilerStartsExpanded);
+                        require(RecordCanvas(hud, *commands, output, true, true));
+                        commands->EndDebugEvent();
+                    }
                 }
                 if(mainQuery) commands->WriteTimestamp(mainQuery, 1);
             });
@@ -616,8 +618,11 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
             ? RHI::ResourceState::ShaderResource
             : RHI::ResourceState::Undefined;
         if(readback && !CaptureFrame(*readback))return false;
-        if(!selectedOutput && !nativeDevice->Present()) return RendererFailure("Scene presentation failed.");
-        if(!selectedOutput) DY_PROFILE_FRAME_MARK();
+        if(!selectedOutput)
+        {
+            if(!nativeDevice->Present()) return RendererFailure("Scene presentation failed.");
+            DY_PROFILE_FRAME_MARK();
+        }
         return true;
     }
     catch(const std::exception& error)
