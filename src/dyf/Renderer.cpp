@@ -412,7 +412,6 @@ bool Renderer::InitializeMesh(RHI::TextureHandle output,bool compositeAlpha)
 	if(vertexShader == nullptr || fragmentShader == nullptr ||
 		(shadows && shadowVertexShader == nullptr)) return false;
     nativeDevice->DestroyPipeline(pipeline);pipeline=nullptr;
-    nativeDevice->DestroyPipeline(shadowPipeline);shadowPipeline=nullptr;
 	if(!BuildPipelineStates(nativeDevice,colorFormat,compositeAlpha)) return false;
     meshColorFormat=colorFormat;
     meshCompositeAlpha=compositeAlpha;
@@ -435,8 +434,6 @@ void Renderer::Shutdown()
     lightingBuffer=shadowMatrixBuffer=nullptr;
     for(auto* value:{pipeline,shadowPipeline,canvasPipeline,tonePipeline})if(value)device->DestroyPipeline(value);
     pipeline=shadowPipeline=canvasPipeline=tonePipeline=nullptr;
-    meshColorFormat=toneColorFormat=RHI::Format::Unknown;
-    meshCompositeAlpha=false;
     for(auto* shader:{vertexShader,fragmentShader,shadowVertexShader,canvasVertexShader,canvasFragmentShader,toneVertexShader,toneFragmentShader})
         if(shader)device->DestroyShader(shader);
     vertexShader=fragmentShader=shadowVertexShader=canvasVertexShader=canvasFragmentShader=toneVertexShader=toneFragmentShader=nullptr;
@@ -571,12 +568,11 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
                 .SetExecute([&](RHI::ICommandList* commands) {
                     require(RecordCanvas(*overlay, *commands, output, true, true));
                 });
-        graph.AddPass("Profiler HUD").Write(backBuffer, State::RenderTarget)
-            .SetExecute([&](RHI::ICommandList* commands) {
-                const double cpuMs = std::chrono::duration<double,std::milli>(
-                    std::chrono::steady_clock::now()-cpuStart).count();
-                if(!selectedOutput)
-                {
+        if(!selectedOutput)
+            graph.AddPass("Profiler HUD").Write(backBuffer, State::RenderTarget)
+                .SetExecute([&](RHI::ICommandList* commands) {
+                    const double cpuMs = std::chrono::duration<double,std::milli>(
+                        std::chrono::steady_clock::now()-cpuStart).count();
                     RecordProfilerFrame(cpuMs, scene.GetEntityCount());
                     if(config.enableProfilerHud)
                     {
@@ -586,9 +582,8 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
                         require(RecordCanvas(hud, *commands, output, true, true));
                         commands->EndDebugEvent();
                     }
-                }
-                if(mainQuery) commands->WriteTimestamp(mainQuery, 1);
-            });
+                    if(mainQuery) commands->WriteTimestamp(mainQuery, 1);
+                });
         if(!graph.Compile()) return RendererFailure("Scene RenderGraph compilation failed.");
         struct FrameCommands
         {
@@ -730,7 +725,7 @@ bool Renderer::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorFormat,
     pipeline = device->CreateGraphicsPipeline(desc);
 	if(pipeline == nullptr) return false;
 
-	if(!config.lighting.enabled || !config.lighting.shadows) return true;
+	if(!config.lighting.enabled || !config.lighting.shadows || shadowPipeline) return true;
 	if(shadowVertexShader == nullptr) return false;
 
 	std::vector<RHI::ResourceBindingLayout> shadowBindings = {{
@@ -833,14 +828,13 @@ bool Renderer::CreateDefaultMaterialTextures(RHI::IDevice* device)
 bool Renderer::EnsureDepthStencilTarget(RHI::IDevice* device,RHI::TextureHandle output)
 {
 	if(device == nullptr) return false;
-	RHI::TextureHandle backBuffer = output ? output : device->GetBackBuffer();
-	if(backBuffer == nullptr || backBuffer->GetDesc().width == 0u || backBuffer->GetDesc().height == 0u)
+	if(output == nullptr || output->GetDesc().width == 0u || output->GetDesc().height == 0u)
 		return false;
 
 	const bool recreate =
 		depthStencilTarget == nullptr ||
-		depthStencilTarget->GetDesc().width != backBuffer->GetDesc().width ||
-		depthStencilTarget->GetDesc().height != backBuffer->GetDesc().height;
+		depthStencilTarget->GetDesc().width != output->GetDesc().width ||
+		depthStencilTarget->GetDesc().height != output->GetDesc().height;
 
 	if(!recreate) return true;
 
@@ -852,8 +846,8 @@ bool Renderer::EnsureDepthStencilTarget(RHI::IDevice* device,RHI::TextureHandle 
 	}
 
 	RHI::TextureDesc depthDesc = {};
-	depthDesc.width = backBuffer->GetDesc().width;
-	depthDesc.height = backBuffer->GetDesc().height;
+	depthDesc.width = output->GetDesc().width;
+	depthDesc.height = output->GetDesc().height;
 	depthDesc.depthOrArraySize = 1;
 	depthDesc.mipLevels = 1;
 	depthDesc.format = RHI::Format::D32_FLOAT;

@@ -149,7 +149,7 @@ private:
         RHI::TextureHandle output = nullptr, RHI::ResourceState before = RHI::ResourceState::Present);
     bool BuildPipelineStates(RHI::IDevice*,RHI::Format colorFormat,bool compositeAlpha);
     bool CreateDefaultMaterialTextures(RHI::IDevice*);
-    bool EnsureDepthStencilTarget(RHI::IDevice*,RHI::TextureHandle output = nullptr);
+    bool EnsureDepthStencilTarget(RHI::IDevice*,RHI::TextureHandle output);
     bool EnsureShadowDepthTarget(RHI::IDevice*,uint32_t columns,uint32_t rows,uint32_t resolution);
     void UpdateMaterialStates(const Scene&);
     bool UpdateLightingBuffer(const Scene&,const Camera&,RHI::IDevice*,RHI::ICommandList&);
