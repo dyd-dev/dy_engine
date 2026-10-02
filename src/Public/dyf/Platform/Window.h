@@ -43,6 +43,8 @@ namespace dyf::Platform
 		[[nodiscard]] static bool ConsumeKeyPress(Key key, const void* nativeWindow);
 
 		void* GetHandle() const;
+		// GLFW backend integration only. GetHandle remains the RHI native-window handle.
+		[[nodiscard]] GLFWwindow* GetGlfwHandle() const { return m_window; }
 
 	private:
 		void ResetCursorDelta();

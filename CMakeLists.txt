@@ -45,6 +45,7 @@ target_include_directories(${PROJECT_NAME} BEFORE PUBLIC "${PROJECT_SOURCE_DIR}/
 target_include_directories(${PROJECT_NAME} PRIVATE "${PROJECT_SOURCE_DIR}/src")
 
 option(DY_EXTEND_MODEL "Build the optional Model extension." OFF)
+option(DY_EXTEND_IMGUI "Build the optional Dear ImGui extension." OFF)
 
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     include(CiChecks)
@@ -57,6 +58,9 @@ include(ShaderAssets)
 
 if(DY_EXTEND_MODEL)
 	add_subdirectory(src/Extend/Model)
+endif()
+if(DY_EXTEND_IMGUI)
+	add_subdirectory(src/Extend/ImGui)
 endif()
 
 # Only add the executable if this is the main project being built (not when included as a subdirectory in another project)

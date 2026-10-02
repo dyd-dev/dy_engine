@@ -50,8 +50,9 @@ Window::Window(unsigned int width, unsigned int height, const char* title)
 		std::fprintf(stderr, "dyf: failed to create GLFW window.\n");
 		return;
 	}
+    try { windows.push_back(this); }
+    catch(...) { glfwDestroyWindow(m_window); if(windowCount == 0) glfwTerminate(); throw; }
     ++windowCount;
-    windows.push_back(this);
     glfwSetWindowUserPointer(m_window, this);
     (void)RenderDocCapture::Initialize();
 	glfwSetKeyCallback(m_window, [](GLFWwindow* handle, int key, int scan, int action, int mods)
