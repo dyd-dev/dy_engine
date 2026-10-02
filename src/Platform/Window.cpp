@@ -1,8 +1,10 @@
 #include "dyf/Platform/Window.h"
 #include "dyf/Platform/RenderDocCapture.h"
 #include <cstdio>
-#include <limits>
 #include <algorithm>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
 #include <vector>
 #include <GLFW/glfw3.h>
 // Expose native window handles for RHI Device initialization
@@ -15,7 +17,18 @@
 
 using namespace dyf::Platform;
 
-namespace { unsigned int windowCount = 0; std::vector<Window*> windows; }
+namespace
+{
+	unsigned int windowCount = 0;
+	std::vector<Window*> windows;
+
+	void ValidateSize(unsigned int width, unsigned int height)
+	{
+		const auto maxSize = static_cast<unsigned int>((std::numeric_limits<int>::max)());
+		if(width == 0 || height == 0 || width > maxSize || height > maxSize)
+			throw std::invalid_argument("Window dimensions must be positive and fit in int.");
+	}
+}
 
 Window::Window(unsigned int width, unsigned int height)
 	: Window(width, height, "New Window") {}
@@ -41,12 +54,47 @@ Window::Window(unsigned int width, unsigned int height, const char* title)
     windows.push_back(this);
     glfwSetWindowUserPointer(m_window, this);
     (void)RenderDocCapture::Initialize();
-    glfwSetKeyCallback(m_window, [](GLFWwindow* window, int key, int, int action, int) {
+	glfwSetKeyCallback(m_window, [](GLFWwindow* handle, int key, int scan, int action, int mods)
+	{
+		auto& input = static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input;
+		InputEvent event; event.type = InputEventType::Key; event.code = key; event.scancode = scan;
+        event.action = static_cast<InputAction>(action); event.modifiers = mods;
+        input.OnEvent(event);
         if(key == GLFW_KEY_F11 && action == GLFW_PRESS)
-            static_cast<Window*>(glfwGetWindowUserPointer(window))->m_profilerToggle = true;
-        if(key == GLFW_KEY_F12 && action == GLFW_PRESS)
-            (void)RenderDocCapture::TriggerNextFrame();
-    });
+            static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_profilerToggle = true;
+        if(key == GLFW_KEY_F12 && action == GLFW_PRESS) (void)RenderDocCapture::TriggerNextFrame();
+	});
+	glfwSetMouseButtonCallback(m_window, [](GLFWwindow* handle, int button, int action, int mods)
+	{
+		auto& input = static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input;
+		InputEvent event; event.type = InputEventType::MouseButton; event.code = button;
+		event.action = static_cast<InputAction>(action); event.modifiers = mods;
+		input.OnEvent(event);
+	});
+	glfwSetCursorPosCallback(m_window, [](GLFWwindow* handle, double x, double y)
+	{
+		InputEvent event; event.type = InputEventType::Cursor; event.x = x; event.y = y;
+		static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input.OnEvent(event);
+	});
+	glfwSetScrollCallback(m_window, [](GLFWwindow* handle, double x, double y)
+	{
+		InputEvent event; event.type = InputEventType::Scroll; event.x = x; event.y = y;
+		static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input.OnEvent(event);
+	});
+	glfwSetCharCallback(m_window, [](GLFWwindow* handle, unsigned int codepoint)
+	{
+		InputEvent event; event.type = InputEventType::Text; event.codepoint = codepoint;
+		static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input.OnEvent(event);
+	});
+	glfwSetWindowFocusCallback(m_window, [](GLFWwindow* handle, int focused)
+	{
+		InputEvent event; event.type = InputEventType::Focus; event.focused = focused != 0;
+		static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input.OnEvent(event);
+	});
+	m_input.m_pending.focused = HasFocus();
+	glfwGetCursorPos(m_window, &m_input.m_pending.position.x, &m_input.m_pending.position.y);
+	m_input.m_hasCursorPosition = true;
+	m_input.PublishFrame();
 }
 
 Window::~Window()
@@ -61,6 +109,104 @@ Window::~Window()
 
 bool Window::IsRunning() const { return m_window && !glfwWindowShouldClose(m_window); }
 
+void Window::RequestClose() const { if(m_window) glfwSetWindowShouldClose(m_window, GLFW_TRUE); }
+
+void Window::PollEvents()
+{
+	if(windows.empty()) return;
+	glfwPollEvents();
+	for(auto* window : windows) window->m_input.PublishFrame();
+}
+
+void Window::WaitEvents(double timeoutSeconds)
+{
+	if(!std::isfinite(timeoutSeconds) || timeoutSeconds <= 0)
+		throw std::invalid_argument("Event wait timeout must be finite and positive.");
+	if(!windows.empty()) glfwWaitEventsTimeout(timeoutSeconds);
+}
+
+void Window::Resize(unsigned int width, unsigned int height) const
+{
+	ValidateSize(width, height);
+	if(m_window) glfwSetWindowSize(m_window, static_cast<int>(width), static_cast<int>(height));
+}
+
+WindowSize Window::GetSize() const
+{
+	WindowSize size;
+	if(m_window) glfwGetWindowSize(m_window, &size.width, &size.height);
+	return size;
+}
+
+WindowSize Window::GetFramebufferSize() const
+{
+	WindowSize size;
+	if(m_window) glfwGetFramebufferSize(m_window, &size.width, &size.height);
+	return size;
+}
+
+ContentScale Window::GetContentScale() const
+{
+	ContentScale scale;
+	if(m_window) glfwGetWindowContentScale(m_window, &scale.x, &scale.y);
+	return scale;
+}
+
+bool Window::HasFocus() const { return m_window && glfwGetWindowAttrib(m_window, GLFW_FOCUSED) == GLFW_TRUE; }
+bool Window::IsMinimized() const { return m_window && glfwGetWindowAttrib(m_window, GLFW_ICONIFIED) == GLFW_TRUE; }
+
+void Window::SetCursorMode(CursorMode mode)
+{
+    if(!m_window) return;
+	int nativeMode;
+	switch(mode)
+	{
+	case CursorMode::Normal: nativeMode = GLFW_CURSOR_NORMAL; break;
+	case CursorMode::Hidden: nativeMode = GLFW_CURSOR_HIDDEN; break;
+	case CursorMode::Locked: nativeMode = GLFW_CURSOR_DISABLED; break;
+	default: throw std::invalid_argument("Unknown cursor mode.");
+	}
+	if(glfwGetInputMode(m_window, GLFW_CURSOR) == nativeMode) return;
+	glfwSetInputMode(m_window, GLFW_CURSOR, nativeMode);
+	ResetCursorDelta();
+}
+
+void Window::ResetCursorDelta()
+{
+	glfwGetCursorPos(m_window, &m_input.m_pending.position.x, &m_input.m_pending.position.y);
+	m_input.m_hasCursorPosition = true;
+	m_input.m_pending.delta = {};
+	m_input.m_frame.delta = {};
+}
+
+CursorMode Window::GetCursorMode() const
+{
+    if(!m_window) return CursorMode::Normal;
+	switch(glfwGetInputMode(m_window, GLFW_CURSOR))
+	{
+	case GLFW_CURSOR_DISABLED: return CursorMode::Locked;
+	case GLFW_CURSOR_HIDDEN: return CursorMode::Hidden;
+	default: return CursorMode::Normal;
+	}
+}
+
+bool Window::IsRawMouseMotionSupported() const { return glfwRawMouseMotionSupported() == GLFW_TRUE; }
+
+bool Window::SetRawMouseMotion(bool enabled)
+{
+    if(!m_window) return false;
+	if(!IsRawMouseMotionSupported()) return !enabled;
+	if(IsRawMouseMotionEnabled() == enabled) return true;
+	glfwSetInputMode(m_window, GLFW_RAW_MOUSE_MOTION, enabled ? GLFW_TRUE : GLFW_FALSE);
+	ResetCursorDelta();
+	return IsRawMouseMotionEnabled() == enabled;
+}
+
+bool Window::IsRawMouseMotionEnabled() const
+{
+	return m_window && glfwGetInputMode(m_window, GLFW_RAW_MOUSE_MOTION) == GLFW_TRUE;
+}
+
 bool Window::ConsumeKeyPress(Key key, const void* nativeWindow)
 {
     if(key != Key::F11) return false;
@@ -69,8 +215,6 @@ bool Window::ConsumeKeyPress(Key key, const void* nativeWindow)
         { window->m_profilerToggle = false; return true; }
     return false;
 }
-
-void Window::PollEvents() const { if(m_window) glfwPollEvents(); }
 
 void* Window::GetHandle() const
 {
