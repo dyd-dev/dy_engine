@@ -117,11 +117,11 @@ template<typename T> std::vector<T>& Scene::Lights()
     else return m_discAreaLights;
 }
 template<typename T> LightHandle<T>::operator bool() const
-{const auto data=m_scene.lock();return data && m_index<data->Lights<T>().size();}
+{const auto data=m_scene.lock();return data && m_index<data->template Lights<T>().size();}
 template<typename T> T LightHandle<T>::Get() const
-{const auto data=m_scene.lock();if(!data || m_index>=data->Lights<T>().size()){InvalidHandle("light");return {};}return data->Lights<T>()[m_index];}
+{const auto data=m_scene.lock();if(!data || m_index>=data->template Lights<T>().size()){InvalidHandle("light");return {};}return data->template Lights<T>()[m_index];}
 template<typename T> bool LightHandle<T>::Set(const T& value)
-{const auto data=m_scene.lock();if(!data || m_index>=data->Lights<T>().size())return InvalidHandle("light");data->Lights<T>()[m_index]=value;return true;}
+{const auto data=m_scene.lock();if(!data || m_index>=data->template Lights<T>().size())return InvalidHandle("light");data->template Lights<T>()[m_index]=value;return true;}
 
 LightHandle<DirectionalLight> Scene::Add(const DirectionalLight& light)
 {

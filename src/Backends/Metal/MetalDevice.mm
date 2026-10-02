@@ -346,6 +346,7 @@ bool MetalDevice::SupportsNative(RHI::Feature feature) const
     switch(feature)
     {
     case RHI::Feature::Rasterization:
+    case RHI::Feature::Tessellation:
     case RHI::Feature::DescriptorIndexing:
     case RHI::Feature::FractionalDepthBias:
     case RHI::Feature::Wireframe:
@@ -395,6 +396,8 @@ uint64_t MetalDevice::GetLimitNative(RHI::Limit limit) const
     case RHI::Limit::SamplerAnisotropy:
         // MTLSamplerDescriptor.maxAnisotropy의 명시 범위는 1~16이다.
         return 16;
+    case RHI::Limit::TessellationPatchControlPoints:
+        return 32;
     default: return 0;
     }
 }
@@ -848,6 +851,8 @@ void MetalDevice::DestroySwapchainNative()
 				}) != m_impl->liveShaders.end();
 		};
 		if(!ownsShader(desc.vertexShader) ||
+			(desc.hullShader != nullptr && !ownsShader(desc.hullShader)) ||
+			(desc.domainShader != nullptr && !ownsShader(desc.domainShader)) ||
 			(desc.fragmentShader != nullptr && !ownsShader(desc.fragmentShader)))
 		{
 			return nullptr;
@@ -855,6 +860,7 @@ void MetalDevice::DestroySwapchainNative()
         auto pipeline = std::unique_ptr<MetalPipeline, MetalObjectDeleter>(
             new MetalPipeline(desc, (__bridge void*)m_impl->device));
 		if(pipeline->GetNativePipeline() == nullptr ||
+			(pipeline->IsTessellated() && pipeline->GetNativeHullPipeline() == nullptr) ||
 			(desc.depthStencil.format != RHI::Format::Unknown &&
 				pipeline->GetNativeDepthStencil() == nullptr)) return nullptr;
 		MetalPipeline* result = pipeline.get();

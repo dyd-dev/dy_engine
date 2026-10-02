@@ -19,6 +19,8 @@ namespace dyf::Backends
 		{
 			VkShaderStageFlags result = 0;
 			if ((stages & dyf::RHI::ShaderStageFlags::Vertex) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_VERTEX_BIT;
+			if ((stages & dyf::RHI::ShaderStageFlags::Hull) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+			if ((stages & dyf::RHI::ShaderStageFlags::Domain) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
 			if ((stages & dyf::RHI::ShaderStageFlags::Fragment) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_FRAGMENT_BIT;
             if((stages & RHI::ShaderStageFlags::Compute)!=RHI::ShaderStageFlags::None)result|=VK_SHADER_STAGE_COMPUTE_BIT;
 			return result;
@@ -137,6 +139,7 @@ namespace dyf::Backends
 			case dyf::RHI::PrimitiveTopology::LineList: return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
 			case dyf::RHI::PrimitiveTopology::TriangleList: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 			case dyf::RHI::PrimitiveTopology::TriangleStrip: return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP;
+			case dyf::RHI::PrimitiveTopology::PatchList: return VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
 			default: throw std::runtime_error("Vulkan primitive topology is undefined");
 			}
 		}
@@ -435,8 +438,12 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& context,const RHI::ComputePi
 			throw std::runtime_error("Vulkan graphics pipeline arrays are missing");
 		}
 		const VulkanShader* vertexShader = dynamic_cast<const VulkanShader*>(desc.vertexShader);
+		const VulkanShader* hullShader = dynamic_cast<const VulkanShader*>(desc.hullShader);
+		const VulkanShader* domainShader = dynamic_cast<const VulkanShader*>(desc.domainShader);
 		const VulkanShader* fragmentShader = dynamic_cast<const VulkanShader*>(desc.fragmentShader);
 		if (vertexShader == nullptr || vertexShader->GetStage() != dyf::RHI::ShaderStage::Vertex ||
+			(desc.hullShader != nullptr && (hullShader == nullptr || hullShader->GetStage() != dyf::RHI::ShaderStage::Hull)) ||
+			(desc.domainShader != nullptr && (domainShader == nullptr || domainShader->GetStage() != dyf::RHI::ShaderStage::Domain)) ||
 			(desc.fragmentShader != nullptr && (fragmentShader == nullptr || fragmentShader->GetStage() != dyf::RHI::ShaderStage::Fragment)))
 		{
 			throw std::runtime_error("Invalid Vulkan graphics shaders");
@@ -454,19 +461,29 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& context,const RHI::ComputePi
 		}
 		m_depthFormat = desc.depthStencil.format;
 
-		std::array<VkPipelineShaderStageCreateInfo, 2> shaderStages{};
+		std::array<VkPipelineShaderStageCreateInfo, 4> shaderStages{};
 		shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
 		shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
 		shaderStages[0].module = vertexShader->GetModule();
 		shaderStages[0].pName = vertexShader->GetEntryPoint();
 		uint32_t shaderStageCount = 1;
+		if (hullShader != nullptr)
+		{
+			shaderStages[shaderStageCount].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			shaderStages[shaderStageCount].stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+			shaderStages[shaderStageCount].module = hullShader->GetModule();
+			shaderStages[shaderStageCount++].pName = hullShader->GetEntryPoint();
+			shaderStages[shaderStageCount].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			shaderStages[shaderStageCount].stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+			shaderStages[shaderStageCount].module = domainShader->GetModule();
+			shaderStages[shaderStageCount++].pName = domainShader->GetEntryPoint();
+		}
 		if (fragmentShader != nullptr)
 		{
-			shaderStages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-			shaderStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-			shaderStages[1].module = fragmentShader->GetModule();
-			shaderStages[1].pName = fragmentShader->GetEntryPoint();
-			shaderStageCount = 2;
+			shaderStages[shaderStageCount].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			shaderStages[shaderStageCount].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+			shaderStages[shaderStageCount].module = fragmentShader->GetModule();
+			shaderStages[shaderStageCount++].pName = fragmentShader->GetEntryPoint();
 		}
 
 		std::vector<VkVertexInputBindingDescription> vertexBindings;
@@ -515,6 +532,10 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& context,const RHI::ComputePi
 		VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
 		inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
 		inputAssembly.topology = ToTopology(desc.topology);
+
+		VkPipelineTessellationStateCreateInfo tessellation{};
+		tessellation.sType = VK_STRUCTURE_TYPE_PIPELINE_TESSELLATION_STATE_CREATE_INFO;
+		tessellation.patchControlPoints = desc.patchControlPoints;
 
 		VkPipelineViewportStateCreateInfo viewportState{};
 		viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -609,6 +630,7 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& context,const RHI::ComputePi
 		info.pStages = shaderStages.data();
 		info.pVertexInputState = &vertexInput;
 		info.pInputAssemblyState = &inputAssembly;
+		info.pTessellationState = hullShader == nullptr ? nullptr : &tessellation;
 		info.pViewportState = &viewportState;
 		info.pRasterizationState = &raster;
 		info.pMultisampleState = &multisample;

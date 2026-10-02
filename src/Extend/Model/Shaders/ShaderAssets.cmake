@@ -52,10 +52,7 @@ function(dy_embed_model_shader source stage name)
 endfunction()
 
 if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
-    find_program(DY_MODEL_XCRUN NAMES xcrun)
-    if(NOT DY_MODEL_XCRUN)
-        message(FATAL_ERROR "xcrun is required to build the Model shaders")
-    endif()
+    include(MetalToolchain)
     set(model_air_files)
     foreach(enable_shadows IN ITEMS 1 0)
         if(enable_shadows)
@@ -68,7 +65,7 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
         add_custom_command(
             OUTPUT "${air}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_MODEL_SHADER_GENERATED_DIR}"
-            COMMAND "${DY_MODEL_XCRUN}" -sdk macosx metal -I "${DY_MODEL_SHADER_SOURCE_DIR}"
+            COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal -I "${DY_MODEL_SHADER_SOURCE_DIR}"
                 "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}" "-DRENDERER_VERTEX_ENTRY=${vertex_entry}"
                 -c "${source}" -o "${air}"
             DEPENDS "${source}" ${DY_MODEL_SHADER_HELPERS}
@@ -80,7 +77,7 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
     add_custom_command(
         OUTPUT "${air}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_MODEL_SHADER_GENERATED_DIR}"
-        COMMAND "${DY_MODEL_XCRUN}" -sdk macosx metal -I "${DY_MODEL_SHADER_SOURCE_DIR}"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal -I "${DY_MODEL_SHADER_SOURCE_DIR}"
             -c "${source}" -o "${air}"
         DEPENDS "${source}" ${DY_MODEL_SHADER_HELPERS}
         VERBATIM)
@@ -89,7 +86,7 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
     set(header "${DY_MODEL_SHADER_GENERATED_DIR}/ModelMetalLibrary.h")
     add_custom_command(
         OUTPUT "${header}"
-        COMMAND "${DY_MODEL_XCRUN}" -sdk macosx metallib ${model_air_files} -o "${library}"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metallib ${model_air_files} -o "${library}"
         COMMAND "${CMAKE_COMMAND}" "-DINPUT=${library}" "-DOUTPUT=${header}" -DSYMBOL=kModelMetalLibrary
             -P "${DY_MODEL_SHADER_EMBED_SCRIPT}"
         DEPENDS ${model_air_files} "${DY_MODEL_SHADER_EMBED_SCRIPT}"

@@ -22,7 +22,11 @@ FetchContent_Declare(
     GIT_REPOSITORY "https://github.com/spnda/fastgltf.git"
     GIT_TAG "v0.9.0" # 최신 버전
 )
+# fastgltf v0.9.0 is validated with its pinned simdjson 3.12.3. Do not let a
+# host package manager silently substitute a newer, incompatible header.
+set(CMAKE_DISABLE_FIND_PACKAGE_simdjson ON)
 FetchContent_MakeAvailable(fastgltf)
+unset(CMAKE_DISABLE_FIND_PACKAGE_simdjson)
 target_link_libraries(dy_extend_model PRIVATE fastgltf::fastgltf)
 
 # ufbx 자동 다운로드 설정

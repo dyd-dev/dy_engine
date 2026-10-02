@@ -43,7 +43,7 @@ vertex float4 modelShadowVertexShader(
     const device SkinInfluence* skinInfluences [[buffer(RENDERER_BINDING_SKIN_INFLUENCES)]],
     const device SkinJointMatrices* skinPalette [[buffer(RENDERER_BINDING_SKIN_PALETTE)]],
     constant DrawConstants& drawConstants [[buffer(RENDERER_BINDING_INLINE_CONSTANTS)]],
-    constant ShadowMatrix& shadowMatrix [[buffer(RENDERER_BINDING_SHADOW_MATRIX)]]) [[position]]
+    constant ShadowMatrix& shadowMatrix [[buffer(RENDERER_BINDING_SHADOW_MATRIX)]])
 {
     float4x4 skin, skinNormal;
     LoadSkinning(skinInfluences, skinPalette, vertexId, drawConstants.influenceOffset, drawConstants.paletteOffset, skin, skinNormal);

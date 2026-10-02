@@ -42,7 +42,7 @@ struct ShadowVertex
 vertex float4 shadowVertexShader(
     ShadowVertex input [[stage_in]],
     constant DrawConstants& drawConstants [[buffer(RENDERER_BINDING_INLINE_CONSTANTS)]],
-    constant ShadowMatrix& shadowMatrix [[buffer(RENDERER_BINDING_SHADOW_MATRIX)]]) [[position]]
+    constant ShadowMatrix& shadowMatrix [[buffer(RENDERER_BINDING_SHADOW_MATRIX)]])
 {
     return shadowMatrix.lightViewProjectionMatrix[drawConstants.padding2] * drawConstants.modelMatrix * float4(input.position, 1.0f);
 }

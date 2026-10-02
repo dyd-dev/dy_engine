@@ -13,7 +13,9 @@ namespace dyf::RHI
 		Unknown,
 		Vertex,
 		Fragment,
-        Compute
+		Compute,
+		Hull,
+		Domain
 	};
 
 	struct ShaderDesc

@@ -163,8 +163,9 @@ namespace dyf::RHI
 
     [[nodiscard]] inline bool IsValidStageFlags(RHI::ShaderStageFlags stages)
     {
-    	constexpr auto all = RHI::ShaderStageFlags::Vertex |
-    		RHI::ShaderStageFlags::Fragment | RHI::ShaderStageFlags::Compute;
+		constexpr auto all = RHI::ShaderStageFlags::Vertex |
+			RHI::ShaderStageFlags::Hull | RHI::ShaderStageFlags::Domain |
+			RHI::ShaderStageFlags::Fragment | RHI::ShaderStageFlags::Compute;
     	return stages != RHI::ShaderStageFlags::None &&
     		(stages & all) == stages;
     }
@@ -243,7 +244,7 @@ namespace dyf::RHI
     [[nodiscard]] inline bool ValidateGraphicsPipelineDesc(
     	const RHI::GraphicsPipelineDesc& desc)
     {
-        if ((desc.layout.inlineConstantStages & ShaderStageFlags::Compute) != ShaderStageFlags::None)
+		if ((desc.layout.inlineConstantStages & ShaderStageFlags::Compute) != ShaderStageFlags::None)
             return false;
         if (desc.layout.bindings)
             for (uint32_t i = 0; i < desc.layout.bindingCount; ++i)
@@ -256,18 +257,39 @@ namespace dyf::RHI
     		return false;
     	}
 
-    	auto* vertexShader = dynamic_cast<RHI::Shader*>(desc.vertexShader);
-    	if(vertexShader == nullptr || vertexShader->GetStage() != RHI::ShaderStage::Vertex ||
-    		(desc.topology == RHI::PrimitiveTopology::Undefined || desc.topology > RHI::PrimitiveTopology::TriangleStrip) ||
-    		(desc.raster.fillMode == RHI::FillMode::Undefined || desc.raster.fillMode > RHI::FillMode::Wireframe) ||
+		auto* vertexShader = dynamic_cast<RHI::Shader*>(desc.vertexShader);
+		auto* hullShader = dynamic_cast<RHI::Shader*>(desc.hullShader);
+		auto* domainShader = dynamic_cast<RHI::Shader*>(desc.domainShader);
+		const bool tessellated = desc.hullShader != nullptr || desc.domainShader != nullptr;
+		if(vertexShader == nullptr || vertexShader->GetStage() != RHI::ShaderStage::Vertex ||
+			(desc.topology == RHI::PrimitiveTopology::Undefined || desc.topology > RHI::PrimitiveTopology::PatchList) ||
+			(desc.raster.fillMode == RHI::FillMode::Undefined || desc.raster.fillMode > RHI::FillMode::Wireframe) ||
     		(desc.raster.cullMode == RHI::CullMode::Undefined || desc.raster.cullMode > RHI::CullMode::Back) ||
     		(desc.raster.frontFace == RHI::FrontFace::Undefined || desc.raster.frontFace > RHI::FrontFace::Clockwise) ||
     		!std::isfinite(desc.raster.depthBiasConstant) ||
     		!std::isfinite(desc.raster.depthBiasSlope) ||
     		!std::isfinite(desc.raster.depthBiasClamp))
     	{
-    		return false;
-    	}
+			return false;
+		}
+		if(tessellated)
+		{
+			if(hullShader == nullptr || hullShader->GetStage() != RHI::ShaderStage::Hull ||
+				domainShader == nullptr || domainShader->GetStage() != RHI::ShaderStage::Domain ||
+				desc.topology != RHI::PrimitiveTopology::PatchList || desc.patchControlPoints == 0 ||
+				desc.tessellation.domain > RHI::TessellationDomain::Quad ||
+				desc.tessellation.partitioning > RHI::TessellationPartitioning::PowerOfTwo ||
+				desc.tessellation.outputWinding < RHI::FrontFace::CounterClockwise ||
+				desc.tessellation.outputWinding > RHI::FrontFace::Clockwise ||
+				desc.tessellation.maxFactor == 0 || desc.tessellation.maxFactor > 64)
+			{
+				return false;
+			}
+		}
+		else if(desc.topology == RHI::PrimitiveTopology::PatchList || desc.patchControlPoints != 0)
+		{
+			return false;
+		}
 
     	if(desc.fragmentShader != nullptr)
     	{

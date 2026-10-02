@@ -464,6 +464,7 @@ bool D3D12Device::SupportsNative(RHI::Feature feature) const
     switch(feature)
     {
     case RHI::Feature::Rasterization:
+    case RHI::Feature::Tessellation:
     case RHI::Feature::DescriptorIndexing:
     case RHI::Feature::SamplerLodBias:
     case RHI::Feature::Wireframe:
@@ -493,6 +494,8 @@ uint64_t D3D12Device::GetLimitNative(RHI::Limit limit) const
         return std::numeric_limits<uint32_t>::max();
     case RHI::Limit::SamplerAnisotropy:
         return D3D12_MAX_MAXANISOTROPY;
+    case RHI::Limit::TessellationPatchControlPoints:
+        return 32;
     }
     return 0;
 }
@@ -501,14 +504,15 @@ bool D3D12Device::SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc& de
 {
     if(!m_internal || !m_internal->device) return false;
     const auto graphicsStages = static_cast<uint32_t>(RHI::ShaderStageFlags::Vertex |
+        RHI::ShaderStageFlags::Hull | RHI::ShaderStageFlags::Domain |
         RHI::ShaderStageFlags::Fragment);
     if(desc.inlineConstantSize &&
         (static_cast<uint32_t>(desc.inlineConstantStages) & ~graphicsStages)) return false;
     uint64_t rootCost = desc.inlineConstantSize / sizeof(uint32_t);
     uint64_t descriptorCount = 0;
     uint64_t samplerCount = 0;
-    uint64_t constantBuffers[2] = {};
-    uint64_t shaderResources[2] = {};
+    uint64_t constantBuffers[4] = {};
+    uint64_t shaderResources[4] = {};
     uint64_t unorderedAccessViews = 0;
     for(uint32_t index = 0; index < desc.bindingCount; ++index)
     {
@@ -521,9 +525,12 @@ bool D3D12Device::SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc& de
             // 현재 번역은 binding마다 descriptor table 하나를 사용한다.
             ++rootCost;
             descriptorCount += binding.count;
-            for (uint32_t stage = 0; stage < 2; ++stage)
+            constexpr RHI::ShaderStageFlags stageFlags[] = {
+                RHI::ShaderStageFlags::Vertex, RHI::ShaderStageFlags::Hull,
+                RHI::ShaderStageFlags::Domain, RHI::ShaderStageFlags::Fragment};
+            for (uint32_t stage = 0; stage < 4; ++stage)
             {
-                const auto flag = stage == 0 ? RHI::ShaderStageFlags::Vertex : RHI::ShaderStageFlags::Fragment;
+                const auto flag = stageFlags[stage];
                 if ((binding.stages & flag) == RHI::ShaderStageFlags::None) continue;
                 if (binding.type == RHI::ResourceBindingType::ConstantBuffer)
                     constantBuffers[stage] += binding.count;
@@ -1131,9 +1138,15 @@ void D3D12Device::DestroySwapchainNative()
         D3D12_SHADER_VISIBILITY ToShaderVisibility(RHI::ShaderStageFlags stages)
         {
             const bool vertex = HasStage(stages, RHI::ShaderStageFlags::Vertex);
+            const bool hull = HasStage(stages, RHI::ShaderStageFlags::Hull);
+            const bool domain = HasStage(stages, RHI::ShaderStageFlags::Domain);
             const bool fragment = HasStage(stages, RHI::ShaderStageFlags::Fragment);
-            if (vertex && !fragment) return D3D12_SHADER_VISIBILITY_VERTEX;
-            if (fragment && !vertex) return D3D12_SHADER_VISIBILITY_PIXEL;
+            const uint32_t count = static_cast<uint32_t>(vertex) + static_cast<uint32_t>(hull) +
+                static_cast<uint32_t>(domain) + static_cast<uint32_t>(fragment);
+            if (count == 1 && vertex) return D3D12_SHADER_VISIBILITY_VERTEX;
+            if (count == 1 && hull) return D3D12_SHADER_VISIBILITY_HULL;
+            if (count == 1 && domain) return D3D12_SHADER_VISIBILITY_DOMAIN;
+            if (count == 1 && fragment) return D3D12_SHADER_VISIBILITY_PIXEL;
             return D3D12_SHADER_VISIBILITY_ALL;
         }
 
@@ -1161,11 +1174,14 @@ void D3D12Device::DestroySwapchainNative()
             case RHI::PrimitiveTopology::TriangleList:
             case RHI::PrimitiveTopology::TriangleStrip:
                 return D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            case RHI::PrimitiveTopology::PatchList:
+                return D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
             default: return D3D12_PRIMITIVE_TOPOLOGY_TYPE_UNDEFINED;
             }
         }
 
-        D3D12_PRIMITIVE_TOPOLOGY ToPrimitiveTopology(RHI::PrimitiveTopology topology)
+        D3D12_PRIMITIVE_TOPOLOGY ToPrimitiveTopology(
+            RHI::PrimitiveTopology topology, uint32_t patchControlPoints)
         {
             switch (topology)
             {
@@ -1173,6 +1189,11 @@ void D3D12Device::DestroySwapchainNative()
             case RHI::PrimitiveTopology::LineList: return D3D_PRIMITIVE_TOPOLOGY_LINELIST;
             case RHI::PrimitiveTopology::TriangleList: return D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
             case RHI::PrimitiveTopology::TriangleStrip: return D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+            case RHI::PrimitiveTopology::PatchList:
+                if(patchControlPoints == 0 || patchControlPoints > 32)
+                    return D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
+                return static_cast<D3D12_PRIMITIVE_TOPOLOGY>(
+                    D3D_PRIMITIVE_TOPOLOGY_1_CONTROL_POINT_PATCHLIST + patchControlPoints - 1);
             default: return D3D_PRIMITIVE_TOPOLOGY_UNDEFINED;
             }
         }
@@ -1455,6 +1476,8 @@ void D3D12Device::DestroySwapchainNative()
     RHI::ShaderHandle D3D12Device::CreateShaderNative(const RHI::ShaderDesc& desc)
     {
         if (desc.stage != RHI::ShaderStage::Vertex &&
+            desc.stage != RHI::ShaderStage::Hull &&
+            desc.stage != RHI::ShaderStage::Domain &&
             desc.stage != RHI::ShaderStage::Fragment)
         {
             return nullptr;
@@ -1477,9 +1500,15 @@ void D3D12Device::DestroySwapchainNative()
         }
 
         auto* vertexShader = dynamic_cast<D3D12Shader*>(desc.vertexShader);
+        auto* hullShader = dynamic_cast<D3D12Shader*>(desc.hullShader);
+        auto* domainShader = dynamic_cast<D3D12Shader*>(desc.domainShader);
         auto* fragmentShader = dynamic_cast<D3D12Shader*>(desc.fragmentShader);
         if (vertexShader == nullptr ||
             vertexShader->GetBinarySize() == 0 ||
+            (desc.hullShader != nullptr &&
+                (hullShader == nullptr || hullShader->GetBinarySize() == 0)) ||
+            (desc.domainShader != nullptr &&
+                (domainShader == nullptr || domainShader->GetBinarySize() == 0)) ||
             (desc.fragmentShader != nullptr &&
                 (fragmentShader == nullptr ||
                     fragmentShader->GetBinarySize() == 0)))
@@ -1697,6 +1726,11 @@ void D3D12Device::DestroySwapchainNative()
             vertexShader->GetBinary(),
             vertexShader->GetBinarySize()
         };
+        if (hullShader != nullptr)
+        {
+            pipelineDesc.HS = {hullShader->GetBinary(), hullShader->GetBinarySize()};
+            pipelineDesc.DS = {domainShader->GetBinary(), domainShader->GetBinarySize()};
+        }
         if (fragmentShader != nullptr)
         {
             pipelineDesc.PS = {
@@ -1853,7 +1887,7 @@ void D3D12Device::DestroySwapchainNative()
                 std::move(vertexBindings),
                 inlineConstantRootParameter,
                 descriptorCount,
-                static_cast<uint32_t>(ToPrimitiveTopology(desc.topology)),
+                static_cast<uint32_t>(ToPrimitiveTopology(desc.topology, desc.patchControlPoints)),
                 desc.depthStencil.stencilEnabled,
                 desc.depthStencil.depthWriteEnabled ||
                     desc.depthStencil.stencilEnabled));
