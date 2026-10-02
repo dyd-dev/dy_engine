@@ -1,0 +1,241 @@
+{
+  "dyf": {
+    "렌더러": [
+      "dyf::Renderer",
+      "dyf::RendererConfig",
+      "dyf::RendererShaderDesc",
+      "dyf::RendererDrawDesc"
+    ],
+    "장면·카메라": [
+      "dyf::Scene",
+      "dyf::Camera",
+      "dyf::EntityHandle",
+      "dyf::Transform",
+      "dyf::EntityID",
+      "dyf::ToIndex",
+      "dyf::IsValid"
+    ],
+    "메시·재질": [
+      "dyf::MeshData",
+      "dyf::Vertex",
+      "dyf::MaterialDesc",
+      "dyf::MaterialTextureKind",
+      "dyf::kMaterialTextureCount",
+      "dyf::MeshID",
+      "dyf::MaterialID"
+    ],
+    "조명": [
+      "dyf::LightingConfig",
+      "dyf::EnvironmentDesc",
+      "dyf::ShadowQuality",
+      "dyf::EntityLightingDesc",
+      "dyf::DirectionalLight",
+      "dyf::PointLight",
+      "dyf::SpotLight",
+      "dyf::RectAreaLight",
+      "dyf::DiscAreaLight",
+      "dyf::LightHandle",
+      "dyf::DirectionalLightID",
+      "dyf::PointLightID",
+      "dyf::SpotLightID",
+      "dyf::RectAreaLightID",
+      "dyf::DiscAreaLightID"
+    ],
+    "Canvas·텍스트": [
+      "dyf::Canvas",
+      "dyf::Rectangle",
+      "dyf::Font",
+      "dyf::FontGlyph",
+      "dyf::DecodeUtf8"
+    ],
+    "이미지": [
+      "dyf::Image",
+      "dyf::ColorSpace",
+      "dyf::TextureID"
+    ]
+  },
+  "RHI": {
+    "장치·스왑체인": [
+      "dyf::RHI::IDevice",
+      "dyf::RHI::DeviceDesc",
+      "dyf::RHI::Feature",
+      "dyf::RHI::Limit",
+      "dyf::RHI::SwapchainDesc",
+      "dyf::RHI::PresentMode",
+      "dyf::RHI::ColorSpace",
+      "dyf::RHI::CompositeAlpha"
+    ],
+    "자원·수명 관리": [
+      "dyf::RHI::ResourceScope",
+      "dyf::RHI::Buffer",
+      "dyf::RHI::BufferDesc",
+      "dyf::RHI::BufferHandle",
+      "dyf::RHI::BufferUsage",
+      "dyf::RHI::Texture",
+      "dyf::RHI::TextureDesc",
+      "dyf::RHI::TextureHandle",
+      "dyf::RHI::TextureSubresourceRange",
+      "dyf::RHI::TextureUsage",
+      "dyf::RHI::Format",
+      "dyf::RHI::TextureReadback"
+    ],
+    "셰이더·바인딩": [
+      "dyf::RHI::Shader",
+      "dyf::RHI::ShaderDesc",
+      "dyf::RHI::ShaderHandle",
+      "dyf::RHI::ShaderStage",
+      "dyf::RHI::ShaderStageFlags",
+      "dyf::RHI::ResourceSet",
+      "dyf::RHI::ResourceSetDesc",
+      "dyf::RHI::ResourceSetHandle",
+      "dyf::RHI::ResourceBindingLayout",
+      "dyf::RHI::ResourceBinding",
+      "dyf::RHI::ResourceBindingType",
+      "dyf::RHI::SamplerDesc",
+      "dyf::RHI::SamplerFilter",
+      "dyf::RHI::SamplerAddressMode",
+      "dyf::RHI::SamplerBorderColor"
+    ],
+    "파이프라인·렌더 상태": [
+      "dyf::RHI::Pipeline",
+      "dyf::RHI::GraphicsPipelineDesc",
+      "dyf::RHI::ComputePipelineDesc",
+      "dyf::RHI::PipelineHandle",
+      "dyf::RHI::PipelineLayoutDesc",
+      "dyf::RHI::VertexBufferLayout",
+      "dyf::RHI::VertexAttribute",
+      "dyf::RHI::VertexStepMode",
+      "dyf::RHI::PrimitiveTopology",
+      "dyf::RHI::RasterState",
+      "dyf::RHI::FillMode",
+      "dyf::RHI::CullMode",
+      "dyf::RHI::FrontFace",
+      "dyf::RHI::DepthStencilState",
+      "dyf::RHI::CompareOp",
+      "dyf::RHI::StencilFaceState",
+      "dyf::RHI::StencilOp",
+      "dyf::RHI::BlendState",
+      "dyf::RHI::BlendFactor",
+      "dyf::RHI::BlendOp",
+      "dyf::RHI::ColorWriteMask",
+      "dyf::RHI::ColorAttachmentDesc",
+      "dyf::RHI::RenderingDesc",
+      "dyf::RHI::ColorAttachment",
+      "dyf::RHI::DepthStencilAttachment",
+      "dyf::RHI::LoadOp",
+      "dyf::RHI::StoreOp",
+      "dyf::RHI::Viewport",
+      "dyf::RHI::Rect"
+    ],
+    "명령·제출·동기화": [
+      "dyf::RHI::ICommandList",
+      "dyf::RHI::SubmitDesc",
+      "dyf::RHI::FenceHandle",
+      "dyf::RHI::ResourceBarrierDesc",
+      "dyf::RHI::ResourceState"
+    ],
+    "RenderGraph": [
+      "dyf::RHI::RenderGraph",
+      "dyf::RHI::RenderGraphPass",
+      "dyf::RHI::RGResourceHandle",
+      "dyf::RHI::RGResourceBinding",
+      "dyf::RHI::RGExecutionStage"
+    ],
+    "진단·측정": [
+      "dyf::RHI::ResourceAllocationCounters",
+      "dyf::RHI::ResourceCounter",
+      "dyf::RHI::DebugLabelColor",
+      "dyf::RHI::TimestampQuery",
+      "dyf::RHI::TimestampQueryDesc",
+      "dyf::RHI::TimestampQueryHandle"
+    ]
+  },
+  "Math": {
+    "벡터": [
+      "dyf::Math::float2",
+      "dyf::Math::float3",
+      "dyf::Math::float4"
+    ],
+    "행렬": [
+      "dyf::Math::float4x4"
+    ],
+    "범위": [
+      "dyf::Math::Bounds3"
+    ],
+    "쿼터니언": [
+      "dyf::Math::quat",
+      "dyf::Math::DualQuaternionTRS"
+    ]
+  },
+  "Platform": {
+    "창·입력": [
+      "dyf::Platform::Window",
+      "dyf::Platform::Input",
+      "dyf::Platform::Key"
+    ],
+    "시간": [
+      "dyf::Platform::Time"
+    ],
+    "스레드 풀": [
+      "dyf::Platform::ThreadPool"
+    ],
+    "프로파일링": [
+      "dyf::Platform::ProfilerSampler",
+      "dyf::Platform::ProfilerTimingSample",
+      "dyf::Platform::ProfilerTimingSnapshot",
+      "DY_PROFILE_CPU_ZONE",
+      "DY_PROFILE_CPU_ZONE_NAMED",
+      "DY_PROFILE_FRAME_MARK",
+      "DY_PROFILE_GPU_MILLISECONDS",
+      "DY_PROFILE_RESOURCE_COUNT",
+      "DY_PROFILE_RAW_VALUE"
+    ],
+    "RenderDoc 캡처": [
+      "dyf::Platform::RenderDocCapture"
+    ]
+  },
+  "확장: Model": {
+    "파일 로딩·자산": [
+      "dyf::ModelLoadOptions",
+      "dyf::ModelData",
+      "dyf::ModelAsset",
+      "dyf::ModelAssetID"
+    ],
+    "메시·재질": [
+      "dyf::ModelMesh",
+      "dyf::ModelAssetMesh",
+      "dyf::ModelMaterialInfo"
+    ],
+    "인스턴스·장면": [
+      "dyf::ModelScene",
+      "dyf::ModelInstance",
+      "dyf::ModelSceneDesc",
+      "dyf::ModelEntityBinding",
+      "dyf::ModelInstanceID"
+    ],
+    "노드·애니메이션": [
+      "dyf::ModelNode",
+      "dyf::NodeTransform",
+      "dyf::AnimationClip",
+      "dyf::AnimationPlayback",
+      "dyf::NodeAnimationTrack",
+      "dyf::MorphWeightTrack",
+      "dyf::AnimationInterpolation",
+      "dyf::Vec3Key",
+      "dyf::QuatKey",
+      "dyf::FloatKey"
+    ],
+    "모프·스키닝": [
+      "dyf::ModelSkin",
+      "dyf::SkinningMethod",
+      "dyf::SkinInfluence",
+      "dyf::SkinJointMatrices",
+      "dyf::MorphTarget"
+    ],
+    "모델 렌더링": [
+      "dyf::ModelRenderer",
+      "dyf::ModelShaderDesc",
+      "dyf::SkinningExecutionMode"
+    ]
+  }
+}
