@@ -92,7 +92,6 @@ namespace dyf::Platform
 		void OnCursor(double x, double y);
 		void OnFocusLost();
 		void PublishFrame();
-		bool ConsumeKeyPress(Key key);
 		State m_frame, m_pending;
 		Buttons m_consumed;
 		Buttons m_frameStartDown;

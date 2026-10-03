@@ -70,17 +70,8 @@ void Input::PublishFrame()
 	for(const auto& event : m_events)
 		if(event.type == InputEventType::Text) m_text.push_back(static_cast<char32_t>(event.codepoint));
 	++m_frameNumber;
-	m_consumed.reset();
 	m_pending.pressed.reset();
 	m_pending.released.reset();
 	m_pending.delta = {};
 	m_pending.scroll = {};
-}
-
-bool Input::ConsumeKeyPress(Key key)
-{
-	const auto index = Index(key);
-	if(!Test(m_frame.pressed, index) || m_consumed[index]) return false;
-	m_consumed.set(index);
-	return true;
 }

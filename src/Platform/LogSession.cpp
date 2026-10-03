@@ -7,10 +7,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
 #include <mutex>
 #include <memory>
-#include <sstream>
 #include <string>
 #ifdef _WIN32
 #define NOMINMAX
@@ -110,12 +108,7 @@ namespace dyf::Platform::LogInternal
             out.flush();
             if (!out) throw std::runtime_error("session metadata write failed");
             out.close();
-#ifdef _WIN32
-            if (!MoveFileExW(temporary.c_str(), (state.directory / "session.json").c_str(), MOVEFILE_REPLACE_EXISTING))
-                throw std::runtime_error("session metadata replacement failed");
-#else
             fs::rename(temporary, state.directory / "session.json");
-#endif
         }
         void Finish()
         {
@@ -229,7 +222,6 @@ namespace dyf::Platform::LogInternal
         {
             auto& state = State();
             if (state.output.is_open()) state.output.close();
-            state.output.clear();
             char name[48];
             std::snprintf(name, sizeof(name), "engine-%08u.log", ++state.index);
             state.output.open(state.directory / name, std::ios::binary | std::ios::trunc);

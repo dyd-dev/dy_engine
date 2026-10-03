@@ -7,12 +7,11 @@ using namespace dyf::Platform;
 ActionMap::Action& ActionMap::AddAction(ActionId id, bool axis)
 {
 	if(m_updated) throw std::logic_error("Configure action bindings before the first Update.");
-	auto found = m_actions.find(id);
-	if(found != m_actions.end() && found->second.axis != axis)
+	auto [found, inserted] = m_actions.try_emplace(id);
+	if(!inserted && found->second.axis != axis)
 		throw std::invalid_argument("An action cannot mix button and axis bindings.");
-	auto& action = m_actions[id];
-	action.axis = axis;
-	return action;
+	found->second.axis = axis;
+	return found->second;
 }
 
 void ActionMap::BindButton(ActionId action, Key key)

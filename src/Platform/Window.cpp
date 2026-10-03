@@ -1,7 +1,6 @@
 #include "dyf/Platform/Log.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/Platform/RenderDocCapture.h"
-#include <cstdio>
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -20,7 +19,6 @@ using namespace dyf::Platform;
 
 namespace
 {
-	unsigned int windowCount = 0;
 	std::vector<Window*> windows;
 
 	void ValidateSize(unsigned int width, unsigned int height)
@@ -39,7 +37,7 @@ Window::Window(unsigned int width, unsigned int height, const char* title)
     Log::Initialize();
 	if(!width || !height || width > static_cast<unsigned>((std::numeric_limits<int>::max)()) || height > static_cast<unsigned>((std::numeric_limits<int>::max)()))
     { dyf::Platform::Log::Writef(dyf::Platform::LogLevel::Error, "Platform", __FILE__, __LINE__, "dyf: invalid window dimensions."); return; }
-    if(windowCount == 0 && !glfwInit())
+    if(windows.empty() && !glfwInit())
     { dyf::Platform::Log::Writef(dyf::Platform::LogLevel::Error, "Platform", __FILE__, __LINE__, "dyf: failed to initialize GLFW."); return; }
 	
 	// Tell GLFW to NOT create an OpenGL context
@@ -48,13 +46,12 @@ Window::Window(unsigned int width, unsigned int height, const char* title)
 	m_window = glfwCreateWindow(width, height, title ? title : "New Window", nullptr, nullptr);
 	if(!m_window)
 	{
-		if(windowCount == 0) glfwTerminate();
+		if(windows.empty()) glfwTerminate();
 		dyf::Platform::Log::Writef(dyf::Platform::LogLevel::Error, "Platform", __FILE__, __LINE__, "dyf: failed to create GLFW window.");
 		return;
 	}
     try { windows.push_back(this); }
-    catch(...) { glfwDestroyWindow(m_window); if(windowCount == 0) glfwTerminate(); throw; }
-    ++windowCount;
+    catch(...) { glfwDestroyWindow(m_window); if(windows.empty()) glfwTerminate(); throw; }
     glfwSetWindowUserPointer(m_window, this);
     (void)RenderDocCapture::Initialize();
 	glfwSetKeyCallback(m_window, [](GLFWwindow* handle, int key, int scan, int action, int mods)
@@ -106,7 +103,7 @@ Window::~Window()
     {
 		glfwDestroyWindow(m_window);
         windows.erase(std::remove(windows.begin(),windows.end(),this),windows.end());
-        if(--windowCount == 0) glfwTerminate();
+        if(windows.empty()) glfwTerminate();
     }
 }
 

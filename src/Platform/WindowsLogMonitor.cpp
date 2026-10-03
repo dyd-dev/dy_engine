@@ -149,7 +149,7 @@ int wmain(int argc, wchar_t** argv)
     bool initialBreakpoint=true;
     if(!Save(folder,result)) result.error=ERROR_WRITE_FAULT;
     // A report/dump storage error must not prevent consuming debug events.
-    while(true)
+    while(!result.exited)
     {
         DEBUG_EVENT event{};
         if(!WaitForDebugEvent(&event,INFINITE)) {result.error=GetLastError(); break;}
@@ -188,7 +188,6 @@ int wmain(int argc, wchar_t** argv)
         }
         if(!ContinueDebugEvent(event.dwProcessId,event.dwThreadId,continuation)) {result.error=GetLastError(); break;}
         if(signalReady && !SetEvent(ready)) result.error=GetLastError();
-        if(result.exited) break;
     }
     if(!result.exited)
     {
