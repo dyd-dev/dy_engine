@@ -24,11 +24,7 @@ namespace dyf::Backends
     {
         m_internal->descriptorHeap = descriptorHeap;
         m_internal->descriptorSize = descriptorSize;
-        m_internal->resources.reserve(resources.size());
-        for (ID3D12Resource* resource : resources)
-        {
-            m_internal->resources.emplace_back(resource);
-        }
+        m_internal->resources.assign(resources.begin(), resources.end());
     }
 
     D3D12ResourceSet::~D3D12ResourceSet()

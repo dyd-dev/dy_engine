@@ -61,11 +61,9 @@ namespace dyf::Backends
             ID3D12Object* object)
         {
             if (object == nullptr) return;
-            for (const ComPtr<ID3D12Object>& retained : objects)
-            {
-                if (retained.Get() == object) return;
-            }
-            objects.emplace_back(object);
+            if (std::none_of(objects.begin(), objects.end(),
+                    [object](const ComPtr<ID3D12Object>& retained) { return retained.Get() == object; }))
+                objects.emplace_back(object);
         }
 
         bool HasUsage(RHI::BufferUsage usage, RHI::BufferUsage flag)
@@ -421,9 +419,7 @@ namespace dyf::Backends
     }
     void D3D12CommandList::GlobalBarrierNative()
     {
-        D3D12_RESOURCE_BARRIER barrier = {};
-        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-        barrier.UAV.pResource = nullptr;
+        const auto barrier = CD3DX12_RESOURCE_BARRIER::UAV(nullptr);
         m_internal->commandList->ResourceBarrier(1, &barrier);
     }
 
@@ -519,20 +515,12 @@ namespace dyf::Backends
                         // Legacy D3D12 copies are synchronous; repeated read states need no barrier.
                         continue;
                     }
-                    D3D12_RESOURCE_BARRIER nativeBarrier = {};
-                    nativeBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-                    nativeBarrier.UAV.pResource = resource;
-                    nativeBarriers.push_back(nativeBarrier);
+                    nativeBarriers.push_back(CD3DX12_RESOURCE_BARRIER::UAV(resource));
                     continue;
                 }
                 if (before == after) continue;
-                D3D12_RESOURCE_BARRIER nativeBarrier = {};
-                nativeBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                nativeBarrier.Transition.pResource = resource;
-                nativeBarrier.Transition.StateBefore = before;
-                nativeBarrier.Transition.StateAfter = after;
-                nativeBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                nativeBarriers.push_back(nativeBarrier);
+                nativeBarriers.push_back(
+                    CD3DX12_RESOURCE_BARRIER::Transition(resource, before, after));
                 continue;
             }
 
@@ -595,10 +583,7 @@ namespace dyf::Backends
                     // Read-only states likewise need no native transition to the same state.
                     continue;
                 }
-                D3D12_RESOURCE_BARRIER nativeBarrier = {};
-                nativeBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-                nativeBarrier.UAV.pResource = resource;
-                nativeBarriers.push_back(nativeBarrier);
+                nativeBarriers.push_back(CD3DX12_RESOURCE_BARRIER::UAV(resource));
                 continue;
             }
             if (before == after) continue;
@@ -608,45 +593,34 @@ namespace dyf::Backends
                 mipCount == textureDesc.mipLevels &&
                 layerCount == textureDesc.depthOrArraySize)
             {
-                D3D12_RESOURCE_BARRIER nativeBarrier = {};
-                nativeBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                nativeBarrier.Transition.pResource = resource;
-                nativeBarrier.Transition.StateBefore = before;
-                nativeBarrier.Transition.StateAfter = after;
-                nativeBarrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                nativeBarriers.push_back(nativeBarrier);
+                nativeBarriers.push_back(
+                    CD3DX12_RESOURCE_BARRIER::Transition(resource, before, after));
                 continue;
             }
 
-            D3D12_FEATURE_DATA_FORMAT_INFO formatInfo = {};
-            formatInfo.Format = resource->GetDesc().Format;
-            if (m_internal->device == nullptr ||
-                FAILED(m_internal->device->CheckFeatureSupport(
-                    D3D12_FEATURE_FORMAT_INFO, &formatInfo, sizeof(formatInfo))) ||
-                formatInfo.PlaneCount == 0)
+            const DXGI_FORMAT format = resource->GetDesc().Format;
+            const uint32_t planeCount = m_internal->device != nullptr
+                ? D3D12GetFormatPlaneCount(m_internal->device, format)
+                : 0;
+            if (planeCount == 0)
             {
                 RejectRecording(m_internal);
                 return;
             }
-            const uint32_t planeCount = formatInfo.PlaneCount;
             for (uint32_t plane = 0; plane < planeCount; ++plane)
             {
                 for (uint32_t layer = 0; layer < layerCount; ++layer)
                 {
                     for (uint32_t mip = 0; mip < mipCount; ++mip)
                     {
-                        D3D12_RESOURCE_BARRIER nativeBarrier = {};
-                        nativeBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-                        nativeBarrier.Transition.pResource = resource;
-                        nativeBarrier.Transition.StateBefore = before;
-                        nativeBarrier.Transition.StateAfter = after;
-                        nativeBarrier.Transition.Subresource = D3D12CalcSubresource(
+                        const UINT subresource = D3D12CalcSubresource(
                             barrier.subresources.firstMipLevel + mip,
                             barrier.subresources.firstArrayLayer + layer,
                             plane,
                             textureDesc.mipLevels,
                             textureDesc.depthOrArraySize);
-                        nativeBarriers.push_back(nativeBarrier);
+                        nativeBarriers.push_back(CD3DX12_RESOURCE_BARRIER::Transition(
+                            resource, before, after, subresource));
                     }
                 }
             }
@@ -773,6 +747,12 @@ namespace dyf::Backends
                 m_internal->retainedObjects,
                 static_cast<ID3D12DescriptorHeap*>(
                     texture->GetRenderTargetViewHeap()));
+            const UINT subresource = D3D12CalcSubresource(
+                attachment.mipLevel,
+                attachment.arrayLayer,
+                0,
+                texture->GetDesc().mipLevels,
+                texture->GetDesc().depthOrArraySize);
 
             if (attachment.loadOp == RHI::LoadOp::Clear)
             {
@@ -782,34 +762,19 @@ namespace dyf::Backends
             else if (attachment.loadOp == RHI::LoadOp::Discard)
             {
                 D3D12_DISCARD_REGION region = {};
-                region.FirstSubresource = D3D12CalcSubresource(
-                    attachment.mipLevel,
-                    attachment.arrayLayer,
-                    0,
-                    texture->GetDesc().mipLevels,
-                    texture->GetDesc().depthOrArraySize);
+                region.FirstSubresource = subresource;
                 region.NumSubresources = 1;
                 m_internal->commandList->DiscardResource(resource, &region);
             }
             if (attachment.storeOp == RHI::StoreOp::Discard)
             {
-                m_internal->storeDiscardResources.push_back({
-                    resource,
-                    D3D12CalcSubresource(
-                        attachment.mipLevel,
-                        attachment.arrayLayer,
-                        0,
-                        texture->GetDesc().mipLevels,
-                        texture->GetDesc().depthOrArraySize)
-                });
+                m_internal->storeDiscardResources.push_back({ resource, subresource });
             }
         }
 
         D3D12_CPU_DESCRIPTOR_HANDLE depthHandle = {};
         D3D12_CPU_DESCRIPTOR_HANDLE* depthHandlePointer = nullptr;
         m_internal->depthTexture = nullptr;
-        m_internal->depthMipLevel = 0;
-        m_internal->depthArrayLayer = 0;
         if (desc.depthStencilAttachment != nullptr)
         {
             const RHI::DepthStencilAttachment& attachment =
@@ -910,7 +875,6 @@ namespace dyf::Backends
         m_internal->scissorSet = false;
         m_internal->stencilReferenceSet = false;
         m_internal->pipeline = nullptr;
-        m_internal->inlineConstantCoverage.clear();
         m_internal->rendering = true;
     }
 
@@ -943,12 +907,7 @@ namespace dyf::Backends
             return;
         }
         auto* pipeline = dynamic_cast<D3D12PipelineState*>(pipelineState);
-        if (pipeline == nullptr)
-        {
-            RejectRecording(m_internal);
-            return;
-        }
-        if (pipeline->GetNativePipelineState() == nullptr ||
+        if (pipeline == nullptr || pipeline->GetNativePipelineState() == nullptr ||
             pipeline->GetNativeRootSignature() == nullptr)
         {
             RejectRecording(m_internal);
@@ -1076,8 +1035,7 @@ namespace dyf::Backends
         }
         if (heap != nullptr)
         {
-            ID3D12DescriptorHeap* heaps[] = { heap };
-            m_internal->commandList->SetDescriptorHeaps(1, heaps);
+            m_internal->commandList->SetDescriptorHeaps(1, &heap);
             const D3D12_GPU_DESCRIPTOR_HANDLE start =
                 heap->GetGPUDescriptorHandleForHeapStart();
             for (const D3D12PipelineBinding& binding :
@@ -1123,12 +1081,7 @@ namespace dyf::Backends
             return;
         }
         auto* resource = static_cast<ID3D12Resource*>(d3dBuffer->GetNativeResource());
-        if (resource == nullptr)
-        {
-            RejectRecording(m_internal);
-            return;
-        }
-        if (!RequireBufferState(
+        if (resource == nullptr || !RequireBufferState(
                 m_internal,
                 d3dBuffer,
                 RHI::ResourceState::VertexBuffer))
@@ -1156,12 +1109,8 @@ namespace dyf::Backends
             buffer == nullptr ||
             !HasUsage(buffer->GetDesc().usage, RHI::BufferUsage::Index) ||
             offset >= buffer->GetDesc().size ||
-            (format != RHI::Format::R16_UINT && format != RHI::Format::R32_UINT))
-        {
-            RejectRecording(m_internal);
-            return;
-        }
-        if ((offset % indexSize) != 0 || buffer->GetDesc().size - offset < indexSize)
+            (format != RHI::Format::R16_UINT && format != RHI::Format::R32_UINT) ||
+            (offset % indexSize) != 0 || buffer->GetDesc().size - offset < indexSize)
         {
             RejectRecording(m_internal);
             return;
@@ -1173,12 +1122,7 @@ namespace dyf::Backends
             return;
         }
         auto* resource = static_cast<ID3D12Resource*>(d3dBuffer->GetNativeResource());
-        if (resource == nullptr)
-        {
-            RejectRecording(m_internal);
-            return;
-        }
-        if (!RequireBufferState(
+        if (resource == nullptr || !RequireBufferState(
                 m_internal,
                 d3dBuffer,
                 RHI::ResourceState::IndexBuffer))
@@ -1220,10 +1164,7 @@ namespace dyf::Backends
         }
         m_internal->commandList->SetGraphicsRoot32BitConstants(
             rootParameter, size / 4, data, offset / 4);
-        std::fill(
-            m_internal->inlineConstantCoverage.begin() + offset,
-            m_internal->inlineConstantCoverage.begin() + offset + size,
-            1);
+        std::fill_n(m_internal->inlineConstantCoverage.begin() + offset, size, 1);
     }
 
     void D3D12CommandList::SetStencilReferenceNative(uint32_t reference)
@@ -1322,20 +1263,16 @@ namespace dyf::Backends
 
     bool D3D12CommandList::CloseNative()
     {
-        if (m_internal == nullptr || m_internal->closed) return m_internal && m_internal->closed && !m_internal->recordingFailed;
-        if (m_internal->rendering || m_internal->commandList == nullptr)
+        if (m_internal == nullptr || m_internal->closed) return IsClosed();
+        if (m_internal->rendering || m_internal->commandList == nullptr ||
+            FAILED(m_internal->commandList->Close()))
         {
             RejectRecording(m_internal);
-            return m_internal && m_internal->closed && !m_internal->recordingFailed;
-        }
-        if (FAILED(m_internal->commandList->Close()))
-        {
-            RejectRecording(m_internal);
-            return m_internal && m_internal->closed && !m_internal->recordingFailed;
+            return IsClosed();
         }
         m_internal->closed = true;
 
-        return m_internal && m_internal->closed && !m_internal->recordingFailed;
+        return IsClosed();
     }
 
     void* D3D12CommandList::GetNativeList()
@@ -1373,14 +1310,7 @@ namespace dyf::Backends
 
         D3D12_HEAP_PROPERTIES heapProperties = {};
         heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
-        D3D12_RESOURCE_DESC resourceDesc = {};
-        resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        resourceDesc.Width = size;
-        resourceDesc.Height = 1;
-        resourceDesc.DepthOrArraySize = 1;
-        resourceDesc.MipLevels = 1;
-        resourceDesc.SampleDesc.Count = 1;
-        resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        const auto resourceDesc = CD3DX12_RESOURCE_DESC::Buffer(size);
 
         ComPtr<ID3D12Resource> upload;
         if (FAILED(m_internal->device->CreateCommittedResource(
@@ -1466,14 +1396,7 @@ namespace dyf::Backends
 
         D3D12_HEAP_PROPERTIES heapProperties = {};
         heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
-        D3D12_RESOURCE_DESC uploadDesc = {};
-        uploadDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        uploadDesc.Width = uploadSize;
-        uploadDesc.Height = 1;
-        uploadDesc.DepthOrArraySize = 1;
-        uploadDesc.MipLevels = 1;
-        uploadDesc.SampleDesc.Count = 1;
-        uploadDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        const auto uploadDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadSize);
         ComPtr<ID3D12Resource> upload;
         if (FAILED(m_internal->device->CreateCommittedResource(
                 &heapProperties,
@@ -1505,14 +1428,8 @@ namespace dyf::Backends
         D3D12_RANGE writeRange = { 0, static_cast<SIZE_T>(uploadSize) };
         upload->Unmap(0, &writeRange);
 
-        D3D12_TEXTURE_COPY_LOCATION sourceLocation = {};
-        sourceLocation.pResource = upload.Get();
-        sourceLocation.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        sourceLocation.PlacedFootprint = footprint;
-        D3D12_TEXTURE_COPY_LOCATION destinationLocation = {};
-        destinationLocation.pResource = destination;
-        destinationLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        destinationLocation.SubresourceIndex = subresource;
+        const CD3DX12_TEXTURE_COPY_LOCATION sourceLocation(upload.Get(), footprint);
+        const CD3DX12_TEXTURE_COPY_LOCATION destinationLocation(destination, subresource);
         m_internal->commandList->CopyTextureRegion(
             &destinationLocation, 0, 0, 0, &sourceLocation, nullptr);
         TrackSwapchainImage(m_internal->referencedSwapchainImages, texture);
@@ -1538,32 +1455,6 @@ namespace dyf::Backends
             switch (operation.kind)
             {
             case OperationKind::BufferBarrier:
-            {
-                const auto found = state.buffers.find(operation.buffer);
-                const RHI::ResourceState current =
-                    found == state.buffers.end()
-                    ? operation.buffer->GetState()
-                    : found->second;
-                if (current != operation.before) return false;
-                state.buffers[operation.buffer] = operation.after;
-                break;
-            }
-            case OperationKind::TextureBarrier:
-            {
-                const auto key = TextureKey(
-                    operation.texture,
-                    operation.mipLevel,
-                    operation.arrayLayer);
-                const auto found = state.textureSubresources.find(key);
-                const RHI::ResourceState current =
-                    found == state.textureSubresources.end()
-                    ? operation.texture->GetState(
-                        operation.mipLevel, operation.arrayLayer)
-                    : found->second;
-                if (current != operation.before) return false;
-                state.textureSubresources[key] = operation.after;
-                break;
-            }
             case OperationKind::BufferRequirement:
             {
                 const auto found = state.buffers.find(operation.buffer);
@@ -1572,8 +1463,11 @@ namespace dyf::Backends
                     ? operation.buffer->GetState()
                     : found->second;
                 if (current != operation.before) return false;
+                if (operation.kind == OperationKind::BufferBarrier)
+                    state.buffers[operation.buffer] = operation.after;
                 break;
             }
+            case OperationKind::TextureBarrier:
             case OperationKind::TextureRequirement:
             {
                 const auto key = TextureKey(
@@ -1587,6 +1481,8 @@ namespace dyf::Backends
                         operation.mipLevel, operation.arrayLayer)
                     : found->second;
                 if (current != operation.before) return false;
+                if (operation.kind == OperationKind::TextureBarrier)
+                    state.textureSubresources[key] = operation.after;
                 break;
             }
             case OperationKind::BufferWrite:

@@ -83,12 +83,22 @@ namespace dyf::Backends
         UINT swapchainFlags = 0;
         DXGI_FORMAT swapchainResourceFormat = DXGI_FORMAT_UNKNOWN;
         DXGI_FORMAT swapchainRtvFormat = DXGI_FORMAT_UNKNOWN;
-        RHI::Format swapchainFormat = RHI::Format::Unknown;
         RHI::SwapchainDesc swapchainDesc = {};
         bool swapchainReady = false;
         bool frameReady = false;
         bool frameSubmitted = false;
         bool submissionFaulted = false;
+
+        auto FindActiveCommandList(const RHI::ICommandList* command)
+        {
+            return std::find_if(
+                activeCommandLists.begin(),
+                activeCommandLists.end(),
+                [command](const auto& candidate)
+                {
+                    return candidate.get() == command;
+                });
+        }
 
         bool CollectCompletedWork(uint64_t& completedValue)
         {
@@ -176,11 +186,8 @@ namespace dyf::Backends
         output.pixels.resize(static_cast<size_t>(bytes));
         D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(resource, before, D3D12_RESOURCE_STATE_COPY_SOURCE, 0);
         commands->ResourceBarrier(1, &barrier);
-        D3D12_TEXTURE_COPY_LOCATION source{};
-        source.pResource = resource; source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        D3D12_TEXTURE_COPY_LOCATION destination{};
-        destination.pResource = buffer.Get(); destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        destination.PlacedFootprint = footprint;
+        const CD3DX12_TEXTURE_COPY_LOCATION source(resource, 0u);
+        const CD3DX12_TEXTURE_COPY_LOCATION destination(buffer.Get(), footprint);
         commands->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
         std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
         commands->ResourceBarrier(1, &barrier);
@@ -336,10 +343,9 @@ namespace dyf::Backends
         delete m_internal;
     }
 
-    int D3D12Device::Initialize(const void* windowHandle, const RHI::DeviceDesc& desc)
+    int D3D12Device::Initialize(const void*, const RHI::DeviceDesc& desc)
     {
         if (desc.maxFramesInFlight == 0) return -1;
-        m_internal->windowHandle = static_cast<HWND>(const_cast<void*>(windowHandle));
 
         if(desc.enableValidation)
         {
@@ -417,16 +423,8 @@ RHI::TimestampQueryHandle D3D12Device::CreateTimestampQueryNative(const RHI::Tim
     heap.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
     heap.Count = desc.count;
     if(FAILED(m_internal->device->CreateQueryHeap(&heap, IID_PPV_ARGS(&query->heap)))) return nullptr;
-    D3D12_HEAP_PROPERTIES properties{};
-    properties.Type = D3D12_HEAP_TYPE_READBACK;
-    properties.CreationNodeMask = properties.VisibleNodeMask = 1;
-    D3D12_RESOURCE_DESC buffer{};
-    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    buffer.Width = uint64_t(desc.count) * sizeof(uint64_t);
-    buffer.Height = 1;
-    buffer.DepthOrArraySize = buffer.MipLevels = 1;
-    buffer.SampleDesc.Count = 1;
-    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    const auto properties = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
+    const auto buffer = CD3DX12_RESOURCE_DESC::Buffer(uint64_t(desc.count) * sizeof(uint64_t));
     if(FAILED(m_internal->device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE,
         &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&query->readback)))) return nullptr;
     return query.release();
@@ -438,7 +436,7 @@ void D3D12Device::DestroyTimestampQueryNative(RHI::TimestampQueryHandle query)
 bool D3D12Device::ReadTimestampsNative(RHI::TimestampQueryHandle handle, uint32_t first,
     uint32_t count, uint64_t* ticks)
 {
-    if(m_internal->submissionFaulted || IsLostNative()) return false;
+    if(IsLostNative()) return false;
     auto& query = *static_cast<D3D12TimestampQuery*>(handle);
     for(uint32_t index = first; index < first + count; ++index)
         if(!query.completions[index] || query.InFlight(index)) return false;
@@ -607,35 +605,24 @@ void D3D12Device::DestroySwapchainNative()
             return false;
         }
 
-        RHI::Format actualFormat = desc.format;
-        DXGI_FORMAT resourceFormat = DXGI_FORMAT_UNKNOWN;
-        DXGI_FORMAT rtvFormat = DXGI_FORMAT_UNKNOWN;
         switch (desc.format)
         {
-        case RHI::Format::Unknown: return false;
         case RHI::Format::R8G8B8A8_UNORM:
-            resourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-            rtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-            break;
         case RHI::Format::B8G8R8A8_UNORM:
-            resourceFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
-            rtvFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
-            break;
         case RHI::Format::R8G8B8A8_UNORM_SRGB:
-            resourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-            rtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-            break;
         case RHI::Format::B8G8R8A8_UNORM_SRGB:
-            resourceFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
-            rtvFormat = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
-            break;
         case RHI::Format::R16G16B16A16_FLOAT:
-            resourceFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
-            rtvFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
             break;
         default:
             return false;
         }
+        const DXGI_FORMAT rtvFormat = static_cast<DXGI_FORMAT>(
+            D3D12Texture::ToDxgiFormat(desc.format));
+        const DXGI_FORMAT resourceFormat = desc.format == RHI::Format::R8G8B8A8_UNORM_SRGB
+            ? DXGI_FORMAT_R8G8B8A8_UNORM
+            : desc.format == RHI::Format::B8G8R8A8_UNORM_SRGB
+                ? DXGI_FORMAT_B8G8R8A8_UNORM
+                : rtvFormat;
 
         ComPtr<IDXGIFactory4> factory;
         if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return false;
@@ -726,7 +713,7 @@ void D3D12Device::DestroySwapchainNative()
         if (!CreateBackBufferViews(
                 m_internal,
                 swapchain3.Get(),
-                actualFormat,
+                desc.format,
                 resourceFormat,
                 rtvFormat,
                 rtvHeap,
@@ -750,7 +737,6 @@ void D3D12Device::DestroySwapchainNative()
         m_internal->swapchainFlags = swapchainFlags;
         m_internal->swapchainResourceFormat = resourceFormat;
         m_internal->swapchainRtvFormat = rtvFormat;
-        m_internal->swapchainFormat = actualFormat;
         m_internal->swapchainDesc = desc;
         m_internal->activeImageIndex = m_internal->swapChain->GetCurrentBackBufferIndex();
         m_internal->swapchainReady =
@@ -801,21 +787,17 @@ void D3D12Device::DestroySwapchainNative()
 
         if (m_internal->backBufferTextures.empty())
         {
-            ComPtr<ID3D12DescriptorHeap> rtvHeap;
-            std::vector<std::unique_ptr<D3D12Texture, D3D12ObjectDeleter>> backBufferTextures;
             if (!CreateBackBufferViews(
                     m_internal,
                     m_internal->swapChain.Get(),
-                    m_internal->swapchainFormat,
+                    m_internal->swapchainDesc.format,
                     m_internal->swapchainResourceFormat,
                     m_internal->swapchainRtvFormat,
-                    rtvHeap,
-                    backBufferTextures))
+                    m_internal->rtvHeap,
+                    m_internal->backBufferTextures))
             {
                 return false;
             }
-            m_internal->rtvHeap = std::move(rtvHeap);
-            m_internal->backBufferTextures = std::move(backBufferTextures);
             m_internal->imageCompletionValues.assign(
                 m_internal->backBufferTextures.size(), 0);
         }
@@ -854,44 +836,32 @@ void D3D12Device::DestroySwapchainNative()
                     m_internal->swapchainResourceFormat,
                     m_internal->swapchainFlags)))
             {
-                ComPtr<ID3D12DescriptorHeap> rtvHeap;
-                std::vector<std::unique_ptr<D3D12Texture, D3D12ObjectDeleter>> backBufferTextures;
                 if (CreateBackBufferViews(
                         m_internal,
                         m_internal->swapChain.Get(),
-                        m_internal->swapchainFormat,
+                        m_internal->swapchainDesc.format,
                         m_internal->swapchainResourceFormat,
                         m_internal->swapchainRtvFormat,
-                        rtvHeap,
-                        backBufferTextures))
+                        m_internal->rtvHeap,
+                        m_internal->backBufferTextures))
                 {
-                    m_internal->rtvHeap = std::move(rtvHeap);
-                    m_internal->backBufferTextures = std::move(backBufferTextures);
                     m_internal->imageCompletionValues.assign(
                         m_internal->backBufferTextures.size(), 0);
                 }
                 return false;
             }
 
-            ComPtr<ID3D12DescriptorHeap> rtvHeap;
-            std::vector<std::unique_ptr<D3D12Texture, D3D12ObjectDeleter>> backBufferTextures;
-            const RHI::Format format =
-                m_internal->swapchainDesc.format == RHI::Format::Unknown
-                    ? m_internal->swapchainFormat
-                    : m_internal->swapchainDesc.format;
             if (!CreateBackBufferViews(
                     m_internal,
                     m_internal->swapChain.Get(),
-                    format,
+                    m_internal->swapchainDesc.format,
                     m_internal->swapchainResourceFormat,
                     m_internal->swapchainRtvFormat,
-                    rtvHeap,
-                    backBufferTextures))
+                    m_internal->rtvHeap,
+                    m_internal->backBufferTextures))
             {
                 return false;
             }
-            m_internal->rtvHeap = std::move(rtvHeap);
-            m_internal->backBufferTextures = std::move(backBufferTextures);
             m_internal->imageCompletionValues.assign(
                 m_internal->backBufferTextures.size(), 0);
         }
@@ -924,9 +894,7 @@ void D3D12Device::DestroySwapchainNative()
         auto commandList = std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>(
             new D3D12CommandList(m_internal->device.Get()));
         if (commandList->GetNativeList() == nullptr) return nullptr;
-        D3D12CommandList* result = commandList.get();
-        m_internal->activeCommandLists.push_back(std::move(commandList));
-        return result;
+        return m_internal->activeCommandLists.emplace_back(std::move(commandList)).get();
     }
 
     bool D3D12Device::SubmitNative(RHI::ICommandList** cmdLists, uint32_t count)
@@ -954,19 +922,10 @@ void D3D12Device::DestroySwapchainNative()
         for (uint32_t index = 0; index < count; ++index)
         {
             if (cmdLists[index] == nullptr) return false;
-            for (uint32_t previous = 0; previous < index; ++previous)
-            {
-                if (cmdLists[previous] == cmdLists[index]) return false;
-            }
+            if (std::find(cmdLists, cmdLists + index, cmdLists[index]) != cmdLists + index)
+                return false;
 
-            const auto owned = std::find_if(
-                m_internal->activeCommandLists.begin(),
-                m_internal->activeCommandLists.end(),
-                [command = cmdLists[index]](
-                    const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& candidate)
-                {
-                    return candidate.get() == command;
-                });
+            const auto owned = m_internal->FindActiveCommandList(cmdLists[index]);
             if (owned == m_internal->activeCommandLists.end()) return false;
 
             D3D12CommandList* commandList = owned->get();
@@ -1006,16 +965,7 @@ void D3D12Device::DestroySwapchainNative()
         {
             for (D3D12CommandList* commandList : submittedCommandLists)
             {
-                const auto owned = std::find_if(
-                    m_internal->activeCommandLists.begin(),
-                    m_internal->activeCommandLists.end(),
-                    [commandList](
-                        const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& candidate)
-                    {
-                        return candidate.get() == commandList;
-                    });
-                if (owned != m_internal->activeCommandLists.end())
-                    m_internal->activeCommandLists.erase(owned);
+                DiscardCommandListNative(commandList);
             }
             return false;
         }
@@ -1026,14 +976,7 @@ void D3D12Device::DestroySwapchainNative()
         submission.commandLists.reserve(count);
         for (D3D12CommandList* commandList : submittedCommandLists)
         {
-            const auto owned = std::find_if(
-                m_internal->activeCommandLists.begin(),
-                m_internal->activeCommandLists.end(),
-                [commandList](
-                    const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& candidate)
-                {
-                    return candidate.get() == commandList;
-                });
+            const auto owned = m_internal->FindActiveCommandList(commandList);
             submission.commandLists.push_back(std::move(*owned));
             m_internal->activeCommandLists.erase(owned);
         }
@@ -1130,24 +1073,19 @@ void D3D12Device::DestroySwapchainNative()
                 range.firstArrayLayer == 0 && range.arrayLayerCount == 0;
         }
 
-        bool HasStage(RHI::ShaderStageFlags stages, RHI::ShaderStageFlags stage)
-        {
-            return (static_cast<uint32_t>(stages) & static_cast<uint32_t>(stage)) != 0;
-        }
-
         D3D12_SHADER_VISIBILITY ToShaderVisibility(RHI::ShaderStageFlags stages)
         {
-            const bool vertex = HasStage(stages, RHI::ShaderStageFlags::Vertex);
-            const bool hull = HasStage(stages, RHI::ShaderStageFlags::Hull);
-            const bool domain = HasStage(stages, RHI::ShaderStageFlags::Domain);
-            const bool fragment = HasStage(stages, RHI::ShaderStageFlags::Fragment);
-            const uint32_t count = static_cast<uint32_t>(vertex) + static_cast<uint32_t>(hull) +
-                static_cast<uint32_t>(domain) + static_cast<uint32_t>(fragment);
-            if (count == 1 && vertex) return D3D12_SHADER_VISIBILITY_VERTEX;
-            if (count == 1 && hull) return D3D12_SHADER_VISIBILITY_HULL;
-            if (count == 1 && domain) return D3D12_SHADER_VISIBILITY_DOMAIN;
-            if (count == 1 && fragment) return D3D12_SHADER_VISIBILITY_PIXEL;
-            return D3D12_SHADER_VISIBILITY_ALL;
+            const auto graphicsStages = stages & (RHI::ShaderStageFlags::Vertex |
+                RHI::ShaderStageFlags::Hull | RHI::ShaderStageFlags::Domain |
+                RHI::ShaderStageFlags::Fragment);
+            switch (graphicsStages)
+            {
+            case RHI::ShaderStageFlags::Vertex: return D3D12_SHADER_VISIBILITY_VERTEX;
+            case RHI::ShaderStageFlags::Hull: return D3D12_SHADER_VISIBILITY_HULL;
+            case RHI::ShaderStageFlags::Domain: return D3D12_SHADER_VISIBILITY_DOMAIN;
+            case RHI::ShaderStageFlags::Fragment: return D3D12_SHADER_VISIBILITY_PIXEL;
+            default: return D3D12_SHADER_VISIBILITY_ALL;
+            }
         }
 
         DXGI_FORMAT ToVertexFormat(RHI::Format format)
@@ -1432,9 +1370,7 @@ void D3D12Device::DestroySwapchainNative()
         auto buffer = std::unique_ptr<D3D12Buffer, D3D12ObjectDeleter>(
             new D3D12Buffer(m_internal->device.Get(), desc));
         if (buffer->GetNativeResource() == nullptr) return nullptr;
-        D3D12Buffer* result = buffer.get();
-        m_internal->liveBuffers.push_back(std::move(buffer));
-        return result;
+        return m_internal->liveBuffers.emplace_back(std::move(buffer)).get();
     }
 
     RHI::TextureHandle D3D12Device::CreateTextureNative(const RHI::TextureDesc& desc)
@@ -1468,9 +1404,7 @@ void D3D12Device::DestroySwapchainNative()
         {
             return nullptr;
         }
-        D3D12Texture* result = texture.get();
-        m_internal->liveTextures.push_back(std::move(texture));
-        return result;
+        return m_internal->liveTextures.emplace_back(std::move(texture)).get();
     }
 
     RHI::ShaderHandle D3D12Device::CreateShaderNative(const RHI::ShaderDesc& desc)
@@ -1484,16 +1418,13 @@ void D3D12Device::DestroySwapchainNative()
         }
         auto shader = std::unique_ptr<D3D12Shader, D3D12ObjectDeleter>(
             new D3D12Shader(desc));
-        D3D12Shader* result = shader.get();
-        m_internal->liveShaders.push_back(std::move(shader));
-        return result;
+        return m_internal->liveShaders.emplace_back(std::move(shader)).get();
     }
 
     RHI::PipelineHandle D3D12Device::CreateGraphicsPipelineNative(
         const RHI::GraphicsPipelineDesc& desc)
     {
-        if (m_internal == nullptr || m_internal->device == nullptr ||
-            !SupportsPipelineLayoutNative(desc.layout) ||
+        if (!SupportsPipelineLayoutNative(desc.layout) ||
             !SupportsGraphicsPipelineNative(desc))
         {
             return nullptr;
@@ -1593,8 +1524,7 @@ void D3D12Device::DestroySwapchainNative()
                 continue;
             }
 
-            descriptorRanges.emplace_back();
-            descriptorRanges.back().Init(
+            descriptorRanges.emplace_back(
                 ToDescriptorRangeType(binding.type),
                 binding.count,
                 binding.binding,
@@ -1602,8 +1532,7 @@ void D3D12Device::DestroySwapchainNative()
                 D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE |
                     D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
                 0);
-            rootParameters.emplace_back();
-            rootParameters.back().InitAsDescriptorTable(
+            rootParameters.emplace_back().InitAsDescriptorTable(
                 1,
                 &descriptorRanges.back(),
                 ToShaderVisibility(binding.stages));
@@ -1623,8 +1552,7 @@ void D3D12Device::DestroySwapchainNative()
         {
             inlineConstantRootParameter =
                 static_cast<uint32_t>(rootParameters.size());
-            rootParameters.emplace_back();
-            rootParameters.back().InitAsConstants(
+            rootParameters.emplace_back().InitAsConstants(
                 rootConstantDwords,
                 desc.layout.inlineConstantBinding,
                 0,
@@ -1681,10 +1609,6 @@ void D3D12Device::DestroySwapchainNative()
         for (uint32_t index = 0; index < desc.vertexBufferCount; ++index)
         {
             const RHI::VertexBufferLayout& layout = desc.vertexBuffers[index];
-            if (layout.binding >= D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT)
-            {
-                return nullptr;
-            }
             vertexBindings.push_back({ layout.binding, layout.stride });
         }
 
@@ -1811,6 +1735,7 @@ void D3D12Device::DestroySwapchainNative()
             }
         }
 
+        pipelineDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
         pipelineDesc.DepthStencilState.DepthEnable =
             desc.depthStencil.depthTestEnabled ||
             desc.depthStencil.depthWriteEnabled;
@@ -1847,17 +1772,6 @@ void D3D12Device::DestroySwapchainNative()
             pipelineDesc.DepthStencilState.BackFace.StencilFunc =
                 ToCompareOp(desc.depthStencil.back.compareOp);
         }
-        else
-        {
-            pipelineDesc.DepthStencilState.FrontFace = {
-                D3D12_STENCIL_OP_KEEP,
-                D3D12_STENCIL_OP_KEEP,
-                D3D12_STENCIL_OP_KEEP,
-                D3D12_COMPARISON_FUNC_ALWAYS
-            };
-            pipelineDesc.DepthStencilState.BackFace =
-                pipelineDesc.DepthStencilState.FrontFace;
-        }
         pipelineDesc.DSVFormat = static_cast<DXGI_FORMAT>(
             D3D12Texture::ToDxgiFormat(
                 desc.depthStencil.format));
@@ -1891,8 +1805,7 @@ void D3D12Device::DestroySwapchainNative()
                 desc.depthStencil.stencilEnabled,
                 desc.depthStencil.depthWriteEnabled ||
                     desc.depthStencil.stencilEnabled));
-        D3D12PipelineState* result = pipeline.get();
-        m_internal->livePipelines.push_back(std::move(pipeline));
+        auto* result = m_internal->livePipelines.emplace_back(std::move(pipeline)).get();
         if (alphaFactorsTranslated)
 		ReportDiagnostic(DiagnosticSeverity::Info,
                 "D3D12: Alpha blend color factors were translated to equivalent alpha factors.");
@@ -2032,34 +1945,20 @@ void D3D12Device::DestroySwapchainNative()
                 {
                     return nullptr;
                 }
+                const uint32_t stride = buffer->GetDesc().stride;
+                const uint32_t elementSize = stride != 0 ? stride : 4;
+                if ((binding.offset % elementSize) != 0 ||
+                    (binding.size % elementSize) != 0)
+                {
+                    return nullptr;
+                }
                 D3D12_UNORDERED_ACCESS_VIEW_DESC view = {};
                 view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-                if (buffer->GetDesc().stride != 0)
-                {
-                    if ((binding.offset % buffer->GetDesc().stride) != 0 ||
-                        (binding.size % buffer->GetDesc().stride) != 0)
-                    {
-                        return nullptr;
-                    }
-                    view.Format = DXGI_FORMAT_UNKNOWN;
-                    view.Buffer.FirstElement =
-                        binding.offset / buffer->GetDesc().stride;
-                    view.Buffer.NumElements =
-                        binding.size / buffer->GetDesc().stride;
-                    view.Buffer.StructureByteStride = buffer->GetDesc().stride;
-                }
-                else
-                {
-                    if ((binding.offset % 4) != 0 ||
-                        (binding.size % 4) != 0)
-                    {
-                        return nullptr;
-                    }
-                    view.Format = DXGI_FORMAT_R32_TYPELESS;
-                    view.Buffer.FirstElement = binding.offset / 4;
-                    view.Buffer.NumElements = binding.size / 4;
-                    view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-                }
+                view.Format = stride != 0 ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_TYPELESS;
+                view.Buffer.FirstElement = binding.offset / elementSize;
+                view.Buffer.NumElements = binding.size / elementSize;
+                view.Buffer.StructureByteStride = stride;
+                view.Buffer.Flags = stride != 0 ? D3D12_BUFFER_UAV_FLAG_NONE : D3D12_BUFFER_UAV_FLAG_RAW;
 
                 auto* resource = static_cast<ID3D12Resource*>(
                     buffer->GetNativeResource());
@@ -2163,9 +2062,7 @@ void D3D12Device::DestroySwapchainNative()
                 descriptorHeap.Get(),
                 descriptorSize,
                 resources));
-        D3D12ResourceSet* result = resourceSet.get();
-        m_internal->liveResourceSets.push_back(std::move(resourceSet));
-        return result;
+        return m_internal->liveResourceSets.emplace_back(std::move(resourceSet)).get();
     }
 
     void D3D12Device::DestroyBufferNative(RHI::BufferHandle buffer)
@@ -2218,14 +2115,7 @@ void D3D12Device::DestroySwapchainNative()
         if (m_internal == nullptr) return false;
         auto* d3dCommandList = dynamic_cast<D3D12CommandList*>(&commandList);
         auto* d3dBuffer = dynamic_cast<D3D12Buffer*>(buffer);
-        const auto owned = std::find_if(
-            m_internal->activeCommandLists.begin(),
-            m_internal->activeCommandLists.end(),
-            [d3dCommandList](
-                const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& candidate)
-            {
-                return candidate.get() == d3dCommandList;
-            });
+        const auto owned = m_internal->FindActiveCommandList(d3dCommandList);
         return d3dCommandList != nullptr && d3dBuffer != nullptr &&
             owned != m_internal->activeCommandLists.end() &&
             d3dCommandList->RecordBufferUpload(
@@ -2245,14 +2135,7 @@ void D3D12Device::DestroySwapchainNative()
         if (m_internal == nullptr) return false;
         auto* d3dCommandList = dynamic_cast<D3D12CommandList*>(&commandList);
         auto* d3dTexture = dynamic_cast<D3D12Texture*>(texture);
-        const auto owned = std::find_if(
-            m_internal->activeCommandLists.begin(),
-            m_internal->activeCommandLists.end(),
-            [d3dCommandList](
-                const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& candidate)
-            {
-                return candidate.get() == d3dCommandList;
-            });
+        const auto owned = m_internal->FindActiveCommandList(d3dCommandList);
         return d3dCommandList != nullptr && d3dTexture != nullptr &&
             owned != m_internal->activeCommandLists.end() &&
             d3dCommandList->RecordTextureUpload(
