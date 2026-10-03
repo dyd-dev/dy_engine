@@ -1,12 +1,21 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
+#include <system_error>
+#include <utility>
+#include <vector>
 #include <string>
 
 #include <dyf/Extends/Model/Model.h>
 
 namespace dyf
 {
+	[[nodiscard]] SkinInfluence MakeSkinInfluence(
+		std::vector<std::pair<uint32_t, float>> values, bool& truncated);
+	[[nodiscard]] bool IsPathInsideDirectory(
+		const std::filesystem::path& directory, const std::filesystem::path& candidate, std::error_code& error);
+
 	class ModelLoadBudget
 	{
 	public:

@@ -1,4 +1,5 @@
 #include <dyf/Extends/Model/Model.h>
+#include "ModelLoader.h"
 
 #include <algorithm>
 #include <cctype>
@@ -12,14 +13,6 @@ namespace dyf
 {
 	namespace
 	{
-		[[nodiscard]] Math::float3 BuildFallbackTangent(const Math::float3& normal)
-		{
-			const Math::float3 up = std::fabs(normal.z) < 0.999f
-				? Math::float3(0.0f, 0.0f, 1.0f)
-				: Math::float3(0.0f, 1.0f, 0.0f);
-			return NormalizeOr(Cross(up, normal), Math::float3(1.0f, 0.0f, 0.0f));
-		}
-
 		struct ModelBounds
 		{
 			Math::float3 min;
@@ -115,9 +108,9 @@ namespace dyf
 			material.normalTexture = CreateTextureIfPresent(source, MaterialTextureKind::Normal, importedTextures);
 			material.occlusionTexture = CreateTextureIfPresent(source, MaterialTextureKind::Occlusion, importedTextures);
 			material.emissiveTexture = CreateTextureIfPresent(source, MaterialTextureKind::Emissive, importedTextures);
-			const Image textures[]={material.baseColorTexture,material.metallicRoughnessTexture,material.normalTexture,material.occlusionTexture,material.emissiveTexture};
+			const Image* textures[]={&material.baseColorTexture,&material.metallicRoughnessTexture,&material.normalTexture,&material.occlusionTexture,&material.emissiveTexture};
             for(uint32_t slot=0;slot<5;++slot)
-                if((source.textureIndices[slot]<importedTextures.size() || (source.hasTexture[slot] && !source.texturePaths[slot].empty())) && !textures[slot].IsValid())return false;
+                if((source.textureIndices[slot]<importedTextures.size() || (source.hasTexture[slot] && !source.texturePaths[slot].empty())) && !textures[slot]->IsValid())return false;
             return true;
 		}
 
@@ -129,7 +122,6 @@ namespace dyf
 			std::filesystem::path canonicalPath = std::filesystem::weakly_canonical(path, error);
 			if(error)
 			{
-				error.clear();
 				canonicalPath = std::filesystem::absolute(path, error).lexically_normal();
 				if(error) canonicalPath = std::filesystem::path(path).lexically_normal();
 			}
@@ -367,24 +359,22 @@ namespace dyf
 		}
 
 		const ModelBounds bounds = ComputeModelBounds(model);
-		std::vector<Image> importedTextures;
-		importedTextures.reserve(model.textures.size());
-		for(const Image& texture : model.textures)
+		for(Image& texture : model.textures)
 		{
-			Image prepared = texture;
-			if(!prepared.IsValid())
+			if(!texture.IsValid())
 			{
-				if(texture.GetSourcePath().empty() || !LoadImage(texture.GetSourcePath(), prepared)) return false;
-				prepared.SetColorSpace(texture.GetColorSpace());
+				const ColorSpace colorSpace = texture.GetColorSpace();
+				const std::string path = texture.GetSourcePath();
+				if(path.empty() || !LoadImage(path, texture)) return false;
+				texture.SetColorSpace(colorSpace);
 			}
-			importedTextures.push_back(std::move(prepared));
 		}
 		std::vector<MaterialID> materials;
 		materials.reserve(model.materials.size());
 		for(const ModelMaterialInfo& material : model.materials)
         {
             MaterialDesc prepared;
-            if(!BuildSceneMaterial(material,importedTextures,prepared))return false;
+            if(!BuildSceneMaterial(material,model.textures,prepared))return false;
             materials.push_back(scene.CreateMaterial(prepared));
         }
 		if(materials.empty()) materials.push_back(scene.CreateMaterial(MaterialDesc{}));
@@ -398,10 +388,7 @@ namespace dyf
 		asset.hasBounds = bounds.valid;
 		if(bounds.valid)
 		{
-			asset.boundsCenter = Math::float3(
-				(bounds.min.x + bounds.max.x) * 0.5f,
-				(bounds.min.y + bounds.max.y) * 0.5f,
-				(bounds.min.z + bounds.max.z) * 0.5f);
+			asset.boundsCenter = (bounds.min + bounds.max) * 0.5f;
 			asset.boundsLargestAxis = std::max(
 				std::max(bounds.max.x - bounds.min.x, bounds.max.y - bounds.min.y),
 				bounds.max.z - bounds.min.z);
@@ -416,9 +403,7 @@ namespace dyf
 			ModelAssetMesh assetMesh;
 			assetMesh.mesh = scene.CreateMesh(modelMesh.mesh);
             scene.m_meshSkinInfluences.resize(scene.Meshes().size());
-            auto& gpuInfluences=scene.m_meshSkinInfluences[ToIndex(assetMesh.mesh)];
-            for(const auto& input:modelMesh.skinInfluences)
-                gpuInfluences.push_back(input);
+            scene.m_meshSkinInfluences[ToIndex(assetMesh.mesh)] = std::move(modelMesh.skinInfluences);
 			assetMesh.material = material;
 			assetMesh.nodeIndex = modelMesh.nodeIndex;
 			assetMesh.skinIndex = modelMesh.skinIndex;
@@ -561,29 +546,20 @@ namespace dyf
 			const uint32_t vertexOffset = static_cast<uint32_t>(merged.vertices.size());
 			for(size_t vertexIndex = 0; vertexIndex < sourceGeometry->vertices.size(); ++vertexIndex)
 			{
-				Vertex vertex = sourceGeometry->vertices[vertexIndex];
-				Math::float3 localPosition = vertex.position;
-				Math::float3 localNormal = vertex.normal;
-				Math::float3 localTangent(vertex.tangent.x, vertex.tangent.y, vertex.tangent.z);
+				const Vertex& sourceVertex = sourceGeometry->vertices[vertexIndex];
+				Vertex vertex = sourceVertex;
 				if(hasSkin)
 				{
 					const SkinInfluence& influence = sourceMesh.skinInfluences[vertexIndex];
-					Vertex skinnedVertex;
-					if(!SkinVertex(vertex, influence, bindPalette, skinnedVertex)) return {};
-					localPosition = skinnedVertex.position;
-					localNormal = skinnedVertex.normal;
-					localTangent = Math::float3(
-						skinnedVertex.tangent.x,
-						skinnedVertex.tangent.y,
-						skinnedVertex.tangent.z);
-					vertex.tangent.w = skinnedVertex.tangent.w;
+					if(!SkinVertex(sourceVertex, influence, bindPalette, vertex)) return {};
 				}
 
-				vertex.position = Math::TransformPoint(outerTransform, localPosition);
+				vertex.position = Math::TransformPoint(outerTransform, vertex.position);
 				vertex.normal = NormalizeOr(
-					Math::TransformVector(outerNormalTransform, localNormal),
+					Math::TransformVector(outerNormalTransform, vertex.normal),
 					Math::float3(0.0f, 0.0f, 1.0f));
-				const Math::float3 rawTransformedTangent = Math::TransformVector(outerTransform, localTangent);
+				const Math::float3 rawTransformedTangent = Math::TransformVector(
+					outerTransform, Math::float3(vertex.tangent.x, vertex.tangent.y, vertex.tangent.z));
 				const Math::float3 transformedTangent = NormalizeOr(
 					rawTransformedTangent - vertex.normal * Dot(vertex.normal, rawTransformedTangent),
 					BuildFallbackTangent(vertex.normal));

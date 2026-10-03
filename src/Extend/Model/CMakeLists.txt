@@ -11,7 +11,6 @@ add_library(dy_extend_model STATIC
 )
 add_library(dyf::Model ALIAS dy_extend_model)
 target_link_libraries(dy_extend_model PUBLIC dy_engine)
-target_include_directories(dy_extend_model PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 
 # Model을 선택한 경우에만 변형 셰이더를 생성한다.
 include("${CMAKE_CURRENT_SOURCE_DIR}/Shaders/ShaderAssets.cmake")

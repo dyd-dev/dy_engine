@@ -1,5 +1,6 @@
 #include "ModelLoader.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <sstream>
@@ -7,6 +8,50 @@
 
 namespace dyf
 {
+	[[nodiscard]] SkinInfluence MakeSkinInfluence(
+		std::vector<std::pair<uint32_t, float>> values,
+		bool& truncated)
+	{
+		values.erase(std::remove_if(values.begin(), values.end(), [](const auto& value) {
+			return value.second <= 0.0f;
+		}), values.end());
+		std::stable_sort(values.begin(), values.end(), [](const auto& lhs, const auto& rhs) {
+			return lhs.second > rhs.second;
+		});
+		truncated = values.size() > 4;
+		if(values.size() > 4) values.resize(4);
+
+		SkinInfluence result;
+		float total = 0.0f;
+		for(const auto& value : values) total += value.second;
+		if(total <= 1.0e-6f) return result;
+		for(size_t index = 0; index < values.size(); ++index)
+		{
+			result.jointIndices[index] = values[index].first;
+			result.weights[index] = values[index].second / total;
+		}
+		return result;
+	}
+	[[nodiscard]] bool IsPathInsideDirectory(
+		const std::filesystem::path& directory,
+		const std::filesystem::path& candidate,
+		std::error_code& error)
+	{
+		error.clear();
+		const std::filesystem::path canonicalDirectory =
+			std::filesystem::weakly_canonical(directory, error);
+		if(error) return false;
+		const std::filesystem::path canonicalCandidate =
+			std::filesystem::weakly_canonical(candidate, error);
+		if(error) return false;
+		const std::filesystem::path relative =
+			canonicalCandidate.lexically_relative(canonicalDirectory);
+		if(relative.empty() || relative.is_absolute()) return false;
+		for(const std::filesystem::path& component : relative)
+			if(component == "..") return false;
+		return true;
+	}
+
 	ModelLoadBudget::ModelLoadBudget(const std::string& path, const ModelLoadOptions& options)
 		: m_path(path), m_options(options)
 	{

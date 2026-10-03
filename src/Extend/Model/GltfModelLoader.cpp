@@ -56,12 +56,8 @@ namespace dyf
 			material.textureIndices[slot] = static_cast<uint32_t>(imageIndex);
 			material.hasTexture[slot] = true;
 			const fastgltf::Image& image = gltf.images[imageIndex];
-			std::visit(dy_gltf_visitor{
-				[&](const fastgltf::sources::URI& filePath) {
-					SetTexturePath(material, kind, (basePath / filePath.uri.fspath()).string());
-				},
-				[&](const auto&) {}
-			}, image.data);
+			if(const auto* filePath = std::get_if<fastgltf::sources::URI>(&image.data))
+				SetTexturePath(material, kind, (basePath / filePath->uri.fspath()).string());
 		}
 
 		[[nodiscard]] bool LoadGltfTextureAssets(
@@ -167,30 +163,6 @@ namespace dyf
 			default: return AnimationInterpolation::Linear;
 			}
 		}
-		[[nodiscard]] SkinInfluence MakeSkinInfluence(
-			std::vector<std::pair<uint32_t, float>> values,
-			bool& truncated)
-		{
-			values.erase(std::remove_if(values.begin(), values.end(), [](const auto& value) {
-				return value.second <= 0.0f;
-			}), values.end());
-			std::stable_sort(values.begin(), values.end(), [](const auto& lhs, const auto& rhs) {
-				return lhs.second > rhs.second;
-			});
-			truncated = values.size() > 4;
-			if(values.size() > 4) values.resize(4);
-
-			SkinInfluence result;
-			float total = 0.0f;
-			for(const auto& value : values) total += value.second;
-			if(total <= 1.0e-6f) return result;
-			for(size_t index = 0; index < values.size(); ++index)
-			{
-				result.jointIndices[index] = values[index].first;
-				result.weights[index] = values[index].second / total;
-			}
-			return result;
-		}
 		[[nodiscard]] bool IsFinite(const Math::float3& value)
 		{
 			return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
@@ -212,15 +184,6 @@ namespace dyf
 		[[nodiscard]] bool IsFinite(const NodeTransform& value)
 		{
 			return IsFinite(value.translation) && IsFinite(value.rotation) && IsFinite(value.scale);
-		}
-
-		template<typename Key>
-		[[nodiscard]] bool HasStrictFiniteKeyTimes(const std::vector<Key>& keys)
-		{
-			if(keys.empty() || !std::isfinite(keys.front().time)) return false;
-			for(size_t index = 1; index < keys.size(); ++index)
-				if(!std::isfinite(keys[index].time) || keys[index].time <= keys[index - 1].time) return false;
-			return true;
 		}
 
 		[[nodiscard]] bool HasStrictFiniteTimes(const std::vector<float>& times)
@@ -310,25 +273,6 @@ namespace dyf
 			}
 			return true;
 		}
-		[[nodiscard]] bool IsPathInsideDirectory(
-			const std::filesystem::path& directory,
-			const std::filesystem::path& candidate,
-			std::error_code& error)
-		{
-			error.clear();
-			const std::filesystem::path canonicalDirectory =
-				std::filesystem::weakly_canonical(directory, error);
-			if(error) return false;
-			const std::filesystem::path canonicalCandidate =
-				std::filesystem::weakly_canonical(candidate, error);
-			if(error) return false;
-			const std::filesystem::path relative =
-				canonicalCandidate.lexically_relative(canonicalDirectory);
-			if(relative.empty() || relative.is_absolute()) return false;
-			for(const std::filesystem::path& component : relative)
-				if(component == "..") return false;
-			return true;
-		}
 		[[nodiscard]] bool ValidateGltfSourceBudget(
 			const std::string& filepath,
 			const std::filesystem::path& basePath,
@@ -357,7 +301,6 @@ namespace dyf
 				if(uriSource == nullptr || !uriSource->uri.isLocalPath()) continue;
 
 				const std::filesystem::path externalPath = basePath / uriSource->uri.fspath();
-				sizeError.clear();
 				if(!IsPathInsideDirectory(basePath, externalPath, sizeError))
 				{
 					return ReportModelError(
@@ -366,7 +309,6 @@ namespace dyf
 							? "failed to canonicalize external glTF buffer path"
 							: "external glTF buffer path escapes the model directory");
 				}
-				sizeError.clear();
 				const uintmax_t externalSize = std::filesystem::file_size(externalPath, sizeError);
 				if(sizeError)
 				{
@@ -390,7 +332,6 @@ namespace dyf
 				if(uriSource == nullptr || !uriSource->uri.isLocalPath()) continue;
 
 				const std::filesystem::path externalPath = basePath / uriSource->uri.fspath();
-				sizeError.clear();
 				if(!IsPathInsideDirectory(basePath, externalPath, sizeError))
 				{
 					return ReportModelError(
@@ -399,7 +340,6 @@ namespace dyf
 							? "failed to canonicalize external glTF image path"
 							: "external glTF image path escapes the model directory");
 				}
-				sizeError.clear();
 				const uintmax_t externalSize = std::filesystem::file_size(externalPath, sizeError);
 				if(sizeError)
 				{
@@ -582,7 +522,6 @@ namespace dyf
 				}
 				if(source.meshIndex.has_value())
 				{
-					if(source.meshIndex.value() >= gltf.meshes.size()) return false;
 					const fastgltf::Mesh& mesh = gltf.meshes[source.meshIndex.value()];
 					size_t targetCount = 0u;
 					for(const fastgltf::Primitive& primitive : mesh.primitives)
@@ -687,16 +626,16 @@ namespace dyf
 				for(size_t channelIndex = 0; channelIndex < source.channels.size(); ++channelIndex)
 				{
 					const fastgltf::AnimationChannel& channel = source.channels[channelIndex];
+					if(!channel.nodeIndex.has_value() || channel.nodeIndex.value() >= outModel.nodes.size()
+						|| channel.samplerIndex >= source.samplers.size())
+					{
+						return ReportModelError(
+							filepath,
+							channel.path == fastgltf::AnimationPath::Weights
+								? "glTF morph animation channel is invalid" : "glTF animation channel is invalid");
+					}
 					if(channel.path == fastgltf::AnimationPath::Weights)
 					{
-						if(!channel.nodeIndex.has_value()
-							|| channel.nodeIndex.value() >= outModel.nodes.size()
-							|| channel.samplerIndex >= source.samplers.size())
-						{
-							return ReportModelError(
-								filepath,
-								"glTF morph animation channel is invalid");
-						}
 						const uint32_t nodeIndex = static_cast<uint32_t>(channel.nodeIndex.value());
 						const size_t targetCount = outModel.nodes[nodeIndex].morphWeights.size();
 						if(targetCount == 0u)
@@ -757,26 +696,15 @@ namespace dyf
 								if(cubic)
 								{
 									key.inTangent = values[keyBase + targetIndex];
-									key.value = values[keyBase + targetCount + targetIndex];
 									key.outTangent = values[keyBase + targetCount * 2u + targetIndex];
 								}
-								else
-								{
-									key.value = values[keyBase + targetIndex];
-								}
+								key.value = values[keyBase + (cubic ? targetCount : 0u) + targetIndex];
 								track.weights.push_back(key);
 							}
 							clip.morphTracks.push_back(std::move(track));
 						}
 						clip.duration = std::max(clip.duration, times.back());
 						continue;
-					}
-					if(!channel.nodeIndex.has_value() || channel.nodeIndex.value() >= outModel.nodes.size()
-						|| channel.samplerIndex >= source.samplers.size())
-					{
-						return ReportModelError(
-							filepath,
-							"glTF animation channel is invalid");
 					}
 
 					const fastgltf::AnimationSampler& sampler = source.samplers[channel.samplerIndex];
@@ -837,8 +765,7 @@ namespace dyf
 							}
 							track.rotations.push_back(key);
 						}
-						if(!HasStrictFiniteKeyTimes(track.rotations)
-							|| std::any_of(track.rotations.begin(), track.rotations.end(), [](const QuatKey& key) {
+						if(std::any_of(track.rotations.begin(), track.rotations.end(), [](const QuatKey& key) {
 								return !IsFinite(key.value) || !IsFinite(key.inTangent) || !IsFinite(key.outTangent);
 							}))
 						{
@@ -876,8 +803,7 @@ namespace dyf
 							}
 							destination->push_back(key);
 						}
-						if(!HasStrictFiniteKeyTimes(*destination)
-							|| std::any_of(destination->begin(), destination->end(), [](const Vec3Key& key) {
+						if(std::any_of(destination->begin(), destination->end(), [](const Vec3Key& key) {
 								return !IsFinite(key.value) || !IsFinite(key.inTangent) || !IsFinite(key.outTangent);
 							}))
 						{
@@ -981,6 +907,7 @@ namespace dyf
 								"glTF POSITION attribute contains non-finite values");
 						}
 
+						const Math::float4x4 modelVertexMatrix = ToFloat4x4(vertexMatrix);
 						const auto* normalAttr = primitive.findAttribute("NORMAL");
 						const bool hasNormalAttribute = normalAttr != primitive.attributes.end();
 						if(hasNormalAttribute)
@@ -989,7 +916,7 @@ namespace dyf
 							const fastgltf::Accessor& normalAcc = gltf.accessors[normalAttr->accessorIndex];
 							if(normalAcc.count != posAccessor.count) return false;
 							Math::float4x4 normalMatrix = {};
-							if(!Math::InverseTranspose(ToFloat4x4(vertexMatrix), normalMatrix))
+							if(!Math::InverseTranspose(modelVertexMatrix, normalMatrix))
 							{
 								return ReportModelError(
 									filepath,
@@ -1024,15 +951,14 @@ namespace dyf
 							}
 						}
 
-						bool hasAuthoredTangents = false;
-						if(auto* tangentAttr = primitive.findAttribute("TANGENT"); tangentAttr != primitive.attributes.end())
+						const auto* tangentAttr = primitive.findAttribute("TANGENT");
+						if(tangentAttr != primitive.attributes.end())
 						{
 							if(tangentAttr->accessorIndex >= gltf.accessors.size()) return false;
 							const fastgltf::Accessor& tangentAccessor = gltf.accessors[tangentAttr->accessorIndex];
 							if(tangentAccessor.count != posAccessor.count) return false;
-							const Math::float4x4 tangentMatrix = ToFloat4x4(vertexMatrix);
 							const float tangentHandednessSign =
-								Math::Determinant3x3(tangentMatrix) < 0.0f ? -1.0f : 1.0f;
+								Math::Determinant3x3(modelVertexMatrix) < 0.0f ? -1.0f : 1.0f;
 							bool invalidTangent = false;
 							fastgltf::iterateAccessorWithIndex<fastgltf::math::fvec4>(gltf, tangentAccessor, [&](const fastgltf::math::fvec4& value, size_t idx) {
 								if(!std::isfinite(value.x()) || !std::isfinite(value.y())
@@ -1042,7 +968,7 @@ namespace dyf
 									return;
 								}
 								const Math::float3 transformed = Math::TransformVector(
-									tangentMatrix,
+									modelVertexMatrix,
 									Math::float3(value.x(), value.y(), value.z()));
 								const Math::float3& normal = mesh.mesh.vertices[idx].normal;
 								const Math::float3 orthogonal = transformed - normal * Dot(normal, transformed);
@@ -1061,7 +987,6 @@ namespace dyf
 									filepath,
 									"glTF TANGENT attribute contains non-finite values");
 							}
-							hasAuthoredTangents = true;
 						}
 
 						if(auto* uvAttr = primitive.findAttribute("TEXCOORD_0"); uvAttr != primitive.attributes.end())
@@ -1182,10 +1107,9 @@ namespace dyf
 						}
 
 						mesh.morphTargets.reserve(primitive.targets.size());
-						const Math::float4x4 morphPositionMatrix = ToFloat4x4(vertexMatrix);
 						Math::float4x4 morphNormalMatrix = {};
 						if(!primitive.targets.empty()
-							&& !Math::InverseTranspose(morphPositionMatrix, morphNormalMatrix))
+							&& !Math::InverseTranspose(modelVertexMatrix, morphNormalMatrix))
 						{
 							return ReportModelError(
 								filepath,
@@ -1224,9 +1148,9 @@ namespace dyf
 									filepath,
 									"glTF morph target contains non-finite deltas");
 							};
-							if(!loadDeltas("POSITION", morphPositionMatrix, target.positionDeltas)
+							if(!loadDeltas("POSITION", modelVertexMatrix, target.positionDeltas)
 								|| !loadDeltas("NORMAL", morphNormalMatrix, target.normalDeltas)
-								|| !loadDeltas("TANGENT", morphPositionMatrix, target.tangentDeltas)) return false;
+								|| !loadDeltas("TANGENT", modelVertexMatrix, target.tangentDeltas)) return false;
 							if(target.positionDeltas.empty() && target.normalDeltas.empty() && target.tangentDeltas.empty())
 							{
 								return ReportModelError(
@@ -1263,7 +1187,7 @@ namespace dyf
 								"glTF index references a vertex outside the primitive");
 						}
 
-						if(!hasAuthoredTangents)
+						if(tangentAttr == primitive.attributes.end())
 							CalculateTangents(mesh.mesh, !hasNormalAttribute);
 						outModel.meshes.push_back(std::move(mesh));
 					}

@@ -107,30 +107,6 @@ namespace dyf
 			default: return SkinningMethod::Linear;
 			}
 		}
-		[[nodiscard]] SkinInfluence MakeSkinInfluence(
-			std::vector<std::pair<uint32_t, float>> values,
-			bool& truncated)
-		{
-			values.erase(std::remove_if(values.begin(), values.end(), [](const auto& value) {
-				return value.second <= 0.0f;
-			}), values.end());
-			std::stable_sort(values.begin(), values.end(), [](const auto& lhs, const auto& rhs) {
-				return lhs.second > rhs.second;
-			});
-			truncated = values.size() > 4;
-			if(values.size() > 4) values.resize(4);
-
-			SkinInfluence result;
-			float total = 0.0f;
-			for(const auto& value : values) total += value.second;
-			if(total <= 1.0e-6f) return result;
-			for(size_t index = 0; index < values.size(); ++index)
-			{
-				result.jointIndices[index] = values[index].first;
-				result.weights[index] = values[index].second / total;
-			}
-			return result;
-		}
 		[[nodiscard]] bool IsFinite(const Math::float2& value)
 		{
 			return std::isfinite(value.x) && std::isfinite(value.y);
@@ -370,25 +346,6 @@ namespace dyf
 				: 1.0f;
 			return weights;
 		}
-		[[nodiscard]] bool IsPathInsideDirectory(
-			const std::filesystem::path& directory,
-			const std::filesystem::path& candidate,
-			std::error_code& error)
-		{
-			error.clear();
-			const std::filesystem::path canonicalDirectory =
-				std::filesystem::weakly_canonical(directory, error);
-			if(error) return false;
-			const std::filesystem::path canonicalCandidate =
-				std::filesystem::weakly_canonical(candidate, error);
-			if(error) return false;
-			const std::filesystem::path relative =
-				canonicalCandidate.lexically_relative(canonicalDirectory);
-			if(relative.empty() || relative.is_absolute()) return false;
-			for(const std::filesystem::path& component : relative)
-				if(component == "..") return false;
-			return true;
-		}
 		struct UfbxExternalFileContext
 		{
 			std::filesystem::path modelDirectory;
@@ -409,8 +366,6 @@ namespace dyf
 		{
 			auto* context = static_cast<UfbxExternalFileContext*>(user);
 			if(context == nullptr || stream == nullptr || path == nullptr || info == nullptr) return false;
-			if(info->type == UFBX_OPEN_FILE_MAIN_MODEL)
-				return ufbx_default_open_file(nullptr, stream, path, pathLength, info);
 
 			const size_t actualPathLength = pathLength == SIZE_MAX ? std::strlen(path) : pathLength;
 			const std::string pathString(path, actualPathLength);
@@ -539,12 +494,9 @@ namespace dyf
 					std::error_code pathError;
 					for(const std::filesystem::path& candidate : candidates)
 					{
-						pathError.clear();
 						if(!IsPathInsideDirectory(externalFileContext.modelDirectory, candidate, pathError)) continue;
-						pathError.clear();
 						if(!std::filesystem::is_regular_file(candidate, pathError) || pathError) continue;
 
-						pathError.clear();
 						const std::filesystem::path canonicalPath =
 							std::filesystem::weakly_canonical(candidate, pathError);
 						if(pathError) continue;
@@ -631,20 +583,14 @@ namespace dyf
 
 			ufbx_error error;
 			ufbx_scene* scene = ufbx_load_file(filepath.c_str(), &opts, &error);
-			if(externalFileContext.pathRejected)
+			if(externalFileContext.pathRejected || externalFileContext.sourceLimitExceeded)
 			{
 				if(scene != nullptr) ufbx_free_scene(scene);
 				return ReportModelError(
 					filepath,
-					"ufbx external file path escapes the model directory: "
-						+ externalFileContext.rejectedPath);
-			}
-			if(externalFileContext.sourceLimitExceeded)
-			{
-				if(scene != nullptr) ufbx_free_scene(scene);
-				return ReportModelError(
-					filepath,
-					"ufbx source bytes exceed maxSourceBytes while accounting for external files");
+					externalFileContext.pathRejected
+						? "ufbx external file path escapes the model directory: " + externalFileContext.rejectedPath
+						: "ufbx source bytes exceed maxSourceBytes while accounting for external files");
 			}
 			if(scene == nullptr)
 			{
@@ -827,9 +773,7 @@ namespace dyf
 					Math::quat previousRotation = Math::quat::Identity();
 					for(size_t sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
 					{
-						const double relativeTime = sampleCount > 1
-							? std::min(duration, static_cast<double>(sampleIndex) / fbxBakeRate)
-							: 0.0;
+						const double relativeTime = std::min(duration, static_cast<double>(sampleIndex) / fbxBakeRate);
 						const ufbx_transform transform = ufbx_evaluate_transform(
 							stack->anim,
 							scene->nodes.data[nodeIndex],
@@ -873,7 +817,6 @@ namespace dyf
 				}
 				for(const UfbxBlendChannelBinding& binding : blendChannelBindings)
 				{
-					if(binding.channel == nullptr || binding.targetCount == 0u) continue;
 					std::vector<MorphWeightTrack> tracks(binding.targetCount);
 					for(uint32_t targetOffset = 0u; targetOffset < binding.targetCount; ++targetOffset)
 					{
@@ -884,9 +827,7 @@ namespace dyf
 					}
 					for(size_t sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
 					{
-						const double relativeTime = sampleCount > 1
-							? std::min(duration, static_cast<double>(sampleIndex) / fbxBakeRate)
-							: 0.0;
+						const double relativeTime = std::min(duration, static_cast<double>(sampleIndex) / fbxBakeRate);
 						const float channelWeight = static_cast<float>(ufbx_evaluate_blend_weight(
 							stack->anim,
 							binding.channel,
@@ -961,8 +902,7 @@ namespace dyf
 					? mat->pbr.base_color.texture
 					: mat->fbx.diffuse_color.texture;
 				applyTexture(material, MaterialTextureKind::BaseColor, baseColorTexture);
-				if(mat->pbr.metalness.texture != nullptr
-					&& mat->pbr.metalness.texture == mat->pbr.roughness.texture)
+				if(mat->pbr.metalness.texture == mat->pbr.roughness.texture)
 				{
 					applyTexture(material, MaterialTextureKind::MetallicRoughness, mat->pbr.metalness.texture);
 				}
@@ -1007,6 +947,7 @@ namespace dyf
 				const ufbx_skin_deformer* skinDeformer = sourceMesh->skin_deformers.count > 0
 					? sourceMesh->skin_deformers.data[0]
 					: nullptr;
+				uint32_t modelSkinIndex = UINT32_MAX;
 				if(skinDeformer != nullptr)
 				{
 					for(size_t deformerIndex = 1u; deformerIndex < sourceMesh->skin_deformers.count; ++deformerIndex)
@@ -1019,10 +960,6 @@ namespace dyf
 								"FBX mesh uses incompatible multiple skin deformers");
 						}
 					}
-				}
-				uint32_t modelSkinIndex = UINT32_MAX;
-				if(skinDeformer != nullptr)
-				{
 					const auto skin = skinIndices.find(skinDeformer);
 					if(skin == skinIndices.end()) return false;
 					modelSkinIndex = skin->second;
@@ -1173,13 +1110,11 @@ namespace dyf
 						if(skinDeformer != nullptr)
 						{
 							std::map<uint32_t, float> combinedInfluences;
-							const ufbx_skin_vertex* primarySkinVertex = nullptr;
 							for(size_t deformerIndex = 0u; deformerIndex < sourceMesh->skin_deformers.count; ++deformerIndex)
 							{
 								const ufbx_skin_deformer* deformer = sourceMesh->skin_deformers.data[deformerIndex];
 								if(deformer == nullptr || logicalVertex >= deformer->vertices.count) return false;
 								const ufbx_skin_vertex& skinVertex = deformer->vertices.data[logicalVertex];
-								if(primarySkinVertex == nullptr) primarySkinVertex = &skinVertex;
 								if(static_cast<size_t>(skinVertex.weight_begin) + skinVertex.num_weights > deformer->weights.count)
 									return false;
 								for(uint32_t weightIndex = 0; weightIndex < skinVertex.num_weights; ++weightIndex)
@@ -1196,7 +1131,6 @@ namespace dyf
 									combinedInfluences[weight.cluster_index] += static_cast<float>(weight.weight);
 								}
 							}
-							if(primarySkinVertex == nullptr) return false;
 							std::vector<std::pair<uint32_t, float>> influences(
 								combinedInfluences.begin(),
 								combinedInfluences.end());
@@ -1208,7 +1142,7 @@ namespace dyf
 							}
 							else if(skinDeformer->skinning_method == UFBX_SKINNING_METHOD_BLENDED_DQ_LINEAR)
 							{
-								const float dqBlendWeight = static_cast<float>(primarySkinVertex->dq_weight);
+								const float dqBlendWeight = static_cast<float>(skinDeformer->vertices.data[logicalVertex].dq_weight);
 								if(!std::isfinite(dqBlendWeight) || dqBlendWeight < 0.0f || dqBlendWeight > 1.0f)
 								{
 									return ReportModelError(
@@ -1227,11 +1161,9 @@ namespace dyf
 							}
 						}
 
-						if(mesh.morphTargets.size() != morphSourcesByNode[ni].size()) return false;
 						for(size_t targetIndex = 0; targetIndex < mesh.morphTargets.size(); ++targetIndex)
 						{
 							const ufbx_blend_shape* shape = morphSourcesByNode[ni][targetIndex].shape;
-							if(shape == nullptr) return false;
 							const ufbx_vec3 sourcePositionDelta =
 								ufbx_get_blend_shape_vertex_offset(shape, logicalVertex);
 							const ufbx_vec3 transformedPositionDelta =

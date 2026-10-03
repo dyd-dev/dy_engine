@@ -353,7 +353,7 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
         if(device.Supports(RHI::Feature::TimestampQuery)) query = device.CreateTimestampQuery({2});
         if(query) { commands->ResetTimestamps(query, 0, 2); commands->WriteTimestamp(query, 0); }
         commands->BindComputePipeline(m_computePipeline);
-        for(uint32_t index = 0; prepared && index < scene.GetEntityCount(); ++index)
+        for(uint32_t index = 0; index < scene.GetEntityCount(); ++index)
         {
             const auto entity = static_cast<EntityID>(index);
             const uint32_t paletteOffset = scene.GetEntitySkinPaletteOffset(entity);

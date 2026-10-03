@@ -44,7 +44,7 @@ namespace dyf
 
 	ModelInstanceID ModelScene::CreateModelInstance(ModelInstance instance)
 	{
-		const ModelAsset* asset = IsValid(instance.assetId) ? TryGetModelAsset(instance.assetId) : nullptr;
+		const ModelAsset* asset = TryGetModelAsset(instance.assetId);
 		if(IsValid(instance.assetId) && asset == nullptr) return ModelInstanceID::Invalid;
 		const std::vector<ModelNode>& nodes = asset != nullptr ? asset->nodes : instance.nodes;
 		instance.localPose.resize(nodes.size());
@@ -70,7 +70,7 @@ namespace dyf
 	{
 		if(!ValidInstance(instanceId, m_modelInstances) || !ValidEntity(entity, this->GetEntityCount())) return false;
 		ModelInstance& instance = m_modelInstances[ToIndex(instanceId)];
-		const ModelAsset* asset = IsValid(instance.assetId) ? TryGetModelAsset(instance.assetId) : nullptr;
+		const ModelAsset* asset = TryGetModelAsset(instance.assetId);
 		const std::vector<ModelNode>& nodes = asset != nullptr ? asset->nodes : instance.nodes;
 		const std::vector<ModelSkin>& skins = asset != nullptr ? asset->skins : instance.skins;
 		if(nodeIndex >= nodes.size()) return false;
@@ -124,7 +124,7 @@ namespace dyf
 		{
 			ModelInstance& instance = m_modelInstances[instanceIndex];
 			const ModelInstanceID instanceId = static_cast<ModelInstanceID>(instanceIndex);
-			const ModelAsset* asset = IsValid(instance.assetId) ? TryGetModelAsset(instance.assetId) : nullptr;
+			const ModelAsset* asset = TryGetModelAsset(instance.assetId);
 			const std::vector<ModelNode>& nodes = asset != nullptr ? asset->nodes : instance.nodes;
 			const std::vector<ModelSkin>& skins = asset != nullptr ? asset->skins : instance.skins;
 			const std::vector<AnimationClip>& clips = asset != nullptr ? asset->animations : instance.clips;
@@ -140,15 +140,6 @@ namespace dyf
 			if(validClip)
 			{
 				const AnimationClip& clip = clips[instance.playback.clipIndex];
-				for(const MorphWeightTrack& track : clip.morphTracks)
-				{
-					if(track.nodeIndex >= nodes.size()
-						|| track.nodeIndex >= instance.nodeMorphWeights.size()
-						|| track.targetIndex >= instance.nodeMorphWeights[track.nodeIndex].size()) continue;
-					const std::vector<float>& bindWeights = nodes[track.nodeIndex].morphWeights;
-					instance.nodeMorphWeights[track.nodeIndex][track.targetIndex] =
-						track.targetIndex < bindWeights.size() ? bindWeights[track.targetIndex] : 0.0f;
-				}
 				const float duration = std::max(clip.duration, 0.0f);
 				if(instance.playback.playing)
 				{
@@ -199,12 +190,8 @@ namespace dyf
 			{
 				ModelEntityBinding& binding = *current;
 				binding.paletteOffset = UINT32_MAX;
-				if(!ValidEntity(binding.entity, this->GetEntityCount()) || binding.nodeIndex >= instance.globalPose.size())
-				{
-					fail(instanceId, binding.entity, "invalid entity binding");
-					continue;
-				}
-				if(!GetEntity(binding.entity).SetTransform(instance.rootTransform * instance.globalPose[binding.nodeIndex]))
+				if(!ValidEntity(binding.entity, this->GetEntityCount()) || binding.nodeIndex >= instance.globalPose.size()
+					|| !GetEntity(binding.entity).SetTransform(instance.rootTransform * instance.globalPose[binding.nodeIndex]))
                 {
                     fail(instanceId, binding.entity, "invalid entity binding");
                     continue;
@@ -285,7 +272,7 @@ namespace dyf
 	{
 		if(!ValidInstance(instanceId, m_modelInstances)) return false;
 		ModelInstance& instance = m_modelInstances[ToIndex(instanceId)];
-		const ModelAsset* asset = IsValid(instance.assetId) ? TryGetModelAsset(instance.assetId) : nullptr;
+		const ModelAsset* asset = TryGetModelAsset(instance.assetId);
 		const std::vector<AnimationClip>& clips = asset != nullptr ? asset->animations : instance.clips;
 		if(clipIndex >= clips.size()) return false;
 		instance.playback.clipIndex = clipIndex;
@@ -318,7 +305,7 @@ namespace dyf
 	{
 		if(!ValidInstance(instanceId, m_modelInstances)) return false;
 		ModelInstance& instance = m_modelInstances[ToIndex(instanceId)];
-		const ModelAsset* asset = IsValid(instance.assetId) ? TryGetModelAsset(instance.assetId) : nullptr;
+		const ModelAsset* asset = TryGetModelAsset(instance.assetId);
 		const std::vector<AnimationClip>& clips = asset != nullptr ? asset->animations : instance.clips;
 		if(!paused && instance.playback.clipIndex >= clips.size()) return false;
 		instance.playback.playing = !paused;
