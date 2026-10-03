@@ -28,15 +28,12 @@ IDevice* IDevice::Create(const DeviceDesc& desc)
 	device = new dyf::Backends::NullDevice();
     dyf::Platform::Log::Write(dyf::Platform::LogLevel::Info, "RHI", "Initializing Null backend");
 #endif
-	if(device)
+	device->m_desc = desc;
+	if(device->Initialize(nullptr, device->GetDesc()) != 0)
 	{
-		device->m_desc = desc;
-		if(device->Initialize(nullptr, device->GetDesc()) != 0)
-		{
-			dyf::Platform::Log::Write(dyf::Platform::LogLevel::Error, "RHI", "Device initialization failed");
-			delete device;
-			device = nullptr;
-		}
+		dyf::Platform::Log::Write(dyf::Platform::LogLevel::Error, "RHI", "Device initialization failed");
+		delete device;
+		device = nullptr;
 	}
 	return device;
 }

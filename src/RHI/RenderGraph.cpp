@@ -6,7 +6,6 @@
 #include "RHI/Validation.h"
 
 #include <atomic>
-#include <cstdio>
 #include <queue>
 
 namespace dyf::RHI
@@ -198,12 +197,9 @@ namespace dyf::RHI
                     const auto& resource = m_resources[found->second];
                     if(!(resource.buffer ? IsBufferStateAllowed(resource.buffer->GetDesc(), binding.state) :
                         IsTextureStateAllowed(resource.texture->GetDesc(), binding.state))) return false;
-                    const auto inserted = uses.emplace(found->second, Use{binding.state, write});
-                    if(!inserted.second)
-                    {
-                        if(inserted.first->second.state != binding.state) return false;
-                        inserted.first->second.write |= write;
-                    }
+                    auto& use = uses.emplace(found->second, Use{binding.state, write}).first->second;
+                    if(use.state != binding.state) return false;
+                    use.write |= write;
                 }
                 return true;
             };

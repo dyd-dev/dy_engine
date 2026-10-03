@@ -47,7 +47,6 @@ ICommandList::~ICommandList()
         if(m_preparedNative) m_owner->DiscardCommandListNative(m_preparedNative);
         m_owner->m_recordedCommands.erase(this);
         m_references.clear();
-        m_owner = nullptr;
     }
 }
 
@@ -395,8 +394,6 @@ class RecordedCommandList final : public ICommandList
         m_resourceSet=nullptr;
         m_vertexBuffers.clear();
         m_indexBuffer=nullptr;
-        m_colorFormats.clear();
-        m_depthStencilFormat=Format::Unknown;
         m_viewport=m_scissor=false;
         m_commands.push_back([](ICommandList& n){n.EndRenderingNative();return true;});
     }

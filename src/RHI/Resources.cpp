@@ -6,7 +6,6 @@
 #include "dyf/Core/ThreadPool.h"
 #include <chrono>
 #include <thread>
-#include <cstdio>
 
 namespace dyf::RHI
 {
@@ -211,11 +210,8 @@ ICommandList* IDevice::AcquireCommandList()
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
     auto* commands = ICommandList::CreateRecorded();
     m_userCommands.insert(commands);
-    if(commands)
-    {
-        commands->m_owner = this;
-        m_recordedCommands.insert(commands);
-    }
+    commands->m_owner = this;
+    m_recordedCommands.insert(commands);
     return commands;
 }
 
@@ -487,8 +483,7 @@ PipelineHandle IDevice::CreateGraphicsPipeline(const GraphicsPipelineDesc& desc)
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
     auto vertex = Reference(desc.vertexShader), hull = Reference(desc.hullShader);
     auto domain = Reference(desc.domainShader), fragment = Reference(desc.fragmentShader);
-    if(!vertex || (desc.hullShader && !hull) || (desc.domainShader && !domain) ||
-        (desc.fragmentShader && !fragment) || !Supports(desc))
+    if(!Supports(desc))
     {ReportDiagnostic(DiagnosticSeverity::Error,"CreateGraphicsPipeline: unsupported description or device limit. Query Supports(desc) before creation.");return nullptr;}
     auto* pipeline = CreateGraphicsPipelineNative(desc);
     if(!pipeline) ReportDiagnostic(DiagnosticSeverity::Error,"CreateGraphicsPipeline: native creation failed; no fallback pipeline was substituted.");
@@ -522,18 +517,14 @@ ResourceSetHandle IDevice::CreateResourceSet(const ResourceSetDesc& desc)
     for(uint32_t i = 0; i < desc.bindingCount; ++i)
     {
         const auto& binding = desc.bindings[i];
-        if(binding.buffer)
-        {
-            auto reference = Reference(binding.buffer);
-            if(!reference) return nullptr;
-            dependencies.push_back(std::move(reference));
-        }
-        if(binding.texture)
-        {
-            auto reference = Reference(binding.texture);
-            if(!reference) return nullptr;
-            dependencies.push_back(std::move(reference));
-        }
+        const void* handles[] = {binding.buffer, binding.texture};
+        for(const void* handle : handles)
+            if(handle)
+            {
+                auto reference = Reference(handle);
+                if(!reference) return nullptr;
+                dependencies.push_back(std::move(reference));
+            }
     }
     if(!ValidateResourceSetDesc(desc)) return nullptr;
     const auto& layout = desc.pipeline->GetLayout();
@@ -541,9 +532,8 @@ ResourceSetHandle IDevice::CreateResourceSet(const ResourceSetDesc& desc)
     {
         const auto& binding = desc.bindings[i];
         if(!binding.buffer) continue;
-        const auto found = std::find_if(layout.bindings, layout.bindings + layout.bindingCount,
-            [&](const auto& entry) { return entry.binding == binding.binding; });
-        if(found == layout.bindings + layout.bindingCount) return nullptr;
+        const auto* found = FindLayoutBinding(layout, binding.binding);
+        if(!found) return nullptr;
         const bool uniform = found->type == ResourceBindingType::ConstantBuffer;
         const auto alignment = GetLimit(uniform ? Limit::UniformBufferOffsetAlignment : Limit::StorageBufferOffsetAlignment);
         const auto maximum = GetLimit(uniform ? Limit::UniformBufferBytes : Limit::StorageBufferBytes);
