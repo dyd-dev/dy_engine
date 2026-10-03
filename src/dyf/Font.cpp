@@ -73,8 +73,8 @@ const FontGlyph& Font::Impl::GetGlyph(uint32_t codepoint)
     const auto found = glyphs.find(codepoint);
     if(found != glyphs.end()) return found->second;
     FontGlyph glyph;
-    int advance, bearing;
-    stbtt_GetCodepointHMetrics(&info, static_cast<int>(codepoint), &advance, &bearing);
+    int advance;
+    stbtt_GetCodepointHMetrics(&info, static_cast<int>(codepoint), &advance, nullptr);
     glyph.advance = advance * scale;
     unsigned char* pixels = stbtt_GetCodepointBitmap(&info, scale, scale, static_cast<int>(codepoint),
         &glyph.width, &glyph.height, &glyph.offsetX, &glyph.offsetY);

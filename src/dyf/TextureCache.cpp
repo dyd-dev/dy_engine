@@ -67,7 +67,6 @@ namespace dyf
 			RHI::TextureDesc textureDesc;
 			textureDesc.width = image.GetWidth();
 			textureDesc.height = image.GetHeight();
-			textureDesc.depthOrArraySize = textureDesc.mipLevels = 1;
 			textureDesc.format = image.GetColorSpace() == ColorSpace::Srgb
 				? RHI::Format::R8G8B8A8_UNORM_SRGB : RHI::Format::R8G8B8A8_UNORM;
 			textureDesc.usage = RHI::TextureUsage::ShaderResource;
@@ -99,7 +98,7 @@ namespace dyf
 				*commandList, slot.texture, 0, 0, pixels.data(), uploadSize, rowPitch, uploadSize);
 			uploadFailed = uploadFailed || !uploaded;
 			barrier.before = RHI::ResourceState::CopyDestination;
-			barrier.after = uploaded ? RHI::ResourceState::ShaderResource : RHI::ResourceState::Common;
+			barrier.after = RHI::ResourceState::ShaderResource;
 			commandList->ResourceBarrier(&barrier, 1);
 			submittedStates[textureIndex] = barrier.after;
 		}
@@ -119,7 +118,6 @@ namespace dyf
 
 	void Renderer::ReleaseTextures(RHI::IDevice* device)
 	{
-		if(device == nullptr) return;
 		for(TextureSlot& slot : m_textures)
 		{
 			if(slot.texture) device->DestroyTexture(slot.texture);

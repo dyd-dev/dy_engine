@@ -60,27 +60,18 @@ namespace
 		float farPlane = 20.0f;
 		const auto& boundsMin = bounds.min;
 		const auto& boundsMax = bounds.max;
+		const Math::float3 normalizedDirection = Normalize(lightDirection);
 		if(bounds.valid && !(boundsMin.x > boundsMax.x || boundsMin.y > boundsMax.y || boundsMin.z > boundsMax.z))
 		{
-			const Math::float3 center(
-				(boundsMin.x + boundsMax.x) * 0.5f,
-				(boundsMin.y + boundsMax.y) * 0.5f,
-				(boundsMin.z + boundsMax.z) * 0.5f);
-			const Math::float3 halfExtent(
-				(boundsMax.x - boundsMin.x) * 0.5f,
-				(boundsMax.y - boundsMin.y) * 0.5f,
-				(boundsMax.z - boundsMin.z) * 0.5f);
+			const Math::float3 center = bounds.Center();
+			const Math::float3 halfExtent = bounds.Extent();
 			const float radius = std::max(Length(halfExtent), 0.1f);
 
-			const Math::float3 lightForward = Normalize(lightDirection);
 			sceneCenter = center;
 			lightDistance = std::max(radius + 0.25f + 0.1f, 0.5f);
 
-			const Math::float3 lightOrigin(
-				sceneCenter.x + lightForward.x * lightDistance,
-				sceneCenter.y + lightForward.y * lightDistance,
-				sceneCenter.z + lightForward.z * lightDistance);
-			const Math::float4x4 view = Math::LookAtRH(lightOrigin, sceneCenter, SelectUpVector(lightForward));
+			const Math::float3 lightOrigin = sceneCenter + normalizedDirection * lightDistance;
+			const Math::float4x4 view = Math::LookAtRH(lightOrigin, sceneCenter, SelectUpVector(normalizedDirection));
 
 			const Math::float3 corners[] = {
 				Math::float3(boundsMin.x, boundsMin.y, boundsMin.z),
@@ -93,26 +84,16 @@ namespace
 				Math::float3(boundsMax.x, boundsMax.y, boundsMax.z)
 			};
 
-			float minX = std::numeric_limits<float>::max();
-			float minY = std::numeric_limits<float>::max();
-			float minZ = std::numeric_limits<float>::max();
-			float maxX = -std::numeric_limits<float>::max();
-			float maxY = -std::numeric_limits<float>::max();
-			float maxZ = -std::numeric_limits<float>::max();
+			const float limit = std::numeric_limits<float>::max();
+			Math::Bounds3 lightBounds{{limit, limit, limit}, {-limit, -limit, -limit}, true};
 			for(const Math::float3& corner : corners)
 			{
-				const Math::float3 lightSpace = Math::TransformPoint(view, corner);
-				minX = std::min(minX, lightSpace.x);
-				minY = std::min(minY, lightSpace.y);
-				minZ = std::min(minZ, lightSpace.z);
-				maxX = std::max(maxX, lightSpace.x);
-				maxY = std::max(maxY, lightSpace.y);
-				maxZ = std::max(maxZ, lightSpace.z);
+				lightBounds.Include(Math::TransformPoint(view, corner));
 			}
 
-			orthoWidth = std::max(maxX - minX + 0.25f * 2.0f, 0.1f);
-			orthoHeight = std::max(maxY - minY + 0.25f * 2.0f, 0.1f);
-			const float depthRange = std::max(maxZ - minZ + 0.25f * 2.0f, 0.1f);
+			orthoWidth = std::max(lightBounds.max.x - lightBounds.min.x + 0.25f * 2.0f, 0.1f);
+			orthoHeight = std::max(lightBounds.max.y - lightBounds.min.y + 0.25f * 2.0f, 0.1f);
+			const float depthRange = std::max(lightBounds.max.z - lightBounds.min.z + 0.25f * 2.0f, 0.1f);
 			farPlane = std::max(0.1f + depthRange + lightDistance, 0.1f + 0.1f);
 		}
 
@@ -125,25 +106,17 @@ namespace
 			const Math::float3 up = Math::NormalizeOr(Math::Cross(right, viewForward), Math::float3(0.0f, 1.0f, 0.0f));
 			const float texelX = orthoWidth / static_cast<float>(tileResolution);
 			const float texelY = orthoHeight / static_cast<float>(tileResolution);
-			if(!(texelX <= 0.0f || texelY <= 0.0f))
-			{
-				const float centerX = Math::Dot(sceneCenter, right);
-				const float centerY = Math::Dot(sceneCenter, up);
-				const float snappedX = std::round(centerX / texelX) * texelX;
-				const float snappedY = std::round(centerY / texelY) * texelY;
-				sceneCenter = sceneCenter + right * (snappedX - centerX) + up * (snappedY - centerY);
-			}
+			const float centerX = Math::Dot(sceneCenter, right);
+			const float centerY = Math::Dot(sceneCenter, up);
+			const float snappedX = std::round(centerX / texelX) * texelX;
+			const float snappedY = std::round(centerY / texelY) * texelY;
+			sceneCenter = sceneCenter + right * (snappedX - centerX) + up * (snappedY - centerY);
 		}
 
-		const Math::float3 lightForward = Normalize(lightDirection);
-
 		// lightDirection은 표면에서 광원으로 향하므로 광원 카메라를 그 방향에 둔다.
-		const Math::float3 lightOrigin(
-			sceneCenter.x + lightForward.x * lightDistance,
-			sceneCenter.y + lightForward.y * lightDistance,
-			sceneCenter.z + lightForward.z * lightDistance);
+		const Math::float3 lightOrigin = sceneCenter + normalizedDirection * lightDistance;
 
-		const Math::float3 up = SelectUpVector(lightForward);
+		const Math::float3 up = SelectUpVector(normalizedDirection);
 		const Math::float4x4 view = Math::LookAtRH(lightOrigin, sceneCenter, up);
 		// 그림자 깊이 패스/샘플링은 Y-down 광원 투영 기준으로 튜닝돼 있다(카메라 캐노니컬과 무관).
 		Math::float4x4 proj = Math::OrthographicRH_ZO(orthoWidth, orthoHeight, 0.1f, farPlane);
@@ -185,10 +158,7 @@ namespace
 		float farPlane)
 	{
 		const Math::float3 lightForward = Normalize(lightDirection);
-		const Math::float3 target(
-			lightPosition.x + lightForward.x,
-			lightPosition.y + lightForward.y,
-			lightPosition.z + lightForward.z);
+		const Math::float3 target = lightPosition + lightForward;
 		const Math::float4x4 view = Math::LookAtRH(lightPosition, target, SelectUpVector(lightForward));
 		// 그림자 깊이 패스/샘플링은 Y-down 광원 투영 기준으로 튜닝돼 있다(카메라 캐노니컬과 무관).
 		Math::float4x4 proj = Math::PerspectiveRH_ZO(fovYRadians, 1.0f, 0.1f, farPlane);
@@ -251,7 +221,7 @@ void Renderer::BuildShadows(ShadowData& state,const Scene& scene,const Camera& c
             const float cameraFar=camera.projection.m[14]/(camera.projection.m[10]+1);
             const float nearPlane=std::max(cameraNear,0.0001f);
             const float farPlane=std::max(cameraFar,nearPlane+0.0001f);
-            count=std::clamp(cascadeCount,1u,4u);
+            count=cascadeCount;
             auto& splits=constants.directionalSplits[i];
             for(uint32_t c=0;c<count;++c)
             {
@@ -260,7 +230,6 @@ void Renderer::BuildShadows(ShadowData& state,const Scene& scene,const Camera& c
                 const float uniform=nearPlane+(farPlane-nearPlane)*fraction;
                 splits[c]=logarithmic*.65f+uniform*(1.0f-.65f);
             }
-            for(uint32_t c=count;c<4;++c)splits[c]=farPlane;
             splits[count-1u]=farPlane;
             float sliceNear=std::max(cameraNear,0.0001f);
             for(uint32_t c=0;c<count;++c)

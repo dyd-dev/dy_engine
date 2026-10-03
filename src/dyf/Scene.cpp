@@ -59,7 +59,7 @@ namespace
 {
     bool InvalidHandle(const char* kind) { std::fprintf(stderr, "dyf: invalid %s handle.\n", kind); return false; }
     bool ValidEntity(const std::shared_ptr<Scene>& data, EntityID id)
-    { return data && IsValid(id); }
+    { return data && IsValid(id) && ToIndex(id)<data->GetEntityCount(); }
     bool Finite(const Math::float4x4& value)
     { for(float v:value.m) if(!std::isfinite(v)) return false; return true; }
 
@@ -81,33 +81,33 @@ EntityHandle Scene::Add(const MeshData& mesh,const MaterialDesc& material,const 
     }
     catch(const std::exception& error) {std::fprintf(stderr,"dyf: Scene::Add: %s\n",error.what());return {};}
 }
-EntityHandle::operator bool() const { const auto data=m_scene.lock();return ValidEntity(data,m_id) && ToIndex(m_id)<data->GetEntityCount(); }
+EntityHandle::operator bool() const { const auto data=m_scene.lock();return ValidEntity(data,m_id); }
 Math::float4x4 EntityHandle::GetTransform() const
-{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id) || ToIndex(m_id)>=data->GetEntityCount()){InvalidHandle("entity");return Math::float4x4::Identity();}return data->GetTransform(m_id).worldMatrix; }
+{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id)){InvalidHandle("entity");return Math::float4x4::Identity();}return data->GetTransform(m_id).worldMatrix; }
 MaterialDesc EntityHandle::GetMaterial() const
-{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id) || ToIndex(m_id)>=data->GetEntityCount()){InvalidHandle("entity");return {};}return data->Materials()[ToIndex(data->GetEntityMaterial(m_id))]; }
+{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id)){InvalidHandle("entity");return {};}return data->Materials()[ToIndex(data->GetEntityMaterial(m_id))]; }
 bool EntityHandle::SetTransform(const Math::float4x4& value)
 {
-    const auto data=m_scene.lock();if(!ValidEntity(data,m_id) || ToIndex(m_id)>=data->GetEntityCount())return InvalidHandle("entity");
+    const auto data=m_scene.lock();if(!ValidEntity(data,m_id))return InvalidHandle("entity");
     if(!Finite(value)){std::fprintf(stderr,"dyf: transform must be finite.\n");return false;}
     data->m_entityTransforms[ToIndex(m_id)].worldMatrix=value;return true;
 }
 bool EntityHandle::SetPosition(Math::float3 value)
 {
-    const auto data=m_scene.lock();if(!ValidEntity(data,m_id) || ToIndex(m_id)>=data->GetEntityCount())return InvalidHandle("entity");
+    const auto data=m_scene.lock();if(!ValidEntity(data,m_id))return InvalidHandle("entity");
     auto transform=data->GetTransform(m_id).worldMatrix;transform.m[12]=value.x;transform.m[13]=value.y;transform.m[14]=value.z;
     return SetTransform(transform);
 }
 bool EntityHandle::SetMaterial(const MaterialDesc& value)
 {
-    const auto data=m_scene.lock();if(!ValidEntity(data,m_id) || ToIndex(m_id)>=data->GetEntityCount())return InvalidHandle("entity");
+    const auto data=m_scene.lock();if(!ValidEntity(data,m_id))return InvalidHandle("entity");
     try {data->SetMaterial(data->GetEntityMaterial(m_id),value);return true;}
     catch(const std::exception& error){std::fprintf(stderr,"dyf: material update: %s\n",error.what());return false;}
 }
 EntityLightingDesc EntityHandle::GetLighting() const
-{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id) || ToIndex(m_id)>=data->GetEntityCount()){InvalidHandle("entity");return {};}return data->GetEntityLighting(m_id); }
+{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id)){InvalidHandle("entity");return {};}return data->GetEntityLighting(m_id); }
 bool EntityHandle::SetLighting(const EntityLightingDesc& lighting)
-{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id) || ToIndex(m_id)>=data->GetEntityCount())return InvalidHandle("entity");data->SetEntityLighting(m_id,lighting);return true; }
+{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id))return InvalidHandle("entity");data->SetEntityLighting(m_id,lighting);return true; }
 template<typename T> std::vector<T>& Scene::Lights()
 {
     if constexpr(std::is_same_v<T,DirectionalLight>)return m_directionalLights;

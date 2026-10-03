@@ -135,10 +135,6 @@ constant uint kTextureFlagOcclusion =
     uint(RENDERER_TEXTURE_FLAG_OCCLUSION);
 constant uint kTextureFlagEmissive =
     uint(RENDERER_TEXTURE_FLAG_EMISSIVE);
-#if RENDERER_ENABLE_SHADOWS
-constant uint kTextureFlagReceiveShadow =
-    uint(RENDERER_TEXTURE_FLAG_RECEIVE_SHADOW);
-#endif
 constant float kPi = 3.14159265359f;
 
 inline float DistributionGGX(float3 normal, float3 halfway, float roughness)
@@ -156,18 +152,6 @@ inline float GeometrySchlickGGX(float ndotv, float roughness)
     const float r = roughness + 1.0f;
     const float k = (r * r) / 8.0f;
     return ndotv / max(ndotv * (1.0f - k) + k, 0.0001f);
-}
-
-inline float GeometrySmith(
-    float3 normal,
-    float3 viewDirection,
-    float3 lightDirection,
-    float roughness)
-{
-    const float ndotv = max(dot(normal, viewDirection), 0.0f);
-    const float ndotl = max(dot(normal, lightDirection), 0.0f);
-    return GeometrySchlickGGX(ndotv, roughness) *
-        GeometrySchlickGGX(ndotl, roughness);
 }
 
 inline float3 FresnelSchlick(float cosTheta, float3 f0)
@@ -261,7 +245,6 @@ float SampleShadow(int type,int lightIndex,float3 worldPosition,float3 normal,fl
     return 1.0-clamp(views.z,0.0,1.0)*(1.0-visible/max(samples,1.0));
 }
 
-#else
 #endif
 
 // 현재 언어의 조명 계산을 직접 작성한다.
@@ -304,7 +287,7 @@ inline float3 EvaluateDirectLight(
     float3 halfway = halfwayVector * rsqrt(halfwayLengthSquared);
     float3 f0 = mix(float3(0.04,0.04,0.04), albedo, metallic);
     float ndf = DistributionGGX(normal, halfway, roughness);
-    float geometry = GeometrySmith(normal, viewDir, lightDir, roughness);
+    float geometry = GeometrySchlickGGX(ndotv, roughness) * GeometrySchlickGGX(ndotl, roughness);
     float3 fresnel = FresnelSchlick(max(dot(halfway, viewDir), 0.0), f0);
     float3 specular = (ndf * geometry * fresnel) / max(4.0 * ndotv * ndotl, 0.0001);
     float3 diffuseWeight = (float3(1.0,1.0,1.0) - fresnel) * (1.0 - metallic);

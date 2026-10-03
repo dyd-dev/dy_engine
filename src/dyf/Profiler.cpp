@@ -84,7 +84,6 @@ RHI::TimestampQueryHandle Renderer::BeginGpuSample(uint32_t slot)
         device->DestroyTimestampQuery(sample.query);
         m_pending.pop_front();
     }
-    if(!device->Supports(RHI::Feature::TimestampQuery))return nullptr;
     auto* query=device->CreateTimestampQuery({2});
     if(query)m_pending.push_back({query,{},slot});
     return query;
@@ -123,7 +122,7 @@ void Renderer::RecordProfilerFrame(double cpu,uint32_t entities)
     for(uint32_t i=0;i<m_count;++i)
         scale=std::max(scale,std::max({m_history[i],m_cpuHistory[i],m_gpuHistoryValid[i]?m_gpuHistory[i]:0.f})*1.15f);
     m_graphScaleMilliseconds=std::max(scale,m_graphScaleMilliseconds*0.97f);
-    m_cpuMilliseconds=m_profilerSnapshot.cpuRenderAverageMilliseconds;m_entities=entities;
+    m_entities=entities;
     DY_PROFILE_GPU_MILLISECONDS("Frame.Average.ms",m_profilerSnapshot.frameAverageMilliseconds);
     DY_PROFILE_GPU_MILLISECONDS("Frame.Maximum.ms",m_profilerSnapshot.frameMaximumMilliseconds);
     DY_PROFILE_GPU_MILLISECONDS("CPU.Render.Average.ms",m_profilerSnapshot.cpuRenderAverageMilliseconds);
@@ -142,7 +141,7 @@ Canvas Renderer::BuildProfilerOverlay(uint32_t width,uint32_t height,bool expand
     char line[128];
     std::snprintf(line,sizeof(line),"FPS AVG %.1f  FRAME AVG %.2f MS",m_profilerSnapshot.fps,m_profilerSnapshot.frameAverageMilliseconds);
     Text(canvas,line,18,18);
-    std::snprintf(line,sizeof(line),"CPU AVG %.2f MS  ENTITIES %u  F11",m_cpuMilliseconds,m_entities);
+    std::snprintf(line,sizeof(line),"CPU AVG %.2f MS  ENTITIES %u  F11",m_profilerSnapshot.cpuRenderAverageMilliseconds,m_entities);
     Text(canvas,line,18,38);
     if(m_profilerSnapshot.hasGpuMain)
     {

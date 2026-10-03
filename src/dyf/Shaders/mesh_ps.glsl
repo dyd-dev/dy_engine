@@ -54,14 +54,8 @@ layout(set = RENDERER_DESCRIPTOR_SET, binding = RENDERER_BINDING_SHADOW_TEXTURE)
 #endif
 #if !RENDERER_BINDLESS
 layout(set = RENDERER_DESCRIPTOR_SET, binding = RENDERER_BINDING_METALLIC_ROUGHNESS_TEXTURE) uniform texture2D metallicRoughnessTexture;
-#endif
-#if !RENDERER_BINDLESS
 layout(set = RENDERER_DESCRIPTOR_SET, binding = RENDERER_BINDING_NORMAL_TEXTURE) uniform texture2D normalTexture;
-#endif
-#if !RENDERER_BINDLESS
 layout(set = RENDERER_DESCRIPTOR_SET, binding = RENDERER_BINDING_OCCLUSION_TEXTURE) uniform texture2D occlusionTexture;
-#endif
-#if !RENDERER_BINDLESS
 layout(set = RENDERER_DESCRIPTOR_SET, binding = RENDERER_BINDING_EMISSIVE_TEXTURE) uniform texture2D emissiveTexture;
 #endif
 layout(set = RENDERER_DESCRIPTOR_SET, binding = RENDERER_BINDING_MATERIAL_SAMPLER) uniform sampler materialSampler;
@@ -157,12 +151,6 @@ float GeometrySchlickGGX(float ndotv, float roughness) {
     return ndotv / max(ndotv * (1.0 - k) + k, 0.0001);
 }
 
-float GeometrySmith(vec3 normal, vec3 viewDir, vec3 lightDir, float roughness) {
-    float ndotv = max(dot(normal, viewDir), 0.0);
-    float ndotl = max(dot(normal, lightDir), 0.0);
-    return GeometrySchlickGGX(ndotv, roughness) * GeometrySchlickGGX(ndotl, roughness);
-}
-
 vec3 FresnelSchlick(float cosTheta, vec3 f0) {
     return f0 + (1.0 - f0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
 }
@@ -193,12 +181,8 @@ vec4 SampleMaterial(uint kind,vec2 uv)
 vec3 GetNormal() {
     vec3 normal = normalize(fragNormal);
     int textureFlags = int(pushConstants.textureFlags);
-    if ((textureFlags & RENDERER_TEXTURE_FLAG_NORMAL) == 0) {
-        return normal;
-    }
-
     float normalScale = pushConstants.materialParams.z;
-    if (normalScale <= 0.0001) {
+    if ((textureFlags & RENDERER_TEXTURE_FLAG_NORMAL) == 0 || normalScale <= 0.0001) {
         return normal;
     }
 
@@ -275,17 +259,15 @@ float SampleShadow(int type,int lightIndex,vec3 worldPosition,vec3 normal,vec3 l
     }
     radius=min(radius,shadowMatrix.filterParams.z);
     int extent=int(ceil(radius));
-    float visible=0.0,samples=0.0;
+    float visible=0.0,samples=float((2*extent+1)*(2*extent+1));
     for(int y=-extent;y<=extent;++y)for(int x=-extent;x<=extent;++x)
     {
         vec2 sampleUv=clamp(uv+vec2(x,y)*texel,minUv,maxUv);
         visible+=receiver<=texture(sampler2D(shadowMap,shadowSampler),sampleUv).r?1.0:0.0;
-        samples+=1.0;
     }
     return 1.0-clamp(views.z,0.0,1.0)*(1.0-visible/max(samples,1.0));
 }
 
-#else
 #endif
 
 // 현재 언어의 조명 계산을 직접 작성한다.
@@ -328,7 +310,7 @@ vec3 EvaluateDirectLight(
     vec3 halfway = halfwayVector * inversesqrt(halfwayLengthSquared);
     vec3 f0 = mix(vec3(0.04,0.04,0.04), albedo, metallic);
     float ndf = DistributionGGX(normal, halfway, roughness);
-    float geometry = GeometrySmith(normal, viewDir, lightDir, roughness);
+    float geometry = GeometrySchlickGGX(ndotv, roughness) * GeometrySchlickGGX(ndotl, roughness);
     vec3 fresnel = FresnelSchlick(max(dot(halfway, viewDir), 0.0), f0);
     vec3 specular = (ndf * geometry * fresnel) / max(4.0 * ndotv * ndotl, 0.0001);
     vec3 diffuseWeight = (vec3(1.0,1.0,1.0) - fresnel) * (1.0 - metallic);

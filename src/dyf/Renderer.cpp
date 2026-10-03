@@ -30,7 +30,6 @@
 #include <stdexcept>
 #include "dyf/RHI/IDevice.h"
 #include "dyf/RHI/Pipeline.h"
-#include "dyf/RHI/ResourceScope.h"
 #include "dyf/RHI/Shader.h"
 #include "dyf/RHI/Texture.h"
 
@@ -54,24 +53,6 @@ namespace
 			Math::float3(1.0f, 0.0f, 0.0f)));
 	}
 }
-
-namespace
-{
-	[[nodiscard]] const DirectionalLight* GetPrimaryDirectionalLight(const std::vector<DirectionalLight>& lights)
-	{
-		const auto active = SelectActiveLightIndices(lights, 1);
-		return active.empty() ? nullptr : &lights[ToIndex(active.front())];
-	}
-
-	[[nodiscard]] const PointLight* GetPrimaryPointLight(const std::vector<PointLight>& lights)
-	{
-		const auto active = SelectActiveLightIndices(lights, 1);
-		return active.empty() ? nullptr : &lights[ToIndex(active.front())];
-	}
-
-}
-
-
 
 namespace
 {
@@ -174,7 +155,6 @@ bool Renderer::ApplySettings()
         config.allowReadback != nextConfig.allowReadback;
     RHI::SwapchainDesc output;
     output.format = RHI::Format::B8G8R8A8_UNORM;
-    output.minimumImageCount = 2;
     output.presentMode = nextConfig.vsync ? RHI::PresentMode::Fifo : RHI::PresentMode::Immediate;
     output.allowReadback = nextConfig.allowReadback;
     output.window = windowHandle;
@@ -378,9 +358,7 @@ bool Renderer::Initialize()
 	if(!nativeDevice->CreateSwapchain(swapchainDesc)) return false;
 
 	RHI::TextureHandle backBuffer = nativeDevice->GetBackBuffer();
-	if(backBuffer == nullptr || backBuffer->GetDesc().format == RHI::Format::Unknown) return false;
-	if(backBuffer->GetDesc().format != swapchainDesc.format)
-		return false;
+	if(backBuffer == nullptr || backBuffer->GetDesc().format != swapchainDesc.format) return false;
 
     return true;
 }
@@ -425,18 +403,12 @@ void Renderer::Shutdown()
     // 생성한 RHI 자원은 Renderer에서 직접 해제한다. 보조 객체의 소멸 순서에 위임하지 않는다.
     ReleaseGeometry(device);ReleaseTextures(device);
     for(const auto& sample:m_pending)device->DestroyTimestampQuery(sample.query);
-    m_pending.clear();materialStates.clear();
     for(auto* texture:{depthStencilTarget,shadowDepthTarget,hdrTarget})if(texture)device->DestroyTexture(texture);
-    depthStencilTarget=shadowDepthTarget=hdrTarget=nullptr;
-    depthStencilState=shadowDepthState=hdrState=RHI::ResourceState::Undefined;
-    for(auto& texture:defaultMaterialTextures){if(texture)device->DestroyTexture(texture);texture=nullptr;}
+    for(auto* texture:defaultMaterialTextures)if(texture)device->DestroyTexture(texture);
     for(auto* buffer:{lightingBuffer,shadowMatrixBuffer})if(buffer)device->DestroyBuffer(buffer);
-    lightingBuffer=shadowMatrixBuffer=nullptr;
     for(auto* value:{pipeline,shadowPipeline,canvasPipeline,tonePipeline})if(value)device->DestroyPipeline(value);
-    pipeline=shadowPipeline=canvasPipeline=tonePipeline=nullptr;
     for(auto* shader:{vertexShader,fragmentShader,shadowVertexShader,canvasVertexShader,canvasFragmentShader,toneVertexShader,toneFragmentShader})
         if(shader)device->DestroyShader(shader);
-    vertexShader=fragmentShader=shadowVertexShader=canvasVertexShader=canvasFragmentShader=toneVertexShader=toneFragmentShader=nullptr;
 }
 
 bool Renderer::RenderToTexture(const Scene& scene,const Camera& camera,RHI::TextureHandle target,RHI::ResourceState before)
@@ -683,8 +655,7 @@ RHI::PipelineLayoutDesc Renderer::MeshLayout(bool bindless, std::vector<RHI::Res
 
 bool Renderer::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorFormat,bool compositeAlpha)
 {
-	if(colorFormat == RHI::Format::Unknown ||
-		vertexShader == nullptr || fragmentShader == nullptr) return false;
+	if(colorFormat == RHI::Format::Unknown) return false;
 
 	const RHI::VertexBufferLayout vertexBuffer = {
 		0,
@@ -774,8 +745,6 @@ bool Renderer::CreateDefaultMaterialTextures(RHI::IDevice* device)
 	RHI::TextureDesc desc = {};
 	desc.width = 1;
 	desc.height = 1;
-	desc.depthOrArraySize = 1;
-	desc.mipLevels = 1;
 	desc.format = RHI::Format::R8G8B8A8_UNORM;
 	desc.usage = RHI::TextureUsage::ShaderResource;
 	for(RHI::TextureHandle& texture : defaultMaterialTextures)
@@ -789,11 +758,9 @@ bool Renderer::CreateDefaultMaterialTextures(RHI::IDevice* device)
 	std::array<RHI::ResourceBarrierDesc, 3> beforeCopy = {};
 	std::array<RHI::ResourceBarrierDesc, 3> barriers = {};
 	uint32_t barrierCount = 0;
-	bool uploadFailed = false;
 	for(uint32_t index = 0; index < defaultMaterialTextures.size(); ++index)
 	{
 		beforeCopy[index].texture = defaultMaterialTextures[index];
-		beforeCopy[index].before = RHI::ResourceState::Undefined;
 		beforeCopy[index].after = RHI::ResourceState::CopyDestination;
 	}
 	commandList->ResourceBarrier(beforeCopy.data(), static_cast<uint32_t>(beforeCopy.size()));
@@ -809,7 +776,6 @@ bool Renderer::CreateDefaultMaterialTextures(RHI::IDevice* device)
 				4,
 				4))
 		{
-			uploadFailed = true;
 			continue;
 		}
 		barriers[barrierCount].texture = defaultMaterialTextures[index];
@@ -822,7 +788,7 @@ bool Renderer::CreateDefaultMaterialTextures(RHI::IDevice* device)
 	std::array<RHI::ICommandList*, 1> commandLists = { commandList };
 	const bool submitted = device->Submit(commandLists.data(), 1);
     device->DestroyCommandList(commandList);
-	return submitted && !uploadFailed;
+	return submitted;
 }
 
 bool Renderer::EnsureDepthStencilTarget(RHI::IDevice* device,RHI::TextureHandle output)
@@ -848,8 +814,6 @@ bool Renderer::EnsureDepthStencilTarget(RHI::IDevice* device,RHI::TextureHandle 
 	RHI::TextureDesc depthDesc = {};
 	depthDesc.width = output->GetDesc().width;
 	depthDesc.height = output->GetDesc().height;
-	depthDesc.depthOrArraySize = 1;
-	depthDesc.mipLevels = 1;
 	depthDesc.format = RHI::Format::D32_FLOAT;
 	depthDesc.usage = RHI::TextureUsage::DepthStencil;
 	depthStencilTarget = device->CreateTexture(depthDesc);
@@ -880,8 +844,6 @@ bool Renderer::EnsureShadowDepthTarget(RHI::IDevice* device,uint32_t columns,uin
 	RHI::TextureDesc shadowDesc = {};
 	shadowDesc.width = width;
 	shadowDesc.height = height;
-	shadowDesc.depthOrArraySize = 1;
-	shadowDesc.mipLevels = 1;
 	shadowDesc.format = RHI::Format::D32_FLOAT;
 	shadowDesc.usage = RHI::TextureUsage::DepthStencil | RHI::TextureUsage::ShaderResource;
 	shadowDepthTarget = device->CreateTexture(shadowDesc);
@@ -891,6 +853,7 @@ bool Renderer::EnsureShadowDepthTarget(RHI::IDevice* device,uint32_t columns,uin
 void Renderer::UpdateMaterialStates(const Scene& scene)
 {
 	const uint32_t materialCount = scene.Materials().size();
+	constexpr std::array<uint32_t,kMaterialTextureCount> defaults = {0u,0u,1u,0u,2u};
 	for(uint32_t materialIndex = 0; materialIndex < materialCount; ++materialIndex)
 	{
 		const MaterialDesc& material = scene.Materials()[materialIndex];
@@ -906,29 +869,15 @@ void Renderer::UpdateMaterialStates(const Scene& scene)
 		materialState.textures[ToIndex(MaterialTextureKind::Emissive)] =
 			ResolveTexture(material.emissiveTexture);
 
-		uint32_t textureFlags = 0;
-		if(materialState.textures[ToIndex(MaterialTextureKind::BaseColor)] != nullptr)
-			textureFlags |= 1u;
-		if(materialState.textures[ToIndex(MaterialTextureKind::MetallicRoughness)] != nullptr)
-			textureFlags |= 2u;
-		if(materialState.textures[ToIndex(MaterialTextureKind::Normal)] != nullptr)
-			textureFlags |= 4u;
-		if(materialState.textures[ToIndex(MaterialTextureKind::Occlusion)] != nullptr)
-			textureFlags |= 8u;
-		if(materialState.textures[ToIndex(MaterialTextureKind::Emissive)] != nullptr)
-			textureFlags |= 16u;
-		materialState.textureFlags = textureFlags;
-
-		if(materialState.textures[ToIndex(MaterialTextureKind::BaseColor)] == nullptr)
-			materialState.textures[ToIndex(MaterialTextureKind::BaseColor)] = defaultMaterialTextures[0];
-		if(materialState.textures[ToIndex(MaterialTextureKind::MetallicRoughness)] == nullptr)
-			materialState.textures[ToIndex(MaterialTextureKind::MetallicRoughness)] = defaultMaterialTextures[0];
-		if(materialState.textures[ToIndex(MaterialTextureKind::Normal)] == nullptr)
-			materialState.textures[ToIndex(MaterialTextureKind::Normal)] = defaultMaterialTextures[1];
-		if(materialState.textures[ToIndex(MaterialTextureKind::Occlusion)] == nullptr)
-			materialState.textures[ToIndex(MaterialTextureKind::Occlusion)] = defaultMaterialTextures[0];
-		if(materialState.textures[ToIndex(MaterialTextureKind::Emissive)] == nullptr)
-			materialState.textures[ToIndex(MaterialTextureKind::Emissive)] = defaultMaterialTextures[2];
+		materialState.textureFlags = 0u;
+		for(uint32_t slot = 0; slot < kMaterialTextureCount; ++slot)
+		{
+			auto& texture = materialState.textures[slot];
+			if(texture != nullptr)
+				materialState.textureFlags |= 1u << slot;
+			else
+				texture = defaultMaterialTextures[defaults[slot]];
+		}
 	}
 }
 
@@ -938,19 +887,19 @@ bool Renderer::UpdateLightingBuffer(
 	RHI::IDevice* device,
 	RHI::ICommandList& commandList)
 {
-	if(lightingBuffer == nullptr)
-	{
-		lightingBuffer = device->CreateBuffer(RHI::BufferDesc{
-			static_cast<uint32_t>(sizeof(RendererLightingConstants)),
-			static_cast<uint32_t>(sizeof(RendererLightingConstants)),
-			RHI::BufferUsage::Constant,
-			RHI::ResourceState::CopyDestination
-		});
-	}
+	lightingBuffer = device->CreateBuffer(RHI::BufferDesc{
+		static_cast<uint32_t>(sizeof(RendererLightingConstants)),
+		static_cast<uint32_t>(sizeof(RendererLightingConstants)),
+		RHI::BufferUsage::Constant,
+		RHI::ResourceState::CopyDestination
+	});
 	if(lightingBuffer == nullptr) return false;
 
-	const DirectionalLight* light = GetPrimaryDirectionalLight(scene.DirectionalLights());
-	const PointLight* pointLight = GetPrimaryPointLight(scene.PointLights());
+	RendererLightingConstants constants = {};
+	const auto directionalIndices=SelectActiveLightIndices(scene.DirectionalLights(),static_cast<uint32_t>(std::size(constants.directionalLights)));
+	const auto pointIndices=SelectActiveLightIndices(scene.PointLights(),static_cast<uint32_t>(std::size(constants.pointLights)));
+	const DirectionalLight* light = directionalIndices.empty() ? nullptr : &scene.DirectionalLights()[directionalIndices.front()];
+	const PointLight* pointLight = pointIndices.empty() ? nullptr : &scene.PointLights()[pointIndices.front()];
 	const Math::float3 lightDirection = light != nullptr
 		? light->direction
 		: Math::float3(0.0f, 0.0f, 1.0f);
@@ -962,7 +911,6 @@ bool Renderer::UpdateLightingBuffer(
 		light != nullptr && light->castShadow;
 	const float shadowStrength = shadowsEnabled ? light->shadowStrength : 0.0f;
 
-	RendererLightingConstants constants = {};
 	constants.cameraPosition = Math::float4(
 		camera.position.x,
 		camera.position.y,
@@ -1003,14 +951,11 @@ bool Renderer::UpdateLightingBuffer(
 	}
 
     // 기본 셰이더의 고정 배열 크기에 맞춰 활성 광원을 선택하고 GPU 형식으로 변환한다.
-        const auto directionalIndices=SelectActiveLightIndices(scene.DirectionalLights(),static_cast<uint32_t>(std::size(constants.directionalLights)));
-        const auto pointIndices=SelectActiveLightIndices(scene.PointLights(),static_cast<uint32_t>(std::size(constants.pointLights)));
         const auto spotIndices=SelectActiveLightIndices(scene.SpotLights(),static_cast<uint32_t>(std::size(constants.spotLights)));
         const auto rectAreaIndices=SelectActiveLightIndices(scene.RectAreaLights(),static_cast<uint32_t>(std::size(constants.rectAreaLights)));
         const auto discAreaIndices=SelectActiveLightIndices(scene.DiscAreaLights(),static_cast<uint32_t>(std::size(constants.discAreaLights)));
-        const DirectionalLight* directional=directionalIndices.empty()?nullptr:&scene.DirectionalLights()[directionalIndices[0]];
 		const uint32_t directionalCount = static_cast<uint32_t>(directionalIndices.size());
-		for(uint32_t index = 0u; index < directionalCount && directional != nullptr; ++index)
+		for(uint32_t index = 0u; index < directionalCount; ++index)
 		{
 			const DirectionalLight& light = scene.DirectionalLights()[directionalIndices[index]];
 			const Math::float3 direction = NormalizeDirection(light.direction);
@@ -1105,15 +1050,12 @@ bool Renderer::UpdateShadowBuffer(
 	RHI::ICommandList& commandList,const ShadowData& shadows)
 {
 	if(!config.lighting.enabled || !config.lighting.shadows) return true;
-	if(shadowMatrixBuffer == nullptr)
-	{
-		shadowMatrixBuffer = device->CreateBuffer(RHI::BufferDesc{
-			static_cast<uint32_t>(sizeof(RendererShadowConstants)),
-			static_cast<uint32_t>(sizeof(RendererShadowConstants)),
-			RHI::BufferUsage::Constant,
-			RHI::ResourceState::CopyDestination
-		});
-	}
+	shadowMatrixBuffer = device->CreateBuffer(RHI::BufferDesc{
+		static_cast<uint32_t>(sizeof(RendererShadowConstants)),
+		static_cast<uint32_t>(sizeof(RendererShadowConstants)),
+		RHI::BufferUsage::Constant,
+		RHI::ResourceState::CopyDestination
+	});
 	if(shadowMatrixBuffer == nullptr) return false;
 
     const auto& shadow=shadows.constants;

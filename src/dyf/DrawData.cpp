@@ -3,17 +3,13 @@
 #include "dyf/Scene.h"
 
 #include <algorithm>
-#include <array>
 #include <cstdint>
-#include <limits>
 #include <vector>
 
-#include "ShaderLayout.h"
 #include "ShaderLayout.h"
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/IDevice.h"
-#include "dyf/RHI/Pipeline.h"
 #include "dyf/RHI/ResourceSet.h"
 #include "dyf/RHI/Texture.h"
 
@@ -33,11 +29,6 @@ namespace
 		uint32_t sizeBytes, uint32_t stride, RHI::BufferUsage usage)
 	{
 		if(device == nullptr) return false;
-		if(sizeBytes == 0)
-		{
-			DestroyBuffer(device, buffer, ready);
-			return true;
-		}
 		if(buffer != nullptr && buffer->GetDesc().size == sizeBytes) return true;
 		DestroyBuffer(device, buffer, ready);
 		buffer = device->CreateBuffer({sizeBytes, stride, usage, RHI::ResourceState::CopyDestination});
@@ -108,12 +99,8 @@ bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList&
 			{
 				const auto texture = materialStates[i].textures[slot];
 				const auto found = std::find(page.textures.begin(), page.textures.end(), texture);
-				if(found == page.textures.end())
-				{
-					indices[i * 8 + slot] = static_cast<uint32_t>(page.textures.size());
-					page.textures.push_back(texture);
-				}
-				else indices[i * 8 + slot] = static_cast<uint32_t>(found - page.textures.begin());
+				indices[i * 8 + slot] = static_cast<uint32_t>(found - page.textures.begin());
+				if(found == page.textures.end()) page.textures.push_back(texture);
 			}
 		}
 		if(indices.size() > UINT32_MAX / sizeof(uint32_t)) return false;
@@ -121,15 +108,12 @@ bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList&
 			16, RHI::BufferUsage::Storage, RHI::ResourceState::CopyDestination});
 		if(!materialBuffer) return false;
 		// 재질 인덱스 업로드를 장면 명령의 앞부분에 기록한다.
-		if(!device->UpdateBuffer(commands, materialBuffer, 0, indices.data(), materialBuffer->GetDesc().size))
+		if(!RecordBufferUpload(device, commands, materialBuffer, indices.data(),
+			materialBuffer->GetDesc().size, RHI::ResourceState::ShaderResource))
 		{
 			device->DestroyBuffer(materialBuffer);
 			return false;
 		}
-		const RHI::ResourceBarrierDesc ready = {
-			materialBuffer, nullptr, RHI::ResourceState::CopyDestination, RHI::ResourceState::ShaderResource, {}
-		};
-		commands.ResourceBarrier(&ready, 1);
 		sets.assign(draws ? scene.GetEntityCount() : materialStates.size(), nullptr);
 		for(const auto& page : pages)
 		{
@@ -267,7 +251,7 @@ bool Renderer::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 			for(uint32_t index = 0; index < source.vertices.size(); ++index) sequentialIndices.push_back(index);
 		}
 		const auto& indices = source.indices.empty() ? sequentialIndices : source.indices;
-		if(vertices.empty() || indices.empty())
+		if(vertices.empty())
 		{
 			DestroyMeshState(device, mesh);
 			mesh.prepared = true;
@@ -284,11 +268,6 @@ bool Renderer::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 			return false;
 		}
 		mesh.indexCount = static_cast<uint32_t>(indices.size());
-		if(mesh.vertexReady && mesh.indexReady)
-		{
-			mesh.prepared = true;
-			continue;
-		}
 		if(!commands) commands = device->AcquireCommandList();
 		if(!commands) return false;
 		if(!mesh.vertexReady)
@@ -360,12 +339,6 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 		depth.state = RHI::ResourceState::DepthWrite;
 		depth.depthLoadOp = RHI::LoadOp::Clear;
 		depth.depthStoreOp = RHI::StoreOp::Store;
-		depth.clearDepth = 1;
-		if(shadowDepthTarget->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT)
-		{
-			depth.stencilLoadOp = RHI::LoadOp::Discard;
-			depth.stencilStoreOp = RHI::StoreOp::Discard;
-		}
 		commands.BeginRendering({nullptr, 0, &depth});
 		commands.BindGraphicsPipeline(shadowPipeline);
 		for(uint32_t view = 0; view < shadows.viewCount; ++view)
@@ -441,7 +414,6 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
 	depth.state = RHI::ResourceState::DepthWrite;
 	depth.depthLoadOp = RHI::LoadOp::Clear;
 	depth.depthStoreOp = RHI::StoreOp::Discard;
-	depth.clearDepth = 1;
 	if(depthStencilTarget->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT)
 	{
 		depth.stencilLoadOp = RHI::LoadOp::Discard;

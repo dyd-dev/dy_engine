@@ -96,17 +96,9 @@ cbuffer RendererLighting : register(b1, space0) { RendererLightingConstants ligh
 
 #if !RENDERER_BINDLESS
 Texture2D BaseColorTexture : register(t0, space0);
-#endif
-#if !RENDERER_BINDLESS
 Texture2D MetallicRoughnessTexture : register(t4, space0);
-#endif
-#if !RENDERER_BINDLESS
 Texture2D NormalTexture : register(t5, space0);
-#endif
-#if !RENDERER_BINDLESS
 Texture2D OcclusionTexture : register(t6, space0);
-#endif
-#if !RENDERER_BINDLESS
 Texture2D EmissiveTexture : register(t7, space0);
 #endif
 #if RENDERER_ENABLE_SHADOWS
@@ -152,13 +144,6 @@ float GeometrySchlickGGX(float ndotv, float roughness)
     return ndotv / max(ndotv * (1.0 - k) + k, 0.0001);
 }
 
-float GeometrySmith(float3 normal, float3 viewDir, float3 lightDir, float roughness)
-{
-    float ndotv = max(dot(normal, viewDir), 0.0);
-    float ndotl = max(dot(normal, lightDir), 0.0);
-    return GeometrySchlickGGX(ndotv, roughness) * GeometrySchlickGGX(ndotl, roughness);
-}
-
 float3 FresnelSchlick(float cosTheta, float3 f0)
 {
     return f0 + (1.0 - f0) * pow(saturate(1.0 - cosTheta), 5.0);
@@ -188,20 +173,11 @@ float4 SampleMaterial(uint kind,float2 uv)
 #endif
 }
 
-float4 SampleBaseColorTexture(float2 uv)
-{
-    return SampleMaterial(0u,uv);
-}
-
 float3 GetNormal(PSInput input, uint textureFlags)
 {
     float3 normal = normalize(input.worldNormal);
-    if ((textureFlags & RENDERER_TEXTURE_FLAG_NORMAL) == 0u)
-    {
-        return normal;
-    }
     float normalScale = materialParams.z;
-    if (normalScale <= 0.0001)
+    if ((textureFlags & RENDERER_TEXTURE_FLAG_NORMAL) == 0u || normalScale <= 0.0001)
     {
         return normal;
     }
@@ -289,7 +265,6 @@ float SampleShadow(int type,int lightIndex,float3 worldPosition,float3 normal,fl
     return 1.0-clamp(views.z,0.0,1.0)*(1.0-visible/max(samples,1.0));
 }
 
-#else
 #endif
 
 // 현재 언어의 조명 계산을 직접 작성한다.
@@ -332,7 +307,7 @@ inline float3 EvaluateDirectLight(
     float3 halfway = halfwayVector * rsqrt(halfwayLengthSquared);
     float3 f0 = lerp(float3(0.04,0.04,0.04), albedo, metallic);
     float ndf = DistributionGGX(normal, halfway, roughness);
-    float geometry = GeometrySmith(normal, viewDir, lightDir, roughness);
+    float geometry = GeometrySchlickGGX(ndotv, roughness) * GeometrySchlickGGX(ndotl, roughness);
     float3 fresnel = FresnelSchlick(max(dot(halfway, viewDir), 0.0), f0);
     float3 specular = (ndf * geometry * fresnel) / max(4.0 * ndotv * ndotl, 0.0001);
     float3 diffuseWeight = (float3(1.0,1.0,1.0) - fresnel) * (1.0 - metallic);
@@ -486,7 +461,7 @@ float4 main(PSInput input) : SV_TARGET
     float3 albedo = baseColor.rgb;
     if ((textureFlags & RENDERER_TEXTURE_FLAG_BASE_COLOR) != 0u)
     {
-        albedo *= SampleBaseColorTexture(input.uv).rgb;
+        albedo *= SampleMaterial(0u,input.uv).rgb;
     }
 
     float minRoughness = clamp(lighting.pbrParams.x, 0.01, 1.0);

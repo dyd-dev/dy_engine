@@ -70,10 +70,9 @@ bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList
     for(const auto* source:images)
     {
         const auto& image=*source;
-        if(!image.GetWidth() || !image.GetHeight() || static_cast<uint64_t>(image.GetWidth())*image.GetHeight()*4!=image.GetPixels().size()
-            || image.GetPixels().size()>UINT32_MAX) { prepared=false; break; }
+        if(image.GetPixels().size()>UINT32_MAX) { prepared=false; break; }
         TextureDesc desc;
-        desc.width=image.GetWidth();desc.height=image.GetHeight();desc.depthOrArraySize=desc.mipLevels=1;
+        desc.width=image.GetWidth();desc.height=image.GetHeight();
         desc.format=image.GetColorSpace()==dyf::ColorSpace::Srgb ? Format::R8G8B8A8_UNORM_SRGB : Format::R8G8B8A8_UNORM;
         desc.usage=TextureUsage::ShaderResource;
         auto* texture=device->CreateTexture(desc);
@@ -83,7 +82,7 @@ bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList
         commandList.ResourceBarrier(&barrier,1);
         if(!device->UpdateTexture(commandList,texture,0,0,image.GetPixels().data(),static_cast<uint32_t>(image.GetPixels().size()),image.GetWidth()*4,image.GetWidth()*image.GetHeight()*4)) { prepared=false;break; }
         barrier.before=ResourceState::CopyDestination;barrier.after=ResourceState::ShaderResource;commandList.ResourceBarrier(&barrier,1);
-        ResourceBinding binding;binding.binding=0;binding.texture=texture;
+        ResourceBinding binding;binding.texture=texture;
         auto* set=device->CreateResourceSet({canvasPipeline,&binding,1});
         if(!set) { prepared=false;break; }
         sets.push_back(set);
