@@ -15,16 +15,6 @@ namespace dyf::Backends
 {
 	namespace
 	{
-		VkShaderStageFlags ToShaderStages(dyf::RHI::ShaderStageFlags stages)
-		{
-			VkShaderStageFlags result = 0;
-			if ((stages & dyf::RHI::ShaderStageFlags::Vertex) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_VERTEX_BIT;
-			if ((stages & dyf::RHI::ShaderStageFlags::Hull) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
-			if ((stages & dyf::RHI::ShaderStageFlags::Domain) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
-			if ((stages & dyf::RHI::ShaderStageFlags::Fragment) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_FRAGMENT_BIT;
-            if((stages & RHI::ShaderStageFlags::Compute)!=RHI::ShaderStageFlags::None)result|=VK_SHADER_STAGE_COMPUTE_BIT;
-			return result;
-		}
 
 		VkDescriptorType ToDescriptorType(dyf::RHI::ResourceBindingType type)
 		{
@@ -462,29 +452,22 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& context,const RHI::ComputePi
 		m_depthFormat = desc.depthStencil.format;
 
 		std::array<VkPipelineShaderStageCreateInfo, 4> shaderStages{};
-		shaderStages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-		shaderStages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
-		shaderStages[0].module = vertexShader->GetModule();
-		shaderStages[0].pName = vertexShader->GetEntryPoint();
-		uint32_t shaderStageCount = 1;
+		uint32_t shaderStageCount = 0;
+		const auto appendShaderStage = [&](VkShaderStageFlagBits stage, const VulkanShader& shader)
+		{
+			auto& info = shaderStages[shaderStageCount++];
+			info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+			info.stage = stage;
+			info.module = shader.GetModule();
+			info.pName = shader.GetEntryPoint();
+		};
+		appendShaderStage(VK_SHADER_STAGE_VERTEX_BIT, *vertexShader);
 		if (hullShader != nullptr)
 		{
-			shaderStages[shaderStageCount].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-			shaderStages[shaderStageCount].stage = VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
-			shaderStages[shaderStageCount].module = hullShader->GetModule();
-			shaderStages[shaderStageCount++].pName = hullShader->GetEntryPoint();
-			shaderStages[shaderStageCount].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-			shaderStages[shaderStageCount].stage = VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
-			shaderStages[shaderStageCount].module = domainShader->GetModule();
-			shaderStages[shaderStageCount++].pName = domainShader->GetEntryPoint();
+			appendShaderStage(VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT, *hullShader);
+			appendShaderStage(VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, *domainShader);
 		}
-		if (fragmentShader != nullptr)
-		{
-			shaderStages[shaderStageCount].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-			shaderStages[shaderStageCount].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
-			shaderStages[shaderStageCount].module = fragmentShader->GetModule();
-			shaderStages[shaderStageCount++].pName = fragmentShader->GetEntryPoint();
-		}
+		if (fragmentShader != nullptr) appendShaderStage(VK_SHADER_STAGE_FRAGMENT_BIT, *fragmentShader);
 
 		std::vector<VkVertexInputBindingDescription> vertexBindings;
 		std::set<uint32_t> usedVertexBindings;
@@ -728,16 +711,7 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& context,const RHI::ComputePi
 		for (uint32_t i = 0; i < desc.bindingCount; ++i)
 		{
 			const dyf::RHI::ResourceBinding& source = desc.bindings[i];
-			const dyf::RHI::ResourceBindingLayout* bindingLayout = nullptr;
-			for (uint32_t j = 0; j < layout.bindingCount; ++j)
-			{
-				const dyf::RHI::ResourceBindingLayout& candidate = layout.bindings[j];
-				if (candidate.binding == source.binding)
-				{
-					bindingLayout = &candidate;
-					break;
-				}
-			}
+			const auto* bindingLayout = dyf::RHI::FindLayoutBinding(layout, source.binding);
 			if (bindingLayout == nullptr || bindingLayout->type == dyf::RHI::ResourceBindingType::StaticSampler ||
 				source.arrayElement >= bindingLayout->count ||
 				!provided.emplace(source.binding, source.arrayElement).second)

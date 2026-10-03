@@ -67,6 +67,17 @@ namespace dyf::Backends
 		}
 	}
 
+	VkShaderStageFlags ToShaderStages(dyf::RHI::ShaderStageFlags stages)
+	{
+		VkShaderStageFlags result = 0;
+		if ((stages & dyf::RHI::ShaderStageFlags::Vertex) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_VERTEX_BIT;
+		if ((stages & dyf::RHI::ShaderStageFlags::Hull) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+		if ((stages & dyf::RHI::ShaderStageFlags::Domain) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+		if ((stages & dyf::RHI::ShaderStageFlags::Fragment) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_FRAGMENT_BIT;
+		if ((stages & dyf::RHI::ShaderStageFlags::Compute) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_COMPUTE_BIT;
+		return result;
+	}
+
 	VkFormat ToVulkanFormat(dyf::RHI::Format format)
 	{
 		switch (format)

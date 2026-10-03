@@ -1,6 +1,7 @@
 #pragma once
 #include <mutex>
 
+#include "dyf/RHI/Binding.h"
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/ResourceState.h"
 #include "dyf/RHI/Texture.h"
@@ -74,6 +75,7 @@ namespace dyf::Backends
 		bool m_hasKnownLayout = false;
 	};
 
+	[[nodiscard]] VkShaderStageFlags ToShaderStages(dyf::RHI::ShaderStageFlags stages);
 	[[nodiscard]] VkFormat ToVulkanFormat(dyf::RHI::Format format);
 	[[nodiscard]] dyf::RHI::Format FromVulkanColorFormat(VkFormat format);
 	[[nodiscard]] VkImageLayout ToVulkanImageLayout(dyf::RHI::ResourceState state);

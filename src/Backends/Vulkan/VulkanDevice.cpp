@@ -172,9 +172,6 @@ namespace dyf::Backends
 		VulkanContext m_context;
 		VulkanSwapchain m_swapchain;
 		void* m_windowHandle = nullptr;
-		uint32_t m_maxFramesInFlight = 0;
-        uint32_t m_adapterIndex=0;
-        bool m_enableValidation=false;
         VkDebugUtilsMessengerEXT m_debugMessenger = VK_NULL_HANDLE;
 
 		std::vector<VkSemaphore> m_imageAvailableSemaphores;
@@ -343,11 +340,8 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
             if(binding.type==RHI::ResourceBindingType::ReadWriteStorageBuffer ||
                 binding.type==RHI::ResourceBindingType::StorageTexture)
             {
-                if((binding.stages&RHI::ShaderStageFlags::Vertex)!=RHI::ShaderStageFlags::None &&
-                    !features.vertexPipelineStoresAndAtomics)return false;
-                if((binding.stages&RHI::ShaderStageFlags::Hull)!=RHI::ShaderStageFlags::None &&
-                    !features.vertexPipelineStoresAndAtomics)return false;
-                if((binding.stages&RHI::ShaderStageFlags::Domain)!=RHI::ShaderStageFlags::None &&
+                if((binding.stages&(RHI::ShaderStageFlags::Vertex | RHI::ShaderStageFlags::Hull |
+                    RHI::ShaderStageFlags::Domain))!=RHI::ShaderStageFlags::None &&
                     !features.vertexPipelineStoresAndAtomics)return false;
                 if((binding.stages&RHI::ShaderStageFlags::Fragment)!=RHI::ShaderStageFlags::None &&
                     !features.fragmentStoresAndAtomics)return false;
@@ -532,13 +526,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 	int VulkanDevice::Impl::Initialize(const void* windowHandle, const dyf::RHI::DeviceDesc& desc)
 	{
 		m_windowHandle = const_cast<void*>(windowHandle);
-		m_maxFramesInFlight = desc.maxFramesInFlight;
-        m_adapterIndex=desc.adapterIndex;
-        m_enableValidation=desc.enableValidation;
-		if (m_maxFramesInFlight == 0) return -1;
+		if (desc.maxFramesInFlight == 0) return -1;
 
 		if (!CreateInstance() || !PickPhysicalDevice() || !CreateLogicalDevice()) return -1;
-		m_frameSlots.assign(m_maxFramesInFlight, VK_NULL_HANDLE);
+		m_frameSlots.assign(m_owner.GetDesc().maxFramesInFlight, VK_NULL_HANDLE);
 		return 0;
 	}
 
@@ -941,7 +932,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         m_presentPending=false;
         m_frameReady=false;
         m_imageAcquired=false;
-        m_currentFrameSlot=(m_currentFrameSlot+1)%m_maxFramesInFlight;
+        m_currentFrameSlot=(m_currentFrameSlot+1)%m_owner.GetDesc().maxFramesInFlight;
         const bool recreateRequestedByAcquire=m_recreateAfterPresent;
         m_recreateAfterPresent=false;
         if(result==VK_SUCCESS || result==VK_SUBOPTIMAL_KHR || result==VK_ERROR_OUT_OF_DATE_KHR)
@@ -1331,8 +1322,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 #endif
         if(supported(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME))
             extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
-        const bool captureValidation = m_enableValidation && m_context.debugUtilsEnabled;
-        if (m_enableValidation && !captureValidation)
+        const bool captureValidation = m_owner.GetDesc().enableValidation && m_context.debugUtilsEnabled;
+        if (m_owner.GetDesc().enableValidation && !captureValidation)
             Platform::Log::Write(Platform::LogLevel::Warning, "Vulkan", "Validation log capture unavailable: VK_EXT_debug_utils is missing");
         VkDebugUtilsMessengerCreateInfoEXT debugInfo{};
         debugInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
@@ -1342,7 +1333,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         const uint32_t extensionCount=static_cast<uint32_t>(extensions.size());
 
 		std::vector<const char*> layers;
-		if(m_enableValidation) {if(!ValidationLayerAvailable())return false;layers.push_back(kValidationLayerName);}
+		if(m_owner.GetDesc().enableValidation) {if(!ValidationLayerAvailable())return false;layers.push_back(kValidationLayerName);}
 
 		VkApplicationInfo application{};
 		application.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -1400,67 +1391,52 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		std::vector<VkPhysicalDevice> devices(deviceCount);
 		if (vkEnumeratePhysicalDevices(m_context.instance, &deviceCount, devices.data()) != VK_SUCCESS) return false;
 
-		if(m_adapterIndex>=devices.size())return false;
-        const std::array<VkPhysicalDevice,1> selected={devices[m_adapterIndex]};
-        for (VkPhysicalDevice device : selected)
+		if(m_owner.GetDesc().adapterIndex>=devices.size())return false;
+		const VkPhysicalDevice device = devices[m_owner.GetDesc().adapterIndex];
+		VkPhysicalDeviceProperties properties{};
+		vkGetPhysicalDeviceProperties(device, &properties);
+		if (properties.apiVersion < VK_API_VERSION_1_3) return false;
+
+		VkPhysicalDeviceVulkan13Features vulkan13{};
+		vulkan13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+		VkPhysicalDeviceFeatures2 features{};
+		features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+		features.pNext = &vulkan13;
+		vkGetPhysicalDeviceFeatures2(device, &features);
+		if (!vulkan13.dynamicRendering || !vulkan13.synchronization2) return false;
+
+		uint32_t familyCount = 0;
+		vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, nullptr);
+		std::vector<VkQueueFamilyProperties> families(familyCount);
+		vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, families.data());
+		VulkanContext::QueueFamilyIndices indices{};
+		for (uint32_t i = 0; i < familyCount; ++i)
 		{
-			VkPhysicalDeviceProperties properties{};
-			vkGetPhysicalDeviceProperties(device, &properties);
-			if (properties.apiVersion < VK_API_VERSION_1_3) continue;
+			if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) indices.graphicsFamily = i;
+			if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) indices.presentFamily = i;
+			if (indices.IsComplete()) break;
+		}
 
-			VkPhysicalDeviceVulkan13Features vulkan13{};
-			vulkan13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-			VkPhysicalDeviceFeatures2 features{};
-			features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-			features.pNext = &vulkan13;
-			vkGetPhysicalDeviceFeatures2(device, &features);
-			if (!vulkan13.dynamicRendering || !vulkan13.synchronization2) continue;
-
-			uint32_t familyCount = 0;
-			vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, nullptr);
-			std::vector<VkQueueFamilyProperties> families(familyCount);
-			vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, families.data());
-			VulkanContext::QueueFamilyIndices indices{};
-			for (uint32_t i = 0; i < familyCount; ++i)
-			{
-				if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) indices.graphicsFamily = i;
-				if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) indices.presentFamily = i;
-				if (indices.IsComplete()) break;
-			}
-
-			if (!indices.IsComplete()) continue;
+		if (!indices.IsComplete()) return false;
 
             Platform::Log::Writef(Platform::LogLevel::Info, "Vulkan", nullptr, 0,
                 "GPU=%s vendor=%u device=%u driverVersionRaw=%u api=%u.%u.%u validation=%s capture=%s",
                 properties.deviceName, properties.vendorID, properties.deviceID, properties.driverVersion,
                 VK_API_VERSION_MAJOR(properties.apiVersion), VK_API_VERSION_MINOR(properties.apiVersion), VK_API_VERSION_PATCH(properties.apiVersion),
-                m_enableValidation ? "on" : "off", m_debugMessenger != VK_NULL_HANDLE ? "on" : "off");
-			m_context.physicalDevice = device;
-			m_context.queueIndices = indices;
-			return true;
-		}
-		return false;
+                m_owner.GetDesc().enableValidation ? "on" : "off", m_debugMessenger != VK_NULL_HANDLE ? "on" : "off");
+		m_context.physicalDevice = device;
+		m_context.queueIndices = indices;
+		return true;
 	}
 
 	bool VulkanDevice::Impl::CreateLogicalDevice()
 	{
-		std::vector<uint32_t> queueFamilies = { m_context.queueIndices.graphicsFamily };
-		if (m_context.queueIndices.presentFamily != m_context.queueIndices.graphicsFamily)
-		{
-			queueFamilies.push_back(m_context.queueIndices.presentFamily);
-		}
 		const float priority = 1.0f;
-		std::vector<VkDeviceQueueCreateInfo> queueInfos;
-		queueInfos.reserve(queueFamilies.size());
-		for (uint32_t family : queueFamilies)
-		{
-			VkDeviceQueueCreateInfo queueInfo{};
-			queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-			queueInfo.queueFamilyIndex = family;
-			queueInfo.queueCount = 1;
-			queueInfo.pQueuePriorities = &priority;
-			queueInfos.push_back(queueInfo);
-		}
+		VkDeviceQueueCreateInfo queueInfo{};
+		queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+		queueInfo.queueFamilyIndex = m_context.queueIndices.graphicsFamily;
+		queueInfo.queueCount = 1;
+		queueInfo.pQueuePriorities = &priority;
 
 		VkPhysicalDeviceFeatures supported{};
 		vkGetPhysicalDeviceFeatures(m_context.physicalDevice, &supported);
@@ -1482,8 +1458,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		VkDeviceCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 		info.pNext = &vulkan13;
-		info.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
-		info.pQueueCreateInfos = queueInfos.data();
+		info.queueCreateInfoCount = 1;
+		info.pQueueCreateInfos = &queueInfo;
 		info.enabledExtensionCount = 1;
 		info.ppEnabledExtensionNames = extensions;
 		info.pEnabledFeatures = &enabled;
@@ -1495,34 +1471,28 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 	bool VulkanDevice::Impl::CreateSwapchainSyncObjects()
 	{
-		m_imageAvailableSemaphores.assign(m_maxFramesInFlight, VK_NULL_HANDLE);
+		m_imageAvailableSemaphores.assign(m_owner.GetDesc().maxFramesInFlight, VK_NULL_HANDLE);
 		m_renderFinishedSemaphores.assign(m_swapchain.GetImageCount(), VK_NULL_HANDLE);
 		m_imagesInFlight.assign(m_swapchain.GetImageCount(), VK_NULL_HANDLE);
 		VkSemaphoreCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-		for (VkSemaphore& semaphore : m_imageAvailableSemaphores)
+		const auto createSemaphores = [&](std::vector<VkSemaphore>& semaphores, const char* operation)
 		{
-			const VkResult result = vkCreateSemaphore(m_context.device, &info, nullptr, &semaphore);
-			if (result != VK_SUCCESS)
+			for (VkSemaphore& semaphore : semaphores)
 			{
-				LogVulkanFailure("vkCreateSemaphore(acquire)", result);
-				m_submissionFaulted = true;
-				DestroySwapchainSyncObjects();
-				return false;
+				const VkResult result = vkCreateSemaphore(m_context.device, &info, nullptr, &semaphore);
+				if (result != VK_SUCCESS)
+				{
+					LogVulkanFailure(operation, result);
+					m_submissionFaulted = true;
+					DestroySwapchainSyncObjects();
+					return false;
+				}
 			}
-		}
-		for (VkSemaphore& semaphore : m_renderFinishedSemaphores)
-		{
-			const VkResult result = vkCreateSemaphore(m_context.device, &info, nullptr, &semaphore);
-			if (result != VK_SUCCESS)
-			{
-				LogVulkanFailure("vkCreateSemaphore(present)", result);
-				m_submissionFaulted = true;
-				DestroySwapchainSyncObjects();
-				return false;
-			}
-		}
-		return true;
+			return true;
+		};
+		return createSemaphores(m_imageAvailableSemaphores, "vkCreateSemaphore(acquire)") &&
+			createSemaphores(m_renderFinishedSemaphores, "vkCreateSemaphore(present)");
 	}
 
 	void VulkanDevice::Impl::UpdateBackBuffers()

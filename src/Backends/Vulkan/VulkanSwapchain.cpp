@@ -76,11 +76,9 @@ bool VulkanSwapchain::Initialize(
     if (status.result != VK_SUCCESS) return false;
     if (swapchainSupport.formats.empty() || swapchainSupport.presentModes.empty()) return false;
 
-    VkSurfaceFormatKHR surfaceFormat{};
-    VkPresentModeKHR presentMode = VK_PRESENT_MODE_FIFO_KHR;
     VkExtent2D extent{};
-    if (!ChooseSwapSurfaceFormat(swapchainSupport.formats, requestedFormat, requestedColorSpace, surfaceFormat) ||
-        !ChoosePresentMode(swapchainSupport.presentModes, requestedPresentMode, presentMode) ||
+    if (!SupportsSurfaceFormat(swapchainSupport.formats, requestedFormat, requestedColorSpace) ||
+        !SupportsPresentMode(swapchainSupport.presentModes, requestedPresentMode) ||
         !ChooseSwapExtent(swapchainSupport.capabilities, windowHandle, extent, status)) {
         return false;
     }
@@ -97,8 +95,8 @@ bool VulkanSwapchain::Initialize(
     createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
     createInfo.surface = context.surface;
     createInfo.minImageCount = imageCount;
-    createInfo.imageFormat = surfaceFormat.format;
-    createInfo.imageColorSpace = surfaceFormat.colorSpace;
+    createInfo.imageFormat = requestedFormat;
+    createInfo.imageColorSpace = requestedColorSpace;
     createInfo.imageExtent = extent;
     createInfo.imageArrayLayers = 1;
     createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
@@ -118,7 +116,7 @@ bool VulkanSwapchain::Initialize(
 
     createInfo.preTransform = swapchainSupport.capabilities.currentTransform;
     createInfo.compositeAlpha = compositeAlpha;
-    createInfo.presentMode = presentMode;
+    createInfo.presentMode = requestedPresentMode;
     createInfo.clipped = VK_TRUE;
     createInfo.oldSwapchain = oldSwapchain;
 
@@ -145,14 +143,14 @@ bool VulkanSwapchain::Initialize(
     imageViews.reserve(images.size());
     for (VkImage image : images) {
         VkImageView view = VK_NULL_HANDLE;
-        if (!status.Check(CreateImageView(context.device, image, surfaceFormat.format, view), "vkCreateImageView(swapchain)")) return false;
+        if (!status.Check(CreateImageView(context.device, image, requestedFormat, view), "vkCreateImageView(swapchain)")) return false;
         imageViews.push_back(view);
     }
 
     m_swapchain = swapchain;
     m_swapchainImages = std::move(images);
     m_swapchainImageViews = std::move(imageViews);
-    m_swapchainImageFormat = surfaceFormat.format;
+    m_swapchainImageFormat = requestedFormat;
     m_swapchainExtent = extent;
     pending.handle = VK_NULL_HANDLE;
     return true;
@@ -202,11 +200,10 @@ VulkanSwapchain::SwapchainSupportDetails VulkanSwapchain::QuerySwapchainSupport(
     return details;
 }
 
-bool VulkanSwapchain::ChooseSwapSurfaceFormat(
+bool VulkanSwapchain::SupportsSurfaceFormat(
     const std::vector<VkSurfaceFormatKHR>& availableFormats,
     VkFormat requestedFormat,
-    VkColorSpaceKHR requestedColorSpace,
-    VkSurfaceFormatKHR& selectedFormat)
+    VkColorSpaceKHR requestedColorSpace)
 {
     if (requestedFormat == VK_FORMAT_UNDEFINED) return false;
     for (const auto& format : availableFormats)
@@ -214,22 +211,17 @@ bool VulkanSwapchain::ChooseSwapSurfaceFormat(
         if ((format.format == requestedFormat || format.format == VK_FORMAT_UNDEFINED) &&
             format.colorSpace == requestedColorSpace)
         {
-            selectedFormat = {requestedFormat, requestedColorSpace};
             return true;
         }
     }
     return false;
 }
 
-bool VulkanSwapchain::ChoosePresentMode(
+bool VulkanSwapchain::SupportsPresentMode(
     const std::vector<VkPresentModeKHR>& availablePresentModes,
-    VkPresentModeKHR requestedPresentMode,
-    VkPresentModeKHR& selectedPresentMode)
+    VkPresentModeKHR requestedPresentMode)
 {
-    const auto it = std::find(availablePresentModes.begin(), availablePresentModes.end(), requestedPresentMode);
-    if (it == availablePresentModes.end()) return false;
-    selectedPresentMode = *it;
-    return true;
+    return std::find(availablePresentModes.begin(), availablePresentModes.end(), requestedPresentMode) != availablePresentModes.end();
 }
 
 bool VulkanSwapchain::ChooseSwapExtent(
@@ -240,8 +232,6 @@ bool VulkanSwapchain::ChooseSwapExtent(
 {
     if (capabilities.currentExtent.width != std::numeric_limits<uint32_t>::max()) {
         selectedExtent = capabilities.currentExtent;
-        status.retryLater = selectedExtent.width == 0 || selectedExtent.height == 0;
-        return selectedExtent.width > 0 && selectedExtent.height > 0;
     } else {
         int width = 0;
         int height = 0;
@@ -266,9 +256,9 @@ bool VulkanSwapchain::ChooseSwapExtent(
         selectedExtent.width = std::clamp(selectedExtent.width, capabilities.minImageExtent.width, capabilities.maxImageExtent.width);
         selectedExtent.height = std::clamp(selectedExtent.height, capabilities.minImageExtent.height, capabilities.maxImageExtent.height);
 
-        status.retryLater = selectedExtent.width == 0 || selectedExtent.height == 0;
-        return !status.retryLater;
     }
+    status.retryLater = selectedExtent.width == 0 || selectedExtent.height == 0;
+    return !status.retryLater;
 }
 
 }

@@ -85,16 +85,6 @@ namespace dyf::Backends
 			}
 		}
 
-		VkShaderStageFlags ToShaderStages(dyf::RHI::ShaderStageFlags stages)
-		{
-			VkShaderStageFlags result = 0;
-			if ((stages & dyf::RHI::ShaderStageFlags::Vertex) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_VERTEX_BIT;
-			if ((stages & dyf::RHI::ShaderStageFlags::Hull) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
-			if ((stages & dyf::RHI::ShaderStageFlags::Domain) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
-			if ((stages & dyf::RHI::ShaderStageFlags::Fragment) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_FRAGMENT_BIT;
-            if((stages & RHI::ShaderStageFlags::Compute)!=RHI::ShaderStageFlags::None)result|=VK_SHADER_STAGE_COMPUTE_BIT;
-			return result;
-		}
 
 		VkAttachmentLoadOp ToLoadOp(dyf::RHI::LoadOp op)
 		{
@@ -448,23 +438,16 @@ namespace dyf::Backends
 				: std::max(1u, texture->GetDesc().height >> source.mipLevel);
 			const VkAttachmentLoadOp loadOp = ToLoadOp(source.loadOp);
 			const VkAttachmentStoreOp storeOp = ToStoreOp(source.storeOp);
-			bool clearValueValid = true;
 			const bool integerColor = texture != nullptr && (texture->GetDesc().format == RHI::Format::R32_UINT ||
 				texture->GetDesc().format == RHI::Format::R16_UINT);
-			if (source.loadOp == dyf::RHI::LoadOp::Clear)
-			{
-				for (uint32_t channel = 0; channel < (integerColor ? 1u : 4u); ++channel)
+			const bool clearValueValid = source.loadOp != dyf::RHI::LoadOp::Clear ||
+				std::all_of(source.clearColor, source.clearColor + (integerColor ? 1u : 4u), [&](float component)
 				{
-					const float component = source.clearColor[channel];
-					clearValueValid = clearValueValid && std::isfinite(component);
-					if (integerColor)
-					{
-						const double maximum = texture->GetDesc().format == RHI::Format::R16_UINT ? UINT16_MAX : UINT32_MAX;
-						clearValueValid = clearValueValid && component >= 0.0f &&
-							static_cast<double>(component) <= maximum && std::trunc(component) == component;
-					}
-				}
-			}
+					if (!std::isfinite(component)) return false;
+					if (!integerColor) return true;
+					const double maximum = texture->GetDesc().format == RHI::Format::R16_UINT ? UINT16_MAX : UINT32_MAX;
+					return component >= 0.0f && static_cast<double>(component) <= maximum && std::trunc(component) == component;
+				});
 			if (texture == nullptr || imageView == VK_NULL_HANDLE || attachmentWidth == 0 || attachmentHeight == 0 ||
 				source.arrayLayer >= texture->GetDesc().depthOrArraySize ||
 				loadOp == VK_ATTACHMENT_LOAD_OP_MAX_ENUM || storeOp == VK_ATTACHMENT_STORE_OP_MAX_ENUM ||
@@ -721,19 +704,10 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 	void VulkanCommandList::BindVertexBufferNative(uint32_t binding, dyf::RHI::BufferHandle buffer, uint32_t offset)
 	{
 		VulkanBuffer* nativeBuffer = dynamic_cast<VulkanBuffer*>(buffer);
-		const dyf::RHI::VertexBufferLayout* layout = nullptr;
-		if (m_boundPipeline != nullptr)
-		{
-			for (const dyf::RHI::VertexBufferLayout& candidate : m_boundPipeline->GetVertexBuffers())
-			{
-				if (candidate.binding == binding)
-				{
-					layout = &candidate;
-					break;
-				}
-			}
-		}
-		if (m_closed || !m_rendering || m_boundPipeline == nullptr || layout == nullptr ||
+		const bool hasLayout = m_boundPipeline != nullptr &&
+			std::any_of(m_boundPipeline->GetVertexBuffers().begin(), m_boundPipeline->GetVertexBuffers().end(),
+				[binding](const dyf::RHI::VertexBufferLayout& layout) { return layout.binding == binding; });
+		if (m_closed || !m_rendering || m_boundPipeline == nullptr || !hasLayout ||
 			nativeBuffer == nullptr || offset >= nativeBuffer->GetDesc().size ||
 			(nativeBuffer->GetDesc().usage & dyf::RHI::BufferUsage::Vertex) == dyf::RHI::BufferUsage::None)
 		{
@@ -1142,16 +1116,11 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 			const uint64_t available = found->second.buffer->GetDesc().size - found->second.offset;
 			if (first + count > available / layout.stride) return false;
 		}
-		bool resourceSetRequired = false;
 		const dyf::RHI::PipelineLayoutDesc& layout = m_boundPipeline->GetLayout();
-		for (uint32_t index = 0; index < layout.bindingCount; ++index)
-		{
-			if (layout.bindings[index].type != dyf::RHI::ResourceBindingType::StaticSampler)
-			{
-				resourceSetRequired = true;
-				break;
-			}
-		}
+		const bool resourceSetRequired = layout.bindingCount != 0 &&
+			std::any_of(layout.bindings, layout.bindings + layout.bindingCount,
+				[](const dyf::RHI::ResourceBindingLayout& binding)
+				{ return binding.type != dyf::RHI::ResourceBindingType::StaticSampler; });
 		if (resourceSetRequired && m_boundResourceSet == nullptr) return false;
 		return std::find(m_inlineConstantCoverage.begin(), m_inlineConstantCoverage.end(), 0) ==
 			m_inlineConstantCoverage.end();
@@ -1165,51 +1134,20 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 			switch (operation.kind)
 			{
 			case OperationKind::BufferBarrier:
-			{
-				const auto found = state.buffers.find(operation.buffer);
-				const dyf::RHI::ResourceState current = found == state.buffers.end()
-					? operation.buffer->GetState() : found->second;
-				if (current != operation.before) return false;
-				state.buffers[operation.buffer] = operation.after;
-				break;
-			}
-			case OperationKind::TextureBarrier:
-			{
-				const auto key = TextureKey(operation.texture, operation.mipLevel, operation.arrayLayer);
-				const auto found = state.textureSubresources.find(key);
-				const dyf::RHI::ResourceState current = found == state.textureSubresources.end()
-					? operation.texture->GetState(operation.mipLevel, operation.arrayLayer)
-					: found->second;
-				if (current != operation.before) return false;
-				state.textureSubresources[key] = operation.after;
-				break;
-			}
 			case OperationKind::BufferRequirement:
-			{
-				const auto found = state.buffers.find(operation.buffer);
-				const dyf::RHI::ResourceState current = found == state.buffers.end()
-					? operation.buffer->GetState() : found->second;
-				if (current != operation.before) return false;
-				break;
-			}
-			case OperationKind::TextureRequirement:
-			{
-				const auto key = TextureKey(operation.texture, operation.mipLevel, operation.arrayLayer);
-				const auto found = state.textureSubresources.find(key);
-				const dyf::RHI::ResourceState current = found == state.textureSubresources.end()
-					? operation.texture->GetState(operation.mipLevel, operation.arrayLayer)
-					: found->second;
-				if (current != operation.before) return false;
-				break;
-			}
 			case OperationKind::BufferWrite:
 			{
 				const auto found = state.buffers.find(operation.buffer);
 				const dyf::RHI::ResourceState current = found == state.buffers.end()
 					? operation.buffer->GetState() : found->second;
-				if (current != dyf::RHI::ResourceState::CopyDestination) return false;
+				const dyf::RHI::ResourceState required = operation.kind == OperationKind::BufferWrite
+					? dyf::RHI::ResourceState::CopyDestination : operation.before;
+				if (current != required) return false;
+				if (operation.kind == OperationKind::BufferBarrier) state.buffers[operation.buffer] = operation.after;
 				break;
 			}
+			case OperationKind::TextureBarrier:
+			case OperationKind::TextureRequirement:
 			case OperationKind::TextureWrite:
 			{
 				const auto key = TextureKey(operation.texture, operation.mipLevel, operation.arrayLayer);
@@ -1217,7 +1155,10 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 				const dyf::RHI::ResourceState current = found == state.textureSubresources.end()
 					? operation.texture->GetState(operation.mipLevel, operation.arrayLayer)
 					: found->second;
-				if (current != dyf::RHI::ResourceState::CopyDestination) return false;
+				const dyf::RHI::ResourceState required = operation.kind == OperationKind::TextureWrite
+					? dyf::RHI::ResourceState::CopyDestination : operation.before;
+				if (current != required) return false;
+				if (operation.kind == OperationKind::TextureBarrier) state.textureSubresources[key] = operation.after;
 				break;
 			}
 			}
