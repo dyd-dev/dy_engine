@@ -18,7 +18,7 @@
 #include "dyf/RHI/Binding.h"
 #include "dyf/RHI/Format.h"
 
-namespace dyf::RHI { class IDevice; class ICommandList; struct PipelineLayoutDesc; }
+namespace dyf::RHI { class IDevice; class ICommandList; class ResourceScope; struct PipelineLayoutDesc; }
 namespace dyf
 {
 class Image;
@@ -103,7 +103,7 @@ public:
     bool SetConfig(const RendererConfig&);
     // 선택적 셰이더 교체다. 입력 바이트와 진입점은 복사하며 다음 Render에서 적용한다.
     bool SetShaders(const RendererShaderDesc&);
-    // 반환한 셰이더 바이트는 다음 설정 적용까지 유효한 읽기 뷰다.
+    // 반환한 셰이더 바이트와 진입점은 다음 설정 적용까지 유효한 읽기 뷰다.
     [[nodiscard]] RendererShaderDesc GetShaders() const;
 
 private:
@@ -161,7 +161,7 @@ private:
 
     // 메시·텍스처 업로드와 draw에 필요한 RHI 호출을 cpp 파일별로 나눈 멤버 함수다.
     bool PrepareGeometry(const Scene&,RHI::IDevice*);
-    bool CreateMaterialResourceSets(const Scene&,RHI::ICommandList&,const std::vector<RendererDrawDesc>*,std::vector<RHI::ResourceSetHandle>&);
+    bool CreateMaterialResourceSets(const Scene&,RHI::ICommandList&,const std::vector<RendererDrawDesc>*,std::vector<RHI::ResourceSetHandle>&,RHI::ResourceScope&);
     bool RecordShadowPass(const Scene&,const Camera&,const ShadowData&,RHI::ICommandList&,
         const std::vector<RendererDrawDesc>*,RHI::TimestampQueryHandle);
     bool RecordMainPass(const Scene&,const Camera&,RHI::ICommandList&,
@@ -188,7 +188,11 @@ private:
     std::unique_ptr<RendererConfig> pendingConfig;
     // GPU 셰이더 핸들과 달리 이것은 선택적 사용자 입력의 CPU 복사본이다.
     ShaderSources shaderSources,pendingShaderSources;
+    // SetShaders로 교체한 pending 입력의 이전 읽기 뷰도 적용 성공까지 유지한다.
+    mutable std::deque<ShaderSources> shaderViews;
+    mutable bool shaderViewCurrent=false;
     bool shadersPending=false;
+    bool canvasFramePending=false;
     RHI::ShaderHandle vertexShader=nullptr,fragmentShader=nullptr,shadowVertexShader=nullptr;
     RHI::ShaderHandle canvasVertexShader=nullptr,canvasFragmentShader=nullptr;
     RHI::ShaderHandle toneVertexShader=nullptr,toneFragmentShader=nullptr;

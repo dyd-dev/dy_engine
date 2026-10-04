@@ -85,7 +85,11 @@ RHI::TimestampQueryHandle Renderer::BeginGpuSample(uint32_t slot)
         m_pending.pop_front();
     }
     auto* query=device->CreateTimestampQuery({2});
-    if(query)m_pending.push_back({query,{},slot});
+    if(query)
+    {
+        try { m_pending.push_back({query,{},slot}); }
+        catch(...) { device->DestroyTimestampQuery(query); throw; }
+    }
     return query;
 }
 void Renderer::SubmittedGpuSample(RHI::TimestampQueryHandle query,RHI::FenceHandle completion)

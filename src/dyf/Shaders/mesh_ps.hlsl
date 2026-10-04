@@ -177,7 +177,7 @@ float3 GetNormal(PSInput input, uint textureFlags)
 {
     float3 normal = normalize(input.worldNormal);
     float normalScale = materialParams.z;
-    if ((textureFlags & RENDERER_TEXTURE_FLAG_NORMAL) == 0u || normalScale <= 0.0001)
+    if ((textureFlags & RENDERER_TEXTURE_FLAG_NORMAL) == 0u || abs(normalScale) <= 0.0001)
     {
         return normal;
     }
@@ -468,7 +468,7 @@ float4 main(PSInput input) : SV_TARGET
     float ambientSpecularStrength = max(lighting.pbrParams.y, 0.0);
     float metallic = clamp(materialParams.x, 0.0, 1.0);
     float roughness = clamp(materialParams.y, minRoughness, 1.0);
-    float occlusion = clamp(materialParams.w, 0.0, 1.0);
+    float occlusion = 1.0;
     if ((textureFlags & RENDERER_TEXTURE_FLAG_METALLIC_ROUGHNESS) != 0u)
     {
         float4 metallicRoughness = SampleMaterial(1u,input.uv);
@@ -477,7 +477,7 @@ float4 main(PSInput input) : SV_TARGET
     }
     if ((textureFlags & RENDERER_TEXTURE_FLAG_OCCLUSION) != 0u)
     {
-        occlusion *= SampleMaterial(3u,input.uv).r;
+        occlusion = lerp(1.0, SampleMaterial(3u,input.uv).r, clamp(materialParams.w, 0.0, 1.0));
     }
     float3 emissive = emissiveColor.rgb;
     if ((textureFlags & RENDERER_TEXTURE_FLAG_EMISSIVE) != 0u)

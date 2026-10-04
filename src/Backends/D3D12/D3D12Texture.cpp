@@ -86,11 +86,11 @@ namespace dyf::Backends
 
     D3D12Texture::D3D12Texture(ID3D12Device* device, const RHI::TextureDesc& desc)
         : RHI::Texture(desc)
-        , m_internal(new D3D12TextureInternal())
         , m_states(
             static_cast<std::size_t>(desc.mipLevels) * desc.depthOrArraySize,
             RHI::ResourceState::Undefined)
     {
+        m_internal = new D3D12TextureInternal();
         if (device == nullptr || desc.width == 0 || desc.height == 0 ||
             desc.depthOrArraySize == 0 || desc.mipLevels == 0)
         {
@@ -229,13 +229,13 @@ namespace dyf::Backends
         std::size_t rtvHandle,
         bool swapchainImage)
         : RHI::Texture(desc)
-        , m_internal(new D3D12TextureInternal())
         , m_states(
             static_cast<std::size_t>(desc.mipLevels) * desc.depthOrArraySize,
             swapchainImage
                 ? RHI::ResourceState::Present
                 : RHI::ResourceState::Undefined)
     {
+        m_internal = new D3D12TextureInternal();
         m_internal->resource = resource;
         m_internal->rtvHandle.ptr = rtvHandle;
         m_internal->swapchainImage = swapchainImage;

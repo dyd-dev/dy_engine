@@ -133,6 +133,7 @@ namespace dyf::Backends
 		void Fail() { m_failed = true; }
 
 		VulkanContext m_context;
+		bool m_supportsCompute = false;
 		VkCommandPool m_commandPool = VK_NULL_HANDLE;
 		VkCommandBuffer m_commandBuffer = VK_NULL_HANDLE;
 		VulkanPipeline* m_boundPipeline = nullptr;

@@ -117,7 +117,7 @@ bool VulkanSwapchain::Initialize(
     createInfo.preTransform = swapchainSupport.capabilities.currentTransform;
     createInfo.compositeAlpha = compositeAlpha;
     createInfo.presentMode = requestedPresentMode;
-    createInfo.clipped = VK_TRUE;
+    createInfo.clipped = allowReadback ? VK_FALSE : VK_TRUE;
     createInfo.oldSwapchain = oldSwapchain;
 
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;

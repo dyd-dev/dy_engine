@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 
@@ -142,8 +143,15 @@ namespace dyf
 			key += "|maxNodeDepth=" + std::to_string(options.maxNodeDepth);
 			key += "|maxJointsPerSkin=" + std::to_string(options.maxJointsPerSkin);
 			key += "|maxAnimationKeys=" + std::to_string(options.maxAnimationKeys);
-			key += "|fbxBakeRate=" + std::to_string(options.fbxBakeRate);
-			key += "|fbxConstantTrackTolerance=" + std::to_string(options.fbxConstantTrackTolerance);
+			// Preserve every float bit (including signed zero) without locale or decimal rounding.
+			const auto floatIdentity = [](float value) {
+				uint32_t bits;
+				static_assert(sizeof(bits) == sizeof(value));
+				std::memcpy(&bits, &value, sizeof(bits));
+				return std::to_string(bits);
+			};
+			key += "|fbxBakeRate=" + floatIdentity(options.fbxBakeRate);
+			key += "|fbxConstantTrackTolerance=" + floatIdentity(options.fbxConstantTrackTolerance);
 			return key;
 		}
 	}
@@ -359,10 +367,17 @@ namespace dyf
 		}
 
 		const ModelBounds bounds = ComputeModelBounds(model);
+		std::string extension = std::filesystem::path(path).extension().string();
+		std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value) {
+			return static_cast<char>(std::tolower(value));
+		});
+		const bool ufbxTexturesDecoded = extension == ".fbx" || extension == ".obj";
 		for(Image& texture : model.textures)
 		{
 			if(!texture.IsValid())
 			{
+				// The ufbx loader already attempted bounded decoding. Do not retry without its budget.
+				if(ufbxTexturesDecoded) return false;
 				const ColorSpace colorSpace = texture.GetColorSpace();
 				const std::string path = texture.GetSourcePath();
 				if(path.empty() || !LoadImage(path, texture)) return false;

@@ -133,7 +133,16 @@ namespace dyf::Backends
 		dyf::RHI::BufferHandle CreateBuffer(const dyf::RHI::BufferDesc& desc);
 		dyf::RHI::TextureHandle CreateTexture(const dyf::RHI::TextureDesc& desc);
 		dyf::RHI::ShaderHandle CreateShader(const dyf::RHI::ShaderDesc& desc);
-		RHI::PipelineHandle CreateComputePipeline(const RHI::ComputePipelineDesc& desc) {try {auto* pipeline=new VulkanPipeline(m_context,desc);m_pipelines.push_back(pipeline);return pipeline;}catch(const std::exception&){return nullptr;}}
+		RHI::PipelineHandle CreateComputePipeline(const RHI::ComputePipelineDesc& desc)
+		{
+			try
+			{
+				std::unique_ptr<VulkanPipeline, VulkanObjectDeleter> pipeline(new VulkanPipeline(m_context, desc));
+				m_pipelines.push_back(pipeline.get());
+				return pipeline.release();
+			}
+			catch (const std::exception&) { return nullptr; }
+		}
         dyf::RHI::PipelineHandle CreateGraphicsPipeline(const dyf::RHI::GraphicsPipelineDesc& desc);
 		dyf::RHI::ResourceSetHandle CreateResourceSet(const dyf::RHI::ResourceSetDesc& desc);
 		void DestroyBuffer(dyf::RHI::BufferHandle buffer);
@@ -735,7 +744,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         if(m_backBuffers[m_currentImageIndex]->GetBarrierOldLayout(RHI::ResourceState::Present)==VK_IMAGE_LAYOUT_UNDEFINED)
         {
             auto* command=static_cast<VulkanCommandList*>(AcquireCommandList());
-            if(!command)return false;
+            if(!command) { m_frameReady=false;return false; }
             RHI::ResourceBarrierDesc barrier{};
             barrier.texture=m_backBuffer;
             barrier.before=RHI::ResourceState::Present;
@@ -1597,7 +1606,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 	VkSwapchainKHR VulkanDevice::Impl::RetireSwapchainGeneration()
 	{
-		RetiredSwapchainGeneration generation{};
+		// Allocate the retirement record before moving any native ownership.
+		auto& generation = m_retiredSwapchains.emplace_back();
 		const VkSwapchainKHR handle = m_swapchain.GetHandle();
 		generation.swapchain = std::move(m_swapchain);
 		generation.imageAvailableSemaphores = std::move(m_imageAvailableSemaphores);
@@ -1607,7 +1617,6 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		m_imagesInFlight.clear();
 		m_currentImageIndex = 0;
 		m_recreateAfterPresent = false;
-		m_retiredSwapchains.push_back(std::move(generation));
 		return handle;
 	}
 

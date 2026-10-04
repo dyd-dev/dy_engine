@@ -17,6 +17,14 @@ namespace dyf
 {
 namespace
 {
+template<class Cleanup>
+struct ScopeExit
+{
+    Cleanup cleanup;
+    ~ScopeExit() { cleanup(); }
+};
+template<class Cleanup> ScopeExit(Cleanup) -> ScopeExit<Cleanup>;
+
 // 기본 Renderer의 정점 입력에 맞춰 변형 결과를 전달한다. Model 자료형은 기본 API로 전달하지 않는다.
 struct ModelVertex
 {
@@ -182,6 +190,7 @@ bool ModelRenderer::PrepareComputePipeline()
     auto& device = m_renderer.GetDevice();
     auto* shader = device.CreateShader(ShaderDescription(2, GetModelComputeShader()));
     if(!shader) return Failure("Compute shader creation failed.");
+    ScopeExit discardShader{[&] { if(shader) device.DestroyShader(shader); }};
     const std::array<RHI::ResourceBindingLayout, 4> bindings = {{
         {11, RHI::ResourceBindingType::ReadOnlyStorageBuffer, 1, RHI::ShaderStageFlags::Compute, {}},
         {12, RHI::ResourceBindingType::ReadOnlyStorageBuffer, 1, RHI::ShaderStageFlags::Compute, {}},
@@ -190,11 +199,14 @@ bool ModelRenderer::PrepareComputePipeline()
     }};
     auto* pipeline = device.CreateComputePipeline({shader,
         {bindings.data(), static_cast<uint32_t>(bindings.size()), 16, RHI::ShaderStageFlags::Compute, 10}});
-    if(!pipeline) { device.DestroyShader(shader); return Failure("Compute pipeline creation failed."); }
+    if(!pipeline) return Failure("Compute pipeline creation failed.");
+    ScopeExit discardPipeline{[&] { if(pipeline) device.DestroyPipeline(pipeline); }};
     if(m_computePipeline) device.DestroyPipeline(m_computePipeline);
     if(m_computeShader) device.DestroyShader(m_computeShader);
     m_computeShader = shader;
     m_computePipeline = pipeline;
+    shader = nullptr;
+    pipeline = nullptr;
     m_computeShaderChanged = false;
     return true;
 }
@@ -284,17 +296,26 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
         m_meshBuffers.resize(scene.Meshes().size());
     }
     m_draws.resize(scene.GetEntityCount());
+    bool submitted = false;
+    ScopeExit rollback{[&] {
+        // A cached upload is usable only after its recorded transitions have been submitted.
+        if(!submitted) { ReleaseFrameBuffers(); ReleaseMeshBuffers(); }
+    }};
     auto* commands = device.AcquireCommandList();
     if(!commands) return Failure("Model upload command list creation failed.");
+    ScopeExit discardCommands{[&] { device.DestroyCommandList(commands); }};
+    const auto destroyBuffer = [&device](RHI::Buffer* buffer) { device.DestroyBuffer(buffer); };
     bool prepared = true;
     auto upload = [&](const void* data, size_t count, uint32_t stride,
         RHI::BufferUsage usage, RHI::ResourceState state) -> RHI::BufferHandle
     {
         if(!count || count > UINT32_MAX / stride) { prepared = false; return nullptr; }
-        auto* buffer = device.CreateBuffer({static_cast<uint32_t>(count * stride), stride,
-            usage, RHI::ResourceState::CopyDestination});
-        if(!buffer) { prepared = false; return nullptr; }
-        m_frameBuffers.push_back(buffer);
+        std::unique_ptr<RHI::Buffer, decltype(destroyBuffer)> ownedBuffer(
+            device.CreateBuffer({static_cast<uint32_t>(count * stride), stride,
+                usage, RHI::ResourceState::CopyDestination}), destroyBuffer);
+        if(!ownedBuffer) { prepared = false; return nullptr; }
+        m_frameBuffers.push_back(ownedBuffer.get());
+        auto* buffer = ownedBuffer.release();
         if(!device.UpdateBuffer(*commands, buffer, 0, data, buffer->GetDesc().size)) prepared = false;
         const RHI::ResourceBarrierDesc ready{buffer, nullptr, RHI::ResourceState::CopyDestination, state, {}};
         commands->ResourceBarrier(&ready, 1);
@@ -328,6 +349,7 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
             if(cached.source.lock() != source)
             {
                 if(cached.buffer) device.DestroyBuffer(cached.buffer);
+                cached = {};
                 const auto vertices = BuildVertices(*source);
                 cached.buffer = upload(vertices.data(), vertices.size(), sizeof(ModelVertex),
                     RHI::BufferUsage::Vertex | RHI::BufferUsage::Storage, RHI::ResourceState::VertexBuffer);
@@ -347,7 +369,10 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
     }
 
     std::vector<RHI::ResourceSetHandle> resourceSets;
+    ScopeExit discardSets{[&] { for(auto* set : resourceSets) device.DestroyResourceSet(set); }};
+    const auto destroySet = [&device](RHI::ResourceSet* set) { device.DestroyResourceSet(set); };
     RHI::TimestampQueryHandle query = nullptr;
+    ScopeExit discardQuery{[&] { if(query) device.DestroyTimestampQuery(query); }};
     if(compute && prepared)
     {
         if(device.Supports(RHI::Feature::TimestampQuery)) query = device.CreateTimestampQuery({2});
@@ -362,18 +387,22 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
             auto* source = draw.vertexBuffer;
             if(!source) { prepared = false; break; }
             const uint32_t bytes = source->GetDesc().size;
-            auto* output = device.CreateBuffer({bytes, sizeof(ModelVertex),
-                RHI::BufferUsage::Vertex | RHI::BufferUsage::Storage, RHI::ResourceState::UnorderedAccess});
-            if(!output) { prepared = false; break; }
-            m_frameBuffers.push_back(output);
+            std::unique_ptr<RHI::Buffer, decltype(destroyBuffer)> ownedOutput(
+                device.CreateBuffer({bytes, sizeof(ModelVertex),
+                    RHI::BufferUsage::Vertex | RHI::BufferUsage::Storage, RHI::ResourceState::UnorderedAccess}), destroyBuffer);
+            if(!ownedOutput) { prepared = false; break; }
+            m_frameBuffers.push_back(ownedOutput.get());
+            auto* output = ownedOutput.release();
             const std::array<RHI::ResourceBinding, 4> bindings = {{
                 {11, 0, influenceBuffer, nullptr, 0, influenceBuffer->GetDesc().size, {}},
                 {12, 0, paletteBuffer, nullptr, 0, paletteBuffer->GetDesc().size, {}},
                 {14, 0, source, nullptr, 0, bytes, {}}, {15, 0, output, nullptr, 0, bytes, {}}
             }};
-            auto* set = device.CreateResourceSet({m_computePipeline, bindings.data(), static_cast<uint32_t>(bindings.size())});
-            if(!set) { prepared = false; break; }
-            resourceSets.push_back(set);
+            std::unique_ptr<RHI::ResourceSet, decltype(destroySet)> ownedSet(
+                device.CreateResourceSet({m_computePipeline, bindings.data(), static_cast<uint32_t>(bindings.size())}), destroySet);
+            if(!ownedSet) { prepared = false; break; }
+            resourceSets.push_back(ownedSet.get());
+            auto* set = ownedSet.release();
             const RHI::ResourceBarrierDesc before{source, nullptr,
                 RHI::ResourceState::VertexBuffer, RHI::ResourceState::ShaderResource, {}};
             commands->ResourceBarrier(&before, 1);
@@ -394,18 +423,14 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
     }
     const bool closed = commands->Close();
     RHI::FenceHandle completion;
-    const bool submitted = prepared && closed && device.Submit({&commands, 1, nullptr, 0}, completion);
-    device.DestroyCommandList(commands);
-    for(auto* set : resourceSets) device.DestroyResourceSet(set);
-    if(query)
+    submitted = prepared && closed && device.Submit({&commands, 1, nullptr, 0}, completion);
+    if(query && submitted)
     {
-        if(submitted) m_gpuSamples.push_back({query, completion});
-        else device.DestroyTimestampQuery(query);
+        m_gpuSamples.push_back({query, completion});
+        query = nullptr;
     }
     if(!submitted)
     {
-        ReleaseFrameBuffers();
-        ReleaseMeshBuffers();
         return Failure("Model deformation upload or compute submission failed.");
     }
     return true;

@@ -448,7 +448,7 @@ inline float3 ResolveNormal(
     float3 normal = normalize(input.worldNormal);
     const uint textureFlags = drawConstants.textureFlags;
     if ((textureFlags & kTextureFlagNormal) == 0u ||
-        drawConstants.materialParams.z <= 0.0001f)
+        abs(drawConstants.materialParams.z) <= 0.0001f)
     {
         return normal;
     }
@@ -498,8 +498,7 @@ inline float4 RunFragmentShader(
         clamp(drawConstants.materialParams.x, 0.0f, 1.0f);
     float roughness =
         clamp(drawConstants.materialParams.y, minRoughness, 1.0f);
-    float occlusion =
-        clamp(drawConstants.materialParams.w, 0.0f, 1.0f);
+    float occlusion = 1.0f;
 
     if ((textureFlags & kTextureFlagMetallicRoughness) != 0u)
     {
@@ -516,8 +515,8 @@ inline float4 RunFragmentShader(
     }
     if ((textureFlags & kTextureFlagOcclusion) != 0u)
     {
-        occlusion *=
-            occlusionTexture.sample(materialSampler, input.uv).r;
+        occlusion = mix(1.0f, occlusionTexture.sample(materialSampler, input.uv).r,
+            clamp(drawConstants.materialParams.w, 0.0f, 1.0f));
     }
 
     const float3 normal =

@@ -24,6 +24,7 @@ namespace dyf
 		[[nodiscard]] bool CheckJoints(uint64_t count) const;
 		[[nodiscard]] bool AddAnimationKeys(uint64_t count);
 		[[nodiscard]] bool AddBytes(uint64_t count, uint64_t stride, const char* category);
+		[[nodiscard]] uint64_t DecodedBytes() const { return m_decodedBytes; }
 
 	private:
 		const std::string& m_path;

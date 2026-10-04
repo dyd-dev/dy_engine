@@ -208,11 +208,16 @@ void IDevice::ReleaseResources()
 ICommandList* IDevice::AcquireCommandList()
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
-    auto* commands = ICommandList::CreateRecorded();
-    m_userCommands.insert(commands);
+    const auto rollback = [this](ICommandList* value) {
+        m_userCommands.erase(value);
+        delete value;
+    };
+    std::unique_ptr<ICommandList, decltype(rollback)> owner(ICommandList::CreateRecorded(), rollback);
+    auto* commands = owner.get();
     commands->m_owner = this;
+    m_userCommands.insert(commands);
     m_recordedCommands.insert(commands);
-    return commands;
+    return owner.release();
 }
 
 TextureHandle IDevice::GetBackBuffer()
@@ -315,7 +320,9 @@ bool IDevice::PrepareCommandLists(ICommandList* const* commands, uint32_t count,
             {
                 if(!commands[i] || !m_userCommands.count(commands[i]) ||
                     !commands[i]->m_recordingClosed || commands[i]->m_recordingFailed ||
-                    commands[i]->m_completion > completed) return false;
+                    commands[i]->m_completion > completed ||
+                    (commands[i]->m_imageGeneration && !m_frameActive) ||
+                    (commands[i]->m_imageGeneration && commands[i]->m_imageGeneration != m_imageGeneration)) return false;
                 for(uint32_t j = 0; j < i; ++j) if(commands[i] == commands[j]) return false;
             }
             // Native pools/allocators are allocated under the device lock. Each list
@@ -468,13 +475,14 @@ PipelineHandle IDevice::CreateComputePipeline(const ComputePipelineDesc& desc)
         (desc.layout.inlineConstantSize && desc.layout.inlineConstantStages!=ShaderStageFlags::Compute))return nullptr;
     for(uint32_t i=0;i<desc.layout.bindingCount;++i)
         if(desc.layout.bindings[i].stages!=ShaderStageFlags::Compute)return nullptr;
+    std::vector<std::shared_ptr<void>> dependencies{shader};
     auto* pipeline=CreateComputePipelineNative(desc);
     if(!pipeline) ReportDiagnostic(DiagnosticSeverity::Error,"CreateComputePipeline: native creation failed; no substitute pipeline was selected.");
     if(pipeline) { ++m_allocationCounters.pipelines.live; ++m_allocationCounters.pipelines.created; }
     Track(pipeline,[](IDevice& device,void* handle){
         device.DestroyPipelineNative(static_cast<PipelineHandle>(handle));
         --device.m_allocationCounters.pipelines.live; ++device.m_allocationCounters.pipelines.destroyed;
-    },{shader});
+    },std::move(dependencies));
     return pipeline;
 }
 
@@ -485,25 +493,32 @@ PipelineHandle IDevice::CreateGraphicsPipeline(const GraphicsPipelineDesc& desc)
     auto domain = Reference(desc.domainShader), fragment = Reference(desc.fragmentShader);
     if(!Supports(desc))
     {ReportDiagnostic(DiagnosticSeverity::Error,"CreateGraphicsPipeline: unsupported description or device limit. Query Supports(desc) before creation.");return nullptr;}
+    // Complete fallible metadata allocation before acquiring the native object.
+    // Track owns all failures once its shared_ptr construction begins.
+    std::vector<std::shared_ptr<void>> dependencies{vertex, hull, domain, fragment};
+    std::vector<uint32_t> requiredVertexBindings;
+    std::vector<Format> colorFormats;
+    for(uint32_t i=0;i<desc.vertexAttributeCount;++i)
+    {
+        const uint32_t binding=desc.vertexAttributes[i].binding;
+        if(std::find(requiredVertexBindings.begin(),requiredVertexBindings.end(),binding)==requiredVertexBindings.end())
+            requiredVertexBindings.push_back(binding);
+    }
+    for(uint32_t i=0;i<desc.colorAttachmentCount;++i)
+        colorFormats.push_back(desc.colorAttachments[i].format);
     auto* pipeline = CreateGraphicsPipelineNative(desc);
     if(!pipeline) ReportDiagnostic(DiagnosticSeverity::Error,"CreateGraphicsPipeline: native creation failed; no fallback pipeline was substituted.");
     if(pipeline)
     {
-        for(uint32_t i=0;i<desc.vertexAttributeCount;++i)
-        {
-            const uint32_t binding=desc.vertexAttributes[i].binding;
-            if(std::find(pipeline->m_requiredVertexBindings.begin(),pipeline->m_requiredVertexBindings.end(),binding)==pipeline->m_requiredVertexBindings.end())
-                pipeline->m_requiredVertexBindings.push_back(binding);
-        }
-        for(uint32_t i=0;i<desc.colorAttachmentCount;++i)
-            pipeline->m_colorFormats.push_back(desc.colorAttachments[i].format);
+        pipeline->m_requiredVertexBindings = std::move(requiredVertexBindings);
+        pipeline->m_colorFormats = std::move(colorFormats);
         pipeline->m_depthStencilFormat=desc.depthStencil.format;
     }
     if(pipeline) { ++m_allocationCounters.pipelines.live; ++m_allocationCounters.pipelines.created; }
     Track(pipeline, [](IDevice& device, void* handle) {
         device.DestroyPipelineNative(static_cast<PipelineHandle>(handle));
         --device.m_allocationCounters.pipelines.live; ++device.m_allocationCounters.pipelines.destroyed;
-    }, {vertex, hull, domain, fragment});
+    }, std::move(dependencies));
     return pipeline;
 }
 

@@ -184,10 +184,14 @@ namespace dyf::Platform::LogInternal
 #ifdef _WIN32
                 root = EnvironmentPath("LOCALAPPDATA");
 #elif defined(__APPLE__)
-                root = EnvironmentPath("HOME") / "Library" / "Logs";
+                root = EnvironmentPath("HOME");
+                if (!root.empty()) root /= fs::path("Library") / "Logs";
 #else
                 root = EnvironmentPath("XDG_STATE_HOME");
-                if (root.empty()) root = EnvironmentPath("HOME") / ".local" / "state";
+                if (root.empty()) {
+                    root = EnvironmentPath("HOME");
+                    if (!root.empty()) root /= fs::path(".local") / "state";
+                }
 #endif
                 if (root.empty()) root = fs::temp_directory_path();
                 root /= fs::path("dy_engine") / "logs" / (executable.empty() ? fs::path("application") : executable.stem());

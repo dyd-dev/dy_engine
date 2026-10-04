@@ -22,12 +22,23 @@ MeshID Scene::CreateMesh(const MeshData& mesh)
 EntityID Scene::CreateEntity(MeshID mesh, MaterialID material,
     const Math::float4x4& transform, const EntityLightingDesc& lighting)
 {
-    const auto entity = static_cast<EntityID>(m_entityMeshes.size());
-    m_entityMeshes.push_back(mesh);
-    m_entityMaterials.push_back(material);
-    m_entityTransforms.push_back(Transform{transform});
-    m_entityLighting.push_back(lighting);
-    return entity;
+    const auto count = m_entityMeshes.size();
+    try
+    {
+        m_entityMeshes.push_back(mesh);
+        m_entityMaterials.push_back(material);
+        m_entityTransforms.push_back(Transform{transform});
+        m_entityLighting.push_back(lighting);
+    }
+    catch(...)
+    {
+        m_entityMeshes.resize(count);
+        m_entityMaterials.resize(count);
+        m_entityTransforms.resize(count);
+        m_entityLighting.resize(count);
+        throw;
+    }
+    return static_cast<EntityID>(count);
 }
 
 uint32_t Scene::GetEntityCount() const { return static_cast<uint32_t>(m_entityMeshes.size()); }

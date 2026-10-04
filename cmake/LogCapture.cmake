@@ -24,10 +24,17 @@ if(DY_LOG_CRASH_MONITOR)
         foreach(target IN LISTS targets)
             get_target_property(kind "${target}" TYPE)
             if(kind STREQUAL "EXECUTABLE" AND NOT target STREQUAL "dy_log_monitor")
+                # Resolve consumer paths outside the custom target command so
+                # CMP0112 OLD cannot add a reverse dependency on the consumer.
+                set(copy_script "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${target}_log_runtime-$<CONFIG>.cmake")
+                file(GENERATE OUTPUT "${copy_script}" CONTENT
+"file(MAKE_DIRECTORY [==[$<TARGET_FILE_DIR:${target}>]==])
+execute_process(COMMAND [==[${CMAKE_COMMAND}]==] -E copy_if_different
+    [==[$<TARGET_FILE:dy_log_monitor>]==] [==[$<TARGET_FILE_DIR:${target}>]==]
+    COMMAND_ERROR_IS_FATAL ANY)
+")
                 add_custom_target(${target}_log_runtime
-                    COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:${target}>"
-                    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
-                        "$<TARGET_FILE:dy_log_monitor>" "$<TARGET_FILE_DIR:${target}>"
+                    COMMAND "${CMAKE_COMMAND}" -P "${copy_script}"
                     VERBATIM)
                 add_dependencies(${target}_log_runtime dy_log_monitor)
                 add_dependencies(${target} ${target}_log_runtime)

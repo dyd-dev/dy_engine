@@ -11,6 +11,7 @@
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/RHI/ResourceSet.h"
+#include "dyf/RHI/ResourceScope.h"
 #include "dyf/RHI/Texture.h"
 
 namespace dyf
@@ -47,13 +48,6 @@ namespace
 		return true;
 	}
 
-	void DestroyResourceSets(RHI::IDevice* device, std::vector<RHI::ResourceSetHandle>& sets)
-	{
-		if(device != nullptr)
-			for(auto* set : sets) if(set != nullptr) device->DestroyResourceSet(set);
-		sets.clear();
-	}
-
 	DrawConstants MakeDrawConstants(const Math::float4x4& viewProjection,
 		const MaterialDesc& material, const Transform& transform, uint32_t textureFlags)
 	{
@@ -70,7 +64,8 @@ namespace
 }
 
 bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList& commands,
-	const std::vector<RendererDrawDesc>* draws, std::vector<RHI::ResourceSetHandle>& sets)
+	const std::vector<RendererDrawDesc>* draws, std::vector<RHI::ResourceSetHandle>& sets,
+	RHI::ResourceScope& resources)
 {
 	if(device == nullptr || pipeline == nullptr || lightingBuffer == nullptr) return false;
 	const bool shadowsEnabled = shadowDepthTarget != nullptr;
@@ -107,11 +102,11 @@ bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList&
 		auto* materialBuffer = device->CreateBuffer({static_cast<uint32_t>(indices.size() * sizeof(uint32_t)),
 			16, RHI::BufferUsage::Storage, RHI::ResourceState::CopyDestination});
 		if(!materialBuffer) return false;
+		resources.Keep(materialBuffer);
 		// 재질 인덱스 업로드를 장면 명령의 앞부분에 기록한다.
 		if(!RecordBufferUpload(device, commands, materialBuffer, indices.data(),
 			materialBuffer->GetDesc().size, RHI::ResourceState::ShaderResource))
 		{
-			device->DestroyBuffer(materialBuffer);
 			return false;
 		}
 		sets.assign(draws ? scene.GetEntityCount() : materialStates.size(), nullptr);
@@ -142,10 +137,9 @@ bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList&
 					sets[entity] = device->CreateResourceSet({pipeline, combined.data(), static_cast<uint32_t>(combined.size())});
 					if(!sets[entity])
 					{
-						DestroyResourceSets(device, sets);
-						device->DestroyBuffer(materialBuffer);
 						return false;
 					}
+					resources.Keep(sets[entity]);
 				}
 			}
 			else
@@ -153,14 +147,12 @@ bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList&
 				auto* table = device->CreateResourceSet({pipeline, bindings.data(), static_cast<uint32_t>(bindings.size())});
 				if(!table)
 				{
-					DestroyResourceSets(device, sets);
-					device->DestroyBuffer(materialBuffer);
 					return false;
 				}
+				resources.Keep(table);
 				for(auto index : page.materials) sets[index] = table;
 			}
 		}
-		device->DestroyBuffer(materialBuffer);
 		return true;
 	}
 
@@ -190,9 +182,9 @@ bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList&
 		sets[setIndex] = device->CreateResourceSet({pipeline, bindings.data(), static_cast<uint32_t>(bindings.size())});
 		if(!sets[setIndex])
 		{
-			DestroyResourceSets(device, sets);
 			return false;
 		}
+		resources.Keep(sets[setIndex]);
 	}
 	return true;
 }
@@ -217,6 +209,7 @@ bool Renderer::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 	m_meshes.resize(scene.Meshes().size());
 
 	RHI::ICommandList* commands = nullptr;
+	RHI::ResourceScope resources(*device);
 	bool uploadFailed = false;
 	std::vector<bool*> uploaded;
 	for(uint32_t meshIndex = 0; meshIndex < scene.Meshes().size(); ++meshIndex)
@@ -233,7 +226,6 @@ bool Renderer::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 		if(source.vertices.size() > UINT32_MAX / sizeof(RendererVertex) ||
 			source.indices.size() > UINT32_MAX / sizeof(uint32_t))
 		{
-			if(commands) device->DestroyCommandList(commands);
 			return false;
 		}
 		std::vector<RendererVertex> vertices;
@@ -264,11 +256,14 @@ bool Renderer::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 			!EnsureBuffer(device, mesh.indexBuffer, mesh.indexReady, indexBytes,
 				sizeof(uint32_t), RHI::BufferUsage::Index))
 		{
-			if(commands) device->DestroyCommandList(commands);
 			return false;
 		}
 		mesh.indexCount = static_cast<uint32_t>(indices.size());
-		if(!commands) commands = device->AcquireCommandList();
+		if(!commands)
+		{
+			commands = device->AcquireCommandList();
+			if(commands) resources.Keep(commands);
+		}
 		if(!commands) return false;
 		if(!mesh.vertexReady)
 		{
@@ -295,7 +290,6 @@ bool Renderer::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 	if(!commands) return true;
 	const bool closed = commands->Close();
 	const bool submitted = closed && device->Submit(&commands, 1);
-	device->DestroyCommandList(commands);
 	if(submitted)
 	{
 		// 실패한 제출은 준비 완료로 표시하지 않아 다음 프레임에서 다시 업로드한다.
@@ -310,6 +304,7 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 	RHI::ICommandList& commands, const std::vector<RendererDrawDesc>* draws,
 	RHI::TimestampQueryHandle shadowQuery)
 {
+	RHI::ResourceScope resources(*device);
 	std::vector<RHI::ResourceSetHandle> shadowSets;
 	{
 		commands.BeginDebugEvent("Shadow");
@@ -326,9 +321,9 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 			shadowSets[i] = device->CreateResourceSet({shadowPipeline, bindings.data(), static_cast<uint32_t>(bindings.size())});
 			if(!shadowSets[i])
 			{
-				DestroyResourceSets(device, shadowSets);
 				return false;
 			}
+			resources.Keep(shadowSets[i]);
 		}
 	}
 	const auto viewProjection = camera.projection * camera.view;
@@ -379,7 +374,6 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 	}
 	if(shadowQuery) commands.WriteTimestamp(shadowQuery, 1);
 	commands.EndDebugEvent();
-	DestroyResourceSets(device, shadowSets);
 	return true;
 }
 
@@ -387,8 +381,9 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
 	RHI::ICommandList& commands, const std::vector<RendererDrawDesc>* draws,
 	RHI::TimestampQueryHandle mainQuery, RHI::TextureHandle output)
 {
+	RHI::ResourceScope resources(*device);
 	std::vector<RHI::ResourceSetHandle> materialSets;
-	if(!CreateMaterialResourceSets(scene, commands, draws, materialSets)) return false;
+	if(!CreateMaterialResourceSets(scene, commands, draws, materialSets, resources)) return false;
 	auto* target = config.enableHdrRendering ? hdrTarget : output;
 	const auto viewProjection = camera.projection * camera.view;
 	if(mainQuery) { commands.ResetTimestamps(mainQuery, 0, 2); commands.WriteTimestamp(mainQuery, 0); }
@@ -455,7 +450,6 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
 	}
 	commands.EndRendering();
 	commands.EndDebugEvent();
-	DestroyResourceSets(device, materialSets);
 	return true;
 }
 

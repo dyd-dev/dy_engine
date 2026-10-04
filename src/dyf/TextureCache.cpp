@@ -4,6 +4,7 @@
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/RHI/Texture.h"
+#include "dyf/RHI/ResourceScope.h"
 
 #include <limits>
 #include <vector>
@@ -39,6 +40,7 @@ namespace dyf
 		m_textures.resize(images.size());
 
 		bool uploadFailed = false;
+		RHI::ResourceScope resources(*device);
 		RHI::ICommandList* commandList = nullptr;
 		// 기록한 상태는 제출이 성공한 뒤에만 캐시에 반영한다.
 		std::vector<RHI::ResourceState> submittedStates(images.size(), RHI::ResourceState::Undefined);
@@ -78,7 +80,11 @@ namespace dyf
 				uploadFailed = true;
 				continue;
 			}
-			if(commandList == nullptr) commandList = device->AcquireCommandList();
+			if(commandList == nullptr)
+			{
+				commandList = device->AcquireCommandList();
+				if(commandList) resources.Keep(commandList);
+			}
 			if(commandList == nullptr)
 			{
 				uploadFailed = true;
@@ -105,7 +111,6 @@ namespace dyf
 
 		if(commandList == nullptr) return !uploadFailed;
 		const bool submitted = commandList->Close() && device->Submit(&commandList, 1);
-		device->DestroyCommandList(commandList);
 		if(!submitted) return false;
 
 		for(uint32_t textureIndex = 0; textureIndex < submittedStates.size(); ++textureIndex)

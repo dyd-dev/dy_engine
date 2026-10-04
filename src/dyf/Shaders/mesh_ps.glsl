@@ -182,7 +182,7 @@ vec3 GetNormal() {
     vec3 normal = normalize(fragNormal);
     int textureFlags = int(pushConstants.textureFlags);
     float normalScale = pushConstants.materialParams.z;
-    if ((textureFlags & RENDERER_TEXTURE_FLAG_NORMAL) == 0 || normalScale <= 0.0001) {
+    if ((textureFlags & RENDERER_TEXTURE_FLAG_NORMAL) == 0 || abs(normalScale) <= 0.0001) {
         return normal;
     }
 
@@ -469,14 +469,14 @@ void main() {
     float ambientSpecularStrength = max(lighting.pbrParams.y, 0.0);
     float metallic = clamp(pushConstants.materialParams.x, 0.0, 1.0);
     float roughness = clamp(pushConstants.materialParams.y, minRoughness, 1.0);
-    float occlusion = clamp(pushConstants.materialParams.w, 0.0, 1.0);
+    float occlusion = 1.0;
     if ((textureFlags & RENDERER_TEXTURE_FLAG_METALLIC_ROUGHNESS) != 0) {
         vec4 metallicRoughness = SampleMaterial(1u,fragUv);
         roughness = clamp(roughness * metallicRoughness.g, minRoughness, 1.0);
         metallic = clamp(metallic * metallicRoughness.b, 0.0, 1.0);
     }
     if ((textureFlags & RENDERER_TEXTURE_FLAG_OCCLUSION) != 0) {
-        occlusion *= SampleMaterial(3u,fragUv).r;
+        occlusion = mix(1.0, SampleMaterial(3u,fragUv).r, clamp(pushConstants.materialParams.w, 0.0, 1.0));
     }
 
     vec3 normal = GetNormal();

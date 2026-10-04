@@ -52,8 +52,10 @@ namespace dyf::Backends
 			VkAccessFlags2 access = VK_ACCESS_2_NONE;
 		};
 
-		StateInfo GetStateInfo(dyf::RHI::ResourceState state)
+		StateInfo GetStateInfo(dyf::RHI::ResourceState state, bool supportsCompute)
 		{
+			const VkPipelineStageFlags2 shaderStages = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+				(supportsCompute ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE);
 			switch (state)
 			{
 			case dyf::RHI::ResourceState::Undefined:
@@ -67,11 +69,11 @@ namespace dyf::Backends
 			case dyf::RHI::ResourceState::IndexBuffer:
 				return { VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT, VK_ACCESS_2_INDEX_READ_BIT };
 			case dyf::RHI::ResourceState::ConstantBuffer:
-				return { VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_UNIFORM_READ_BIT };
+				return { shaderStages, VK_ACCESS_2_UNIFORM_READ_BIT };
 			case dyf::RHI::ResourceState::ShaderResource:
-				return { VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT };
+				return { shaderStages, VK_ACCESS_2_SHADER_READ_BIT };
 			case dyf::RHI::ResourceState::UnorderedAccess:
-				return { VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT };
+				return { shaderStages, VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT };
 			case dyf::RHI::ResourceState::RenderTarget:
 				return { VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT };
 			case dyf::RHI::ResourceState::DepthRead:
@@ -189,6 +191,13 @@ namespace dyf::Backends
 			return nullptr;
 		}
 
+		bool RequiresResourceSet(const RHI::PipelineLayoutDesc& layout)
+		{
+			return layout.bindingCount != 0 &&
+				std::any_of(layout.bindings, layout.bindings + layout.bindingCount,
+					[](const RHI::ResourceBindingLayout& binding)
+					{ return binding.type != RHI::ResourceBindingType::StaticSampler; });
+		}
 	}
 
 	VulkanCommandList::VulkanCommandList(const VulkanContext& context)
@@ -197,6 +206,13 @@ namespace dyf::Backends
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(context.physicalDevice, &properties);
         std::copy_n(properties.limits.maxComputeWorkGroupCount, 3, m_maxComputeGroups);
+		uint32_t familyCount = 0;
+		vkGetPhysicalDeviceQueueFamilyProperties(context.physicalDevice, &familyCount, nullptr);
+		std::vector<VkQueueFamilyProperties> families(familyCount);
+		vkGetPhysicalDeviceQueueFamilyProperties(context.physicalDevice, &familyCount, families.data());
+		if (context.queueIndices.graphicsFamily >= familyCount)
+			throw std::runtime_error("Vulkan command queue family is unavailable");
+		m_supportsCompute = (families[context.queueIndices.graphicsFamily].queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
 		VkCommandPoolCreateInfo poolInfo{};
 		poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
 		poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
@@ -274,8 +290,8 @@ namespace dyf::Backends
 				Fail();
 				return;
 			}
-			StateInfo before = GetStateInfo(source.before);
-			StateInfo after = GetStateInfo(source.after);
+			StateInfo before = GetStateInfo(source.before, m_supportsCompute);
+			StateInfo after = GetStateInfo(source.after, m_supportsCompute);
 			// 같은 상태도 복사/attachment 쓰기 사이의 메모리 의존성을 기록한다.
 			// 이미지 레이아웃은 유지하고 해당 상태의 stage/access 범위를 사용한다.
 			if (unorderedAccessBarrier)
@@ -595,7 +611,7 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 {
     if(m_closed || m_rendering || !m_boundPipeline || !m_boundPipeline->IsCompute() ||
         !x || !y || !z || x>m_maxComputeGroups[0] || y>m_maxComputeGroups[1] || z>m_maxComputeGroups[2] ||
-        (m_boundPipeline->GetLayout().bindingCount && !m_boundResourceSet) ||
+        (RequiresResourceSet(m_boundPipeline->GetLayout()) && !m_boundResourceSet) ||
         std::any_of(m_inlineConstantCoverage.begin(),m_inlineConstantCoverage.end(),[](uint8_t byte){return !byte;}))
     {Fail();return;}
     vkCmdDispatch(m_commandBuffer,x,y,z);
@@ -923,16 +939,23 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 		}
 		StagingAllocation staging{};
 		if (!CreateStagingAllocation(data, size, staging)) return false;
+		// Transfer ownership and register the operation before recording a copy.
+		try { m_stagingAllocations.push_back(staging); }
+		catch (...)
+		{
+			vkDestroyBuffer(m_context.device, staging.buffer, nullptr);
+			vkFreeMemory(m_context.device, staging.memory, nullptr);
+			throw;
+		}
+		Operation operation{};
+		operation.kind = OperationKind::BufferWrite;
+		operation.buffer = &buffer;
+		m_operations.push_back(operation);
 		VkBufferCopy region{};
 		region.srcOffset = 0;
 		region.dstOffset = offset;
 		region.size = size;
 		vkCmdCopyBuffer(m_commandBuffer, staging.buffer, buffer.GetHandle(), 1, &region);
-		m_stagingAllocations.push_back(staging);
-		Operation operation{};
-		operation.kind = OperationKind::BufferWrite;
-		operation.buffer = &buffer;
-		m_operations.push_back(operation);
 		return true;
 	}
 
@@ -979,6 +1002,19 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 		}
 		StagingAllocation staging{};
 		if (!CreateStagingAllocation(uploadData, uploadBytes, staging)) return false;
+		try { m_stagingAllocations.push_back(staging); }
+		catch (...)
+		{
+			vkDestroyBuffer(m_context.device, staging.buffer, nullptr);
+			vkFreeMemory(m_context.device, staging.memory, nullptr);
+			throw;
+		}
+		Operation operation{};
+		operation.kind = OperationKind::TextureWrite;
+		operation.texture = &texture;
+		operation.mipLevel = mipLevel;
+		operation.arrayLayer = arrayLayer;
+		m_operations.push_back(operation);
 		VkBufferImageCopy region{};
 		region.bufferOffset = 0;
 		region.bufferRowLength = nativeRowLength;
@@ -995,13 +1031,6 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 			1,
 			&region);
-		m_stagingAllocations.push_back(staging);
-		Operation operation{};
-		operation.kind = OperationKind::TextureWrite;
-		operation.texture = &texture;
-		operation.mipLevel = mipLevel;
-		operation.arrayLayer = arrayLayer;
-		m_operations.push_back(operation);
 		return true;
 	}
 
@@ -1117,11 +1146,7 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 			if (first + count > available / layout.stride) return false;
 		}
 		const dyf::RHI::PipelineLayoutDesc& layout = m_boundPipeline->GetLayout();
-		const bool resourceSetRequired = layout.bindingCount != 0 &&
-			std::any_of(layout.bindings, layout.bindings + layout.bindingCount,
-				[](const dyf::RHI::ResourceBindingLayout& binding)
-				{ return binding.type != dyf::RHI::ResourceBindingType::StaticSampler; });
-		if (resourceSetRequired && m_boundResourceSet == nullptr) return false;
+		if (RequiresResourceSet(layout) && m_boundResourceSet == nullptr) return false;
 		return std::find(m_inlineConstantCoverage.begin(), m_inlineConstantCoverage.end(), 0) ==
 			m_inlineConstantCoverage.end();
 	}

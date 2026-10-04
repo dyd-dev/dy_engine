@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -171,9 +172,12 @@ namespace dyf
 			const std::string& filepath,
 			const ufbx_scene& scene,
 			const ModelLoadOptions& options,
-			double bakeRate)
+			double bakeRate,
+			std::vector<size_t>& sampleCounts,
+			uint64_t& decodedBytes)
 		{
 			ModelLoadBudget budget(filepath, options);
+			sampleCounts.assign(scene.anim_stacks.count, 0u);
 			if(!budget.CheckNodes(scene.nodes.count)
 				|| !budget.AddBytes(scene.nodes.count, sizeof(ModelNode), "nodes")
 				|| !budget.AddBytes(scene.materials.count, sizeof(ModelMaterialInfo), "materials")) return false;
@@ -207,9 +211,16 @@ namespace dyf
 			{
 				const ufbx_anim_stack* stack = scene.anim_stacks.data[stackIndex];
 				if(stack->anim == nullptr) continue;
-				const double duration = std::max(0.0, stack->time_end - stack->time_begin);
-				const uint64_t sampleCount = duration > 0.0
-					? static_cast<uint64_t>(std::ceil(duration * bakeRate)) + 1u : 1u;
+				const double span = stack->time_end - stack->time_begin;
+				const double duration = std::max(0.0, span);
+				const double intervals = std::ceil(duration * bakeRate);
+				// The per-track cap is below both size_t and uint64_t limits on supported platforms.
+				// Check while still floating point; conversion and +1 are then bounded.
+				if(!std::isfinite(stack->time_begin) || !std::isfinite(stack->time_end)
+					|| !std::isfinite(span) || !std::isfinite(intervals) || intervals > 99999.0)
+					return ReportModelError(filepath, "FBX animation exceeds the per-track bake sample limit");
+				const size_t sampleCount = static_cast<size_t>(intervals) + 1u;
+				sampleCounts[stackIndex] = sampleCount;
 				if(scene.nodes.count != 0u
 					&& sampleCount > std::numeric_limits<uint64_t>::max() / scene.nodes.count)
 					return false;
@@ -270,6 +281,7 @@ namespace dyf
 						"FBX morph deltas")) return false;
 				}
 			}
+			decodedBytes = budget.DecodedBytes();
 			return true;
 		}
 		[[nodiscard]] bool NearlyEqual(const Math::float3& lhs, const Math::float3& rhs, float tolerance)
@@ -307,45 +319,60 @@ namespace dyf
 			uint32_t targetCount = 0u;
 		};
 
-		[[nodiscard]] std::vector<float> EvaluateUfbxBlendKeyframeWeights(
+		[[nodiscard]] bool EvaluateUfbxBlendKeyframeWeights(
 			const ufbx_blend_channel& channel,
-			float channelWeight)
+			double channelWeight,
+			std::vector<float>& weights)
 		{
-			std::vector<float> weights(channel.keyframes.count, 0.0f);
-			if(channel.keyframes.count == 0u || !std::isfinite(channelWeight)) return weights;
-			// ufbx normalizes target, default, and evaluated weights to 1.0 at full strength.
-			auto targetWeight = [&](size_t keyframeIndex) {
-				return static_cast<float>(channel.keyframes.data[keyframeIndex].target_weight);
+			weights.assign(channel.keyframes.count, 0.0f);
+			if(!std::isfinite(channelWeight)) return false;
+			// Match pinned ufbx's zero anchor, signed traversal and final-segment extrapolation.
+			const size_t zero = channel.keyframes.count;
+			size_t firstNonnegative = 0u;
+			for(size_t index = 0; index < zero; ++index)
+			{
+				if(!std::isfinite(channel.keyframes.data[index].target_weight)) return false;
+				if(channel.keyframes.data[index].target_weight < 0.0) firstNonnegative = index + 1u;
+			}
+			size_t previous = zero, next = zero;
+			if(channelWeight > 0.0)
+			{
+				if(firstNonnegative > 0u) previous = firstNonnegative - 1u;
+				for(size_t index = firstNonnegative; index < zero; ++index)
+				{
+					previous = next; next = index;
+					if(channel.keyframes.data[next].target_weight > channelWeight) break;
+				}
+			}
+			else
+			{
+				if(firstNonnegative < zero) previous = firstNonnegative;
+				for(size_t index = firstNonnegative; index > 0u;)
+				{
+					previous = next; next = --index;
+					if(channel.keyframes.data[next].target_weight < channelWeight) break;
+				}
+			}
+			const auto target = [&](size_t index) -> double {
+				return index == zero ? 0.0 : channel.keyframes.data[index].target_weight;
 			};
-
-			const float firstTargetWeight = targetWeight(0u);
-			if(channel.keyframes.count == 1u || channelWeight <= firstTargetWeight)
+			const double delta = target(next) - target(previous);
+			if(!std::isfinite(delta)) return false;
+			if(delta != 0.0)
 			{
-				weights[0] = std::fabs(firstTargetWeight) > 1.0e-8f
-					? channelWeight / firstTargetWeight
-					: 1.0f;
-				return weights;
+				const double alpha = (channelWeight - target(previous)) / delta;
+				const double previousWeight = 1.0 - alpha;
+				const auto fitsFloat = [](double value) {
+					return std::isfinite(value) && std::fabs(value) <= std::numeric_limits<float>::max();
+				};
+				// Validate both stored endpoints before either narrowing conversion. The virtual
+				// zero anchor has no output coefficient and remains outside the model data.
+				if((previous != zero && !fitsFloat(previousWeight)) || (next != zero && !fitsFloat(alpha)))
+					return false;
+				if(previous != zero) weights[previous] = static_cast<float>(previousWeight);
+				if(next != zero) weights[next] = static_cast<float>(alpha);
 			}
-
-			for(size_t keyframeIndex = 1u; keyframeIndex < channel.keyframes.count; ++keyframeIndex)
-			{
-				const float leftTargetWeight = targetWeight(keyframeIndex - 1u);
-				const float rightTargetWeight = targetWeight(keyframeIndex);
-				if(channelWeight > rightTargetWeight) continue;
-				const float width = rightTargetWeight - leftTargetWeight;
-				const float alpha = std::fabs(width) > 1.0e-8f
-					? (channelWeight - leftTargetWeight) / width
-					: 1.0f;
-				weights[keyframeIndex - 1u] = 1.0f - alpha;
-				weights[keyframeIndex] = alpha;
-				return weights;
-			}
-
-			const float lastTargetWeight = targetWeight(channel.keyframes.count - 1u);
-			weights.back() = std::fabs(lastTargetWeight) > 1.0e-8f
-				? channelWeight / lastTargetWeight
-				: 1.0f;
-			return weights;
+			return true;
 		}
 		struct UfbxExternalFileContext
 		{
@@ -437,6 +464,7 @@ namespace dyf
 			outModel.textures.reserve(scene.textures.count);
 			textureIndices.clear();
 			decodedTextureBytes = 0u;
+			std::map<std::filesystem::path, size_t> decodedExternalTextures;
 
 			for(size_t textureIndex = 0; textureIndex < scene.textures.count; ++textureIndex)
 			{
@@ -501,12 +529,12 @@ namespace dyf
 						const std::filesystem::path canonicalPath =
 							std::filesystem::weakly_canonical(candidate, pathError);
 						if(pathError) continue;
+						const uintmax_t fileBytes = std::filesystem::file_size(canonicalPath, pathError);
+						if(pathError || fileBytes > std::numeric_limits<uint64_t>::max()) continue;
 						const bool alreadyAccounted = externalFileContext.accountedPaths.find(canonicalPath)
 							!= externalFileContext.accountedPaths.end();
 						if(!alreadyAccounted)
 						{
-							const uintmax_t fileBytes = std::filesystem::file_size(canonicalPath, pathError);
-							if(pathError || fileBytes > std::numeric_limits<uint64_t>::max()) continue;
 							const uint64_t sourceBytes = static_cast<uint64_t>(fileBytes);
 							if(externalFileContext.sourceBytes > externalFileContext.sourceByteLimit
 								|| sourceBytes > externalFileContext.sourceByteLimit - externalFileContext.sourceBytes)
@@ -518,7 +546,36 @@ namespace dyf
 							externalFileContext.sourceBytes += sourceBytes;
 							externalFileContext.accountedPaths.insert(canonicalPath);
 						}
+						const auto existing = decodedExternalTextures.find(canonicalPath);
+						if(existing != decodedExternalTextures.end())
+						{
+							texture = outModel.textures[existing->second];
+							break;
+						}
 						texture.SetSourcePath(canonicalPath.string());
+						// Read only the accounted source size and use the allocation-bounded decoder.
+						if(fileBytes > std::numeric_limits<int>::max()
+							|| fileBytes > externalFileContext.sourceByteLimit)
+							return ReportModelError(filepath, "external texture source size is invalid");
+						std::ifstream stream(canonicalPath, std::ios::binary);
+						std::vector<uint8_t> encoded(static_cast<size_t>(fileBytes));
+						bool limitExceeded = false;
+						if(stream.read(reinterpret_cast<char*>(encoded.data()), static_cast<std::streamsize>(encoded.size()))
+							&& stream.peek() == std::char_traits<char>::eof())
+						{
+							Image decoded;
+							if(LoadImage(encoded.data(), encoded.size(), decoded,
+								options.maxDecodedBytes - decodedTextureBytes, &limitExceeded))
+							{
+								decodedTextureBytes += decoded.GetPixels().size();
+								decoded.SetSourcePath(canonicalPath.string());
+								texture = std::move(decoded);
+							}
+							else if(limitExceeded)
+								return ReportModelError(filepath, "external texture exceeds maxDecodedBytes");
+						}
+						// Missing/unsupported pixels remain invalid as before; asset creation will reject them.
+						decodedExternalTextures.emplace(canonicalPath, outModel.textures.size());
 						break;
 					}
 				}
@@ -614,22 +671,24 @@ namespace dyf
 					std::string("failed to load model through ufbx: ") + error.info);
 			}
 			std::unique_ptr<ufbx_scene, void(*)(ufbx_scene*)> sceneOwner(scene, ufbx_free_scene);
+			const double fbxBakeRate = static_cast<double>(options.fbxBakeRate);
+			std::vector<size_t> sampleCounts;
+			uint64_t geometryBytes = 0u;
+			if(!ValidateFbxLoadLimits(filepath, *scene, options, fbxBakeRate, sampleCounts, geometryBytes)) return false;
+			ModelLoadOptions textureOptions = options;
+			textureOptions.maxDecodedBytes -= geometryBytes;
 			outModel = {};
 			std::map<const ufbx_texture*, uint32_t> textureIndices;
 			uint64_t decodedTextureBytes = 0u;
 			if(!LoadUfbxTextureAssets(
 				filepath,
 				*scene,
-				options,
+				textureOptions,
 				externalFileContext,
 				outModel,
 				textureIndices,
 				decodedTextureBytes)) return false;
 
-			ModelLoadOptions geometryOptions = options;
-			geometryOptions.maxDecodedBytes -= decodedTextureBytes;
-			const double fbxBakeRate = static_cast<double>(options.fbxBakeRate);
-			if(!ValidateFbxLoadLimits(filepath, *scene, geometryOptions, fbxBakeRate)) return false;
 			const bool animatedModel = scene->skin_deformers.count > 0
 				|| scene->anim_stacks.count > 0
 				|| scene->blend_deformers.count > 0;
@@ -676,15 +735,16 @@ namespace dyf
 							|| channel->keyframes.count > std::numeric_limits<uint32_t>::max() - morphSources.size())
 							return false;
 						const uint32_t firstTargetIndex = static_cast<uint32_t>(morphSources.size());
-						const float channelWeight = static_cast<float>(channel->weight);
+						const double channelWeight = channel->weight;
 						if(!std::isfinite(channelWeight))
 						{
 							return ReportModelError(
 								filepath,
 								"FBX blend channel weight is non-finite");
 						}
-						const std::vector<float> defaultWeights =
-							EvaluateUfbxBlendKeyframeWeights(*channel, channelWeight);
+						std::vector<float> defaultWeights;
+						if(!EvaluateUfbxBlendKeyframeWeights(*channel, channelWeight, defaultWeights))
+							return ReportModelError(filepath, "FBX blend coefficients are non-finite or exceed float range");
 						for(size_t keyframeIndex = 0; keyframeIndex < channel->keyframes.count; ++keyframeIndex)
 						{
 							const ufbx_blend_keyframe& keyframe = channel->keyframes.data[keyframeIndex];
@@ -750,15 +810,7 @@ namespace dyf
 				if(stack->anim == nullptr) continue;
 				const double beginTime = stack->time_begin;
 				const double duration = std::max(0.0, stack->time_end - beginTime);
-				const size_t sampleCount = duration > 0.0
-					? static_cast<size_t>(std::ceil(duration * fbxBakeRate)) + 1u
-					: 1u;
-				if(sampleCount > 100000u)
-				{
-					return ReportModelError(
-						filepath,
-						"FBX animation exceeds the per-track bake sample limit");
-				}
+				const size_t sampleCount = sampleCounts[stackIndex];
 
 				AnimationClip clip;
 				clip.name = stack->name.length > 0 ? stack->name.data : ("Animation_" + std::to_string(stackIndex));
@@ -829,18 +881,19 @@ namespace dyf
 					for(size_t sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
 					{
 						const double relativeTime = std::min(duration, static_cast<double>(sampleIndex) / fbxBakeRate);
-						const float channelWeight = static_cast<float>(ufbx_evaluate_blend_weight(
+						const double channelWeight = ufbx_evaluate_blend_weight(
 							stack->anim,
 							binding.channel,
-							beginTime + relativeTime));
+							beginTime + relativeTime);
 						if(!std::isfinite(channelWeight))
 						{
 							return ReportModelError(
 								filepath,
 								"FBX blend animation sample is non-finite");
 						}
-						const std::vector<float> effectiveWeights =
-							EvaluateUfbxBlendKeyframeWeights(*binding.channel, channelWeight);
+						std::vector<float> effectiveWeights;
+						if(!EvaluateUfbxBlendKeyframeWeights(*binding.channel, channelWeight, effectiveWeights))
+							return ReportModelError(filepath, "FBX animated blend coefficients are non-finite or exceed float range");
 						if(effectiveWeights.size() != binding.targetCount) return false;
 						for(uint32_t targetOffset = 0u; targetOffset < binding.targetCount; ++targetOffset)
 						{

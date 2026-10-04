@@ -32,14 +32,13 @@ namespace
 		const Math::float3 forward = Math::NormalizeOr(Math::float3(-camera.view.m[2], -camera.view.m[6], -camera.view.m[10]), Math::float3(0.0f, 1.0f, 0.0f));
 		const Math::float3 right = Math::NormalizeOr(Math::Cross(forward, Math::float3(camera.view.m[1], camera.view.m[5], camera.view.m[9])), Math::float3(1.0f, 0.0f, 0.0f));
 		const Math::float3 up = Math::NormalizeOr(Math::Cross(right, forward), Math::float3(0.0f, 0.0f, 1.0f));
-		const float fovYRadians = 2 * std::atan(1 / camera.projection.m[5]);
-		const float tangent = std::tan(std::clamp(fovYRadians * 0.5f, 0.05f, 1.5f));
-		const float safeAspect = std::max(camera.projection.m[5] / camera.projection.m[0], 0.0001f);
+		const float tangentY = 1 / camera.projection.m[5];
+		const float tangentX = 1 / camera.projection.m[0];
 		for(uint32_t planeIndex = 0u; planeIndex < 2u; ++planeIndex)
 		{
 			const float distance = planeIndex == 0u ? sliceNear : sliceFar;
-			const float halfHeight = tangent * distance;
-			const float halfWidth = halfHeight * safeAspect;
+			const float halfHeight = tangentY * distance;
+			const float halfWidth = tangentX * distance;
 			const Math::float3 center = camera.position + forward * distance;
 			bounds.Include(center + right * halfWidth + up * halfHeight);
 			bounds.Include(center + right * halfWidth - up * halfHeight);
@@ -162,7 +161,10 @@ namespace
 		const Math::float4x4 view = Math::LookAtRH(lightPosition, target, SelectUpVector(lightForward));
 		// 그림자 깊이 패스/샘플링은 Y-down 광원 투영 기준으로 튜닝돼 있다(카메라 캐노니컬과 무관).
 		Math::float4x4 proj = Math::PerspectiveRH_ZO(fovYRadians, 1.0f, 0.1f, farPlane);
-		proj.m[5] = -proj.m[5];
+		// The shared math helper caps FOV at 3 radians. A spot cone can reach
+		// 89 degrees per side, so retain its actual focal coefficient here.
+		proj.m[0] = 1.f/std::tan(fovYRadians*.5f);
+		proj.m[5] = -proj.m[0];
 		return proj * view;
 	}
 
@@ -184,7 +186,16 @@ void Renderer::BuildShadows(ShadowData& state,const Scene& scene,const Camera& c
     const auto directional=SelectActiveLightIndices(scene.DirectionalLights(),static_cast<uint32_t>(std::size(constants.directionalViews)));
     const auto points=SelectActiveLightIndices(scene.PointLights(),static_cast<uint32_t>(std::size(constants.pointViews)));
     const auto spots=SelectActiveLightIndices(scene.SpotLights(),static_cast<uint32_t>(std::size(constants.spotViews)));
-    const bool useCascades=cascadeCount>1 && camera.projection.m[11]==-1.f;
+    const auto& projection=camera.projection;
+    const float cameraNear=projection.m[14]/projection.m[10];
+    const float cameraFar=projection.m[14]/(projection.m[10]+1);
+    // Public matrices may be edited directly. Unsupported/non-finite projection
+    // inputs fall back to scene bounds instead of producing invalid cascades.
+    const bool useCascades=cascadeCount>1 && projection.m[11]==-1.f &&
+        std::all_of(std::begin(projection.m),std::end(projection.m),[](float value){return std::isfinite(value);}) &&
+        projection.m[0]>0 && projection.m[5]>0 && projection.m[8]==0 && projection.m[9]==0 &&
+        std::isfinite(1/projection.m[0]) && std::isfinite(1/projection.m[5]) &&
+        std::isfinite(cameraNear) && std::isfinite(cameraFar) && cameraNear>0 && cameraFar>cameraNear;
     uint32_t expectedViewCount=0;
     for(const auto index:directional)
         if(scene.DirectionalLights()[index].castShadow)expectedViewCount+=useCascades?cascadeCount:1;
@@ -216,9 +227,7 @@ void Renderer::BuildShadows(ShadowData& state,const Scene& scene,const Camera& c
         const uint32_t first=viewCount;
         if(useCascades)
         {
-            const float cameraNear=camera.projection.m[14]/camera.projection.m[10];
             // 캐스케이드 범위는 카메라의 가시 범위를 따른다. 내부 초기값 20으로 자르지 않는다.
-            const float cameraFar=camera.projection.m[14]/(camera.projection.m[10]+1);
             const float nearPlane=std::max(cameraNear,0.0001f);
             const float farPlane=std::max(cameraFar,nearPlane+0.0001f);
             count=cascadeCount;
@@ -259,8 +268,9 @@ void Renderer::BuildShadows(ShadowData& state,const Scene& scene,const Camera& c
         const auto& light=scene.SpotLights()[spots[i]];
         if(!light.castShadow)continue;
         constants.spotViews[i]={static_cast<float>(viewCount),1,light.shadowStrength,0};
+        const auto cone=EffectiveSpotCone(light.innerConeRadians,light.outerConeRadians);
         constants.lightViewProjectionMatrix[viewCount++]=ComputeSpotLightViewProj(light.position,light.direction,
-            std::clamp(light.outerConeRadians*2,.001f,3.13f),std::max(light.range,.1f+.001f));
+            std::max(cone.outer*2,.001f),std::max(light.range,.1f+.001f));
     }
     for(uint32_t i=0;i<viewCount;++i)
         constants.atlasRect[i]={static_cast<float>(i%columns)/columns,static_cast<float>(i/columns)/rows,1.f/columns,1.f/rows};

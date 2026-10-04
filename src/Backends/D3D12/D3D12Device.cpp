@@ -29,6 +29,11 @@ using Microsoft::WRL::ComPtr;
 
 namespace dyf::Backends
 {
+    namespace
+    {
+        D3D12_SHADER_VISIBILITY ToShaderVisibility(RHI::ShaderStageFlags stages);
+    }
+
     struct D3D12ObjectDeleter
     {
         template<typename Object>
@@ -527,10 +532,13 @@ bool D3D12Device::SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc& de
             constexpr RHI::ShaderStageFlags stageFlags[] = {
                 RHI::ShaderStageFlags::Vertex, RHI::ShaderStageFlags::Hull,
                 RHI::ShaderStageFlags::Domain, RHI::ShaderStageFlags::Fragment};
+            const auto visibility = ToShaderVisibility(binding.stages);
             for (uint32_t stage = 0; stage < 4; ++stage)
             {
                 const auto flag = stageFlags[stage];
-                if ((binding.stages & flag) == RHI::ShaderStageFlags::None) continue;
+                // Multiple RHI stages become one native ALL-visible table.
+                if (visibility != D3D12_SHADER_VISIBILITY_ALL &&
+                    visibility != ToShaderVisibility(flag)) continue;
                 if (binding.type == RHI::ResourceBindingType::ConstantBuffer)
                     constantBuffers[stage] += binding.count;
                 else if (binding.type == RHI::ResourceBindingType::SampledTexture ||

@@ -10,6 +10,7 @@
 #include "dyf/RHI/ResourceSet.h"
 #include "dyf/RHI/Shader.h"
 #include "dyf/RHI/Texture.h"
+#include "dyf/RHI/ResourceScope.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -25,8 +26,8 @@ bool Renderer::InitializeCanvas(RHI::Format format)
     using namespace RHI;
     if(canvasPipeline) return true;
     const auto shaders=DefaultShaders();
-    canvasVertexShader=device->CreateShader(ShaderDescription(CanvasVertex,shaders.canvasVertex));
-    canvasFragmentShader=device->CreateShader(ShaderDescription(CanvasFragment,shaders.canvasFragment));
+    if(!canvasVertexShader) canvasVertexShader=device->CreateShader(ShaderDescription(CanvasVertex,shaders.canvasVertex));
+    if(!canvasFragmentShader) canvasFragmentShader=device->CreateShader(ShaderDescription(CanvasFragment,shaders.canvasFragment));
     if(!canvasVertexShader || !canvasFragmentShader) return false;
     const VertexBufferLayout buffer{0,sizeof(Canvas::Vertex),VertexStepMode::Vertex};
     const std::array<VertexAttribute,3> attributes={{{0,0,Format::R32G32_FLOAT,0},{1,0,Format::R32G32_FLOAT,8},{2,0,Format::R32G32B32A32_FLOAT,16}}};
@@ -53,8 +54,8 @@ bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList
     using namespace RHI;
     if(!canvas.IsValid()) {std::fprintf(stderr,"dyf: Invalid canvas dimensions.\n");return false;}
     if(!target || !InitializeCanvas(target->GetDesc().format)) return false;
+    ResourceScope resources(*device);
     BufferHandle vertexBuffer=nullptr;
-    std::vector<RHI::TextureHandle> textures;
     std::vector<ResourceSetHandle> sets;
     const Image white{1,1,{255,255,255,255},dyf::ColorSpace::Linear};
     std::vector<const Image*> images{&white};
@@ -77,7 +78,7 @@ bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList
         desc.usage=TextureUsage::ShaderResource;
         auto* texture=device->CreateTexture(desc);
         if(!texture) { prepared=false;break; }
-        textures.push_back(texture);
+        resources.Keep(texture);
         ResourceBarrierDesc barrier{nullptr,texture,ResourceState::Undefined,ResourceState::CopyDestination,{}};
         commandList.ResourceBarrier(&barrier,1);
         if(!device->UpdateTexture(commandList,texture,0,0,image.GetPixels().data(),static_cast<uint32_t>(image.GetPixels().size()),image.GetWidth()*4,image.GetWidth()*image.GetHeight()*4)) { prepared=false;break; }
@@ -85,13 +86,18 @@ bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList
         ResourceBinding binding;binding.texture=texture;
         auto* set=device->CreateResourceSet({canvasPipeline,&binding,1});
         if(!set) { prepared=false;break; }
+        resources.Keep(set);
         sets.push_back(set);
     }
     if(prepared && !canvas.vertices.empty())
     {
         const uint64_t bytes=canvas.vertices.size()*sizeof(Canvas::Vertex);
         if(bytes>UINT32_MAX) prepared=false;
-        else vertexBuffer=device->CreateBuffer({static_cast<uint32_t>(bytes),sizeof(Canvas::Vertex),BufferUsage::Vertex,ResourceState::CopyDestination});
+        else
+        {
+            vertexBuffer=device->CreateBuffer({static_cast<uint32_t>(bytes),sizeof(Canvas::Vertex),BufferUsage::Vertex,ResourceState::CopyDestination});
+            if(vertexBuffer) resources.Keep(vertexBuffer);
+        }
         prepared=prepared && vertexBuffer && device->UpdateBuffer(commandList,vertexBuffer,0,canvas.vertices.data(),static_cast<uint32_t>(bytes));
         if(prepared) { const ResourceBarrierDesc barrier{vertexBuffer,nullptr,ResourceState::CopyDestination,ResourceState::VertexBuffer,{}};commandList.ResourceBarrier(&barrier,1); }
     }
@@ -139,29 +145,45 @@ bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList
         const ResourceBarrierDesc after{nullptr,target,ResourceState::RenderTarget,ResourceState::Present,{}};
         if(!graphManagedTarget) commandList.ResourceBarrier(&after,1);
     }
-    for(auto* set:sets)device->DestroyResourceSet(set);
-    for(auto* texture:textures)device->DestroyTexture(texture);
-    if(vertexBuffer)device->DestroyBuffer(vertexBuffer);
     return prepared;
 }
 
 bool Renderer::RenderCanvas(const Canvas& canvas, Image* readback)
 {
+    if(!canvas.IsValid()) {std::fprintf(stderr,"dyf: Invalid canvas dimensions.\n");return false;}
     if(!device->BeginFrame())
     {
         if(device->IsLost()) {std::fprintf(stderr,"dyf: Canvas device lost.\n");return false;}
         if(readback)*readback={};
         return true;
     }
+    canvasFramePending=true;
+    // Canvas submits a single list ending in Present. Before submission (including
+    // failed recording) the acquired image also remains in Present. Close that
+    // frame after releasing recording ownership, including readback failures.
+    struct FrameEnd
+    {
+        RHI::IDevice& device;
+        bool& pending;
+        ~FrameEnd()
+        {
+            if(!pending) return;
+            try { (void)device.Present(); pending=false; }
+            catch(...) { /* ApplySettings retries recovery before changing output. */ }
+        }
+    } frameEnd{*device,canvasFramePending};
+    RHI::ResourceScope resources(*device);
     auto* commands=device->AcquireCommandList();
     if(!commands) {std::fprintf(stderr,"dyf: Canvas command list acquisition failed.\n");return false;}
+    resources.Keep(commands);
     const bool recorded=RecordCanvas(canvas,*commands,device->GetBackBuffer(),false);
-    const bool closed=commands->Close();
-    const bool submitted=device->Submit(&commands,1);
-    device->DestroyCommandList(commands);
+    const bool closed=recorded && commands->Close();
+    const bool submitted=closed && device->Submit(&commands,1);
     if(!recorded || !closed || !submitted) {std::fprintf(stderr,"dyf: Canvas command assembly/submission failed.\n");return false;}
     if(readback && !CaptureFrame(*readback))return false;
-    if(!device->Present()) {std::fprintf(stderr,"dyf: Canvas presentation failed.\n");return false;}
+    const bool presented=device->Present();
+    canvasFramePending=false;
+    if(!presented) {std::fprintf(stderr,"dyf: Canvas presentation failed.\n");return false;}
     DY_PROFILE_FRAME_MARK();
     return true;
 }

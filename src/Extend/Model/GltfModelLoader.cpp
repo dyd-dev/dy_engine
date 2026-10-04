@@ -627,7 +627,10 @@ namespace dyf
 		{
 			bool warnedInfluenceTruncation = false;
 			std::error_code sourceSizeError;
-			const uintmax_t sourceSize = std::filesystem::file_size(filepath, sourceSizeError);
+			// Resolve once so file reads, sibling assets and containment use the same directory.
+			const auto sourcePath = std::filesystem::absolute(filepath, sourceSizeError);
+			if(sourceSizeError) return ReportModelError(filepath, "failed to resolve glTF source path");
+			const uintmax_t sourceSize = std::filesystem::file_size(sourcePath, sourceSizeError);
 			if(sourceSizeError || sourceSize > std::numeric_limits<uint64_t>::max())
 			{
 				return ReportModelError(
@@ -643,7 +646,7 @@ namespace dyf
 						? "glTF source bytes exceed maxSourceBytes"
 						: "glTF parser input bytes exceed maxParserInputBytes");
 			}
-			auto data = fastgltf::GltfDataBuffer::FromPath(filepath);
+			auto data = fastgltf::GltfDataBuffer::FromPath(sourcePath);
 			if(data.error() != fastgltf::Error::None)
 			{
 				return ReportModelError(
@@ -651,7 +654,7 @@ namespace dyf
 					"failed to read glTF file");
 			}
 
-			const std::filesystem::path basePath = std::filesystem::path(filepath).parent_path();
+			const std::filesystem::path basePath = sourcePath.parent_path();
 			{
 				fastgltf::Parser metadataParser;
 				auto metadataAsset = metadataParser.loadGltf(

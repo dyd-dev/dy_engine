@@ -31,7 +31,7 @@ namespace dyf::Platform
 	private:
 		struct State { float value = 0; bool pressed = false, released = false; };
 		struct Binding { std::size_t index; float scale; };
-		struct Action { bool axis = false; std::vector<Binding> bindings; State state; float startValue = 0; bool previousDown = false; };
+		struct Action { bool axis = false; std::vector<Binding> bindings; State state; float startValue = 0; bool previousDown = false, captureReleased = false; };
 		Action& AddAction(ActionId action, bool axis);
 		State GetState(ActionId action) const;
 		void Evaluate(const Input::Buttons& down, bool focused, InputCapture capture);

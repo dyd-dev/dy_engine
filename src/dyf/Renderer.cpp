@@ -32,6 +32,7 @@
 #include "dyf/RHI/Pipeline.h"
 #include "dyf/RHI/Shader.h"
 #include "dyf/RHI/Texture.h"
+#include "dyf/RHI/ResourceScope.h"
 
 using namespace dyf;
 
@@ -131,8 +132,8 @@ bool Renderer::SetShaders(const RendererShaderDesc& desc)
         }
         if(next.bytes == shaderSources.bytes && next.entries == shaderSources.entries && sameBindings &&
             next.additionalConstantBytes == shaderSources.additionalConstantBytes)
-        { pendingShaderSources = {}; shadersPending = false; return true; }
-        pendingShaderSources=std::move(next);shadersPending=true;return true;
+        { pendingShaderSources = {}; shadersPending = false; shaderViewCurrent=false; return true; }
+        pendingShaderSources=std::move(next);shadersPending=true;shaderViewCurrent=false;return true;
     }
     catch(const std::exception& error){std::fprintf(stderr,"dyf: Shader override: %s\n",error.what());return false;}
 }
@@ -145,6 +146,12 @@ RHI::ShaderDesc Renderer::ShaderDescription(ShaderSlot slot,const RHI::ShaderDes
 }
 bool Renderer::ApplySettings()
 {
+    if(canvasFramePending)
+    {
+        const bool recovered=device->Present();
+        canvasFramePending=false;
+        if(!recovered) return RendererFailure("Canvas frame recovery failed.");
+    }
     if(!pendingConfig && !shadersPending) return true;
     const auto& nextConfig = pendingConfig ? *pendingConfig : config;
     const bool shadows = config.lighting.enabled && config.lighting.shadows;
@@ -166,6 +173,7 @@ bool Renderer::ApplySettings()
         // 그림자 품질에 따른 깊이 텍스처 크기 변경은 EnsureShadowDepthTarget에서 처리한다.
         config=nextConfig;
         pendingConfig.reset();
+        shaderViews.clear();shaderViewCurrent=false;
         return true;
     }
     Renderer next(*device, windowHandle, nextConfig);
@@ -177,6 +185,7 @@ bool Renderer::ApplySettings()
     SwapResources(next);
     pendingConfig.reset();
     pendingShaderSources={};shadersPending=false;
+    shaderViews.clear();shaderViewCurrent=false;
     return true;
 }
 void Renderer::SwapResources(Renderer& other)
@@ -323,7 +332,12 @@ bool Renderer::Render(const MeshData& mesh,const MaterialDesc& material,const Ca
 
 RendererShaderDesc Renderer::GetShaders() const
 {
-    const auto& source = shadersPending ? pendingShaderSources : shaderSources;
+    if(!shaderViewCurrent)
+    {
+        shaderViews.push_back(shadersPending ? pendingShaderSources : shaderSources);
+        shaderViewCurrent=true;
+    }
+    const auto& source = shaderViews.back();
     RendererShaderDesc desc;
     RHI::ShaderDesc* output[] = {&desc.meshVertex, &desc.meshFragment, &desc.shadowVertex,
         &desc.canvasVertex, &desc.canvasFragment, &desc.toneMapVertex, &desc.toneMapFragment};
@@ -377,7 +391,9 @@ bool Renderer::InitializeMesh(RHI::TextureHandle output,bool compositeAlpha)
     if(!output) return false;
     const auto colorFormat=config.enableHdrRendering ? RHI::Format::R16G16B16A16_FLOAT : output->GetDesc().format;
     const bool shadows = config.lighting.enabled && config.lighting.shadows;
-    if(pipeline != nullptr && meshColorFormat==colorFormat && meshCompositeAlpha==compositeAlpha) return true;
+    if(pipeline != nullptr && meshColorFormat==colorFormat && meshCompositeAlpha==compositeAlpha)
+        return (defaultMaterialTextures[0] || CreateDefaultMaterialTextures(device)) &&
+            EnsureDepthStencilTarget(device,output);
     RHI::IDevice* nativeDevice = device;
     const auto stockShaders = DefaultShaders(shadows,UsesBindlessMaterials());
 
@@ -463,42 +479,59 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
             return RendererFailure("HDR pass creation failed.");
         if(!PrepareGeometry(scene, nativeDevice)) return RendererFailure("Mesh upload failed.");
 
-        RHI::BufferHandle previousLightingBuffer = lightingBuffer;
-        RHI::BufferHandle previousShadowMatrixBuffer = shadowMatrixBuffer;
-        lightingBuffer = nullptr;
-        shadowMatrixBuffer = nullptr;
-
-        RHI::ICommandList* frameDataCommand = nativeDevice->AcquireCommandList();
-        if(frameDataCommand == nullptr)
         {
-            lightingBuffer = previousLightingBuffer;
-            shadowMatrixBuffer = previousShadowMatrixBuffer;
-            return RendererFailure("Frame command list acquisition failed.");
+            struct FrameBuffers
+            {
+                Renderer& renderer;
+                RHI::BufferHandle previousLighting,previousShadow;
+                bool committed=false;
+                explicit FrameBuffers(Renderer& owner) : renderer(owner),
+                    previousLighting(std::exchange(owner.lightingBuffer,nullptr)),
+                    previousShadow(std::exchange(owner.shadowMatrixBuffer,nullptr)) {}
+                ~FrameBuffers()
+                {
+                    if(committed)
+                    {
+                        renderer.device->DestroyBuffer(previousLighting);
+                        renderer.device->DestroyBuffer(previousShadow);
+                    }
+                    else
+                    {
+                        renderer.device->DestroyBuffer(renderer.lightingBuffer);
+                        renderer.device->DestroyBuffer(renderer.shadowMatrixBuffer);
+                        renderer.lightingBuffer=previousLighting;
+                        renderer.shadowMatrixBuffer=previousShadow;
+                    }
+                }
+            } buffers(*this);
+            RHI::ResourceScope resources(*nativeDevice);
+            auto* frameDataCommand=nativeDevice->AcquireCommandList();
+            if(!frameDataCommand) return RendererFailure("Frame command list acquisition failed.");
+            resources.Keep(frameDataCommand);
+            const bool shadowUpdated=UpdateShadowBuffer(nativeDevice,*frameDataCommand,shadows);
+            const bool lightingUpdated=shadowUpdated && UpdateLightingBuffer(scene,camera,nativeDevice,*frameDataCommand);
+            const bool submitted=lightingUpdated && frameDataCommand->Close() && nativeDevice->Submit(&frameDataCommand,1);
+            if(!submitted) return RendererFailure("Frame data upload/submission failed.");
+            buffers.committed=true;
         }
-        const bool shadowUpdated = UpdateShadowBuffer(nativeDevice, *frameDataCommand,shadows);
-        const bool lightingUpdated = shadowUpdated &&
-            UpdateLightingBuffer(scene, camera, nativeDevice, *frameDataCommand);
-        frameDataCommand->Close();
-        std::array<RHI::ICommandList*, 1> frameData = { frameDataCommand };
-        const bool frameDataSubmitted = nativeDevice->Submit(frameData.data(), 1);
-        nativeDevice->DestroyCommandList(frameDataCommand);
-        if(!frameDataSubmitted || !shadowUpdated || !lightingUpdated)
-        {
-            if(lightingBuffer != nullptr) nativeDevice->DestroyBuffer(lightingBuffer);
-            if(shadowMatrixBuffer != nullptr) nativeDevice->DestroyBuffer(shadowMatrixBuffer);
-            lightingBuffer = previousLightingBuffer;
-            shadowMatrixBuffer = previousShadowMatrixBuffer;
-            return RendererFailure("Frame data upload/submission failed.");
-        }
-        if(previousLightingBuffer != nullptr) nativeDevice->DestroyBuffer(previousLightingBuffer);
-        if(previousShadowMatrixBuffer != nullptr) nativeDevice->DestroyBuffer(previousShadowMatrixBuffer);
 
-        RHI::TimestampQueryHandle shadowQuery = nullptr, mainQuery = nullptr;
+        struct GpuSamples
+        {
+            Renderer& renderer;
+            RHI::TimestampQueryHandle shadow=nullptr,main=nullptr;
+            RHI::FenceHandle completion;
+            ~GpuSamples()
+            {
+                if(shadow) renderer.SubmittedGpuSample(shadow,completion);
+                if(main) renderer.SubmittedGpuSample(main,completion);
+            }
+        } samples{*this};
         if(!selectedOutput)
         {
-            shadowQuery=BeginGpuSample(0);
-            mainQuery=BeginGpuSample(1);
+            samples.shadow=BeginGpuSample(0);
+            samples.main=BeginGpuSample(1);
         }
+        const auto shadowQuery=samples.shadow, mainQuery=samples.main;
         using State = RHI::ResourceState;
         RHI::RenderGraph graph;
         const auto backBuffer = graph.ImportTexture("Output", output, before, after);
@@ -576,8 +609,7 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
         RHI::FenceHandle completion;
         drawn = drawn && nativeDevice->Submit({frame.lists.data(),
             static_cast<uint32_t>(frame.lists.size()), nullptr, 0}, completion);
-        if(shadowQuery)SubmittedGpuSample(shadowQuery,completion);
-        if(mainQuery)SubmittedGpuSample(mainQuery,completion);
+        if(drawn) samples.completion=completion;
         if(!drawn)return RendererFailure("Scene draw submission failed.");
         if(config.enableHdrRendering) hdrState=RHI::ResourceState::ShaderResource;
         depthStencilState = RHI::ResourceState::DepthWrite;
@@ -736,6 +768,19 @@ bool Renderer::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorFormat,
 bool Renderer::CreateDefaultMaterialTextures(RHI::IDevice* device)
 {
 	if(device == nullptr) return false;
+	// Publish the complete, uploaded fallback set together. Until then a retry
+	// must not mistake a partially created first texture for a prepared cache.
+	struct PendingTextures
+	{
+		RHI::IDevice& device;
+		std::array<RHI::TextureHandle,3> textures={};
+		bool committed=false;
+		~PendingTextures()
+		{
+			if(!committed) for(auto* texture:textures) device.DestroyTexture(texture);
+		}
+	} pending{*device};
+	RHI::ResourceScope resources(*device);
 	const std::array<std::array<uint8_t, 4>, 3> pixels = {{
 		{{ 255, 255, 255, 255 }},
 		{{ 128, 128, 255, 255 }},
@@ -747,7 +792,7 @@ bool Renderer::CreateDefaultMaterialTextures(RHI::IDevice* device)
 	desc.height = 1;
 	desc.format = RHI::Format::R8G8B8A8_UNORM;
 	desc.usage = RHI::TextureUsage::ShaderResource;
-	for(RHI::TextureHandle& texture : defaultMaterialTextures)
+	for(RHI::TextureHandle& texture : pending.textures)
 	{
 		texture = device->CreateTexture(desc);
 		if(texture == nullptr) return false;
@@ -755,20 +800,21 @@ bool Renderer::CreateDefaultMaterialTextures(RHI::IDevice* device)
 
 	RHI::ICommandList* commandList = device->AcquireCommandList();
 	if(commandList == nullptr) return false;
+	resources.Keep(commandList);
 	std::array<RHI::ResourceBarrierDesc, 3> beforeCopy = {};
 	std::array<RHI::ResourceBarrierDesc, 3> barriers = {};
 	uint32_t barrierCount = 0;
-	for(uint32_t index = 0; index < defaultMaterialTextures.size(); ++index)
+	for(uint32_t index = 0; index < pending.textures.size(); ++index)
 	{
-		beforeCopy[index].texture = defaultMaterialTextures[index];
+		beforeCopy[index].texture = pending.textures[index];
 		beforeCopy[index].after = RHI::ResourceState::CopyDestination;
 	}
 	commandList->ResourceBarrier(beforeCopy.data(), static_cast<uint32_t>(beforeCopy.size()));
-	for(uint32_t index = 0; index < defaultMaterialTextures.size(); ++index)
+	for(uint32_t index = 0; index < pending.textures.size(); ++index)
 	{
 		if(!device->UpdateTexture(
 				*commandList,
-				defaultMaterialTextures[index],
+				pending.textures[index],
 				0,
 				0,
 				pixels[index].data(),
@@ -776,19 +822,18 @@ bool Renderer::CreateDefaultMaterialTextures(RHI::IDevice* device)
 				4,
 				4))
 		{
-			continue;
+			return false;
 		}
-		barriers[barrierCount].texture = defaultMaterialTextures[index];
+		barriers[barrierCount].texture = pending.textures[index];
 		barriers[barrierCount].before = RHI::ResourceState::CopyDestination;
 		barriers[barrierCount].after = RHI::ResourceState::ShaderResource;
 		++barrierCount;
 	}
 	if(barrierCount != 0) commandList->ResourceBarrier(barriers.data(), barrierCount);
-	commandList->Close();
-	std::array<RHI::ICommandList*, 1> commandLists = { commandList };
-	const bool submitted = device->Submit(commandLists.data(), 1);
-    device->DestroyCommandList(commandList);
-	return submitted;
+	if(!commandList->Close() || !device->Submit(&commandList,1)) return false;
+	defaultMaterialTextures=pending.textures;
+	pending.committed=true;
+	return true;
 }
 
 bool Renderer::EnsureDepthStencilTarget(RHI::IDevice* device,RHI::TextureHandle output)
@@ -980,15 +1025,13 @@ bool Renderer::UpdateLightingBuffer(
 		{
 			const SpotLight& light = scene.SpotLights()[spotIndices[index]];
 			// 기존 기본 셰이더 정책: 입력 각도를 정렬하고 89도까지 제한하여 cos 값으로 전달한다.
-			constexpr float kMaxConeRadians = 1.55334306f;
-			const float innerRadians = std::clamp(std::min(light.innerConeRadians, light.outerConeRadians), 0.0f, kMaxConeRadians);
-			const float outerRadians = std::clamp(std::max(light.innerConeRadians, light.outerConeRadians), innerRadians, kMaxConeRadians);
+			const auto cone=EffectiveSpotCone(light.innerConeRadians,light.outerConeRadians);
 			const Math::float3 direction = NormalizeDirection(light.direction);
 			constants.spotLights[index] = {
 				Math::float4(light.position.x, light.position.y, light.position.z, std::max(light.range, 0.0f)),
-				Math::float4(direction.x, direction.y, direction.z, std::cos(outerRadians)),
+				Math::float4(direction.x, direction.y, direction.z, std::cos(cone.outer)),
 				Math::float4(light.color.x, light.color.y, light.color.z, std::max(light.intensity, 0.0f)),
-				Math::float4(std::cos(innerRadians), 0.0f, 0.0f, 0.0f)
+				Math::float4(std::cos(cone.inner), 0.0f, 0.0f, 0.0f)
 			};
 		}
 

@@ -6,7 +6,6 @@ void Input::OnEvent(const InputEvent& event)
 {
 	if(event.type == InputEventType::Text &&
 		(event.codepoint > 0x10FFFF || (event.codepoint >= 0xD800 && event.codepoint <= 0xDFFF))) return;
-	m_pendingEvents.push_back(event);
 	switch(event.type)
 	{
 	case InputEventType::Key:
@@ -28,6 +27,9 @@ void Input::OnEvent(const InputEvent& event)
 		break;
 	case InputEventType::Text: break;
 	}
+	// Button/focus state must remain current even if event storage cannot grow.
+	// Window catches callback exceptions and reports them at a C++ event boundary.
+	m_pendingEvents.push_back(event);
 }
 
 void Input::OnButton(std::size_t index, bool down)
