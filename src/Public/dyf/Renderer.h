@@ -142,6 +142,24 @@ private:
         RHI::TextureHandle texture=nullptr;
         RHI::ResourceState state=RHI::ResourceState::Undefined;
     };
+    struct CanvasImageSlot
+    {
+        Image source;
+        RHI::TextureHandle texture=nullptr;
+        RHI::ResourceSetHandle set=nullptr;
+        uint32_t unusedFrames=0;
+        bool used=false;
+    };
+    struct CanvasVertexSlot { RHI::BufferHandle buffer=nullptr; bool ready=false; };
+    struct CanvasFrame
+    {
+        Renderer& owner;
+        size_t imageCount;
+        bool committed=false;
+        explicit CanvasFrame(Renderer&);
+        ~CanvasFrame();
+        void Commit();
+    };
     struct GpuSample {RHI::TimestampQueryHandle query;RHI::FenceHandle completion;uint32_t slot;};
     enum ShaderSlot : uint32_t {MeshVertex,MeshFragment,ShadowVertex,CanvasVertex,CanvasFragment,ToneVertex,ToneFragment,ShaderCount};
     struct ShaderSources
@@ -219,6 +237,13 @@ private:
     RHI::ShaderHandle toneVertexShader=nullptr,toneFragmentShader=nullptr;
     RHI::PipelineHandle pipeline=nullptr,shadowPipeline=nullptr;
     RHI::PipelineHandle canvasPipeline=nullptr,tonePipeline=nullptr;
+    Image canvasWhite;
+    std::vector<CanvasImageSlot> canvasImages;
+    // Overlay and profiler HUD have separate vertex slots, including when both
+    // are recorded in one frame. Pending replacements commit only after Submit.
+    std::vector<CanvasVertexSlot> canvasVertices,canvasPendingVertices;
+    std::vector<uint32_t> canvasDrawImages;
+    size_t canvasVertexCursor=0;
     RHI::Format meshColorFormat=RHI::Format::Unknown,toneColorFormat=RHI::Format::Unknown;
     bool meshCompositeAlpha=false;
     RHI::TextureHandle depthStencilTarget=nullptr,shadowDepthTarget=nullptr,hdrTarget=nullptr;

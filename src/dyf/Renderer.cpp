@@ -205,6 +205,12 @@ void Renderer::SwapResources(Renderer& other)
     swap(pipeline,other.pipeline);
     swap(shadowPipeline,other.shadowPipeline);
     swap(canvasPipeline,other.canvasPipeline);
+    swap(canvasWhite,other.canvasWhite);
+    swap(canvasImages,other.canvasImages);
+    swap(canvasVertices,other.canvasVertices);
+    swap(canvasPendingVertices,other.canvasPendingVertices);
+    swap(canvasDrawImages,other.canvasDrawImages);
+    swap(canvasVertexCursor,other.canvasVertexCursor);
     swap(tonePipeline,other.tonePipeline);
     swap(toneSet,other.toneSet);
     swap(meshColorFormat,other.meshColorFormat);
@@ -453,6 +459,8 @@ void Renderer::Shutdown()
     if(!device)return;
     // 생성한 RHI 자원은 Renderer에서 직접 해제한다. 보조 객체의 소멸 순서에 위임하지 않는다.
     device->DestroyResourceSet(toneSet);
+    for(auto& image:canvasImages) {device->DestroyResourceSet(image.set);device->DestroyTexture(image.texture);}
+    for(auto& vertices:canvasVertices)device->DestroyBuffer(vertices.buffer);
     for(auto& cached:mainSets)device->DestroyResourceSet(cached.set);
     for(auto& cached:shadowSets)device->DestroyResourceSet(cached.set);
     ReleaseGeometry(device);ReleaseTextures(device);
@@ -552,6 +560,7 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
             buffers.committed=true;
         }
 
+        CanvasFrame canvasFrame(*this);
         recordingStatistics={};materialIndexRecorded=false;
         const auto frameWindow=std::max(1u,device->GetDesc().maxFramesInFlight);
         for(auto& set:mainSets)if(set.unusedFrames<frameWindow)++set.unusedFrames;
@@ -662,6 +671,7 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
         drawn = drawn && nativeDevice->Submit({frame.lists.data(),
             static_cast<uint32_t>(frame.lists.size()), nullptr, 0}, completion);
         if(drawn) {
+            canvasFrame.Commit();
             samples.completion=completion;
             lastRenderCompletion=completion;
             lastStatistics=recordingStatistics;

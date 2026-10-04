@@ -1,4 +1,5 @@
 #include "dyf/Extends/Model/ModelScene.h"
+#include "dyf/Platform/Log.h"
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/IDevice.h"
@@ -23,7 +24,6 @@
 #include <random>
 #include <sstream>
 #include <stdexcept>
-#include <streambuf>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -640,18 +640,28 @@ namespace
 		}
 	}
 
-	class CaptureCerr final
+	class CaptureModelDiagnostics final
 	{
 	public:
-		CaptureCerr()
-			: m_previous(std::cerr.rdbuf(&m_sink))
+		CaptureModelDiagnostics()
 		{
+			// Loads are synchronous, and this runner owns the process log callback.
+			Platform::Log::SetCallback(Platform::LogBuffer::Callback, &m_buffer);
 		}
-		~CaptureCerr() { std::cerr.rdbuf(m_previous); }
-		std::string Text() const { return m_sink.str(); }
+		~CaptureModelDiagnostics() { Platform::Log::SetCallback(nullptr); }
+
+		bool HasUsefulErrorFor(const std::filesystem::path& path)
+		{
+			const std::string prefix = path.string() + ": ";
+			const auto records = m_buffer.Drain();
+			return std::any_of(records.begin(), records.end(), [&](const Platform::LogRecord& record) {
+				return record.level == Platform::LogLevel::Error && record.category == "Model"
+					&& record.message.compare(0u, prefix.size(), prefix) == 0
+					&& record.message.size() > prefix.size();
+			});
+		}
 	private:
-		std::stringbuf m_sink;
-		std::streambuf* m_previous = nullptr;
+		Platform::LogBuffer m_buffer;
 	};
 
 	void WriteBytes(const std::filesystem::path& path, const std::vector<uint8_t>& bytes)
@@ -709,11 +719,11 @@ namespace
 		model.skins.push_back(ModelSkin{});
 		model.animations.push_back(AnimationClip{});
 		bool success = false;
-		std::string diagnostics;
+		bool hasUsefulError = false;
 		{
-			CaptureCerr capture;
+			CaptureModelDiagnostics capture;
 			success = LoadModel(path.string(), model, options);
-			diagnostics = capture.Text();
+			hasUsefulError = capture.HasUsefulErrorFor(path);
 		}
 		if(requireSuccess)
 		{
@@ -725,7 +735,7 @@ namespace
 		}
 		runner.Require(!success, "malformed model fixture was accepted: " + path.filename().string());
 		runner.Require(EmptyModel(model), "rejected model left stale output");
-		runner.Require(diagnostics.find(path.string() + ": ") != std::string::npos,
+		runner.Require(hasUsefulError,
 			"rejected model has no useful error diagnostic");
 	}
 
@@ -739,11 +749,11 @@ namespace
 		model.skins.push_back(ModelSkin{});
 		model.animations.push_back(AnimationClip{});
 		bool success = false;
-		std::string diagnostics;
+		bool hasUsefulError = false;
 		{
-			CaptureCerr capture;
+			CaptureModelDiagnostics capture;
 			success = LoadModel(path.string(), model);
-			diagnostics = capture.Text();
+			hasUsefulError = capture.HasUsefulErrorFor(path);
 		}
 		if(success)
 		{
@@ -751,7 +761,7 @@ namespace
 			return;
 		}
 		runner.Require(EmptyModel(model), "rejected mutated model left stale output");
-		runner.Require(diagnostics.find(path.string() + ": ") != std::string::npos,
+		runner.Require(hasUsefulError,
 			"rejected mutated model has no useful error diagnostic");
 	}
 
