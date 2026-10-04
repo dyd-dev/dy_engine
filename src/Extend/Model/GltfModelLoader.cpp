@@ -193,6 +193,262 @@ namespace dyf
 				if(!std::isfinite(times[index]) || times[index] <= times[index - 1]) return false;
 			return true;
 		}
+
+		[[nodiscard]] bool ValidateGltfHierarchy(
+			const std::string& filepath,
+			const fastgltf::Asset& gltf,
+			const ModelLoadOptions& options)
+		{
+			ModelLoadBudget budget(filepath, options);
+			if(!budget.CheckNodes(gltf.nodes.size())) return false;
+			if(options.maxNodeDepth == 0u)
+				return ReportModelError(filepath, "maxNodeDepth must be greater than zero");
+			if(gltf.nodes.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max()))
+				return ReportModelError(filepath, "glTF node count exceeds the supported index range");
+			if(gltf.scenes.empty()
+				|| (gltf.defaultScene.has_value() && gltf.defaultScene.value() >= gltf.scenes.size()))
+				return ReportModelError(filepath, "glTF scene reference is invalid");
+
+			const size_t noParent = std::numeric_limits<size_t>::max();
+			std::vector<size_t> parents(gltf.nodes.size(), noParent);
+			for(size_t nodeIndex = 0; nodeIndex < gltf.nodes.size(); ++nodeIndex)
+			{
+				for(const size_t childIndex : gltf.nodes[nodeIndex].children)
+				{
+					if(childIndex >= gltf.nodes.size() || parents[childIndex] != noParent)
+						return ReportModelError(filepath, "glTF contains an invalid node hierarchy");
+					parents[childIndex] = nodeIndex;
+				}
+			}
+
+			// A single-parent forest can be checked from its roots without recursion. Any
+			// unvisited nodes belong to a cycle, including cycles outside the selected scene.
+			std::vector<std::pair<size_t, uint32_t>> pending;
+			pending.reserve(gltf.nodes.size());
+			for(size_t nodeIndex = 0; nodeIndex < parents.size(); ++nodeIndex)
+				if(parents[nodeIndex] == noParent) pending.emplace_back(nodeIndex, 1u);
+			for(size_t cursor = 0; cursor < pending.size(); ++cursor)
+			{
+				const auto [nodeIndex, depth] = pending[cursor];
+				const auto& children = gltf.nodes[nodeIndex].children;
+				if(!children.empty() && depth >= options.maxNodeDepth)
+					return ReportModelError(filepath, "glTF node hierarchy exceeds maxNodeDepth");
+				for(const size_t childIndex : children) pending.emplace_back(childIndex, depth + 1u);
+			}
+			if(pending.size() != gltf.nodes.size())
+				return ReportModelError(filepath, "glTF node hierarchy contains a cycle");
+
+			std::vector<size_t> rootScene(gltf.nodes.size(), noParent);
+			for(size_t sceneIndex = 0; sceneIndex < gltf.scenes.size(); ++sceneIndex)
+			{
+				for(const size_t rootIndex : gltf.scenes[sceneIndex].nodeIndices)
+				{
+					if(rootIndex >= gltf.nodes.size() || parents[rootIndex] != noParent
+						|| rootScene[rootIndex] == sceneIndex)
+						return ReportModelError(filepath, "glTF scene contains an invalid or duplicate root");
+					rootScene[rootIndex] = sceneIndex;
+				}
+			}
+			return true;
+		}
+
+		[[nodiscard]] bool ValidateGltfReferences(const std::string& filepath, const fastgltf::Asset& gltf)
+		{
+			// fastgltf::validate() dereferences animation and sparse references before
+			// checking their bounds. Keep these checks ahead of the SDK validator.
+			for(const auto& accessor : gltf.accessors)
+			{
+				if((accessor.bufferViewIndex.has_value() && *accessor.bufferViewIndex >= gltf.bufferViews.size())
+					|| (accessor.sparse && (accessor.sparse->indicesBufferView >= gltf.bufferViews.size()
+						|| accessor.sparse->valuesBufferView >= gltf.bufferViews.size())))
+					return ReportModelError(filepath, "glTF accessor buffer view reference is invalid");
+			}
+			for(const auto& animation : gltf.animations)
+			{
+				for(const auto& sampler : animation.samplers)
+					if(sampler.inputAccessor >= gltf.accessors.size() || sampler.outputAccessor >= gltf.accessors.size())
+						return ReportModelError(filepath, "glTF animation accessor reference is invalid");
+				for(const auto& channel : animation.channels)
+				{
+					if(channel.samplerIndex >= animation.samplers.size()
+						|| !channel.nodeIndex.has_value() || *channel.nodeIndex >= gltf.nodes.size())
+						return ReportModelError(filepath, "glTF animation channel reference is invalid");
+					const auto& sampler = animation.samplers[channel.samplerIndex];
+					const auto& input = gltf.accessors[sampler.inputAccessor];
+					const auto& output = gltf.accessors[sampler.outputAccessor];
+					const auto outputType = channel.path == fastgltf::AnimationPath::Weights
+						? fastgltf::AccessorType::Scalar : channel.path == fastgltf::AnimationPath::Rotation
+							? fastgltf::AccessorType::Vec4 : fastgltf::AccessorType::Vec3;
+					if(input.type != fastgltf::AccessorType::Scalar || output.type != outputType)
+						return ReportModelError(filepath, "glTF animation accessor type is invalid");
+					if(sampler.interpolation == fastgltf::AnimationInterpolation::CubicSpline
+						&& input.count > std::numeric_limits<size_t>::max() / 3u)
+						return ReportModelError(filepath, "glTF cubic animation accessor count overflows");
+				}
+			}
+			for(const auto& mesh : gltf.meshes)
+			{
+				for(const auto& primitive : mesh.primitives)
+				{
+					for(const auto& attribute : primitive.attributes)
+						if(attribute.accessorIndex >= gltf.accessors.size())
+							return ReportModelError(filepath, "glTF attribute accessor reference is invalid");
+					if(primitive.indicesAccessor.has_value())
+					{
+						if(*primitive.indicesAccessor >= gltf.accessors.size())
+							return ReportModelError(filepath, "glTF index accessor reference is invalid");
+						const auto& indices = gltf.accessors[*primitive.indicesAccessor];
+						if(indices.type != fastgltf::AccessorType::Scalar
+							|| (indices.componentType != fastgltf::ComponentType::UnsignedByte
+								&& indices.componentType != fastgltf::ComponentType::UnsignedShort
+								&& indices.componentType != fastgltf::ComponentType::UnsignedInt))
+							return ReportModelError(filepath, "glTF index accessor type is invalid");
+					}
+					for(const auto& target : primitive.targets)
+					{
+						for(const auto& attribute : target)
+						{
+							if(attribute.accessorIndex >= gltf.accessors.size())
+								return ReportModelError(filepath, "glTF morph accessor reference is invalid");
+							if((attribute.name == "POSITION" || attribute.name == "NORMAL" || attribute.name == "TANGENT")
+								&& gltf.accessors[attribute.accessorIndex].type != fastgltf::AccessorType::Vec3)
+								return ReportModelError(filepath, "glTF morph accessor type is invalid");
+						}
+					}
+				}
+			}
+			for(const auto& skin : gltf.skins)
+			{
+				for(const size_t joint : skin.joints)
+					if(joint >= gltf.nodes.size())
+						return ReportModelError(filepath, "glTF skin joint reference is invalid");
+				if(skin.inverseBindMatrices.has_value())
+				{
+					if(*skin.inverseBindMatrices >= gltf.accessors.size())
+						return ReportModelError(filepath, "glTF inverse-bind accessor reference is invalid");
+					const auto& accessor = gltf.accessors[*skin.inverseBindMatrices];
+					if(accessor.type != fastgltf::AccessorType::Mat4 || accessor.componentType != fastgltf::ComponentType::Float)
+						return ReportModelError(filepath, "glTF inverse-bind accessor type is invalid");
+				}
+			}
+			for(const auto& image : gltf.images)
+				if(const auto* source = std::get_if<fastgltf::sources::BufferView>(&image.data))
+					if(source->bufferViewIndex >= gltf.bufferViews.size())
+						return ReportModelError(filepath, "glTF image buffer view reference is invalid");
+			return true;
+		}
+
+		[[nodiscard]] bool IsGltfByteRangeValid(
+			size_t byteLength, size_t byteOffset, size_t count, size_t stride, size_t elementBytes)
+		{
+			if(count == 0u || stride == 0u || byteOffset > byteLength) return false;
+			const size_t remaining = byteLength - byteOffset;
+			return elementBytes <= remaining && count - 1u <= (remaining - elementBytes) / stride;
+		}
+
+		[[nodiscard]] bool ValidateGltfBytes(const std::string& filepath, const fastgltf::Asset& gltf)
+		{
+			std::vector<fastgltf::span<const std::byte>> bufferBytes;
+			bufferBytes.reserve(gltf.buffers.size());
+			for(const auto& buffer : gltf.buffers)
+			{
+				fastgltf::span<const std::byte> bytes;
+				bool supported = true;
+				std::visit(dy_gltf_visitor{
+					[&](const fastgltf::sources::Array& source) {
+						bytes = fastgltf::span<const std::byte>(source.bytes.data(), source.bytes.size_bytes());
+					},
+					[&](const fastgltf::sources::Vector& source) {
+						bytes = fastgltf::span<const std::byte>(source.bytes.data(), source.bytes.size());
+					},
+					[&](const fastgltf::sources::ByteView& source) { bytes = source.bytes; },
+					[&](const auto&) { supported = false; }
+				}, buffer.data);
+				if(!supported) return ReportModelError(filepath, "glTF buffer source is not loaded or supported");
+				if(buffer.byteLength > bytes.size())
+					return ReportModelError(filepath, "glTF buffer byteLength exceeds the loaded bytes");
+				bufferBytes.push_back(bytes);
+			}
+			for(const auto& view : gltf.bufferViews)
+			{
+				if(view.bufferIndex >= gltf.buffers.size())
+					return ReportModelError(filepath, "glTF buffer view buffer reference is invalid");
+				const size_t logicalBytes = gltf.buffers[view.bufferIndex].byteLength;
+				const size_t loadedBytes = bufferBytes[view.bufferIndex].size();
+				if(view.byteOffset > logicalBytes || view.byteLength > logicalBytes - view.byteOffset
+					|| view.byteOffset > loadedBytes || view.byteLength > loadedBytes - view.byteOffset)
+					return ReportModelError(filepath, "glTF buffer view byte range is out of bounds");
+				if(view.byteStride.has_value()
+					&& (*view.byteStride < 4u || *view.byteStride > 252u || *view.byteStride % 4u != 0u))
+					return ReportModelError(filepath, "glTF buffer view byteStride is invalid");
+			}
+			for(const auto& accessor : gltf.accessors)
+			{
+				if(accessor.type == fastgltf::AccessorType::Invalid
+					|| accessor.componentType == fastgltf::ComponentType::Invalid || accessor.count == 0u)
+					return ReportModelError(filepath, "glTF accessor type or count is invalid");
+				const size_t componentBytes = fastgltf::getComponentByteSize(accessor.componentType);
+				size_t elementStride = fastgltf::getNumComponents(accessor.type) * componentBytes;
+				size_t elementBytes = elementStride;
+				if(fastgltf::isMatrix(accessor.type))
+				{
+					const size_t rows = fastgltf::getElementRowCount(accessor.type);
+					const size_t columnBytes = rows * componentBytes;
+					const size_t columnStride = (columnBytes + 3u) & ~size_t(3u);
+					elementStride = rows * columnStride;
+					// The final column's trailing padding may be omitted from the view.
+					elementBytes = (rows - 1u) * columnStride + columnBytes;
+				}
+				auto validAlignment = [&](const fastgltf::BufferView& view, size_t offset, size_t componentSize) {
+					return offset % componentSize == 0u && view.byteOffset % componentSize == 0u
+						&& (!fastgltf::isMatrix(accessor.type)
+							|| (view.byteOffset % 4u + offset % 4u) % 4u == 0u);
+				};
+				if(accessor.bufferViewIndex.has_value())
+				{
+					const auto& view = gltf.bufferViews[*accessor.bufferViewIndex];
+					const size_t stride = view.byteStride.value_or(elementStride);
+					if(stride < elementStride || stride % componentBytes != 0u
+						|| !validAlignment(view, accessor.byteOffset, componentBytes)
+						|| !IsGltfByteRangeValid(view.byteLength, accessor.byteOffset, accessor.count, stride, elementBytes))
+						return ReportModelError(filepath, "glTF accessor byte range or stride is invalid");
+				}
+				else if(accessor.byteOffset != 0u)
+					return ReportModelError(filepath, "glTF accessor without a buffer view has a byte offset");
+				if(!accessor.sparse) continue;
+				const auto& sparse = *accessor.sparse;
+				if(sparse.count == 0u || sparse.count > accessor.count
+					|| (sparse.indexComponentType != fastgltf::ComponentType::UnsignedByte
+						&& sparse.indexComponentType != fastgltf::ComponentType::UnsignedShort
+						&& sparse.indexComponentType != fastgltf::ComponentType::UnsignedInt))
+					return ReportModelError(filepath, "glTF sparse accessor count or index type is invalid");
+				const auto& indicesView = gltf.bufferViews[sparse.indicesBufferView];
+				const auto& valuesView = gltf.bufferViews[sparse.valuesBufferView];
+				const size_t indexBytes = fastgltf::getComponentByteSize(sparse.indexComponentType);
+				if(indicesView.byteStride || indicesView.target || valuesView.byteStride || valuesView.target
+					|| sparse.indicesByteOffset % indexBytes != 0u || indicesView.byteOffset % indexBytes != 0u
+					|| !validAlignment(valuesView, sparse.valuesByteOffset, componentBytes)
+					|| !IsGltfByteRangeValid(indicesView.byteLength, sparse.indicesByteOffset, sparse.count, indexBytes, indexBytes)
+					|| !IsGltfByteRangeValid(valuesView.byteLength, sparse.valuesByteOffset, sparse.count, elementStride, elementBytes))
+					return ReportModelError(filepath, "glTF sparse accessor byte range is invalid");
+
+				// Read only after proving both additions and the complete index range fit.
+				const auto indices = bufferBytes[indicesView.bufferIndex]
+					.subspan(indicesView.byteOffset, indicesView.byteLength).subspan(sparse.indicesByteOffset);
+				uint32_t previousIndex = 0u;
+				for(size_t index = 0; index < sparse.count; ++index)
+				{
+					uint32_t value = 0u;
+					for(size_t component = 0; component < indexBytes; ++component)
+						value |= std::to_integer<uint32_t>(indices[index * indexBytes + component]) << (8u * component);
+					if(value >= accessor.count || (index != 0u && value <= previousIndex))
+						return ReportModelError(filepath, "glTF sparse indices must be in range and strictly increasing");
+					previousIndex = value;
+				}
+			}
+			return true;
+		}
+
 		[[nodiscard]] bool ValidateGltfLoadLimits(
 			const std::string& filepath,
 			const fastgltf::Asset& gltf,
@@ -426,6 +682,9 @@ namespace dyf
 					std::string("failed to parse glTF: ")
 						+ std::string(fastgltf::getErrorMessage(asset.error())));
 			}
+			if(!ValidateGltfHierarchy(filepath, asset.get(), options)
+				|| !ValidateGltfReferences(filepath, asset.get())
+				|| !ValidateGltfBytes(filepath, asset.get())) return false;
 			const fastgltf::Error validationError = fastgltf::validate(asset.get());
 			if(validationError != fastgltf::Error::None)
 			{
@@ -824,7 +1083,13 @@ namespace dyf
 			});
 			const bool animatedModel = !outModel.skins.empty() || !outModel.animations.empty() || hasMorphTargets;
 
-			std::function<bool(size_t, fastgltf::math::mat<float, 4, 4>)> processNode =
+			struct PendingNode
+			{
+				size_t index;
+				fastgltf::math::fmat4x4 parentMatrix;
+			};
+			std::vector<PendingNode> pendingNodes;
+			auto processNode =
 				[&](size_t nodeIndex, fastgltf::math::mat<float, 4, 4> parentMatrix)
 			{
 				if(nodeIndex >= gltf.nodes.size()) return false;
@@ -1193,8 +1458,8 @@ namespace dyf
 					}
 				}
 
-				for(const size_t childIndex : node.children)
-					if(!processNode(childIndex, globalMatrix)) return false;
+				for(auto child = node.children.rbegin(); child != node.children.rend(); ++child)
+					pendingNodes.push_back({*child, globalMatrix});
 				return true;
 			};
 
@@ -1203,8 +1468,14 @@ namespace dyf
 			const fastgltf::Scene* scene = gltf.defaultScene.has_value() ? &gltf.scenes[*gltf.defaultScene] : &gltf.scenes[0];
 			// 파일의 노드 변환을 보존한다. 화면에서의 배치 방향은 호출자가 정한다.
 			const fastgltf::math::fmat4x4 initialMatrix(1.0f);
-			for(const size_t nodeIndex : scene->nodeIndices)
-				if(!processNode(nodeIndex, initialMatrix)) return false;
+			for(auto root = scene->nodeIndices.rbegin(); root != scene->nodeIndices.rend(); ++root)
+				pendingNodes.push_back({*root, initialMatrix});
+			while(!pendingNodes.empty())
+			{
+				const PendingNode node = pendingNodes.back();
+				pendingNodes.pop_back();
+				if(!processNode(node.index, node.parentMatrix)) return false;
+			}
 			return !outModel.meshes.empty();
 		}
 

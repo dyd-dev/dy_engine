@@ -193,7 +193,8 @@ namespace dyf::Backends
         commands->ResourceBarrier(1, &barrier);
         if(FAILED(commands->Close())) return false;
         const size_t retirementBase = m_internal->readbackResources.size();
-        m_internal->readbackResources.reserve(retirementBase + 4);
+        m_internal->readbackResources.reserve(retirementBase + 5);
+        m_internal->readbackResources.emplace_back(resource);
         m_internal->readbackResources.emplace_back(buffer.Get());
         m_internal->readbackResources.emplace_back(allocator.Get());
         m_internal->readbackResources.emplace_back(commands.Get());

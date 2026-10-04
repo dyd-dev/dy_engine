@@ -313,8 +313,9 @@ namespace dyf
 		{
 			std::vector<float> weights(channel.keyframes.count, 0.0f);
 			if(channel.keyframes.count == 0u || !std::isfinite(channelWeight)) return weights;
+			// ufbx normalizes target, default, and evaluated weights to 1.0 at full strength.
 			auto targetWeight = [&](size_t keyframeIndex) {
-				return static_cast<float>(channel.keyframes.data[keyframeIndex].target_weight * 0.01);
+				return static_cast<float>(channel.keyframes.data[keyframeIndex].target_weight);
 			};
 
 			const float firstTargetWeight = targetWeight(0u);
@@ -675,7 +676,7 @@ namespace dyf
 							|| channel->keyframes.count > std::numeric_limits<uint32_t>::max() - morphSources.size())
 							return false;
 						const uint32_t firstTargetIndex = static_cast<uint32_t>(morphSources.size());
-						const float channelWeight = static_cast<float>(channel->weight * 0.01);
+						const float channelWeight = static_cast<float>(channel->weight);
 						if(!std::isfinite(channelWeight))
 						{
 							return ReportModelError(

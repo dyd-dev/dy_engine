@@ -190,6 +190,24 @@ namespace dyf::Backends
 		};
 		std::vector<SubmissionRecord> m_submissions;
 		std::vector<std::unique_ptr<VulkanCommandList, VulkanObjectDeleter>> m_acquiredCommandLists;
+		struct ReadbackResources
+		{
+			VkDevice device = VK_NULL_HANDLE;
+			VkBuffer buffer = VK_NULL_HANDLE;
+			VkDeviceMemory memory = VK_NULL_HANDLE;
+			VkCommandPool pool = VK_NULL_HANDLE;
+			VulkanTexture* source = nullptr;
+			std::unique_ptr<VulkanTexture, VulkanObjectDeleter> retiredSource;
+			~ReadbackResources()
+			{
+				if(pool) vkDestroyCommandPool(device, pool, nullptr);
+				if(buffer) vkDestroyBuffer(device, buffer, nullptr);
+				if(memory) vkFreeMemory(device, memory, nullptr);
+			}
+		};
+		// An uncertain completion faults the device and prevents another readback.
+		// Keep its resources until shutdown has established idle or device loss.
+		std::unique_ptr<ReadbackResources> m_failedReadback;
 
 		struct RetiredSwapchainGeneration
 		{
@@ -972,19 +990,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		const auto state = image->GetState(0, 0);
 		if(state == dyf::RHI::ResourceState::Undefined) return false;
 
-		struct Resources
-		{
-			VkDevice device;
-			VkBuffer buffer = VK_NULL_HANDLE;
-			VkDeviceMemory memory = VK_NULL_HANDLE;
-			VkCommandPool pool = VK_NULL_HANDLE;
-			~Resources()
-			{
-				if(pool) vkDestroyCommandPool(device, pool, nullptr);
-				if(buffer) vkDestroyBuffer(device, buffer, nullptr);
-				if(memory) vkFreeMemory(device, memory, nullptr);
-			}
-		} resources{m_context.device};
+		auto readback = std::make_unique<ReadbackResources>();
+		auto& resources = *readback;
+		resources.device = m_context.device;
+		resources.source = image;
 		VkBufferCreateInfo bufferInfo{};
 		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 		bufferInfo.size = bytes;
@@ -1065,10 +1074,26 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 		submit.commandBufferCount = 1;
 		submit.pCommandBuffers = &command;
-		if(vkQueueSubmit(m_context.graphicsQueue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS) return false;
-		if(vkQueueWaitIdle(m_context.graphicsQueue) != VK_SUCCESS)
+		const VkResult submitted = vkQueueSubmit(m_context.graphicsQueue, 1, &submit, VK_NULL_HANDLE);
+		if(submitted != VK_SUCCESS)
+		{
+			// OOM submit failures leave the commands unsubmitted. Other failures
+			// do not provide that guarantee, so use the shutdown retention path.
+			if(submitted != VK_ERROR_OUT_OF_HOST_MEMORY && submitted != VK_ERROR_OUT_OF_DEVICE_MEMORY)
+			{
+				m_submissionFaulted = true;
+				m_failedReadback = std::move(readback);
+			}
+			LogVulkanFailure("vkQueueSubmit(readback)", submitted);
+			return false;
+		}
+		const VkResult waited = vkQueueWaitIdle(m_context.graphicsQueue);
+		if(waited != VK_SUCCESS)
 		{
 			m_submissionFaulted = true;
+			m_failedReadback = std::move(readback);
+			// A log callback may reenter the device, so publish failure ownership first.
+			LogVulkanFailure("vkQueueWaitIdle(readback)", waited);
 			return false;
 		}
 		dyf::RHI::TextureReadback output;
@@ -1219,7 +1244,11 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		const auto found = std::find(m_textures.begin(), m_textures.end(), texture);
 		if(found == m_textures.end()) return;
 		m_textures.erase(found);
-		VulkanObjectDeleter{}(static_cast<VulkanTexture*>(texture));
+		auto* native = static_cast<VulkanTexture*>(texture);
+		if(m_failedReadback && m_failedReadback->source == native)
+			m_failedReadback->retiredSource.reset(native);
+		else
+			VulkanObjectDeleter{}(native);
     }
 
 	void VulkanDevice::Impl::DestroyShader(dyf::RHI::ShaderHandle shader)
@@ -1643,6 +1672,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			m_submissions.clear();
 		}
 		m_acquiredCommandLists.clear();
+		m_failedReadback.reset();
 		std::fill(m_frameSlots.begin(), m_frameSlots.end(), VK_NULL_HANDLE);
 
 		for (dyf::RHI::ResourceSetHandle resourceSet : m_resourceSets)
