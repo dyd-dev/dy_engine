@@ -10,6 +10,7 @@
 namespace dyf
 {
 class ModelScene;
+struct SkinInfluence;
 
 enum class SkinningExecutionMode : uint8_t
 {
@@ -58,6 +59,19 @@ private:
         RHI::TimestampQueryHandle query = nullptr;
         RHI::FenceHandle completion;
     };
+    struct FrameBuffer
+    {
+        RHI::BufferHandle buffer = nullptr;
+        std::vector<uint8_t> bytes;
+        RHI::ResourceState state = RHI::ResourceState::Undefined;
+    };
+    struct FrameResources
+    {
+        std::vector<FrameBuffer> buffers;
+        std::vector<RHI::ResourceSetHandle> sets;
+        std::vector<uintptr_t> workingSet;
+        RHI::FenceHandle completion;
+    };
     bool RenderScene(const ModelScene&, const Camera*, const Canvas*, Image*);
     bool ConfigureShaders();
     bool RestoreShaders();
@@ -65,6 +79,7 @@ private:
     bool PrepareComputePipeline();
     RHI::ShaderDesc ShaderDescription(uint32_t slot, const RHI::ShaderDesc& stock) const;
     void ReleaseFrameBuffers();
+    void ReleaseFrame(FrameResources&);
     void ReleaseMeshBuffers();
     void CollectGpuSamples();
 
@@ -81,7 +96,15 @@ private:
     RHI::PipelineHandle m_computePipeline = nullptr;
     bool m_computeShaderChanged = true;
     std::vector<MeshBuffer> m_meshBuffers;
-    std::vector<RHI::BufferHandle> m_frameBuffers;
+    // Lazily grows to maxFramesInFlight; only a completed slot is modified.
+    std::vector<FrameResources> m_frames;
+    uint32_t m_frameIndex = 0;
+    RHI::BufferHandle m_influenceBuffer = nullptr;
+    std::vector<SkinInfluence> m_influences;
+    std::vector<uint32_t> m_influenceOffsets;
+    std::vector<uint32_t> m_influenceCounts;
+    std::vector<uint64_t> m_requiredInfluenceJoints;
+    std::vector<bool> m_validInfluences;
     std::vector<RendererDrawDesc> m_draws;
     std::deque<GpuSample> m_gpuSamples;
     double m_gpuMilliseconds = -1;

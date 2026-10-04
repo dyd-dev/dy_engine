@@ -92,6 +92,23 @@ EntityHandle Scene::Add(const MeshData& mesh,const MaterialDesc& material,const 
     }
     catch(const std::exception& error) {std::fprintf(stderr,"dyf: Scene::Add: %s\n",error.what());return {};}
 }
+EntityHandle Scene::AddInstance(const EntityHandle& source,const Math::float4x4& transform)
+{
+    const auto owner=source.m_scene.lock();
+    if(owner.get()!=this || !ValidEntity(owner,source.m_id) || !Finite(transform))
+    { std::fprintf(stderr,"dyf: AddInstance requires a live local entity and finite transform.\n"); return {}; }
+    const auto count=m_materials.size();
+    try
+    {
+        // Copy before vector growth: the source material may be inside m_materials.
+        const auto material=m_materials[ToIndex(GetEntityMaterial(source.m_id))];
+        const auto lighting=GetEntityLighting(source.m_id);
+        const auto id=CreateMaterial(material);
+        return GetEntity(CreateEntity(GetEntityMesh(source.m_id),id,transform,lighting));
+    }
+    catch(const std::exception& error)
+    { m_materials.resize(count);std::fprintf(stderr,"dyf: AddInstance: %s\n",error.what());return {}; }
+}
 EntityHandle::operator bool() const { const auto data=m_scene.lock();return ValidEntity(data,m_id); }
 Math::float4x4 EntityHandle::GetTransform() const
 { const auto data=m_scene.lock();if(!ValidEntity(data,m_id)){InvalidHandle("entity");return Math::float4x4::Identity();}return data->GetTransform(m_id).worldMatrix; }

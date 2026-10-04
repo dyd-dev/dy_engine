@@ -7,6 +7,11 @@ class ICommandList;
 struct FenceHandle
 {
     explicit operator bool() const {return m_device && m_value;}
+    // Completion tokens identify one submission on one device, including an empty token.
+    friend constexpr bool operator==(FenceHandle left, FenceHandle right) noexcept
+    {return left.m_device == right.m_device && left.m_value == right.m_value;}
+    friend constexpr bool operator!=(FenceHandle left, FenceHandle right) noexcept
+    {return !(left == right);}
 private:
     friend class IDevice;
     const IDevice* m_device=nullptr;

@@ -42,6 +42,9 @@ namespace dyf
         // 메시와 재질을 복사해 소유한다. 생략한 재질과 변환에는 기본값을 사용한다.
         [[nodiscard]] EntityHandle Add(const MeshData& mesh, const MaterialDesc& material = {},
             const Math::float4x4& transform = Math::float4x4::Identity());
+        // Shares immutable geometry; material, lighting and transform remain independently editable.
+        [[nodiscard]] EntityHandle AddInstance(const EntityHandle& source,
+            const Math::float4x4& transform = Math::float4x4::Identity());
         [[nodiscard]] LightHandle<DirectionalLight> Add(const DirectionalLight& light);
         [[nodiscard]] LightHandle<PointLight> Add(const PointLight& light);
         [[nodiscard]] LightHandle<SpotLight> Add(const SpotLight& light);

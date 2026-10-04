@@ -44,6 +44,12 @@ struct VSInput
     float3 normal : TEXCOORD1;
     float2 uv : TEXCOORD2;
     float4 tangent : TEXCOORD3;
+#if RENDERER_INSTANCING
+    float4 model0 : TEXCOORD4;
+    float4 model1 : TEXCOORD5;
+    float4 model2 : TEXCOORD6;
+    float4 model3 : TEXCOORD7;
+#endif
 };
 
 struct VSOutput
@@ -71,7 +77,11 @@ float3x3 MeshNormalMatrix(float4x4 matrix)
 
 VSOutput main(VSInput input)
 {
+#if RENDERER_INSTANCING
+    const float4x4 world = transpose(float4x4(input.model0,input.model1,input.model2,input.model3));
+#else
     const float4x4 world = modelMatrix;
+#endif
     const float4 worldPosition = mul(world, float4(input.position, 1.0));
     const float3x3 normalMatrix = MeshNormalMatrix(world);
 

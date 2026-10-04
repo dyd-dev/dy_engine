@@ -51,6 +51,10 @@ class Scene;
 class Canvas;
 
 // 쉬운 설정과 CPU 입력을 공개 RHI 명령으로 조합한다. GPU 자원은 이 객체가 직접 소유한다.
+struct RendererStatistics
+{
+    uint32_t mainDrawCount=0,mainInstanceCount=0,culledEntityCount=0;
+};
 class Renderer
 {
 public:
@@ -88,6 +92,15 @@ public:
         const Canvas* overlay = nullptr, Image* readback = nullptr);
     [[nodiscard]] RHI::IDevice& GetDevice() const { return *device; }
 
+    // Published Scene timings: CPU preparation/recording, GPU main pass, and frame cadence.
+    // The existing sampler updates approximately every 200 ms; no readback or wait is performed.
+    [[nodiscard]] const Platform::ProfilerTimingSnapshot& GetProfilerTimingSnapshot() const { return m_profilerSnapshot; }
+
+    // Most recent Scene call: submitted main counts, or zero if skipped/failed before submission.
+    // Excludes shadows, Canvas and HUD.
+    [[nodiscard]] const RendererStatistics& GetLastRenderStatistics() const { return lastStatistics; }
+    // Published at draw submission, even when later readback/Present fails. Survives setting swaps.
+    [[nodiscard]] RHI::FenceHandle GetLastRenderCompletion() const { return lastRenderCompletion; }
     bool SetClearColor(Math::float4);
     bool SetVSync(bool);
     // 조명 설정을 읽거나 교체한다. 변경은 다음 Render에서 적용한다.
@@ -118,9 +131,11 @@ private:
     {
         RHI::BufferHandle vertexBuffer=nullptr,indexBuffer=nullptr;
         uint32_t indexCount=0;
+        Math::Bounds3 bounds;
         std::weak_ptr<const MeshData> source;
         bool vertexReady=false,indexReady=false,prepared=false;
     };
+    struct CachedSet { RHI::ResourceSetHandle set=nullptr; uint32_t unusedFrames=0; };
     struct TextureSlot
     {
         Image source;
@@ -138,11 +153,16 @@ private:
     };
 
     Renderer(RHI::IDevice&,const void* window,const RendererConfig&);
-    static RendererShaderDesc DefaultShaders(bool shadows = false, bool bindless = false);
+    static RendererShaderDesc DefaultShaders(bool shadows = false, bool bindless = false, bool instanced = false);
     bool CaptureFrame(Image&);
     bool Initialize();
     bool InitializeMesh(RHI::TextureHandle output = nullptr,bool compositeAlpha = false);
     bool UsesBindlessMaterials() const;
+    bool UsesStockGeometry() const;
+    bool UsesInstanceStream() const;
+    bool UpdateInstanceBuffer(const Scene&,RHI::ICommandList&);
+    RHI::ResourceSetHandle CachedResourceSet(RHI::PipelineHandle,const std::vector<RHI::ResourceBinding>&,std::vector<CachedSet>&);
+    void PruneResourceSets(std::vector<CachedSet>&);
     RHI::PipelineLayoutDesc MeshLayout(bool bindless, std::vector<RHI::ResourceBindingLayout>& bindings) const;
     void Shutdown();
     bool RenderScene(const Scene&,const Camera*,const Canvas*,Image*,const std::vector<RendererDrawDesc>* = nullptr,
@@ -205,6 +225,12 @@ private:
     RHI::ResourceState depthStencilState=RHI::ResourceState::Undefined;
     RHI::ResourceState shadowDepthState=RHI::ResourceState::Undefined,hdrState=RHI::ResourceState::Undefined;
     RHI::BufferHandle lightingBuffer=nullptr,shadowMatrixBuffer=nullptr;
+    RHI::BufferHandle instanceBuffer=nullptr,materialIndexBuffer=nullptr;
+    bool lightingReady=false,shadowReady=false,instanceReady=false,materialIndexReady=false;
+    bool materialIndexRecorded=false;
+    std::vector<CachedSet> mainSets,shadowSets;
+    RendererStatistics recordingStatistics,lastStatistics;
+    RHI::FenceHandle lastRenderCompletion;
     std::vector<SceneMeshState> m_meshes;
     std::vector<TextureSlot> m_textures;
     std::map<std::pair<const uint8_t*,ColorSpace>,uint32_t> m_indices;
@@ -222,5 +248,7 @@ private:
     Platform::ProfilerSampler m_profilerSampler;
     Platform::ProfilerTimingSnapshot m_profilerSnapshot;
     RHI::ResourceAllocationCounters m_profilerResourceSnapshot;
+    // One immutable tone-map binding: exact pipeline + current HDR texture.
+    RHI::ResourceSetHandle toneSet=nullptr;
 };
 }

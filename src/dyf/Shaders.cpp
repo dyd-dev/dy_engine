@@ -6,6 +6,8 @@
 #include "ToneMapLibrary.h"
 #elif defined(ENABLE_D3D12) || defined(ENABLE_VULKAN)
 #include "StockVertexShader.h"
+#include "StockInstancedVertexShader.h"
+#include "StockInstancedVertexShaderNoShadows.h"
 #include "StockVertexShaderNoShadows.h"
 #include "StockFragmentShader.h"
 #include "StockFragmentShaderNoShadows.h"
@@ -21,11 +23,12 @@
 namespace dyf
 {
 // 선택한 빌드의 셰이더 바이트를 기존 RHI 입력에 직접 담는다.
-RendererShaderDesc Renderer::DefaultShaders(bool shadows, bool bindless)
+RendererShaderDesc Renderer::DefaultShaders(bool shadows, bool bindless, bool instanced)
 {
     RendererShaderDesc shaders;
 #if defined(ENABLE_METAL)
     shaders.meshVertex = {RHI::ShaderStage::Vertex, shadows ? "vertexShader" : "vertexShaderNoShadows", kStockMetalLibrary, kStockMetalLibrarySize};
+    if(instanced) shaders.meshVertex.entryPoint=shadows ? "instancedVertexShader" : "instancedVertexShaderNoShadows";
     shaders.meshFragment = bindless
         ? RHI::ShaderDesc{RHI::ShaderStage::Fragment, shadows ? "bindlessFragment1" : "bindlessFragment0", kBindlessMetalLibrary, kBindlessMetalLibrarySize}
         : RHI::ShaderDesc{RHI::ShaderStage::Fragment, shadows ? "fragmentShader" : "fragmentShaderNoShadows", kStockMetalLibrary, kStockMetalLibrarySize};
@@ -38,6 +41,9 @@ RendererShaderDesc Renderer::DefaultShaders(bool shadows, bool bindless)
     shaders.meshVertex = shadows
         ? RHI::ShaderDesc{RHI::ShaderStage::Vertex, "main", kStockVertexShader, kStockVertexShaderSize}
         : RHI::ShaderDesc{RHI::ShaderStage::Vertex, "main", kStockVertexShaderNoShadows, kStockVertexShaderNoShadowsSize};
+    if(instanced) shaders.meshVertex=shadows
+        ? RHI::ShaderDesc{RHI::ShaderStage::Vertex,"main",kStockInstancedVertexShader,kStockInstancedVertexShaderSize}
+        : RHI::ShaderDesc{RHI::ShaderStage::Vertex,"main",kStockInstancedVertexShaderNoShadows,kStockInstancedVertexShaderNoShadowsSize};
     if(bindless)
         shaders.meshFragment = shadows
             ? RHI::ShaderDesc{RHI::ShaderStage::Fragment, "main", kBindlessFragment, kBindlessFragmentSize}
@@ -57,6 +63,7 @@ RendererShaderDesc Renderer::DefaultShaders(bool shadows, bool bindless)
     shaders.meshFragment.stage=shaders.canvasFragment.stage=shaders.toneMapFragment.stage=RHI::ShaderStage::Fragment;
     (void)shadows;
     (void)bindless;
+    (void)instanced;
 #endif
     return shaders;
 }

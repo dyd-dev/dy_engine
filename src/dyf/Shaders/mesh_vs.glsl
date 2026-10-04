@@ -16,6 +16,9 @@ layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec2 inUv;
 layout(location = 3) in vec4 inTangent;
+#if RENDERER_INSTANCING
+layout(location = 4) in mat4 instanceModel;
+#endif
 
 layout(location = 0) out vec2 fragUv;
 layout(location = 1) out vec3 fragWorldPosition;
@@ -65,7 +68,11 @@ mat3 MeshNormalMatrix(mat4 matrix)
 
 void main()
 {
+#if RENDERER_INSTANCING
+    mat4 world = instanceModel;
+#else
     mat4 world = drawConstants.modelMatrix;
+#endif
     mat3 normalMatrix = MeshNormalMatrix(world);
     vec4 worldPosition = world * vec4(inPosition, 1.0);
     gl_Position = drawConstants.viewProjectionMatrix * worldPosition;

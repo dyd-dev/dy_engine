@@ -50,6 +50,12 @@ struct MeshVertex
     float3 normal [[attribute(1)]];
     float2 uv [[attribute(2)]];
     float4 tangent [[attribute(3)]];
+#if RENDERER_INSTANCING
+    float4 model0 [[attribute(4)]];
+    float4 model1 [[attribute(5)]];
+    float4 model2 [[attribute(6)]];
+    float4 model3 [[attribute(7)]];
+#endif
 };
 
 struct RasterData
@@ -82,7 +88,11 @@ vertex RasterData RENDERER_VERTEX_ENTRY(
 #endif
     constant DrawConstants& drawConstants [[buffer(RENDERER_BINDING_INLINE_CONSTANTS)]])
 {
+#if RENDERER_INSTANCING
+    const float4x4 world(input.model0,input.model1,input.model2,input.model3);
+#else
     const float4x4 world = drawConstants.modelMatrix;
+#endif
     const float4 worldPosition = world * float4(input.position, 1.0f);
     const float3x3 normalMatrix = MeshNormalMatrix(world);
 
