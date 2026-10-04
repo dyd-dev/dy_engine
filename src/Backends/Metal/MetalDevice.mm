@@ -5,6 +5,7 @@
 #include "MetalCommandList.h"
 #include "MetalResourceSet.h"
 #include "MetalShader.h"
+#include "MetalUpload.h"
 #include "dyf/RHI/Readback.h"
 
 #include <algorithm>
@@ -80,6 +81,7 @@ namespace dyf::Backends
 
         id<MTLDevice> device = nil;
         id<MTLCommandQueue> commandQueue = nil;
+        std::shared_ptr<MetalUploadPool> uploadPool;
         const void* windowHandle = nullptr;
 
         CAMetalLayer* metalLayer = nil;
@@ -252,6 +254,12 @@ namespace dyf::Backends
     {
     }
 
+    RHI::UploadMemoryStatistics MetalDevice::GetUploadMemoryStatisticsNative() const
+    {
+        return m_impl != nullptr && m_impl->uploadPool ?
+            m_impl->uploadPool->GetStatistics() : RHI::UploadMemoryStatistics{};
+    }
+
     MetalDevice::~MetalDevice()
     {
         if(m_impl == nullptr) return;
@@ -287,6 +295,7 @@ namespace dyf::Backends
 
         if(m_impl->metalLayer != nil)
             m_impl->metalLayer.device = nil;
+        m_impl->uploadPool.reset();
 #if !__has_feature(objc_arc)
         [m_impl->metalLayer release];
         if(m_impl->drawableQueue != nullptr)
@@ -323,6 +332,7 @@ namespace dyf::Backends
 
         m_impl->commandQueue = [device newCommandQueue];
         if(m_impl->commandQueue == nil) return -1;
+        m_impl->uploadPool = MakeMetalUploadPool(device);
 
         m_impl->frameSlots.resize(desc.maxFramesInFlight);
         m_impl->activeCommandLists.reserve(desc.maxFramesInFlight);
@@ -670,7 +680,7 @@ void MetalDevice::DestroySwapchainNative()
         }
 
         auto commandList = std::unique_ptr<MetalCommandList, MetalObjectDeleter>(
-            new MetalCommandList((__bridge void*)m_impl->commandQueue));
+            new MetalCommandList((__bridge void*)m_impl->commandQueue, m_impl->uploadPool));
         if(!commandList->Begin()) return nullptr;
 
         MetalCommandList* result = commandList.get();

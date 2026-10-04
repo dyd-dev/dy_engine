@@ -1,5 +1,7 @@
 #include "dyf/Scene.h"
 #include <cmath>
+#include <algorithm>
+#include <iterator>
 #include <cstdio>
 #include <exception>
 #include <type_traits>
@@ -29,6 +31,7 @@ EntityID Scene::CreateEntity(MeshID mesh, MaterialID material,
         m_entityMaterials.push_back(material);
         m_entityTransforms.push_back(Transform{transform});
         m_entityLighting.push_back(lighting);
+        m_entityTransformRevisions.push_back(m_transformRevision+1);
     }
     catch(...)
     {
@@ -36,8 +39,10 @@ EntityID Scene::CreateEntity(MeshID mesh, MaterialID material,
         m_entityMaterials.resize(count);
         m_entityTransforms.resize(count);
         m_entityLighting.resize(count);
+        m_entityTransformRevisions.resize(count);
         throw;
     }
+    ++m_transformRevision;
     return static_cast<EntityID>(count);
 }
 
@@ -118,7 +123,11 @@ bool EntityHandle::SetTransform(const Math::float4x4& value)
 {
     const auto data=m_scene.lock();if(!ValidEntity(data,m_id))return InvalidHandle("entity");
     if(!Finite(value)){std::fprintf(stderr,"dyf: transform must be finite.\n");return false;}
-    data->m_entityTransforms[ToIndex(m_id)].worldMatrix=value;return true;
+    auto& current=data->m_entityTransforms[ToIndex(m_id)].worldMatrix;
+    if(std::equal(std::begin(current.m),std::end(current.m),std::begin(value.m)))return true;
+    current=value;
+    data->m_entityTransformRevisions[ToIndex(m_id)]=++data->m_transformRevision;
+    return true;
 }
 bool EntityHandle::SetPosition(Math::float3 value)
 {

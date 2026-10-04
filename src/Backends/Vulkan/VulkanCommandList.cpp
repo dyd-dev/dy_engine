@@ -200,8 +200,45 @@ namespace dyf::Backends
 		}
 	}
 
-	VulkanCommandList::VulkanCommandList(const VulkanContext& context)
+	std::shared_ptr<VulkanUploadPool> CreateVulkanUploadPool(const VulkanContext& context)
+	{
+		// Capture handles by value: no factory refers to the owning Impl's address.
+		const VkDevice device = context.device;
+		const VkPhysicalDevice physicalDevice = context.physicalDevice;
+		return std::make_shared<VulkanUploadPool>([device, physicalDevice](uint64_t capacity)
+			-> std::unique_ptr<VulkanUploadPage>
+		{
+			if (!device || !physicalDevice || capacity == 0 || capacity > std::numeric_limits<size_t>::max()) return {};
+			auto page = std::make_unique<VulkanUploadPage>();
+			page->device = device;
+			page->capacity = capacity;
+			VkBufferCreateInfo bufferInfo{};
+			bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+			bufferInfo.size = capacity;
+			bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+			bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+			if (vkCreateBuffer(device, &bufferInfo, nullptr, &page->buffer) != VK_SUCCESS) return {};
+			VkMemoryRequirements requirements{};
+			vkGetBufferMemoryRequirements(device, page->buffer, &requirements);
+			if (requirements.size < capacity) return {};
+			const uint32_t memoryType = FindHostMemoryType(physicalDevice, requirements.memoryTypeBits);
+			if (memoryType == std::numeric_limits<uint32_t>::max()) return {};
+			VkMemoryAllocateInfo allocation{};
+			allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+			allocation.allocationSize = requirements.size;
+			allocation.memoryTypeIndex = memoryType;
+			if (vkAllocateMemory(device, &allocation, nullptr, &page->memory) != VK_SUCCESS ||
+				vkBindBufferMemory(device, page->buffer, page->memory, 0) != VK_SUCCESS) return {};
+			void* mapped = nullptr;
+			if (vkMapMemory(device, page->memory, 0, capacity, 0, &mapped) != VK_SUCCESS) return {};
+			page->mapped = static_cast<uint8_t*>(mapped);
+			return page;
+		});
+	}
+
+	VulkanCommandList::VulkanCommandList(const VulkanContext& context, std::shared_ptr<VulkanUploadPool> uploadPool)
 		: m_context(context)
+		, m_uploadArena(uploadPool ? std::move(uploadPool) : CreateVulkanUploadPool(context))
 	{
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(context.physicalDevice, &properties);
@@ -248,11 +285,8 @@ namespace dyf::Backends
 
 	VulkanCommandList::~VulkanCommandList()
 	{
-		for (const StagingAllocation& allocation : m_stagingAllocations)
-		{
-			if (allocation.buffer != VK_NULL_HANDLE) vkDestroyBuffer(m_context.device, allocation.buffer, nullptr);
-			if (allocation.memory != VK_NULL_HANDLE) vkFreeMemory(m_context.device, allocation.memory, nullptr);
-		}
+		// Destruction follows completed-submission retirement, or an unsubmitted discard.
+		// The arena returns mapped pages only after this native command pool is released.
 		if (m_commandPool != VK_NULL_HANDLE) vkDestroyCommandPool(m_context.device, m_commandPool, nullptr);
 	}
 
@@ -885,51 +919,6 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
         return !m_failed;
     }
 
-	bool VulkanCommandList::CreateStagingAllocation(const void* data, uint32_t size, StagingAllocation& allocation)
-	{
-		if (data == nullptr || size == 0) return false;
-		VkBufferCreateInfo bufferInfo{};
-		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-		bufferInfo.size = size;
-		bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-		bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-		if (vkCreateBuffer(m_context.device, &bufferInfo, nullptr, &allocation.buffer) != VK_SUCCESS) return false;
-
-		VkMemoryRequirements requirements{};
-		vkGetBufferMemoryRequirements(m_context.device, allocation.buffer, &requirements);
-		const uint32_t memoryType = FindHostMemoryType(m_context.physicalDevice, requirements.memoryTypeBits);
-		if (memoryType == std::numeric_limits<uint32_t>::max())
-		{
-			vkDestroyBuffer(m_context.device, allocation.buffer, nullptr);
-			allocation.buffer = VK_NULL_HANDLE;
-			return false;
-		}
-		VkMemoryAllocateInfo memoryInfo{};
-		memoryInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-		memoryInfo.allocationSize = requirements.size;
-		memoryInfo.memoryTypeIndex = memoryType;
-		if (vkAllocateMemory(m_context.device, &memoryInfo, nullptr, &allocation.memory) != VK_SUCCESS ||
-			vkBindBufferMemory(m_context.device, allocation.buffer, allocation.memory, 0) != VK_SUCCESS)
-		{
-			if (allocation.memory != VK_NULL_HANDLE) vkFreeMemory(m_context.device, allocation.memory, nullptr);
-			vkDestroyBuffer(m_context.device, allocation.buffer, nullptr);
-			allocation = {};
-			return false;
-		}
-
-		void* mapped = nullptr;
-		if (vkMapMemory(m_context.device, allocation.memory, 0, size, 0, &mapped) != VK_SUCCESS)
-		{
-			vkFreeMemory(m_context.device, allocation.memory, nullptr);
-			vkDestroyBuffer(m_context.device, allocation.buffer, nullptr);
-			allocation = {};
-			return false;
-		}
-		std::memcpy(mapped, data, size);
-		vkUnmapMemory(m_context.device, allocation.memory);
-		return true;
-	}
-
 	bool VulkanCommandList::RecordBufferUpdate(VulkanBuffer& buffer, uint32_t offset, const void* data, uint32_t size)
 	{
 		if (m_closed || m_failed || m_rendering || data == nullptr || size == 0 ||
@@ -937,25 +926,20 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 		{
 			return false;
 		}
-		StagingAllocation staging{};
-		if (!CreateStagingAllocation(data, size, staging)) return false;
-		// Transfer ownership and register the operation before recording a copy.
-		try { m_stagingAllocations.push_back(staging); }
-		catch (...)
-		{
-			vkDestroyBuffer(m_context.device, staging.buffer, nullptr);
-			vkFreeMemory(m_context.device, staging.memory, nullptr);
-			throw;
-		}
+		const auto staging = m_uploadArena.Allocate(size, 16);
+		if (!staging) return false;
+		std::memcpy(staging.data, data, size);
+		// Register the operation before recording the copy. A host exception leaves
+		// the lease owned by this command, so no recorded command loses its source.
 		Operation operation{};
 		operation.kind = OperationKind::BufferWrite;
 		operation.buffer = &buffer;
 		m_operations.push_back(operation);
 		VkBufferCopy region{};
-		region.srcOffset = 0;
+		region.srcOffset = staging.offset;
 		region.dstOffset = offset;
 		region.size = size;
-		vkCmdCopyBuffer(m_commandBuffer, staging.buffer, buffer.GetHandle(), 1, &region);
+		vkCmdCopyBuffer(m_commandBuffer, staging.page->buffer, buffer.GetHandle(), 1, &region);
 		return true;
 	}
 
@@ -974,8 +958,8 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 		{
 			return false;
 		}
-		const uint32_t width = std::max(1u, texture.GetDesc().width >> mipLevel);
-		const uint32_t height = std::max(1u, texture.GetDesc().height >> mipLevel);
+		const uint32_t width = std::max(1u, mipLevel < 32 ? texture.GetDesc().width >> mipLevel : 0u);
+		const uint32_t height = std::max(1u, mipLevel < 32 ? texture.GetDesc().height >> mipLevel : 0u);
 		const uint64_t minimumRowPitch = static_cast<uint64_t>(width) * bytesPerPixel;
 		const uint64_t requiredSlicePitch = static_cast<uint64_t>(rowPitch) * height;
 		const uint64_t requiredBytes = static_cast<uint64_t>(rowPitch) * (height - 1) + minimumRowPitch;
@@ -984,31 +968,26 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 			return false;
 		}
 
-		const void* uploadData = data;
-		uint32_t uploadBytes = static_cast<uint32_t>(requiredBytes);
-		uint32_t nativeRowLength = rowPitch / bytesPerPixel;
-		std::vector<uint8_t> packed;
-		if (rowPitch % bytesPerPixel != 0)
+		const bool packed = rowPitch % bytesPerPixel != 0;
+		const uint64_t uploadBytes = packed ? minimumRowPitch * height : requiredBytes;
+		// RGB32 texels have a 12-byte block. Reserve up to two 4-byte padding units
+		// because the shared arena accepts power-of-two alignment only.
+		const uint64_t extraPadding = bytesPerPixel == 12 ? 8 : 0;
+		if (uploadBytes > std::numeric_limits<size_t>::max() - extraPadding) return false;
+		const auto staging = m_uploadArena.Allocate(uploadBytes + extraPadding,
+			bytesPerPixel == 12 ? 4 : std::max(4u, bytesPerPixel));
+		if (!staging) return false;
+		const uint64_t padding = bytesPerPixel == 12 ? (12 - staging.offset % 12) % 12 : 0;
+		uint8_t* destination = staging.data + padding;
+		if (packed)
 		{
-			// Vulkan의 row length는 바이트가 아닌 texel 단위다. byte padding만 제거한다.
-			packed.resize(static_cast<size_t>(minimumRowPitch * height));
+			// Vulkan row length is in texels. Remove byte padding directly into the page.
 			for (uint32_t row = 0; row < height; ++row)
-				std::memcpy(packed.data() + static_cast<size_t>(row * minimumRowPitch),
+				std::memcpy(destination + static_cast<size_t>(row * minimumRowPitch),
 					static_cast<const uint8_t*>(data) + static_cast<size_t>(row) * rowPitch,
 					static_cast<size_t>(minimumRowPitch));
-			uploadData = packed.data();
-			uploadBytes = static_cast<uint32_t>(packed.size());
-			nativeRowLength = 0;
 		}
-		StagingAllocation staging{};
-		if (!CreateStagingAllocation(uploadData, uploadBytes, staging)) return false;
-		try { m_stagingAllocations.push_back(staging); }
-		catch (...)
-		{
-			vkDestroyBuffer(m_context.device, staging.buffer, nullptr);
-			vkFreeMemory(m_context.device, staging.memory, nullptr);
-			throw;
-		}
+		else std::memcpy(destination, data, static_cast<size_t>(uploadBytes));
 		Operation operation{};
 		operation.kind = OperationKind::TextureWrite;
 		operation.texture = &texture;
@@ -1016,8 +995,8 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 		operation.arrayLayer = arrayLayer;
 		m_operations.push_back(operation);
 		VkBufferImageCopy region{};
-		region.bufferOffset = 0;
-		region.bufferRowLength = nativeRowLength;
+		region.bufferOffset = staging.offset + padding;
+		region.bufferRowLength = packed ? 0 : rowPitch / bytesPerPixel;
 		region.bufferImageHeight = height;
 		region.imageSubresource.aspectMask = texture.GetAspectMask();
 		region.imageSubresource.mipLevel = mipLevel;
@@ -1026,7 +1005,7 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 		region.imageExtent = { width, height, 1 };
 		vkCmdCopyBufferToImage(
 			m_commandBuffer,
-			staging.buffer,
+			staging.page->buffer,
 			texture.GetImage(),
 			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 			1,

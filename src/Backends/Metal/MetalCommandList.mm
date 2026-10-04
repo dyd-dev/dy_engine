@@ -4,6 +4,7 @@
 #include "MetalPipeline.h"
 #include "MetalResourceSet.h"
 #include "MetalTexture.h"
+#include "MetalUpload.h"
 
 #include <algorithm>
 #include <cmath>
@@ -224,6 +225,9 @@ namespace dyf::Backends
 		id<MTLBlitCommandEncoder> blitEncoder = nil;
 		MTLRenderPassDescriptor* resumePass = nil;
 		NSMutableArray<id<MTLResource>>* retainedResources = nil;
+		std::shared_ptr<MetalUploadPool> uploadPool;
+		std::shared_ptr<MetalUploadArena> uploadArena;
+		std::shared_ptr<std::shared_ptr<MetalUploadArena>> uploadCompletionLease;
 
 		std::vector<MetalOperation> operations;
 		std::unordered_map<MetalBuffer*, RHI::ResourceState> bufferStates;
@@ -260,6 +264,23 @@ namespace dyf::Backends
 
 	namespace
 	{
+		[[nodiscard]] bool IsNativePending(id<MTLCommandBuffer> buffer)
+		{
+			if(buffer == nil) return false;
+			const auto status = buffer.status;
+			return status != MTLCommandBufferStatusNotEnqueued &&
+				status != MTLCommandBufferStatusCompleted && status != MTLCommandBufferStatusError;
+		}
+
+		template<class T>
+		void ReserveForAppend(std::vector<T>& values)
+		{
+			if(values.size() < values.capacity()) return;
+			const auto capacity = values.size() <= values.max_size() / 2 ?
+				std::max(size_t{1}, values.size() * 2) : values.max_size();
+			values.reserve(capacity);
+		}
+
 		template<typename ImplType>
 		void Invalidate(ImplType* impl)
 		{
@@ -396,27 +417,54 @@ namespace dyf::Backends
 		}
 	}
 
-	MetalCommandList::MetalCommandList(void* commandQueue)
-		: m_impl(new Impl())
+	MetalCommandList::MetalCommandList(void* commandQueue,
+		std::shared_ptr<MetalUploadPool> uploadPool)
 	{
-		m_impl->commandQueue = (__bridge id<MTLCommandQueue>)commandQueue;
+		auto impl = std::make_unique<Impl>();
+		impl->commandQueue = (__bridge id<MTLCommandQueue>)commandQueue;
+		impl->uploadPool = uploadPool ? std::move(uploadPool) :
+			MakeMetalUploadPool(impl->commandQueue.device);
+		m_impl = impl.release();
 	}
 
 	MetalCommandList::~MetalCommandList()
 	{
-		Reset();
+		if(IsNativePending(m_impl->commandBuffer))
+		{
+			// Begin registered the arena retention before any possible commit.
+			// Even a direct native submission keeps its pages until completion.
+			EndRenderEncoding(m_impl);
+			EndBlitEncoding(m_impl);
+#if !__has_feature(objc_arc)
+			[m_impl->resumePass release];
+			[m_impl->retainedResources release];
+			[m_impl->commandBuffer release];
+#endif
+		}
+		else Reset();
 		delete m_impl;
 	}
 
 	bool MetalCommandList::Begin()
 	{
+		if(IsNativePending(m_impl->commandBuffer)) return false;
 		Reset();
+		m_impl->uploadArena = std::make_shared<MetalUploadArena>(m_impl->uploadPool);
 		id<MTLCommandBuffer> commandBuffer = [m_impl->commandQueue commandBuffer];
 		if(commandBuffer == nil) return false;
 #if !__has_feature(objc_arc)
 		[commandBuffer retain];
 #endif
 		m_impl->commandBuffer = commandBuffer;
+		// Completion handlers must be registered before commit. The device's
+		// normal retirement still owns the arena; this also covers direct use.
+		m_impl->uploadCompletionLease =
+			std::make_shared<std::shared_ptr<MetalUploadArena>>(m_impl->uploadArena);
+		auto uploads = m_impl->uploadCompletionLease;
+		[commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+			(void)completed;
+			uploads->reset();
+		}];
 		m_impl->retainedResources = [NSMutableArray new];
 		m_impl->valid = true;
 		return true;
@@ -425,6 +473,13 @@ namespace dyf::Backends
 	void MetalCommandList::Reset()
 	{
 		if(m_impl == nullptr) return;
+		if(IsNativePending(m_impl->commandBuffer)) return;
+		// A discarded autoreleased command buffer may stay alive until its pool
+		// drains. Cancel its unused completion lease so reuse can happen now.
+		if(m_impl->uploadCompletionLease && (m_impl->commandBuffer == nil ||
+			m_impl->commandBuffer.status == MTLCommandBufferStatusNotEnqueued))
+			m_impl->uploadCompletionLease->reset();
+		m_impl->uploadCompletionLease.reset();
 		EndRenderEncoding(m_impl);
 		EndBlitEncoding(m_impl);
 #if !__has_feature(objc_arc)
@@ -435,6 +490,7 @@ namespace dyf::Backends
 		m_impl->retainedResources = nil;
 		m_impl->resumePass = nil;
 		m_impl->commandBuffer = nil;
+		m_impl->uploadArena.reset();
 		m_impl->operations.clear();
 		m_impl->bufferStates.clear();
 		m_impl->textureStates.clear();
@@ -1348,24 +1404,22 @@ namespace dyf::Backends
 				offset, size);
 			return false;
 		}
+		if(!m_impl->uploadArena) return false;
+		// Finish fallible host bookkeeping before issuing an irreversible copy.
+		ReserveForAppend(m_impl->operations);
+		const auto upload = m_impl->uploadArena->Allocate(size, 16);
+		if(!upload) return false;
+		std::memcpy(upload.data, data, size);
 		if(!EnsureBlitEncoder(m_impl)) return false;
-
-		id<MTLBuffer> staging = [m_impl->commandQueue.device newBufferWithBytes:data
-			length:size options:MTLResourceStorageModeShared];
-		if(staging == nil) return false;
-		RetainResource(m_impl, staging);
-		[m_impl->blitEncoder copyFromBuffer:staging
-			sourceOffset:0
-			toBuffer:NativeBuffer(buffer)
-			destinationOffset:offset
-			size:size];
-#if !__has_feature(objc_arc)
-		[staging release];
-#endif
 		MetalOperation operation = {};
 		operation.kind = OperationKind::BufferWrite;
 		operation.buffer = buffer;
 		m_impl->operations.push_back(operation);
+		[m_impl->blitEncoder copyFromBuffer:upload.page->buffer
+			sourceOffset:static_cast<NSUInteger>(upload.offset)
+			toBuffer:NativeBuffer(buffer)
+			destinationOffset:offset
+			size:size];
 		return true;
 	}
 
@@ -1400,47 +1454,31 @@ namespace dyf::Backends
 			return false;
 		}
 
-		if(texture->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT) return false;
+		if(texture->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT ||
+			(pixelSize & (pixelSize - 1u)) != 0) return false;
 
 		id<MTLTexture> nativeTexture = NativeTexture(texture);
-		id<MTLDevice> device = m_impl->commandQueue.device;
 		const uint64_t stagingSize64 = static_cast<uint64_t>(tightRowPitch) * mipHeight;
 		if(stagingSize64 > std::numeric_limits<NSUInteger>::max())
 		{
 			return false;
 		}
-		const NSUInteger stagingSize = static_cast<NSUInteger>(stagingSize64);
-		id<MTLBuffer> staging = [device newBufferWithLength:stagingSize
-			options:MTLResourceStorageModeShared];
-		if(staging == nil) return false;
-		auto* destination = static_cast<uint8_t*>(staging.contents);
+		if(!m_impl->uploadArena) return false;
+		ReserveForAppend(m_impl->operations);
+		if(texture->IsSwapchainImage())
+			ReserveForAppend(m_impl->referencedSwapchainImages);
+		// Metal blit offsets and row pitches are multiples of the pixel size.
+		// Accepted native texture formats are 2/4/8/16-byte pixels, so 16 covers all.
+		const auto upload = m_impl->uploadArena->Allocate(stagingSize64, 16);
+		if(!upload) return false;
+		auto* destination = upload.data;
 		const auto* source = static_cast<const uint8_t*>(data);
 		// 입력 행 사이의 패딩만 건너뛴다. 마지막 행 뒤의 패딩은 요구하거나 읽지 않는다.
 		for(uint32_t row = 0; row < mipHeight; ++row)
 			std::memcpy(destination + static_cast<size_t>(row) * tightRowPitch,
 				source + static_cast<size_t>(row) * rowPitch, tightRowPitch);
 
-		if(!EnsureBlitEncoder(m_impl))
-		{
-#if !__has_feature(objc_arc)
-			[staging release];
-#endif
-			return false;
-		}
-		RetainResource(m_impl, staging);
-		[m_impl->blitEncoder
-			copyFromBuffer:staging
-			sourceOffset:0
-			sourceBytesPerRow:tightRowPitch
-			sourceBytesPerImage:0
-			sourceSize:MTLSizeMake(mipWidth, mipHeight, 1)
-			toTexture:nativeTexture
-			destinationSlice:arrayLayer
-			destinationLevel:mipLevel
-			destinationOrigin:MTLOriginMake(0, 0, 0)];
-#if !__has_feature(objc_arc)
-		[staging release];
-#endif
+		if(!EnsureBlitEncoder(m_impl)) return false;
 		MetalOperation operation = {};
 		operation.kind = OperationKind::TextureWrite;
 		operation.texture = texture;
@@ -1448,6 +1486,16 @@ namespace dyf::Backends
 		operation.arrayLayer = arrayLayer;
 		m_impl->operations.push_back(operation);
 		TrackSwapchainImage(m_impl, texture);
+		[m_impl->blitEncoder
+			copyFromBuffer:upload.page->buffer
+			sourceOffset:static_cast<NSUInteger>(upload.offset)
+			sourceBytesPerRow:tightRowPitch
+			sourceBytesPerImage:0
+			sourceSize:MTLSizeMake(mipWidth, mipHeight, 1)
+			toTexture:nativeTexture
+			destinationSlice:arrayLayer
+			destinationLevel:mipLevel
+			destinationOrigin:MTLOriginMake(0, 0, 0)];
 		return true;
 	}
 

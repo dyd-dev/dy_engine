@@ -2,6 +2,7 @@
 
 #include "dyf/RHI/ICommandList.h"
 #include "VulkanContext.h"
+#include "VulkanUpload.h"
 
 #include <map>
 #include <unordered_map>
@@ -25,7 +26,7 @@ namespace dyf::Backends
 	class VulkanCommandList final : public dyf::RHI::ICommandList
 	{
 	public:
-		explicit VulkanCommandList(const VulkanContext& context);
+		explicit VulkanCommandList(const VulkanContext& context, std::shared_ptr<VulkanUploadPool> uploadPool = {});
         void BeginDebugEventNative(const char*,const RHI::DebugLabelColor&) override;
         void EndDebugEventNative() override;
         void InsertDebugMarkerNative(const char*,const RHI::DebugLabelColor&) override;
@@ -100,19 +101,12 @@ namespace dyf::Backends
 			uint32_t arrayLayer = 0;
 		};
 
-		struct StagingAllocation
-		{
-			VkBuffer buffer = VK_NULL_HANDLE;
-			VkDeviceMemory memory = VK_NULL_HANDLE;
-		};
-
 		struct VertexBinding
 		{
 			VulkanBuffer* buffer = nullptr;
 			uint32_t offset = 0;
 		};
 
-		[[nodiscard]] bool CreateStagingAllocation(const void* data, uint32_t size, StagingAllocation& allocation);
 		[[nodiscard]] bool RequireBufferState(VulkanBuffer* buffer, dyf::RHI::ResourceState state);
 		[[nodiscard]] bool RequireTextureState(
 			VulkanTexture* texture,
@@ -140,7 +134,7 @@ namespace dyf::Backends
 		VulkanResourceSet* m_boundResourceSet = nullptr;
 		VulkanBuffer* m_indexBuffer = nullptr;
 		VulkanTexture* m_depthTexture = nullptr;
-		std::vector<StagingAllocation> m_stagingAllocations;
+		VulkanUploadArena m_uploadArena;
 		std::vector<Operation> m_operations;
 		std::unordered_map<VulkanBuffer*, dyf::RHI::ResourceState> m_bufferStates;
 		std::map<std::pair<VulkanTexture*, uint32_t>, dyf::RHI::ResourceState> m_textureStates;

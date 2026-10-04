@@ -90,6 +90,8 @@ namespace dyf::Backends
 		explicit Impl(VulkanDevice& owner) : m_owner(owner) {}
 		~Impl();
         const VulkanContext& Context() const {return m_context;}
+		RHI::UploadMemoryStatistics GetUploadMemoryStatistics() const
+		{ return m_uploadPool ? m_uploadPool->GetStatistics() : RHI::UploadMemoryStatistics{}; }
 		bool IsLost() const {return m_submissionFaulted;}
         bool Supports(RHI::Feature feature) const
         {
@@ -179,6 +181,7 @@ namespace dyf::Backends
 		void DestroyDeviceResources();
 
 		VulkanContext m_context;
+		std::shared_ptr<VulkanUploadPool> m_uploadPool;
 		VulkanSwapchain m_swapchain;
 		void* m_windowHandle = nullptr;
         VkDebugUtilsMessengerEXT m_debugMessenger = VK_NULL_HANDLE;
@@ -274,6 +277,8 @@ namespace dyf::Backends
 
 
 uint64_t VulkanDevice::GetLastSubmissionNative() const {return m_impl->GetLastSubmission();}
+RHI::UploadMemoryStatistics VulkanDevice::GetUploadMemoryStatisticsNative() const
+{ return m_impl->GetUploadMemoryStatistics(); }
 uint64_t VulkanDevice::GetCompletedSubmissionNative() {return m_impl->GetCompletedSubmission();}
 void VulkanDevice::DiscardCommandListNative(RHI::ICommandList* list) {m_impl->DiscardCommandList(list);}
 
@@ -764,8 +769,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		if (m_context.device == VK_NULL_HANDLE || m_submissionFaulted) return nullptr;
 		try
 		{
+			if (!m_uploadPool) m_uploadPool = CreateVulkanUploadPool(m_context);
 			std::unique_ptr<VulkanCommandList, VulkanObjectDeleter> commandList(
-				new VulkanCommandList(m_context));
+				new VulkanCommandList(m_context, m_uploadPool));
 			VulkanCommandList* result = commandList.get();
 			m_acquiredCommandLists.push_back(std::move(commandList));
 			return result;
@@ -1681,6 +1687,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			m_submissions.clear();
 		}
 		m_acquiredCommandLists.clear();
+		// Commands have retired under their fences (or shutdown established idle/loss).
+		// Drop cached native pages while VkDevice still exists.
+		m_uploadPool.reset();
 		m_failedReadback.reset();
 		std::fill(m_frameSlots.begin(), m_frameSlots.end(), VK_NULL_HANDLE);
 

@@ -53,6 +53,7 @@ namespace dyf::Backends
     struct D3D12InternalState
     {
         ComPtr<ID3D12Device> device;
+        std::shared_ptr<D3D12UploadPool> uploadPool;
         D3D12_RESOURCE_BINDING_TIER resourceBindingTier = D3D12_RESOURCE_BINDING_TIER_1;
         D3D_FEATURE_LEVEL resourceBindingFeatureLevel = D3D_FEATURE_LEVEL_11_0;
         ComPtr<ID3D12InfoQueue> infoQueue; // 디버그 빌드: D3D12 검증 메시지 수집
@@ -368,6 +369,7 @@ namespace dyf::Backends
         if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_internal->device)))) {
             return -1;
         }
+        m_internal->uploadPool = MakeD3D12UploadPool(m_internal->device.Get());
 
         D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
         const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
@@ -419,6 +421,11 @@ namespace dyf::Backends
 
 
 uint64_t D3D12Device::GetLastSubmissionNative() const {return m_internal->lastSubmittedValue;}
+RHI::UploadMemoryStatistics D3D12Device::GetUploadMemoryStatisticsNative() const
+{
+    return m_internal && m_internal->uploadPool
+        ? m_internal->uploadPool->GetStatistics() : RHI::UploadMemoryStatistics{};
+}
 uint64_t D3D12Device::GetCompletedSubmissionNative() {uint64_t value=0; return m_internal->CollectCompletedWork(value)?value:0;}
 void D3D12Device::DiscardCommandListNative(RHI::ICommandList* list) {auto& active=m_internal->activeCommandLists; active.erase(std::remove_if(active.begin(),active.end(),[list](const auto& value){return value.get()==list;}),active.end());}
 
@@ -900,8 +907,12 @@ void D3D12Device::DestroySwapchainNative()
 
         if (!m_internal->CollectCompletedWork()) return nullptr;
 
+        // Also supports native fixtures that supply a device without Initialize.
+        if (!m_internal->uploadPool)
+            m_internal->uploadPool = MakeD3D12UploadPool(m_internal->device.Get());
+
         auto commandList = std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>(
-            new D3D12CommandList(m_internal->device.Get()));
+            new D3D12CommandList(m_internal->device.Get(), m_internal->uploadPool));
         if (commandList->GetNativeList() == nullptr) return nullptr;
         return m_internal->activeCommandLists.emplace_back(std::move(commandList)).get();
     }

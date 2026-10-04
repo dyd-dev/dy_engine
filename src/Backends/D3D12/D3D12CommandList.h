@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dyf/RHI/ICommandList.h"
+#include "D3D12Upload.h"
 
 #include <cstdint>
 #include <map>
@@ -25,7 +26,8 @@ namespace dyf::Backends
     class D3D12CommandList final : public RHI::ICommandList
     {
     public:
-        explicit D3D12CommandList(void* nativeDevice);
+        explicit D3D12CommandList(void* nativeDevice,
+            std::shared_ptr<D3D12UploadPool> uploadPool = {});
         void ResetTimestampsNative(RHI::TimestampQueryHandle, uint32_t, uint32_t) override;
         void WriteTimestampNative(RHI::TimestampQueryHandle, uint32_t) override;
         void MarkTimestampsSubmitted(uint64_t completion);

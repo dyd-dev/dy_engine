@@ -68,23 +68,62 @@ namespace
 // buffers; upload and draw submissions use the same queue, so no CPU wait is needed.
 bool Renderer::UpdateInstanceBuffer(const Scene& scene,RHI::ICommandList& commands)
 {
-    if(!UsesInstanceStream() || !scene.GetEntityCount()) {instanceBuffer=nullptr;instanceReady=false;return true;}
-    if(scene.GetEntityCount()>UINT32_MAX/sizeof(Math::float4x4))return false;
-    const auto bytes=static_cast<uint32_t>(scene.GetEntityCount()*sizeof(Math::float4x4));
+    pendingInstanceScene=scene.m_lifetime;
+    pendingInstanceRevision=scene.m_transformRevision;
+    pendingInstanceCount=scene.GetEntityCount();
+    if(!UsesInstanceStream() || !pendingInstanceCount) {
+        instanceBuffer=nullptr;instanceReady=false;return true;
+    }
+    if(pendingInstanceCount>UINT32_MAX/sizeof(Math::float4x4))return false;
+    const auto bytes=static_cast<uint32_t>(pendingInstanceCount*sizeof(Math::float4x4));
     if(!instanceBuffer || instanceBuffer->GetDesc().size!=bytes) {
         instanceBuffer=device->CreateBuffer({bytes,sizeof(Math::float4x4),RHI::BufferUsage::Vertex,RHI::ResourceState::CopyDestination});
         instanceReady=false;
     }
     if(!instanceBuffer)return false;
-    std::vector<Math::float4x4> transforms;
-    transforms.reserve(scene.GetEntityCount());
-    for(uint32_t i=0;i<scene.GetEntityCount();++i)transforms.push_back(scene.GetTransform(static_cast<EntityID>(i)).worldMatrix);
+    const bool sameScene=!instanceScene.expired() &&
+        !instanceScene.owner_before(pendingInstanceScene) && !pendingInstanceScene.owner_before(instanceScene);
+    bool full=!instanceReady || !sameScene || instanceCount!=pendingInstanceCount;
+    if(!full && instanceRevision==pendingInstanceRevision)return true;
+
+    instanceScratch.resize(pendingInstanceCount);
+    instanceRanges.clear();
+    if(!full) {
+        for(uint32_t i=0;i<pendingInstanceCount;++i) {
+            if(scene.m_entityTransformRevisions[i]<=instanceRevision)continue;
+            if(!instanceRanges.empty() && instanceRanges.back().first+instanceRanges.back().count==i)
+                ++instanceRanges.back().count;
+            else instanceRanges.push_back({i,1});
+            // Bound fragmented work rather than issuing hundreds of tiny copies.
+            if(instanceRanges.size()>32) {full=true;break;}
+        }
+    }
+    if(full) {
+        instanceRanges.clear();instanceRanges.push_back({0,pendingInstanceCount});
+    }
+    for(const auto& range:instanceRanges)
+        for(uint32_t i=range.first;i<range.first+range.count;++i)
+            instanceScratch[i]=scene.GetTransform(static_cast<EntityID>(i)).worldMatrix;
+    if(instanceRanges.empty())return true;
     if(instanceReady) {
         const RHI::ResourceBarrierDesc barrier={instanceBuffer,nullptr,RHI::ResourceState::VertexBuffer,RHI::ResourceState::CopyDestination,{}};
         commands.ResourceBarrier(&barrier,1);
     }
-    return RecordBufferUpload(device,commands,instanceBuffer,transforms.data(),bytes,RHI::ResourceState::VertexBuffer);
+    for(const auto& range:instanceRanges)
+        if(!device->UpdateBuffer(commands,instanceBuffer,range.first*sizeof(Math::float4x4),
+            instanceScratch.data()+range.first,range.count*sizeof(Math::float4x4)))return false;
+    const RHI::ResourceBarrierDesc ready={instanceBuffer,nullptr,RHI::ResourceState::CopyDestination,RHI::ResourceState::VertexBuffer,{}};
+    commands.ResourceBarrier(&ready,1);
+    return true;
 }
+
+void Renderer::CommitFrameData()
+{
+    instanceScene=pendingInstanceScene;instanceRevision=pendingInstanceRevision;instanceCount=pendingInstanceCount;
+    lightingBytes.swap(pendingLightingBytes);
+    if(config.lighting.enabled && config.lighting.shadows)shadowBytes.swap(pendingShadowBytes);
+}
+
 RHI::ResourceSetHandle Renderer::CachedResourceSet(RHI::PipelineHandle selectedPipeline,
     const std::vector<RHI::ResourceBinding>& bindings,std::vector<CachedSet>& cache)
 {
@@ -178,20 +217,28 @@ bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList&
 	{
 		if(materialStates.empty()) {materialIndexBuffer=nullptr;materialIndexReady=false;return true;}
 		// 기본 셰이더의 28개 텍스처 단위로 묶어 재질 수와 관계없이 바인딩한다.
-		struct Page
-		{
-			std::vector<RHI::TextureHandle> textures;
-			std::vector<uint32_t> materials;
-		};
-		std::vector<Page> pages(1);
-		std::vector<uint32_t> indices(materialStates.size() * 8, 0);
+        if(materialPages.empty())materialPages.emplace_back();
+        for(auto& page:materialPages) {page.textures.clear();page.materials.clear();}
+        uint32_t pageCount=1;
+        auto& indices=materialIndexScratch;
+        indices.assign(materialStates.size()*8,0);
 		for(uint32_t i = 0; i < materialStates.size(); ++i)
 		{
-			auto textures = pages.back().textures;
-			for(auto* texture : materialStates[i].textures)
-				if(std::find(textures.begin(), textures.end(), texture) == textures.end()) textures.push_back(texture);
-			if(textures.size() > 28) pages.emplace_back();
-			auto& page = pages.back();
+			auto& current=materialPages[pageCount-1];
+            uint32_t textureCount=static_cast<uint32_t>(current.textures.size());
+            // The five slots may repeat textures; count each new handle once.
+            for(uint32_t slot=0;slot<kMaterialTextureCount;++slot) {
+                const auto texture=materialStates[i].textures[slot];
+                if(std::find(current.textures.begin(),current.textures.end(),texture)!=current.textures.end())continue;
+                bool seen=false;
+                for(uint32_t earlier=0;earlier<slot;++earlier)seen=seen || materialStates[i].textures[earlier]==texture;
+                if(!seen)++textureCount;
+            }
+            if(textureCount>28) {
+                ++pageCount;
+                if(materialPages.size()<pageCount)materialPages.emplace_back();
+            }
+            auto& page=materialPages[pageCount-1];
 			page.materials.push_back(i);
 			for(uint32_t slot = 0; slot < kMaterialTextureCount; ++slot)
 			{
@@ -209,16 +256,19 @@ bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList&
         }
         if(!materialIndexBuffer)return false;
         auto* materialBuffer=materialIndexBuffer;
-        if(materialIndexReady) {
-            const RHI::ResourceBarrierDesc barrier={materialBuffer,nullptr,RHI::ResourceState::ShaderResource,RHI::ResourceState::CopyDestination,{}};
-            commands.ResourceBarrier(&barrier,1);
+        if(!materialIndexReady || indices!=materialIndexBytes) {
+            if(materialIndexReady) {
+                const RHI::ResourceBarrierDesc barrier={materialBuffer,nullptr,RHI::ResourceState::ShaderResource,RHI::ResourceState::CopyDestination,{}};
+                commands.ResourceBarrier(&barrier,1);
+            }
+            if(!RecordBufferUpload(device,commands,materialBuffer,indices.data(),bytes,RHI::ResourceState::ShaderResource))return false;
+            materialIndexRecorded=true;
         }
-        if(!RecordBufferUpload(device,commands,materialBuffer,indices.data(),bytes,RHI::ResourceState::ShaderResource))return false;
-        materialIndexRecorded=true;
 		sets.assign(draws ? scene.GetEntityCount() : materialStates.size(), nullptr);
-		for(const auto& page : pages)
-		{
-			std::vector<RHI::ResourceBinding> bindings;
+		for(uint32_t pageIndex=0;pageIndex<pageCount;++pageIndex)
+        {
+            const auto& page=materialPages[pageIndex];
+            auto& bindings=mainBindingScratch;bindings.clear();
 			for(uint32_t i = 0; i < 28; ++i)
 				bindings.push_back({0, i, nullptr, page.textures[i < page.textures.size() ? i : 0], 0, 0, {}});
 			bindings.push_back({1u, 0, lightingBuffer, nullptr,
@@ -237,7 +287,7 @@ bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList&
 				{
 					const auto material = ToIndex(scene.GetEntityMaterial(static_cast<EntityID>(entity)));
 					if(std::find(page.materials.begin(), page.materials.end(), material) == page.materials.end()) continue;
-					auto combined = bindings;
+					auto& combined=mainCombinedBindingScratch;combined.assign(bindings.begin(),bindings.end());
 					const auto& extra = (*draws)[entity].vertexResources;
 					combined.insert(combined.end(), extra.begin(), extra.end());
 					sets[entity] = CachedResourceSet(pipeline,combined,mainSets);
@@ -267,7 +317,7 @@ bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList&
 			? ToIndex(scene.GetEntityMaterial(static_cast<EntityID>(setIndex))) : setIndex;
 		if(materialIndex >= materialStates.size()) continue;
 		const auto& material = materialStates[materialIndex];
-		std::vector<RHI::ResourceBinding> bindings = {
+		auto& bindings=mainBindingScratch;bindings = {
 			{0u, 0, nullptr, material.textures[ToIndex(MaterialTextureKind::BaseColor)], 0, 0, {}},
 			{1u, 0, lightingBuffer, nullptr, 0, static_cast<uint32_t>(sizeof(RendererLightingConstants)), {}},
 			{4u, 0, nullptr, material.textures[ToIndex(MaterialTextureKind::MetallicRoughness)], 0, 0, {}},
@@ -415,13 +465,13 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 	RHI::TimestampQueryHandle shadowQuery)
 {
 	RHI::ResourceScope resources(*device);
-	std::vector<RHI::ResourceSetHandle> shadowSets;
+	auto& shadowSets=shadowSetScratch;
 	{
 		commands.BeginDebugEvent("Shadow");
 		shadowSets.resize(draws ? scene.GetEntityCount() : 1, nullptr);
 		for(uint32_t i = 0; i < shadowSets.size(); ++i)
 		{
-			std::vector<RHI::ResourceBinding> bindings = {{3u,
+			auto& bindings=shadowBindingScratch;bindings = {{3u,
 				0, shadowMatrixBuffer, nullptr, 0, static_cast<uint32_t>(sizeof(RendererShadowConstants)), {}}};
 			if(draws)
 			{
@@ -491,7 +541,7 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
 	RHI::TimestampQueryHandle mainQuery, RHI::TextureHandle output)
 {
 	RHI::ResourceScope resources(*device);
-	std::vector<RHI::ResourceSetHandle> materialSets;
+	auto& materialSets=mainSetScratch;
     struct MaterialBufferTransaction {
         Renderer& r;
         RHI::BufferHandle previous;

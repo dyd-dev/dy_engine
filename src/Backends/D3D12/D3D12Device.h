@@ -27,6 +27,7 @@ namespace dyf::Backends
         bool SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc&) const override;
         uint64_t GetCompletedSubmissionNative() override;
         uint64_t GetLastSubmissionNative() const override;
+        RHI::UploadMemoryStatistics GetUploadMemoryStatisticsNative() const override;
 
         bool CreateSwapchainNative(const RHI::SwapchainDesc& desc) override;
         bool BeginFrameNative() override;

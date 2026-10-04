@@ -199,6 +199,9 @@ namespace dyf::Backends
 
     struct D3D12CommandListInternal
     {
+        explicit D3D12CommandListInternal(std::shared_ptr<D3D12UploadPool> pool)
+            : uploads(std::move(pool)) {}
+
         struct DiscardRequest
         {
             ComPtr<ID3D12Resource> resource;
@@ -207,6 +210,8 @@ namespace dyf::Backends
 
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> commandList;
+        // The native command is destroyed only after fence-safe retirement or discard.
+        RHI::Detail::UploadArena<D3D12UploadPage> uploads;
         ID3D12Device* device = nullptr;
         D3D12PipelineState* pipeline = nullptr;
         D3D12Texture* depthTexture = nullptr;
@@ -329,8 +334,10 @@ namespace dyf::Backends
         }
     }
 
-    D3D12CommandList::D3D12CommandList(void* nativeDevice)
-        : m_internal(new D3D12CommandListInternal())
+    D3D12CommandList::D3D12CommandList(void* nativeDevice,
+        std::shared_ptr<D3D12UploadPool> uploadPool)
+        : m_internal(new D3D12CommandListInternal(uploadPool ? std::move(uploadPool)
+            : MakeD3D12UploadPool(static_cast<ID3D12Device*>(nativeDevice))))
     {
         auto* device = static_cast<ID3D12Device*>(nativeDevice);
         if (device == nullptr)
@@ -1308,36 +1315,18 @@ namespace dyf::Backends
         auto* destination = static_cast<ID3D12Resource*>(buffer->GetNativeResource());
         if (destination == nullptr) return false;
 
-        D3D12_HEAP_PROPERTIES heapProperties = {};
-        heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
-        const auto resourceDesc = CD3DX12_RESOURCE_DESC::Buffer(size);
+        const auto upload = m_internal->uploads.Allocate(size);
+        if (!upload) return false;
+        std::memcpy(upload.data, data, size);
 
-        ComPtr<ID3D12Resource> upload;
-        if (FAILED(m_internal->device->CreateCommittedResource(
-                &heapProperties,
-                D3D12_HEAP_FLAG_NONE,
-                &resourceDesc,
-                D3D12_RESOURCE_STATE_GENERIC_READ,
-                nullptr,
-                IID_PPV_ARGS(&upload))))
-        {
-            return false;
-        }
-        void* mapped = nullptr;
-        D3D12_RANGE readRange = {};
-        if (FAILED(upload->Map(0, &readRange, &mapped))) return false;
-        std::memcpy(mapped, data, size);
-        D3D12_RANGE writeRange = { 0, size };
-        upload->Unmap(0, &writeRange);
-
-        m_internal->commandList->CopyBufferRegion(
-            destination, offset, upload.Get(), 0, size);
+        // Finish fallible bookkeeping before emitting a native command.
         RetainObject(m_internal->retainedObjects, destination);
-        RetainObject(m_internal->retainedObjects, upload.Get());
         D3D12Operation operation = {};
         operation.kind = OperationKind::BufferWrite;
         operation.buffer = buffer;
         m_internal->operations.push_back(operation);
+        m_internal->commandList->CopyBufferRegion(
+            destination, offset, upload.page->resource.Get(), upload.offset, size);
         return true;
     }
 
@@ -1394,53 +1383,31 @@ namespace dyf::Backends
         if (requiredSourceSize > slicePitch || requiredSourceSize > dataSize)
             return false;
 
-        D3D12_HEAP_PROPERTIES heapProperties = {};
-        heapProperties.Type = D3D12_HEAP_TYPE_UPLOAD;
-        const auto uploadDesc = CD3DX12_RESOURCE_DESC::Buffer(uploadSize);
-        ComPtr<ID3D12Resource> upload;
-        if (FAILED(m_internal->device->CreateCommittedResource(
-                &heapProperties,
-                D3D12_HEAP_FLAG_NONE,
-                &uploadDesc,
-                D3D12_RESOURCE_STATE_GENERIC_READ,
-                nullptr,
-                IID_PPV_ARGS(&upload))))
-        {
-            return false;
-        }
-
-        uint8_t* mapped = nullptr;
-        D3D12_RANGE readRange = {};
-        if (FAILED(upload->Map(
-                0, &readRange, reinterpret_cast<void**>(&mapped))))
-        {
-            return false;
-        }
+        const auto upload = m_internal->uploads.Allocate(
+            uploadSize, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+        if (!upload) return false;
         const auto* source = static_cast<const uint8_t*>(data);
         for (UINT row = 0; row < rowCount; ++row)
         {
             std::memcpy(
-                mapped + footprint.Offset +
+                upload.data + footprint.Offset +
                     static_cast<std::size_t>(row) * footprint.Footprint.RowPitch,
                 source + static_cast<std::size_t>(row) * rowPitch,
                 static_cast<std::size_t>(rowSize));
         }
-        D3D12_RANGE writeRange = { 0, static_cast<SIZE_T>(uploadSize) };
-        upload->Unmap(0, &writeRange);
-
-        const CD3DX12_TEXTURE_COPY_LOCATION sourceLocation(upload.Get(), footprint);
-        const CD3DX12_TEXTURE_COPY_LOCATION destinationLocation(destination, subresource);
-        m_internal->commandList->CopyTextureRegion(
-            &destinationLocation, 0, 0, 0, &sourceLocation, nullptr);
+        footprint.Offset += upload.offset;
         TrackSwapchainImage(m_internal->referencedSwapchainImages, texture);
         RetainObject(m_internal->retainedObjects, destination);
-        RetainObject(m_internal->retainedObjects, upload.Get());
         D3D12Operation operation = {};
         operation.kind = OperationKind::TextureWrite;
         operation.texture = texture;
         operation.mipLevel = mipLevel;
         operation.arrayLayer = arrayLayer;
         m_internal->operations.push_back(operation);
+        const CD3DX12_TEXTURE_COPY_LOCATION sourceLocation(upload.page->resource.Get(), footprint);
+        const CD3DX12_TEXTURE_COPY_LOCATION destinationLocation(destination, subresource);
+        m_internal->commandList->CopyTextureRegion(
+            &destinationLocation, 0, 0, 0, &sourceLocation, nullptr);
         return true;
     }
 

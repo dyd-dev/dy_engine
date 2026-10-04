@@ -223,6 +223,28 @@ void Renderer::SwapResources(Renderer& other)
     swap(lightingReady,other.lightingReady);swap(shadowReady,other.shadowReady);
     swap(instanceReady,other.instanceReady);swap(materialIndexReady,other.materialIndexReady);
     swap(mainSets,other.mainSets);swap(shadowSets,other.shadowSets);
+    swap(instanceScene,other.instanceScene);
+    swap(pendingInstanceScene,other.pendingInstanceScene);
+    swap(instanceRevision,other.instanceRevision);
+    swap(pendingInstanceRevision,other.pendingInstanceRevision);
+    swap(instanceCount,other.instanceCount);
+    swap(pendingInstanceCount,other.pendingInstanceCount);
+    swap(instanceScratch,other.instanceScratch);
+    swap(instanceRanges,other.instanceRanges);
+    swap(lightingBytes,other.lightingBytes);
+    swap(pendingLightingBytes,other.pendingLightingBytes);
+    swap(shadowBytes,other.shadowBytes);
+    swap(pendingShadowBytes,other.pendingShadowBytes);
+    swap(materialIndexBytes,other.materialIndexBytes);
+    swap(materialIndexScratch,other.materialIndexScratch);
+    swap(lightingIndexScratch,other.lightingIndexScratch);
+    swap(materialPages,other.materialPages);
+    swap(mainSetScratch,other.mainSetScratch);
+    swap(shadowSetScratch,other.shadowSetScratch);
+    swap(mainBindingScratch,other.mainBindingScratch);
+    swap(mainCombinedBindingScratch,other.mainCombinedBindingScratch);
+    swap(shadowBindingScratch,other.shadowBindingScratch);
+
     swap(m_meshes,other.m_meshes);
     swap(m_textures,other.m_textures);
     swap(m_indices,other.m_indices);
@@ -526,6 +548,7 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
             const bool submitted=instancesUpdated && frameDataCommand->Close() && nativeDevice->Submit(&frameDataCommand,1);
             if(!submitted) return RendererFailure("Frame data upload/submission failed.");
             lightingReady=true;shadowReady=shadowMatrixBuffer!=nullptr;instanceReady=instanceBuffer!=nullptr;
+            CommitFrameData();
             buffers.committed=true;
         }
 
@@ -642,7 +665,7 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
             samples.completion=completion;
             lastRenderCompletion=completion;
             lastStatistics=recordingStatistics;
-            if(materialIndexRecorded)materialIndexReady=true;
+            if(materialIndexRecorded) {materialIndexReady=true;materialIndexBytes.swap(materialIndexScratch);}
         }
         if(!drawn)return RendererFailure("Scene draw submission failed.");
         if(config.enableHdrRendering) hdrState=RHI::ResourceState::ShaderResource;
@@ -982,9 +1005,20 @@ bool Renderer::UpdateLightingBuffer(
 	});
 	if(lightingBuffer == nullptr) return false;
 
+    // Retain capacity and reproduce stable priority ordering without stable_sort scratch.
+    const auto selectIndices=[&](const auto& lights,uint32_t capacity,uint32_t slot)->const std::vector<uint32_t>& {
+        auto& indices=lightingIndexScratch[slot];indices.clear();
+        indices.reserve(lights.size());
+        for(uint32_t i=0;i<lights.size();++i)if(lights[i].enabled)indices.push_back(i);
+        std::sort(indices.begin(),indices.end(),[&](uint32_t a,uint32_t b) {
+            return lights[a].priority==lights[b].priority ? a<b : lights[a].priority>lights[b].priority;
+        });
+        if(indices.size()>capacity)indices.resize(capacity);
+        return indices;
+    };
 	RendererLightingConstants constants = {};
-	const auto directionalIndices=SelectActiveLightIndices(scene.DirectionalLights(),static_cast<uint32_t>(std::size(constants.directionalLights)));
-	const auto pointIndices=SelectActiveLightIndices(scene.PointLights(),static_cast<uint32_t>(std::size(constants.pointLights)));
+	const auto& directionalIndices=selectIndices(scene.DirectionalLights(),static_cast<uint32_t>(std::size(constants.directionalLights)),0);
+	const auto& pointIndices=selectIndices(scene.PointLights(),static_cast<uint32_t>(std::size(constants.pointLights)),1);
 	const DirectionalLight* light = directionalIndices.empty() ? nullptr : &scene.DirectionalLights()[directionalIndices.front()];
 	const PointLight* pointLight = pointIndices.empty() ? nullptr : &scene.PointLights()[pointIndices.front()];
 	const Math::float3 lightDirection = light != nullptr
@@ -1038,9 +1072,9 @@ bool Renderer::UpdateLightingBuffer(
 	}
 
     // 기본 셰이더의 고정 배열 크기에 맞춰 활성 광원을 선택하고 GPU 형식으로 변환한다.
-        const auto spotIndices=SelectActiveLightIndices(scene.SpotLights(),static_cast<uint32_t>(std::size(constants.spotLights)));
-        const auto rectAreaIndices=SelectActiveLightIndices(scene.RectAreaLights(),static_cast<uint32_t>(std::size(constants.rectAreaLights)));
-        const auto discAreaIndices=SelectActiveLightIndices(scene.DiscAreaLights(),static_cast<uint32_t>(std::size(constants.discAreaLights)));
+        const auto& spotIndices=selectIndices(scene.SpotLights(),static_cast<uint32_t>(std::size(constants.spotLights)),2);
+        const auto& rectAreaIndices=selectIndices(scene.RectAreaLights(),static_cast<uint32_t>(std::size(constants.rectAreaLights)),3);
+        const auto& discAreaIndices=selectIndices(scene.DiscAreaLights(),static_cast<uint32_t>(std::size(constants.discAreaLights)),4);
 		const uint32_t directionalCount = static_cast<uint32_t>(directionalIndices.size());
 		for(uint32_t index = 0u; index < directionalCount; ++index)
 		{
@@ -1113,6 +1147,9 @@ bool Renderer::UpdateLightingBuffer(
 
         constants.shadowLight = {1,0,constants.cameraPosition.w,constants.directionalLightDirection.w};
 
+    const auto* first=reinterpret_cast<const uint8_t*>(&constants);
+    pendingLightingBytes.assign(first,first+sizeof(constants));
+    if(lightingReady && pendingLightingBytes==lightingBytes)return true;
 	if(lightingReady) { const RHI::ResourceBarrierDesc barrier={lightingBuffer,nullptr,RHI::ResourceState::ConstantBuffer,RHI::ResourceState::CopyDestination,{}}; commandList.ResourceBarrier(&barrier,1); }
 	if(!device->UpdateBuffer(
 			commandList,
@@ -1145,8 +1182,11 @@ bool Renderer::UpdateShadowBuffer(
 	});
 	if(shadowMatrixBuffer == nullptr) return false;
 
-    if(shadowReady) { const RHI::ResourceBarrierDesc barrier={shadowMatrixBuffer,nullptr,RHI::ResourceState::ConstantBuffer,RHI::ResourceState::CopyDestination,{}}; commandList.ResourceBarrier(&barrier,1); }
     const auto& shadow=shadows.constants;
+    const auto* first=reinterpret_cast<const uint8_t*>(&shadow);
+    pendingShadowBytes.assign(first,first+sizeof(shadow));
+    if(shadowReady && pendingShadowBytes==shadowBytes)return true;
+    if(shadowReady) { const RHI::ResourceBarrierDesc barrier={shadowMatrixBuffer,nullptr,RHI::ResourceState::ConstantBuffer,RHI::ResourceState::CopyDestination,{}}; commandList.ResourceBarrier(&barrier,1); }
 
 	if(!device->UpdateBuffer(
 			commandList,

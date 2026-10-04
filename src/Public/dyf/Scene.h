@@ -79,6 +79,7 @@ namespace dyf
 
     private:
         friend struct EntityHandle;
+        friend class Renderer;
         template<typename T> friend struct LightHandle;
         template<typename T> std::vector<T>& Lights();
         void SetMaterial(MaterialID material, const MaterialDesc& value);
@@ -90,12 +91,15 @@ namespace dyf
         std::vector<MaterialID> m_entityMaterials;
         std::vector<Transform> m_entityTransforms;
         std::vector<EntityLightingDesc> m_entityLighting;
+        // Append and real transform edits stamp entities; each Renderer keeps its own cursor.
+        uint64_t m_transformRevision=0;
+        std::vector<uint64_t> m_entityTransformRevisions;
         std::vector<DirectionalLight> m_directionalLights;
         std::vector<PointLight> m_pointLights;
         std::vector<SpotLight> m_spotLights;
         std::vector<RectAreaLight> m_rectAreaLights;
         std::vector<DiscAreaLight> m_discAreaLights;
-        // 객체·광원 Handle의 만료 판정만 담당한다. Renderer에는 전달하지 않는다.
+        // Handles and Renderer caches compare the weak control block, including address reuse.
         std::shared_ptr<Scene> m_lifetime;
     };
 }

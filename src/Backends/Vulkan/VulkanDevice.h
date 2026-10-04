@@ -58,6 +58,7 @@ namespace dyf::Backends
 			uint32_t slicePitch) override;
 
 	protected:
+		RHI::UploadMemoryStatistics GetUploadMemoryStatisticsNative() const override;
 		int Initialize(const void* windowHandle, const dyf::RHI::DeviceDesc& desc) override;
 
 	private:

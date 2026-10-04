@@ -161,6 +161,7 @@ private:
     bool UsesStockGeometry() const;
     bool UsesInstanceStream() const;
     bool UpdateInstanceBuffer(const Scene&,RHI::ICommandList&);
+    void CommitFrameData();
     RHI::ResourceSetHandle CachedResourceSet(RHI::PipelineHandle,const std::vector<RHI::ResourceBinding>&,std::vector<CachedSet>&);
     void PruneResourceSets(std::vector<CachedSet>&);
     RHI::PipelineLayoutDesc MeshLayout(bool bindless, std::vector<RHI::ResourceBindingLayout>& bindings) const;
@@ -228,6 +229,24 @@ private:
     RHI::BufferHandle instanceBuffer=nullptr,materialIndexBuffer=nullptr;
     bool lightingReady=false,shadowReady=false,instanceReady=false,materialIndexReady=false;
     bool materialIndexRecorded=false;
+    std::weak_ptr<Scene> instanceScene,pendingInstanceScene;
+    uint64_t instanceRevision=0,pendingInstanceRevision=0;
+    uint32_t instanceCount=0,pendingInstanceCount=0;
+    std::vector<Math::float4x4> instanceScratch;
+    struct InstanceRange {uint32_t first,count;};
+    std::vector<InstanceRange> instanceRanges;
+    // Pending bytes are reusable scratch; committed bytes change only after Submit.
+    std::vector<uint8_t> lightingBytes,pendingLightingBytes,shadowBytes,pendingShadowBytes;
+    std::vector<uint32_t> materialIndexBytes,materialIndexScratch;
+    std::array<std::vector<uint32_t>,5> lightingIndexScratch;
+    struct MaterialPageScratch {
+        std::vector<RHI::TextureHandle> textures;
+        std::vector<uint32_t> materials;
+    };
+    std::vector<MaterialPageScratch> materialPages;
+    // RenderGraph may record Main and Shadow simultaneously: each owns its arrays.
+    std::vector<RHI::ResourceSetHandle> mainSetScratch,shadowSetScratch;
+    std::vector<RHI::ResourceBinding> mainBindingScratch,mainCombinedBindingScratch,shadowBindingScratch;
     std::vector<CachedSet> mainSets,shadowSets;
     RendererStatistics recordingStatistics,lastStatistics;
     RHI::FenceHandle lastRenderCompletion;
