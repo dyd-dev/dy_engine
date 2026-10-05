@@ -6,6 +6,10 @@
 
 namespace
 {
+    // =============================================================================
+    // [예제 범위 및 안내 출력]
+    // 현재 RHI 수준에서의 레이 트레이싱 디노이징(Ray Tracing Denoising) 지원 현황 출력
+    // =============================================================================
     void PrintScope()
     {
         std::cout <<
@@ -17,6 +21,7 @@ namespace
         "아직 제공되지 않는 실행 API를 호출하지 않으며 GPU 결과나 성능 수치를 만들지 않습니다.\n";
     }
 
+    // 개별 RHI 기능 지원 여부 출력 도우미 함수
     void PrintFeature(const dyf::RHI::IDevice& device, const char* name, dyf::RHI::Feature feature)
     {
         std::cout << "  Supports(" << name << ") = "
@@ -24,8 +29,12 @@ namespace
     }
 }
 
+// =============================================================================
+// [메인 진입점]
+// =============================================================================
 int main(int argc, char** argv)
 {
+    // 1. 도움말(--help) 인수 확인
     if(argc == 2 && std::strcmp(argv[1], "--help") == 0)
     {
         std::cout << "사용법: AdvancedRayTracingDenoising [--help]\n"
@@ -40,6 +49,7 @@ int main(int argc, char** argv)
         return 2;
     }
 
+    // 2. RHI 장치 생성
     std::unique_ptr<dyf::RHI::IDevice> device(dyf::RHI::IDevice::Create(dyf::RHI::DeviceDesc{}));
     if(!device)
     {
@@ -47,6 +57,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    // 3. 기능 및 백엔드 한도 조회
     PrintScope();
     std::cout << "다음 값은 현재 선택된 RHI 백엔드가 제공하는 기능/한도입니다.\n"
         "물리 GPU의 전체 기능 및 아직 없는 공개 실행 API의 사용 가능 여부와는 구분합니다.\n";
@@ -59,8 +70,8 @@ int main(int argc, char** argv)
     if(!device->Supports(dyf::RHI::Feature::Rasterization) && !device->Supports(dyf::RHI::Feature::Compute))
         std::cout << "현재 장치는 GPU raster/compute 실행을 제공하지 않습니다. Null 백엔드일 수 있으며, 장치 생성 성공만으로 GPU 가용성을 보장하지 않습니다.\n";
 
+    // 4. 향후 구현 경로 안내 및 미지원 종료 코드 반환
     // 완성 경로: 실제 저샘플 RT 입력 → depth/normal/motion/history → temporal 재투영/거절 → spatial 필터 → 품질 검증.
     std::cout << "결과: 이 주제의 전체 실행 예제는 현재 제공하지 않습니다(종료 코드 77).\n";
     return 77;
 }
-
