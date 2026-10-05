@@ -16,34 +16,51 @@ if(DY_LOG_CRASH_MONITOR)
     target_compile_definitions(dy_log_monitor PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
     target_compile_options(dy_log_monitor PRIVATE /W4 /utf-8)
     target_link_libraries(dy_log_monitor PRIVATE dbghelp)
+endif()
 
-    # Defer until consumer applications declared after add_subdirectory(dy_engine) exist.
-    # A copy target also refreshes the helper when only its source changed.
-    function(dy_copy_log_monitor directory)
+# Defer until applications declared after add_subdirectory(dy_engine) exist.
+function(dy_deploy_runtime)
+    set(runtime_files)
+    foreach(runtime IN ITEMS dy_log_monitor WinPixEventRuntime)
+        if(TARGET ${runtime})
+            list(APPEND runtime_files "$<TARGET_FILE:${runtime}>")
+        endif()
+    endforeach()
+    if(NOT runtime_files)
+        return()
+    endif()
+
+    set(copy_script "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/dy_runtime-$<CONFIG>.cmake")
+    add_custom_target(dy_runtime COMMAND "${CMAKE_COMMAND}" -P "${copy_script}" VERBATIM)
+    if(TARGET dy_log_monitor)
+        add_dependencies(dy_runtime dy_log_monitor)
+    endif()
+    set(directories "${CMAKE_SOURCE_DIR}")
+    set(destinations)
+    while(directories)
+        list(POP_FRONT directories directory)
         get_property(targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
         foreach(target IN LISTS targets)
             get_target_property(kind "${target}" TYPE)
             if(kind STREQUAL "EXECUTABLE" AND NOT target STREQUAL "dy_log_monitor")
-                # Resolve consumer paths outside the custom target command so
-                # CMP0112 OLD cannot add a reverse dependency on the consumer.
-                set(copy_script "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${target}_log_runtime-$<CONFIG>.cmake")
-                file(GENERATE OUTPUT "${copy_script}" CONTENT
-"file(MAKE_DIRECTORY [==[$<TARGET_FILE_DIR:${target}>]==])
-execute_process(COMMAND [==[${CMAKE_COMMAND}]==] -E copy_if_different
-    [==[$<TARGET_FILE:dy_log_monitor>]==] [==[$<TARGET_FILE_DIR:${target}>]==]
-    COMMAND_ERROR_IS_FATAL ANY)
-")
-                add_custom_target(${target}_log_runtime
-                    COMMAND "${CMAKE_COMMAND}" -P "${copy_script}"
-                    VERBATIM)
-                add_dependencies(${target}_log_runtime dy_log_monitor)
-                add_dependencies(${target} ${target}_log_runtime)
+                add_dependencies(${target} dy_runtime)
+                list(APPEND destinations "$<TARGET_FILE_DIR:${target}>")
             endif()
         endforeach()
         get_property(children DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
-        foreach(child IN LISTS children)
-            dy_copy_log_monitor("${child}")
-        endforeach()
-    endfunction()
-    cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL dy_copy_log_monitor "${CMAKE_SOURCE_DIR}")
-endif()
+        list(APPEND directories ${children})
+    endwhile()
+    # Resolve paths here so CMP0112 OLD cannot add consumer dependencies.
+    # The shared target refreshes runtime changes without relinking consumers.
+    file(GENERATE OUTPUT "${copy_script}" CONTENT
+"set(files [==[${runtime_files}]==])
+set(directories [==[${destinations}]==])
+list(REMOVE_DUPLICATES directories)
+foreach(directory IN LISTS directories)
+    file(MAKE_DIRECTORY \"\${directory}\")
+    execute_process(COMMAND [==[${CMAKE_COMMAND}]==] -E copy_if_different
+        \${files} \"\${directory}\" COMMAND_ERROR_IS_FATAL ANY)
+endforeach()
+")
+endfunction()
+cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL dy_deploy_runtime)

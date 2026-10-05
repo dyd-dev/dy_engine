@@ -119,7 +119,7 @@ dyf/RHI의 중첩 CMake 예제와 advanced의 예제 디렉터리를 자동 등�
 
 공식 예제는 `examples/dyf`, `examples/RHI`, `examples/advanced`의 46개로 교체했습니다. 이전 9개 예제의 옵션 파서와 콘솔 RenderGraph 출력 전용 검사는 제거했습니다. 현재 RenderGraph는 `advanced/21_RenderGraph`의 두 실행 모드와 별도 CPU 검사로 확인합니다.
 
-일반 예제는 `add_executable`과 `target_link_libraries(... PRIVATE dy_engine)`을 사용합니다. 셰이더는 `dy_compile_shader`에 언어별 소스와 단계를 지정하면 CI 의존성·산출물에도 등록됩니다. Models/Assets/Textures는 변경·삭제까지 실행 폴더에 동기화합니다. 수동 CMake CI 구성에는 `-DDY_CI=ON -DDY_EXTEND_MODEL=ON`을 함께 지정합니다(`ci.py`는 자동 지정).
+일반 예제는 `add_executable`과 `target_link_libraries(... PRIVATE dy_engine)`을 사용합니다. 셰이더는 `dy_compile_shader`에 언어별 소스와 단계를 지정하면 CI 의존성·산출물에도 등록됩니다. CI에서는 Models/Assets/Textures를 변경·삭제까지 실행 폴더에 동기화합니다. 수동 CMake CI 구성에는 `-DDY_CI=ON -DDY_EXTEND_MODEL=ON`을 함께 지정합니다(`ci.py`는 자동 지정).
 
 실제 기능 미지원으로 종료 77을 사용하는 그래픽 예제는 `unsupported_markers`에 정확한 진단 문구를 선언합니다. 종료 코드와 문구가 모두 일치할 때만 UNSUPPORTED이며, 강제 종료·driver 오류·환경 BLOCKED는 이 분기로 성공 처리하지 않습니다.
 
