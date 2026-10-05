@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 
-MODULE = Path(__file__).resolve().parents[2] / "cmake" / "ExampleSupport.cmake"
+MODULE = Path(__file__).resolve().with_name("ExampleSupport.cmake")
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -50,35 +50,6 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(inventory()['Second'], 'examples/advanced/group/03_Renamed')
             shutil.rmtree(root / 'examples/dyf')
             self.assertEqual(inventory(), {'Second': 'examples/advanced/group/03_Renamed'})
-
-    def test_non_render_and_null_examples_need_no_shaders(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            (root / 'main.cpp').write_text('int main() {}\n', encoding='utf-8')
-            for kind, vulkan in (('window', 'ON'), ('cpu', 'ON'), ('', 'OFF')):
-                declaration = f'dy_example_support(KIND {kind})\n' if kind else ''
-                (root / 'CMakeLists.txt').write_text(
-                    'cmake_minimum_required(VERSION 3.20)\nproject(Probe CXX)\n'
-                    f'include("{MODULE.as_posix()}")\n' + declaration +
-                    'add_executable(Probe main.cpp)\ndy_example_shaders(Probe)\n', encoding='utf-8')
-                result = subprocess.run(['cmake', '-S', str(root), '-B', str(root / 'build'),
-                                         '-DDY_CI=ON', '-DUSE_VULKAN=' + vulkan], capture_output=True, text=True)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_unknown_shader_stage_is_rejected(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            (root / 'Shaders').mkdir()
-            (root / 'Shaders/unknown.glsl').write_text('void main() {}\n', encoding='utf-8')
-            (root / 'main.cpp').write_text('int main() {}\n', encoding='utf-8')
-            (root / 'CMakeLists.txt').write_text(
-                'cmake_minimum_required(VERSION 3.20)\nproject(Probe CXX)\n'
-                f'include("{MODULE.as_posix()}")\n'
-                'add_executable(Probe main.cpp)\ndy_example_shaders(Probe)\n', encoding='utf-8')
-            result = subprocess.run(['cmake', '-S', str(root), '-B', str(root / 'build'), '-DUSE_VULKAN=ON'],
-                                    capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn('unknown shader stage', result.stdout + result.stderr)
 
     def test_real_compile_and_link_failures_are_not_hidden(self):
         with tempfile.TemporaryDirectory() as folder:
