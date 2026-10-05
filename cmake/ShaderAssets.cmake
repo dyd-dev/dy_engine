@@ -101,6 +101,18 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
         VERBATIM)
     list(APPEND metal_air_files "${air}")
 
+    set(air "${DY_STOCK_SHADER_GENERATED_DIR}/mesh_shadow_instanced_vs.air")
+    add_custom_command(
+        OUTPUT "${air}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal
+            -DRENDERER_INSTANCING=1
+            -DRENDERER_SHADOW_VERTEX_ENTRY=instancedShadowVertexShader
+            -c "${source}" -o "${air}"
+        DEPENDS "${source}"
+        VERBATIM)
+    list(APPEND metal_air_files "${air}")
+
     foreach(enable_shadows IN ITEMS 1 0)
         if(enable_shadows)
             set(shader mesh_vs)
@@ -190,6 +202,7 @@ else()
     dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.${shader_extension}" frag StockFragmentShader kStockFragmentShader -DRENDERER_ENABLE_SHADOWS=1)
     dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.${shader_extension}" frag StockFragmentShaderNoShadows kStockFragmentShaderNoShadows -DRENDERER_ENABLE_SHADOWS=0)
     dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_shadow_vs.${shader_extension}" vert StockShadowVertexShader kStockShadowVertexShader)
+    dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_shadow_vs.${shader_extension}" vert StockInstancedShadowVertexShader kStockInstancedShadowVertexShader -DRENDERER_INSTANCING=1)
 endif()
 
 if(DY_BACKEND_NORMALIZED STREQUAL "METAL")

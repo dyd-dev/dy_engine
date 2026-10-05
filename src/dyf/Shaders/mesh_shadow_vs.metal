@@ -7,6 +7,10 @@
 #define RENDERER_BINDING_SHADOW_MATRIX 3
 #define RENDERER_BINDING_INLINE_CONSTANTS 10
 
+#ifndef RENDERER_SHADOW_VERTEX_ENTRY
+#define RENDERER_SHADOW_VERTEX_ENTRY shadowVertexShader
+#endif
+
 using namespace metal;
 
 struct DrawConstants
@@ -37,12 +41,23 @@ struct ShadowMatrix
 struct ShadowVertex
 {
     float3 position [[attribute(0)]];
+#if RENDERER_INSTANCING
+    float4 model0 [[attribute(4)]];
+    float4 model1 [[attribute(5)]];
+    float4 model2 [[attribute(6)]];
+    float4 model3 [[attribute(7)]];
+#endif
 };
 
-vertex float4 shadowVertexShader(
+vertex float4 RENDERER_SHADOW_VERTEX_ENTRY(
     ShadowVertex input [[stage_in]],
     constant DrawConstants& drawConstants [[buffer(RENDERER_BINDING_INLINE_CONSTANTS)]],
     constant ShadowMatrix& shadowMatrix [[buffer(RENDERER_BINDING_SHADOW_MATRIX)]])
 {
+#if RENDERER_INSTANCING
+    const float4x4 world(input.model0, input.model1, input.model2, input.model3);
+    return shadowMatrix.lightViewProjectionMatrix[drawConstants.padding2] * world * float4(input.position, 1.0f);
+#else
     return shadowMatrix.lightViewProjectionMatrix[drawConstants.padding2] * drawConstants.modelMatrix * float4(input.position, 1.0f);
+#endif
 }

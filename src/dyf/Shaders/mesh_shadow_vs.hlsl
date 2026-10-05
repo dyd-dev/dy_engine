@@ -32,7 +32,24 @@ cbuffer ShadowMatrix : register(
     float4 filterParams;
 };
 
+#if RENDERER_INSTANCING
+struct ShadowVertex
+{
+    float3 position : TEXCOORD0;
+    float4 model0 : TEXCOORD4;
+    float4 model1 : TEXCOORD5;
+    float4 model2 : TEXCOORD6;
+    float4 model3 : TEXCOORD7;
+};
+
+float4 main(ShadowVertex input) : SV_POSITION
+{
+    const float4x4 world = transpose(float4x4(input.model0, input.model1, input.model2, input.model3));
+    return mul(lightViewProjectionMatrix[padding2], mul(world, float4(input.position, 1.0)));
+}
+#else
 float4 main(float3 position : TEXCOORD0) : SV_POSITION
 {
     return mul(lightViewProjectionMatrix[padding2], mul(modelMatrix, float4(position, 1.0)));
 }
+#endif

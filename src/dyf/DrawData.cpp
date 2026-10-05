@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include "ShaderLayout.h"
@@ -155,6 +156,73 @@ void Renderer::PruneResourceSets(std::vector<CachedSet>& cache)
 }
 
 namespace {
+Math::Bounds3 ShadowWorldBounds(const Math::Bounds3& local,const Math::float4x4& world,std::array<double,3>& magnitude)
+{
+    if(!local.valid || world.m[3]!=0 || world.m[7]!=0 || world.m[11]!=0 || world.m[15]!=1)return {};
+    for(float value:world.m)if(!std::isfinite(value))return {};
+    const double minimum[]={local.min.x,local.min.y,local.min.z};
+    const double maximum[]={local.max.x,local.max.y,local.max.z};
+    double center[3],extent[3];
+    for(uint32_t axis=0;axis<3;++axis) {
+        if(!std::isfinite(minimum[axis]) || !std::isfinite(maximum[axis]) || minimum[axis]>maximum[axis])return {};
+        center[axis]=(minimum[axis]+maximum[axis])*.5;
+        extent[axis]=(maximum[axis]-minimum[axis])*.5;
+    }
+    float lower[3],upper[3];
+    for(uint32_t row=0;row<3;++row) {
+        double position=world.m[12+row],radius=0;
+        magnitude[row]=std::abs(position);
+        for(uint32_t column=0;column<3;++column) {
+            const double coefficient=world.m[column*4+row];
+            position+=coefficient*center[column];radius+=std::abs(coefficient)*extent[column];
+            magnitude[row]+=std::abs(coefficient)*std::max(std::abs(minimum[column]),std::abs(maximum[column]));
+        }
+        // Round outwards when storing the conservative transformed box as floats.
+        lower[row]=std::nextafter(static_cast<float>(position-radius),-std::numeric_limits<float>::infinity());
+        upper[row]=std::nextafter(static_cast<float>(position+radius),std::numeric_limits<float>::infinity());
+        if(!std::isfinite(lower[row]) || !std::isfinite(upper[row]))return {};
+    }
+    return {{lower[0],lower[1],lower[2]},{upper[0],upper[1],upper[2]},true};
+}
+
+struct ShadowFrustum
+{
+    std::array<std::array<double,4>,6> planes={},magnitudes={};
+    bool valid=false;
+    explicit ShadowFrustum(const Math::float4x4& matrix)
+    {
+        for(float value:matrix.m)if(!std::isfinite(value))return;
+        for(uint32_t plane=0;plane<6;++plane) {
+            const uint32_t row=plane/2;
+            const double sign=plane%2?-1:1;
+            for(uint32_t column=0;column<4;++column) {
+                const double a=matrix.m[column*4+3],b=matrix.m[column*4+row];
+                planes[plane][column]=plane==4?b:a+sign*b;
+                magnitudes[plane][column]=plane==4?std::abs(b):std::abs(a)+std::abs(b);
+            }
+            if(planes[plane][0]==0 && planes[plane][1]==0 && planes[plane][2]==0)return;
+        }
+        valid=true;
+    }
+    bool Outside(const Math::Bounds3& bounds,const std::array<double,3>& worldMagnitude) const
+    {
+        if(!valid || !bounds.valid)return false;
+        const double minimum[]={bounds.min.x,bounds.min.y,bounds.min.z};
+        const double maximum[]={bounds.max.x,bounds.max.y,bounds.max.z};
+        for(uint32_t plane=0;plane<6;++plane) {
+            double distance=planes[plane][3],scale=magnitudes[plane][3];
+            for(uint32_t axis=0;axis<3;++axis) {
+                distance+=planes[plane][axis]*(planes[plane][axis]>=0?maximum[axis]:minimum[axis]);
+                // Preserve the pre-cancellation world terms, including when a
+                // shader multiplies light*world before applying the local vertex.
+                scale+=magnitudes[plane][axis]*worldMagnitude[axis];
+            }
+            if(distance < -1e-5*std::max(1.0,scale))return true;
+        }
+        return false;
+    }
+};
+
 bool OutsideCamera(const Math::Bounds3& bounds,const Math::float4x4& world,const Camera& camera)
 {
     if(!bounds.valid)return false;
@@ -465,6 +533,19 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 	RHI::TimestampQueryHandle shadowQuery)
 {
 	RHI::ResourceScope resources(*device);
+	const bool stock=UsesStockGeometry() && !draws;
+	const bool instanced=UsesInstanceStream();
+	const bool cull=stock && config.enableFrustumCulling;
+	if(cull) {
+        shadowBoundsScratch.resize(scene.GetEntityCount());
+        for(uint32_t i=0;i<scene.GetEntityCount();++i) {
+            auto& bounds=shadowBoundsScratch[i];bounds={};
+            const auto entity=static_cast<EntityID>(i);
+            const auto meshId=scene.GetEntityMesh(entity);
+            if(scene.GetEntityLighting(entity).castShadow && IsValid(meshId) && ToIndex(meshId)<m_meshes.size())
+                bounds.bounds=ShadowWorldBounds(m_meshes[ToIndex(meshId)].bounds,scene.GetTransform(entity).worldMatrix,bounds.magnitude);
+        }
+    }
 	auto& shadowSets=shadowSetScratch;
 	{
 		commands.BeginDebugEvent("Shadow");
@@ -497,6 +578,11 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 		commands.BindGraphicsPipeline(shadowPipeline);
 		for(uint32_t view = 0; view < shadows.viewCount; ++view)
 		{
+			const ShadowFrustum frustum(shadows.constants.lightViewProjectionMatrix[view]);
+			const auto outside=[&](uint32_t index) {
+                const auto& bounds=shadowBoundsScratch[index];
+                return frustum.Outside(bounds.bounds,bounds.magnitude);
+            };
 			const uint32_t x = (view % shadows.columns) * shadows.resolution;
 			const uint32_t y = (view / shadows.columns) * shadows.resolution;
 			commands.SetViewport({static_cast<float>(x), static_cast<float>(y),
@@ -514,9 +600,24 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 				if(meshIndex >= m_meshes.size() || materialIndex >= materialStates.size()) continue;
 				const auto& mesh = m_meshes[meshIndex];
 				if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount) continue;
+				if(cull && outside(entityIndex))continue;
+				uint32_t count=1;
+				if(stock && instanced) {
+                    // The stock depth shader only consumes the mesh, instance matrix
+                    // and light view. Materials cannot change its depth output.
+                    while(entityIndex+count<scene.GetEntityCount()) {
+                        const auto next=static_cast<EntityID>(entityIndex+count);
+                        const auto material=scene.GetEntityMaterial(next);
+                        if(scene.GetEntityMesh(next)!=meshId || !scene.GetEntityLighting(next).castShadow ||
+                            !IsValid(material) || ToIndex(material)>=materialStates.size() ||
+                            (cull && outside(entityIndex+count)))break;
+                        ++count;
+                    }
+                }
 				const auto* input = draws ? &(*draws)[entityIndex] : nullptr;
 				commands.BindResourceSet(shadowSets[input ? entityIndex : 0]);
 				commands.BindVertexBuffer(0, input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer, 0);
+				if(instanced)commands.BindVertexBuffer(1,instanceBuffer,entityIndex*sizeof(Math::float4x4));
 				commands.BindIndexBuffer(mesh.indexBuffer, RHI::Format::R32_UINT, 0);
 				const uint32_t flags = materialStates[materialIndex].textureFlags |
 					(lighting.receiveShadow ? 32u : 0u);
@@ -525,7 +626,8 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 				commands.SetInlineConstants(0, sizeof(constants), &constants);
 				if(input && !input->inlineConstants.empty())
 					commands.SetInlineConstants(sizeof(constants), static_cast<uint32_t>(input->inlineConstants.size()), input->inlineConstants.data());
-				commands.DrawIndexedInstanced(mesh.indexCount, 1, 0, 0, 0);
+				commands.DrawIndexedInstanced(mesh.indexCount,count,0,0,0);
+				entityIndex+=count-1;
 			}
 		}
 		commands.EndRendering();

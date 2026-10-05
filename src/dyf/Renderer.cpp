@@ -250,6 +250,7 @@ void Renderer::SwapResources(Renderer& other)
     swap(mainBindingScratch,other.mainBindingScratch);
     swap(mainCombinedBindingScratch,other.mainCombinedBindingScratch);
     swap(shadowBindingScratch,other.shadowBindingScratch);
+    swap(shadowBoundsScratch,other.shadowBoundsScratch);
 
     swap(m_meshes,other.m_meshes);
     swap(m_textures,other.m_textures);
@@ -812,10 +813,10 @@ bool Renderer::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorFormat,
 	RHI::GraphicsPipelineDesc shadowDesc = {};
 	shadowDesc.vertexShader = shadowVertexShader;
 	shadowDesc.topology = RHI::PrimitiveTopology::TriangleList;
-	shadowDesc.vertexBuffers = &vertexBuffer;
-	shadowDesc.vertexBufferCount = 1;
-	shadowDesc.vertexAttributes = vertexAttributes.data();
-	shadowDesc.vertexAttributeCount = static_cast<uint32_t>(vertexAttributes.size());
+	shadowDesc.vertexBuffers = vertexBuffers.data();
+	shadowDesc.vertexBufferCount = static_cast<uint32_t>(vertexBuffers.size());
+	shadowDesc.vertexAttributes = attributes.data();
+	shadowDesc.vertexAttributeCount = static_cast<uint32_t>(attributes.size());
 	shadowDesc.raster = {
 		RHI::FillMode::Solid,
 		RHI::CullMode::None,

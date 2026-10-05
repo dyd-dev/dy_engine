@@ -12,6 +12,7 @@
 #include "StockFragmentShader.h"
 #include "StockFragmentShaderNoShadows.h"
 #include "StockShadowVertexShader.h"
+#include "StockInstancedShadowVertexShader.h"
 #include "BindlessFragment.h"
 #include "BindlessFragmentNoShadows.h"
 #include "CanvasVertex.h"
@@ -32,7 +33,7 @@ RendererShaderDesc Renderer::DefaultShaders(bool shadows, bool bindless, bool in
     shaders.meshFragment = bindless
         ? RHI::ShaderDesc{RHI::ShaderStage::Fragment, shadows ? "bindlessFragment1" : "bindlessFragment0", kBindlessMetalLibrary, kBindlessMetalLibrarySize}
         : RHI::ShaderDesc{RHI::ShaderStage::Fragment, shadows ? "fragmentShader" : "fragmentShaderNoShadows", kStockMetalLibrary, kStockMetalLibrarySize};
-    shaders.shadowVertex = {RHI::ShaderStage::Vertex, "shadowVertexShader", kStockMetalLibrary, kStockMetalLibrarySize};
+    shaders.shadowVertex = {RHI::ShaderStage::Vertex, instanced ? "instancedShadowVertexShader" : "shadowVertexShader", kStockMetalLibrary, kStockMetalLibrarySize};
     shaders.canvasVertex = {RHI::ShaderStage::Vertex, "canvasVertex", kCanvasLibrary, kCanvasLibrarySize};
     shaders.canvasFragment = {RHI::ShaderStage::Fragment, "canvasFragment", kCanvasLibrary, kCanvasLibrarySize};
     shaders.toneMapVertex = {RHI::ShaderStage::Vertex, "toneVertex", kToneMapLibrary, kToneMapLibrarySize};
@@ -52,7 +53,9 @@ RendererShaderDesc Renderer::DefaultShaders(bool shadows, bool bindless, bool in
         shaders.meshFragment = shadows
             ? RHI::ShaderDesc{RHI::ShaderStage::Fragment, "main", kStockFragmentShader, kStockFragmentShaderSize}
             : RHI::ShaderDesc{RHI::ShaderStage::Fragment, "main", kStockFragmentShaderNoShadows, kStockFragmentShaderNoShadowsSize};
-    shaders.shadowVertex = {RHI::ShaderStage::Vertex, "main", kStockShadowVertexShader, kStockShadowVertexShaderSize};
+    shaders.shadowVertex = instanced
+        ? RHI::ShaderDesc{RHI::ShaderStage::Vertex, "main", kStockInstancedShadowVertexShader, kStockInstancedShadowVertexShaderSize}
+        : RHI::ShaderDesc{RHI::ShaderStage::Vertex, "main", kStockShadowVertexShader, kStockShadowVertexShaderSize};
     shaders.canvasVertex = {RHI::ShaderStage::Vertex, "main", kCanvasVertex, kCanvasVertexSize};
     shaders.canvasFragment = {RHI::ShaderStage::Fragment, "main", kCanvasFragment, kCanvasFragmentSize};
     shaders.toneMapVertex = {RHI::ShaderStage::Vertex, "main", kToneMapVertex, kToneMapVertexSize};

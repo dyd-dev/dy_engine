@@ -135,6 +135,11 @@ private:
         std::weak_ptr<const MeshData> source;
         bool vertexReady=false,indexReady=false,prepared=false;
     };
+    struct ShadowBounds
+    {
+        Math::Bounds3 bounds;
+        std::array<double,3> magnitude={};
+    };
     struct CachedSet { RHI::ResourceSetHandle set=nullptr; uint32_t unusedFrames=0; };
     struct TextureSlot
     {
@@ -272,6 +277,7 @@ private:
     // RenderGraph may record Main and Shadow simultaneously: each owns its arrays.
     std::vector<RHI::ResourceSetHandle> mainSetScratch,shadowSetScratch;
     std::vector<RHI::ResourceBinding> mainBindingScratch,mainCombinedBindingScratch,shadowBindingScratch;
+    std::vector<ShadowBounds> shadowBoundsScratch;
     std::vector<CachedSet> mainSets,shadowSets;
     RendererStatistics recordingStatistics,lastStatistics;
     RHI::FenceHandle lastRenderCompletion;

@@ -210,7 +210,12 @@ void Renderer::BuildShadows(ShadowData& state,const Scene& scene,const Camera& c
     const auto atlasLimit=std::min<uint64_t>(atlasResolution,device->GetLimit(RHI::Limit::Texture2DDimension));
     state.resolution=static_cast<uint32_t>(std::min<uint64_t>(resolution,atlasLimit/std::max(columns,rows)));
     Math::Bounds3 bounds;
-    for(uint32_t i=0;i<scene.GetEntityCount();++i)
+    // Only a non-cascaded directional light uses scene bounds. Keep its exact
+    // vertex-derived fit; replacing it with a looser box changes shadow quality.
+    const bool needsSceneBounds=!useCascades && std::any_of(directional.begin(),directional.end(),[&](uint32_t index) {
+        return scene.DirectionalLights()[index].castShadow;
+    });
+    if(needsSceneBounds)for(uint32_t i=0;i<scene.GetEntityCount();++i)
     {
         const auto entity=static_cast<EntityID>(i);
         const auto mesh=scene.GetEntityMesh(entity);

@@ -9,6 +9,9 @@
 #define RENDERER_BINDING_SHADOW_MATRIX 3
 
 layout(location = 0) in vec3 inPosition;
+#if RENDERER_INSTANCING
+layout(location = 4) in mat4 instanceModel;
+#endif
 
 layout(push_constant) uniform DrawConstants
 {
@@ -37,5 +40,9 @@ layout(set = RENDERER_DESCRIPTOR_SET, binding = RENDERER_BINDING_SHADOW_MATRIX) 
 
 void main()
 {
+#if RENDERER_INSTANCING
+    gl_Position = shadowMatrix.lightViewProjectionMatrix[drawConstants.padding2] * instanceModel * vec4(inPosition, 1.0);
+#else
     gl_Position = shadowMatrix.lightViewProjectionMatrix[drawConstants.padding2] * drawConstants.modelMatrix * vec4(inPosition, 1.0);
+#endif
 }
