@@ -18,10 +18,13 @@ using Clock = std::chrono::steady_clock;
 
 namespace
 {
+// 오류 검사 도우미 함수
 void Check(bool ok, const char* operation)
 {
     if (!ok) throw std::runtime_error(operation);
 }
+
+// 명령행 옵션 구조체
 struct Options
 {
     std::string mode;
@@ -29,6 +32,8 @@ struct Options
     std::string capture;
     bool validation = false;
 };
+
+// 명령행 인수 파싱 도우미 함수
 bool Parse(int argc, char** argv, Options& options, const char* modes, const char* description)
 {
     for (int i = 1; i < argc; ++i)
@@ -59,6 +64,8 @@ bool Parse(int argc, char** argv, Options& options, const char* modes, const cha
     }
     return true;
 }
+
+// 렌더 타깃 텍스처를 CPU 메모리로 읽어와 PPM 파일로 캡처 저장
 void Capture(RHI::IDevice& device, RHI::TextureHandle texture, const std::string& path)
 {
     RHI::TextureReadback image;
@@ -80,15 +87,21 @@ void Capture(RHI::IDevice& device, RHI::TextureHandle texture, const std::string
 }
 }
 
+// =============================================================================
+// [메인 진입점]
+// =============================================================================
 int main(int argc, char** argv)
 {
     try
     {
+        // 1. 명령행 인자 파싱 및 기본 모드 설정
         Options options;
         options.mode = "graph";
         if (!Parse(argc, argv, options, "manual|graph",
             "Identical two-pass picture: explicit barriers versus compiled RenderGraph.")) return 0;
         Check(options.mode == "manual" || options.mode == "graph", "Invalid --mode");
+
+        // 2. 윈도우 생성 및 RHI 디바이스 초기화
         dyf::Platform::Window window(800, 600, "Advanced / RenderGraph");
         Check(window.GetHandle() != nullptr, "Window creation failed");
         RHI::DeviceDesc deviceDesc;
@@ -97,6 +110,8 @@ int main(int argc, char** argv)
         Check(bool(deviceOwner), "Device creation failed");
         auto& device = *deviceOwner;
         RHI::ResourceScope resources(device);
+
+        // 3. 스왑체인(Swapchain) 생성
         RHI::SwapchainDesc swapchain;
         swapchain.window = window.GetHandle();
         swapchain.format = RHI::Format::B8G8R8A8_UNORM;
@@ -106,6 +121,7 @@ int main(int argc, char** argv)
         if (ShaderData::vertexSize == 0) { swapchain.initialWidth = 800; swapchain.initialHeight = 600; }
         Check(device.CreateSwapchain(swapchain), "Swapchain creation failed");
 
+        // 4. 버텍스 및 그래픽스 파이프라인 리소스 설정
         struct Vertex { float x, y; };
         struct Constants { float scaleX, scaleY, x, y, r, g, b, a; };
         const std::array<Vertex, 6> vertices{{{-0.5f,-0.5f},{0.5f,-0.5f},{0.5f,0.5f},
@@ -139,6 +155,7 @@ int main(int argc, char** argv)
         pipelineDesc.layout = {nullptr, 0, sizeof(Constants), RHI::ShaderStageFlags::Vertex, 15};
         auto* pipeline = resources.Keep(device.CreateGraphicsPipeline(pipelineDesc));
 
+        // 5. 메인 렌더 루프
         uint32_t frame = 0, callbacks = 0;
         double compileMilliseconds = 0.0, recordMilliseconds = 0.0;
         bool captured = false;
@@ -186,6 +203,7 @@ int main(int argc, char** argv)
             const auto recordStart = Clock::now();
             if (options.mode == "manual")
             {
+                // [수동 배리어 모드]: 명시적 리소스 상태 전환 배리어 기록
                 const RHI::ResourceBarrierDesc begin{nullptr, backBuffer,
                     RHI::ResourceState::Present, RHI::ResourceState::RenderTarget, {}};
                 commands->ResourceBarrier(&begin, 1);
@@ -201,6 +219,7 @@ int main(int argc, char** argv)
             }
             else
             {
+                // [렌더그래프 모드]: 의존성 기반 자동 배리어 및 패스 스케줄링
                 // swapchain handle은 프레임마다 달라질 수 있으므로 현재 자원으로 새 계획을 만든다.
                 RHI::RenderGraph graph;
                 const auto target = graph.ImportTexture("backbuffer", backBuffer,
@@ -231,6 +250,7 @@ int main(int argc, char** argv)
             }
             Check(commands->Close(), "Command recording failed");
             recordMilliseconds += std::chrono::duration<double, std::milli>(Clock::now() - recordStart).count();
+            // 커맨드 리스트 제출 및 화면 프레젠트
             Check(device.Submit(&commands, 1), "Submission failed");
             if (!captured && !options.capture.empty() && (options.frames == 0 || frame + 1 == options.frames))
             {
@@ -240,6 +260,7 @@ int main(int argc, char** argv)
             Check(device.Present(), "Present failed");
             ++frame;
         }
+        // 6. 디바이스 유휴 대기 및 성능 측정 요약 정보 출력
         Check(device.WaitIdle(), "WaitIdle failed");
         std::printf("mode=%s frames=%u pass_callbacks=%u cpu_record_ms=%.3f compile_ms=%.3f\n",
             options.mode.c_str(), frame, callbacks, recordMilliseconds, compileMilliseconds);
