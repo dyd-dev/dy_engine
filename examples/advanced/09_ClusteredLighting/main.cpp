@@ -90,7 +90,7 @@ else if(arg=="--exposure") { double n=Number(value,0.01,20);params.settings[0]=f
     std::unique_ptr<IDevice> owner(IDevice::Create(deviceDesc));
     if(!owner) throw std::runtime_error("Device creation failed.");
     auto& device=*owner;
-    if(!device.Supports(Feature::Compute)) {std::puts("Unsupported: this RHI backend has no Compute dispatch/storage-buffer implementation. Use the Vulkan backend. No CPU fallback is substituted.");return 77;}
+    if(!device.Supports(Feature::Compute)) {std::puts("Unsupported: this RHI backend has no Compute dispatch/storage-buffer implementation. No CPU fallback is substituted.");return 77;}
     ResourceScope resources(device);
     SwapchainDesc swap;swap.window=window.GetHandle();swap.format=Format::B8G8R8A8_UNORM;
     swap.minimumImageCount=2;swap.presentMode=PresentMode::Fifo;swap.allowReadback=!capture.empty();
@@ -119,6 +119,7 @@ auto lightingShader=resources.Keep(device.CreateShader({ShaderStage::Fragment,Sh
     ResourceBindingLayout computeBinding{0,ResourceBindingType::ReadWriteStorageBuffer,1,ShaderStageFlags::Compute,{}};
     ComputePipelineDesc computeDesc;computeDesc.computeShader=clusterShader;
     computeDesc.layout={&computeBinding,1,sizeof(Params),ShaderStageFlags::Compute,15};
+    computeDesc.threadGroupSize[0]=64;
     auto clusterPipeline=resources.Keep(device.CreateComputePipeline(computeDesc));
     ResourceBinding listBinding{0,0,lightLists,nullptr,0,listDesc.size,{}};
     auto clusterSet=resources.Keep(device.CreateResourceSet({clusterPipeline,&listBinding,1}));

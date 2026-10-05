@@ -658,7 +658,7 @@ namespace dyf::Backends
 				attachment.mipLevel < texture->GetDesc().mipLevels &&
 				attachment.arrayLayer < texture->GetDesc().depthOrArraySize;
 			const bool hasStencil = texture != nullptr &&
-				texture->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT;
+				RHI::HasStencil(texture->GetDesc().format);
 			const bool declaredStateValid =
 				attachment.state == RHI::ResourceState::DepthRead ||
 				attachment.state == RHI::ResourceState::DepthWrite;
@@ -779,6 +779,71 @@ namespace dyf::Backends
 		m_impl->rendering = false;
 	}
 
+	void MetalCommandList::BindComputePipelineNative(RHI::PipelineHandle pipelineState)
+	{
+		auto* pipeline = dynamic_cast<MetalPipeline*>(pipelineState);
+		if(m_impl->closed || m_impl->rendering || pipeline == nullptr ||
+			!pipeline->IsCompute() || pipeline->GetNativePipeline() == nullptr)
+		{
+			Invalidate(m_impl);
+			return;
+		}
+		m_impl->pipeline = pipeline;
+		m_impl->resourceSet = nullptr;
+		m_impl->inlineConstants.assign(pipeline->GetLayout().inlineConstantSize, 0);
+		m_impl->inlineConstantCoverage.assign(pipeline->GetLayout().inlineConstantSize, 0);
+	}
+
+	void MetalCommandList::DispatchNative(uint32_t x, uint32_t y, uint32_t z)
+	{
+		auto* pipeline = m_impl->pipeline;
+		if(m_impl->closed || m_impl->rendering || !pipeline || !pipeline->IsCompute() ||
+			!x || !y || !z || (pipeline->GetLayout().bindingCount && !m_impl->resourceSet) ||
+			std::any_of(m_impl->inlineConstantCoverage.begin(), m_impl->inlineConstantCoverage.end(),
+				[](uint8_t byte) { return !byte; }))
+		{
+			Invalidate(m_impl);
+			return;
+		}
+		EndBlitEncoding(m_impl);
+		id<MTLComputeCommandEncoder> encoder = [m_impl->commandBuffer computeCommandEncoder];
+		if(encoder == nil) { Invalidate(m_impl); return; }
+		[encoder setComputePipelineState:(__bridge id<MTLComputePipelineState>)pipeline->GetNativePipeline()];
+		const auto& layout = pipeline->GetLayout();
+		if(m_impl->resourceSet)
+			for(uint32_t i = 0; i < m_impl->resourceSet->GetBindingCount(); ++i)
+			{
+				const auto& binding = m_impl->resourceSet->GetBindings()[i];
+				const auto* declaration = FindLayoutBinding(layout, binding.binding);
+				auto* buffer = dynamic_cast<MetalBuffer*>(binding.buffer);
+				if(!declaration || !buffer) { Invalidate(m_impl); break; }
+				const auto required = declaration->type == RHI::ResourceBindingType::ConstantBuffer
+					? RHI::ResourceState::ConstantBuffer : declaration->type == RHI::ResourceBindingType::ReadOnlyStorageBuffer
+					? RHI::ResourceState::ShaderResource : RHI::ResourceState::UnorderedAccess;
+				if(!RequireBufferState(m_impl, buffer, required)) { Invalidate(m_impl); break; }
+				[encoder setBuffer:NativeBuffer(buffer) offset:binding.offset atIndex:binding.binding + binding.arrayElement];
+			}
+		if(!m_impl->inlineConstants.empty())
+		{
+			id<MTLBuffer> constants = [m_impl->commandQueue.device newBufferWithBytes:m_impl->inlineConstants.data()
+				length:m_impl->inlineConstants.size() options:MTLResourceStorageModeShared];
+			if(constants == nil) Invalidate(m_impl);
+			else
+			{
+				RetainResource(m_impl, constants);
+				[encoder setBuffer:constants offset:0 atIndex:layout.inlineConstantBinding];
+#if !__has_feature(objc_arc)
+				[constants release];
+#endif
+			}
+		}
+		const auto* size = pipeline->GetThreadGroupSize();
+		if(m_impl->valid)
+			[encoder dispatchThreadgroups:MTLSizeMake(x, y, z) threadsPerThreadgroup:MTLSizeMake(size[0], size[1], size[2])];
+		// Tracked buffer hazards synchronize this pass with subsequent compute/render/blit passes.
+		[encoder endEncoding];
+	}
+
 	void MetalCommandList::BindGraphicsPipelineNative(RHI::PipelineHandle pipelineState)
 	{
 		auto* pipeline = dynamic_cast<MetalPipeline*>(pipelineState);
@@ -838,12 +903,15 @@ namespace dyf::Backends
 	void MetalCommandList::BindResourceSetNative(RHI::ResourceSetHandle resourceSet)
 	{
 		auto* set = dynamic_cast<MetalResourceSet*>(resourceSet);
-		if(m_impl->closed || !m_impl->rendering || m_impl->pipeline == nullptr ||
+		if(m_impl->closed || m_impl->pipeline == nullptr ||
+			(!m_impl->rendering && !m_impl->pipeline->IsCompute()) ||
 			set == nullptr || set->GetPipeline() != m_impl->pipeline)
 		{
 			Invalidate(m_impl);
 			return;
 		}
+
+		if(m_impl->pipeline->IsCompute()) { m_impl->resourceSet = set; return; }
 
 		const RHI::PipelineLayoutDesc& layout = m_impl->pipeline->GetLayout();
 		id<MTLRenderCommandEncoder> encoder = m_impl->renderEncoder;
@@ -984,7 +1052,8 @@ namespace dyf::Backends
 		uint32_t size,
 		const void* data)
 	{
-		if(m_impl->closed || !m_impl->rendering || m_impl->pipeline == nullptr ||
+		if(m_impl->closed || m_impl->pipeline == nullptr ||
+			(!m_impl->rendering && !m_impl->pipeline->IsCompute()) ||
 			data == nullptr || size == 0 ||
 			(offset % sizeof(uint32_t)) != 0 || (size % sizeof(uint32_t)) != 0 ||
 			offset > m_impl->inlineConstants.size() ||
@@ -998,6 +1067,7 @@ namespace dyf::Backends
 			m_impl->inlineConstantCoverage.begin() + offset,
 			m_impl->inlineConstantCoverage.begin() + offset + size,
 			1);
+		if(m_impl->pipeline->IsCompute()) return;
 		id<MTLDevice> device = m_impl->commandQueue.device;
 		id<MTLBuffer> constants = [device newBufferWithBytes:m_impl->inlineConstants.data()
 			length:m_impl->inlineConstants.size()

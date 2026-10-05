@@ -487,7 +487,7 @@
       "kind": "headless-compare",
       "markers": [
         "GPU readback matches both recorded texture uploads.",
-        "CPU recording and CPU native replay/submission are measured separately."
+        "CPU recording includes native translation; submission is measured separately. These are not GPU timings."
       ],
       "dimensions": [512, 256],
       "pixels": [[0.125, 0.25, 78, 64, 0], [0.375, 0.75, 206, 192, 0], [0.625, 0.25, 78, 135, 113], [0.875, 0.75, 206, 7, 113]],

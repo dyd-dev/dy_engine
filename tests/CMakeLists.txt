@@ -66,3 +66,18 @@ if(DY_BUILD_TESTS)
     add_test(NAME TessellationContracts COMMAND TessellationTests)
     set_tests_properties(TessellationContracts PROPERTIES TIMEOUT 30)
 endif()
+
+if(DY_BUILD_TESTS AND USE_METAL)
+    include(MetalToolchain)
+    set(compute_source "${CMAKE_CURRENT_SOURCE_DIR}/Shaders/Compute/buffers.metal")
+    set(compute_library "${CMAKE_CURRENT_BINARY_DIR}/compute-tests.metallib")
+    add_custom_command(OUTPUT "${compute_library}"
+        BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/compute-tests.air"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal -c "${compute_source}" -o "${CMAKE_CURRENT_BINARY_DIR}/compute-tests.air"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metallib "${CMAKE_CURRENT_BINARY_DIR}/compute-tests.air" -o "${compute_library}"
+        DEPENDS "${compute_source}" VERBATIM)
+    add_executable(MetalComputeTests MetalComputeTests.cpp "${compute_library}")
+    target_link_libraries(MetalComputeTests PRIVATE dy_engine)
+    add_test(NAME MetalComputeContracts COMMAND MetalComputeTests "${compute_library}")
+    set_tests_properties(MetalComputeContracts PROPERTIES TIMEOUT 30 ENVIRONMENT "MTL_DEBUG_LAYER=1")
+endif()

@@ -1,4 +1,5 @@
 #include "dyf/Extends/Model/ModelScene.h"
+#include "dyf/Platform/Log.h"
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/IDevice.h"
@@ -23,7 +24,6 @@
 #include <random>
 #include <sstream>
 #include <stdexcept>
-#include <streambuf>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -640,18 +640,24 @@ namespace
 		}
 	}
 
-	class CaptureCerr final
+	class CaptureModelErrors final
 	{
 	public:
-		CaptureCerr()
-			: m_previous(std::cerr.rdbuf(&m_sink))
+		CaptureModelErrors()
 		{
+			Platform::Log::SetCallback(Platform::LogBuffer::Callback, &m_records);
 		}
-		~CaptureCerr() { std::cerr.rdbuf(m_previous); }
-		std::string Text() const { return m_sink.str(); }
+		~CaptureModelErrors() { Platform::Log::SetCallback(nullptr); }
+		std::string Text()
+		{
+			std::string text;
+			for(const auto& record : m_records.Drain())
+				if(record.category == "Model" && record.level == Platform::LogLevel::Error)
+					text += record.message + '\n';
+			return text;
+		}
 	private:
-		std::stringbuf m_sink;
-		std::streambuf* m_previous = nullptr;
+		Platform::LogBuffer m_records;
 	};
 
 	void WriteBytes(const std::filesystem::path& path, const std::vector<uint8_t>& bytes)
@@ -711,7 +717,7 @@ namespace
 		bool success = false;
 		std::string diagnostics;
 		{
-			CaptureCerr capture;
+			CaptureModelErrors capture;
 			success = LoadModel(path.string(), model, options);
 			diagnostics = capture.Text();
 		}
@@ -741,7 +747,7 @@ namespace
 		bool success = false;
 		std::string diagnostics;
 		{
-			CaptureCerr capture;
+			CaptureModelErrors capture;
 			success = LoadModel(path.string(), model);
 			diagnostics = capture.Text();
 		}

@@ -183,11 +183,11 @@ void ICommandList::BeginRendering(const RenderingDesc& desc)
             (depth.depthLoadOp==LoadOp::Clear &&
                 (!std::isfinite(depth.clearDepth) || depth.clearDepth<0 || depth.clearDepth>1 || depth.state!=ResourceState::DepthWrite)))
         {m_recordingFailed=true;return;}
-        if(depth.texture->GetDesc().format==Format::D24_UNORM_S8_UINT &&
+        if(HasStencil(depth.texture->GetDesc().format) &&
             (depth.stencilLoadOp<LoadOp::Load || depth.stencilLoadOp>LoadOp::Discard ||
              depth.stencilStoreOp<StoreOp::Store || depth.stencilStoreOp>StoreOp::Discard))
         {m_recordingFailed=true;return;}
-        if(depth.texture->GetDesc().format==Format::D24_UNORM_S8_UINT && depth.stencilLoadOp==LoadOp::Clear &&
+        if(HasStencil(depth.texture->GetDesc().format) && depth.stencilLoadOp==LoadOp::Clear &&
             (depth.clearStencil>255 || depth.state!=ResourceState::DepthWrite))
         {
             m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,"BeginRendering: stencil clear requires DepthWrite and a value in [0,255]; high bits are not silently discarded.");
