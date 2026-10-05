@@ -266,6 +266,7 @@ int main(int argc, char** argv) try {
     ComputePipelineDesc computeDesc;
     computeDesc.computeShader = clusterShader;
     computeDesc.layout = {&computeBinding, 1, sizeof(Params), ShaderStageFlags::Compute, 15};
+    computeDesc.threadGroupSize[0] = 64;
 
     auto clusterPipeline = resources.Keep(device.CreateComputePipeline(computeDesc));
 

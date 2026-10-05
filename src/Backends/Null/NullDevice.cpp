@@ -352,7 +352,7 @@ namespace dyf::Backends
 						attachment.mipLevel < texture->GetDesc().mipLevels &&
 						attachment.arrayLayer < texture->GetDesc().depthOrArraySize;
 					const bool hasStencil = texture != nullptr &&
-						texture->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT;
+						RHI::HasStencil(texture->GetDesc().format);
 					const bool declaredStateValid =
 						attachment.state == RHI::ResourceState::DepthRead ||
 						attachment.state == RHI::ResourceState::DepthWrite;

@@ -574,6 +574,12 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 		depth.state = RHI::ResourceState::DepthWrite;
 		depth.depthLoadOp = RHI::LoadOp::Clear;
 		depth.depthStoreOp = RHI::StoreOp::Store;
+		depth.clearDepth = 1;
+		if(RHI::HasStencil(shadowDepthTarget->GetDesc().format))
+		{
+			depth.stencilLoadOp = RHI::LoadOp::Discard;
+			depth.stencilStoreOp = RHI::StoreOp::Discard;
+		}
 		commands.BeginRendering({nullptr, 0, &depth});
 		commands.BindGraphicsPipeline(shadowPipeline);
 		for(uint32_t view = 0; view < shadows.viewCount; ++view)
@@ -684,7 +690,8 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
 	depth.state = RHI::ResourceState::DepthWrite;
 	depth.depthLoadOp = RHI::LoadOp::Clear;
 	depth.depthStoreOp = RHI::StoreOp::Discard;
-	if(depthStencilTarget->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT)
+	depth.clearDepth = 1;
+	if(RHI::HasStencil(depthStencilTarget->GetDesc().format))
 	{
 		depth.stencilLoadOp = RHI::LoadOp::Discard;
 		depth.stencilStoreOp = RHI::StoreOp::Discard;

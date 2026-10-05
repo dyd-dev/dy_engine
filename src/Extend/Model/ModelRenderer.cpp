@@ -198,7 +198,7 @@ bool ModelRenderer::PrepareComputePipeline()
         {15, RHI::ResourceBindingType::ReadWriteStorageBuffer, 1, RHI::ShaderStageFlags::Compute, {}}
     }};
     auto* pipeline = device.CreateComputePipeline({shader,
-        {bindings.data(), static_cast<uint32_t>(bindings.size()), 16, RHI::ShaderStageFlags::Compute, 10}});
+        {bindings.data(), static_cast<uint32_t>(bindings.size()), 16, RHI::ShaderStageFlags::Compute, 10}, {64, 1, 1}});
     if(!pipeline) return Failure("Compute pipeline creation failed.");
     ScopeExit discardPipeline{[&] { if(pipeline) device.DestroyPipeline(pipeline); }};
     if(m_computePipeline) device.DestroyPipeline(m_computePipeline);
