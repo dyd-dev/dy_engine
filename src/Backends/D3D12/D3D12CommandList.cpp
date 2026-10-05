@@ -955,11 +955,38 @@ namespace dyf::Backends
         RetainObject(m_internal->retainedObjects, pipeline->GetNativeRootSignature());
     }
 
+    void D3D12CommandList::BindComputePipelineNative(RHI::PipelineHandle pipelineState)
+    {
+        if (!CanRecord(m_internal))
+        {
+            RejectRecording(m_internal);
+            return;
+        }
+        auto* pipeline = static_cast<D3D12PipelineState*>(pipelineState);
+        m_internal->pipeline = pipeline;
+        m_internal->inlineConstantCoverage.assign(
+            pipeline->GetLayout().inlineConstantSize, 0);
+        m_internal->commandList->SetPipelineState(pipeline->GetNativePipelineState());
+        m_internal->commandList->SetComputeRootSignature(
+            pipeline->GetNativeRootSignature());
+    }
+
+    void D3D12CommandList::DispatchNative(uint32_t x, uint32_t y, uint32_t z)
+    {
+        if (!CanRecord(m_internal))
+        {
+            RejectRecording(m_internal);
+            return;
+        }
+        m_internal->commandList->Dispatch(x, y, z);
+    }
+
     void D3D12CommandList::BindResourceSetNative(RHI::ResourceSetHandle resourceSet)
     {
-        if (!CanRecord(m_internal) || !m_internal->rendering ||
+        if (!CanRecord(m_internal) ||
             resourceSet == nullptr ||
             m_internal->pipeline == nullptr ||
+            (!m_internal->rendering && !m_internal->pipeline->IsCompute()) ||
             resourceSet->GetPipeline() != m_internal->pipeline)
         {
             RejectRecording(m_internal);
@@ -1051,8 +1078,16 @@ namespace dyf::Backends
                 D3D12_GPU_DESCRIPTOR_HANDLE handle = start;
                 handle.ptr += static_cast<UINT64>(binding.descriptorOffset) *
                     set->GetDescriptorSize();
-                m_internal->commandList->SetGraphicsRootDescriptorTable(
-                    binding.rootParameter, handle);
+                if (m_internal->pipeline->IsCompute())
+                {
+                    m_internal->commandList->SetComputeRootDescriptorTable(
+                        binding.rootParameter, handle);
+                }
+                else
+                {
+                    m_internal->commandList->SetGraphicsRootDescriptorTable(
+                        binding.rootParameter, handle);
+                }
             }
             RetainObject(m_internal->retainedObjects, heap);
         }
@@ -1169,8 +1204,16 @@ namespace dyf::Backends
             RejectRecording(m_internal);
             return;
         }
-        m_internal->commandList->SetGraphicsRoot32BitConstants(
-            rootParameter, size / 4, data, offset / 4);
+        if (m_internal->pipeline->IsCompute())
+        {
+            m_internal->commandList->SetComputeRoot32BitConstants(
+                rootParameter, size / 4, data, offset / 4);
+        }
+        else
+        {
+            m_internal->commandList->SetGraphicsRoot32BitConstants(
+                rootParameter, size / 4, data, offset / 4);
+        }
         std::fill_n(m_internal->inlineConstantCoverage.begin() + offset, size, 1);
     }
 

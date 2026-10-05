@@ -41,6 +41,8 @@ namespace dyf::Backends
         void EndRenderingNative() override;
 
         void BindGraphicsPipelineNative(RHI::PipelineHandle pipelineState) override;
+        void BindComputePipelineNative(RHI::PipelineHandle pipelineState) override;
+        void DispatchNative(uint32_t x, uint32_t y, uint32_t z) override;
         void BindResourceSetNative(RHI::ResourceSetHandle resourceSet) override;
         void BindVertexBufferNative(uint32_t binding, RHI::BufferHandle buffer, uint32_t offset) override;
         void BindIndexBufferNative(RHI::BufferHandle buffer, RHI::Format format, uint32_t offset) override;

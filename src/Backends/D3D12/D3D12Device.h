@@ -43,6 +43,8 @@ namespace dyf::Backends
         RHI::ShaderHandle CreateShaderNative(const RHI::ShaderDesc& desc) override;
         RHI::PipelineHandle CreateGraphicsPipelineNative(
             const RHI::GraphicsPipelineDesc& desc) override;
+        RHI::PipelineHandle CreateComputePipelineNative(
+            const RHI::ComputePipelineDesc& desc) override;
         RHI::ResourceSetHandle CreateResourceSetNative(
             const RHI::ResourceSetDesc& desc) override;
 
@@ -72,6 +74,9 @@ namespace dyf::Backends
         int Initialize(const void* windowHandle, const RHI::DeviceDesc& desc) override;
 
     private:
+        RHI::PipelineHandle CreatePipeline(
+            const RHI::GraphicsPipelineDesc& desc, RHI::ShaderHandle computeShader);
+
         D3D12InternalState* m_internal = nullptr;
     };
 }

@@ -474,6 +474,7 @@ bool D3D12Device::SupportsNative(RHI::Feature feature) const
     if(feature == RHI::Feature::TimestampQuery) return m_internal->timestampFrequency != 0;
     switch(feature)
     {
+    case RHI::Feature::Compute:
     case RHI::Feature::Rasterization:
     case RHI::Feature::Tessellation:
     case RHI::Feature::DescriptorIndexing:
@@ -514,21 +515,21 @@ uint64_t D3D12Device::GetLimitNative(RHI::Limit limit) const
 bool D3D12Device::SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc& desc) const
 {
     if(!m_internal || !m_internal->device) return false;
-    const auto graphicsStages = static_cast<uint32_t>(RHI::ShaderStageFlags::Vertex |
+    const auto supportedStages = static_cast<uint32_t>(RHI::ShaderStageFlags::Vertex |
         RHI::ShaderStageFlags::Hull | RHI::ShaderStageFlags::Domain |
-        RHI::ShaderStageFlags::Fragment);
+        RHI::ShaderStageFlags::Fragment | RHI::ShaderStageFlags::Compute);
     if(desc.inlineConstantSize &&
-        (static_cast<uint32_t>(desc.inlineConstantStages) & ~graphicsStages)) return false;
+        (static_cast<uint32_t>(desc.inlineConstantStages) & ~supportedStages)) return false;
     uint64_t rootCost = desc.inlineConstantSize / sizeof(uint32_t);
     uint64_t descriptorCount = 0;
     uint64_t samplerCount = 0;
-    uint64_t constantBuffers[4] = {};
-    uint64_t shaderResources[4] = {};
+    uint64_t constantBuffers[5] = {};
+    uint64_t shaderResources[5] = {};
     uint64_t unorderedAccessViews = 0;
     for(uint32_t index = 0; index < desc.bindingCount; ++index)
     {
         const auto& binding = desc.bindings[index];
-        if(static_cast<uint32_t>(binding.stages) & ~graphicsStages) return false;
+        if(static_cast<uint32_t>(binding.stages) & ~supportedStages) return false;
         if(binding.type == RHI::ResourceBindingType::StaticSampler)
             samplerCount += binding.count;
         else
@@ -538,9 +539,10 @@ bool D3D12Device::SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc& de
             descriptorCount += binding.count;
             constexpr RHI::ShaderStageFlags stageFlags[] = {
                 RHI::ShaderStageFlags::Vertex, RHI::ShaderStageFlags::Hull,
-                RHI::ShaderStageFlags::Domain, RHI::ShaderStageFlags::Fragment};
+                RHI::ShaderStageFlags::Domain, RHI::ShaderStageFlags::Fragment,
+                RHI::ShaderStageFlags::Compute};
             const auto visibility = ToShaderVisibility(binding.stages);
-            for (uint32_t stage = 0; stage < 4; ++stage)
+            for (uint32_t stage = 0; stage < 5; ++stage)
             {
                 const auto flag = stageFlags[stage];
                 // Multiple RHI stages become one native ALL-visible table.
@@ -1432,7 +1434,8 @@ void D3D12Device::DestroySwapchainNative()
         if (desc.stage != RHI::ShaderStage::Vertex &&
             desc.stage != RHI::ShaderStage::Hull &&
             desc.stage != RHI::ShaderStage::Domain &&
-            desc.stage != RHI::ShaderStage::Fragment)
+            desc.stage != RHI::ShaderStage::Fragment &&
+            desc.stage != RHI::ShaderStage::Compute)
         {
             return nullptr;
         }
@@ -1444,8 +1447,22 @@ void D3D12Device::DestroySwapchainNative()
     RHI::PipelineHandle D3D12Device::CreateGraphicsPipelineNative(
         const RHI::GraphicsPipelineDesc& desc)
     {
-        if (!SupportsPipelineLayoutNative(desc.layout) ||
-            !SupportsGraphicsPipelineNative(desc))
+        return CreatePipeline(desc, nullptr);
+    }
+
+    RHI::PipelineHandle D3D12Device::CreateComputePipelineNative(
+        const RHI::ComputePipelineDesc& desc)
+    {
+        RHI::GraphicsPipelineDesc pipelineDesc;
+        pipelineDesc.layout = desc.layout;
+        return CreatePipeline(pipelineDesc, desc.computeShader);
+    }
+
+    RHI::PipelineHandle D3D12Device::CreatePipeline(
+        const RHI::GraphicsPipelineDesc& desc, RHI::ShaderHandle computeShader)
+    {
+        if (!computeShader && (!SupportsPipelineLayoutNative(desc.layout) ||
+            !SupportsGraphicsPipelineNative(desc)))
         {
             return nullptr;
         }
@@ -1454,7 +1471,7 @@ void D3D12Device::DestroySwapchainNative()
         auto* hullShader = dynamic_cast<D3D12Shader*>(desc.hullShader);
         auto* domainShader = dynamic_cast<D3D12Shader*>(desc.domainShader);
         auto* fragmentShader = dynamic_cast<D3D12Shader*>(desc.fragmentShader);
-        if (vertexShader == nullptr ||
+        if (!computeShader && (vertexShader == nullptr ||
             vertexShader->GetBinarySize() == 0 ||
             (desc.hullShader != nullptr &&
                 (hullShader == nullptr || hullShader->GetBinarySize() == 0)) ||
@@ -1462,7 +1479,7 @@ void D3D12Device::DestroySwapchainNative()
                 (domainShader == nullptr || domainShader->GetBinarySize() == 0)) ||
             (desc.fragmentShader != nullptr &&
                 (fragmentShader == nullptr ||
-                    fragmentShader->GetBinarySize() == 0)))
+                    fragmentShader->GetBinarySize() == 0))))
         {
             return nullptr;
         }
@@ -1595,7 +1612,8 @@ void D3D12Device::DestroySwapchainNative()
             rootParameters.empty() ? nullptr : rootParameters.data(),
             static_cast<UINT>(staticSamplers.size()),
             staticSamplers.empty() ? nullptr : staticSamplers.data(),
-            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+            computeShader ? D3D12_ROOT_SIGNATURE_FLAG_NONE :
+                D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
         ComPtr<ID3DBlob> serializedRootSignature;
         ComPtr<ID3DBlob> rootSignatureError;
         if (FAILED(D3DX12SerializeVersionedRootSignature(
@@ -1622,6 +1640,34 @@ void D3D12Device::DestroySwapchainNative()
                 IID_PPV_ARGS(&rootSignature))))
         {
             return nullptr;
+        }
+
+        if (computeShader)
+        {
+            auto* shader = static_cast<D3D12Shader*>(computeShader);
+            D3D12_COMPUTE_PIPELINE_STATE_DESC pipelineDesc = {};
+            pipelineDesc.pRootSignature = rootSignature.Get();
+            pipelineDesc.CS = {shader->GetBinary(), shader->GetBinarySize()};
+            ComPtr<ID3D12PipelineState> pipelineState;
+            if (FAILED(m_internal->device->CreateComputePipelineState(
+                    &pipelineDesc, IID_PPV_ARGS(&pipelineState))))
+            {
+                return nullptr;
+            }
+            auto pipeline = std::unique_ptr<D3D12PipelineState, D3D12ObjectDeleter>(
+                new D3D12PipelineState(
+                    desc.layout,
+                    pipelineState.Get(),
+                    rootSignature.Get(),
+                    std::move(pipelineBindings),
+                    {},
+                    inlineConstantRootParameter,
+                    descriptorCount,
+                    D3D_PRIMITIVE_TOPOLOGY_UNDEFINED,
+                    false,
+                    false,
+                    true));
+            return m_internal->livePipelines.emplace_back(std::move(pipeline)).get();
         }
 
         std::vector<D3D12VertexBinding> vertexBindings;
