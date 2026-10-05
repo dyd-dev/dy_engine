@@ -345,6 +345,7 @@ bool MetalDevice::SupportsNative(RHI::Feature feature) const
     if(!m_impl || m_impl->device == nil) return false;
     switch(feature)
     {
+    case RHI::Feature::Compute:
     case RHI::Feature::Rasterization:
     case RHI::Feature::Tessellation:
     case RHI::Feature::DescriptorIndexing:
@@ -837,6 +838,16 @@ void MetalDevice::DestroySwapchainNative()
 		m_impl->liveShaders.push_back(std::move(shader));
 		return result;
 	}
+
+    RHI::PipelineHandle MetalDevice::CreateComputePipelineNative(const RHI::ComputePipelineDesc& desc)
+    {
+        auto pipeline = std::unique_ptr<MetalPipeline, MetalObjectDeleter>(
+            new MetalPipeline(desc, (__bridge void*)m_impl->device));
+        if(pipeline->GetNativePipeline() == nullptr) return nullptr;
+        auto* result = pipeline.get();
+        m_impl->livePipelines.push_back(std::move(pipeline));
+        return result;
+    }
 
     RHI::PipelineHandle MetalDevice::CreateGraphicsPipelineNative(
         const RHI::GraphicsPipelineDesc& desc)

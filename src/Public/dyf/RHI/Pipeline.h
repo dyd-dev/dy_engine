@@ -245,6 +245,8 @@ namespace dyf::RHI
     {
         ShaderHandle computeShader=nullptr;
         PipelineLayoutDesc layout={};
+        // Metal dispatch geometry; match the shader local_size/numthreads on other backends.
+        uint32_t threadGroupSize[3]={1,1,1};
     };
 
 	class Pipeline

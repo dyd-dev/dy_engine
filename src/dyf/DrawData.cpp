@@ -361,7 +361,7 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 		depth.depthLoadOp = RHI::LoadOp::Clear;
 		depth.depthStoreOp = RHI::StoreOp::Store;
 		depth.clearDepth = 1;
-		if(shadowDepthTarget->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT)
+		if(RHI::HasStencil(shadowDepthTarget->GetDesc().format))
 		{
 			depth.stencilLoadOp = RHI::LoadOp::Discard;
 			depth.stencilStoreOp = RHI::StoreOp::Discard;
@@ -442,7 +442,7 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
 	depth.depthLoadOp = RHI::LoadOp::Clear;
 	depth.depthStoreOp = RHI::StoreOp::Discard;
 	depth.clearDepth = 1;
-	if(depthStencilTarget->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT)
+	if(RHI::HasStencil(depthStencilTarget->GetDesc().format))
 	{
 		depth.stencilLoadOp = RHI::LoadOp::Discard;
 		depth.stencilStoreOp = RHI::StoreOp::Discard;

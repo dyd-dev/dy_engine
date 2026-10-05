@@ -20,7 +20,7 @@ namespace dyf::Backends
 		[[nodiscard]] bool IsDepthFormat(RHI::Format format)
 		{
 			return format == RHI::Format::D32_FLOAT ||
-				format == RHI::Format::D24_UNORM_S8_UINT;
+				RHI::HasStencil(format);
 		}
 
 		[[nodiscard]] uint32_t MaximumMipCount(uint32_t width, uint32_t height)
@@ -57,6 +57,7 @@ namespace dyf::Backends
             case RHI::Format::R32G32B32A32_FLOAT:    return MTLPixelFormatRGBA32Float;
             case RHI::Format::D32_FLOAT:             return MTLPixelFormatDepth32Float;
             case RHI::Format::D24_UNORM_S8_UINT:     return MTLPixelFormatDepth24Unorm_Stencil8;
+            case RHI::Format::D32_FLOAT_S8_UINT:     return MTLPixelFormatDepth32Float_Stencil8;
 			case RHI::Format::R32_UINT:              return MTLPixelFormatR32Uint;
 			case RHI::Format::R16_UINT:              return MTLPixelFormatR16Uint;
             default:                                 return MTLPixelFormatInvalid;
