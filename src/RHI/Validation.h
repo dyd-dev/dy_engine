@@ -11,6 +11,17 @@
 
 namespace dyf::RHI
 {
+    [[nodiscard]] inline bool MayWriteStencil(const RHI::DepthStencilState& state)
+    {
+        const auto changesValue = [](const RHI::StencilFaceState& face)
+        {
+            return face.failOp != RHI::StencilOp::Keep ||
+                face.depthFailOp != RHI::StencilOp::Keep || face.passOp != RHI::StencilOp::Keep;
+        };
+        return state.stencilEnabled && state.stencilWriteMask != 0 &&
+            (changesValue(state.front) || changesValue(state.back));
+    }
+
     [[nodiscard]] inline bool HasUsage(RHI::BufferUsage value, RHI::BufferUsage usage)
     {
     	return (value & usage) != RHI::BufferUsage::None;

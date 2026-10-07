@@ -6,6 +6,7 @@
 #include "D3D12Shader.h"
 #include "D3D12Texture.h"
 #include "D3D12Query.h"
+#include "../../RHI/Validation.h"
 #include "dyf/RHI/ResourceSet.h"
 #include "dyf/RHI/Shader.h"
 #include "dyf/RHI/Pipeline.h"
@@ -1083,16 +1084,18 @@ void D3D12Device::DestroySwapchainNative()
 
     namespace
     {
-        bool HasUsage(RHI::TextureUsage usage, RHI::TextureUsage flag)
-        {
-            return (static_cast<uint32_t>(usage) & static_cast<uint32_t>(flag)) != 0;
-        }
-
         bool IsDefaultSubresourceRange(
             const RHI::TextureSubresourceRange& range)
         {
             return range.firstMipLevel == 0 && range.mipLevelCount == 0 &&
                 range.firstArrayLayer == 0 && range.arrayLayerCount == 0;
+        }
+
+        bool IsStorageBufferViewRangeValid(uint32_t stride, uint32_t offset, uint32_t size)
+        {
+            const uint32_t elementSize = stride != 0 ? stride : 4;
+            return stride <= D3D12_REQ_MULTI_ELEMENT_STRUCTURE_SIZE_IN_BYTES &&
+                offset % elementSize == 0 && size % elementSize == 0;
         }
 
         D3D12_SHADER_VISIBILITY ToShaderVisibility(RHI::ShaderStageFlags stages)
@@ -1870,7 +1873,7 @@ void D3D12Device::DestroySwapchainNative()
                 static_cast<uint32_t>(ToPrimitiveTopology(desc.topology, desc.patchControlPoints)),
                 desc.depthStencil.stencilEnabled,
                 desc.depthStencil.depthWriteEnabled ||
-                    desc.depthStencil.stencilEnabled));
+                    RHI::MayWriteStencil(desc.depthStencil)));
         auto* result = m_internal->livePipelines.emplace_back(std::move(pipeline)).get();
         if (alphaFactorsTranslated)
 		ReportDiagnostic(DiagnosticSeverity::Info,
@@ -1962,7 +1965,8 @@ void D3D12Device::DestroySwapchainNative()
                 RHI::ResourceBindingType::ReadOnlyStorageBuffer)
             {
                 auto* buffer = dynamic_cast<D3D12Buffer*>(binding.buffer);
-                if (buffer == nullptr || !IsDefaultSubresourceRange(binding.subresources))
+                if (buffer == nullptr || !IsDefaultSubresourceRange(binding.subresources) ||
+                    !IsStorageBufferViewRangeValid(buffer->GetDesc().stride, binding.offset, binding.size))
                 {
                     return nullptr;
                 }
@@ -1972,11 +1976,6 @@ void D3D12Device::DestroySwapchainNative()
                     D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 if (buffer->GetDesc().stride != 0)
                 {
-                    if ((binding.offset % buffer->GetDesc().stride) != 0 ||
-                        (binding.size % buffer->GetDesc().stride) != 0)
-                    {
-                        return nullptr;
-                    }
                     view.Format = DXGI_FORMAT_UNKNOWN;
                     view.Buffer.FirstElement =
                         binding.offset / buffer->GetDesc().stride;
@@ -1986,11 +1985,6 @@ void D3D12Device::DestroySwapchainNative()
                 }
                 else
                 {
-                    if ((binding.offset % 4) != 0 ||
-                        (binding.size % 4) != 0)
-                    {
-                        return nullptr;
-                    }
                     view.Format = DXGI_FORMAT_R32_TYPELESS;
                     view.Buffer.FirstElement = binding.offset / 4;
                     view.Buffer.NumElements = binding.size / 4;
@@ -2007,17 +2001,13 @@ void D3D12Device::DestroySwapchainNative()
                 RHI::ResourceBindingType::ReadWriteStorageBuffer)
             {
                 auto* buffer = dynamic_cast<D3D12Buffer*>(binding.buffer);
-                if (buffer == nullptr || !IsDefaultSubresourceRange(binding.subresources))
+                if (buffer == nullptr || !IsDefaultSubresourceRange(binding.subresources) ||
+                    !IsStorageBufferViewRangeValid(buffer->GetDesc().stride, binding.offset, binding.size))
                 {
                     return nullptr;
                 }
                 const uint32_t stride = buffer->GetDesc().stride;
                 const uint32_t elementSize = stride != 0 ? stride : 4;
-                if ((binding.offset % elementSize) != 0 ||
-                    (binding.size % elementSize) != 0)
-                {
-                    return nullptr;
-                }
                 D3D12_UNORDERED_ACCESS_VIEW_DESC view = {};
                 view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
                 view.Format = stride != 0 ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_TYPELESS;

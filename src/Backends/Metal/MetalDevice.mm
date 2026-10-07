@@ -1115,7 +1115,9 @@ void MetalDevice::DestroySwapchainNative()
 
     bool MetalDevice::ReadTextureNative(RHI::TextureHandle texture, RHI::TextureReadback& result)
     {
-        if(!m_impl || !texture || m_impl->asyncWorkFailed || !m_impl->activeCommandLists.empty()) return false;
+        if(!m_impl || !texture) return false;
+        m_impl->CollectCompletedSubmissions();
+        if(m_impl->asyncWorkFailed || !m_impl->activeCommandLists.empty()) return false;
         const bool backBuffer = texture == m_impl->backBufferTex;
         id<MTLTexture> image = nil;
         if(backBuffer)
@@ -1166,7 +1168,9 @@ void MetalDevice::DestroySwapchainNative()
             [blit endEncoding];
             [command commit];
             [command waitUntilCompleted];
-            const bool succeeded = command.status == MTLCommandBufferStatusCompleted && buffer.contents != nullptr;
+            m_impl->CollectCompletedSubmissions();
+            const bool succeeded = !m_impl->asyncWorkFailed &&
+                command.status == MTLCommandBufferStatusCompleted && buffer.contents != nullptr;
             if(succeeded)
                 for(uint32_t row = 0; row < desc.height; ++row)
                     std::memcpy(output.pixels.data() + static_cast<size_t>(row) * output.rowPitch,

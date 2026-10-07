@@ -15,6 +15,7 @@ namespace dyf::Backends
 	class VulkanPipeline;
 	class VulkanResourceSet;
 	class VulkanTexture;
+	class VulkanTimestampQuery;
 	struct VulkanObjectDeleter;
 
 	struct VulkanSubmissionState
@@ -71,6 +72,7 @@ namespace dyf::Backends
 		}
 		[[nodiscard]] bool ValidateForSubmit(VulkanSubmissionState& state) const;
 		void CommitResourceStates();
+        void CompleteTimestampResets();
         uint32_t m_maxComputeGroups[3]={};
 
 	private:
@@ -127,6 +129,11 @@ namespace dyf::Backends
 		void Fail() { m_failed = true; }
 
 		VulkanContext m_context;
+        uint32_t m_maxColorAttachments=0;
+        uint32_t m_maxViewportDimensions[2]={};
+        float m_viewportBounds[2]={};
+        struct QueryReset { VulkanTimestampQuery* query; uint32_t first, count; };
+        std::vector<QueryReset> m_queryResets;
 		bool m_supportsCompute = false;
 		VkCommandPool m_commandPool = VK_NULL_HANDLE;
 		VkCommandBuffer m_commandBuffer = VK_NULL_HANDLE;

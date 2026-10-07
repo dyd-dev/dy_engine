@@ -197,8 +197,7 @@ namespace dyf::Backends
 			// https://developer.apple.com/metal/capabilities/
 			const uint32_t constantArgumentCount = appleGpu ? 31 : 14;
 			uint32_t vertexConstantArguments = 0;
-			uint32_t hullConstantArguments = 0;
-			uint32_t domainConstantArguments = 0;
+			uint32_t computeConstantArguments = 0;
 			uint32_t fragmentConstantArguments = 0;
 			constexpr uint32_t nativeBufferBindingCount = 31;
 			constexpr uint32_t nativeTextureBindingCount = 128;
@@ -226,11 +225,18 @@ namespace dyf::Backends
 				}
 			}
 
+			// Vertex/Domain share the render table; Vertex/Hull share the compute
+			// table. Both tables also contain the declared vertex input buffers.
+			std::set<uint32_t> computeBufferSlots = vertexBufferSlots;
 			std::set<uint32_t> fragmentBufferSlots;
 			std::set<uint32_t> vertexTextureSlots;
+			std::set<uint32_t> computeTextureSlots;
 			std::set<uint32_t> fragmentTextureSlots;
 			std::set<uint32_t> vertexSamplerSlots;
+			std::set<uint32_t> computeSamplerSlots;
 			std::set<uint32_t> fragmentSamplerSlots;
+			constexpr auto renderVertexStages = RHI::ShaderStageFlags::Vertex | RHI::ShaderStageFlags::Domain;
+			constexpr auto tessellationComputeStages = RHI::ShaderStageFlags::Vertex | RHI::ShaderStageFlags::Hull;
 			constexpr auto graphicsStages = RHI::ShaderStageFlags::Vertex |
 				RHI::ShaderStageFlags::Hull | RHI::ShaderStageFlags::Domain |
 				RHI::ShaderStageFlags::Fragment;
@@ -260,12 +266,10 @@ namespace dyf::Backends
 					return false;
 				if(binding.type == RHI::ResourceBindingType::ConstantBuffer)
 				{
-					if(HasStage(binding.stages, RHI::ShaderStageFlags::Vertex))
+					if(HasStage(binding.stages, renderVertexStages))
 						vertexConstantArguments += binding.count;
-					if(HasStage(binding.stages, RHI::ShaderStageFlags::Hull))
-						hullConstantArguments += binding.count;
-					if(HasStage(binding.stages, RHI::ShaderStageFlags::Domain))
-						domainConstantArguments += binding.count;
+					if(HasStage(binding.stages, tessellationComputeStages))
+						computeConstantArguments += binding.count;
 					if(HasStage(binding.stages, RHI::ShaderStageFlags::Fragment))
 						fragmentConstantArguments += binding.count;
 				}
@@ -274,20 +278,28 @@ namespace dyf::Backends
 				{
 					const uint32_t slot = binding.binding + element;
 					std::set<uint32_t>* vertexSlots = &vertexBufferSlots;
+					std::set<uint32_t>* computeSlots = &computeBufferSlots;
 					std::set<uint32_t>* fragmentSlots = &fragmentBufferSlots;
 					if(binding.type == RHI::ResourceBindingType::SampledTexture ||
 						binding.type == RHI::ResourceBindingType::StorageTexture)
 					{
 						vertexSlots = &vertexTextureSlots;
+						computeSlots = &computeTextureSlots;
 						fragmentSlots = &fragmentTextureSlots;
 					}
 					else if(binding.type == RHI::ResourceBindingType::StaticSampler)
 					{
 						vertexSlots = &vertexSamplerSlots;
+						computeSlots = &computeSamplerSlots;
 						fragmentSlots = &fragmentSamplerSlots;
 					}
-					if(HasStage(binding.stages, RHI::ShaderStageFlags::Vertex) &&
+					if(HasStage(binding.stages, renderVertexStages) &&
 						!vertexSlots->insert(slot).second)
+					{
+						return false;
+					}
+					if(HasStage(binding.stages, tessellationComputeStages) &&
+						!computeSlots->insert(slot).second)
 					{
 						return false;
 					}
@@ -301,12 +313,10 @@ namespace dyf::Backends
 
 			if(desc.layout.inlineConstantSize != 0)
 			{
-				if(HasStage(desc.layout.inlineConstantStages, RHI::ShaderStageFlags::Vertex))
+				if(HasStage(desc.layout.inlineConstantStages, renderVertexStages))
 					++vertexConstantArguments;
-				if(HasStage(desc.layout.inlineConstantStages, RHI::ShaderStageFlags::Hull))
-					++hullConstantArguments;
-				if(HasStage(desc.layout.inlineConstantStages, RHI::ShaderStageFlags::Domain))
-					++domainConstantArguments;
+				if(HasStage(desc.layout.inlineConstantStages, tessellationComputeStages))
+					++computeConstantArguments;
 				if(HasStage(desc.layout.inlineConstantStages, RHI::ShaderStageFlags::Fragment))
 					++fragmentConstantArguments;
 				if(desc.layout.inlineConstantBinding >= nativeBufferBindingCount)
@@ -322,8 +332,13 @@ namespace dyf::Backends
 				{
 					return false;
 				}
-				if(HasStage(desc.layout.inlineConstantStages, RHI::ShaderStageFlags::Vertex) &&
+				if(HasStage(desc.layout.inlineConstantStages, renderVertexStages) &&
 					!vertexBufferSlots.insert(desc.layout.inlineConstantBinding).second)
+				{
+					return false;
+				}
+				if(HasStage(desc.layout.inlineConstantStages, tessellationComputeStages) &&
+					!computeBufferSlots.insert(desc.layout.inlineConstantBinding).second)
 				{
 					return false;
 				}
@@ -332,8 +347,7 @@ namespace dyf::Backends
 					return false;
 			}
 			return vertexConstantArguments <= constantArgumentCount &&
-				hullConstantArguments <= constantArgumentCount &&
-				domainConstantArguments <= constantArgumentCount &&
+				computeConstantArguments <= constantArgumentCount &&
 				fragmentConstantArguments <= constantArgumentCount;
 		}
 	}

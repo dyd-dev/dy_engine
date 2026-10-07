@@ -120,7 +120,25 @@ namespace dyf::Backends
         uint64_t GetCompletedSubmission() {CollectCompletedSubmissions(); return m_submissionFaulted?0:m_completedSubmission;}
         void DiscardCommandList(RHI::ICommandList* list) {auto& active=m_acquiredCommandLists;active.erase(std::remove_if(active.begin(),active.end(),[list](const auto& value){return value.get()==list;}),active.end());}
         VkResult WaitForShutdown() { return m_context.device == VK_NULL_HANDLE ? VK_SUCCESS : vkDeviceWaitIdle(m_context.device); }
-        bool WaitIdle() { if(m_context.device == VK_NULL_HANDLE || vkDeviceWaitIdle(m_context.device) != VK_SUCCESS) return false; CollectCompletedSubmissions(); return !m_submissionFaulted; }
+        bool WaitIdle()
+        {
+            if(m_context.device==VK_NULL_HANDLE) return false;
+            const VkResult result=vkDeviceWaitIdle(m_context.device);
+            if(result==VK_ERROR_DEVICE_LOST) m_submissionFaulted=true;
+            if(result!=VK_SUCCESS) return false;
+            CollectCompletedSubmissions();
+            return !m_submissionFaulted;
+        }
+        bool ReadTimestamps(VulkanTimestampQuery& query,uint32_t first,uint32_t count,uint64_t* ticks)
+        {
+            CollectCompletedSubmissions();
+            if(m_submissionFaulted || !std::all_of(query.initialized.begin()+first,query.initialized.begin()+first+count,
+                [](uint8_t initialized) { return initialized!=0; })) return false;
+            const VkResult result=vkGetQueryPoolResults(m_context.device,query.pool,first,count,
+                size_t(count)*sizeof(uint64_t),ticks,sizeof(uint64_t),VK_QUERY_RESULT_64_BIT);
+            if(result==VK_ERROR_DEVICE_LOST) m_submissionFaulted=true;
+            return result==VK_SUCCESS;
+        }
         void ClearSwapchain() { DestroyCurrentSwapchain(); DestroyRetiredSwapchains(); m_hasSwapchainDesc = false; }
 
 		int Initialize(const void* windowHandle, const dyf::RHI::DeviceDesc& desc);
@@ -293,8 +311,7 @@ void VulkanDevice::DestroyTimestampQueryNative(RHI::TimestampQueryHandle query)
 {delete static_cast<VulkanTimestampQuery*>(query);}
 bool VulkanDevice::ReadTimestampsNative(RHI::TimestampQueryHandle query,uint32_t first,uint32_t count,uint64_t* ticks)
 {
-    return vkGetQueryPoolResults(m_impl->Context().device,static_cast<VulkanTimestampQuery*>(query)->pool,
-        first,count,count*sizeof(uint64_t),ticks,sizeof(uint64_t),VK_QUERY_RESULT_64_BIT)==VK_SUCCESS;
+    return m_impl->ReadTimestamps(*static_cast<VulkanTimestampQuery*>(query),first,count,ticks);
 }
 double VulkanDevice::GetTimestampPeriodNative() const
 {
@@ -412,6 +429,15 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
         const auto& limits=properties.limits;
         if(desc.vertexBufferCount>limits.maxVertexInputBindings || desc.vertexAttributeCount>limits.maxVertexInputAttributes ||
             desc.colorAttachmentCount>limits.maxColorAttachments)return false;
+        uint64_t fragmentResources=desc.colorAttachmentCount;
+        for(uint32_t i=0;i<desc.layout.bindingCount;++i)
+        {
+            const auto& binding=desc.layout.bindings[i];
+            if(binding.type!=RHI::ResourceBindingType::StaticSampler &&
+                (binding.stages&RHI::ShaderStageFlags::Fragment)!=RHI::ShaderStageFlags::None)
+                fragmentResources+=binding.count;
+        }
+        if(fragmentResources>limits.maxPerStageResources) return false;
         for(uint32_t i=0;i<desc.vertexBufferCount;++i)
             if(desc.vertexBuffers[i].binding>=limits.maxVertexInputBindings ||
                 desc.vertexBuffers[i].stride>limits.maxVertexInputBindingStride)return false;
@@ -430,9 +456,9 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
         vkGetPhysicalDeviceFeatures(physical,&features);
         const auto sameBlend=[](const RHI::ColorAttachmentDesc& a,const RHI::ColorAttachmentDesc& b) {
             return a.writeMask==b.writeMask && a.blend.enabled==b.blend.enabled &&
-                a.blend.sourceColor==b.blend.sourceColor && a.blend.destinationColor==b.blend.destinationColor &&
+                (!a.blend.enabled || (a.blend.sourceColor==b.blend.sourceColor && a.blend.destinationColor==b.blend.destinationColor &&
                 a.blend.colorOp==b.blend.colorOp && a.blend.sourceAlpha==b.blend.sourceAlpha &&
-                a.blend.destinationAlpha==b.blend.destinationAlpha && a.blend.alphaOp==b.blend.alphaOp;
+                a.blend.destinationAlpha==b.blend.destinationAlpha && a.blend.alphaOp==b.blend.alphaOp));
         };
         for(uint32_t i=0;i<desc.colorAttachmentCount;++i)
         {
@@ -570,13 +596,13 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		if (status.retryLater) return false;
 		if (status.operation != nullptr)
 		{
-			LogVulkanFailure(status.operation, status.result);
 			m_submissionFaulted = true;
+			LogVulkanFailure(status.operation, status.result);
 		}
 		else if (m_hasSwapchainDesc)
 		{
-			Platform::Log::Writef(Platform::LogLevel::Error, "Vulkan", __FILE__, __LINE__, "Vulkan swapchain recreation cannot satisfy the requested configuration.");
 			m_submissionFaulted = true;
+			Platform::Log::Writef(Platform::LogLevel::Error, "Vulkan", __FILE__, __LINE__, "Vulkan swapchain recreation cannot satisfy the requested configuration.");
 		}
 		return false;
 	}
@@ -653,10 +679,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		}
 		catch (const std::exception& exception)
 		{
-			Platform::Log::Writef(Platform::LogLevel::Error, "Vulkan", __FILE__, __LINE__, "Vulkan swapchain creation failed: %s", exception.what());
 			m_submissionFaulted = true;
 			if (oldSwapchainRetired) m_recreationOldSwapchain = VK_NULL_HANDLE;
 			DestroyCurrentSwapchain();
+			Platform::Log::Writef(Platform::LogLevel::Error, "Vulkan", __FILE__, __LINE__, "Vulkan swapchain creation failed: %s", exception.what());
 			return false;
 		}
 
@@ -726,8 +752,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			if (result == VK_NOT_READY || result == VK_TIMEOUT) return false;
 			if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
 			{
-				LogVulkanFailure("vkAcquireNextImageKHR", result);
 				m_submissionFaulted = true;
+				LogVulkanFailure("vkAcquireNextImageKHR", result);
 				return false;
 			}
 			m_imageAcquired = true;
@@ -885,10 +911,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		const VkResult result = vkQueueSubmit(m_context.graphicsQueue, 1, &submitInfo, submission.fence);
 		if (result != VK_SUCCESS)
 		{
-			LogVulkanFailure("vkQueueSubmit", result);
             m_submissionFaulted = true;
             // Keep an uncertain submission alive until shutdown drains the device.
             m_submissions.push_back(std::move(submission));
+			LogVulkanFailure("vkQueueSubmit", result);
 			return false;
 		}
 		for (VulkanCommandList* commandList : selected) commandList->CommitResourceStates();
@@ -917,8 +943,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         const VkResult fenceCreated=vkCreateFence(m_context.device,&fenceInfo,nullptr,&completion.fence);
         if(fenceCreated!=VK_SUCCESS)
         {
-            LogVulkanFailure("vkCreateFence(Present)",fenceCreated);
             m_submissionFaulted=true;
+            LogVulkanFailure("vkCreateFence(Present)",fenceCreated);
             return false;
         }
         const VkPipelineStageFlags waitStage=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -936,9 +962,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         const VkResult submitted=vkQueueSubmit(m_context.graphicsQueue,1,&submit,completion.fence);
         if(submitted!=VK_SUCCESS)
         {
-            LogVulkanFailure("vkQueueSubmit(Present)",submitted);
             m_submissionFaulted=true;
             m_submissions.push_back(std::move(completion));
+            LogVulkanFailure("vkQueueSubmit(Present)",submitted);
             return false;
         }
         completion.serial=++m_lastSubmission;
@@ -976,9 +1002,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
             return true;
         }
         // acquire의 SUBOPTIMAL 신호가 뒤따른 present의 실제 실패를 가리지 않게 한다.
-        LogVulkanFailure("vkQueuePresentKHR",result);
         if(result==VK_ERROR_DEVICE_LOST)m_submissionFaulted=true;
         else m_swapchainNeedsRecreate=true;
+        LogVulkanFailure("vkQueuePresentKHR",result);
         return false;
     }
 
@@ -1435,7 +1461,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		std::vector<VkPhysicalDevice> devices(deviceCount);
 		if (vkEnumeratePhysicalDevices(m_context.instance, &deviceCount, devices.data()) != VK_SUCCESS) return false;
 
-		if(m_owner.GetDesc().adapterIndex>=devices.size())return false;
+		if(m_owner.GetDesc().adapterIndex>=deviceCount)return false;
 		const VkPhysicalDevice device = devices[m_owner.GetDesc().adapterIndex];
 		VkPhysicalDeviceProperties properties{};
 		vkGetPhysicalDeviceProperties(device, &properties);
@@ -1527,9 +1553,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 				const VkResult result = vkCreateSemaphore(m_context.device, &info, nullptr, &semaphore);
 				if (result != VK_SUCCESS)
 				{
-					LogVulkanFailure(operation, result);
 					m_submissionFaulted = true;
 					DestroySwapchainSyncObjects();
+					LogVulkanFailure(operation, result);
 					return false;
 				}
 			}
@@ -1567,7 +1593,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 	void VulkanDevice::Impl::CollectCompletedSubmissions()
 	{
-		if (m_context.device == VK_NULL_HANDLE) return;
+		if (m_context.device == VK_NULL_HANDLE || m_submissionFaulted) return;
 		for (size_t i = 0; i < m_submissions.size();)
 		{
 			SubmissionRecord& submission = m_submissions[i];
@@ -1576,10 +1602,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
             if(status==VK_NOT_READY)break;
 			if (status != VK_SUCCESS)
 			{
-				LogVulkanFailure("vkGetFenceStatus", status);
 				m_submissionFaulted = true;
-				++i;
-				continue;
+				LogVulkanFailure("vkGetFenceStatus", status);
+				return;
 			}
 
 			if (submission.frameSlot < m_frameSlots.size() && m_frameSlots[submission.frameSlot] == submission.fence)
@@ -1590,6 +1615,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			{
 				m_imagesInFlight[submission.imageIndex] = VK_NULL_HANDLE;
 			}
+            for(const auto& commands:submission.commandLists) commands->CompleteTimestampResets();
 			m_completedSubmission=std::max(m_completedSubmission,submission.serial);
             vkDestroyFence(m_context.device, submission.fence, nullptr);
 			m_submissions.erase(m_submissions.begin() + static_cast<std::ptrdiff_t>(i));
@@ -1679,7 +1705,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		if (m_context.device != VK_NULL_HANDLE)
 		{
 			// 소유 장치의 소멸자가 큐 완료 또는 실제 DEVICE_LOST를 확인한 뒤에만 호출된다.
-			CollectCompletedSubmissions();
+            // Public resources (including queries) were already released. Retire
+            // native records without publishing query initialization during teardown.
 			for (SubmissionRecord& submission : m_submissions)
 			{
 				if (submission.fence != VK_NULL_HANDLE) vkDestroyFence(m_context.device, submission.fence, nullptr);

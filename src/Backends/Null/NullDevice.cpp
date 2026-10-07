@@ -404,7 +404,7 @@ namespace dyf::Backends
 				m_inlineConstantCoverage.assign(
 					pipeline->GetLayout().inlineConstantSize, 0);
 				if((pipeline->GetDesc().depthStencil.depthWriteEnabled ||
-					pipeline->GetDesc().depthStencil.stencilEnabled) &&
+					RHI::MayWriteStencil(pipeline->GetDesc().depthStencil)) &&
 					m_depthTexture != nullptr &&
 					!RequireTextureState(
 						m_depthTexture,
@@ -946,9 +946,9 @@ namespace dyf::Backends
 						first = startVertex;
 						count = vertexCount;
 					}
-					const uint64_t requiredEnd = static_cast<uint64_t>(found->second.offset) +
-						(first + count) * layout.stride;
-					if(requiredEnd > found->second.buffer->GetDesc().size) return false;
+					const uint64_t size = found->second.buffer->GetDesc().size;
+					if(layout.stride == 0 || found->second.offset > size ||
+						first + count > (size - found->second.offset) / layout.stride) return false;
 				}
 				const bool resourceSetRequired = desc.layout.bindingCount != 0 &&
 					std::any_of(desc.layout.bindings, desc.layout.bindings + desc.layout.bindingCount,

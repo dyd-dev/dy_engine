@@ -41,7 +41,16 @@ namespace dyf::Backends
         }
     }
     void VulkanCommandList::ResetTimestampsNative(RHI::TimestampQueryHandle query,uint32_t first,uint32_t count)
-    {vkCmdResetQueryPool(m_commandBuffer,static_cast<VulkanTimestampQuery*>(query)->pool,first,count);}
+    {
+        auto* native=static_cast<VulkanTimestampQuery*>(query);
+        m_queryResets.push_back({native,first,count});
+        vkCmdResetQueryPool(m_commandBuffer,native->pool,first,count);
+    }
+    void VulkanCommandList::CompleteTimestampResets()
+    {
+        for(const auto& reset:m_queryResets)
+            std::fill_n(reset.query->initialized.begin()+reset.first,reset.count,uint8_t{1});
+    }
     void VulkanCommandList::WriteTimestampNative(RHI::TimestampQueryHandle query,uint32_t index)
     {vkCmdWriteTimestamp2(m_commandBuffer,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,static_cast<VulkanTimestampQuery*>(query)->pool,index);}
 	namespace
@@ -243,6 +252,9 @@ namespace dyf::Backends
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(context.physicalDevice, &properties);
         std::copy_n(properties.limits.maxComputeWorkGroupCount, 3, m_maxComputeGroups);
+        m_maxColorAttachments=properties.limits.maxColorAttachments;
+        std::copy_n(properties.limits.maxViewportDimensions,2,m_maxViewportDimensions);
+        std::copy_n(properties.limits.viewportBoundsRange,2,m_viewportBounds);
 		uint32_t familyCount = 0;
 		vkGetPhysicalDeviceQueueFamilyProperties(context.physicalDevice, &familyCount, nullptr);
 		std::vector<VkQueueFamilyProperties> families(familyCount);
@@ -313,6 +325,17 @@ namespace dyf::Backends
 		std::vector<VkImageMemoryBarrier2> imageBarriers;
 		bufferBarriers.reserve(count);
 		imageBarriers.reserve(count);
+        const auto flush=[&] {
+            if(bufferBarriers.empty() && imageBarriers.empty()) return;
+            VkDependencyInfo dependency{};
+            dependency.sType=VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            dependency.bufferMemoryBarrierCount=static_cast<uint32_t>(bufferBarriers.size());
+            dependency.pBufferMemoryBarriers=bufferBarriers.data();
+            dependency.imageMemoryBarrierCount=static_cast<uint32_t>(imageBarriers.size());
+            dependency.pImageMemoryBarriers=imageBarriers.data();
+            vkCmdPipelineBarrier2(m_commandBuffer,&dependency);
+            bufferBarriers.clear(); imageBarriers.clear();
+        };
 		for (uint32_t i = 0; i < count; ++i)
 		{
 			const dyf::RHI::ResourceBarrierDesc& source = barriers[i];
@@ -412,6 +435,14 @@ namespace dyf::Backends
 				barrier.subresourceRange.levelCount = mipLevelCount;
 				barrier.subresourceRange.baseArrayLayer = source.subresources.firstArrayLayer;
 				barrier.subresourceRange.layerCount = arrayLayerCount;
+                // Successive layout transitions of an overlapping range are
+                // ordered commands; independent ranges can share one dependency.
+                if(std::any_of(imageBarriers.begin(),imageBarriers.end(),[&](const VkImageMemoryBarrier2& prior) {
+                    const auto& a=prior.subresourceRange; const auto& b=barrier.subresourceRange;
+                    return prior.image==barrier.image && (a.aspectMask&b.aspectMask)!=0 &&
+                        a.baseMipLevel<b.baseMipLevel+b.levelCount && b.baseMipLevel<a.baseMipLevel+a.levelCount &&
+                        a.baseArrayLayer<b.baseArrayLayer+b.layerCount && b.baseArrayLayer<a.baseArrayLayer+a.layerCount;
+                })) flush();
 				imageBarriers.push_back(barrier);
 				for (uint32_t layer = source.subresources.firstArrayLayer;
 					layer < source.subresources.firstArrayLayer + arrayLayerCount; ++layer)
@@ -434,18 +465,12 @@ namespace dyf::Backends
 			}
 		}
 
-		VkDependencyInfo dependency{};
-		dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-		dependency.bufferMemoryBarrierCount = static_cast<uint32_t>(bufferBarriers.size());
-		dependency.pBufferMemoryBarriers = bufferBarriers.empty() ? nullptr : bufferBarriers.data();
-		dependency.imageMemoryBarrierCount = static_cast<uint32_t>(imageBarriers.size());
-		dependency.pImageMemoryBarriers = imageBarriers.empty() ? nullptr : imageBarriers.data();
-		vkCmdPipelineBarrier2(m_commandBuffer, &dependency);
+        flush();
 	}
 
 	void VulkanCommandList::BeginRenderingNative(const dyf::RHI::RenderingDesc& desc)
 	{
-		if (m_closed || m_rendering ||
+		if (m_closed || m_rendering || desc.colorAttachmentCount>m_maxColorAttachments ||
 			(desc.colorAttachmentCount > 0 && desc.colorAttachments == nullptr) ||
 			(desc.colorAttachmentCount == 0 && desc.depthStencilAttachment == nullptr))
 		{
@@ -504,6 +529,7 @@ namespace dyf::Backends
 				(texture->GetDesc().usage & dyf::RHI::TextureUsage::RenderTarget) == dyf::RHI::TextureUsage::None ||
 				!RequireTextureState(texture, source.mipLevel, source.arrayLayer, dyf::RHI::ResourceState::RenderTarget) ||
 				!clearValueValid ||
+                std::any_of(colorAttachments.begin(),colorAttachments.end(),[imageView](const VkRenderingAttachmentInfo& previous) { return previous.imageView==imageView; }) ||
 				(i > 0 && (attachmentWidth != width || attachmentHeight != height)))
 			{
 				Fail();
@@ -849,13 +875,19 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 		native.height = -viewport.height;
 		native.minDepth = viewport.minDepth;
 		native.maxDepth = viewport.maxDepth;
+        if(!std::isfinite(native.y) || native.width>m_maxViewportDimensions[0] || -native.height>m_maxViewportDimensions[1] ||
+            native.x<m_viewportBounds[0] || double(native.x)+native.width>m_viewportBounds[1] ||
+            native.y<m_viewportBounds[0] || native.y>m_viewportBounds[1] ||
+            double(native.y)+native.height<m_viewportBounds[0])
+        { Fail(); return; }
 		vkCmdSetViewport(m_commandBuffer, 0, 1, &native);
 		m_hasViewport = true;
 	}
 
 	void VulkanCommandList::SetScissorNative(const dyf::RHI::Rect& rect)
 	{
-		if (m_closed || !m_rendering || rect.x < 0 || rect.y < 0 || rect.width == 0 || rect.height == 0)
+		if (m_closed || !m_rendering || rect.x < 0 || rect.y < 0 || rect.width == 0 || rect.height == 0 ||
+            uint64_t(rect.x)+rect.width>INT32_MAX || uint64_t(rect.y)+rect.height>INT32_MAX)
 		{
 			Fail();
 			return;

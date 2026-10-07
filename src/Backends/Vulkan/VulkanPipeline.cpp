@@ -211,17 +211,6 @@ namespace dyf::Backends
 			return result;
 		}
 
-		bool MayWriteStencil(const RHI::DepthStencilState& state)
-		{
-			const auto changesValue = [](const RHI::StencilFaceState& face)
-			{
-				return face.failOp != RHI::StencilOp::Keep ||
-					face.depthFailOp != RHI::StencilOp::Keep || face.passOp != RHI::StencilOp::Keep;
-			};
-			return state.stencilEnabled && state.stencilWriteMask != 0 &&
-				(changesValue(state.front) || changesValue(state.back));
-		}
-
 		VkBlendFactor ToBlendFactor(dyf::RHI::BlendFactor factor)
 		{
 			switch (factor)
@@ -308,7 +297,7 @@ namespace dyf::Backends
 		: dyf::RHI::Pipeline(desc.layout)
 		, m_device(context.device)
 		, m_usesStencil(desc.depthStencil.stencilEnabled)
-		, m_requiresDepthWrite(desc.depthStencil.depthWriteEnabled || MayWriteStencil(desc.depthStencil))
+		, m_requiresDepthWrite(desc.depthStencil.depthWriteEnabled || RHI::MayWriteStencil(desc.depthStencil))
 	{
 		try
 		{
