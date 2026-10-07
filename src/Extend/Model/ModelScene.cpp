@@ -214,13 +214,21 @@ namespace dyf
 						if(activeMorph)
 						{
 							const MeshID meshId = this->GetEntityMesh(binding.entity);
-							if(!IsValid(meshId) || ToIndex(meshId) >= Meshes().size()
-								|| !EvaluateMorphTargets(
+							auto& output=this->m_entityMorphedMeshes[ToIndex(binding.entity)];
+							bool evaluated=false;
+							try
+							{
+								evaluated=IsValid(meshId) && ToIndex(meshId)<Meshes().size()
+									&& EvaluateMorphTargets(
 									*Meshes()[ToIndex(meshId)],
 									assetMesh.morphTargets,
 									weights,
-									this->m_entityMorphedMeshes[ToIndex(binding.entity)]))
+									output);
+							}
+							catch(...) { output.vertices.clear(); output.indices.clear(); throw; }
+							if(!evaluated)
 							{
+								output.vertices.clear(); output.indices.clear();
 								fail(instanceId, binding.entity, "invalid morph target");
 								continue;
 							}

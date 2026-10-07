@@ -155,12 +155,18 @@ RHI::ShaderDesc Renderer::ShaderDescription(ShaderSlot slot,const RHI::ShaderDes
     if(shaderSources.bytes[slot].empty())return stock;
     return {stock.stage,shaderSources.entries[slot].c_str(),shaderSources.bytes[slot].data(),shaderSources.bytes[slot].size()};
 }
+Renderer::FrameEnd::~FrameEnd()
+{
+    if(!pending) return;
+    try { (void)device.Present(); pending=false; }
+    catch(...) { /* ApplySettings retries recovery before changing output. */ }
+}
 bool Renderer::ApplySettings()
 {
-    if(canvasFramePending)
+    if(framePending)
     {
         const bool recovered=device->Present();
-        canvasFramePending=false;
+        framePending=false;
         if(!recovered) return RendererFailure("Canvas frame recovery failed.");
     }
     if(!pendingConfig && !shadersPending) return true;
@@ -524,6 +530,8 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
         if(readback && !config.allowReadback) return RendererFailure("Renderer readback was not enabled.");
         RHI::IDevice* nativeDevice = device;
         if(!selectedOutput && !nativeDevice->BeginFrame()){if(nativeDevice->IsLost())return RendererFailure("RHI device was lost.");if(readback)*readback={};return true;}
+        if(!selectedOutput) framePending=true;
+        FrameEnd frameEnd{*nativeDevice,framePending};
         auto* output=selectedOutput ? selectedOutput : nativeDevice->GetBackBuffer();
         const auto after=selectedOutput ? RHI::ResourceState::ShaderResource : RHI::ResourceState::Present;
         Camera defaultCamera;
@@ -704,7 +712,9 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
         if(readback && !CaptureFrame(*readback))return false;
         if(!selectedOutput)
         {
-            if(!nativeDevice->Present()) return RendererFailure("Scene presentation failed.");
+            const bool presented=nativeDevice->Present();
+            framePending=false;
+            if(!presented) return RendererFailure("Scene presentation failed.");
             DY_PROFILE_FRAME_MARK();
         }
         return true;

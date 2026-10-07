@@ -165,6 +165,12 @@ private:
         ~CanvasFrame();
         void Commit();
     };
+    struct FrameEnd
+    {
+        RHI::IDevice& device;
+        bool& pending;
+        ~FrameEnd();
+    };
     struct GpuSample {RHI::TimestampQueryHandle query;RHI::FenceHandle completion;uint32_t slot;};
     enum ShaderSlot : uint32_t {MeshVertex,MeshFragment,ShadowVertex,CanvasVertex,CanvasFragment,ToneVertex,ToneFragment,ShaderCount};
     struct ShaderSources
@@ -237,7 +243,7 @@ private:
     mutable std::deque<ShaderSources> shaderViews;
     mutable const ShaderSources* shaderView=nullptr;
     bool shadersPending=false;
-    bool canvasFramePending=false;
+    bool framePending=false;
     RHI::ShaderHandle vertexShader=nullptr,fragmentShader=nullptr,shadowVertexShader=nullptr;
     RHI::ShaderHandle canvasVertexShader=nullptr,canvasFragmentShader=nullptr;
     RHI::ShaderHandle toneVertexShader=nullptr,toneFragmentShader=nullptr;

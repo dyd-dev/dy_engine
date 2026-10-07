@@ -11,6 +11,9 @@
 
 namespace dyf
 {
+    // Internal loader accounting for deferred external-image decoding.
+    [[nodiscard]] bool LoadModel(const std::string& path, ModelData& outModel,
+        const ModelLoadOptions& options, uint64_t& decodedBytes);
 	[[nodiscard]] SkinInfluence MakeSkinInfluence(
 		std::vector<std::pair<uint32_t, float>> values, bool& truncated);
 	[[nodiscard]] bool IsPathInsideDirectory(
@@ -45,9 +48,9 @@ namespace dyf
 	[[nodiscard]] bool LoadGltfModel(
 		const std::string& filepath,
 		ModelData& outModel,
-		const ModelLoadOptions& options);
+		const ModelLoadOptions& options, uint64_t* decodedBytes = nullptr);
 	[[nodiscard]] bool LoadUfbxModel(
 		const std::string& filepath,
 		ModelData& outModel,
-		const ModelLoadOptions& options);
+		const ModelLoadOptions& options, uint64_t* decodedBytes = nullptr);
 }

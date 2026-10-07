@@ -452,7 +452,7 @@ namespace dyf
 		[[nodiscard]] bool ValidateGltfLoadLimits(
 			const std::string& filepath,
 			const fastgltf::Asset& gltf,
-			const ModelLoadOptions& options)
+			const ModelLoadOptions& options, uint64_t& decodedBytes)
 		{
 			ModelLoadBudget budget(filepath, options);
 			if(!budget.CheckNodes(gltf.nodes.size())
@@ -527,6 +527,7 @@ namespace dyf
 					if(!budget.AddBytes(indexCount, sizeof(uint32_t), "indices")) return false;
 				}
 			}
+			decodedBytes=budget.DecodedBytes();
 			return true;
 		}
 		[[nodiscard]] bool ValidateGltfSourceBudget(
@@ -623,8 +624,9 @@ namespace dyf
 
 	}
 
-		[[nodiscard]] bool LoadGltfModel(const std::string& filepath, ModelData& outModel, const ModelLoadOptions& options)
+		[[nodiscard]] bool LoadGltfModel(const std::string& filepath, ModelData& outModel, const ModelLoadOptions& options, uint64_t* decodedBytes)
 		{
+			if(decodedBytes) *decodedBytes=0;
 			bool warnedInfluenceTruncation = false;
 			std::error_code sourceSizeError;
 			// Resolve once so file reads, sibling assets and containment use the same directory.
@@ -717,7 +719,8 @@ namespace dyf
 			geometryOptions.maxDecodedBytes = decodedImageBytes <= options.maxDecodedBytes
 				? options.maxDecodedBytes - decodedImageBytes
 				: 0u;
-			if(!ValidateGltfLoadLimits(filepath, gltf, geometryOptions)) return false;
+			uint64_t geometryBytes=0;
+			if(!ValidateGltfLoadLimits(filepath, gltf, geometryOptions, geometryBytes)) return false;
 			outModel.materials.reserve(gltf.materials.size());
 			for(size_t materialIndex = 0; materialIndex < gltf.materials.size(); ++materialIndex)
 			{
@@ -1479,6 +1482,7 @@ namespace dyf
 				pendingNodes.pop_back();
 				if(!processNode(node.index, node.parentMatrix)) return false;
 			}
+			if(decodedBytes) *decodedBytes=geometryBytes+decodedImageBytes;
 			return !outModel.meshes.empty();
 		}
 

@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <exception>
 #include <type_traits>
+#include <utility>
 
 namespace dyf
 {
@@ -61,7 +62,12 @@ MaterialID Scene::GetEntityMaterial(EntityID entity) const { return m_entityMate
 const Transform& Scene::GetTransform(EntityID entity) const { return m_entityTransforms[ToIndex(entity)]; }
 const EntityLightingDesc& Scene::GetEntityLighting(EntityID entity) const { return m_entityLighting[ToIndex(entity)]; }
 void Scene::SetEntityLighting(EntityID entity, const EntityLightingDesc& lighting) { m_entityLighting[ToIndex(entity)] = lighting; }
-void Scene::SetMaterial(MaterialID material, const MaterialDesc& value) { m_materials[ToIndex(material)] = value; }
+void Scene::SetMaterial(MaterialID material, const MaterialDesc& value)
+{
+    static_assert(std::is_nothrow_move_assignable_v<MaterialDesc>);
+    auto replacement=value;
+    m_materials[ToIndex(material)]=std::move(replacement);
+}
 
 const std::vector<std::shared_ptr<const MeshData>>& Scene::Meshes() const { return m_meshes; }
 const std::vector<MaterialDesc>& Scene::Materials() const { return m_materials; }
@@ -85,6 +91,7 @@ Scene::Scene() : m_lifetime(this, [](Scene*) {}) {}
 Scene::~Scene() = default;
 EntityHandle Scene::Add(const MeshData& mesh,const MaterialDesc& material,const Math::float4x4& transform)
 {
+    const auto meshCount=m_meshes.size(), materialCount=m_materials.size();
     try
     {
         if(mesh.vertices.empty() || mesh.indices.empty() || !Finite(transform))
@@ -95,7 +102,11 @@ EntityHandle Scene::Add(const MeshData& mesh,const MaterialDesc& material,const 
         handle.m_id=this->CreateEntity(this->CreateMesh(mesh),this->CreateMaterial(material),transform);
         return handle;
     }
-    catch(const std::exception& error) {std::fprintf(stderr,"dyf: Scene::Add: %s\n",error.what());return {};}
+    catch(const std::exception& error)
+    {
+        m_meshes.resize(meshCount); m_materials.resize(materialCount);
+        std::fprintf(stderr,"dyf: Scene::Add: %s\n",error.what());return {};
+    }
 }
 EntityHandle Scene::AddInstance(const EntityHandle& source,const Math::float4x4& transform)
 {

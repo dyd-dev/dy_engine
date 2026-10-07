@@ -215,21 +215,11 @@ bool Renderer::RenderCanvas(const Canvas& canvas, Image* readback)
         if(readback)*readback={};
         return true;
     }
-    canvasFramePending=true;
+    framePending=true;
     // Canvas submits a single list ending in Present. Before submission (including
     // failed recording) the acquired image also remains in Present. Close that
     // frame after releasing recording ownership, including readback failures.
-    struct FrameEnd
-    {
-        RHI::IDevice& device;
-        bool& pending;
-        ~FrameEnd()
-        {
-            if(!pending) return;
-            try { (void)device.Present(); pending=false; }
-            catch(...) { /* ApplySettings retries recovery before changing output. */ }
-        }
-    } frameEnd{*device,canvasFramePending};
+    FrameEnd frameEnd{*device,framePending};
     CanvasFrame canvasFrame(*this);
     RHI::ResourceScope resources(*device);
     auto* commands=device->AcquireCommandList();
@@ -242,7 +232,7 @@ bool Renderer::RenderCanvas(const Canvas& canvas, Image* readback)
     canvasFrame.Commit();
     if(readback && !CaptureFrame(*readback))return false;
     const bool presented=device->Present();
-    canvasFramePending=false;
+    framePending=false;
     if(!presented) {std::fprintf(stderr,"dyf: Canvas presentation failed.\n");return false;}
     DY_PROFILE_FRAME_MARK();
     return true;

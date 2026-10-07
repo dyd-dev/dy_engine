@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 
 #include <dyf/Extends/Model/ModelScene.h>
@@ -75,10 +76,30 @@ namespace dyf
 			return transform * desc.transform * asset.assetTransform;
 		}
 
+        bool LoadExternalImage(const std::string& path, Image& image,
+            const ModelLoadOptions& options, ModelLoadBudget& budget)
+        {
+            std::error_code error;
+            const auto size=std::filesystem::file_size(path,error);
+            if(error || !size || size>options.maxSourceBytes || size>options.maxParserInputBytes ||
+                size>static_cast<uint64_t>(std::numeric_limits<int>::max()))
+                return ReportModelError(path,"external image source size is invalid or exceeds its byte limit");
+            std::ifstream file(path,std::ios::binary);
+            std::vector<uint8_t> encoded(static_cast<size_t>(size));
+            if(!file.read(reinterpret_cast<char*>(encoded.data()),static_cast<std::streamsize>(encoded.size())))
+                return ReportModelError(path,"failed to read external image");
+            bool exceeded=false;
+            if(!LoadImage(encoded.data(),encoded.size(),image,
+                options.maxDecodedBytes-budget.DecodedBytes(),&exceeded))
+                return ReportModelError(path,exceeded ? "external image pixels exceed maxDecodedBytes" : "failed to decode external image");
+            if(!budget.AddBytes(image.GetPixels().size(),1,"external image pixels")) return false;
+            image.SetSourcePath(path);
+            return true;
+        }
 		[[nodiscard]] Image CreateTextureIfPresent(
 			const ModelMaterialInfo& material,
 			MaterialTextureKind kind,
-			const std::vector<Image>& importedTextures)
+			const std::vector<Image>& importedTextures, const ModelLoadOptions& options, ModelLoadBudget& budget)
 		{
 			const uint32_t slot = static_cast<uint32_t>(kind);
 			const uint32_t textureIndex = material.textureIndices[slot];
@@ -90,7 +111,7 @@ namespace dyf
 			}
 			else if(material.hasTexture[slot] && !material.texturePaths[slot].empty())
 			{
-				if(!LoadImage(material.texturePaths[slot], texture)) return {};
+				if(!LoadExternalImage(material.texturePaths[slot], texture, options, budget)) return {};
 			}
 			else return {};
 			// 재질별 색 공간만 바꾸며 이미 디코딩한 픽셀은 같은 저장소를 공유한다.
@@ -101,14 +122,15 @@ namespace dyf
 
 		[[nodiscard]] bool BuildSceneMaterial(
 			const ModelMaterialInfo& source,
-			const std::vector<Image>& importedTextures, MaterialDesc& material)
+			const std::vector<Image>& importedTextures, MaterialDesc& material,
+            const ModelLoadOptions& options, ModelLoadBudget& budget)
 		{
 			material = source.material;
-			material.baseColorTexture = CreateTextureIfPresent(source, MaterialTextureKind::BaseColor, importedTextures);
-			material.metallicRoughnessTexture = CreateTextureIfPresent(source, MaterialTextureKind::MetallicRoughness, importedTextures);
-			material.normalTexture = CreateTextureIfPresent(source, MaterialTextureKind::Normal, importedTextures);
-			material.occlusionTexture = CreateTextureIfPresent(source, MaterialTextureKind::Occlusion, importedTextures);
-			material.emissiveTexture = CreateTextureIfPresent(source, MaterialTextureKind::Emissive, importedTextures);
+			material.baseColorTexture = CreateTextureIfPresent(source, MaterialTextureKind::BaseColor, importedTextures, options, budget);
+			material.metallicRoughnessTexture = CreateTextureIfPresent(source, MaterialTextureKind::MetallicRoughness, importedTextures, options, budget);
+			material.normalTexture = CreateTextureIfPresent(source, MaterialTextureKind::Normal, importedTextures, options, budget);
+			material.occlusionTexture = CreateTextureIfPresent(source, MaterialTextureKind::Occlusion, importedTextures, options, budget);
+			material.emissiveTexture = CreateTextureIfPresent(source, MaterialTextureKind::Emissive, importedTextures, options, budget);
 			const Image* textures[]={&material.baseColorTexture,&material.metallicRoughnessTexture,&material.normalTexture,&material.occlusionTexture,&material.emissiveTexture};
             for(uint32_t slot=0;slot<5;++slot)
                 if((source.textureIndices[slot]<importedTextures.size() || (source.hasTexture[slot] && !source.texturePaths[slot].empty())) && !textures[slot]->IsValid())return false;
@@ -352,7 +374,10 @@ namespace dyf
 		}
 
 		ModelData model = {};
-		if(!LoadModel(path, model, options)) return false;
+        uint64_t decodedBytes=0;
+		if(!LoadModel(path, model, options, decodedBytes)) return false;
+        ModelLoadBudget budget(path,options);
+        if(!budget.AddBytes(decodedBytes,1,"decoded model data")) return false;
 		const bool animatedModel = !model.skins.empty() || !model.animations.empty()
 			|| std::any_of(model.meshes.begin(), model.meshes.end(), [](const ModelMesh& mesh) {
 				return !mesh.morphTargets.empty();
@@ -380,7 +405,7 @@ namespace dyf
 				if(ufbxTexturesDecoded) return false;
 				const ColorSpace colorSpace = texture.GetColorSpace();
 				const std::string path = texture.GetSourcePath();
-				if(path.empty() || !LoadImage(path, texture)) return false;
+				if(path.empty() || !LoadExternalImage(path, texture, options, budget)) return false;
 				texture.SetColorSpace(colorSpace);
 			}
 		}
@@ -389,7 +414,7 @@ namespace dyf
 		for(const ModelMaterialInfo& material : model.materials)
         {
             MaterialDesc prepared;
-            if(!BuildSceneMaterial(material,model.textures,prepared))return false;
+            if(!BuildSceneMaterial(material,model.textures,prepared,options,budget))return false;
             materials.push_back(scene.CreateMaterial(prepared));
         }
 		if(materials.empty()) materials.push_back(scene.CreateMaterial(MaterialDesc{}));
@@ -484,7 +509,7 @@ namespace dyf
 		}
 		if(animatedModel)
 		{
-			if(!scene.UpdateAnimations(0.0f)) return false;
+			if(!scene.UpdateAnimations(0.0f,instanceId)) return false;
 			if(outInstance != nullptr) *outInstance = instanceId;
 		}
 		return createdAny;

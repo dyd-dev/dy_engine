@@ -588,8 +588,9 @@ namespace dyf
 
 	}
 
-		[[nodiscard]] bool LoadUfbxModel(const std::string& filepath, ModelData& outModel, const ModelLoadOptions& options)
+		[[nodiscard]] bool LoadUfbxModel(const std::string& filepath, ModelData& outModel, const ModelLoadOptions& options, uint64_t* decodedBytes)
 		{
+			if(decodedBytes) *decodedBytes=0;
 			if(options.maxNodeDepth == 0u)
 				return ReportModelError(
 					filepath,
@@ -1281,6 +1282,7 @@ namespace dyf
 				}
 			}
 
+			if(decodedBytes) *decodedBytes=geometryBytes+decodedTextureBytes;
 			return !outModel.meshes.empty();
 		}
 }
