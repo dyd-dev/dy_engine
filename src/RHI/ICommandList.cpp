@@ -6,6 +6,7 @@
 namespace dyf::RHI
 {
 void ICommandList::BeginDebugEvent(const char* name, const DebugLabelColor& color)
+try
 {
     if(!CanRecordCommands()) return;
     if(!name || !*name || !std::isfinite(color.r) || !std::isfinite(color.g) ||
@@ -13,32 +14,41 @@ void ICommandList::BeginDebugEvent(const char* name, const DebugLabelColor& colo
     ++m_debugEventDepth;
     BeginDebugEventNative(name, color);
 }
+catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::EndDebugEvent()
+try
 {
     if(!CanRecordCommands()) return;
     if(!m_debugEventDepth) { m_recordingFailed = true; return; }
     --m_debugEventDepth;
     EndDebugEventNative();
 }
+catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::InsertDebugMarker(const char* name, const DebugLabelColor& color)
+try
 {
     if(!CanRecordCommands()) return;
     if(!name || !*name || !std::isfinite(color.r) || !std::isfinite(color.g) ||
         !std::isfinite(color.b) || !std::isfinite(color.a)) { m_recordingFailed = true; return; }
     InsertDebugMarkerNative(name, color);
 }
+catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::ResetTimestamps(TimestampQueryHandle query,uint32_t first,uint32_t count)
+try
 {
     if(!Track(query)) return;
     if(m_rendering || !count || first>=query->GetCount() || count>query->GetCount()-first) {m_recordingFailed=true;return;}
     ResetTimestampsNative(query,first,count);
 }
+catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::WriteTimestamp(TimestampQueryHandle query,uint32_t index)
+try
 {
     if(!Track(query)) return;
     if(index>=query->GetCount()) {m_recordingFailed=true;return;}
     WriteTimestampNative(query,index);
 }
+catch(...) { m_recordingFailed=true; throw; }
 ICommandList::~ICommandList()
 {
     if(m_owner)
@@ -64,13 +74,16 @@ bool ICommandList::ReplayNative(const std::vector<std::function<bool(ICommandLis
 }
 
 void ICommandList::GlobalBarrier()
+try
 {
     if(!CanRecordCommands()) return;
     if(m_rendering) { m_recordingFailed = true; return; }
     GlobalBarrierNative();
 }
+catch(...) { m_recordingFailed=true; throw; }
 
 bool ICommandList::Track(const void* handle)
+try
 {
     if(!CanRecordCommands()) return false;
     // References recorded before Destroy* retain the object until this list ends.
@@ -85,8 +98,10 @@ bool ICommandList::Track(const void* handle)
     m_references.push_back(std::move(reference));
     return true;
 }
+catch(...) { m_recordingFailed=true; throw; }
 
 void ICommandList::ResourceBarrier(const ResourceBarrierDesc* barriers, uint32_t count)
+try
 {
     if(!CanRecordCommands()) return;
     if(count && !barriers) { m_recordingFailed = true; return; }
@@ -120,9 +135,11 @@ void ICommandList::ResourceBarrier(const ResourceBarrierDesc* barriers, uint32_t
     }
     ResourceBarrierNative(barriers, count);
 }
+catch(...) { m_recordingFailed=true; throw; }
 
 
 void ICommandList::RequireState(const void* resource,uint32_t mip,uint32_t layer,ResourceState state)
+try
 {
     const auto key=std::make_tuple(reinterpret_cast<uintptr_t>(resource),mip,layer);
     m_stateOperations.push_back([key,state](StateMap& states){
@@ -130,7 +147,9 @@ void ICommandList::RequireState(const void* resource,uint32_t mip,uint32_t layer
         return found!=states.end() && found->second==state;
     });
 }
+catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::BeginRendering(const RenderingDesc& desc)
+try
 {
     if(!CanRecordCommands())return;
     if(m_rendering || (desc.colorAttachmentCount && !desc.colorAttachments) ||
@@ -212,13 +231,23 @@ void ICommandList::BeginRendering(const RenderingDesc& desc)
     }
     BeginRenderingNative({colors.data(),desc.colorAttachmentCount,nativeDepth});
 }
+catch(...) { m_recordingFailed=true; throw; }
 
-void ICommandList::EndRendering() { if(CanRecordCommands()) EndRenderingNative(); }
-void ICommandList::BindGraphicsPipeline(PipelineHandle pipeline) {if(!Track(pipeline))return;if(pipeline->IsCompute()){m_recordingFailed=true;return;}m_resourceSet=nullptr;BindGraphicsPipelineNative(pipeline);}
-void ICommandList::BindComputePipeline(PipelineHandle pipeline) {if(!Track(pipeline))return;if(m_rendering||!pipeline->IsCompute()){m_recordingFailed=true;return;}m_resourceSet=nullptr;BindComputePipelineNative(pipeline);}
-void ICommandList::Dispatch(uint32_t x,uint32_t y,uint32_t z) {if(!CanRecordCommands())return;if(m_rendering||!m_pipeline||!m_pipeline->IsCompute()||!x||!y||!z){m_recordingFailed=true;return;}if(ValidateBindings(false,true))DispatchNative(x,y,z);}
+void ICommandList::EndRendering() try
+{ if(CanRecordCommands()) EndRenderingNative(); }
+catch(...) { m_recordingFailed=true; throw; }
+void ICommandList::BindGraphicsPipeline(PipelineHandle pipeline) try
+{if(!Track(pipeline))return;if(pipeline->IsCompute()){m_recordingFailed=true;return;}m_resourceSet=nullptr;BindGraphicsPipelineNative(pipeline);}
+catch(...) { m_recordingFailed=true; throw; }
+void ICommandList::BindComputePipeline(PipelineHandle pipeline) try
+{if(!Track(pipeline))return;if(m_rendering||!pipeline->IsCompute()){m_recordingFailed=true;return;}m_resourceSet=nullptr;BindComputePipelineNative(pipeline);}
+catch(...) { m_recordingFailed=true; throw; }
+void ICommandList::Dispatch(uint32_t x,uint32_t y,uint32_t z) try
+{if(!CanRecordCommands())return;if(m_rendering||!m_pipeline||!m_pipeline->IsCompute()||!x||!y||!z){m_recordingFailed=true;return;}if(ValidateBindings(false,true))DispatchNative(x,y,z);}
+catch(...) { m_recordingFailed=true; throw; }
 
 void ICommandList::BindResourceSet(ResourceSetHandle resources)
+try
 {
     if(!Track(resources))return;
     if(!m_pipeline || resources->GetPipeline()!=m_pipeline || (!m_pipeline->IsCompute() && !m_rendering))
@@ -227,6 +256,7 @@ void ICommandList::BindResourceSet(ResourceSetHandle resources)
     m_resourceSet=resources;
     BindResourceSetNative(resources);
 }
+catch(...) { m_recordingFailed=true; throw; }
 
 bool ICommandList::RequireResourceSetStates(ResourceSetHandle resources)
 {
@@ -254,6 +284,7 @@ bool ICommandList::RequireResourceSetStates(ResourceSetHandle resources)
     return true;
 }
 void ICommandList::BindVertexBuffer(uint32_t binding,BufferHandle buffer,uint32_t offset)
+try
 {
     if(!Track(buffer))return;
     if(!m_rendering || !m_pipeline || m_pipeline->IsCompute() || offset>=buffer->GetDesc().size || !HasUsage(buffer->GetDesc().usage,BufferUsage::Vertex))
@@ -262,7 +293,9 @@ void ICommandList::BindVertexBuffer(uint32_t binding,BufferHandle buffer,uint32_
     m_vertexBuffers[binding]=buffer;
     BindVertexBufferNative(binding,buffer,offset);
 }
+catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::BindIndexBuffer(BufferHandle buffer,Format format,uint32_t offset)
+try
 {
     if(!Track(buffer))return;
     if(!m_rendering || (format!=Format::R16_UINT && format!=Format::R32_UINT) || offset>=buffer->GetDesc().size ||
@@ -271,26 +304,34 @@ void ICommandList::BindIndexBuffer(BufferHandle buffer,Format format,uint32_t of
     RequireState(buffer,0,0,ResourceState::IndexBuffer);
     BindIndexBufferNative(buffer,format,offset);
 }
+catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::SetInlineConstants(uint32_t offset, uint32_t size, const void* data)
+try
 {
     if(!CanRecordCommands()) return;
     if(!data || !size || !m_pipeline || offset%4 || size%4 || offset>m_pipeline->GetLayout().inlineConstantSize ||
         size>m_pipeline->GetLayout().inlineConstantSize-offset) { m_recordingFailed = true; return; }
     SetInlineConstantsNative(offset, size, data);
 }
-void ICommandList::SetViewport(const Viewport& viewport) {
+catch(...) { m_recordingFailed=true; throw; }
+void ICommandList::SetViewport(const Viewport& viewport) try
+{
     if(!CanRecordCommands())return;
     if(!std::isfinite(viewport.x+viewport.y+viewport.width+viewport.height+viewport.minDepth+viewport.maxDepth) ||
         viewport.width<=0 || viewport.height<=0 || viewport.minDepth<0 || viewport.maxDepth>1 || viewport.minDepth>viewport.maxDepth)
     {m_recordingFailed=true;return;}
     SetViewportNative(viewport);
 }
-void ICommandList::SetScissor(const Rect& rect) {
+catch(...) { m_recordingFailed=true; throw; }
+void ICommandList::SetScissor(const Rect& rect) try
+{
     if(!CanRecordCommands())return;
     if(rect.x<0 || rect.y<0 || !rect.width || !rect.height) {m_recordingFailed=true;return;}
     SetScissorNative(rect);
 }
+catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::SetStencilReference(uint32_t reference)
+try
 {
     if(!CanRecordCommands())return;
     if(reference>255)
@@ -300,6 +341,7 @@ void ICommandList::SetStencilReference(uint32_t reference)
     }
     SetStencilReferenceNative(reference);
 }
+catch(...) { m_recordingFailed=true; throw; }
 
 bool ICommandList::ValidateBindings(bool indexed, bool compute)
 {
@@ -335,11 +377,16 @@ bool ICommandList::ValidateBindings(bool indexed, bool compute)
     return !m_resourceSet || RequireResourceSetStates(m_resourceSet);
 }
 void ICommandList::DrawInstanced(uint32_t vertices, uint32_t instances, uint32_t firstVertex, uint32_t firstInstance)
+try
 { if(CanRecordCommands() && ValidateBindings(false,false)) DrawInstancedNative(vertices, instances, firstVertex, firstInstance); }
+catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::DrawIndexedInstanced(uint32_t indices, uint32_t instances, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance)
+try
 { if(CanRecordCommands() && ValidateBindings(true,false)) DrawIndexedInstancedNative(indices, instances, firstIndex, vertexOffset, firstInstance); }
+catch(...) { m_recordingFailed=true; throw; }
 
 bool ICommandList::Close()
+try
 {
     if(m_recordingClosed) { m_recordingFailed = true; return false; }
     if(m_debugEventDepth) m_recordingFailed = true;
@@ -349,6 +396,7 @@ bool ICommandList::Close()
     if(m_recordingFailed && m_owner)m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,"Close: command recording failed. Invalid commands will not be submitted.");
     return !m_recordingFailed;
 }
+catch(...) { m_recordingFailed=true; throw; }
 }
 
 

@@ -29,6 +29,8 @@ namespace dyf::RHI
 	class Shader
 	{
 	public:
+		Shader(const Shader&) = delete;
+		Shader& operator=(const Shader&) = delete;
 		[[nodiscard]] ShaderStage GetStage() const { return m_stage; }
 		[[nodiscard]] const char* GetEntryPoint() const { return m_entryPoint.c_str(); }
 		[[nodiscard]] const void* GetBinary() const { return m_binary.data(); }

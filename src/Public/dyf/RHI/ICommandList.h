@@ -20,6 +20,10 @@ namespace dyf::RHI
 	class ICommandList
 	{
 	public:
+        ICommandList(const ICommandList&) = delete;
+        ICommandList& operator=(const ICommandList&) = delete;
+        // A recording exception invalidates this list until IDevice::ResetCommandList.
+        // The original exception is propagated; Close/Prepare/Submit reject the list.
         // Labels are copied when recorded. Unsupported native capture tools treat them as no-ops.
         void BeginDebugEvent(const char* name, const DebugLabelColor& color = {});
         void EndDebugEvent();
@@ -67,6 +71,7 @@ namespace dyf::RHI
 		bool Close();
 
 	protected:
+        ICommandList() = default;
         virtual bool ReplayNative(const std::vector<std::function<bool(ICommandList&)>>& commands);
         virtual void BeginDebugEventNative(const char*, const DebugLabelColor&) {}
         virtual void EndDebugEventNative() {}

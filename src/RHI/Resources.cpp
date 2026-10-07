@@ -401,10 +401,13 @@ bool IDevice::Submit(ICommandList** commands, uint32_t count)
         commands[i]->m_preparedNative=nullptr;
     }
     const auto discard=[&] {for(auto* list:native) DiscardCommandListNative(list);};
-    if(!SubmitNative(native.data(),count))
+    bool submitted=false;
+    try { submitted=SubmitNative(native.data(),count); }
+    catch(...) { discard(); throw; }
+    if(!submitted)
     {
-        ReportDiagnostic(DiagnosticSeverity::Error,"Submit: native submission failed.");
         discard();
+        ReportDiagnostic(DiagnosticSeverity::Error,"Submit: native submission failed.");
         return false;
     }
     for(const auto& entry:states) {
@@ -577,6 +580,7 @@ void IDevice::DestroyPipeline(PipelineHandle handle) { std::lock_guard<std::recu
 void IDevice::DestroyResourceSet(ResourceSetHandle handle) { std::lock_guard<std::recursive_mutex> lock(m_resourceMutex); m_resources.erase(handle); }
 
 bool IDevice::UpdateBuffer(ICommandList& commands, BufferHandle buffer, uint32_t offset, const void* data, uint32_t size)
+try
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
     if(commands.m_owner != this || !commands.Track(buffer) || !data || !size
@@ -593,9 +597,11 @@ bool IDevice::UpdateBuffer(ICommandList& commands, BufferHandle buffer, uint32_t
     });
     return true;
 }
+catch(...) { commands.m_recordingFailed=true; throw; }
 
 bool IDevice::UpdateTexture(ICommandList& commands, TextureHandle texture, uint32_t mip, uint32_t layer,
     const void* data, uint32_t size, uint32_t rowPitch, uint32_t slicePitch)
+try
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
     if(commands.m_owner != this || !commands.Track(texture) || !data || !size
@@ -619,6 +625,7 @@ bool IDevice::UpdateTexture(ICommandList& commands, TextureHandle texture, uint3
     });
     return true;
 }
+catch(...) { commands.m_recordingFailed=true; throw; }
 
 bool IDevice::ReadTexture(TextureHandle texture, TextureReadback& result)
 {

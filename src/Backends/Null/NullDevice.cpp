@@ -106,28 +106,7 @@ namespace dyf::Backends
 				m_states[static_cast<size_t>(arrayLayer) * GetDesc().mipLevels + mipLevel] = state;
 			}
 
-			void Write(
-				uint32_t mipLevel,
-				uint32_t arrayLayer,
-				uint32_t rowPitch,
-				uint32_t slicePitch,
-				const std::vector<uint8_t>& data)
-			{
-				const size_t index = static_cast<size_t>(arrayLayer) * GetDesc().mipLevels + mipLevel;
-				m_subresources.resize(
-					static_cast<size_t>(GetDesc().depthOrArraySize) * GetDesc().mipLevels);
-				m_subresources[index] = {rowPitch, slicePitch, data};
-			}
-
 		private:
-			struct SubresourceData
-			{
-				uint32_t rowPitch = 0;
-				uint32_t slicePitch = 0;
-				std::vector<uint8_t> data;
-			};
-
-			std::vector<SubresourceData> m_subresources;
 			std::vector<RHI::ResourceState> m_states;
 			bool m_swapchainImage = false;
 		};
@@ -807,17 +786,11 @@ namespace dyf::Backends
 						break;
 					case OperationKind::BufferRequirement:
 					case OperationKind::TextureRequirement:
+					case OperationKind::TextureWrite:
+						// Texture uploads are validated; Null has no pixel readback.
 						break;
 					case OperationKind::BufferWrite:
 						operation.buffer->Write(operation.offset, operation.data);
-						break;
-					case OperationKind::TextureWrite:
-						operation.texture->Write(
-							operation.mipLevel,
-							operation.arrayLayer,
-							operation.rowPitch,
-							operation.slicePitch,
-							operation.data);
 						break;
 					}
 				}

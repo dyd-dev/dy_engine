@@ -250,6 +250,8 @@ namespace dyf::RHI
 	class Pipeline
 	{
 	public:
+		Pipeline(const Pipeline&) = delete;
+		Pipeline& operator=(const Pipeline&) = delete;
 		[[nodiscard]] bool IsCompute() const {return m_compute;}
         [[nodiscard]] const PipelineLayoutDesc& GetLayout() const { return m_layout; }
 

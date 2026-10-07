@@ -58,6 +58,8 @@ namespace dyf::RHI
 	class Texture
 	{
 	public:
+		Texture(const Texture&) = delete;
+		Texture& operator=(const Texture&) = delete;
 		[[nodiscard]] const TextureDesc& GetDesc() const { return m_desc; }
 
 	protected:
