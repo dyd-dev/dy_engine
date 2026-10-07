@@ -32,7 +32,7 @@ namespace dyf::Backends
 
 		NSError* error = nil;
 		m_impl->library = [metalDevice newLibraryWithData:libraryData error:&error];
-#if !OS_OBJECT_USE_OBJC
+#if !OS_OBJECT_USE_OBJC || !__has_feature(objc_arc)
 		dispatch_release(libraryData);
 #endif
 		if(m_impl->library == nil) return;

@@ -427,7 +427,8 @@ BufferHandle IDevice::CreateBuffer(const BufferDesc& desc)
         device.DestroyBufferNative(static_cast<BufferHandle>(handle));
         --device.m_allocationCounters.buffers.live; ++device.m_allocationCounters.buffers.destroyed;
     });
-    if(buffer)m_resourceStates[{reinterpret_cast<uintptr_t>(buffer),0,0}]=desc.initialState;
+    try { if(buffer)m_resourceStates[{reinterpret_cast<uintptr_t>(buffer),0,0}]=desc.initialState; }
+    catch(...) { m_resources.erase(buffer); throw; }
     return buffer;
 }
 
@@ -445,8 +446,12 @@ TextureHandle IDevice::CreateTexture(const TextureDesc& desc)
         device.DestroyTextureNative(static_cast<TextureHandle>(handle));
         --device.m_allocationCounters.textures.live; ++device.m_allocationCounters.textures.destroyed;
     });
-    if(texture)for(uint32_t layer=0;layer<desc.depthOrArraySize;++layer)for(uint32_t mip=0;mip<desc.mipLevels;++mip)
-        m_resourceStates[{reinterpret_cast<uintptr_t>(texture),mip,layer}]=ResourceState::Undefined;
+    try
+    {
+        if(texture)for(uint32_t layer=0;layer<desc.depthOrArraySize;++layer)for(uint32_t mip=0;mip<desc.mipLevels;++mip)
+            m_resourceStates[{reinterpret_cast<uintptr_t>(texture),mip,layer}]=ResourceState::Undefined;
+    }
+    catch(...) { m_resources.erase(texture); throw; }
     return texture;
 }
 

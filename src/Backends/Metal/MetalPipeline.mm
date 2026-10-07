@@ -374,6 +374,7 @@ namespace dyf::Backends
 
 	struct MetalPipeline::Impl
 	{
+		~Impl();
 		id<MTLRenderPipelineState> pipelineState = nil;
 		id<MTLComputePipelineState> hullPipelineState = nil;
 		id<MTLDepthStencilState> depthStencilState = nil;
@@ -454,6 +455,8 @@ namespace dyf::Backends
 		default: return;
 		}
 
+		// Register each new native sampler without a subsequent allocation.
+		m_impl->ownedStaticSamplers.reserve(desc.layout.bindingCount);
 		for(uint32_t index = 0; index < desc.layout.bindingCount; ++index)
 		{
 			const RHI::ResourceBindingLayout& binding = desc.layout.bindings[index];
@@ -636,31 +639,26 @@ namespace dyf::Backends
 		}
 	}
 
-	MetalPipeline::~MetalPipeline()
+	MetalPipeline::~MetalPipeline() = default;
+
+	MetalPipeline::Impl::~Impl()
 	{
-		if(m_impl == nullptr) return;
 #if __has_feature(objc_arc)
-		for(void* sampler : m_impl->ownedStaticSamplers)
+		for(void* sampler : ownedStaticSamplers)
 		{
 			id<MTLSamplerState> released =
 				(__bridge_transfer id<MTLSamplerState>)sampler;
 			(void)released;
 		}
 #else
-		for(void* sampler : m_impl->ownedStaticSamplers)
+		for(void* sampler : ownedStaticSamplers)
 			[(__bridge id<MTLSamplerState>)sampler release];
 #endif
-		m_impl->ownedStaticSamplers.clear();
-		m_impl->staticSamplers.clear();
 #if !__has_feature(objc_arc)
-		[m_impl->depthStencilState release];
-		[m_impl->hullPipelineState release];
-		[m_impl->pipelineState release];
+		[depthStencilState release];
+		[hullPipelineState release];
+		[pipelineState release];
 #endif
-		m_impl->depthStencilState = nil;
-		m_impl->hullPipelineState = nil;
-		m_impl->pipelineState = nil;
-		delete m_impl;
 	}
 
 	const RHI::GraphicsPipelineDesc& MetalPipeline::GetDesc() const { return m_desc; }

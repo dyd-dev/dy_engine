@@ -65,20 +65,20 @@ namespace dyf::Backends
 
     MetalTexture::MetalTexture(const RHI::TextureDesc& desc)
         : RHI::Texture(desc)
-        , m_impl(new Impl())
 		, m_states(
 			static_cast<size_t>(desc.mipLevels) * desc.depthOrArraySize,
 			RHI::ResourceState::Present)
+        , m_impl(new Impl())
     {
         m_impl->swapchainImage = true;
     }
 
     MetalTexture::MetalTexture(const RHI::TextureDesc& desc, void* device)
 		: RHI::Texture(desc)
-		, m_impl(new Impl())
 		, m_states(
 			static_cast<size_t>(desc.mipLevels) * desc.depthOrArraySize,
 			RHI::ResourceState::Undefined)
+		, m_impl(new Impl())
     {
         m_impl->swapchainImage = false;
         id<MTLDevice> mtlDevice = (__bridge id<MTLDevice>)device;

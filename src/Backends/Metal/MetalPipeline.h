@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "dyf/RHI/Pipeline.h"
@@ -45,7 +46,7 @@ namespace dyf::Backends
 		~MetalPipeline() override;
 
 		struct Impl;
-		Impl* m_impl = nullptr;
+		std::unique_ptr<Impl> m_impl;
 		RHI::GraphicsPipelineDesc m_desc = {};
 		std::vector<RHI::VertexBufferLayout> m_vertexBuffers;
 		std::vector<RHI::VertexAttribute> m_vertexAttributes;

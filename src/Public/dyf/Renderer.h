@@ -173,6 +173,7 @@ private:
         std::array<std::string,ShaderCount> entries;
         std::vector<RHI::ResourceBindingLayout> vertexBindings;
         uint32_t additionalConstantBytes = 0;
+        bool operator==(const ShaderSources&) const;
     };
 
     Renderer(RHI::IDevice&,const void* window,const RendererConfig&);
@@ -234,7 +235,7 @@ private:
     ShaderSources shaderSources,pendingShaderSources;
     // SetShaders로 교체한 pending 입력의 이전 읽기 뷰도 적용 성공까지 유지한다.
     mutable std::deque<ShaderSources> shaderViews;
-    mutable bool shaderViewCurrent=false;
+    mutable const ShaderSources* shaderView=nullptr;
     bool shadersPending=false;
     bool canvasFramePending=false;
     RHI::ShaderHandle vertexShader=nullptr,fragmentShader=nullptr,shadowVertexShader=nullptr;

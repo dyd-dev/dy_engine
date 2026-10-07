@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 #include "dyf/RHI/ResourceSet.h"
@@ -37,6 +38,6 @@ namespace dyf::Backends
 		~MetalResourceSet() override;
 
 		struct Impl;
-		Impl* m_impl = nullptr;
+		std::unique_ptr<Impl> m_impl;
 	};
 }

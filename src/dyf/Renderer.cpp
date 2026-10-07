@@ -98,6 +98,26 @@ bool Renderer::SetHdrEnabled(bool value) {auto desc=GetConfig();desc.enableHdrRe
 bool Renderer::SetExposure(float value) {auto desc=GetConfig();desc.exposure=value;return SetConfig(desc);}
 bool Renderer::SetProfilerVisible(bool value) {auto desc=GetConfig();desc.enableProfilerHud=value;return SetConfig(desc);}
 bool Renderer::SetReadbackEnabled(bool value) {auto desc=GetConfig();desc.allowReadback=value;return SetConfig(desc);}
+bool Renderer::ShaderSources::operator==(const ShaderSources& other) const
+{
+    if(bytes!=other.bytes || entries!=other.entries || additionalConstantBytes!=other.additionalConstantBytes ||
+        vertexBindings.size()!=other.vertexBindings.size()) return false;
+    // Compare float representations so copied default NaNs also match.
+    const auto sameFloat=[](float left,float right) {return std::memcmp(&left,&right,sizeof(float))==0;};
+    for(size_t i=0;i<vertexBindings.size();++i)
+    {
+        const auto& left=vertexBindings[i];const auto& right=other.vertexBindings[i];
+        if(left.binding!=right.binding || left.type!=right.type || left.count!=right.count || left.stages!=right.stages)
+            return false;
+        const auto& a=left.staticSampler;const auto& b=right.staticSampler;
+        if(a.minFilter!=b.minFilter || a.magFilter!=b.magFilter || a.mipFilter!=b.mipFilter ||
+            a.addressU!=b.addressU || a.addressV!=b.addressV || a.addressW!=b.addressW ||
+            a.borderColor!=b.borderColor || a.maxAnisotropy!=b.maxAnisotropy ||
+            !sameFloat(a.mipLodBias,b.mipLodBias) || !sameFloat(a.minLod,b.minLod) || !sameFloat(a.maxLod,b.maxLod))
+            return false;
+    }
+    return true;
+}
 bool Renderer::SetShaders(const RendererShaderDesc& desc)
 {
     try
@@ -122,18 +142,9 @@ bool Renderer::SetShaders(const RendererShaderDesc& desc)
             next.entries[i]=shader.entryPoint;
         }
         // 호출 범위에서 쓴 셰이더를 되돌렸다가 다시 선택한 경우 기존 GPU 파이프라인을 유지한다.
-        bool sameBindings = next.vertexBindings.size() == shaderSources.vertexBindings.size();
-        for(size_t i = 0; sameBindings && i < next.vertexBindings.size(); ++i)
-        {
-            const auto& left = next.vertexBindings[i];
-            const auto& right = shaderSources.vertexBindings[i];
-            sameBindings = left.binding == right.binding && left.type == right.type && left.count == right.count &&
-                left.stages == right.stages && left.type != RHI::ResourceBindingType::StaticSampler;
-        }
-        if(next.bytes == shaderSources.bytes && next.entries == shaderSources.entries && sameBindings &&
-            next.additionalConstantBytes == shaderSources.additionalConstantBytes)
-        { pendingShaderSources = {}; shadersPending = false; shaderViewCurrent=false; return true; }
-        pendingShaderSources=std::move(next);shadersPending=true;shaderViewCurrent=false;return true;
+        if(next == shaderSources)
+        { pendingShaderSources = {}; shadersPending = false; shaderView=nullptr; return true; }
+        pendingShaderSources=std::move(next);shadersPending=true;shaderView=nullptr;return true;
     }
     catch(const std::exception& error){std::fprintf(stderr,"dyf: Shader override: %s\n",error.what());return false;}
 }
@@ -174,7 +185,7 @@ bool Renderer::ApplySettings()
         // 그림자 품질에 따른 깊이 텍스처 크기 변경은 EnsureShadowDepthTarget에서 처리한다.
         config=nextConfig;
         pendingConfig.reset();
-        shaderViews.clear();shaderViewCurrent=false;
+        shaderViews.clear();shaderView=nullptr;
         return true;
     }
     Renderer next(*device, windowHandle, nextConfig);
@@ -186,7 +197,7 @@ bool Renderer::ApplySettings()
     SwapResources(next);
     pendingConfig.reset();
     pendingShaderSources={};shadersPending=false;
-    shaderViews.clear();shaderViewCurrent=false;
+    shaderViews.clear();shaderView=nullptr;
     return true;
 }
 void Renderer::SwapResources(Renderer& other)
@@ -367,12 +378,18 @@ bool Renderer::Render(const MeshData& mesh,const MaterialDesc& material,const Ca
 
 RendererShaderDesc Renderer::GetShaders() const
 {
-    if(!shaderViewCurrent)
+    if(!shaderView)
     {
-        shaderViews.push_back(shadersPending ? pendingShaderSources : shaderSources);
-        shaderViewCurrent=true;
+        const auto& selected=shadersPending ? pendingShaderSources : shaderSources;
+        const auto found=std::find(shaderViews.begin(),shaderViews.end(),selected);
+        if(found!=shaderViews.end()) shaderView=&*found;
+        else
+        {
+            shaderViews.push_back(selected);
+            shaderView=&shaderViews.back();
+        }
     }
-    const auto& source = shaderViews.back();
+    const auto& source = *shaderView;
     RendererShaderDesc desc;
     RHI::ShaderDesc* output[] = {&desc.meshVertex, &desc.meshFragment, &desc.shadowVertex,
         &desc.canvasVertex, &desc.canvasFragment, &desc.toneMapVertex, &desc.toneMapFragment};

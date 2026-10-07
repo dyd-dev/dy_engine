@@ -790,6 +790,10 @@ namespace dyf::Backends
 
 		if(valid)
 		{
+#if !__has_feature(objc_arc)
+			[m_impl->resumePass release];
+#endif
+			m_impl->resumePass = nil;
 			m_impl->resumePass = [pass copy];
 			for(uint32_t index = 0; index < desc.colorAttachmentCount; ++index)
 			{
