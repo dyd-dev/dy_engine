@@ -139,10 +139,11 @@ const float PI = 3.14159265359;
 float DistributionGGX(vec3 normal, vec3 halfway, float roughness) {
     float a = roughness * roughness;
     float a2 = a * a;
-    float ndoth = max(dot(normal, halfway), 0.0);
+    float ndoth = clamp(dot(normal, halfway), 0.0, 1.0);
     float ndoth2 = ndoth * ndoth;
-    float denom = ndoth2 * (a2 - 1.0) + 1.0;
-    return a2 / max(PI * denom * denom, 0.0001);
+    // roughness >= .01; this form retains a2 at the specular peak.
+    float denom = (1.0 - ndoth2) + ndoth2 * a2;
+    return a2 / (PI * denom * denom);
 }
 
 float GeometrySchlickGGX(float ndotv, float roughness) {
@@ -481,22 +482,10 @@ void main() {
 
     vec3 normal = GetNormal();
     vec3 viewDir = normalize(lighting.cameraPosition.xyz - fragWorldPosition);
-    bool usePointLight = lighting.pointLightColorIntensity.a > 0.0 && lighting.pointLightPositionRange.w > 0.0;
-    vec3 lightDir = normalize(lighting.directionalLightDirection.xyz);
-    if (usePointLight) {
-        vec3 toLight = lighting.pointLightPositionRange.xyz - fragWorldPosition;
-        float distanceToLight = length(toLight);
-        lightDir = distanceToLight > 0.0001 ? toLight / distanceToLight : vec3(0.0, 0.0, 1.0);
-    }
-    vec3 halfway = normalize(viewDir + lightDir);
-
     vec3 f0 = mix(vec3(0.04), albedo, metallic);
-    vec3 fresnel = FresnelSchlick(max(dot(halfway, viewDir), 0.0), f0);
-
-    vec3 kS = fresnel;
-    vec3 kD = (vec3(1.0) - kS) * (1.0 - metallic);
     vec3 directLight = EvaluateLights(lighting, fragWorldPosition, normal, viewDir, albedo, metallic, roughness);
     vec3 ambientFresnel = FresnelSchlickRoughness(max(dot(normal, viewDir), 0.0), f0, roughness);
+    vec3 kD = (vec3(1.0) - ambientFresnel) * (1.0 - metallic);
     vec3 ambientDiffuse = kD * albedo * lighting.ambientColor.rgb * lighting.ambientColor.a;
     vec3 ambientSpecular = ambientFresnel * lighting.environmentColor.rgb * lighting.environmentColor.a * ambientSpecularStrength;
     vec3 ambient = (ambientDiffuse + ambientSpecular) * occlusion;
@@ -507,7 +496,7 @@ void main() {
     vec3 color = lighting.lightCounts.w > 0.5 ? ambient + directLight + emissive : albedo + emissive;
 
     if(lighting.pbrParams.z >= 0.0) {
-        color *= lighting.pbrParams.w;
+        color = min(color * lighting.pbrParams.w, vec3(16777216.0));
     color = color / (color + vec3(1.0));
     if (lighting.pbrParams.z > 0.5) color = pow(color, vec3(1.0 / 2.2));
     }

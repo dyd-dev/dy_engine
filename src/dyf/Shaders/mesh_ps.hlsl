@@ -131,10 +131,11 @@ float DistributionGGX(float3 normal, float3 halfway, float roughness)
 {
     float a = roughness * roughness;
     float a2 = a * a;
-    float ndoth = max(dot(normal, halfway), 0.0);
+    float ndoth = clamp(dot(normal, halfway), 0.0, 1.0);
     float ndoth2 = ndoth * ndoth;
-    float denom = ndoth2 * (a2 - 1.0) + 1.0;
-    return a2 / max(PI * denom * denom, 0.0001);
+    // roughness >= .01; this form retains a2 at the specular peak.
+    float denom = (1.0 - ndoth2) + ndoth2 * a2;
+    return a2 / (PI * denom * denom);
 }
 
 float GeometrySchlickGGX(float ndotv, float roughness)
@@ -487,30 +488,17 @@ float4 main(PSInput input) : SV_TARGET
 
     float3 normal = GetNormal(input, textureFlags);
     float3 viewDir = normalize(lighting.cameraPosition.xyz - input.worldPosition);
-    bool usePointLight = lighting.pointLightColorIntensity.a > 0.0 && lighting.pointLightPositionRange.w > 0.0;
-    float3 lightDir = normalize(lighting.directionalLightDirection.xyz);
-    if (usePointLight)
-    {
-        float3 toLight = lighting.pointLightPositionRange.xyz - input.worldPosition;
-        float distanceToLight = length(toLight);
-        lightDir = distanceToLight > 0.0001 ? toLight / distanceToLight : float3(0.0, 0.0, 1.0);
-    }
-
-    float3 halfway = normalize(viewDir + lightDir);
     float3 f0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
-    float3 fresnel = FresnelSchlick(max(dot(halfway, viewDir), 0.0), f0);
-
-    float3 kS = fresnel;
-    float3 kD = (float3(1.0, 1.0, 1.0) - kS) * (1.0 - metallic);
     float3 directLight = EvaluateLights(lighting, input.worldPosition, normal, viewDir, albedo, metallic, roughness);
     float3 ambientFresnel = FresnelSchlickRoughness(max(dot(normal, viewDir), 0.0), f0, roughness);
+    float3 kD = (float3(1.0, 1.0, 1.0) - ambientFresnel) * (1.0 - metallic);
     float3 ambientDiffuse = kD * albedo * lighting.ambientColor.rgb * lighting.ambientColor.a;
     float3 ambientSpecular = ambientFresnel * lighting.environmentColor.rgb * lighting.environmentColor.a * ambientSpecularStrength;
     float3 ambient = (ambientDiffuse + ambientSpecular) * occlusion;
     float3 color = lighting.lightCounts.w > 0.5 ? ambient + directLight + emissive : albedo + emissive;
 
     if(lighting.pbrParams.z >= 0.0) {
-        color *= lighting.pbrParams.w;
+        color = min(color * lighting.pbrParams.w, 16777216.0);
     color = color / (color + float3(1.0, 1.0, 1.0));
     if (lighting.pbrParams.z > 0.5) color = pow(color, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
     }

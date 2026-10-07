@@ -71,14 +71,34 @@ struct RasterData
 };
 
 // 특이 변환에서는 기존처럼 단위행렬을 법선 변환에 사용한다.
+inline float3 MeshNormalizeOr(float3 value, float3 fallback)
+{
+    float scale = max(max(abs(value.x),abs(value.y)),abs(value.z));
+    if (!(scale > 0.0) || scale > 3.402823466e38) return fallback;
+    value /= scale;
+    return value / length(value);
+}
+
+inline float3 MeshFallbackTangent(float3 normal)
+{
+    float3 up = abs(normal.z) < 0.999 ? float3(0,0,1) : float3(0,1,0);
+    return MeshNormalizeOr(cross(up,normal),float3(1,0,0));
+}
+
 inline float3x3 MeshNormalMatrix(float4x4 matrix)
 {
     float3 a = matrix[0].xyz;
     float3 b = matrix[1].xyz;
     float3 c = matrix[2].xyz;
+    float scale = max(max(max(abs(a.x),abs(a.y)),abs(a.z)),
+        max(max(max(abs(b.x),abs(b.y)),abs(b.z)),max(max(abs(c.x),abs(c.y)),abs(c.z))));
+    if (scale == 0.0f) return float3x3(1.0f);
+    a /= scale; b /= scale; c /= scale;
     float det = dot(a, cross(b, c));
-    if (abs(det) <= 0.00000001f) return float3x3(1.0f);
-    return float3x3(cross(b, c) / det, cross(c, a) / det, cross(a, b) / det);
+    if (det == 0.0f) return float3x3(1.0f);
+    // Normals are normalized below; omit the common positive inverse scale.
+    float orientation = det < 0.0f ? -1.0f : 1.0f;
+    return float3x3(cross(b, c) * orientation, cross(c, a) * orientation, cross(a, b) * orientation);
 }
 
 vertex RasterData RENDERER_VERTEX_ENTRY(
@@ -100,10 +120,10 @@ vertex RasterData RENDERER_VERTEX_ENTRY(
     output.position = drawConstants.viewProjectionMatrix * worldPosition;
     output.uv = input.uv;
     output.worldPosition = worldPosition.xyz;
-    output.worldNormal = normalize(normalMatrix * input.normal);
+    output.worldNormal = MeshNormalizeOr(normalMatrix * input.normal, float3(0,0,1));
     const float3x3 linear(world[0].xyz, world[1].xyz, world[2].xyz);
     float3 tangent = linear * input.tangent.xyz;
-    tangent = normalize(tangent - output.worldNormal * dot(output.worldNormal, tangent));
+    tangent = MeshNormalizeOr(tangent - output.worldNormal * dot(output.worldNormal, tangent), MeshFallbackTangent(output.worldNormal));
     output.worldTangent = float4(tangent, determinant(linear) < 0.0 ? -input.tangent.w : input.tangent.w);
 #if RENDERER_ENABLE_SHADOWS
     output.lightSpacePosition = shadowMatrix.lightViewProjectionMatrix[0] * worldPosition;

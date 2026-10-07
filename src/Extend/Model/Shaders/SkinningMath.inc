@@ -8,10 +8,29 @@ DY_SKIN_INLINE float4x4 SkinNormalMatrix(float4x4 matrix, float4x4 fallback) {
     float3 a = SkinColumn(matrix, 0).xyz;
     float3 b = SkinColumn(matrix, 1).xyz;
     float3 c = SkinColumn(matrix, 2).xyz;
+    float scale = max(max(max(abs(a.x),abs(a.y)),abs(a.z)),
+        max(max(max(abs(b.x),abs(b.y)),abs(b.z)),max(max(abs(c.x),abs(c.y)),abs(c.z))));
+    if (scale == 0.0) return fallback;
+    a /= scale; b /= scale; c /= scale;
     float determinant = dot(a, cross(b,c));
-    if (abs(determinant) <= 0.00000001) return fallback;
-    return SkinColumns(float4(cross(b,c)/determinant,0), float4(cross(c,a)/determinant,0),
-        float4(cross(a,b)/determinant,0), float4(0,0,0,1));
+    if (determinant == 0.0) return fallback;
+    // Only directions consume this matrix; retain inverse-transpose orientation
+    // without its common positive magnitude. Weighted joint fallbacks stay intact.
+    float orientation = determinant < 0.0 ? -1.0 : 1.0;
+    return SkinColumns(float4(cross(b,c)*orientation,0), float4(cross(c,a)*orientation,0),
+        float4(cross(a,b)*orientation,0), float4(0,0,0,1));
+}
+
+DY_SKIN_INLINE float3 SkinNormalizeOr(float3 value, float3 fallback) {
+    float scale = max(max(abs(value.x),abs(value.y)),abs(value.z));
+    if (!(scale > 0.0) || scale > 3.402823466e38) return fallback;
+    value /= scale;
+    return value / length(value);
+}
+
+DY_SKIN_INLINE float3 SkinFallbackTangent(float3 normal) {
+    float3 up = abs(normal.z) < 0.999 ? float3(0,0,1) : float3(0,1,0);
+    return SkinNormalizeOr(cross(up,normal),float3(1,0,0));
 }
 
 DY_SKIN_INLINE float4 QuaternionProduct(float4 a, float4 b) {

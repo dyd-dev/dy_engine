@@ -22,13 +22,13 @@ namespace dyf
 		if(values.size() > 4) values.resize(4);
 
 		SkinInfluence result;
-		float total = 0.0f;
+		double total = 0.0;
 		for(const auto& value : values) total += value.second;
 		if(total <= 1.0e-6f) return result;
 		for(size_t index = 0; index < values.size(); ++index)
 		{
 			result.jointIndices[index] = values[index].first;
-			result.weights[index] = values[index].second / total;
+			result.weights[index] = static_cast<float>(values[index].second / total);
 		}
 		return result;
 	}
@@ -124,8 +124,11 @@ namespace dyf
 			Math::float3(1.0f, 0.0f, 0.0f));
 	}
 
-	void CalculateTangents(MeshData& data, bool generateMissingNormals)
+	bool CalculateTangents(MeshData& data, bool generateMissingNormals)
 	{
+		const auto finite3 = [](const Math::float3& value) {
+			return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+		};
 		std::vector<Math::float3> tangents(data.vertices.size(), Math::float3(0.0f, 0.0f, 0.0f));
 		std::vector<Math::float3> bitangents(data.vertices.size(), Math::float3(0.0f, 0.0f, 0.0f));
 		std::vector<Math::float3> normals;
@@ -144,9 +147,11 @@ namespace dyf
 			const Vertex& v2 = data.vertices[i2];
 			const Math::float3 edge1 = v1.position - v0.position;
 			const Math::float3 edge2 = v2.position - v0.position;
+			if(!finite3(edge1) || !finite3(edge2)) return false;
 			if(generateMissingNormals)
 			{
 				const Math::float3 faceNormal = Math::Cross(edge1, edge2);
+				if(!finite3(faceNormal)) return false;
 				normals[i0] = normals[i0] + faceNormal;
 				normals[i1] = normals[i1] + faceNormal;
 				normals[i2] = normals[i2] + faceNormal;
@@ -157,11 +162,13 @@ namespace dyf
 			const float du2 = v2.uv.x - v0.uv.x;
 			const float dv2 = v2.uv.y - v0.uv.y;
 			const float determinant = du1 * dv2 - du2 * dv1;
+			if(!std::isfinite(determinant)) return false;
 			if(std::fabs(determinant) <= 1.0e-8f) continue;
 
 			const float inverseDeterminant = 1.0f / determinant;
 			const Math::float3 tangent = ((edge1 * dv2) - (edge2 * dv1)) * inverseDeterminant;
 			const Math::float3 bitangent = ((edge2 * du1) - (edge1 * du2)) * inverseDeterminant;
+			if(!finite3(tangent) || !finite3(bitangent)) return false;
 			tangents[i0] = tangents[i0] + tangent;
 			tangents[i1] = tangents[i1] + tangent;
 			tangents[i2] = tangents[i2] + tangent;
@@ -174,20 +181,25 @@ namespace dyf
 		{
 			Vertex& vertex = data.vertices[i];
 			const Math::float3 sourceNormal = generateMissingNormals ? normals[i] : vertex.normal;
+			if(!finite3(sourceNormal) || !finite3(tangents[i]) || !finite3(bitangents[i])) return false;
 			const Math::float3 normal = Math::NormalizeOr(
 				sourceNormal,
 				Math::float3(0.0f, 0.0f, 1.0f));
 			const Math::float3 rawTangent = tangents[i];
 			const Math::float3 orthogonalTangent = rawTangent
 				- normal * Math::Dot(normal, rawTangent);
+			if(!finite3(orthogonalTangent)) return false;
 			const Math::float3 tangent = Math::NormalizeOr(
 				orthogonalTangent,
 				BuildFallbackTangent(normal));
-			const float handedness = Math::Dot(
+			const float orientation = Math::Dot(
 				Math::Cross(normal, tangent),
-				bitangents[i]) < 0.0f ? -1.0f : 1.0f;
+				bitangents[i]);
+			if(!finite3(normal) || !finite3(tangent) || !std::isfinite(orientation)) return false;
+			const float handedness = orientation < 0.0f ? -1.0f : 1.0f;
 			vertex.normal = normal;
 			vertex.tangent = Math::float4(tangent.x, tangent.y, tangent.z, handedness);
 		}
+		return true;
 	}
 }

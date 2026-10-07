@@ -614,7 +614,9 @@ namespace dyf
 			sharedAllocator.free_fn = UfbxBudgetFree;
 			sharedAllocator.user = &allocatorBudget;
 			std::error_code sourceSizeError;
-			const uintmax_t mainSourceSize = std::filesystem::file_size(filepath, sourceSizeError);
+			const auto sourcePath = std::filesystem::absolute(filepath, sourceSizeError);
+			if(sourceSizeError) return ReportModelError(filepath, "failed to resolve ufbx source path");
+			const uintmax_t mainSourceSize = std::filesystem::file_size(sourcePath, sourceSizeError);
 			if(sourceSizeError || mainSourceSize > std::numeric_limits<uint64_t>::max())
 			{
 				return ReportModelError(
@@ -622,7 +624,7 @@ namespace dyf
 					"failed to query ufbx model source size");
 			}
 			UfbxExternalFileContext externalFileContext{};
-			externalFileContext.modelDirectory = std::filesystem::path(filepath).parent_path();
+			externalFileContext.modelDirectory = sourcePath.parent_path();
 			externalFileContext.sourceByteLimit = options.maxSourceBytes;
 			externalFileContext.sourceBytes = static_cast<uint64_t>(mainSourceSize);
 			ufbx_load_opts opts = {};
@@ -641,7 +643,7 @@ namespace dyf
 			opts.scale_helper_name.length = SIZE_MAX;
 
 			ufbx_error error;
-			ufbx_scene* scene = ufbx_load_file(filepath.c_str(), &opts, &error);
+			ufbx_scene* scene = ufbx_load_file(sourcePath.string().c_str(), &opts, &error);
 			if(externalFileContext.pathRejected || externalFileContext.sourceLimitExceeded)
 			{
 				if(scene != nullptr) ufbx_free_scene(scene);
@@ -918,8 +920,9 @@ namespace dyf
 
 			outModel.materials.reserve(scene->materials.count);
 			std::map<const ufbx_material*, uint32_t> materialIndices;
-			auto applyTexture = [&](ModelMaterialInfo& material, MaterialTextureKind kind, const ufbx_texture* source) {
-				if(source == nullptr) return;
+			auto applyTexture = [&](ModelMaterialInfo& material, MaterialTextureKind kind, const ufbx_material_map& map) {
+				const ufbx_texture* source = map.texture;
+				if(source == nullptr || !map.texture_enabled) return;
 				const auto texture = textureIndices.find(source);
 				if(texture == textureIndices.end() || texture->second >= outModel.textures.size()) return;
 				const Image& asset = outModel.textures[texture->second];
@@ -953,24 +956,24 @@ namespace dyf
 						"ufbx material contains non-finite values");
 				}
 
-				const ufbx_texture* baseColorTexture = mat->pbr.base_color.texture != nullptr
-					? mat->pbr.base_color.texture
-					: mat->fbx.diffuse_color.texture;
+				const ufbx_material_map& baseColorTexture = mat->pbr.base_color.texture != nullptr
+					? mat->pbr.base_color
+					: mat->fbx.diffuse_color;
 				applyTexture(material, MaterialTextureKind::BaseColor, baseColorTexture);
-				if(mat->pbr.metalness.texture == mat->pbr.roughness.texture)
+				if(mat->pbr.metalness.texture == mat->pbr.roughness.texture && mat->pbr.roughness.texture_enabled)
 				{
-					applyTexture(material, MaterialTextureKind::MetallicRoughness, mat->pbr.metalness.texture);
+					applyTexture(material, MaterialTextureKind::MetallicRoughness, mat->pbr.metalness);
 				}
-				const ufbx_texture* normalTexture = mat->pbr.normal_map.texture != nullptr
-					? mat->pbr.normal_map.texture
+				const ufbx_material_map& normalTexture = mat->pbr.normal_map.texture != nullptr
+					? mat->pbr.normal_map
 					: (mat->fbx.normal_map.texture != nullptr
-						? mat->fbx.normal_map.texture
-						: mat->fbx.bump.texture);
+						? mat->fbx.normal_map
+						: mat->fbx.bump);
 				applyTexture(material, MaterialTextureKind::Normal, normalTexture);
-				applyTexture(material, MaterialTextureKind::Occlusion, mat->pbr.ambient_occlusion.texture);
-				const ufbx_texture* emissiveTexture = mat->pbr.emission_color.texture != nullptr
-					? mat->pbr.emission_color.texture
-					: mat->fbx.emission_color.texture;
+				applyTexture(material, MaterialTextureKind::Occlusion, mat->pbr.ambient_occlusion);
+				const ufbx_material_map& emissiveTexture = mat->pbr.emission_color.texture != nullptr
+					? mat->pbr.emission_color
+					: mat->fbx.emission_color;
 				applyTexture(material, MaterialTextureKind::Emissive, emissiveTexture);
 				materialIndices[mat] = static_cast<uint32_t>(outModel.materials.size());
 				outModel.materials.push_back(std::move(material));
@@ -1083,12 +1086,18 @@ namespace dyf
 								"ufbx vertex position contains non-finite values");
 						}
 
+						double normalDeltaScale = 1.0;
 						if(sourceMesh->vertex_normal.exists)
 						{
 							const ufbx_vec3 localNormal = ufbx_get_vertex_vec3(&sourceMesh->vertex_normal, index);
 							const ufbx_vec3 worldNormal = ufbx_transform_direction(&normalMatrix, localNormal);
+							const Math::float3 rawNormal(static_cast<float>(worldNormal.x), static_cast<float>(worldNormal.y), static_cast<float>(worldNormal.z));
+							if(!IsFinite(rawNormal)) return ReportModelError(filepath, "ufbx vertex normal contains non-finite values");
+							const double lengthSquared = double(rawNormal.x) * rawNormal.x
+								+ double(rawNormal.y) * rawNormal.y + double(rawNormal.z) * rawNormal.z;
+							if(lengthSquared > 1.0e-8f) normalDeltaScale = 1.0 / std::sqrt(lengthSquared);
 							vertex.normal = NormalizeOr(
-								Math::float3(static_cast<float>(worldNormal.x), static_cast<float>(worldNormal.y), static_cast<float>(worldNormal.z)),
+								rawNormal,
 								Math::float3(0.0f, 1.0f, 0.0f));
 							if(!IsFinite(vertex.normal))
 							{
@@ -1177,13 +1186,18 @@ namespace dyf
 									const ufbx_skin_weight& weight =
 										deformer->weights.data[skinVertex.weight_begin + weightIndex];
 									if(weight.cluster_index >= deformer->clusters.count) return false;
-									if(!std::isfinite(weight.weight) || weight.weight < 0.0)
+									if(!std::isfinite(weight.weight) || weight.weight < 0.0
+										|| weight.weight > std::numeric_limits<float>::max())
 									{
 										return ReportModelError(
 											filepath,
-											"ufbx skin weight must be finite and non-negative");
+											"ufbx skin weight must be finite, non-negative and representable as float");
 									}
-									combinedInfluences[weight.cluster_index] += static_cast<float>(weight.weight);
+									float& combined = combinedInfluences[weight.cluster_index];
+									const double sum = double(combined) + weight.weight;
+									if(sum > std::numeric_limits<float>::max())
+										return ReportModelError(filepath, "ufbx combined skin weight exceeds float range");
+									combined = static_cast<float>(sum);
 								}
 							}
 							std::vector<std::pair<uint32_t, float>> influences(
@@ -1219,8 +1233,15 @@ namespace dyf
 						for(size_t targetIndex = 0; targetIndex < mesh.morphTargets.size(); ++targetIndex)
 						{
 							const ufbx_blend_shape* shape = morphSourcesByNode[ni][targetIndex].shape;
-							const ufbx_vec3 sourcePositionDelta =
-								ufbx_get_blend_shape_vertex_offset(shape, logicalVertex);
+							const uint32_t offsetIndex = ufbx_get_blend_shape_offset_index(shape, logicalVertex);
+							const ufbx_real offsetWeight = offsetIndex < shape->offset_weights.count
+								? shape->offset_weights.data[offsetIndex] : 1.0;
+							ufbx_vec3 sourcePositionDelta = {};
+							if(offsetIndex != UFBX_NO_INDEX && offsetIndex < shape->position_offsets.count)
+								sourcePositionDelta = shape->position_offsets.data[offsetIndex];
+							sourcePositionDelta.x *= offsetWeight;
+							sourcePositionDelta.y *= offsetWeight;
+							sourcePositionDelta.z *= offsetWeight;
 							const ufbx_vec3 transformedPositionDelta =
 								ufbx_transform_direction(&vertexMatrix, sourcePositionDelta);
 							const Math::float3 positionDelta(
@@ -1239,25 +1260,19 @@ namespace dyf
 							if(shape->normal_offsets.count > 0u)
 							{
 								ufbx_vec3 sourceNormalDelta = {};
-								const uint32_t offsetIndex =
-									ufbx_get_blend_shape_offset_index(shape, logicalVertex);
 								if(offsetIndex != UFBX_NO_INDEX && offsetIndex < shape->normal_offsets.count)
 								{
 									sourceNormalDelta = shape->normal_offsets.data[offsetIndex];
-									if(offsetIndex < shape->offset_weights.count)
-									{
-										const ufbx_real offsetWeight = shape->offset_weights.data[offsetIndex];
-										sourceNormalDelta.x *= offsetWeight;
-										sourceNormalDelta.y *= offsetWeight;
-										sourceNormalDelta.z *= offsetWeight;
-									}
+									sourceNormalDelta.x *= offsetWeight;
+									sourceNormalDelta.y *= offsetWeight;
+									sourceNormalDelta.z *= offsetWeight;
 								}
 								const ufbx_vec3 transformedNormalDelta =
 									ufbx_transform_direction(&normalMatrix, sourceNormalDelta);
 								const Math::float3 normalDelta(
-									static_cast<float>(transformedNormalDelta.x),
-									static_cast<float>(transformedNormalDelta.y),
-									static_cast<float>(transformedNormalDelta.z));
+									static_cast<float>(transformedNormalDelta.x * normalDeltaScale),
+									static_cast<float>(transformedNormalDelta.y * normalDeltaScale),
+									static_cast<float>(transformedNormalDelta.z * normalDeltaScale));
 								if(!IsFinite(normalDelta))
 								{
 									return ReportModelError(
@@ -1277,7 +1292,11 @@ namespace dyf
 				{
 					(void)materialIndex;
 					if(mesh.mesh.indices.empty()) continue;
-					if(!hasAuthoredTangents) CalculateTangents(mesh.mesh);
+					if(ufbx_matrix_determinant(&vertexMatrix) < 0.0)
+						for(size_t index = 0; index < mesh.mesh.indices.size(); index += 3)
+							std::swap(mesh.mesh.indices[index + 1], mesh.mesh.indices[index + 2]);
+					if(!hasAuthoredTangents && !CalculateTangents(mesh.mesh))
+						return ReportModelError(filepath, "ufbx generated normal or tangent is non-finite");
 					outModel.meshes.push_back(std::move(mesh));
 				}
 			}

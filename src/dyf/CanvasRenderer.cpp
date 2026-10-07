@@ -190,8 +190,10 @@ bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList
                 const float right=std::min({static_cast<float>(target->GetDesc().width),v.x+v.width,v.x+c.x+c.width});
                 const float bottom=std::min({static_cast<float>(target->GetDesc().height),v.y+v.height,v.y+c.y+c.height});
                 if(right<=left || bottom<=top) continue;
+                const Rect scissor{static_cast<int32_t>(left),static_cast<int32_t>(top),static_cast<uint32_t>(right-left),static_cast<uint32_t>(bottom-top)};
+                if(!scissor.width || !scissor.height) continue;
                 commandList.SetViewport({v.x,v.y,v.width,v.height,0,1});
-                commandList.SetScissor({static_cast<int32_t>(left),static_cast<int32_t>(top),static_cast<uint32_t>(right-left),static_cast<uint32_t>(bottom-top)});
+                commandList.SetScissor(scissor);
                 const float transform[8]={2/v.width,-2/v.height,-1,1,
                     IsSrgbFormat(target->GetDesc().format)?1.f:0.f,0,0,0};
                 commandList.SetInlineConstants(0,sizeof(transform),transform);

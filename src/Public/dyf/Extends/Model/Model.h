@@ -80,7 +80,8 @@ namespace dyf
 	{
 		std::string path;
 		Math::float3 position = Math::float3(0.0f, 0.0f, 0.0f);
-		// 크기와 방향 보정은 일반 변환으로 지정한다. 생략하면 추가 회전을 적용하지 않는다.
+		// normalize=true이면 모델 중심과 기준 크기를 먼저 맞춘 뒤 이 변환, position 순서로 적용한다.
+		// normalize=false이면 원본 모델에 이 변환과 position만 적용한다.
 		Math::float4x4 transform = Math::float4x4::Identity();
 		float normalizedSize = 1.6f;
 		bool normalize = true;

@@ -68,16 +68,23 @@ VSOutput main(VSInput input, uint vertexId : SV_VertexID)
     LoadSkinning(vertexId, influenceOffset, paletteOffset, skin, skinNormal);
     const float4x4 world = mul(modelMatrix, skin);
     const float4 worldPosition = mul(world, float4(input.position, 1.0));
-    const float3x3 normalMatrix = (float3x3)SkinNormalMatrix(world, skinNormal);
+    const float4x4 modelNormal = SkinNormalMatrix(modelMatrix, SkinIdentity());
+    // Resolve skin fallbacks before the model transform, as CPU/compute do.
+    const float3 skinnedNormal = SkinNormalizeOr(mul((float3x3)skinNormal, input.normal), float3(0,0,1));
+    float3 skinnedTangent = mul((float3x3)skin, input.tangent.xyz);
+    skinnedTangent = SkinNormalizeOr(skinnedTangent - skinnedNormal * dot(skinnedNormal, skinnedTangent), SkinFallbackTangent(skinnedNormal));
 
     VSOutput output;
     output.position = mul(viewProjectionMatrix, worldPosition);
     output.uv = input.uv;
     output.worldPosition = worldPosition.xyz;
-    output.worldNormal = normalize(mul(normalMatrix, input.normal));
-    float3 tangent = mul((float3x3)world, input.tangent.xyz);
-    tangent = normalize(tangent - output.worldNormal * dot(output.worldNormal, tangent));
-    output.worldTangent = float4(tangent, determinant((float3x3)world) < 0.0 ? -input.tangent.w : input.tangent.w);
+    const float3 fallbackNormal = SkinNormalizeOr(SkinColumn(modelNormal, 2).xyz, float3(0,0,1));
+    output.worldNormal = SkinNormalizeOr(mul((float3x3)modelNormal, skinnedNormal), fallbackNormal);
+    float3 tangent = mul((float3x3)modelMatrix, skinnedTangent);
+    tangent = SkinNormalizeOr(tangent - output.worldNormal * dot(output.worldNormal, tangent), SkinFallbackTangent(output.worldNormal));
+    float orientation = (determinant((float3x3)skin) < 0.0 ? -1.0 : 1.0) *
+        (determinant((float3x3)modelMatrix) < 0.0 ? -1.0 : 1.0);
+    output.worldTangent = float4(tangent, orientation * input.tangent.w);
 #if RENDERER_ENABLE_SHADOWS
     output.lightSpacePosition = mul(lightViewProjectionMatrix[0], worldPosition);
 #endif

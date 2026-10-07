@@ -141,10 +141,11 @@ inline float DistributionGGX(float3 normal, float3 halfway, float roughness)
 {
     const float a = roughness * roughness;
     const float a2 = a * a;
-    const float ndoth = max(dot(normal, halfway), 0.0f);
+    const float ndoth = clamp(dot(normal, halfway), 0.0f, 1.0f);
     const float ndoth2 = ndoth * ndoth;
-    const float denominator = ndoth2 * (a2 - 1.0f) + 1.0f;
-    return a2 / max(kPi * denominator * denominator, 0.0001f);
+    // roughness >= .01; this form retains a2 at the specular peak.
+    const float denominator = (1.0f - ndoth2) + ndoth2 * a2;
+    return a2 / (kPi * denominator * denominator);
 }
 
 inline float GeometrySchlickGGX(float ndotv, float roughness)
@@ -524,32 +525,8 @@ inline float4 RunFragmentShader(
     const float3 viewDirection =
         normalize(lighting.cameraPosition.xyz - input.worldPosition);
 
-    const bool usePointLight =
-        lighting.pointLightColorIntensity.a > 0.0f &&
-        lighting.pointLightPositionRange.w > 0.0f;
-    float3 lightDirection =
-        normalize(lighting.directionalLightDirection.xyz);
-
-    if (usePointLight)
-    {
-        const float3 toLight =
-            lighting.pointLightPositionRange.xyz - input.worldPosition;
-        const float distanceToLight = length(toLight);
-        lightDirection = distanceToLight > 0.0001f
-            ? toLight / distanceToLight
-            : float3(0.0f, 0.0f, 1.0f);
-    }
-
-    const float3 halfway =
-        normalize(viewDirection + lightDirection);
     const float3 f0 =
         mix(float3(0.04f), albedo, metallic);
-    const float3 fresnel =
-        FresnelSchlick(max(dot(halfway, viewDirection), 0.0f), f0);
-
-    const float3 kS = fresnel;
-    const float3 kD =
-        (float3(1.0f) - kS) * (1.0f - metallic);
     const float3 directLight = EvaluateLights(lighting,
 #if RENDERER_ENABLE_SHADOWS
         shadowMatrix,shadowMap,shadowSampler,drawConstants.textureFlags,
@@ -560,6 +537,7 @@ inline float4 RunFragmentShader(
         max(dot(normal, viewDirection), 0.0f),
         f0,
         roughness);
+    const float3 kD = (float3(1.0f) - ambientFresnel) * (1.0f - metallic);
     const float3 ambientDiffuse =
         kD *
         albedo *
@@ -582,7 +560,7 @@ inline float4 RunFragmentShader(
 
     float3 color = lighting.lightCounts.w > 0.5 ? ambient + directLight + emissive : albedo + emissive;
     if(lighting.pbrParams.z >= 0.0f) {
-        color *= lighting.pbrParams.w;
+        color = min(color * lighting.pbrParams.w, 16777216.0f);
         color = color / (color + 1.0f);
         if (lighting.pbrParams.z > 0.5f) color = pow(color, float3(1.0f / 2.2f));
     }

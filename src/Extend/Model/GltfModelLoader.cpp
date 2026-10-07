@@ -476,9 +476,25 @@ namespace dyf
 					if(sampler.inputAccessor >= gltf.accessors.size()
 						|| sampler.outputAccessor >= gltf.accessors.size()) return false;
 					const bool morphWeights = channel.path == fastgltf::AnimationPath::Weights;
-					const uint64_t keyCount = morphWeights
+					uint64_t keyCount = morphWeights
 						? gltf.accessors[sampler.outputAccessor].count
 						: gltf.accessors[sampler.inputAccessor].count;
+					if(morphWeights)
+					{
+						if(!channel.nodeIndex.has_value() || channel.nodeIndex.value() >= gltf.nodes.size()) return false;
+						const auto& node = gltf.nodes[channel.nodeIndex.value()];
+						if(!node.meshIndex.has_value() || node.meshIndex.value() >= gltf.meshes.size()) return false;
+						const auto& primitives = gltf.meshes[node.meshIndex.value()].primitives;
+						if(primitives.empty()) return false;
+						const uint64_t targets = primitives.front().targets.size();
+						const uint64_t parts = sampler.interpolation == fastgltf::AnimationInterpolation::CubicSpline ? 3u : 1u;
+						const uint64_t times = gltf.accessors[sampler.inputAccessor].count;
+						if(targets == 0 || targets > std::numeric_limits<uint64_t>::max() / parts
+							|| times > std::numeric_limits<uint64_t>::max() / (targets * parts)
+							|| keyCount != times * targets * parts)
+							return ReportModelError(filepath, "glTF morph animation input/output counts do not match");
+						keyCount /= parts;
+					}
 					const uint64_t keyStride = morphWeights
 						? sizeof(FloatKey)
 						: (channel.path == fastgltf::AnimationPath::Rotation
@@ -1229,7 +1245,8 @@ namespace dyf
 							const fastgltf::Accessor& tangentAccessor = gltf.accessors[tangentAttr->accessorIndex];
 							if(tangentAccessor.count != posAccessor.count) return false;
 							const float tangentHandednessSign =
-								Math::Determinant3x3(modelVertexMatrix) < 0.0f ? -1.0f : 1.0f;
+								(Math::Determinant3x3(modelVertexMatrix) < 0.0f ? -1.0f : 1.0f)
+								* (options.flipV ? -1.0f : 1.0f);
 							bool invalidTangent = false;
 							fastgltf::iterateAccessorWithIndex<fastgltf::math::fvec4>(gltf, tangentAccessor, [&](const fastgltf::math::fvec4& value, size_t idx) {
 								if(!std::isfinite(value.x()) || !std::isfinite(value.y())
@@ -1458,8 +1475,12 @@ namespace dyf
 								"glTF index references a vertex outside the primitive");
 						}
 
-						if(tangentAttr == primitive.attributes.end())
-							CalculateTangents(mesh.mesh, !hasNormalAttribute);
+						if(Math::Determinant3x3(modelVertexMatrix) < 0.0f)
+							for(size_t index = 0; index < mesh.mesh.indices.size(); index += 3)
+								std::swap(mesh.mesh.indices[index + 1], mesh.mesh.indices[index + 2]);
+						if(tangentAttr == primitive.attributes.end()
+							&& !CalculateTangents(mesh.mesh, !hasNormalAttribute))
+							return ReportModelError(filepath, "glTF generated normal or tangent is non-finite");
 						outModel.meshes.push_back(std::move(mesh));
 					}
 				}

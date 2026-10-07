@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <limits>
 
 namespace dyf
 {
@@ -299,11 +300,13 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
             counts[index] = static_cast<uint32_t>(source.size());
             for(const auto& influence : source)
             {
+                double totalWeight = 0.0;
                 if(!std::isfinite(influence.dqBlendWeight) || influence.dqBlendWeight < 0 || influence.dqBlendWeight > 1)
                     validInfluences[index] = false;
                 for(uint32_t component = 0; component < 4; ++component)
                 {
                     const float weight = influence.weights[component];
+                    totalWeight += weight;
                     if(!std::isfinite(weight) || weight < 0)
                         validInfluences[index] = false;
                     if(weight > 0)
@@ -312,6 +315,8 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
                         requiredJoints[index] = std::max(requiredJoints[index], uint64_t(joint) + 1);
                     }
                 }
+                if(!std::isfinite(totalWeight) || totalWeight > std::numeric_limits<float>::max())
+                    validInfluences[index] = false;
             }
             influences.insert(influences.end(), source.begin(), source.end());
         }

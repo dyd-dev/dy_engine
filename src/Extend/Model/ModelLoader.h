@@ -43,7 +43,7 @@ namespace dyf
 		const std::string& path,
 		const std::string& message);
 	[[nodiscard]] Math::float3 BuildFallbackTangent(const Math::float3& normal);
-	void CalculateTangents(MeshData& data, bool generateMissingNormals = false);
+	[[nodiscard]] bool CalculateTangents(MeshData& data, bool generateMissingNormals = false);
 	[[nodiscard]] uint32_t EnsureDefaultMaterial(ModelData& model);
 	[[nodiscard]] bool LoadGltfModel(
 		const std::string& filepath,

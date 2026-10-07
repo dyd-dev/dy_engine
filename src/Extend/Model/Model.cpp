@@ -62,7 +62,7 @@ namespace dyf
 
 		[[nodiscard]] Math::float4x4 BuildModelSceneTransform(const ModelAsset& asset, const ModelSceneDesc& desc)
 		{
-			Math::float4x4 transform = Math::Translation(desc.position);
+			Math::float4x4 transform = Math::Translation(desc.position) * desc.transform;
 			if(desc.normalize && asset.hasBounds)
 			{
 				const float scale = asset.boundsLargestAxis > 0.0001f
@@ -73,7 +73,7 @@ namespace dyf
 					-asset.boundsCenter.y,
 					-asset.boundsCenter.z));
 			}
-			return transform * desc.transform * asset.assetTransform;
+			return transform * asset.assetTransform;
 		}
 
         bool LoadExternalImage(const std::string& path, Image& image,
@@ -251,7 +251,7 @@ namespace dyf
 		if(!std::isfinite(influence.dqBlendWeight)
 			|| influence.dqBlendWeight < 0.0f
 			|| influence.dqBlendWeight > 1.0f) return false;
-		float totalWeight = 0.0f;
+		double totalWeight = 0.0;
 		for(size_t component = 0u; component < 4u; ++component)
 		{
 			const float weight = influence.weights[component];
@@ -277,7 +277,7 @@ namespace dyf
 		{
 			const float rawWeight = influence.weights[component];
 			if(rawWeight <= 0.0f) continue;
-			const float weight = rawWeight / totalWeight;
+			const float weight = static_cast<float>(rawWeight / totalWeight);
 			const SkinJointMatrices& joint = palette[influence.jointIndices[component]];
 			for(size_t matrixIndex = 0u; matrixIndex < 16u; ++matrixIndex)
 			{
@@ -380,7 +380,7 @@ namespace dyf
         if(!budget.AddBytes(decodedBytes,1,"decoded model data")) return false;
 		const bool animatedModel = !model.skins.empty() || !model.animations.empty()
 			|| std::any_of(model.meshes.begin(), model.meshes.end(), [](const ModelMesh& mesh) {
-				return !mesh.morphTargets.empty();
+				return mesh.nodeIndex != UINT32_MAX || !mesh.morphTargets.empty();
 			});
 		for(const ModelMesh& modelMesh : model.meshes)
 		{
@@ -468,7 +468,7 @@ namespace dyf
 		if(asset == nullptr) return false;
 		const bool animatedModel = !asset->skins.empty() || !asset->animations.empty()
 			|| std::any_of(asset->meshes.begin(), asset->meshes.end(), [](const ModelAssetMesh& mesh) {
-				return !mesh.morphTargets.empty();
+				return mesh.nodeIndex != UINT32_MAX || !mesh.morphTargets.empty();
 			});
 		const Math::float4x4 transform = BuildModelSceneTransform(*asset, desc);
 
@@ -565,6 +565,7 @@ namespace dyf
 				meshNodeGlobal = bindGlobals[sourceMesh.nodeIndex];
 			}
 			const Math::float4x4 outerTransform = model.assetTransform * meshNodeGlobal;
+			const bool reflected = Math::Determinant3x3(outerTransform) < 0.0f;
 			Math::float4x4 outerNormalTransform = {};
 			if(!Math::InverseTranspose(outerTransform, outerNormalTransform)) return {};
 
@@ -603,7 +604,7 @@ namespace dyf
 				const Math::float3 transformedTangent = NormalizeOr(
 					rawTransformedTangent - vertex.normal * Dot(vertex.normal, rawTransformedTangent),
 					BuildFallbackTangent(vertex.normal));
-				if(Math::Determinant3x3(outerTransform) < 0.0f) vertex.tangent.w = -vertex.tangent.w;
+				if(reflected) vertex.tangent.w = -vertex.tangent.w;
 				vertex.tangent = Math::float4(
 					transformedTangent.x,
 					transformedTangent.y,
@@ -611,11 +612,15 @@ namespace dyf
 					vertex.tangent.w);
 				merged.vertices.push_back(vertex);
 			}
+			const size_t indexOffset = merged.indices.size();
 			for(const uint32_t index : sourceGeometry->indices)
 			{
 				if(index >= sourceGeometry->vertices.size()) return {};
 				merged.indices.push_back(vertexOffset + index);
 			}
+			if(reflected)
+				for(size_t index = indexOffset; index + 2 < merged.indices.size(); index += 3)
+					std::swap(merged.indices[index + 1], merged.indices[index + 2]);
 		}
 		return merged;
 	}

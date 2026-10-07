@@ -80,12 +80,17 @@ const FontGlyph& Font::Impl::GetGlyph(uint32_t codepoint)
         &glyph.width, &glyph.height, &glyph.offsetX, &glyph.offsetY);
     if (glyph.width > 0 && glyph.height > 0 && !pixels)
         throw std::runtime_error("Font glyph rasterization failed.");
+    if (!glyph.width || !glyph.height)
+    {
+        stbtt_FreeBitmap(pixels, nullptr);
+        return glyphs.emplace(codepoint, glyph).first->second;
+    }
     if (glyph.width > static_cast<int>(atlasWidth) - 2 || glyph.height > static_cast<int>(atlasHeight) - 2)
     {
         stbtt_FreeBitmap(pixels, nullptr);
         throw std::runtime_error("Glyph exceeds the font atlas dimensions.");
     }
-    if (glyph.width >= static_cast<int>(atlasWidth) - penX - 1)
+    if (glyph.width > static_cast<int>(atlasWidth) - penX - 1)
     {
         if (rowHeight + 1 >= static_cast<int>(atlasHeight) - penY)
         {
@@ -94,7 +99,7 @@ const FontGlyph& Font::Impl::GetGlyph(uint32_t codepoint)
         }
         penX = 1; penY += rowHeight + 1; rowHeight = 0;
     }
-    if(glyph.height >= static_cast<int>(atlasHeight) - penY - 1)
+    if(glyph.height > static_cast<int>(atlasHeight) - penY - 1)
     {
         stbtt_FreeBitmap(pixels, nullptr);
         throw std::runtime_error("Font glyph atlas is full.");

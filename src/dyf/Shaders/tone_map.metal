@@ -8,7 +8,8 @@ vertex ToneVertex toneVertex(uint id [[vertex_id]]) {
 fragment float4 toneFragment(ToneVertex in [[stage_in]],texture2d<float> image [[texture(0)]],
     sampler imageSampler [[sampler(1)]],constant float4& settings [[buffer(15)]]) {
     float4 hdr=image.sample(imageSampler,in.uv);
-    float3 mapped=max(hdr.rgb*settings.x,0.f);
+    // At 2^24, x + 1 rounds to x in float; brighter values already map to 1.
+    float3 mapped=min(max(hdr.rgb*settings.x,0.f),16777216.0f);
     mapped=mapped/(mapped+1.f);
     if(settings.y>.5)mapped=pow(mapped,float3(1.f/2.2f));
     return float4(mapped,hdr.a);

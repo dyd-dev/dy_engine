@@ -1060,7 +1060,7 @@ bool Renderer::UpdateLightingBuffer(
 	const DirectionalLight* light = directionalIndices.empty() ? nullptr : &scene.DirectionalLights()[directionalIndices.front()];
 	const PointLight* pointLight = pointIndices.empty() ? nullptr : &scene.PointLights()[pointIndices.front()];
 	const Math::float3 lightDirection = light != nullptr
-		? light->direction
+		? (Math::LengthSquared(light->direction)<=1e-8f ? Math::float3(0,0,-1) : light->direction)
 		: Math::float3(0.0f, 0.0f, 1.0f);
 	const Math::float3 lightColor = light != nullptr
 		? light->color

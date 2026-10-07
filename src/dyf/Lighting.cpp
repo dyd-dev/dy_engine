@@ -59,7 +59,7 @@ namespace
 		float farPlane = 20.0f;
 		const auto& boundsMin = bounds.min;
 		const auto& boundsMax = bounds.max;
-		const Math::float3 normalizedDirection = Normalize(lightDirection);
+		const Math::float3 normalizedDirection = Math::NormalizeOr(lightDirection, {0,0,-1});
 		if(bounds.valid && !(boundsMin.x > boundsMax.x || boundsMin.y > boundsMax.y || boundsMin.z > boundsMax.z))
 		{
 			const Math::float3 center = bounds.Center();
@@ -97,9 +97,13 @@ namespace
 		}
 
 		// 캐스케이드 타일의 텍셀에 중심을 맞춘 뒤 최종 광원 행렬을 만든다.
-		if(tileResolution != 0u)
+		if(tileResolution > 1u)
 		{
-			const Math::float3 lightForward = Math::NormalizeOr(lightDirection, Math::float3(0.0f, 0.0f, 1.0f));
+			// Reserve half a texel on each side for the largest center snap.
+			const float snapPadding = float(tileResolution) / float(tileResolution - 1u);
+			orthoWidth *= snapPadding;
+			orthoHeight *= snapPadding;
+			const Math::float3 lightForward = normalizedDirection;
 			const Math::float3 viewForward = lightForward * -1.0f;
 			const Math::float3 right = Math::NormalizeOr(Math::Cross(viewForward, SelectUpVector(lightForward)), Math::float3(1.0f, 0.0f, 0.0f));
 			const Math::float3 up = Math::NormalizeOr(Math::Cross(right, viewForward), Math::float3(0.0f, 1.0f, 0.0f));
@@ -193,7 +197,10 @@ void Renderer::BuildShadows(ShadowData& state,const Scene& scene,const Camera& c
     // inputs fall back to scene bounds instead of producing invalid cascades.
     const bool useCascades=cascadeCount>1 && projection.m[11]==-1.f &&
         std::all_of(std::begin(projection.m),std::end(projection.m),[](float value){return std::isfinite(value);}) &&
-        projection.m[0]>0 && projection.m[5]>0 && projection.m[8]==0 && projection.m[9]==0 &&
+        projection.m[0]>0 && projection.m[5]>0 &&
+        projection.m[1]==0 && projection.m[2]==0 && projection.m[3]==0 &&
+        projection.m[4]==0 && projection.m[6]==0 && projection.m[7]==0 &&
+        projection.m[8]==0 && projection.m[9]==0 && projection.m[12]==0 && projection.m[13]==0 && projection.m[15]==0 &&
         std::isfinite(1/projection.m[0]) && std::isfinite(1/projection.m[5]) &&
         std::isfinite(cameraNear) && std::isfinite(cameraFar) && cameraNear>0 && cameraFar>cameraNear;
     uint32_t expectedViewCount=0;

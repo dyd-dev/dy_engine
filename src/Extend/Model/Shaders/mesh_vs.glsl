@@ -56,15 +56,22 @@ void main()
     mat4 skin, skinNormal;
     LoadSkinning(gl_VertexIndex, drawConstants.influenceOffset, drawConstants.paletteOffset, skin, skinNormal);
     mat4 world = drawConstants.modelMatrix * skin;
-    mat4 normalMatrix = SkinNormalMatrix(world, skinNormal);
+    mat4 modelNormal = SkinNormalMatrix(drawConstants.modelMatrix, SkinIdentity());
+    // Resolve skin fallbacks before the model transform, as CPU/compute do.
+    vec3 skinnedNormal = SkinNormalizeOr(mat3(skinNormal) * inNormal, vec3(0,0,1));
+    vec3 skinnedTangent = mat3(skin) * inTangent.xyz;
+    skinnedTangent = SkinNormalizeOr(skinnedTangent - skinnedNormal * dot(skinnedNormal, skinnedTangent), SkinFallbackTangent(skinnedNormal));
     vec4 worldPosition = world * vec4(inPosition, 1.0);
     gl_Position = drawConstants.viewProjectionMatrix * worldPosition;
     fragUv = inUv;
     fragWorldPosition = worldPosition.xyz;
-    fragNormal = normalize(mat3(normalMatrix) * inNormal);
-    vec3 tangent = mat3(world) * inTangent.xyz;
-    tangent = normalize(tangent - fragNormal * dot(fragNormal, tangent));
-    fragTangent = vec4(tangent, determinant(mat3(world)) < 0.0 ? -inTangent.w : inTangent.w);
+    vec3 fallbackNormal = SkinNormalizeOr(SkinColumn(modelNormal, 2).xyz, vec3(0,0,1));
+    fragNormal = SkinNormalizeOr(mat3(modelNormal) * skinnedNormal, fallbackNormal);
+    vec3 tangent = mat3(drawConstants.modelMatrix) * skinnedTangent;
+    tangent = SkinNormalizeOr(tangent - fragNormal * dot(fragNormal, tangent), SkinFallbackTangent(fragNormal));
+    float orientation = (determinant(mat3(skin)) < 0.0 ? -1.0 : 1.0) *
+        (determinant(mat3(drawConstants.modelMatrix)) < 0.0 ? -1.0 : 1.0);
+    fragTangent = vec4(tangent, orientation * inTangent.w);
 #if RENDERER_ENABLE_SHADOWS
     fragLightSpacePosition = shadowMatrix.lightViewProjectionMatrix[0] * worldPosition;
 #endif

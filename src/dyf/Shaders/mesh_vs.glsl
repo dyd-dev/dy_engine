@@ -56,14 +56,34 @@ layout(set = RENDERER_DESCRIPTOR_SET, binding = RENDERER_BINDING_SHADOW_MATRIX) 
 #endif
 
 // 특이 변환에서는 기존처럼 단위행렬을 법선 변환에 사용한다.
+vec3 MeshNormalizeOr(vec3 value, vec3 fallback)
+{
+    float scale = max(max(abs(value.x),abs(value.y)),abs(value.z));
+    if (!(scale > 0.0) || scale > 3.402823466e38) return fallback;
+    value /= scale;
+    return value / length(value);
+}
+
+vec3 MeshFallbackTangent(vec3 normal)
+{
+    vec3 up = abs(normal.z) < 0.999 ? vec3(0,0,1) : vec3(0,1,0);
+    return MeshNormalizeOr(cross(up,normal),vec3(1,0,0));
+}
+
 mat3 MeshNormalMatrix(mat4 matrix)
 {
     vec3 a = matrix[0].xyz;
     vec3 b = matrix[1].xyz;
     vec3 c = matrix[2].xyz;
+    float scale = max(max(max(abs(a.x),abs(a.y)),abs(a.z)),
+        max(max(max(abs(b.x),abs(b.y)),abs(b.z)),max(max(abs(c.x),abs(c.y)),abs(c.z))));
+    if (scale == 0.0) return mat3(1.0);
+    a /= scale; b /= scale; c /= scale;
     float det = dot(a, cross(b, c));
-    if (abs(det) <= 0.00000001) return mat3(1.0);
-    return mat3(cross(b, c) / det, cross(c, a) / det, cross(a, b) / det);
+    if (det == 0.0) return mat3(1.0);
+    // Normals are normalized below; omit the common positive inverse scale.
+    float orientation = det < 0.0 ? -1.0 : 1.0;
+    return mat3(cross(b, c) * orientation, cross(c, a) * orientation, cross(a, b) * orientation);
 }
 
 void main()
@@ -78,9 +98,9 @@ void main()
     gl_Position = drawConstants.viewProjectionMatrix * worldPosition;
     fragUv = inUv;
     fragWorldPosition = worldPosition.xyz;
-    fragNormal = normalize(mat3(normalMatrix) * inNormal);
+    fragNormal = MeshNormalizeOr(mat3(normalMatrix) * inNormal, vec3(0,0,1));
     vec3 tangent = mat3(world) * inTangent.xyz;
-    tangent = normalize(tangent - fragNormal * dot(fragNormal, tangent));
+    tangent = MeshNormalizeOr(tangent - fragNormal * dot(fragNormal, tangent), MeshFallbackTangent(fragNormal));
     fragTangent = vec4(tangent, determinant(mat3(world)) < 0.0 ? -inTangent.w : inTangent.w);
 #if RENDERER_ENABLE_SHADOWS
     fragLightSpacePosition = shadowMatrix.lightViewProjectionMatrix[0] * worldPosition;
