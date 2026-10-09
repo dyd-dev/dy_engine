@@ -3,6 +3,7 @@
 #include "VulkanPipeline.h"
 #include "VulkanResources.h"
 #include "VulkanQuery.h"
+#include "VulkanValidation.h"
 
 #include <algorithm>
 #include <cmath>
@@ -186,18 +187,6 @@ namespace dyf::Backends
 			return mipLevelCount != 0 && arrayLayerCount != 0 &&
 				mipLevelCount <= texture.GetDesc().mipLevels - range.firstMipLevel &&
 				arrayLayerCount <= texture.GetDesc().depthOrArraySize - range.firstArrayLayer;
-		}
-
-		const dyf::RHI::ResourceBindingLayout* FindLayoutBinding(
-			const dyf::RHI::PipelineLayoutDesc& layout,
-			uint32_t binding)
-		{
-			for (uint32_t index = 0; index < layout.bindingCount; ++index)
-			{
-				const dyf::RHI::ResourceBindingLayout& candidate = layout.bindings[index];
-				if (candidate.binding == binding) return &candidate;
-			}
-			return nullptr;
 		}
 
 		bool RequiresResourceSet(const RHI::PipelineLayoutDesc& layout)
@@ -716,7 +705,7 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 		{
 			const dyf::RHI::ResourceBinding& binding = set->GetBindings()[index];
 			const dyf::RHI::ResourceBindingLayout* declaration =
-				FindLayoutBinding(layout, binding.binding);
+				VulkanValidation::FindLayoutBinding(layout, binding.binding);
 			if (declaration == nullptr)
 			{
 				Fail();

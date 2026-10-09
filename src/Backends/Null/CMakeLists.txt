@@ -2,9 +2,10 @@
 set(BACKEND_NAME "dy_backend_null")
 
 add_library(${BACKEND_NAME} OBJECT
+	NullFactory.cpp
 	NullDevice.cpp
 )
-target_include_directories(${BACKEND_NAME} BEFORE PRIVATE "${PROJECT_SOURCE_DIR}/src/Public" "${PROJECT_SOURCE_DIR}/src")
+target_include_directories(${BACKEND_NAME} BEFORE PRIVATE "${PROJECT_SOURCE_DIR}/src/Public")
 target_link_libraries(${BACKEND_NAME} PRIVATE
 	dy_engine_options
 )

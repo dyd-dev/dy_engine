@@ -1,5 +1,5 @@
 #pragma once
-#include "../../RHI/UploadPool.h"
+#include "MetalUploadPool.h"
 #include <limits>
 #import <Metal/Metal.h>
 
@@ -22,8 +22,8 @@ namespace dyf::Backends
             buffer = nil;
         }
     };
-    using MetalUploadPool = RHI::Detail::UploadPagePool<MetalUploadPage>;
-    using MetalUploadArena = RHI::Detail::UploadArena<MetalUploadPage>;
+    using MetalUploadPool = MetalDetail::UploadPagePool<MetalUploadPage>;
+    using MetalUploadArena = MetalDetail::UploadArena<MetalUploadPage>;
 
     // The factory may outlive MetalDevice through a command-owned page lease.
     // Explicit MRC ownership mirrors ARC's strong Objective-C data member.

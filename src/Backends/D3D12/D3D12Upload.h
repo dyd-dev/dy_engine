@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../../RHI/UploadPool.h"
+#include "D3D12UploadPool.h"
 
 #include <d3d12.h>
 #include <wrl.h>
@@ -21,7 +21,7 @@ namespace dyf::Backends
         }
     };
 
-    using D3D12UploadPool = RHI::Detail::UploadPagePool<D3D12UploadPage>;
+    using D3D12UploadPool = D3D12Detail::UploadPagePool<D3D12UploadPage>;
 
     inline std::shared_ptr<D3D12UploadPool> MakeD3D12UploadPool(ID3D12Device* device)
     {

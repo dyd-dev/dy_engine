@@ -10,7 +10,7 @@
 #include <utility>
 #include <vector>
 
-namespace dyf::RHI::Detail
+namespace dyf::Backends::MetalDetail
 {
 // Page supplies capacity, mapped bytes and API-specific destruction. A lease
 // belongs to a native command list until its existing retirement/discard path.
@@ -86,7 +86,7 @@ public:
         std::lock_guard<std::mutex> lock(m_mutex);
         Accumulate(m_statistics.requestCount,1);Accumulate(m_statistics.requestedBytes,bytes);
     }
-    [[nodiscard]] UploadMemoryStatistics GetStatistics() const
+    [[nodiscard]] RHI::UploadMemoryStatistics GetStatistics() const
     { std::lock_guard<std::mutex> lock(m_mutex);return m_statistics; }
 private:
     void Return(std::unique_ptr<Page> page) noexcept
@@ -109,7 +109,7 @@ private:
     uint64_t m_pageSize,m_cacheBudget;
     mutable std::mutex m_mutex;
     std::vector<std::unique_ptr<Page>> m_free;
-    UploadMemoryStatistics m_statistics;
+    RHI::UploadMemoryStatistics m_statistics;
 };
 
 template<class Page>

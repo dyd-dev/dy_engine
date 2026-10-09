@@ -43,7 +43,6 @@ namespace dyf::Backends
 		[[nodiscard]] bool RequiresDepthWrite() const { return m_requiresDepthWrite; }
 
 	private:
-		friend class VulkanResourceSet;
 		friend struct VulkanObjectDeleter;
 
 		~VulkanPipeline() override;

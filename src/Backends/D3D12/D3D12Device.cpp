@@ -6,7 +6,7 @@
 #include "D3D12Shader.h"
 #include "D3D12Texture.h"
 #include "D3D12Query.h"
-#include "../../RHI/Validation.h"
+#include "D3D12Validation.h"
 #include "dyf/RHI/ResourceSet.h"
 #include "dyf/RHI/Shader.h"
 #include "dyf/RHI/Pipeline.h"
@@ -1408,22 +1408,22 @@ void D3D12Device::DestroySwapchainNative()
         }
         const bool depthFormat = desc.format == RHI::Format::D32_FLOAT ||
             desc.format == RHI::Format::D24_UNORM_S8_UINT;
-        if (depthFormat != HasUsage(
+        if (depthFormat != D3D12Validation::HasUsage(
                 desc.usage, RHI::TextureUsage::DepthStencil) ||
             (depthFormat &&
-                (HasUsage(desc.usage, RHI::TextureUsage::RenderTarget) ||
-                    HasUsage(desc.usage, RHI::TextureUsage::Storage))) ||
+                (D3D12Validation::HasUsage(desc.usage, RHI::TextureUsage::RenderTarget) ||
+                    D3D12Validation::HasUsage(desc.usage, RHI::TextureUsage::Storage))) ||
             (RHI::IsSrgbFormat(desc.format) &&
-                HasUsage(desc.usage, RHI::TextureUsage::Storage)))
+                D3D12Validation::HasUsage(desc.usage, RHI::TextureUsage::Storage)))
         {
             return nullptr;
         }
         auto texture = std::unique_ptr<D3D12Texture, D3D12ObjectDeleter>(
             new D3D12Texture(m_internal->device.Get(), desc));
         if (texture->GetNativeResource() == nullptr ||
-            (HasUsage(desc.usage, RHI::TextureUsage::RenderTarget) &&
+            (D3D12Validation::HasUsage(desc.usage, RHI::TextureUsage::RenderTarget) &&
                 texture->GetRenderTargetViewHandle(0, 0) == 0) ||
-            (HasUsage(desc.usage, RHI::TextureUsage::DepthStencil) &&
+            (D3D12Validation::HasUsage(desc.usage, RHI::TextureUsage::DepthStencil) &&
                 (texture->GetDepthStencilViewHandle(0, 0, false) == 0 ||
                     texture->GetDepthStencilViewHandle(0, 0, true) == 0)))
         {
@@ -1578,7 +1578,8 @@ void D3D12Device::DestroySwapchainNative()
                 ToShaderVisibility(binding.stages));
 
             D3D12PipelineBinding pipelineBinding = {};
-            pipelineBinding.layout = binding;
+            pipelineBinding.binding = binding.binding;
+            pipelineBinding.type = binding.type;
             pipelineBinding.rootParameter =
                 static_cast<uint32_t>(rootParameters.size() - 1);
             pipelineBinding.descriptorOffset = descriptorOffset;
@@ -1873,7 +1874,7 @@ void D3D12Device::DestroySwapchainNative()
                 static_cast<uint32_t>(ToPrimitiveTopology(desc.topology, desc.patchControlPoints)),
                 desc.depthStencil.stencilEnabled,
                 desc.depthStencil.depthWriteEnabled ||
-                    RHI::MayWriteStencil(desc.depthStencil)));
+                    D3D12Validation::MayWriteStencil(desc.depthStencil)));
         auto* result = m_internal->livePipelines.emplace_back(std::move(pipeline)).get();
         if (alphaFactorsTranslated)
 		ReportDiagnostic(DiagnosticSeverity::Info,
@@ -1922,7 +1923,7 @@ void D3D12Device::DestroySwapchainNative()
                 pipeline->GetBindings().end(),
                 [&binding](const D3D12PipelineBinding& candidate)
                 {
-                    return candidate.layout.binding == binding.binding;
+                    return candidate.binding == binding.binding;
                 });
             if (slot == pipeline->GetBindings().end())
             {
@@ -1935,7 +1936,7 @@ void D3D12Device::DestroySwapchainNative()
                 descriptorHeap->GetCPUDescriptorHandleForHeapStart();
             handle.ptr += static_cast<SIZE_T>(descriptorIndex) * descriptorSize;
 
-            if (slot->layout.type == RHI::ResourceBindingType::ConstantBuffer)
+            if (slot->type == RHI::ResourceBindingType::ConstantBuffer)
             {
                 auto* buffer = dynamic_cast<D3D12Buffer*>(binding.buffer);
                 if (buffer == nullptr ||
@@ -1961,7 +1962,7 @@ void D3D12Device::DestroySwapchainNative()
                 m_internal->device->CreateConstantBufferView(&view, handle);
                 resources.push_back(resource);
             }
-            else if (slot->layout.type ==
+            else if (slot->type ==
                 RHI::ResourceBindingType::ReadOnlyStorageBuffer)
             {
                 auto* buffer = dynamic_cast<D3D12Buffer*>(binding.buffer);
@@ -1997,7 +1998,7 @@ void D3D12Device::DestroySwapchainNative()
                     resource, &view, handle);
                 resources.push_back(resource);
             }
-            else if (slot->layout.type ==
+            else if (slot->type ==
                 RHI::ResourceBindingType::ReadWriteStorageBuffer)
             {
                 auto* buffer = dynamic_cast<D3D12Buffer*>(binding.buffer);
@@ -2022,7 +2023,7 @@ void D3D12Device::DestroySwapchainNative()
                     resource, nullptr, &view, handle);
                 resources.push_back(resource);
             }
-            else if (slot->layout.type ==
+            else if (slot->type ==
                 RHI::ResourceBindingType::SampledTexture)
             {
                 auto* texture = dynamic_cast<D3D12Texture*>(binding.texture);
@@ -2066,7 +2067,7 @@ void D3D12Device::DestroySwapchainNative()
                     resource, &view, handle);
                 resources.push_back(resource);
             }
-            else if (slot->layout.type ==
+            else if (slot->type ==
                 RHI::ResourceBindingType::StorageTexture)
             {
                 auto* texture = dynamic_cast<D3D12Texture*>(binding.texture);

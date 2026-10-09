@@ -3,6 +3,7 @@
 set(BACKEND_NAME "dy_backend_d3d12")
 
 add_library(${BACKEND_NAME} OBJECT
+	D3D12Factory.cpp
 	D3D12Device.cpp
 	D3D12Buffer.cpp       
 	D3D12CommandList.cpp  

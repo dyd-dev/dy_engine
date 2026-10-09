@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "dyf/RHI/ICommandList.h"
-#include "../../RHI/UploadPool.h"
+#include "MetalUploadPool.h"
 
 namespace dyf::Backends
 {
@@ -27,7 +27,7 @@ namespace dyf::Backends
 	{
 	public:
 		explicit MetalCommandList(void* commandQueue,
-			std::shared_ptr<RHI::Detail::UploadPagePool<MetalUploadPage>> uploadPool = {});
+			std::shared_ptr<MetalDetail::UploadPagePool<MetalUploadPage>> uploadPool = {});
         bool ReplayNative(const std::vector<std::function<bool(ICommandList&)>>& commands) override;
         void GlobalBarrierNative() override;
 

@@ -62,7 +62,7 @@ namespace dyf::RHI
 		LoadOp depthLoadOp = LoadOp::Undefined;
 		StoreOp depthStoreOp = StoreOp::Undefined;
 		float clearDepth = 1.0f;
-		// D32_FLOAT에는 stencil 성분이 없다. 설정한 stencil load/store/clear는 stderr로 알리고 무시한다.
+		// D32_FLOAT에는 stencil 성분이 없다. 설정한 stencil load/store/clear는 공통 로그 경고로 알리고 무시한다(출력은 로그 설정을 따른다).
 		LoadOp stencilLoadOp = LoadOp::Undefined;
 		StoreOp stencilStoreOp = StoreOp::Undefined;
 		// D24_UNORM_S8_UINT의 stencilLoadOp=Clear일 때 0..255. 범위 초과를 자르지 않는다.

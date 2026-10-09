@@ -15,7 +15,8 @@ namespace dyf::Backends
 
     struct D3D12PipelineBinding
     {
-        RHI::ResourceBindingLayout layout = {};
+        uint32_t binding = 0;
+        RHI::ResourceBindingType type = RHI::ResourceBindingType::Undefined;
         uint32_t rootParameter = 0;
         uint32_t descriptorOffset = 0;
     };

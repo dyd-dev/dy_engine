@@ -6,36 +6,11 @@
 //
 
 #include "MetalTexture.h"
+#include "MetalValidation.h"
 #import <Metal/Metal.h>
 
 namespace dyf::Backends
 {
-	namespace
-	{
-		[[nodiscard]] bool HasUsage(RHI::TextureUsage value, RHI::TextureUsage usage)
-		{
-			return (value & usage) != RHI::TextureUsage::None;
-		}
-
-		[[nodiscard]] bool IsDepthFormat(RHI::Format format)
-		{
-			return format == RHI::Format::D32_FLOAT ||
-				format == RHI::Format::D24_UNORM_S8_UINT;
-		}
-
-		[[nodiscard]] uint32_t MaximumMipCount(uint32_t width, uint32_t height)
-		{
-			uint32_t dimension = width > height ? width : height;
-			uint32_t result = 0;
-			while(dimension != 0)
-			{
-				++result;
-				dimension >>= 1u;
-			}
-			return result;
-		}
-	}
-
     struct MetalTexture::Impl
     {
 		id<MTLTexture> ownedTexture = nil;
@@ -85,10 +60,10 @@ namespace dyf::Backends
 		const MTLPixelFormat pixelFormat = ToMTLFormat(desc.format);
 		if(mtlDevice == nil || desc.width == 0 || desc.height == 0 ||
 			desc.depthOrArraySize == 0 || desc.mipLevels == 0 ||
-			desc.mipLevels > MaximumMipCount(desc.width, desc.height) ||
+			desc.mipLevels > MetalValidation::MaximumMipCount(desc.width, desc.height) ||
 			desc.usage == RHI::TextureUsage::None || pixelFormat == MTLPixelFormatInvalid ||
-			(IsDepthFormat(desc.format) && HasUsage(desc.usage, RHI::TextureUsage::RenderTarget)) ||
-			(!IsDepthFormat(desc.format) && HasUsage(desc.usage, RHI::TextureUsage::DepthStencil)))
+			(MetalValidation::IsDepthFormat(desc.format) && MetalValidation::HasUsage(desc.usage, RHI::TextureUsage::RenderTarget)) ||
+			(!MetalValidation::IsDepthFormat(desc.format) && MetalValidation::HasUsage(desc.usage, RHI::TextureUsage::DepthStencil)))
 		{
 			return;
 		}

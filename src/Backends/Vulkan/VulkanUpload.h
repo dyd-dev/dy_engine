@@ -1,6 +1,6 @@
 #pragma once
 
-#include "RHI/UploadPool.h"
+#include "VulkanUploadPool.h"
 #include "VulkanContext.h"
 
 #include <memory>
@@ -23,8 +23,8 @@ namespace dyf::Backends
         }
     };
 
-    using VulkanUploadPool = RHI::Detail::UploadPagePool<VulkanUploadPage>;
-    using VulkanUploadArena = RHI::Detail::UploadArena<VulkanUploadPage>;
+    using VulkanUploadPool = VulkanDetail::UploadPagePool<VulkanUploadPage>;
+    using VulkanUploadArena = VulkanDetail::UploadArena<VulkanUploadPage>;
 
     // The owner must release its commands and pool before destroying VkDevice.
     std::shared_ptr<VulkanUploadPool> CreateVulkanUploadPool(const VulkanContext& context);

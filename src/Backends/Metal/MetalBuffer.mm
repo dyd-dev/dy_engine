@@ -6,42 +6,11 @@
 //
 
 #include "MetalBuffer.h"
+#include "MetalValidation.h"
 #import <Metal/Metal.h>
 
 namespace dyf::Backends
 {
-	namespace
-	{
-		[[nodiscard]] bool HasUsage(RHI::BufferUsage value, RHI::BufferUsage usage)
-		{
-			return (value & usage) != RHI::BufferUsage::None;
-		}
-
-		[[nodiscard]] bool IsStateAllowed(
-			const RHI::BufferDesc& desc,
-			RHI::ResourceState state)
-		{
-			switch(state)
-			{
-			case RHI::ResourceState::Undefined:
-			case RHI::ResourceState::Common:
-			case RHI::ResourceState::CopyDestination:
-				return true;
-			case RHI::ResourceState::VertexBuffer:
-				return HasUsage(desc.usage, RHI::BufferUsage::Vertex);
-			case RHI::ResourceState::IndexBuffer:
-				return HasUsage(desc.usage, RHI::BufferUsage::Index);
-			case RHI::ResourceState::ConstantBuffer:
-				return HasUsage(desc.usage, RHI::BufferUsage::Constant);
-			case RHI::ResourceState::ShaderResource:
-			case RHI::ResourceState::UnorderedAccess:
-				return HasUsage(desc.usage, RHI::BufferUsage::Storage);
-			default:
-				return false;
-			}
-		}
-	}
-
     struct MetalBuffer::Impl
     {
         id<MTLBuffer> buffer = nil;
@@ -54,7 +23,7 @@ namespace dyf::Backends
     {
         id<MTLDevice> mtlDevice = (__bridge id<MTLDevice>)device;
 		if(mtlDevice == nil || desc.size == 0 || desc.usage == RHI::BufferUsage::None ||
-			!IsStateAllowed(desc, desc.initialState))
+			!MetalValidation::IsBufferStateAllowed(desc, desc.initialState))
 			return;
         m_impl->buffer = [mtlDevice newBufferWithLength:desc.size
 			options:MTLResourceStorageModePrivate];

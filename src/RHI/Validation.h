@@ -228,19 +228,18 @@ namespace dyf::RHI
     		return false;
     	}
 
-    	std::set<uint32_t> occupied;
     	for(uint32_t index = 0; index < desc.bindingCount; ++index)
     	{
     		const RHI::ResourceBindingLayout& binding = desc.bindings[index];
     		if((binding.type == RHI::ResourceBindingType::Undefined || binding.type > RHI::ResourceBindingType::StaticSampler) ||
     			binding.count == 0 || !IsValidStageFlags(binding.stages)) return false;
-    		if(!occupied.insert(binding.binding).second) return false;
             if(static_cast<uint64_t>(binding.binding) + binding.count > uint64_t{UINT32_MAX} + 1) return false;
             for(uint32_t previous = 0; previous < index; ++previous)
             {
                 const auto& other = desc.bindings[previous];
-                if(BindingNamespace(binding.type) == BindingNamespace(other.type) &&
-                    BindingRangesOverlap(binding.binding,binding.count,other.binding,other.count)) return false;
+                if(binding.binding == other.binding ||
+                    (BindingNamespace(binding.type) == BindingNamespace(other.type) &&
+                     BindingRangesOverlap(binding.binding,binding.count,other.binding,other.count))) return false;
             }
             if(binding.type == ResourceBindingType::ConstantBuffer && desc.inlineConstantSize &&
                 BindingRangesOverlap(binding.binding,binding.count,desc.inlineConstantBinding,1)) return false;

@@ -1,5 +1,5 @@
 #include "NullDevice.h"
-#include "RHI/Validation.h"
+#include "NullValidation.h"
 
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/ICommandList.h"
@@ -219,7 +219,7 @@ namespace dyf::Backends
 					if(barrier.buffer != nullptr)
 					{
 						auto* buffer = dynamic_cast<NullBuffer*>(barrier.buffer);
-						if(buffer == nullptr || !RHI::IsBufferStateAllowed(buffer->GetDesc(), barrier.after) ||
+						if(buffer == nullptr || !NullValidation::IsBufferStateAllowed(buffer->GetDesc(), barrier.after) ||
 							(m_bufferStates.find(buffer) != m_bufferStates.end() &&
 								m_bufferStates[buffer] != barrier.before))
 						{
@@ -242,11 +242,11 @@ namespace dyf::Backends
 						uint32_t firstLayer = 0;
 						uint32_t layerCount = 0;
 						if(texture == nullptr ||
-							!RHI::IsTextureStateAllowed(texture->GetDesc(), barrier.after) ||
+							!NullValidation::IsTextureStateAllowed(texture->GetDesc(), barrier.after) ||
 							((barrier.before == RHI::ResourceState::Present ||
 								barrier.after == RHI::ResourceState::Present) &&
 								!texture->IsSwapchainImage()) ||
-							!RHI::ResolveSubresources(
+							!NullValidation::ResolveSubresources(
 								texture, barrier.subresources,
 								firstMip, mipCount, firstLayer, layerCount))
 						{
@@ -304,7 +304,7 @@ namespace dyf::Backends
 					const bool clearValueValid = attachment.loadOp != RHI::LoadOp::Clear ||
 						std::all_of(std::begin(attachment.clearColor), std::end(attachment.clearColor),
 							[](float component) { return std::isfinite(component); });
-					if(texture == nullptr || !RHI::HasUsage(texture->GetDesc().usage, RHI::TextureUsage::RenderTarget) ||
+					if(texture == nullptr || !NullValidation::HasUsage(texture->GetDesc().usage, RHI::TextureUsage::RenderTarget) ||
 						attachment.mipLevel >= texture->GetDesc().mipLevels ||
 						attachment.arrayLayer >= texture->GetDesc().depthOrArraySize ||
 						!RequireTextureState(
@@ -347,7 +347,7 @@ namespace dyf::Backends
 							attachment.clearDepth <= 1.0f);
 					const bool stencilClearValid = attachment.stencilLoadOp != RHI::LoadOp::Clear ||
 						attachment.clearStencil <= std::numeric_limits<uint8_t>::max();
-					if(texture == nullptr || !RHI::HasUsage(texture->GetDesc().usage, RHI::TextureUsage::DepthStencil) ||
+					if(texture == nullptr || !NullValidation::HasUsage(texture->GetDesc().usage, RHI::TextureUsage::DepthStencil) ||
 						!subresourceValid || !stateValid || !depthClearValid || !stencilClearValid ||
 						attachment.depthLoadOp == RHI::LoadOp::Undefined ||
 						attachment.depthStoreOp == RHI::StoreOp::Undefined ||
@@ -400,11 +400,10 @@ namespace dyf::Backends
 				}
 				m_pipeline = pipeline;
 				m_resourceSet = nullptr;
-				m_inlineConstants.assign(pipeline->GetLayout().inlineConstantSize, 0);
 				m_inlineConstantCoverage.assign(
 					pipeline->GetLayout().inlineConstantSize, 0);
 				if((pipeline->GetDesc().depthStencil.depthWriteEnabled ||
-					RHI::MayWriteStencil(pipeline->GetDesc().depthStencil)) &&
+					NullValidation::MayWriteStencil(pipeline->GetDesc().depthStencil)) &&
 					m_depthTexture != nullptr &&
 					!RequireTextureState(
 						m_depthTexture,
@@ -430,7 +429,7 @@ namespace dyf::Backends
 				{
 					const RHI::ResourceBinding& binding = set->GetBindings()[index];
 					const RHI::ResourceBindingLayout* declaration =
-						RHI::FindLayoutBinding(layout, binding.binding);
+						NullValidation::FindLayoutBinding(layout, binding.binding);
 					if(declaration == nullptr)
 					{
 						Invalidate();
@@ -466,7 +465,7 @@ namespace dyf::Backends
 						uint32_t mipCount = 0;
 						uint32_t firstLayer = 0;
 						uint32_t layerCount = 0;
-						if(texture == nullptr || !RHI::ResolveBindingSubresources(
+						if(texture == nullptr || !NullValidation::ResolveBindingSubresources(
 							texture, binding, declaration->type,
 							firstMip, mipCount, firstLayer, layerCount) ||
 							!RequireTextureSubresourcesInState(
@@ -496,7 +495,7 @@ namespace dyf::Backends
 						[binding](const RHI::VertexBufferLayout& candidate) { return candidate.binding == binding; });
 				if(m_closed || !m_rendering || pipelineDesc == nullptr || !hasLayout ||
 					nullBuffer == nullptr || offset >= nullBuffer->GetDesc().size ||
-					!RHI::HasUsage(nullBuffer->GetDesc().usage, RHI::BufferUsage::Vertex) ||
+					!NullValidation::HasUsage(nullBuffer->GetDesc().usage, RHI::BufferUsage::Vertex) ||
 					!RequireBufferState(
 						nullBuffer, RHI::ResourceState::VertexBuffer))
 				{
@@ -512,10 +511,10 @@ namespace dyf::Backends
 				uint32_t offset) override
 			{
 				auto* nullBuffer = dynamic_cast<NullBuffer*>(buffer);
-				const uint32_t indexSize = RHI::FormatSize(format);
+				const uint32_t indexSize = NullValidation::FormatSize(format);
 				if(m_closed || !m_rendering || nullBuffer == nullptr ||
 					offset >= nullBuffer->GetDesc().size ||
-					!RHI::HasUsage(nullBuffer->GetDesc().usage, RHI::BufferUsage::Index) ||
+					!NullValidation::HasUsage(nullBuffer->GetDesc().usage, RHI::BufferUsage::Index) ||
 					!RequireBufferState(
 						nullBuffer, RHI::ResourceState::IndexBuffer) ||
 					(format != RHI::Format::R16_UINT && format != RHI::Format::R32_UINT) ||
@@ -539,12 +538,11 @@ namespace dyf::Backends
 					data == nullptr || size == 0 ||
 					(offset % sizeof(uint32_t)) != 0 ||
 					(size % sizeof(uint32_t)) != 0 ||
-					offset > m_inlineConstants.size() || size > m_inlineConstants.size() - offset)
+					offset > m_inlineConstantCoverage.size() || size > m_inlineConstantCoverage.size() - offset)
 				{
 					Invalidate();
 					return;
 				}
-				std::memcpy(m_inlineConstants.data() + offset, data, size);
 				std::fill(
 					m_inlineConstantCoverage.begin() + offset,
 					m_inlineConstantCoverage.begin() + offset + size,
@@ -609,7 +607,7 @@ namespace dyf::Backends
 				int32_t,
 				uint32_t firstInstance) override
 			{
-				const uint32_t indexSize = RHI::FormatSize(m_indexFormat);
+				const uint32_t indexSize = NullValidation::FormatSize(m_indexFormat);
 				const uint64_t firstByte = static_cast<uint64_t>(m_indexOffset) +
 					static_cast<uint64_t>(firstIndex) * indexSize;
 				const uint64_t end = firstByte +
@@ -667,7 +665,7 @@ namespace dyf::Backends
 				{
 					return false;
 				}
-				const uint32_t pixelSize = RHI::FormatSize(texture->GetDesc().format);
+				const uint32_t pixelSize = NullValidation::FormatSize(texture->GetDesc().format);
 				const uint32_t mipWidth = std::max(1u, texture->GetDesc().width >> mipLevel);
 				const uint32_t mipHeight = std::max(1u, texture->GetDesc().height >> mipLevel);
 				if(pixelSize == 0 || mipWidth >
@@ -974,7 +972,6 @@ namespace dyf::Backends
 			std::unordered_map<uint32_t, VertexBinding> m_vertexBindings;
 			std::vector<NullTexture*> m_referencedSwapchainImages;
 			std::vector<RHI::Format> m_colorFormats;
-			std::vector<uint8_t> m_inlineConstants;
 			std::vector<uint8_t> m_inlineConstantCoverage;
 			NullPipelineState* m_pipeline = nullptr;
 			NullResourceSet* m_resourceSet = nullptr;
@@ -1100,7 +1097,7 @@ void NullDevice::DestroySwapchainNative()
 		default:
 			return false;
 		}
-		if(!RHI::IsColorFormat(format)) return false;
+		if(!NullValidation::IsColorFormat(format)) return false;
         if(desc.colorSpace > RHI::ColorSpace::LinearSrgb ||
             desc.compositeAlpha > RHI::CompositeAlpha::Inherit) return false;
 
@@ -1246,8 +1243,8 @@ void NullDevice::DestroySwapchainNative()
 
 	RHI::TextureHandle NullDevice::CreateTextureNative(const RHI::TextureDesc& desc)
 	{
-		if((RHI::IsDepthFormat(desc.format) && RHI::HasUsage(desc.usage, RHI::TextureUsage::RenderTarget)) ||
-			(!RHI::IsDepthFormat(desc.format) && RHI::HasUsage(desc.usage, RHI::TextureUsage::DepthStencil)))
+		if((NullValidation::IsDepthFormat(desc.format) && NullValidation::HasUsage(desc.usage, RHI::TextureUsage::RenderTarget)) ||
+			(!NullValidation::IsDepthFormat(desc.format) && NullValidation::HasUsage(desc.usage, RHI::TextureUsage::DepthStencil)))
 		{
 			return nullptr;
 		}
