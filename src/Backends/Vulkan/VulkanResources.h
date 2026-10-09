@@ -41,7 +41,6 @@ namespace dyf::Backends
 		VulkanTexture(const dyf::RHI::TextureDesc& desc, VkImage image, VkImageView imageView);
 
 		[[nodiscard]] VkImage GetImage() const { return m_image; }
-		[[nodiscard]] VkImageView GetImageView() const { return m_imageView; }
 		[[nodiscard]] VkImageAspectFlags GetAspectMask() const { return m_aspectMask; }
 		[[nodiscard]] bool IsSwapchainImage() const { return !m_ownsImage; }
 		[[nodiscard]] bool IsStateAllowed(dyf::RHI::ResourceState state) const;

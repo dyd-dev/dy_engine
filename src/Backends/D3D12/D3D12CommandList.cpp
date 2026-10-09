@@ -5,6 +5,7 @@
 #include "D3D12ResourceSet.h"
 #include "D3D12Texture.h"
 #include "D3D12Query.h"
+#include "D3D12Validation.h"
 #include "d3dx12.h"
 
 #include <algorithm>
@@ -66,38 +67,11 @@ namespace dyf::Backends
                 objects.emplace_back(object);
         }
 
-        bool HasUsage(RHI::BufferUsage usage, RHI::BufferUsage flag)
-        {
-            return (static_cast<uint32_t>(usage) & static_cast<uint32_t>(flag)) != 0;
-        }
-
-        bool HasUsage(RHI::TextureUsage usage, RHI::TextureUsage flag)
-        {
-            return (static_cast<uint32_t>(usage) & static_cast<uint32_t>(flag)) != 0;
-        }
-
         bool IsBufferStateValid(
             const D3D12Buffer& buffer,
             RHI::ResourceState state)
         {
-            switch (state)
-            {
-            case RHI::ResourceState::Undefined:
-            case RHI::ResourceState::Common:
-            case RHI::ResourceState::CopyDestination:
-                return true;
-            case RHI::ResourceState::VertexBuffer:
-                return HasUsage(buffer.GetDesc().usage, RHI::BufferUsage::Vertex);
-            case RHI::ResourceState::IndexBuffer:
-                return HasUsage(buffer.GetDesc().usage, RHI::BufferUsage::Index);
-            case RHI::ResourceState::ConstantBuffer:
-                return HasUsage(buffer.GetDesc().usage, RHI::BufferUsage::Constant);
-            case RHI::ResourceState::ShaderResource:
-            case RHI::ResourceState::UnorderedAccess:
-                return HasUsage(buffer.GetDesc().usage, RHI::BufferUsage::Storage);
-            default:
-                return false;
-            }
+            return D3D12Validation::IsBufferStateAllowed(buffer.GetDesc(), state);
         }
 
         bool IsTextureStateValid(
@@ -111,15 +85,15 @@ namespace dyf::Backends
             case RHI::ResourceState::CopyDestination:
                 return true;
             case RHI::ResourceState::ShaderResource:
-                return HasUsage(
+                return D3D12Validation::HasUsage(
                     texture.GetDesc().usage, RHI::TextureUsage::ShaderResource);
             case RHI::ResourceState::UnorderedAccess:
-                return HasUsage(texture.GetDesc().usage, RHI::TextureUsage::Storage);
+                return D3D12Validation::HasUsage(texture.GetDesc().usage, RHI::TextureUsage::Storage);
             case RHI::ResourceState::RenderTarget:
-                return HasUsage(texture.GetDesc().usage, RHI::TextureUsage::RenderTarget);
+                return D3D12Validation::HasUsage(texture.GetDesc().usage, RHI::TextureUsage::RenderTarget);
             case RHI::ResourceState::DepthRead:
             case RHI::ResourceState::DepthWrite:
-                return HasUsage(texture.GetDesc().usage, RHI::TextureUsage::DepthStencil);
+                return D3D12Validation::HasUsage(texture.GetDesc().usage, RHI::TextureUsage::DepthStencil);
             case RHI::ResourceState::Present:
                 return texture.IsSwapchainImage();
             default:
@@ -161,20 +135,6 @@ namespace dyf::Backends
                     texture.GetDesc().depthOrArraySize - range.firstArrayLayer;
         }
 
-        const RHI::ResourceBindingLayout* FindLayoutBinding(
-            const RHI::PipelineLayoutDesc& layout,
-            uint32_t binding)
-        {
-            for (uint32_t index = 0; index < layout.bindingCount; ++index)
-            {
-                const RHI::ResourceBindingLayout& candidate =
-                    layout.bindings[index];
-                if (candidate.binding == binding)
-                    return &candidate;
-            }
-            return nullptr;
-        }
-
         enum class OperationKind : uint8_t
         {
             BufferBarrier,
@@ -211,7 +171,7 @@ namespace dyf::Backends
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> commandList;
         // The native command is destroyed only after fence-safe retirement or discard.
-        RHI::Detail::UploadArena<D3D12UploadPage> uploads;
+        D3D12Detail::UploadArena<D3D12UploadPage> uploads;
         ID3D12Device* device = nullptr;
         D3D12PipelineState* pipeline = nullptr;
         D3D12Texture* depthTexture = nullptr;
@@ -1012,7 +972,7 @@ namespace dyf::Backends
         for (uint32_t index = 0; index < set->GetBindingCount(); ++index)
         {
             const RHI::ResourceBinding& binding = set->GetBindings()[index];
-            const RHI::ResourceBindingLayout* declaration = FindLayoutBinding(
+            const RHI::ResourceBindingLayout* declaration = D3D12Validation::FindLayoutBinding(
                 layout, binding.binding);
             if (declaration == nullptr)
             {
@@ -1106,7 +1066,7 @@ namespace dyf::Backends
         if (!CanRecord(m_internal) || !m_internal->rendering ||
             m_internal->pipeline == nullptr ||
             buffer == nullptr ||
-            !HasUsage(buffer->GetDesc().usage, RHI::BufferUsage::Vertex) ||
+            !D3D12Validation::HasUsage(buffer->GetDesc().usage, RHI::BufferUsage::Vertex) ||
             binding >= D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT ||
             offset >= buffer->GetDesc().size)
         {
@@ -1152,7 +1112,7 @@ namespace dyf::Backends
         const uint32_t indexSize = format == RHI::Format::R16_UINT ? 2u : 4u;
         if (!CanRecord(m_internal) || !m_internal->rendering ||
             buffer == nullptr ||
-            !HasUsage(buffer->GetDesc().usage, RHI::BufferUsage::Index) ||
+            !D3D12Validation::HasUsage(buffer->GetDesc().usage, RHI::BufferUsage::Index) ||
             offset >= buffer->GetDesc().size ||
             (format != RHI::Format::R16_UINT && format != RHI::Format::R32_UINT) ||
             (offset % indexSize) != 0 || buffer->GetDesc().size - offset < indexSize)
@@ -1487,35 +1447,6 @@ namespace dyf::Backends
             {
             case OperationKind::BufferBarrier:
             case OperationKind::BufferRequirement:
-            {
-                const auto found = state.buffers.find(operation.buffer);
-                const RHI::ResourceState current =
-                    found == state.buffers.end()
-                    ? operation.buffer->GetState()
-                    : found->second;
-                if (current != operation.before) return false;
-                if (operation.kind == OperationKind::BufferBarrier)
-                    state.buffers[operation.buffer] = operation.after;
-                break;
-            }
-            case OperationKind::TextureBarrier:
-            case OperationKind::TextureRequirement:
-            {
-                const auto key = TextureKey(
-                    operation.texture,
-                    operation.mipLevel,
-                    operation.arrayLayer);
-                const auto found = state.textureSubresources.find(key);
-                const RHI::ResourceState current =
-                    found == state.textureSubresources.end()
-                    ? operation.texture->GetState(
-                        operation.mipLevel, operation.arrayLayer)
-                    : found->second;
-                if (current != operation.before) return false;
-                if (operation.kind == OperationKind::TextureBarrier)
-                    state.textureSubresources[key] = operation.after;
-                break;
-            }
             case OperationKind::BufferWrite:
             {
                 const auto found = state.buffers.find(operation.buffer);
@@ -1523,10 +1454,16 @@ namespace dyf::Backends
                     found == state.buffers.end()
                     ? operation.buffer->GetState()
                     : found->second;
-                if (current != RHI::ResourceState::CopyDestination)
-                    return false;
+                const RHI::ResourceState expected =
+                    operation.kind == OperationKind::BufferWrite
+                    ? RHI::ResourceState::CopyDestination : operation.before;
+                if (current != expected) return false;
+                if (operation.kind == OperationKind::BufferBarrier)
+                    state.buffers[operation.buffer] = operation.after;
                 break;
             }
+            case OperationKind::TextureBarrier:
+            case OperationKind::TextureRequirement:
             case OperationKind::TextureWrite:
             {
                 const auto key = TextureKey(
@@ -1539,8 +1476,12 @@ namespace dyf::Backends
                     ? operation.texture->GetState(
                         operation.mipLevel, operation.arrayLayer)
                     : found->second;
-                if (current != RHI::ResourceState::CopyDestination)
-                    return false;
+                const RHI::ResourceState expected =
+                    operation.kind == OperationKind::TextureWrite
+                    ? RHI::ResourceState::CopyDestination : operation.before;
+                if (current != expected) return false;
+                if (operation.kind == OperationKind::TextureBarrier)
+                    state.textureSubresources[key] = operation.after;
                 break;
             }
             }

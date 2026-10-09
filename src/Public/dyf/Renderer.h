@@ -212,7 +212,7 @@ private:
 
     // 메시·텍스처 업로드와 draw에 필요한 RHI 호출을 cpp 파일별로 나눈 멤버 함수다.
     bool PrepareGeometry(const Scene&,RHI::IDevice*);
-    bool CreateMaterialResourceSets(const Scene&,RHI::ICommandList&,const std::vector<RendererDrawDesc>*,std::vector<RHI::ResourceSetHandle>&,RHI::ResourceScope&);
+    bool CreateMaterialResourceSets(const Scene&,RHI::ICommandList&,const std::vector<RendererDrawDesc>*,std::vector<RHI::ResourceSetHandle>&);
     bool RecordShadowPass(const Scene&,const Camera&,const ShadowData&,RHI::ICommandList&,
         const std::vector<RendererDrawDesc>*,RHI::TimestampQueryHandle);
     bool RecordMainPass(const Scene&,const Camera&,RHI::ICommandList&,

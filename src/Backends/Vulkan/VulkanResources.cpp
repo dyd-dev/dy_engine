@@ -1,4 +1,5 @@
 #include "VulkanResources.h"
+#include "VulkanValidation.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -7,16 +8,6 @@ namespace dyf::Backends
 {
 	namespace
 	{
-		bool HasUsage(dyf::RHI::BufferUsage usage, dyf::RHI::BufferUsage value)
-		{
-			return (usage & value) != dyf::RHI::BufferUsage::None;
-		}
-
-		bool HasUsage(dyf::RHI::TextureUsage usage, dyf::RHI::TextureUsage value)
-		{
-			return (usage & value) != dyf::RHI::TextureUsage::None;
-		}
-
 		uint32_t FindMemoryType(VkPhysicalDevice physicalDevice, uint32_t typeBits, VkMemoryPropertyFlags properties)
 		{
 			VkPhysicalDeviceMemoryProperties memoryProperties{};
@@ -35,21 +26,21 @@ namespace dyf::Backends
 		VkBufferUsageFlags ToBufferUsage(dyf::RHI::BufferUsage usage)
 		{
 			VkBufferUsageFlags result = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-			if (HasUsage(usage, dyf::RHI::BufferUsage::Vertex)) result |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-			if (HasUsage(usage, dyf::RHI::BufferUsage::Index)) result |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-			if (HasUsage(usage, dyf::RHI::BufferUsage::Constant)) result |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
-			if (HasUsage(usage, dyf::RHI::BufferUsage::Storage)) result |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-			if (HasUsage(usage, dyf::RHI::BufferUsage::Indirect)) result |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+			if (VulkanValidation::HasUsage(usage, dyf::RHI::BufferUsage::Vertex)) result |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+			if (VulkanValidation::HasUsage(usage, dyf::RHI::BufferUsage::Index)) result |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+			if (VulkanValidation::HasUsage(usage, dyf::RHI::BufferUsage::Constant)) result |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+			if (VulkanValidation::HasUsage(usage, dyf::RHI::BufferUsage::Storage)) result |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+			if (VulkanValidation::HasUsage(usage, dyf::RHI::BufferUsage::Indirect)) result |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
 			return result;
 		}
 
 		VkImageUsageFlags ToImageUsage(dyf::RHI::TextureUsage usage)
 		{
 			VkImageUsageFlags result = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-			if (HasUsage(usage, dyf::RHI::TextureUsage::ShaderResource)) result |= VK_IMAGE_USAGE_SAMPLED_BIT;
-			if (HasUsage(usage, dyf::RHI::TextureUsage::RenderTarget)) result |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-			if (HasUsage(usage, dyf::RHI::TextureUsage::DepthStencil)) result |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-			if (HasUsage(usage, dyf::RHI::TextureUsage::Storage)) result |= VK_IMAGE_USAGE_STORAGE_BIT;
+			if (VulkanValidation::HasUsage(usage, dyf::RHI::TextureUsage::ShaderResource)) result |= VK_IMAGE_USAGE_SAMPLED_BIT;
+			if (VulkanValidation::HasUsage(usage, dyf::RHI::TextureUsage::RenderTarget)) result |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+			if (VulkanValidation::HasUsage(usage, dyf::RHI::TextureUsage::DepthStencil)) result |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+			if (VulkanValidation::HasUsage(usage, dyf::RHI::TextureUsage::Storage)) result |= VK_IMAGE_USAGE_STORAGE_BIT;
 			return result;
 		}
 
@@ -185,24 +176,7 @@ namespace dyf::Backends
 
 	bool VulkanBuffer::IsStateAllowed(dyf::RHI::ResourceState state) const
 	{
-		switch (state)
-		{
-		case dyf::RHI::ResourceState::Undefined:
-		case dyf::RHI::ResourceState::Common:
-		case dyf::RHI::ResourceState::CopyDestination:
-			return true;
-		case dyf::RHI::ResourceState::VertexBuffer:
-			return HasUsage(GetDesc().usage, dyf::RHI::BufferUsage::Vertex);
-		case dyf::RHI::ResourceState::IndexBuffer:
-			return HasUsage(GetDesc().usage, dyf::RHI::BufferUsage::Index);
-		case dyf::RHI::ResourceState::ConstantBuffer:
-			return HasUsage(GetDesc().usage, dyf::RHI::BufferUsage::Constant);
-		case dyf::RHI::ResourceState::ShaderResource:
-		case dyf::RHI::ResourceState::UnorderedAccess:
-			return HasUsage(GetDesc().usage, dyf::RHI::BufferUsage::Storage);
-		default:
-			return false;
-		}
+		return VulkanValidation::IsBufferStateAllowed(GetDesc(), state);
 	}
 
 	VulkanTexture::VulkanTexture(const VulkanContext& context, const dyf::RHI::TextureDesc& desc)
@@ -318,14 +292,14 @@ namespace dyf::Backends
 		case dyf::RHI::ResourceState::CopyDestination:
 			return true;
 		case dyf::RHI::ResourceState::ShaderResource:
-			return HasUsage(GetDesc().usage, dyf::RHI::TextureUsage::ShaderResource);
+			return VulkanValidation::HasUsage(GetDesc().usage, dyf::RHI::TextureUsage::ShaderResource);
 		case dyf::RHI::ResourceState::UnorderedAccess:
-			return HasUsage(GetDesc().usage, dyf::RHI::TextureUsage::Storage);
+			return VulkanValidation::HasUsage(GetDesc().usage, dyf::RHI::TextureUsage::Storage);
 		case dyf::RHI::ResourceState::RenderTarget:
-			return HasUsage(GetDesc().usage, dyf::RHI::TextureUsage::RenderTarget);
+			return VulkanValidation::HasUsage(GetDesc().usage, dyf::RHI::TextureUsage::RenderTarget);
 		case dyf::RHI::ResourceState::DepthRead:
 		case dyf::RHI::ResourceState::DepthWrite:
-			return HasUsage(GetDesc().usage, dyf::RHI::TextureUsage::DepthStencil);
+			return VulkanValidation::HasUsage(GetDesc().usage, dyf::RHI::TextureUsage::DepthStencil);
 		case dyf::RHI::ResourceState::Present:
 			return IsSwapchainImage();
 		default:

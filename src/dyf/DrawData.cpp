@@ -274,8 +274,7 @@ bool EqualMaterial(const MaterialDesc& a,const MaterialDesc& b)
 }
 
 bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList& commands,
-	const std::vector<RendererDrawDesc>* draws, std::vector<RHI::ResourceSetHandle>& sets,
-	RHI::ResourceScope& resources)
+	const std::vector<RendererDrawDesc>* draws, std::vector<RHI::ResourceSetHandle>& sets)
 {
 	if(device == nullptr || pipeline == nullptr || lightingBuffer == nullptr) return false;
 	const bool shadowsEnabled = shadowDepthTarget != nullptr;
@@ -532,7 +531,6 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 	RHI::ICommandList& commands, const std::vector<RendererDrawDesc>* draws,
 	RHI::TimestampQueryHandle shadowQuery)
 {
-	RHI::ResourceScope resources(*device);
 	const bool stock=UsesStockGeometry() && !draws;
 	const bool instanced=UsesInstanceStream();
 	const bool cull=stock && config.enableFrustumCulling;
@@ -642,7 +640,6 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
 	RHI::ICommandList& commands, const std::vector<RendererDrawDesc>* draws,
 	RHI::TimestampQueryHandle mainQuery, RHI::TextureHandle output)
 {
-	RHI::ResourceScope resources(*device);
 	auto& materialSets=mainSetScratch;
     struct MaterialBufferTransaction {
         Renderer& r;
@@ -657,7 +654,7 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
             }
         }
     } materialTransaction(*this);
-	if(!CreateMaterialResourceSets(scene, commands, draws, materialSets, resources)) return false;
+	if(!CreateMaterialResourceSets(scene, commands, draws, materialSets)) return false;
     materialTransaction.committed=true;
 	auto* target = config.enableHdrRendering ? hdrTarget : output;
 	const auto viewProjection = camera.projection * camera.view;

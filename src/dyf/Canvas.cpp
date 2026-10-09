@@ -51,7 +51,7 @@ void Canvas::Triangle(Math::float2 a, Math::float2 b, Math::float2 c, Math::floa
 {
     Draw draw{static_cast<uint32_t>(vertices.size()), 3, {}, viewport, clip};
     for(auto point : {a, b, c}) vertices.push_back({point.x, point.y, 0, 0, color.x, color.y, color.z, color.w});
-    draws.push_back(draw);
+    draws.push_back(std::move(draw));
 }
 void Canvas::Quad(Rectangle r, Rectangle uv, Math::float4 color, const dyf::Image& image)
 {
@@ -60,7 +60,7 @@ void Canvas::Quad(Rectangle r, Rectangle uv, Math::float4 color, const dyf::Imag
     for(auto p : {Math::float2{0, 0}, {1, 0}, {0, 1}, {0, 1}, {1, 0}, {1, 1}})
         vertices.push_back({r.x + p.x * r.width, r.y + p.y * r.height, uv.x + p.x * uv.width, uv.y + p.y * uv.height,
             color.x, color.y, color.z, color.w});
-    draws.push_back(draw);
+    draws.push_back(std::move(draw));
 }
 void Canvas::Point(Math::float2 p, Math::float4 color, float size) { FillRect({p.x - size / 2, p.y - size / 2, size, size}, color); }
 void Canvas::Line(Math::float2 a, Math::float2 b, Math::float4 color, float width)

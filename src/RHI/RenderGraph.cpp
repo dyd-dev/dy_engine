@@ -3,10 +3,9 @@
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/Core/ThreadPool.h"
-#include "RHI/Validation.h"
+#include "Validation.h"
 
 #include <atomic>
-#include <queue>
 
 namespace dyf::RHI
 {
@@ -231,31 +230,18 @@ namespace dyf::RHI
                 m_finalBarriers.push_back({resource.buffer, resource.texture, states[index], resource.finalState, {}});
         }
 
-        std::vector<uint32_t> inDegree(passCount, 0);
         std::vector<uint32_t> stageIndices(passCount, 0);
-        for(auto& successors : edges)
+        // Dependencies only point forward; registration order is also submission order.
+        // Explicit backward dependencies would require a topological sort again.
+        for(uint32_t pass = 0; pass < passCount; ++pass)
         {
-            std::sort(successors.begin(), successors.end());
-            successors.erase(std::unique(successors.begin(), successors.end()), successors.end());
-            for(uint32_t successor : successors) ++inDegree[successor];
-        }
-        std::priority_queue<uint32_t, std::vector<uint32_t>, std::greater<uint32_t>> ready;
-        for(uint32_t pass = 0; pass < passCount; ++pass) if(!inDegree[pass]) ready.push(pass);
-        while(!ready.empty())
-        {
-            const uint32_t pass = ready.top();
-            ready.pop();
             m_executionOrder.push_back(pass);
             const uint32_t stage = stageIndices[pass];
             if(m_executionStages.size() <= stage) m_executionStages.resize(size_t(stage) + 1);
             m_executionStages[stage].passIndices.push_back(pass);
             for(uint32_t next : edges[pass])
-            {
                 stageIndices[next] = (std::max)(stageIndices[next], stage + 1);
-                if(--inDegree[next] == 0) ready.push(next);
-            }
         }
-        if(m_executionOrder.size() != passCount) return Fail("resource dependencies contain a cycle.");
         for(const auto& pass : m_passes) m_compiledRevisions.push_back(pass->GetRevision());
         m_compiled = true;
         return true;

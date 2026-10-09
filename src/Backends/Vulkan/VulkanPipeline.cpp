@@ -1,7 +1,7 @@
 #include "VulkanPipeline.h"
 
 #include "VulkanResources.h"
-#include "RHI/Validation.h"
+#include "VulkanValidation.h"
 
 #include <algorithm>
 #include <array>
@@ -297,7 +297,7 @@ namespace dyf::Backends
 		: dyf::RHI::Pipeline(desc.layout)
 		, m_device(context.device)
 		, m_usesStencil(desc.depthStencil.stencilEnabled)
-		, m_requiresDepthWrite(desc.depthStencil.depthWriteEnabled || RHI::MayWriteStencil(desc.depthStencil))
+		, m_requiresDepthWrite(desc.depthStencil.depthWriteEnabled || VulkanValidation::MayWriteStencil(desc.depthStencil))
 	{
 		try
 		{
@@ -339,7 +339,7 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& context, const dyf::RHI::Mes
     : dyf::RHI::Pipeline(desc.layout, false, true)
     , m_device(context.device)
     , m_usesStencil(desc.depthStencil.stencilEnabled)
-    , m_requiresDepthWrite(desc.depthStencil.depthWriteEnabled || desc.depthStencil.stencilEnabled)
+    , m_requiresDepthWrite(desc.depthStencil.depthWriteEnabled || VulkanValidation::MayWriteStencil(desc.depthStencil))
 {
     try
     {
@@ -462,12 +462,10 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& context, const dyf::RHI::Mes
 		{
 			throw std::runtime_error("Invalid Vulkan graphics shaders");
 		}
-		m_vertexBuffers.clear();
 		if (desc.vertexBufferCount != 0)
 		{
 			m_vertexBuffers.assign(desc.vertexBuffers, desc.vertexBuffers + desc.vertexBufferCount);
 		}
-		m_colorFormats.clear();
 		m_colorFormats.reserve(desc.colorAttachmentCount);
 		for (uint32_t i = 0; i < desc.colorAttachmentCount; ++i)
 		{
@@ -873,7 +871,7 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& context, const dyf::RHI::Mes
 		for (uint32_t i = 0; i < desc.bindingCount; ++i)
 		{
 			const dyf::RHI::ResourceBinding& source = desc.bindings[i];
-			const auto* bindingLayout = dyf::RHI::FindLayoutBinding(layout, source.binding);
+			const auto* bindingLayout = VulkanValidation::FindLayoutBinding(layout, source.binding);
 			if (bindingLayout == nullptr || bindingLayout->type == dyf::RHI::ResourceBindingType::StaticSampler ||
 				source.arrayElement >= bindingLayout->count ||
 				!provided.emplace(source.binding, source.arrayElement).second)
@@ -919,7 +917,7 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& context, const dyf::RHI::Mes
 					? dyf::RHI::TextureUsage::Storage
 					: dyf::RHI::TextureUsage::ShaderResource;
 				uint32_t firstMip = 0, mipCount = 0, firstLayer = 0, layerCount = 0;
-				const bool validRange = texture != nullptr && RHI::ResolveBindingSubresources(
+				const bool validRange = texture != nullptr && VulkanValidation::ResolveBindingSubresources(
 					texture, source, bindingLayout->type, firstMip, mipCount, firstLayer, layerCount);
 				const VkImageView imageView = !validRange
 					? VK_NULL_HANDLE

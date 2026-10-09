@@ -93,7 +93,6 @@ namespace dyf::Platform
 		void OnFocusLost();
 		void PublishFrame();
 		State m_frame, m_pending;
-		Buttons m_consumed;
 		Buttons m_frameStartDown;
 		// Fixed release stamps let optional maps recover held-input suppression across skipped updates.
 		std::array<uint64_t, ButtonCount> m_lastReleaseFrame{};

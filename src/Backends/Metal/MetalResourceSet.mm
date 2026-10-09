@@ -2,57 +2,12 @@
 
 #include "MetalPipeline.h"
 #include "MetalTexture.h"
+#include "MetalValidation.h"
 
 #import <Metal/Metal.h>
 
 namespace dyf::Backends
 {
-	namespace
-	{
-		[[nodiscard]] const RHI::ResourceBindingLayout* FindLayoutBinding(
-			const RHI::PipelineLayoutDesc& layout,
-			uint32_t binding)
-		{
-			for(uint32_t index = 0; index < layout.bindingCount; ++index)
-			{
-				const RHI::ResourceBindingLayout& candidate = layout.bindings[index];
-				if(candidate.binding == binding)
-					return &candidate;
-			}
-			return nullptr;
-		}
-
-		[[nodiscard]] bool ResolveTextureRange(
-			MetalTexture* texture,
-			const RHI::ResourceBinding& binding,
-			RHI::ResourceBindingType type,
-			uint32_t& firstMip,
-			uint32_t& mipCount,
-			uint32_t& firstLayer,
-			uint32_t& layerCount)
-		{
-			firstMip = binding.subresources.firstMipLevel;
-			firstLayer = binding.subresources.firstArrayLayer;
-			if(firstMip >= texture->GetDesc().mipLevels ||
-				firstLayer >= texture->GetDesc().depthOrArraySize)
-			{
-				return false;
-			}
-			mipCount = binding.subresources.mipLevelCount == 0
-				? texture->GetDesc().mipLevels - firstMip
-				: binding.subresources.mipLevelCount;
-			layerCount = binding.subresources.arrayLayerCount == 0
-				? texture->GetDesc().depthOrArraySize - firstLayer
-				: binding.subresources.arrayLayerCount;
-			if(mipCount > texture->GetDesc().mipLevels - firstMip ||
-				layerCount > texture->GetDesc().depthOrArraySize - firstLayer)
-			{
-				return false;
-			}
-			return type != RHI::ResourceBindingType::StorageTexture || mipCount == 1;
-		}
-	}
-
 	struct MetalResourceSet::Impl
 	{
 		~Impl();
@@ -77,7 +32,7 @@ namespace dyf::Backends
 		{
 			const RHI::ResourceBinding& binding = GetBindings()[index];
 			const RHI::ResourceBindingLayout* declaration =
-				FindLayoutBinding(layout, binding.binding);
+				MetalValidation::FindLayoutBinding(layout, binding.binding);
 			if(declaration == nullptr ||
 				(declaration->type != RHI::ResourceBindingType::SampledTexture &&
 					declaration->type != RHI::ResourceBindingType::StorageTexture)) continue;
@@ -88,7 +43,7 @@ namespace dyf::Backends
 			uint32_t firstLayer = 0;
 			uint32_t layerCount = 0;
 			if(texture == nullptr || texture->GetNativeTexture() == nullptr ||
-				!ResolveTextureRange(
+				!MetalValidation::ResolveBindingSubresources(
 					texture, binding, declaration->type,
 					firstMip, mipCount, firstLayer, layerCount)) return;
 

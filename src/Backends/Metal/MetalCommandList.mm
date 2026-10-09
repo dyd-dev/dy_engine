@@ -6,7 +6,7 @@
 #include "MetalTexture.h"
 #include "MetalTessellation.h"
 #include "MetalUpload.h"
-#include "../../RHI/Validation.h"
+#include "MetalValidation.h"
 
 #include <algorithm>
 #include <array>
@@ -118,7 +118,6 @@ namespace dyf::Backends
 		std::unordered_map<MetalBuffer*, RHI::ResourceState> bufferStates;
 		std::map<std::pair<MetalTexture*, uint32_t>, RHI::ResourceState> textureStates;
 		std::unordered_map<uint32_t, VertexBinding> vertexBindings;
-		std::vector<MetalTexture*> referencedSwapchainImages;
 		std::vector<RHI::Format> colorFormats;
 		std::vector<uint8_t> inlineConstants;
 		std::vector<uint8_t> inlineConstantCoverage;
@@ -261,12 +260,6 @@ namespace dyf::Backends
 		{
 			if(texture == nullptr || !texture->IsSwapchainImage()) return;
 			impl->usesBackBuffer = true;
-			if(std::find(impl->referencedSwapchainImages.begin(),
-				impl->referencedSwapchainImages.end(), texture) ==
-				impl->referencedSwapchainImages.end())
-			{
-				impl->referencedSwapchainImages.push_back(texture);
-			}
 		}
 
 		template<typename ImplType>
@@ -391,7 +384,6 @@ namespace dyf::Backends
 		m_impl->bufferStates.clear();
 		m_impl->textureStates.clear();
 		m_impl->vertexBindings.clear();
-		m_impl->referencedSwapchainImages.clear();
 		m_impl->colorFormats.clear();
 		m_impl->inlineConstants.clear();
 		m_impl->inlineConstantCoverage.clear();
@@ -455,7 +447,7 @@ namespace dyf::Backends
 			{
 				auto* buffer = dynamic_cast<MetalBuffer*>(barrier.buffer);
 				if(buffer == nullptr || NativeBuffer(buffer) == nil ||
-					!IsBufferStateAllowed(buffer->GetDesc(), barrier.after) ||
+					!MetalValidation::IsBufferStateAllowed(buffer->GetDesc(), barrier.after) ||
 					(m_impl->bufferStates.find(buffer) != m_impl->bufferStates.end() &&
 						m_impl->bufferStates[buffer] != barrier.before))
 				{
@@ -478,11 +470,11 @@ namespace dyf::Backends
 			uint32_t firstLayer = 0;
 			uint32_t layerCount = 0;
 			if(texture == nullptr || NativeTexture(texture) == nil ||
-				!IsTextureStateAllowed(texture->GetDesc(), barrier.after) ||
+				!MetalValidation::IsTextureStateAllowed(texture->GetDesc(), barrier.after) ||
 				((barrier.before == RHI::ResourceState::Present ||
 					barrier.after == RHI::ResourceState::Present) &&
 					!texture->IsSwapchainImage()) ||
-				!ResolveSubresources(
+				!MetalValidation::ResolveSubresources(
 					texture, barrier.subresources,
 					firstMip, mipCount, firstLayer, layerCount))
 			{
@@ -556,7 +548,7 @@ namespace dyf::Backends
 					clearValueValid = clearValueValid && std::isfinite(component);
 			}
 			if(texture == nullptr || native == nil ||
-				!HasUsage(texture->GetDesc().usage, RHI::TextureUsage::RenderTarget) ||
+				!MetalValidation::HasUsage(texture->GetDesc().usage, RHI::TextureUsage::RenderTarget) ||
 				attachment.mipLevel >= texture->GetDesc().mipLevels ||
 				attachment.arrayLayer >= texture->GetDesc().depthOrArraySize ||
 				!RequireTextureState(
@@ -627,7 +619,7 @@ namespace dyf::Backends
 			const bool stencilClearValid = attachment.stencilLoadOp != RHI::LoadOp::Clear ||
 				attachment.clearStencil <= std::numeric_limits<uint8_t>::max();
 			if(texture == nullptr || native == nil ||
-				!HasUsage(texture->GetDesc().usage, RHI::TextureUsage::DepthStencil) ||
+				!MetalValidation::HasUsage(texture->GetDesc().usage, RHI::TextureUsage::DepthStencil) ||
 				!subresourceValid || !stateValid || !depthClearValid || !stencilClearValid ||
 				attachment.depthLoadOp == RHI::LoadOp::Undefined ||
 				attachment.depthStoreOp == RHI::StoreOp::Undefined ||
@@ -776,7 +768,7 @@ namespace dyf::Backends
 			for(uint32_t i = 0; i < m_impl->resourceSet->GetBindingCount(); ++i)
 			{
 				const auto& binding = m_impl->resourceSet->GetBindings()[i];
-				const auto* declaration = FindLayoutBinding(layout, binding.binding);
+				const auto* declaration = MetalValidation::FindLayoutBinding(layout, binding.binding);
 				auto* buffer = dynamic_cast<MetalBuffer*>(binding.buffer);
 				if(!declaration || !buffer) { Invalidate(m_impl); break; }
 				const auto required = declaration->type == RHI::ResourceBindingType::ConstantBuffer
@@ -823,7 +815,7 @@ namespace dyf::Backends
 		m_impl->inlineConstantCoverage.assign(
 			pipeline->GetLayout().inlineConstantSize, 0);
 		if((pipeline->GetDesc().depthStencil.depthWriteEnabled ||
-			RHI::MayWriteStencil(pipeline->GetDesc().depthStencil)) &&
+			MetalValidation::MayWriteStencil(pipeline->GetDesc().depthStencil)) &&
 			m_impl->depthTexture != nullptr &&
 			!RequireTextureState(
 				m_impl,
@@ -893,7 +885,7 @@ namespace dyf::Backends
 		{
 			const RHI::ResourceBinding& binding = set->GetBindings()[index];
 			const RHI::ResourceBindingLayout* declaration =
-				FindLayoutBinding(layout, binding.binding);
+				MetalValidation::FindLayoutBinding(layout, binding.binding);
 			if(declaration == nullptr)
 			{
 				Invalidate(m_impl);
@@ -989,7 +981,7 @@ namespace dyf::Backends
 		if(m_impl->closed || !m_impl->rendering || pipelineDesc == nullptr ||
 			layout == nullptr || metalBuffer == nullptr ||
 			offset >= metalBuffer->GetDesc().size ||
-			!HasUsage(metalBuffer->GetDesc().usage, RHI::BufferUsage::Vertex) ||
+			!MetalValidation::HasUsage(metalBuffer->GetDesc().usage, RHI::BufferUsage::Vertex) ||
 			!RequireBufferState(
 				m_impl, metalBuffer, RHI::ResourceState::VertexBuffer))
 		{
@@ -1008,10 +1000,10 @@ namespace dyf::Backends
 		uint32_t offset)
 	{
 		auto* metalBuffer = dynamic_cast<MetalBuffer*>(buffer);
-		const uint32_t indexSize = FormatSize(format);
+		const uint32_t indexSize = MetalValidation::FormatSize(format);
 		if(m_impl->closed || !m_impl->rendering || metalBuffer == nullptr ||
 			offset >= metalBuffer->GetDesc().size ||
-			!HasUsage(metalBuffer->GetDesc().usage, RHI::BufferUsage::Index) ||
+			!MetalValidation::HasUsage(metalBuffer->GetDesc().usage, RHI::BufferUsage::Index) ||
 			!RequireBufferState(
 				m_impl, metalBuffer, RHI::ResourceState::IndexBuffer) ||
 			(format != RHI::Format::R16_UINT && format != RHI::Format::R32_UINT) ||
@@ -1253,7 +1245,7 @@ namespace dyf::Backends
 				for(uint32_t index = 0; index < resourceSet->GetBindingCount(); ++index)
 				{
 					const auto& binding = resourceSet->GetBindings()[index];
-					const auto* declaration = FindLayoutBinding(layout, binding.binding);
+					const auto* declaration = MetalValidation::FindLayoutBinding(layout, binding.binding);
 					if(declaration == nullptr ||
 						(!HasStage(declaration->stages, RHI::ShaderStageFlags::Vertex) &&
 						 !HasStage(declaration->stages, RHI::ShaderStageFlags::Hull))) continue;
@@ -1365,7 +1357,7 @@ namespace dyf::Backends
 			Invalidate(m_impl);
 			return;
 		}
-		const uint32_t indexSize = FormatSize(m_impl->indexFormat);
+		const uint32_t indexSize = MetalValidation::FormatSize(m_impl->indexFormat);
 		const uint64_t nativeOffset = static_cast<uint64_t>(m_impl->indexOffset) +
 			static_cast<uint64_t>(firstIndex) * indexSize;
 		const uint64_t end = nativeOffset + static_cast<uint64_t>(indexCount) * indexSize;
@@ -1504,7 +1496,7 @@ namespace dyf::Backends
 		{
 			return false;
 		}
-		const uint32_t pixelSize = FormatSize(texture->GetDesc().format);
+		const uint32_t pixelSize = MetalValidation::FormatSize(texture->GetDesc().format);
 		const uint32_t mipWidth = std::max(1u, texture->GetDesc().width >> mipLevel);
 		const uint32_t mipHeight = std::max(1u, texture->GetDesc().height >> mipLevel);
 		if(pixelSize == 0 || mipWidth > std::numeric_limits<uint32_t>::max() / pixelSize)
@@ -1530,8 +1522,6 @@ namespace dyf::Backends
 		}
 		if(!m_impl->uploadArena) return false;
 		ReserveForAppend(m_impl->operations);
-		if(texture->IsSwapchainImage())
-			ReserveForAppend(m_impl->referencedSwapchainImages);
 		// Metal blit offsets and row pitches are multiples of the pixel size.
 		// Accepted native texture formats are 2/4/8/16-byte pixels, so 16 covers all.
 		const auto upload = m_impl->uploadArena->Allocate(stagingSize64, 16);

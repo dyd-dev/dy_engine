@@ -5,6 +5,7 @@
 set(BACKEND_NAME "dy_backend_metal")
 
 add_library(${BACKEND_NAME} OBJECT
+    MetalFactory.cpp
     MetalDevice.mm
     MetalBuffer.mm
     MetalTexture.mm

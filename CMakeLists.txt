@@ -44,7 +44,6 @@ target_link_libraries(${PROJECT_NAME} PUBLIC Engine_Options)
 find_package(Threads REQUIRED)
 target_link_libraries(${PROJECT_NAME} PUBLIC Threads::Threads)
 target_include_directories(${PROJECT_NAME} BEFORE PUBLIC "${PROJECT_SOURCE_DIR}/src/Public")
-target_include_directories(${PROJECT_NAME} PRIVATE "${PROJECT_SOURCE_DIR}/src")
 
 option(DY_EXTEND_MODEL "Build the optional Model extension." OFF)
 option(DY_EXTEND_IMGUI "Build the optional Dear ImGui extension." OFF)

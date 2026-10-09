@@ -6,6 +6,7 @@
 #include "MetalResourceSet.h"
 #include "MetalShader.h"
 #include "MetalUpload.h"
+#include "MetalValidation.h"
 #include "dyf/RHI/Readback.h"
 
 #include <algorithm>
@@ -15,7 +16,6 @@
 #include <limits>
 #include <memory>
 #include <mutex>
-#include <set>
 #include <vector>
 
 #import <AppKit/AppKit.h>
@@ -944,34 +944,11 @@ void MetalDevice::DestroySwapchainNative()
 			return nullptr;
 		}
 
-		const RHI::PipelineLayoutDesc& layout = (*pipelineIt)->GetLayout();
-		std::set<std::pair<uint32_t, uint32_t>> populated;
 		uint32_t textureBindingCount = 0;
 		for(uint32_t index = 0; index < desc.bindingCount; ++index)
 		{
 			const RHI::ResourceBinding& binding = desc.bindings[index];
-			const RHI::ResourceBindingLayout* declaration = nullptr;
-			for(uint32_t layoutIndex = 0; layoutIndex < layout.bindingCount; ++layoutIndex)
-			{
-				if(layout.bindings[layoutIndex].binding == binding.binding)
-				{
-					declaration = &layout.bindings[layoutIndex];
-					break;
-				}
-			}
-			if(declaration == nullptr ||
-				declaration->type == RHI::ResourceBindingType::StaticSampler ||
-				binding.arrayElement >= declaration->count ||
-				!populated.emplace(binding.binding, binding.arrayElement).second)
-			{
-				return nullptr;
-			}
-
-			switch(declaration->type)
-			{
-			case RHI::ResourceBindingType::ConstantBuffer:
-			case RHI::ResourceBindingType::ReadOnlyStorageBuffer:
-			case RHI::ResourceBindingType::ReadWriteStorageBuffer:
+			if(binding.buffer != nullptr)
 			{
 				const auto bufferIt = std::find_if(
 					m_impl->liveBuffers.begin(), m_impl->liveBuffers.end(),
@@ -980,23 +957,11 @@ void MetalDevice::DestroySwapchainNative()
 					{
 						return static_cast<RHI::BufferHandle>(candidate.get()) == requested;
 					});
-				if(bufferIt == m_impl->liveBuffers.end() || binding.texture != nullptr)
+				if(bufferIt == m_impl->liveBuffers.end() ||
+					(*bufferIt)->GetNativeBuffer() == nullptr)
 					return nullptr;
-				MetalBuffer* buffer = bufferIt->get();
-				const RHI::BufferUsage required =
-					declaration->type == RHI::ResourceBindingType::ConstantBuffer
-					? RHI::BufferUsage::Constant : RHI::BufferUsage::Storage;
-				if(buffer->GetNativeBuffer() == nullptr || binding.size == 0 ||
-					(buffer->GetDesc().usage & required) == RHI::BufferUsage::None ||
-					binding.offset > buffer->GetDesc().size ||
-					binding.size > buffer->GetDesc().size - binding.offset)
-				{
-					return nullptr;
-				}
-				break;
 			}
-			case RHI::ResourceBindingType::SampledTexture:
-			case RHI::ResourceBindingType::StorageTexture:
+			if(binding.texture != nullptr)
 			{
 				const auto textureIt = std::find_if(
 					m_impl->liveTextures.begin(), m_impl->liveTextures.end(),
@@ -1005,50 +970,14 @@ void MetalDevice::DestroySwapchainNative()
 					{
 						return static_cast<RHI::TextureHandle>(candidate.get()) == requested;
 					});
-				if(textureIt == m_impl->liveTextures.end() || binding.buffer != nullptr)
+				if(textureIt == m_impl->liveTextures.end() ||
+					(*textureIt)->GetNativeTexture() == nullptr)
 					return nullptr;
-				MetalTexture* texture = textureIt->get();
-				const RHI::TextureUsage required =
-					declaration->type == RHI::ResourceBindingType::SampledTexture
-					? RHI::TextureUsage::ShaderResource : RHI::TextureUsage::Storage;
-				const RHI::TextureDesc& textureDesc = texture->GetDesc();
-				if(texture->GetNativeTexture() == nullptr ||
-					(textureDesc.usage & required) == RHI::TextureUsage::None ||
-					binding.subresources.firstMipLevel >= textureDesc.mipLevels ||
-					binding.subresources.firstArrayLayer >= textureDesc.depthOrArraySize)
-				{
-					return nullptr;
-				}
-				const uint32_t mipCount = binding.subresources.mipLevelCount == 0
-					? textureDesc.mipLevels - binding.subresources.firstMipLevel
-					: binding.subresources.mipLevelCount;
-				const uint32_t layerCount = binding.subresources.arrayLayerCount == 0
-					? textureDesc.depthOrArraySize - binding.subresources.firstArrayLayer
-					: binding.subresources.arrayLayerCount;
-				if(mipCount > textureDesc.mipLevels - binding.subresources.firstMipLevel ||
-					layerCount > textureDesc.depthOrArraySize - binding.subresources.firstArrayLayer ||
-					(declaration->type == RHI::ResourceBindingType::StorageTexture && mipCount != 1))
-				{
-					return nullptr;
-				}
 				++textureBindingCount;
-				break;
-			}
-			default:
-				return nullptr;
 			}
 		}
-
-		for(uint32_t index = 0; index < layout.bindingCount; ++index)
-		{
-			const RHI::ResourceBindingLayout& declaration = layout.bindings[index];
-			if(declaration.type == RHI::ResourceBindingType::StaticSampler) continue;
-			for(uint32_t element = 0; element < declaration.count; ++element)
-			{
-				if(populated.find({declaration.binding, element}) == populated.end())
-					return nullptr;
-			}
-		}
+		// The validator dereferences handles; check live ownership first.
+		if(!MetalValidation::ValidateResourceSetDesc(desc)) return nullptr;
 		auto resourceSet = std::unique_ptr<MetalResourceSet, MetalObjectDeleter>(
 			new MetalResourceSet(desc));
 		if(resourceSet->GetTextureBindings().size() != textureBindingCount) return nullptr;

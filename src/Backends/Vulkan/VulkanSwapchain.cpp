@@ -2,7 +2,6 @@
 #include <GLFW/glfw3.h>
 #include <algorithm>
 #include <limits>
-#include <stdexcept>
 #include <utility>
 #if defined(_WIN32)
 #ifndef NOMINMAX
