@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="572" viewBox="0 0 1440 572" role="img" aria-labelledby="title desc">
+<title id="title">dy_framework 구성도 — 왼쪽에서 오른쪽으로 진행하는 배치</title>
+<desc id="desc">개발자 C++ 코드는 데이터 처리와 RenderGraph를 거치거나 RHI를 직접 제어한다. 두 경로는 공통 RHI를 통해 Vulkan, Direct3D 12, Metal로 연결된다. 수학, SIMD, ThreadPool, 플랫폼, 계측은 공통 기반이다.</desc>
+<style>text {font-family: 'Noto Sans CJK KR', sans-serif; fill: #111111;} .box {fill:white;stroke:#111111;stroke-width:2.2;} .rule {fill:none;stroke:#111111;stroke-width:2.2;stroke-linecap:square;stroke-linejoin:miter;}</style>
+<rect width="1440" height="572" fill="white"/>
+
+<rect x="20" y="24" width="172" height="444" fill="white" stroke="#111111" stroke-width="2.2"/>
+<rect x="21.1" y="25.1" width="169.8" height="168.9" fill="#eeeeee" stroke="none" stroke-width="2.2"/>
+<polyline points="20,194 192,194" class="rule"/>
+<text x="106" y="99" text-anchor="middle" font-size="34" font-weight="700">개발자</text>
+<text x="106" y="150" text-anchor="middle" font-size="32" font-weight="700">C++ 코드</text>
+<text x="106" y="316" text-anchor="middle" font-size="27" font-weight="400">필요한 제어</text>
+<text x="106" y="357" text-anchor="middle" font-size="27" font-weight="400">수준을 선택</text>
+<rect x="246" y="24" width="235" height="268" fill="white" stroke="#111111" stroke-width="2.2"/>
+<rect x="247.1" y="25.1" width="232.8" height="58.9" fill="#eeeeee" stroke="none" stroke-width="2.2"/>
+<polyline points="246,84 481,84" class="rule"/>
+<text x="363.5" y="66" text-anchor="middle" font-size="33" font-weight="700">데이터 처리</text>
+<text x="363.5" y="132" text-anchor="middle" font-size="30" font-weight="400">Scene · Model</text>
+<text x="363.5" y="174" text-anchor="middle" font-size="30" font-weight="400">변환 데이터</text>
+<text x="363.5" y="222" text-anchor="middle" font-size="30" font-weight="400">용도별 배열</text>
+<text x="363.5" y="264" text-anchor="middle" font-size="30" font-weight="400">GPU 입력 준비</text>
+<rect x="535" y="24" width="294" height="268" fill="white" stroke="#111111" stroke-width="2.2"/>
+<rect x="536.1" y="25.1" width="291.8" height="92.9" fill="#eeeeee" stroke="none" stroke-width="2.2"/>
+<polyline points="535,118 829,118" class="rule"/>
+<text x="682" y="65" text-anchor="middle" font-size="33" font-weight="700">작업 계획</text>
+<text x="682" y="104" text-anchor="middle" font-size="31" font-weight="700">RenderGraph</text>
+<text x="682" y="157" text-anchor="middle" font-size="29" font-weight="400">읽기·쓰기 관계</text>
+<text x="682" y="193" text-anchor="middle" font-size="29" font-weight="400">→ 순서·배리어</text>
+<text x="682" y="238" text-anchor="middle" font-size="29" font-weight="400">독립 패스의 CPU</text>
+<text x="682" y="274" text-anchor="middle" font-size="29" font-weight="400">병렬 명령 기록</text>
+<rect x="246" y="350" width="583" height="118" fill="white" stroke="#111111" stroke-width="2.2"/>
+<rect x="247.1" y="351.1" width="580.8" height="50.9" fill="#eeeeee" stroke="none" stroke-width="2.2"/>
+<polyline points="246,402 829,402" class="rule"/>
+<text x="537.5" y="387" text-anchor="middle" font-size="32" font-weight="700">RHI 직접 제어</text>
+<text x="537.5" y="446" text-anchor="middle" font-size="30" font-weight="400">자원·명령을 사용자 코드에서 구성</text>
+<rect x="891" y="24" width="285" height="444" fill="white" stroke="#111111" stroke-width="2.2"/>
+<rect x="892.1" y="25.1" width="282.8" height="94.9" fill="#eeeeee" stroke="none" stroke-width="2.2"/>
+<polyline points="891,120 1176,120" class="rule"/>
+<text x="1033.5" y="67" text-anchor="middle" font-size="34" font-weight="700">공통 RHI</text>
+<text x="1033.5" y="105" text-anchor="middle" font-size="27" font-weight="400">(GPU 자원·명령 제어)</text>
+<text x="1033.5" y="170" text-anchor="middle" font-size="30" font-weight="400">버퍼·텍스처</text>
+<text x="1033.5" y="215" text-anchor="middle" font-size="30" font-weight="400">파이프라인</text>
+<text x="1033.5" y="260" text-anchor="middle" font-size="30" font-weight="400">바인딩·동기화</text>
+<polyline points="912,289 1155,289" class="rule"/>
+<text x="1033.5" y="337" text-anchor="middle" font-size="30" font-weight="400">명령 기록·제출</text>
+<text x="1033.5" y="391" text-anchor="middle" font-size="30" font-weight="400">GPU 완료까지</text>
+<text x="1033.5" y="435" text-anchor="middle" font-size="30" font-weight="400">자원 보유</text>
+<rect x="1230" y="24" width="190" height="104" fill="#f6f6f6" stroke="#111111" stroke-width="2.2"/>
+<text x="1325" y="88" text-anchor="middle" font-size="30" font-weight="700">Vulkan</text>
+<rect x="1230" y="194" width="190" height="104" fill="#f6f6f6" stroke="#111111" stroke-width="2.2"/>
+<text x="1325" y="258" text-anchor="middle" font-size="30" font-weight="700">Direct3D 12</text>
+<rect x="1230" y="364" width="190" height="104" fill="#f6f6f6" stroke="#111111" stroke-width="2.2"/>
+<text x="1325" y="428" text-anchor="middle" font-size="30" font-weight="700">Metal</text>
+<polyline points="192,158 246,158" class="rule"/>
+<polygon points="246,158 234.0,163.5 234.0,152.5" fill="#111111"/>
+<polyline points="481,158 535,158" class="rule"/>
+<polygon points="535,158 523.0,163.5 523.0,152.5" fill="#111111"/>
+<polyline points="829,158 891,158" class="rule"/>
+<polygon points="891,158 879.0,163.5 879.0,152.5" fill="#111111"/>
+<polyline points="192,409 246,409" class="rule"/>
+<polygon points="246,409 234.0,414.5 234.0,403.5" fill="#111111"/>
+<polyline points="829,409 891,409" class="rule"/>
+<polygon points="891,409 879.0,414.5 879.0,403.5" fill="#111111"/>
+<polyline points="1176,246 1204,246" class="rule"/>
+<polyline points="1204,76 1204,416" class="rule"/>
+<polyline points="1204,76 1230,76" class="rule"/>
+<polygon points="1230,76 1218.0,81.5 1218.0,70.5" fill="#111111"/>
+<polyline points="1204,246 1230,246" class="rule"/>
+<polygon points="1230,246 1218.0,251.5 1218.0,240.5" fill="#111111"/>
+<polyline points="1204,416 1230,416" class="rule"/>
+<polygon points="1230,416 1218.0,421.5 1218.0,410.5" fill="#111111"/>
+<rect x="20" y="512" width="1400" height="44" fill="#eeeeee" stroke="#111111" stroke-width="2.2"/>
+<text x="720" y="543" text-anchor="middle" font-size="27" font-weight="400">공통 기반  |  수학·SIMD · ThreadPool · 플랫폼 · 계측</text>
+</svg>

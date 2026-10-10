@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="324" viewBox="0 0 1440 324" role="img"><title>데이터 지향 설계에서 GPU 실행으로 이어지는 흐름 — 개념도</title>
+<style>text{font-family:"Noto Sans CJK KR",sans-serif;fill:#111111}</style>
+<rect width="1440" height="324" fill="white"/>
+<rect x="20" y="20" width="420" height="280" fill="white" stroke="#111111" stroke-width="2"/>
+<rect x="20" y="20" width="420" height="64" fill="#ededed" stroke="#111111" stroke-width="2"/>
+<text x="230.0" y="64" text-anchor="middle" font-size="33" font-weight="700">데이터 배치</text>
+<rect x="505" y="20" width="400" height="280" fill="white" stroke="#111111" stroke-width="2"/>
+<rect x="505" y="20" width="400" height="64" fill="#ededed" stroke="#111111" stroke-width="2"/>
+<text x="705.0" y="64" text-anchor="middle" font-size="33" font-weight="700">접근 · 변환</text>
+<rect x="970" y="20" width="450" height="280" fill="white" stroke="#111111" stroke-width="2"/>
+<rect x="970" y="20" width="450" height="64" fill="#ededed" stroke="#111111" stroke-width="2"/>
+<text x="1195.0" y="64" text-anchor="middle" font-size="33" font-weight="700">GPU 입력 · 실행</text>
+<text x="72" y="143" text-anchor="middle" font-size="30" font-weight="400">변환</text>
+<rect x="136" y="111" width="64" height="44" fill="#f7f7f7" stroke="#111111" stroke-width="2"/>
+<text x="168.0" y="142.45" text-anchor="middle" font-size="27" font-weight="400">0</text>
+<rect x="203" y="111" width="64" height="44" fill="#f7f7f7" stroke="#111111" stroke-width="2"/>
+<text x="235.0" y="142.45" text-anchor="middle" font-size="27" font-weight="400">1</text>
+<rect x="270" y="111" width="64" height="44" fill="#f7f7f7" stroke="#111111" stroke-width="2"/>
+<text x="302.0" y="142.45" text-anchor="middle" font-size="27" font-weight="400">2</text>
+<rect x="337" y="111" width="64" height="44" fill="#f7f7f7" stroke="#111111" stroke-width="2"/>
+<text x="369.0" y="142.45" text-anchor="middle" font-size="27" font-weight="400">…</text>
+<text x="72" y="206" text-anchor="middle" font-size="30" font-weight="400">재질</text>
+<rect x="136" y="174" width="64" height="44" fill="#f7f7f7" stroke="#111111" stroke-width="2"/>
+<text x="168.0" y="205.45" text-anchor="middle" font-size="27" font-weight="400">0</text>
+<rect x="203" y="174" width="64" height="44" fill="#f7f7f7" stroke="#111111" stroke-width="2"/>
+<text x="235.0" y="205.45" text-anchor="middle" font-size="27" font-weight="400">1</text>
+<rect x="270" y="174" width="64" height="44" fill="#f7f7f7" stroke="#111111" stroke-width="2"/>
+<text x="302.0" y="205.45" text-anchor="middle" font-size="27" font-weight="400">2</text>
+<rect x="337" y="174" width="64" height="44" fill="#f7f7f7" stroke="#111111" stroke-width="2"/>
+<text x="369.0" y="205.45" text-anchor="middle" font-size="27" font-weight="400">…</text>
+<text x="72" y="269" text-anchor="middle" font-size="30" font-weight="400">광원</text>
+<rect x="136" y="237" width="64" height="44" fill="#f7f7f7" stroke="#111111" stroke-width="2"/>
+<text x="168.0" y="268.45" text-anchor="middle" font-size="27" font-weight="400">0</text>
+<rect x="203" y="237" width="64" height="44" fill="#f7f7f7" stroke="#111111" stroke-width="2"/>
+<text x="235.0" y="268.45" text-anchor="middle" font-size="27" font-weight="400">1</text>
+<rect x="270" y="237" width="64" height="44" fill="#f7f7f7" stroke="#111111" stroke-width="2"/>
+<text x="302.0" y="268.45" text-anchor="middle" font-size="27" font-weight="400">2</text>
+<rect x="337" y="237" width="64" height="44" fill="#f7f7f7" stroke="#111111" stroke-width="2"/>
+<text x="369.0" y="268.45" text-anchor="middle" font-size="27" font-weight="400">…</text>
+<text x="705" y="138" text-anchor="middle" font-size="29" font-weight="400">처리 단위에 맞춰 묶기</text>
+<text x="705" y="201" text-anchor="middle" font-size="29" font-weight="400">연속 접근 · SIMD</text>
+<text x="705" y="264" text-anchor="middle" font-size="29" font-weight="400">독립 작업의 병렬 처리</text>
+<text x="1195" y="138" text-anchor="middle" font-size="29" font-weight="400">버퍼 · 텍스처</text>
+<text x="1195" y="201" text-anchor="middle" font-size="29" font-weight="400">작업의 읽기 · 쓰기 관계</text>
+<text x="1195" y="264" text-anchor="middle" font-size="29" font-weight="400">명령 기록 · 제출</text>
+<polyline points="440,184 505,184" fill="none" stroke="#111111" stroke-width="2.2"/>
+<polygon points="505,184 493.0,189.0 493.0,179.0" fill="#111111"/>
+<polyline points="905,184 970,184" fill="none" stroke="#111111" stroke-width="2.2"/>
+<polygon points="970,184 958.0,189.0 958.0,179.0" fill="#111111"/>
+</svg>

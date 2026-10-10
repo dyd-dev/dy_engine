@@ -1,0 +1,206 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1560" height="722" viewBox="0 0 1560 722" role="img"><title>데이터 지향 설계에서 GPU 자원과 실행으로 이어지는 구체적 흐름</title>
+<style>text{font-family:"Noto Sans CJK KR",sans-serif;fill:#111111}</style>
+<rect width="1560" height="722" fill="white"/>
+<rect x="16" y="14" width="274" height="690" fill="white" stroke="#111111" stroke-width="2"/>
+<rect x="16" y="14" width="274" height="68" fill="#e8e8e8" stroke="#111111" stroke-width="2"/>
+<text x="153.0" y="59" text-anchor="middle" font-size="33" font-weight="700">① 처리 데이터</text>
+<rect x="340" y="14" width="398" height="690" fill="white" stroke="#111111" stroke-width="2"/>
+<rect x="340" y="14" width="398" height="68" fill="#e8e8e8" stroke="#111111" stroke-width="2"/>
+<text x="539.0" y="59" text-anchor="middle" font-size="33" font-weight="700">② 배치·접근</text>
+<rect x="788" y="14" width="342" height="690" fill="white" stroke="#111111" stroke-width="2"/>
+<rect x="788" y="14" width="342" height="68" fill="#e8e8e8" stroke="#111111" stroke-width="2"/>
+<text x="959.0" y="59" text-anchor="middle" font-size="33" font-weight="700">③ 처리 단위</text>
+<rect x="1180" y="14" width="364" height="690" fill="white" stroke="#111111" stroke-width="2"/>
+<rect x="1180" y="14" width="364" height="68" fill="#e8e8e8" stroke="#111111" stroke-width="2"/>
+<text x="1362.0" y="59" text-anchor="middle" font-size="33" font-weight="700">④ GPU 제어</text>
+<rect x="38" y="126" width="230" height="101" fill="white" stroke="#111111" stroke-width="2"/>
+<text x="153" y="160" text-anchor="middle" font-size="33" font-weight="700">대상 0</text>
+<rect x="48" y="174" width="69" height="42" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="82.5" y="204.8" text-anchor="middle" font-size="33" font-weight="400">T0</text>
+<rect x="118" y="174" width="69" height="42" fill="#ececec" stroke="#111111" stroke-width="2"/>
+<text x="152.5" y="204.8" text-anchor="middle" font-size="33" font-weight="400">M0</text>
+<rect x="188" y="174" width="69" height="42" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="222.5" y="204.8" text-anchor="middle" font-size="33" font-weight="400">G0</text>
+<rect x="38" y="262" width="230" height="101" fill="white" stroke="#111111" stroke-width="2"/>
+<text x="153" y="296" text-anchor="middle" font-size="33" font-weight="700">대상 1</text>
+<rect x="48" y="310" width="69" height="42" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="82.5" y="340.8" text-anchor="middle" font-size="33" font-weight="400">T1</text>
+<rect x="118" y="310" width="69" height="42" fill="#ececec" stroke="#111111" stroke-width="2"/>
+<text x="152.5" y="340.8" text-anchor="middle" font-size="33" font-weight="400">M1</text>
+<rect x="188" y="310" width="69" height="42" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="222.5" y="340.8" text-anchor="middle" font-size="33" font-weight="400">G1</text>
+<rect x="38" y="439" width="230" height="101" fill="white" stroke="#111111" stroke-width="2"/>
+<text x="153" y="473" text-anchor="middle" font-size="33" font-weight="700">대상 7</text>
+<rect x="48" y="487" width="69" height="42" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="82.5" y="517.8" text-anchor="middle" font-size="33" font-weight="400">T7</text>
+<rect x="118" y="487" width="69" height="42" fill="#ececec" stroke="#111111" stroke-width="2"/>
+<text x="152.5" y="517.8" text-anchor="middle" font-size="33" font-weight="400">M7</text>
+<rect x="188" y="487" width="69" height="42" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="222.5" y="517.8" text-anchor="middle" font-size="33" font-weight="400">G7</text>
+<text x="153" y="404" text-anchor="middle" font-size="39" font-weight="400">⋮</text>
+<text x="153" y="586" text-anchor="middle" font-size="33" font-weight="400">T : 변환</text>
+<text x="153" y="627" text-anchor="middle" font-size="33" font-weight="400">M : 재질</text>
+<text x="153" y="668" text-anchor="middle" font-size="33" font-weight="400">G : 기하</text>
+<text x="539" y="127" text-anchor="middle" font-size="33" font-weight="700">변환 배열 (T)</text>
+<rect x="359" y="152" width="45" height="52" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="381.5" y="189.55" text-anchor="middle" font-size="33" font-weight="400">0</text>
+<rect x="404" y="152" width="45" height="52" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="426.5" y="189.55" text-anchor="middle" font-size="33" font-weight="400">1</text>
+<rect x="449" y="152" width="45" height="52" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="471.5" y="189.55" text-anchor="middle" font-size="33" font-weight="400">2</text>
+<rect x="494" y="152" width="45" height="52" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="516.5" y="189.55" text-anchor="middle" font-size="33" font-weight="400">3</text>
+<rect x="539" y="152" width="45" height="52" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="561.5" y="189.55" text-anchor="middle" font-size="33" font-weight="400">4</text>
+<rect x="584" y="152" width="45" height="52" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="606.5" y="189.55" text-anchor="middle" font-size="33" font-weight="400">5</text>
+<rect x="629" y="152" width="45" height="52" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="651.5" y="189.55" text-anchor="middle" font-size="33" font-weight="400">6</text>
+<rect x="674" y="152" width="45" height="52" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="696.5" y="189.55" text-anchor="middle" font-size="33" font-weight="400">7</text>
+<polyline points="359,212 359,221 535,221 535,212" fill="none" stroke="#111111" stroke-width="1.5"/>
+<polyline points="539,212 539,221 719,221 719,212" fill="none" stroke="#111111" stroke-width="1.5"/>
+<text x="447" y="254" text-anchor="middle" font-size="33" font-weight="400">구간 0–3</text>
+<text x="629" y="254" text-anchor="middle" font-size="33" font-weight="400">구간 4–7</text>
+<text x="539" y="304" text-anchor="middle" font-size="33" font-weight="700">재질 배열 (M)</text>
+<rect x="359" y="329" width="45" height="52" fill="#ececec" stroke="#111111" stroke-width="2"/>
+<text x="381.5" y="366.55" text-anchor="middle" font-size="33" font-weight="400">0</text>
+<rect x="404" y="329" width="45" height="52" fill="#ececec" stroke="#111111" stroke-width="2"/>
+<text x="426.5" y="366.55" text-anchor="middle" font-size="33" font-weight="400">1</text>
+<rect x="449" y="329" width="45" height="52" fill="#ececec" stroke="#111111" stroke-width="2"/>
+<text x="471.5" y="366.55" text-anchor="middle" font-size="33" font-weight="400">2</text>
+<rect x="494" y="329" width="45" height="52" fill="#ececec" stroke="#111111" stroke-width="2"/>
+<text x="516.5" y="366.55" text-anchor="middle" font-size="33" font-weight="400">3</text>
+<rect x="539" y="329" width="45" height="52" fill="#ececec" stroke="#111111" stroke-width="2"/>
+<text x="561.5" y="366.55" text-anchor="middle" font-size="33" font-weight="400">4</text>
+<rect x="584" y="329" width="45" height="52" fill="#ececec" stroke="#111111" stroke-width="2"/>
+<text x="606.5" y="366.55" text-anchor="middle" font-size="33" font-weight="400">5</text>
+<rect x="629" y="329" width="45" height="52" fill="#ececec" stroke="#111111" stroke-width="2"/>
+<text x="651.5" y="366.55" text-anchor="middle" font-size="33" font-weight="400">6</text>
+<rect x="674" y="329" width="45" height="52" fill="#ececec" stroke="#111111" stroke-width="2"/>
+<text x="696.5" y="366.55" text-anchor="middle" font-size="33" font-weight="400">7</text>
+<polyline points="359,389 359,398 535,398 535,389" fill="none" stroke="#111111" stroke-width="1.5"/>
+<polyline points="539,389 539,398 719,398 719,389" fill="none" stroke="#111111" stroke-width="1.5"/>
+<text x="447" y="431" text-anchor="middle" font-size="33" font-weight="400">구간 0–3</text>
+<text x="629" y="431" text-anchor="middle" font-size="33" font-weight="400">구간 4–7</text>
+<text x="539" y="481" text-anchor="middle" font-size="33" font-weight="700">기하 배열 (G)</text>
+<rect x="359" y="506" width="45" height="52" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="381.5" y="543.55" text-anchor="middle" font-size="33" font-weight="400">0</text>
+<rect x="404" y="506" width="45" height="52" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="426.5" y="543.55" text-anchor="middle" font-size="33" font-weight="400">1</text>
+<rect x="449" y="506" width="45" height="52" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="471.5" y="543.55" text-anchor="middle" font-size="33" font-weight="400">2</text>
+<rect x="494" y="506" width="45" height="52" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="516.5" y="543.55" text-anchor="middle" font-size="33" font-weight="400">3</text>
+<rect x="539" y="506" width="45" height="52" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="561.5" y="543.55" text-anchor="middle" font-size="33" font-weight="400">4</text>
+<rect x="584" y="506" width="45" height="52" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="606.5" y="543.55" text-anchor="middle" font-size="33" font-weight="400">5</text>
+<rect x="629" y="506" width="45" height="52" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="651.5" y="543.55" text-anchor="middle" font-size="33" font-weight="400">6</text>
+<rect x="674" y="506" width="45" height="52" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="696.5" y="543.55" text-anchor="middle" font-size="33" font-weight="400">7</text>
+<polyline points="359,566 359,575 535,575 535,566" fill="none" stroke="#111111" stroke-width="1.5"/>
+<polyline points="539,566 539,575 719,575 719,566" fill="none" stroke="#111111" stroke-width="1.5"/>
+<text x="447" y="608" text-anchor="middle" font-size="33" font-weight="400">구간 0–3</text>
+<text x="629" y="608" text-anchor="middle" font-size="33" font-weight="400">구간 4–7</text>
+<text x="539" y="675" text-anchor="middle" font-size="33" font-weight="400">필요한 필드에 연속 접근</text>
+<rect x="808" y="129" width="302" height="198" fill="white" stroke="#111111" stroke-width="2"/>
+<rect x="808" y="129" width="302" height="44" fill="#f0f0f0" stroke="#111111" stroke-width="2"/>
+<text x="959" y="161" text-anchor="middle" font-size="33" font-weight="700">CPU 작업 A</text>
+<rect x="824" y="187" width="66" height="43" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="857.0" y="218.3" text-anchor="middle" font-size="33" font-weight="400">T0</text>
+<polyline points="857,233 857,267" fill="none" stroke="#111111" stroke-width="1.6"/>
+<polygon points="857,267 852.0,255.0 862.0,255.0" fill="#111111"/>
+<rect x="824" y="272" width="66" height="42" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="857.0" y="302.8" text-anchor="middle" font-size="33" font-weight="400">R0</text>
+<rect x="892" y="187" width="66" height="43" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="925.0" y="218.3" text-anchor="middle" font-size="33" font-weight="400">T1</text>
+<polyline points="925,233 925,267" fill="none" stroke="#111111" stroke-width="1.6"/>
+<polygon points="925,267 920.0,255.0 930.0,255.0" fill="#111111"/>
+<rect x="892" y="272" width="66" height="42" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="925.0" y="302.8" text-anchor="middle" font-size="33" font-weight="400">R1</text>
+<rect x="960" y="187" width="66" height="43" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="993.0" y="218.3" text-anchor="middle" font-size="33" font-weight="400">T2</text>
+<polyline points="993,233 993,267" fill="none" stroke="#111111" stroke-width="1.6"/>
+<polygon points="993,267 988.0,255.0 998.0,255.0" fill="#111111"/>
+<rect x="960" y="272" width="66" height="42" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="993.0" y="302.8" text-anchor="middle" font-size="33" font-weight="400">R2</text>
+<rect x="1028" y="187" width="66" height="43" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="1061.0" y="218.3" text-anchor="middle" font-size="33" font-weight="400">T3</text>
+<polyline points="1061,233 1061,267" fill="none" stroke="#111111" stroke-width="1.6"/>
+<polygon points="1061,267 1056.0,255.0 1066.0,255.0" fill="#111111"/>
+<rect x="1028" y="272" width="66" height="42" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="1061.0" y="302.8" text-anchor="middle" font-size="33" font-weight="400">R3</text>
+<rect x="808" y="367" width="302" height="198" fill="white" stroke="#111111" stroke-width="2"/>
+<rect x="808" y="367" width="302" height="44" fill="#f0f0f0" stroke="#111111" stroke-width="2"/>
+<text x="959" y="399" text-anchor="middle" font-size="33" font-weight="700">CPU 작업 B</text>
+<rect x="824" y="425" width="66" height="43" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="857.0" y="456.3" text-anchor="middle" font-size="33" font-weight="400">T4</text>
+<polyline points="857,471 857,505" fill="none" stroke="#111111" stroke-width="1.6"/>
+<polygon points="857,505 852.0,493.0 862.0,493.0" fill="#111111"/>
+<rect x="824" y="510" width="66" height="42" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="857.0" y="540.8" text-anchor="middle" font-size="33" font-weight="400">R4</text>
+<rect x="892" y="425" width="66" height="43" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="925.0" y="456.3" text-anchor="middle" font-size="33" font-weight="400">T5</text>
+<polyline points="925,471 925,505" fill="none" stroke="#111111" stroke-width="1.6"/>
+<polygon points="925,505 920.0,493.0 930.0,493.0" fill="#111111"/>
+<rect x="892" y="510" width="66" height="42" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="925.0" y="540.8" text-anchor="middle" font-size="33" font-weight="400">R5</text>
+<rect x="960" y="425" width="66" height="43" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="993.0" y="456.3" text-anchor="middle" font-size="33" font-weight="400">T6</text>
+<polyline points="993,471 993,505" fill="none" stroke="#111111" stroke-width="1.6"/>
+<polygon points="993,505 988.0,493.0 998.0,493.0" fill="#111111"/>
+<rect x="960" y="510" width="66" height="42" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="993.0" y="540.8" text-anchor="middle" font-size="33" font-weight="400">R6</text>
+<rect x="1028" y="425" width="66" height="43" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<text x="1061.0" y="456.3" text-anchor="middle" font-size="33" font-weight="400">T7</text>
+<polyline points="1061,471 1061,505" fill="none" stroke="#111111" stroke-width="1.6"/>
+<polygon points="1061,505 1056.0,493.0 1066.0,493.0" fill="#111111"/>
+<rect x="1028" y="510" width="66" height="42" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<text x="1061.0" y="540.8" text-anchor="middle" font-size="33" font-weight="400">R7</text>
+<text x="959" y="355" text-anchor="middle" font-size="33" font-weight="400">동일 연산을 묶어 적용</text>
+<text x="959" y="610" text-anchor="middle" font-size="33" font-weight="700">SIMD · 연속 처리</text>
+<text x="959" y="650" text-anchor="middle" font-size="33" font-weight="400">독립 구간의 병렬 처리</text>
+<text x="959" y="684" text-anchor="middle" font-size="33" font-weight="400">R : 처리 결과</text>
+<text x="1362" y="127" text-anchor="middle" font-size="33" font-weight="700">GPU 입력 자원</text>
+<rect x="1206" y="149" width="308" height="49" fill="#dedede" stroke="#111111" stroke-width="2"/>
+<polyline points="1442,149 1442,198" fill="none" stroke="#111111" stroke-width="1"/>
+<polyline points="1460,149 1460,198" fill="none" stroke="#111111" stroke-width="1"/>
+<polyline points="1478,149 1478,198" fill="none" stroke="#111111" stroke-width="1"/>
+<polyline points="1496,149 1496,198" fill="none" stroke="#111111" stroke-width="1"/>
+<text x="1318" y="184" text-anchor="middle" font-size="33" font-weight="400">변환 버퍼</text>
+<rect x="1206" y="211" width="308" height="49" fill="#ececec" stroke="#111111" stroke-width="2"/>
+<polyline points="1442,211 1442,260" fill="none" stroke="#111111" stroke-width="1"/>
+<polyline points="1460,211 1460,260" fill="none" stroke="#111111" stroke-width="1"/>
+<polyline points="1478,211 1478,260" fill="none" stroke="#111111" stroke-width="1"/>
+<polyline points="1496,211 1496,260" fill="none" stroke="#111111" stroke-width="1"/>
+<text x="1318" y="246" text-anchor="middle" font-size="33" font-weight="400">재질·텍스처</text>
+<rect x="1206" y="273" width="308" height="49" fill="#f6f6f6" stroke="#111111" stroke-width="2"/>
+<polyline points="1442,273 1442,322" fill="none" stroke="#111111" stroke-width="1"/>
+<polyline points="1460,273 1460,322" fill="none" stroke="#111111" stroke-width="1"/>
+<polyline points="1478,273 1478,322" fill="none" stroke="#111111" stroke-width="1"/>
+<polyline points="1496,273 1496,322" fill="none" stroke="#111111" stroke-width="1"/>
+<text x="1318" y="308" text-anchor="middle" font-size="33" font-weight="400">기하 버퍼</text>
+<polyline points="1362,322 1362,363" fill="none" stroke="#111111" stroke-width="2.2"/>
+<polygon points="1362,363 1357.0,351.0 1367.0,351.0" fill="#111111"/>
+<rect x="1206" y="369" width="308" height="56" fill="#ededed" stroke="#111111" stroke-width="2"/>
+<text x="1360.0" y="406.8" text-anchor="middle" font-size="33" font-weight="700">패스 A · 자원 쓰기</text>
+<polyline points="1362,425 1362,452" fill="none" stroke="#111111" stroke-width="2.2"/>
+<polygon points="1362,452 1357.0,440.0 1367.0,440.0" fill="#111111"/>
+<text x="1362" y="481" text-anchor="middle" font-size="33" font-weight="400">의존성·상태 전환</text>
+<polyline points="1362,492 1362,519" fill="none" stroke="#111111" stroke-width="2.2"/>
+<polygon points="1362,519 1357.0,507.0 1367.0,507.0" fill="#111111"/>
+<rect x="1206" y="525" width="308" height="56" fill="#f5f5f5" stroke="#111111" stroke-width="2"/>
+<text x="1360.0" y="562.8" text-anchor="middle" font-size="33" font-weight="700">패스 B · 자원 읽기</text>
+<polyline points="1362,581 1362,621" fill="none" stroke="#111111" stroke-width="2.2"/>
+<polygon points="1362,621 1357.0,609.0 1367.0,609.0" fill="#111111"/>
+<rect x="1206" y="627" width="308" height="55" fill="#e8e8e8" stroke="#111111" stroke-width="2"/>
+<text x="1360.0" y="664.3" text-anchor="middle" font-size="33" font-weight="700">RHI 명령 기록·제출</text>
+<polyline points="290,243 340,243" fill="none" stroke="#111111" stroke-width="2.4"/>
+<polygon points="340,243 328.0,248.0 328.0,238.0" fill="#111111"/>
+<polyline points="738,243 788,243" fill="none" stroke="#111111" stroke-width="2.4"/>
+<polygon points="788,243 776.0,248.0 776.0,238.0" fill="#111111"/>
+<polyline points="1130,243 1180,243" fill="none" stroke="#111111" stroke-width="2.4"/>
+<polygon points="1180,243 1168.0,248.0 1168.0,238.0" fill="#111111"/>
+</svg>

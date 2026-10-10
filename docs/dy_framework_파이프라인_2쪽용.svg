@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="340" viewBox="0 0 1440 340" role="img"><title>그래픽스 처리 단계와 명시적 API 제어 범위</title>
+<style>text{font-family:"Noto Sans CJK KR",sans-serif;fill:#111111}</style>
+<rect width="1440" height="340" fill="white"/>
+<rect x="16" y="12" width="236" height="86" fill="#ededed" stroke="#111111" stroke-width="2"/>
+<text x="134" y="46" text-anchor="middle" font-size="30" font-weight="700">고정 기능 중심</text>
+<text x="134" y="81" text-anchor="middle" font-size="25" font-weight="400">Wii / GX</text>
+<rect x="292" y="12" width="167" height="86" fill="white" stroke="#111111" stroke-width="2"/>
+<text x="375.5" y="64.45" text-anchor="middle" font-size="27" font-weight="400">정점 입력</text>
+<rect x="498" y="12" width="213" height="86" fill="white" stroke="#111111" stroke-width="2"/>
+<text x="604.5" y="64.45" text-anchor="middle" font-size="27" font-weight="400">정점 변환·조명</text>
+<rect x="750" y="12" width="177" height="86" fill="white" stroke="#111111" stroke-width="2"/>
+<text x="838.5" y="64.45" text-anchor="middle" font-size="27" font-weight="400">래스터화</text>
+<rect x="966" y="12" width="255" height="86" fill="white" stroke="#111111" stroke-width="2"/>
+<text x="1093.5" y="64.45" text-anchor="middle" font-size="27" font-weight="400">텍스처 결합 · TEV</text>
+<rect x="1260" y="12" width="162" height="86" fill="white" stroke="#111111" stroke-width="2"/>
+<text x="1341.0" y="64.45" text-anchor="middle" font-size="27" font-weight="400">깊이·혼합</text>
+<polyline points="459,55 498,55" fill="none" stroke="#111111" stroke-width="2.2"/>
+<polygon points="498,55 486.0,60.0 486.0,50.0" fill="#111111"/>
+<polyline points="711,55 750,55" fill="none" stroke="#111111" stroke-width="2.2"/>
+<polygon points="750,55 738.0,60.0 738.0,50.0" fill="#111111"/>
+<polyline points="927,55 966,55" fill="none" stroke="#111111" stroke-width="2.2"/>
+<polygon points="966,55 954.0,60.0 954.0,50.0" fill="#111111"/>
+<polyline points="1221,55 1260,55" fill="none" stroke="#111111" stroke-width="2.2"/>
+<polygon points="1260,55 1248.0,60.0 1248.0,50.0" fill="#111111"/>
+<rect x="16" y="116" width="236" height="86" fill="#ededed" stroke="#111111" stroke-width="2"/>
+<text x="134" y="150" text-anchor="middle" font-size="30" font-weight="700">프로그래머블</text>
+<text x="134" y="185" text-anchor="middle" font-size="25" font-weight="400">셰이더로 연산 정의</text>
+<rect x="292" y="116" width="167" height="86" fill="white" stroke="#111111" stroke-width="2"/>
+<text x="375.5" y="168.45" text-anchor="middle" font-size="27" font-weight="400">정점 입력</text>
+<rect x="498" y="116" width="213" height="86" fill="white" stroke="#111111" stroke-width="2"/>
+<text x="604.5" y="168.45" text-anchor="middle" font-size="27" font-weight="400">정점 셰이더</text>
+<rect x="750" y="116" width="177" height="86" fill="white" stroke="#111111" stroke-width="2"/>
+<text x="838.5" y="168.45" text-anchor="middle" font-size="27" font-weight="400">래스터화</text>
+<rect x="966" y="116" width="255" height="86" fill="white" stroke="#111111" stroke-width="2"/>
+<text x="1093.5" y="149.82" text-anchor="middle" font-size="27" font-weight="400">픽셀·프래그먼트</text>
+<text x="1093.5" y="187.07999999999998" text-anchor="middle" font-size="27" font-weight="400">셰이더</text>
+<rect x="1260" y="116" width="162" height="86" fill="white" stroke="#111111" stroke-width="2"/>
+<text x="1341.0" y="168.45" text-anchor="middle" font-size="27" font-weight="400">깊이·혼합</text>
+<polyline points="459,159 498,159" fill="none" stroke="#111111" stroke-width="2.2"/>
+<polygon points="498,159 486.0,164.0 486.0,154.0" fill="#111111"/>
+<polyline points="711,159 750,159" fill="none" stroke="#111111" stroke-width="2.2"/>
+<polygon points="750,159 738.0,164.0 738.0,154.0" fill="#111111"/>
+<polyline points="927,159 966,159" fill="none" stroke="#111111" stroke-width="2.2"/>
+<polygon points="966,159 954.0,164.0 954.0,154.0" fill="#111111"/>
+<polyline points="1221,159 1260,159" fill="none" stroke="#111111" stroke-width="2.2"/>
+<polygon points="1260,159 1248.0,164.0 1248.0,154.0" fill="#111111"/>
+<rect x="16" y="220" width="236" height="86" fill="#ededed" stroke="#111111" stroke-width="2"/>
+<text x="134" y="254" text-anchor="middle" font-size="30" font-weight="700">명시적 API</text>
+<text x="134" y="289" text-anchor="middle" font-size="25" font-weight="400">GPU 실행 제어</text>
+<rect x="292" y="220" width="254" height="86" fill="white" stroke="#111111" stroke-width="2"/>
+<text x="419.0" y="272.45" text-anchor="middle" font-size="27" font-weight="400">자원·파이프라인</text>
+<rect x="586" y="220" width="250" height="86" fill="white" stroke="#111111" stroke-width="2"/>
+<text x="711.0" y="272.45" text-anchor="middle" font-size="27" font-weight="400">명령 기록</text>
+<rect x="876" y="220" width="252" height="86" fill="white" stroke="#111111" stroke-width="2"/>
+<text x="1002.0" y="272.45" text-anchor="middle" font-size="27" font-weight="400">의존성·동기화</text>
+<rect x="1168" y="220" width="254" height="86" fill="white" stroke="#111111" stroke-width="2"/>
+<text x="1295.0" y="272.45" text-anchor="middle" font-size="27" font-weight="400">큐 제출·GPU 실행</text>
+<polyline points="546,263 586,263" fill="none" stroke="#111111" stroke-width="2.2"/>
+<polygon points="586,263 574.0,268.0 574.0,258.0" fill="#111111"/>
+<polyline points="836,263 876,263" fill="none" stroke="#111111" stroke-width="2.2"/>
+<polygon points="876,263 864.0,268.0 864.0,258.0" fill="#111111"/>
+<polyline points="1128,263 1168,263" fill="none" stroke="#111111" stroke-width="2.2"/>
+<polygon points="1168,263 1156.0,268.0 1156.0,258.0" fill="#111111"/>
+<text x="720" y="333" text-anchor="middle" font-size="24" font-weight="400">위 두 행: GPU 처리 단계의 변화  /  아래 행: 작업을 구성·제출하는 API의 제어 범위</text>
+</svg>
