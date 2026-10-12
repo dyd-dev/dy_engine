@@ -801,6 +801,9 @@ namespace dyf::Backends
 			if(HasStage(binding.stages, RHI::ShaderStageFlags::Vertex) ||
 				HasStage(binding.stages, RHI::ShaderStageFlags::Domain))
 				[encoder setVertexSamplerState:sampler atIndex:binding.index];
+			if(HasStage(binding.stages, RHI::ShaderStageFlags::Mesh))
+				if(@available(macOS 13.0, iOS 16.0, *))
+					[encoder setMeshSamplerState:sampler atIndex:binding.index];
 			if(HasStage(binding.stages, RHI::ShaderStageFlags::Fragment))
 				[encoder setFragmentSamplerState:sampler atIndex:binding.index];
 		}
@@ -850,6 +853,9 @@ namespace dyf::Backends
 				if(HasStage(declaration->stages, RHI::ShaderStageFlags::Vertex) ||
 					HasStage(declaration->stages, RHI::ShaderStageFlags::Domain))
 					[encoder setVertexBuffer:native offset:binding.offset atIndex:nativeIndex];
+				if(HasStage(declaration->stages, RHI::ShaderStageFlags::Mesh))
+					if(@available(macOS 13.0, iOS 16.0, *))
+						[encoder setMeshBuffer:native offset:binding.offset atIndex:nativeIndex];
 				if(HasStage(declaration->stages, RHI::ShaderStageFlags::Fragment))
 					[encoder setFragmentBuffer:native offset:binding.offset atIndex:nativeIndex];
 				const MTLResourceUsage usage =
@@ -878,6 +884,9 @@ namespace dyf::Backends
 			if(HasStage(binding.stages, RHI::ShaderStageFlags::Vertex) ||
 				HasStage(binding.stages, RHI::ShaderStageFlags::Domain))
 				[encoder setVertexTexture:native atIndex:binding.index];
+			if(HasStage(binding.stages, RHI::ShaderStageFlags::Mesh))
+				if(@available(macOS 13.0, iOS 16.0, *))
+					[encoder setMeshTexture:native atIndex:binding.index];
 			if(HasStage(binding.stages, RHI::ShaderStageFlags::Fragment))
 				[encoder setFragmentTexture:native atIndex:binding.index];
 			const MTLResourceUsage usage =
@@ -984,6 +993,9 @@ namespace dyf::Backends
 			HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Domain))
 			[m_impl->renderEncoder setVertexBuffer:constants
 				offset:0 atIndex:layout.inlineConstantBinding];
+		if(HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Mesh))
+			if(@available(macOS 13.0, iOS 16.0, *))
+				[m_impl->renderEncoder setMeshBuffer:constants offset:0 atIndex:layout.inlineConstantBinding];
 		if(HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Fragment))
 			[m_impl->renderEncoder setFragmentBuffer:constants
 				offset:0 atIndex:layout.inlineConstantBinding];
@@ -1313,6 +1325,7 @@ namespace dyf::Backends
 		uint32_t threadGroupCountZ)
 	{
 		if(m_impl->closed || !m_impl->rendering || m_impl->renderEncoder == nil ||
+			!ValidateDrawState(m_impl) || !m_impl->pipeline->IsMesh() ||
 			threadGroupCountX == 0 || threadGroupCountY == 0 || threadGroupCountZ == 0)
 		{
 			Invalidate(m_impl);

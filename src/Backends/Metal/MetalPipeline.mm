@@ -235,11 +235,12 @@ namespace dyf::Backends
 			std::set<uint32_t> vertexSamplerSlots;
 			std::set<uint32_t> computeSamplerSlots;
 			std::set<uint32_t> fragmentSamplerSlots;
-			constexpr auto renderVertexStages = RHI::ShaderStageFlags::Vertex | RHI::ShaderStageFlags::Domain;
+			constexpr auto renderVertexStages = RHI::ShaderStageFlags::Vertex |
+				RHI::ShaderStageFlags::Domain | RHI::ShaderStageFlags::Mesh;
 			constexpr auto tessellationComputeStages = RHI::ShaderStageFlags::Vertex | RHI::ShaderStageFlags::Hull;
 			constexpr auto graphicsStages = RHI::ShaderStageFlags::Vertex |
 				RHI::ShaderStageFlags::Hull | RHI::ShaderStageFlags::Domain |
-				RHI::ShaderStageFlags::Fragment;
+				RHI::ShaderStageFlags::Fragment | RHI::ShaderStageFlags::Mesh;
 			for(uint32_t index = 0; index < desc.layout.bindingCount; ++index)
 			{
 				const RHI::ResourceBindingLayout& binding = desc.layout.bindings[index];
@@ -749,17 +750,13 @@ namespace dyf::Backends
 		if(desc.fragmentShader != nullptr && desc.fragmentShader->GetStage() != RHI::ShaderStage::Fragment)
 			return false;
 
-		for(uint32_t index = 0; index < desc.colorAttachmentCount; ++index)
-		{
-			if(ToPixelFormat(desc.colorAttachments[index].format) == MTLPixelFormatInvalid)
-				return false;
-		}
-		if(desc.depthStencil.format != RHI::Format::Unknown &&
-			ToPixelFormat(desc.depthStencil.format) == MTLPixelFormatInvalid)
-		{
-			return false;
-		}
-		return SupportsLayout(desc.layout, device);
+		RHI::GraphicsPipelineDesc graphics;
+		graphics.raster = desc.raster;
+		graphics.depthStencil = desc.depthStencil;
+		graphics.colorAttachments = desc.colorAttachments;
+		graphics.colorAttachmentCount = desc.colorAttachmentCount;
+		graphics.layout = desc.layout;
+		return SupportsGraphics(graphics, device);
 	}
 
 	MetalPipeline::MetalPipeline(const RHI::MeshPipelineDesc& desc, void* device)
@@ -772,6 +769,12 @@ namespace dyf::Backends
 				desc.colorAttachments, desc.colorAttachments + desc.colorAttachmentCount);
 		m_meshDesc.colorAttachments = m_colorAttachments.empty() ? nullptr : m_colorAttachments.data();
 		m_meshDesc.layout = GetLayout();
+		// The shared draw-state checks also apply to mesh pipelines without vertex inputs.
+		m_desc.raster = desc.raster;
+		m_desc.depthStencil = desc.depthStencil;
+		m_desc.colorAttachments = m_meshDesc.colorAttachments;
+		m_desc.colorAttachmentCount = desc.colorAttachmentCount;
+		m_desc.layout = GetLayout();
 
 		id<MTLDevice> metalDevice = (__bridge id<MTLDevice>)device;
 		auto* meshShader = dynamic_cast<MetalShader*>(desc.meshShader);

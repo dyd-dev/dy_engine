@@ -169,6 +169,11 @@ namespace dyf::Backends
 				if(desc.colorAttachmentCount != 0)
 					m_colorAttachments.assign(
 						desc.colorAttachments, desc.colorAttachments + desc.colorAttachmentCount);
+				m_desc.raster = desc.raster;
+				m_desc.depthStencil = desc.depthStencil;
+				m_desc.colorAttachments = m_colorAttachments.empty() ? nullptr : m_colorAttachments.data();
+				m_desc.colorAttachmentCount = desc.colorAttachmentCount;
+				m_desc.layout = GetLayout();
 			}
 
 			[[nodiscard]] const RHI::GraphicsPipelineDesc& GetDesc() const { return m_desc; }
@@ -628,6 +633,12 @@ namespace dyf::Backends
 				{
 					Invalidate();
 				}
+			}
+
+			void DispatchMeshNative(uint32_t x, uint32_t y, uint32_t z) override
+			{
+				if(!x || !y || !z || !m_pipeline || !m_pipeline->IsMesh() ||
+					!ValidateDraw(false, 0, 1, 0, 0)) Invalidate();
 			}
 
 			bool CloseNative() override

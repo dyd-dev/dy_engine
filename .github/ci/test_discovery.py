@@ -11,6 +11,51 @@ MODULE = Path(__file__).resolve().with_name("ExampleSupport.cmake")
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_asset_only_rebuild_without_ci(self):
+        repo = MODULE.parents[2]
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'cmake').mkdir()
+            for name in ('ExampleAssets.cmake', 'SyncAssets.cmake'):
+                shutil.copyfile(repo / 'cmake' / name, root / 'cmake' / name)
+            example = root / 'examples/dyf/02_Image'
+            (example / 'Assets').mkdir(parents=True)
+            (root / 'examples/advanced').mkdir()
+            (root / 'examples/advanced/CMakeLists.txt').write_text('', encoding='utf-8')
+            shutil.copyfile(repo / 'examples/CMakeLists.txt', root / 'examples/CMakeLists.txt')
+            (root / 'CMakeLists.txt').write_text(
+                'cmake_minimum_required(VERSION 3.20)\nproject(AssetRebuild CXX)\n'
+                'set(DY_CI OFF)\nadd_subdirectory(examples)\n', encoding='utf-8')
+            (example / 'CMakeLists.txt').write_text(
+                'add_executable(AssetProbe main.cpp)\n'
+                'set_target_properties(AssetProbe PROPERTIES '
+                'RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")\n', encoding='utf-8')
+            (example / 'main.cpp').write_text('int main() {}\n', encoding='utf-8')
+            asset = example / 'Assets/image.txt'
+            asset.write_text('original', encoding='utf-8')
+            build = root / 'build'
+
+            def run(*arguments):
+                result = subprocess.run(['cmake', *arguments], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            run('-S', str(root), '-B', str(build))
+            run('--build', str(build), '--config', 'Debug', '--target', 'AssetProbe')
+            copied = next((build / 'bin').rglob('image.txt'))
+            binary = next(path for path in (build / 'bin').rglob('AssetProbe*')
+                          if path.is_file() and path.suffix in ('', '.exe'))
+            stamp = binary.stat().st_mtime_ns
+            asset.write_text('edited without code changes', encoding='utf-8')
+            extra = example / 'Assets/extra.txt'
+            extra.write_text('added', encoding='utf-8')
+            run('--build', str(build), '--config', 'Debug', '--target', 'AssetProbe')
+            self.assertEqual(copied.read_text(), 'edited without code changes')
+            self.assertEqual(copied.with_name('extra.txt').read_text(), 'added')
+            self.assertEqual(binary.stat().st_mtime_ns, stamp)
+            extra.unlink()
+            run('--build', str(build), '--config', 'Debug', '--target', 'AssetProbe')
+            self.assertFalse(copied.with_name('extra.txt').exists())
+
     def test_registered_nested_examples_follow_add_rename_remove(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

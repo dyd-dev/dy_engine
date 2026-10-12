@@ -166,7 +166,16 @@ namespace dyf::Backends
 			catch (const std::exception&) { return nullptr; }
 		}
         dyf::RHI::PipelineHandle CreateGraphicsPipeline(const dyf::RHI::GraphicsPipelineDesc& desc);
-        dyf::RHI::PipelineHandle CreateMeshPipeline(const dyf::RHI::MeshPipelineDesc& desc) {try {auto* pipeline=new VulkanPipeline(m_context,desc);m_pipelines.push_back(pipeline);return pipeline;}catch(const std::exception&){return nullptr;}}
+        dyf::RHI::PipelineHandle CreateMeshPipeline(const dyf::RHI::MeshPipelineDesc& desc)
+        {
+            try
+            {
+                std::unique_ptr<VulkanPipeline, VulkanObjectDeleter> pipeline(new VulkanPipeline(m_context, desc));
+                m_pipelines.push_back(pipeline.get());
+                return pipeline.release();
+            }
+            catch(const std::exception&) { return nullptr; }
+        }
 		dyf::RHI::ResourceSetHandle CreateResourceSet(const dyf::RHI::ResourceSetDesc& desc);
 		void DestroyBuffer(dyf::RHI::BufferHandle buffer);
 		void DestroyTexture(dyf::RHI::TextureHandle texture);

@@ -252,11 +252,11 @@ namespace dyf::RHI
     [[nodiscard]] inline bool ValidateGraphicsPipelineDesc(
     	const RHI::GraphicsPipelineDesc& desc)
     {
-		if ((desc.layout.inlineConstantStages & ShaderStageFlags::Compute) != ShaderStageFlags::None)
+		if ((desc.layout.inlineConstantStages & (ShaderStageFlags::Compute | ShaderStageFlags::Mesh)) != ShaderStageFlags::None)
             return false;
         if (desc.layout.bindings)
             for (uint32_t i = 0; i < desc.layout.bindingCount; ++i)
-                if ((desc.layout.bindings[i].stages & ShaderStageFlags::Compute) != ShaderStageFlags::None)
+                if ((desc.layout.bindings[i].stages & (ShaderStageFlags::Compute | ShaderStageFlags::Mesh)) != ShaderStageFlags::None)
                     return false;
     	if((desc.vertexBufferCount != 0 && desc.vertexBuffers == nullptr) ||
     		(desc.vertexAttributeCount != 0 && desc.vertexAttributes == nullptr) ||
@@ -382,7 +382,8 @@ namespace dyf::RHI
         const RHI::MeshPipelineDesc& desc)
     {
         constexpr auto stages = ShaderStageFlags::Mesh | ShaderStageFlags::Fragment;
-        if ((desc.layout.inlineConstantStages & stages) != desc.layout.inlineConstantStages)
+        if (desc.layout.inlineConstantSize &&
+            (desc.layout.inlineConstantStages & stages) != desc.layout.inlineConstantStages)
             return false;
         if (desc.layout.bindings)
             for (uint32_t i = 0; i < desc.layout.bindingCount; ++i)
@@ -432,15 +433,21 @@ namespace dyf::RHI
                         (face.passOp > RHI::StencilOp::Undefined && face.passOp <= RHI::StencilOp::DecrementWrap) &&
                         (face.compareOp > RHI::CompareOp::Undefined && face.compareOp <= RHI::CompareOp::Always);
                 };
-                if (!validFace(desc.depthStencil.front) || !validFace(desc.depthStencil.back))
+                if (desc.depthStencil.format != RHI::Format::D24_UNORM_S8_UINT ||
+                    !validFace(desc.depthStencil.front) || !validFace(desc.depthStencil.back))
                     return false;
             }
         }
 
+        else if(desc.depthStencil.depthTestEnabled ||
+            desc.depthStencil.depthWriteEnabled || desc.depthStencil.stencilEnabled)
+            return false;
+
         for (uint32_t index = 0; index < desc.colorAttachmentCount; ++index)
         {
             const RHI::ColorAttachmentDesc& attachment = desc.colorAttachments[index];
-            if (attachment.format == RHI::Format::Unknown || IsDepthFormat(attachment.format) ||
+            if (!IsColorFormat(attachment.format) ||
+                static_cast<uint8_t>(attachment.writeMask) > static_cast<uint8_t>(ColorWriteMask::All) ||
                 (attachment.blend.enabled &&
                     ((attachment.blend.sourceColor == RHI::BlendFactor::Undefined || attachment.blend.sourceColor > RHI::BlendFactor::OneMinusDestinationAlpha) ||
                     (attachment.blend.destinationColor == RHI::BlendFactor::Undefined || attachment.blend.destinationColor > RHI::BlendFactor::OneMinusDestinationAlpha) ||

@@ -544,14 +544,19 @@
       ]
     },
     "examples/advanced/22_MeshShaderBasics": {
-      "kind": "capability",
-      "expected_exit": 77,
-      "markers": [
-        "Supports(MeshShader)",
-        "Supports(TaskShader)",
-        "종료 코드 77"
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.15,
+        0.15,
+        0.85,
+        0.85
       ],
-      "coverage": "backend capability report and explicit unavailable-example exit; GPU rendering is not implemented"
+      "unsupported_markers": [
+        "Current RHI backend or GPU does not support Mesh Shader"
+      ],
+      "coverage": "mesh shader generates a visible colored triangle; devices without MeshShader support report exit 77"
     },
     "examples/advanced/23_MeshletCullingLOD": {
       "kind": "capability",

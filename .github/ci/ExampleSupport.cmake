@@ -63,8 +63,6 @@ function(dy_json_quote output value)
     set(${output} "\"${value}\"" PARENT_SCOPE)
 endfunction()
 
-
-
 function(dy_target_inputs target output complete visited)
     if(target IN_LIST visited)
         set(${output} "" PARENT_SCOPE)

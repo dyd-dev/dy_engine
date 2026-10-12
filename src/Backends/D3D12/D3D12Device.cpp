@@ -1904,15 +1904,13 @@ void D3D12Device::DestroySwapchainNative()
             return false;
         }
         if (!SupportsPipelineLayoutNative(desc.layout)) return false;
-        for (uint32_t i = 0; i < desc.colorAttachmentCount; ++i)
-        {
-            if (D3D12Texture::ToDxgiFormat(desc.colorAttachments[i].format) == DXGI_FORMAT_UNKNOWN)
-                return false;
-        }
-        if (desc.depthStencil.format != RHI::Format::Unknown &&
-            D3D12Texture::ToDxgiFormat(desc.depthStencil.format) == DXGI_FORMAT_UNKNOWN)
-            return false;
-        return true;
+        RHI::GraphicsPipelineDesc graphics;
+        graphics.raster = desc.raster;
+        graphics.depthStencil = desc.depthStencil;
+        graphics.colorAttachments = desc.colorAttachments;
+        graphics.colorAttachmentCount = desc.colorAttachmentCount;
+        graphics.layout = desc.layout;
+        return SupportsGraphicsPipelineNative(graphics);
     }
 
     RHI::PipelineHandle D3D12Device::CreateMeshPipelineNative(
