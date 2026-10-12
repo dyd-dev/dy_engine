@@ -165,10 +165,15 @@ void Run(const std::string& failure) {
         device.failure = failure;
         if(failure == "sample-allocation") {
             device.armAfterSubmit = device.delayCompletion = true;
+            Check(model.ConfigureShaders(), "sample test shader setup failed");
             bool rejected = false;
             for(unsigned attempt = 0; attempt < 64 && !rejected; ++attempt) {
-                rejected = !model.Render(scene);
+                // Exercise the sample handoff itself. Render() also fails because
+                // this fixture deliberately has no window, and may allocate first.
+                try { Check(model.Prepare(scene), "sample preparation failed before handoff"); }
+                catch(const std::bad_alloc&) { rejected = true; }
                 failNextAllocation = false;
+                if(!rejected) device.Complete();
             }
             Check(rejected, "bounded sample handoff allocation was not exercised");
             Check(device.m_userCommands.empty(), "post-submit exception retained user commands");
