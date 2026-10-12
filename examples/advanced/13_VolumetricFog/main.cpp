@@ -10,7 +10,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -46,43 +45,6 @@ double Number(const std::string& value, double minimum, double maximum) {
     return result;
 }
 
-// =============================================================================
-// [화면 캡처 저장]
-// 백버퍼 텍스처를 CPU로 읽어와 PPM 파일로 저장
-// =============================================================================
-void Capture(IDevice& device, TextureHandle texture, const std::string& path) {
-    TextureReadback image;
-    if (!device.ReadTexture(texture, image)) {
-        throw std::runtime_error("ReadTexture failed.");
-    }
-
-    std::ofstream stream(path, std::ios::binary);
-    if (!stream) {
-        throw std::runtime_error("Cannot open capture path.");
-    }
-
-    stream << "P6\n" << image.width << " " << image.height << "\n255\n";
-
-    const bool bgra = (image.format == Format::B8G8R8A8_UNORM ||
-                       image.format == Format::B8G8R8A8_UNORM_SRGB);
-
-    for (uint32_t y = 0; y < image.height; ++y) {
-        for (uint32_t x = 0; x < image.width; ++x) {
-            const auto* pixel = image.pixels.data() + size_t(y) * image.rowPitch + size_t(x) * 4;
-            const char rgb[3] = {
-                char(pixel[bgra ? 2 : 0]),
-                char(pixel[1]),
-                char(pixel[bgra ? 0 : 2])
-            };
-            stream.write(rgb, 3);
-        }
-    }
-
-    if (!stream) {
-        throw std::runtime_error("Capture write failed.");
-    }
-    std::printf("Captured %s (%ux%u).\n", path.c_str(), image.width, image.height);
-}
 
 } // namespace
 
@@ -100,7 +62,6 @@ int main(int argc, char** argv) try {
     bool validation = false;
     bool fixedTime = false;
     float timeValue = 0;
-    std::string capture;
 
     // 명령행 옵션 파싱
     for (int i = 1; i < argc; ++i) {
@@ -110,8 +71,7 @@ int main(int argc, char** argv) try {
             std::puts("VolumetricFog\n"
                       "--mode fog|off|transmittance|scattering, --density [0,3], --steps [8,256], --height-falloff [0,4], --exposure [0.01,20]\n"
                       "Procedural single scattering; no volumetric shadow map or froxel history.\n"
-                      "--frames N (0=unlimited), --capture path.ppm, --time SECONDS, --validation\n"
-                      "--capture defaults to 1 frames unless --frames is supplied.");
+                      "--frames N (0=unlimited), --time SECONDS, --validation");
             return 0;
         }
 
@@ -133,8 +93,6 @@ int main(int argc, char** argv) try {
             }
             frameLimit = uint64_t(n);
             framesSpecified = true;
-        } else if (arg == "--capture") {
-            capture = value;
         } else if (arg == "--time") {
             timeValue = float(Number(value, 0, 1000000));
             fixedTime = true;
@@ -167,15 +125,9 @@ int main(int argc, char** argv) try {
         }
     }
 
-    if (!capture.empty() && !framesSpecified) {
-        frameLimit = 1;
-    }
-    if (!capture.empty() && frameLimit == 0) {
-        throw std::runtime_error("Capture requires a finite frame count.");
-    }
 
     // 1. 윈도우 생성 (해상도: 960x640)
-    dyf::Platform::Window window(960, 640, "Advanced / VolumetricFog");
+    dyf::Platform::Window window(960, 640, "Advanced / 13_VolumetricFog");
     if (!window.GetHandle()) {
         throw std::runtime_error("Window creation failed.");
     }
@@ -198,7 +150,6 @@ int main(int argc, char** argv) try {
     swap.format = Format::B8G8R8A8_UNORM;
     swap.minimumImageCount = 2;
     swap.presentMode = PresentMode::Fifo;
-    swap.allowReadback = !capture.empty();
 
     if (!device.CreateSwapchain(swap)) {
         throw std::runtime_error("Swapchain creation failed.");
@@ -231,21 +182,18 @@ int main(int argc, char** argv) try {
     sampler.addressU = sampler.addressV = sampler.addressW = SamplerAddressMode::ClampToEdge;
     sampler.mipLodBias = sampler.minLod = sampler.maxLod = 0;
 
-    // --- 파이프라인 1: 불투명 씬 컬러 및 선형 레이 거리 렌더링 ---
-    std::vector<ResourceBindingLayout> sceneBindings;
-    std::array<ColorAttachmentDesc, 1> sceneColors{};
-    for (auto& attachment : sceneColors) {
-        attachment = {Format::R16G16B16A16_FLOAT, {}, ColorWriteMask::All};
-    }
+    ColorAttachmentDesc sceneColorDesc{Format::R16G16B16A16_FLOAT, {}, ColorWriteMask::All};
+    ColorAttachmentDesc fogColorDesc{Format::B8G8R8A8_UNORM, {}, ColorWriteMask::All};
 
+    // --- 파이프라인 1: 불투명 씬 컬러 및 선형 레이 거리 렌더링 ---
     GraphicsPipelineDesc sceneDesc;
     sceneDesc.vertexShader = vertexShader;
     sceneDesc.fragmentShader = sceneShader;
     sceneDesc.topology = PrimitiveTopology::TriangleList;
     sceneDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
-    sceneDesc.colorAttachments = sceneColors.data();
-    sceneDesc.colorAttachmentCount = uint32_t(sceneColors.size());
-    sceneDesc.layout = {sceneBindings.data(), uint32_t(sceneBindings.size()), sizeof(Params), ShaderStageFlags::Fragment, 15};
+    sceneDesc.colorAttachments = &sceneColorDesc;
+    sceneDesc.colorAttachmentCount = 1;
+    sceneDesc.layout = {nullptr, 0, sizeof(Params), ShaderStageFlags::Fragment, 15};
     auto scenePipeline = resources.Keep(device.CreateGraphicsPipeline(sceneDesc));
 
     // --- 파이프라인 2: 볼류메트릭 포그 산란 적분 및 백버퍼 합성 ---
@@ -253,18 +201,13 @@ int main(int argc, char** argv) try {
     fogBindings.push_back({0, ResourceBindingType::SampledTexture, 1, ShaderStageFlags::Fragment, {}});
     fogBindings.push_back({8, ResourceBindingType::StaticSampler, 1, ShaderStageFlags::Fragment, sampler});
 
-    std::array<ColorAttachmentDesc, 1> fogColors{};
-    for (auto& attachment : fogColors) {
-        attachment = {Format::B8G8R8A8_UNORM, {}, ColorWriteMask::All};
-    }
-
     GraphicsPipelineDesc fogDesc;
     fogDesc.vertexShader = vertexShader;
     fogDesc.fragmentShader = fogShader;
     fogDesc.topology = PrimitiveTopology::TriangleList;
     fogDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
-    fogDesc.colorAttachments = fogColors.data();
-    fogDesc.colorAttachmentCount = uint32_t(fogColors.size());
+    fogDesc.colorAttachments = &fogColorDesc;
+    fogDesc.colorAttachmentCount = 1;
     fogDesc.layout = {fogBindings.data(), uint32_t(fogBindings.size()), sizeof(Params), ShaderStageFlags::Fragment, 15};
     auto fogPipeline = resources.Keep(device.CreateGraphicsPipeline(fogDesc));
 
@@ -397,9 +340,6 @@ int main(int argc, char** argv) try {
         initializeImages = false;
         ++frame;
 
-        if (!capture.empty() && frame == frameLimit) {
-            Capture(device, backbuffer, capture);
-        }
 
         if (!device.Present()) {
             throw std::runtime_error("Present failed.");

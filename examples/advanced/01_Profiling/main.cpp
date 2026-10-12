@@ -8,7 +8,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -30,7 +29,6 @@ struct Options {
     uint32_t flight = 2;       // 동시 처리 가능한 In-flight 프레임 수 (1 ~ 4)
     uint32_t work = 96;        // 픽셀 셰이더 내 부하 연산 강도 (0 ~ 2048)
     bool validation = false;   // RHI 유효성 검사 계층(Validation Layer) 활성화 여부
-    std::string capture;       // 캡처 이미지 저장 경로 (.ppm 포맷)
 };
 
 // 명령행 인자 파싱 함수
@@ -53,8 +51,6 @@ Options Parse(int argc, char** argv) {
             options.flight = uint32_t(std::stoul(value()));
         } else if (arg == "--work") {
             options.work = uint32_t(std::stoul(value()));
-        } else if (arg == "--capture") {
-            options.capture = value();
         } else if (arg == "--validation") {
             options.validation = true;
         } else {
@@ -66,52 +62,12 @@ Options Parse(int argc, char** argv) {
         throw std::runtime_error("Invalid option range");
     }
 
-    if (!options.capture.empty() && !options.frames) {
-        options.frames = 1;
-    }
 
     return options;
 }
 
-// 조건 검사 헬퍼 함수
-void Check(bool ok, const char* operation) {
-    if (!ok) {
-        throw std::runtime_error(operation);
-    }
-}
+void Check(bool ok, const char* operation) { if (!ok) throw std::runtime_error(operation); }
 
-// =============================================================================
-// [화면 캡처 저장]
-// 렌더링된 텍스처를 CPU로 읽어와 PPM 이미지 파일로 저장
-// =============================================================================
-void SaveCapture(IDevice& device, TextureHandle target, const std::string& path) {
-    TextureReadback readback;
-    Check(device.ReadTexture(target, readback), "ReadTexture failed");
-
-    std::ofstream file(path, std::ios::binary);
-    Check(bool(file), "Cannot open capture");
-
-    // PPM (P6 바이너리) 헤더 기록
-    file << "P6\n" << readback.width << " " << readback.height << "\n255\n";
-
-    const bool bgra = (readback.format == Format::B8G8R8A8_UNORM ||
-                       readback.format == Format::B8G8R8A8_UNORM_SRGB);
-
-    // 픽셀 데이터 변환 및 기록 (BGRA -> RGB 또는 RGBA -> RGB)
-    for (uint32_t y = 0; y < readback.height; ++y) {
-        for (uint32_t x = 0; x < readback.width; ++x) {
-            const auto* p = readback.pixels.data() + size_t(y) * readback.rowPitch + x * 4;
-            const char rgb[3] = {
-                char(p[bgra ? 2 : 0]),
-                char(p[1]),
-                char(p[bgra ? 0 : 2])
-            };
-            file.write(rgb, 3);
-        }
-    }
-
-    Check(bool(file), "Capture write failed");
-}
 
 // =============================================================================
 // [통계 분석 및 출력]
@@ -144,7 +100,7 @@ int main(int argc, char** argv) try {
     for (int i = 1; i < argc; ++i) {
         if (std::string(argv[i]) == "--help") {
             std::cout << "Profiling: --work 0..2048 --flight 1..4; GPU timestamp is optional, CPU timings always measured.\n"
-                      << "Common: --frames N --capture path.ppm --validation\n"
+                      << "Common: --frames N --validation\n"
                       << "F12 requests RenderDoc capture when the API is injected; PIX/RenderDoc show the Profiling pass event.\n";
             return 0;
         }
@@ -154,7 +110,7 @@ int main(int argc, char** argv) try {
     const auto options = Parse(argc, argv);
 
     // 1. 윈도우 생성 (해상도: 800x600)
-    dyf::Platform::Window window(800, 600, "Advanced / Profiling");
+    dyf::Platform::Window window(800, 600, "Advanced / 01_Profiling");
     Check(window.GetHandle() != nullptr, "Window creation failed");
 
     // 2. RHI 렌더 디바이스 생성
@@ -180,7 +136,6 @@ int main(int argc, char** argv) try {
     swapchain.window = window.GetHandle();
     swapchain.format = Format::B8G8R8A8_UNORM;
     swapchain.minimumImageCount = 2;
-    swapchain.allowReadback = !options.capture.empty();
 
     Check(device.CreateSwapchain(swapchain), "Requested swapchain configuration unsupported");
 
@@ -331,10 +286,6 @@ int main(int argc, char** argv) try {
         Check(device.Submit({&commands, 1, nullptr, 0}, fences[slot]), "Submit failed");
         const auto submitEnd = std::chrono::steady_clock::now();
 
-        // 캡처 요청 시 이미지 파일 저장
-        if (!options.capture.empty() && frame + 1 == options.frames) {
-            SaveCapture(device, target, options.capture);
-        }
 
         // 화면 출력(Present)
         Check(device.Present(), "Present failed");

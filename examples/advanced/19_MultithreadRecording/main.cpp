@@ -4,7 +4,6 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -52,7 +51,7 @@ int main(int argc, char** argv)
     try
     {
         // 1. 명령행 인자 파싱 및 기본값 설정
-        std::string mode = "parallel", capture;
+        std::string mode = "parallel";
         uint32_t frames = 3, workers = 2;
         bool validation = false;
         for(int i = 1; i < argc; ++i)
@@ -60,7 +59,7 @@ int main(int argc, char** argv)
             const std::string argument = argv[i];
             if(argument == "--help")
             {
-                std::puts("AdvancedMultithreadRecording --mode serial|parallel --workers N --frames N --capture image.ppm --validation\n"
+                std::puts("AdvancedMultithreadRecording --mode serial|parallel --workers N --frames N --validation\n"
                     "Records two independent texture uploads and a dependent reader; submits in graph order and waits for a completion fence.\n"
                     "Native backends check GPU readback. Null validates command/state/fence contracts without GPU pixels.\n"
                     "--workers 0 selects hardware concurrency; 1 records on the calling thread. --frames must be positive.\n"
@@ -68,11 +67,10 @@ int main(int argc, char** argv)
                 return 0;
             }
             if(argument == "--validation") validation = true;
-            else if((argument == "--mode" || argument == "--workers" || argument == "--frames" || argument == "--capture") && i + 1 < argc)
+            else if((argument == "--mode" || argument == "--workers" || argument == "--frames") && i + 1 < argc)
             {
                 const std::string value = argv[++i];
                 if(argument == "--mode") mode = value;
-                else if(argument == "--capture") capture = value;
                 else if(argument == "--workers") workers = Number(value);
                 else frames = Number(value);
             }
@@ -190,23 +188,10 @@ int main(int argc, char** argv)
                         Check(pixels.pixels[size_t(y) * pixels.rowPitch + x] == inputs[i][size_t(y) * width * 4 + x],
                             "GPU pixels differ from the recorded upload");
             }
-            // 캡처 파일 경로가 지정된 경우 PPM 포맷으로 저장
-            if(!capture.empty())
-            {
-                std::ofstream output(capture, std::ios::binary);
-                Check(bool(output), "Cannot open capture path");
-                output << "P6\n" << width * 2 << ' ' << height << "\n255\n";
-                for(uint32_t y = 0; y < height; ++y)
-                    for(const auto& pixels : readbacks)
-                        for(uint32_t x = 0; x < width; ++x)
-                            output.write(reinterpret_cast<const char*>(pixels.pixels.data() + size_t(y) * pixels.rowPitch + x * 4), 3);
-                Check(bool(output), "Capture write failed");
-            }
             std::puts("GPU readback matches both recorded texture uploads.");
         }
         else
         {
-            Check(capture.empty(), "This backend cannot capture GPU pixels");
             std::puts("Null backend: command/state/fence contracts completed; GPU pixels were not rendered or read back.");
         }
 

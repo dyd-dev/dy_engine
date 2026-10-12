@@ -10,7 +10,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -46,43 +45,6 @@ double Number(const std::string& value, double minimum, double maximum) {
     return result;
 }
 
-// =============================================================================
-// [화면 캡처 저장]
-// 렌더 타깃 텍스처를 CPU로 읽어와 PPM 바이너리 파일로 저장
-// =============================================================================
-void Capture(IDevice& device, TextureHandle texture, const std::string& path) {
-    TextureReadback image;
-    if (!device.ReadTexture(texture, image)) {
-        throw std::runtime_error("ReadTexture failed.");
-    }
-
-    std::ofstream stream(path, std::ios::binary);
-    if (!stream) {
-        throw std::runtime_error("Cannot open capture path.");
-    }
-
-    stream << "P6\n" << image.width << " " << image.height << "\n255\n";
-
-    const bool bgra = (image.format == Format::B8G8R8A8_UNORM ||
-                       image.format == Format::B8G8R8A8_UNORM_SRGB);
-
-    for (uint32_t y = 0; y < image.height; ++y) {
-        for (uint32_t x = 0; x < image.width; ++x) {
-            const auto* pixel = image.pixels.data() + size_t(y) * image.rowPitch + size_t(x) * 4;
-            const char rgb[3] = {
-                char(pixel[bgra ? 2 : 0]),
-                char(pixel[1]),
-                char(pixel[bgra ? 0 : 2])
-            };
-            stream.write(rgb, 3);
-        }
-    }
-
-    if (!stream) {
-        throw std::runtime_error("Capture write failed.");
-    }
-    std::printf("Captured %s (%ux%u).\n", path.c_str(), image.width, image.height);
-}
 
 } // namespace
 
@@ -98,7 +60,6 @@ int main(int argc, char** argv) try {
     bool validation = false;
     bool fixedTime = false;
     float timeValue = 0;
-    std::string capture;
 
     // 명령행 옵션 파싱
     for (int i = 1; i < argc; ++i) {
@@ -108,8 +69,7 @@ int main(int argc, char** argv) try {
             std::puts("ClusteredLighting\n"
                       "World-space clusters: 16x16x8; 64-light capacity; outside volume uses all lights.\n"
                       "--mode clustered|all|count, --lights [1,64], --exposure [0.01,20]\n"
-                      "--frames N (0=unlimited), --capture path.ppm, --time SECONDS, --validation\n"
-                      "--capture defaults to 1 frames unless --frames is supplied.");
+                      "--frames N (0=unlimited), --time SECONDS, --validation");
             return 0;
         }
 
@@ -131,8 +91,6 @@ int main(int argc, char** argv) try {
             }
             frameLimit = uint64_t(n);
             framesSpecified = true;
-        } else if (arg == "--capture") {
-            capture = value;
         } else if (arg == "--time") {
             timeValue = float(Number(value, 0, 1000000));
             fixedTime = true;
@@ -159,15 +117,9 @@ int main(int argc, char** argv) try {
         }
     }
 
-    if (!capture.empty() && !framesSpecified) {
-        frameLimit = 1;
-    }
-    if (!capture.empty() && frameLimit == 0) {
-        throw std::runtime_error("Capture requires a finite frame count.");
-    }
 
     // 1. 윈도우 생성 (해상도: 960x640)
-    dyf::Platform::Window window(960, 640, "Advanced / ClusteredLighting");
+    dyf::Platform::Window window(960, 640, "Advanced / 09_ClusteredLighting");
     if (!window.GetHandle()) {
         throw std::runtime_error("Window creation failed.");
     }
@@ -196,7 +148,6 @@ int main(int argc, char** argv) try {
     swap.format = Format::B8G8R8A8_UNORM;
     swap.minimumImageCount = 2;
     swap.presentMode = PresentMode::Fifo;
-    swap.allowReadback = !capture.empty();
 
     if (!device.CreateSwapchain(swap)) {
         throw std::runtime_error("Swapchain creation failed.");
@@ -226,18 +177,15 @@ int main(int argc, char** argv) try {
     std::vector<ResourceBindingLayout> lightingBindings;
     lightingBindings.push_back({0, ResourceBindingType::ReadOnlyStorageBuffer, 1, ShaderStageFlags::Fragment, {}});
 
-    std::array<ColorAttachmentDesc, 1> lightingColors{};
-    for (auto& attachment : lightingColors) {
-        attachment = {Format::B8G8R8A8_UNORM, {}, ColorWriteMask::All};
-    }
+    ColorAttachmentDesc colorDesc{Format::B8G8R8A8_UNORM, {}, ColorWriteMask::All};
 
     GraphicsPipelineDesc lightingDesc;
     lightingDesc.vertexShader = vertexShader;
     lightingDesc.fragmentShader = lightingShader;
     lightingDesc.topology = PrimitiveTopology::TriangleList;
     lightingDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
-    lightingDesc.colorAttachments = lightingColors.data();
-    lightingDesc.colorAttachmentCount = uint32_t(lightingColors.size());
+    lightingDesc.colorAttachments = &colorDesc;
+    lightingDesc.colorAttachmentCount = 1;
     lightingDesc.layout = {
         lightingBindings.data(),
         uint32_t(lightingBindings.size()),
@@ -251,7 +199,6 @@ int main(int argc, char** argv) try {
     // 6. 클러스터 그리드 스토리지 버퍼 할당
     constexpr uint32_t clusterCount = 16 * 16 * 8;
     constexpr uint32_t wordsPerCluster = 65;
-    static_assert(sizeof(uint32_t) == 4);
 
     BufferDesc listDesc;
     listDesc.size = clusterCount * wordsPerCluster * sizeof(uint32_t);
@@ -274,8 +221,6 @@ int main(int argc, char** argv) try {
     auto lightingSet = resources.Keep(device.CreateResourceSet({lightingPipeline, &listBinding, 1}));
 
     bool listsInitialized = false;
-    uint32_t imageWidth = 0;
-    uint32_t imageHeight = 0;
     uint64_t frame = 0;
 
     // =========================================================================
@@ -300,11 +245,9 @@ int main(int argc, char** argv) try {
         }
 
         const auto dimensions = backbuffer->GetDesc();
-        imageWidth = dimensions.width;
-        imageHeight = dimensions.height;
 
-        params.sizeTime[0] = float(imageWidth);
-        params.sizeTime[1] = float(imageHeight);
+        params.sizeTime[0] = float(dimensions.width);
+        params.sizeTime[1] = float(dimensions.height);
         params.sizeTime[2] = fixedTime ? timeValue : float(frame) / 60.0f;
 
         ResourceScope frameResources(device);
@@ -339,16 +282,16 @@ int main(int argc, char** argv) try {
             const ResourceBarrierDesc backbufferBarrier{nullptr, backbuffer, ResourceState::Present, ResourceState::RenderTarget, {}};
             commands->ResourceBarrier(&backbufferBarrier, 1);
 
-            std::array<ColorAttachment, 1> colors{};
-            colors[0].texture = backbuffer;
-            colors[0].loadOp = LoadOp::Clear;
-            colors[0].storeOp = StoreOp::Store;
+            ColorAttachment colorAttachment{};
+            colorAttachment.texture = backbuffer;
+            colorAttachment.loadOp = LoadOp::Clear;
+            colorAttachment.storeOp = StoreOp::Store;
 
-            commands->BeginRendering({colors.data(), uint32_t(colors.size()), nullptr});
+            commands->BeginRendering({&colorAttachment, 1, nullptr});
             commands->BindGraphicsPipeline(lightingPipeline);
             commands->BindResourceSet(lightingSet);
-            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight), 0, 1});
-            commands->SetScissor({0, 0, imageWidth, imageHeight});
+            commands->SetViewport({0, 0, float(dimensions.width), float(dimensions.height), 0, 1});
+            commands->SetScissor({0, 0, dimensions.width, dimensions.height});
 
             commands->SetInlineConstants(0, sizeof(params), &params);
             commands->DrawInstanced(3, 1, 0, 0);
@@ -366,9 +309,6 @@ int main(int argc, char** argv) try {
         listsInitialized = true;
         ++frame;
 
-        if (!capture.empty() && frame == frameLimit) {
-            Capture(device, backbuffer, capture);
-        }
 
         if (!device.Present()) {
             throw std::runtime_error("Present failed.");

@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -18,18 +17,13 @@ using Clock = std::chrono::steady_clock;
 
 namespace
 {
-// 오류 검사 도우미 함수
-void Check(bool ok, const char* operation)
-{
-    if (!ok) throw std::runtime_error(operation);
-}
+void Check(bool ok, const char* operation) { if (!ok) throw std::runtime_error(operation); }
 
 // 명령행 옵션 구조체
 struct Options
 {
     std::string mode;
     uint32_t frames = 0;
-    std::string capture;
     bool validation = false;
 };
 
@@ -41,16 +35,15 @@ bool Parse(int argc, char** argv, Options& options, const char* modes, const cha
         const std::string argument = argv[i];
         if (argument == "--help")
         {
-            std::printf("%s\n--mode %s --frames N (0 = unlimited) --capture image.ppm --validation\n",
+            std::printf("%s\n--mode %s --frames N (0 = unlimited) --validation\n",
                 description, modes);
             return false;
         }
         if (argument == "--validation") options.validation = true;
-        else if ((argument == "--mode" || argument == "--frames" || argument == "--capture") && i + 1 < argc)
+        else if ((argument == "--mode" || argument == "--frames") && i + 1 < argc)
         {
             const std::string value = argv[++i];
             if (argument == "--mode") options.mode = value;
-            else if (argument == "--capture") options.capture = value;
             else
             {
                 char* end = nullptr;
@@ -65,26 +58,6 @@ bool Parse(int argc, char** argv, Options& options, const char* modes, const cha
     return true;
 }
 
-// 렌더 타깃 텍스처를 CPU 메모리로 읽어와 PPM 파일로 캡처 저장
-void Capture(RHI::IDevice& device, RHI::TextureHandle texture, const std::string& path)
-{
-    RHI::TextureReadback image;
-    Check(device.ReadTexture(texture, image), "ReadTexture failed (this backend may not support pixel readback)");
-    std::ofstream file(path, std::ios::binary);
-    Check(bool(file), "Cannot open capture file");
-    file << "P6\n" << image.width << ' ' << image.height << "\n255\n";
-    const bool bgra = image.format == RHI::Format::B8G8R8A8_UNORM
-        || image.format == RHI::Format::B8G8R8A8_UNORM_SRGB;
-    for (uint32_t y = 0; y < image.height; ++y)
-        for (uint32_t x = 0; x < image.width; ++x)
-        {
-            const auto* p = image.pixels.data() + size_t(y) * image.rowPitch + size_t(x) * 4;
-            const char rgb[3] = {char(p[bgra ? 2 : 0]), char(p[1]), char(p[bgra ? 0 : 2])};
-            file.write(rgb, 3);
-        }
-    Check(bool(file), "Capture write failed");
-    std::printf("capture=%s (%ux%u)\n", path.c_str(), image.width, image.height);
-}
 }
 
 // =============================================================================
@@ -102,7 +75,7 @@ int main(int argc, char** argv)
         Check(options.mode == "manual" || options.mode == "graph", "Invalid --mode");
 
         // 2. 윈도우 생성 및 RHI 디바이스 초기화
-        dyf::Platform::Window window(800, 600, "Advanced / RenderGraph");
+        dyf::Platform::Window window(800, 600, "Advanced / 21_RenderGraph");
         Check(window.GetHandle() != nullptr, "Window creation failed");
         RHI::DeviceDesc deviceDesc;
         deviceDesc.enableValidation = options.validation;
@@ -117,8 +90,6 @@ int main(int argc, char** argv)
         swapchain.format = RHI::Format::B8G8R8A8_UNORM;
         swapchain.minimumImageCount = 2;
         swapchain.presentMode = RHI::PresentMode::Fifo;
-        swapchain.allowReadback = !options.capture.empty();
-        if (ShaderData::vertexSize == 0) { swapchain.initialWidth = 800; swapchain.initialHeight = 600; }
         Check(device.CreateSwapchain(swapchain), "Swapchain creation failed");
 
         // 4. 버텍스 및 그래픽스 파이프라인 리소스 설정
@@ -158,7 +129,6 @@ int main(int argc, char** argv)
         // 5. 메인 렌더 루프
         uint32_t frame = 0, callbacks = 0;
         double compileMilliseconds = 0.0, recordMilliseconds = 0.0;
-        bool captured = false;
         while (window.IsRunning() && (options.frames == 0 || frame < options.frames))
         {
             window.PollEvents();
@@ -252,11 +222,6 @@ int main(int argc, char** argv)
             recordMilliseconds += std::chrono::duration<double, std::milli>(Clock::now() - recordStart).count();
             // 커맨드 리스트 제출 및 화면 프레젠트
             Check(device.Submit(&commands, 1), "Submission failed");
-            if (!captured && !options.capture.empty() && (options.frames == 0 || frame + 1 == options.frames))
-            {
-                Capture(device, backBuffer, options.capture);
-                captured = true;
-            }
             Check(device.Present(), "Present failed");
             ++frame;
         }

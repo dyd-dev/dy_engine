@@ -8,7 +8,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -20,11 +19,7 @@ using Clock = std::chrono::steady_clock;
 namespace {
 
 // 오류 검사 도우미 함수
-void Check(bool ok, const char* operation) {
-    if (!ok) {
-        throw std::runtime_error(operation);
-    }
-}
+void Check(bool ok, const char* operation) { if (!ok) throw std::runtime_error(operation); }
 
 // =============================================================================
 // [설정값 및 옵션 정의]
@@ -33,7 +28,6 @@ void Check(bool ok, const char* operation) {
 struct Options {
     std::string mode;
     uint32_t frames = 0;
-    std::string capture;
     bool validation = false;
 };
 
@@ -43,20 +37,18 @@ bool Parse(int argc, char** argv, Options& options, const char* modes, const cha
         const std::string argument = argv[i];
 
         if (argument == "--help") {
-            std::printf("%s\n--mode %s --frames N (0 = unlimited) --capture image.ppm --validation\n",
+            std::printf("%s\n--mode %s --frames N (0 = unlimited) --validation\n",
                         description, modes);
             return false;
         }
 
         if (argument == "--validation") {
             options.validation = true;
-        } else if ((argument == "--mode" || argument == "--frames" || argument == "--capture") && i + 1 < argc) {
+        } else if ((argument == "--mode" || argument == "--frames") && i + 1 < argc) {
             const std::string value = argv[++i];
 
             if (argument == "--mode") {
                 options.mode = value;
-            } else if (argument == "--capture") {
-                options.capture = value;
             } else {
                 char* end = nullptr;
                 const auto count = std::strtoull(value.c_str(), &end, 10);
@@ -71,33 +63,6 @@ bool Parse(int argc, char** argv, Options& options, const char* modes, const cha
     return true;
 }
 
-// =============================================================================
-// [화면 캡처 저장]
-// 렌더 타깃 텍스처를 CPU로 읽어와 PPM 파일로 저장
-// =============================================================================
-void Capture(RHI::IDevice& device, RHI::TextureHandle texture, const std::string& path) {
-    RHI::TextureReadback image;
-    Check(device.ReadTexture(texture, image), "ReadTexture failed (this backend may not support pixel readback)");
-
-    std::ofstream file(path, std::ios::binary);
-    Check(bool(file), "Cannot open capture file");
-
-    file << "P6\n" << image.width << ' ' << image.height << "\n255\n";
-
-    const bool bgra = image.format == RHI::Format::B8G8R8A8_UNORM ||
-                       image.format == RHI::Format::B8G8R8A8_UNORM_SRGB;
-
-    for (uint32_t y = 0; y < image.height; ++y) {
-        for (uint32_t x = 0; x < image.width; ++x) {
-            const auto* p = image.pixels.data() + size_t(y) * image.rowPitch + size_t(x) * 4;
-            const char rgb[3] = {char(p[bgra ? 2 : 0]), char(p[1]), char(p[bgra ? 0 : 2])};
-            file.write(rgb, 3);
-        }
-    }
-
-    Check(bool(file), "Capture write failed");
-    std::printf("capture=%s (%ux%u)\n", path.c_str(), image.width, image.height);
-}
 
 } // namespace
 
@@ -117,7 +82,7 @@ int main(int argc, char** argv) {
         Check(options.mode == "create" || options.mode == "reuse", "Invalid --mode");
 
         // 1. 윈도우 생성 (해상도: 800x600)
-        dyf::Platform::Window window(800, 600, "Advanced / Resource reuse");
+        dyf::Platform::Window window(800, 600, "Advanced / 15_ResourceReuse");
         Check(window.GetHandle() != nullptr, "Window creation failed");
 
         // 2. RHI 렌더 디바이스 생성
@@ -136,12 +101,6 @@ int main(int argc, char** argv) {
         swapchain.format = RHI::Format::B8G8R8A8_UNORM;
         swapchain.minimumImageCount = 2;
         swapchain.presentMode = RHI::PresentMode::Fifo;
-        swapchain.allowReadback = !options.capture.empty();
-
-        if (ShaderData::vertexSize == 0) {
-            swapchain.initialWidth = 800;
-            swapchain.initialHeight = 600;
-        }
 
         Check(device.CreateSwapchain(swapchain), "Swapchain creation failed");
 
@@ -246,7 +205,6 @@ int main(int argc, char** argv) {
         uint32_t frame = 0;
         uint64_t drawCalls = 0;
         double recordMilliseconds = 0.0;
-        bool captured = false;
 
         // =====================================================================
         // [메인 렌더 루프]
@@ -341,10 +299,6 @@ int main(int argc, char** argv) {
 
             Check(device.Submit(&commands, 1), "Submission failed");
 
-            if (!captured && !options.capture.empty() && (options.frames == 0 || frame + 1 == options.frames)) {
-                Capture(device, backBuffer, options.capture);
-                captured = true;
-            }
 
             Check(device.Present(), "Present failed");
             ++frame;
@@ -361,7 +315,7 @@ int main(int argc, char** argv) {
         std::printf("instance_buffer_creations=%llu instance_buffer_bytes=%u uploaded_bytes=%llu cpu_allocation_ms=%.3f\n",
                     static_cast<unsigned long long>(bufferCreations), unsigned(sizeof(instances)),
                     static_cast<unsigned long long>(uint64_t(frame) * sizeof(instances)), allocationMilliseconds);
-        std::puts("Both modes upload the same bytes and issue one draw per frame. CPU allocation/recording timings exclude GPU execution, present and capture.");
+        std::puts("Both modes upload the same bytes and issue one draw per frame. CPU allocation/recording timings exclude GPU execution and present.");
 
         return 0;
 
