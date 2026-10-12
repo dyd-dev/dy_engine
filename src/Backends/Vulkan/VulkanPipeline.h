@@ -32,6 +32,7 @@ namespace dyf::Backends
 	public:
 		VulkanPipeline(const VulkanContext& context, const dyf::RHI::GraphicsPipelineDesc& desc);
         VulkanPipeline(const VulkanContext&,const RHI::ComputePipelineDesc&);
+        VulkanPipeline(const VulkanContext& context, const dyf::RHI::MeshPipelineDesc& desc);
 
 		[[nodiscard]] VkPipeline GetHandle() const { return m_pipeline; }
 		[[nodiscard]] VkPipelineLayout GetPipelineLayout() const { return m_pipelineLayout; }
@@ -51,6 +52,7 @@ namespace dyf::Backends
 		void CreateDescriptorLayouts(const VulkanContext& context, const dyf::RHI::PipelineLayoutDesc& desc);
 		void CreatePipelineLayout(const dyf::RHI::PipelineLayoutDesc& desc);
 		void CreatePipeline(const dyf::RHI::GraphicsPipelineDesc& desc);
+		void CreatePipeline(const dyf::RHI::MeshPipelineDesc& desc);
 		void Cleanup();
 
 		VkDevice m_device = VK_NULL_HANDLE;

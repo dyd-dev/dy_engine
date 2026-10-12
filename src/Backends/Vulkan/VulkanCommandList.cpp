@@ -936,6 +936,18 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 		vkCmdDrawIndexed(m_commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 	}
 
+	void VulkanCommandList::DispatchMeshNative(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
+	{
+		if (m_closed || !m_rendering || !m_context.vkCmdDrawMeshTasksEXT ||
+			threadGroupCountX == 0 || threadGroupCountY == 0 || threadGroupCountZ == 0 ||
+			!ValidateDraw(false, 0, 1, 0, 0))
+		{
+			Fail();
+			return;
+		}
+		m_context.vkCmdDrawMeshTasksEXT(m_commandBuffer, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+	}
+
 	bool VulkanCommandList::CloseNative()
 	{
 		if (m_closed) return !m_failed;

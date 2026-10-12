@@ -55,6 +55,19 @@ bool IDevice::Supports(const GraphicsPipelineDesc& desc) const
     return SupportsGraphicsPipelineNative(desc);
 }
 
+bool IDevice::Supports(const MeshPipelineDesc& desc) const
+{
+    std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+    if(!Supports(Feature::MeshShader)) return false;
+    if(!Reference(desc.meshShader) || (desc.fragmentShader && !Reference(desc.fragmentShader))) return false;
+    if(!Supports(desc.layout) || !ValidateMeshPipelineDesc(desc)) return false;
+    if(desc.raster.fillMode == FillMode::Wireframe && !Supports(Feature::Wireframe)) return false;
+    if(desc.raster.depthBiasClamp != 0 && !Supports(Feature::DepthBiasClamp)) return false;
+    if(std::trunc(desc.raster.depthBiasConstant) != desc.raster.depthBiasConstant &&
+        !Supports(Feature::FractionalDepthBias)) return false;
+    return SupportsMeshPipelineNative(desc);
+}
+
 TimestampQueryHandle IDevice::CreateTimestampQuery(const TimestampQueryDesc& desc)
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
@@ -462,8 +475,10 @@ ShaderHandle IDevice::CreateShader(const ShaderDesc& desc)
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
     const bool validStage = desc.stage == ShaderStage::Vertex || desc.stage == ShaderStage::Hull ||
-        desc.stage == ShaderStage::Domain || desc.stage == ShaderStage::Fragment || desc.stage == ShaderStage::Compute;
+        desc.stage == ShaderStage::Domain || desc.stage == ShaderStage::Fragment ||
+        desc.stage == ShaderStage::Compute || desc.stage == ShaderStage::Mesh;
     if((desc.stage==ShaderStage::Compute && !Supports(Feature::Compute)) || !validStage ||
+        (desc.stage==ShaderStage::Mesh && !Supports(Feature::MeshShader)) ||
         !desc.binary || !desc.binarySize || !desc.entryPoint || !*desc.entryPoint) return nullptr;
     auto* shader = CreateShaderNative(desc);
     if(!shader) ReportDiagnostic(DiagnosticSeverity::Error,"CreateShader: native shader creation failed; no substitute shader was selected.");
@@ -519,6 +534,31 @@ PipelineHandle IDevice::CreateGraphicsPipeline(const GraphicsPipelineDesc& desc)
     if(pipeline)
     {
         pipeline->m_requiredVertexBindings = std::move(requiredVertexBindings);
+        pipeline->m_colorFormats = std::move(colorFormats);
+        pipeline->m_depthStencilFormat=desc.depthStencil.format;
+    }
+    if(pipeline) { ++m_allocationCounters.pipelines.live; ++m_allocationCounters.pipelines.created; }
+    Track(pipeline, [](IDevice& device, void* handle) {
+        device.DestroyPipelineNative(static_cast<PipelineHandle>(handle));
+        --device.m_allocationCounters.pipelines.live; ++device.m_allocationCounters.pipelines.destroyed;
+    }, std::move(dependencies));
+    return pipeline;
+}
+
+PipelineHandle IDevice::CreateMeshPipeline(const MeshPipelineDesc& desc)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+    auto mesh = Reference(desc.meshShader), fragment = Reference(desc.fragmentShader);
+    if(!mesh || (desc.fragmentShader && !fragment) || !Supports(desc))
+    {ReportDiagnostic(DiagnosticSeverity::Error,"CreateMeshPipeline: unsupported description or device limit. Query Supports(desc) before creation.");return nullptr;}
+    std::vector<std::shared_ptr<void>> dependencies{mesh, fragment};
+    std::vector<Format> colorFormats;
+    for(uint32_t i=0;i<desc.colorAttachmentCount;++i)
+        colorFormats.push_back(desc.colorAttachments[i].format);
+    auto* pipeline = CreateMeshPipelineNative(desc);
+    if(!pipeline) ReportDiagnostic(DiagnosticSeverity::Error,"CreateMeshPipeline: native creation failed; no fallback pipeline was substituted.");
+    if(pipeline)
+    {
         pipeline->m_colorFormats = std::move(colorFormats);
         pipeline->m_depthStencilFormat=desc.depthStencil.format;
     }

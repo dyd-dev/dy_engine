@@ -1307,6 +1307,51 @@ namespace dyf::Backends
 			baseInstance:firstInstance];
 	}
 
+	void MetalCommandList::DispatchMeshNative(
+		uint32_t threadGroupCountX,
+		uint32_t threadGroupCountY,
+		uint32_t threadGroupCountZ)
+	{
+		if(m_impl->closed || !m_impl->rendering || m_impl->renderEncoder == nil ||
+			threadGroupCountX == 0 || threadGroupCountY == 0 || threadGroupCountZ == 0)
+		{
+			Invalidate(m_impl);
+			return;
+		}
+		if(@available(macOS 13.0, iOS 16.0, *))
+		{
+			if(m_impl->pipeline == nullptr || m_impl->pipeline->GetNativePipeline() == nullptr)
+			{
+				Invalidate(m_impl);
+				return;
+			}
+			id<MTLRenderPipelineState> pipelineState =
+				(__bridge id<MTLRenderPipelineState>)m_impl->pipeline->GetNativePipeline();
+			NSUInteger meshThreads = pipelineState.maxTotalThreadsPerMeshThreadgroup;
+			if(meshThreads == 0)
+			{
+				Invalidate(m_impl);
+				return;
+			}
+			NSUInteger objectThreads = pipelineState.maxTotalThreadsPerObjectThreadgroup;
+			if(objectThreads == 0)
+			{
+				objectThreads = 1;
+			}
+			MTLSize threadgroups = MTLSizeMake(threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+			MTLSize threadsPerObjectThreadgroup = MTLSizeMake(objectThreads, 1, 1);
+			MTLSize threadsPerMeshThreadgroup = MTLSizeMake(meshThreads, 1, 1);
+			[m_impl->renderEncoder
+				drawMeshThreadgroups:threadgroups
+				threadsPerObjectThreadgroup:threadsPerObjectThreadgroup
+				threadsPerMeshThreadgroup:threadsPerMeshThreadgroup];
+		}
+		else
+		{
+			Invalidate(m_impl);
+		}
+	}
+
 	bool MetalCommandList::CloseNative()
 	{
 		if(m_impl->closed) Invalidate(m_impl);

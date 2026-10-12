@@ -163,6 +163,14 @@ namespace dyf::Backends
 				m_desc.layout = GetLayout();
 			}
 
+			explicit NullPipelineState(const RHI::MeshPipelineDesc& desc)
+				: RHI::Pipeline(desc.layout, false, true)
+			{
+				if(desc.colorAttachmentCount != 0)
+					m_colorAttachments.assign(
+						desc.colorAttachments, desc.colorAttachments + desc.colorAttachmentCount);
+			}
+
 			[[nodiscard]] const RHI::GraphicsPipelineDesc& GetDesc() const { return m_desc; }
 
 		private:
@@ -1045,7 +1053,9 @@ bool NullDevice::SupportsNative(RHI::Feature feature) const
     case RHI::Feature::FractionalDepthBias:
     case RHI::Feature::Wireframe:
     case RHI::Feature::DepthBiasClamp:
-    case RHI::Feature::Tessellation: return true;
+    case RHI::Feature::Tessellation:
+    case RHI::Feature::MeshShader: return true;
+    case RHI::Feature::TaskShader: return false;
     default: return false;
     }
 }
@@ -1072,6 +1082,10 @@ bool NullDevice::SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc&) co
 bool NullDevice::SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc&) const
 {
     return m_impl->initialized;
+}
+bool NullDevice::SupportsMeshPipelineNative(const RHI::MeshPipelineDesc&) const
+{
+    return m_impl && m_impl->initialized;
 }
 bool NullDevice::IsLostNative() const {return false;}
 bool NullDevice::WaitIdleNative() { return m_impl->initialized; }
@@ -1266,6 +1280,15 @@ void NullDevice::DestroySwapchainNative()
 	{
 		return m_impl->livePipelines.emplace_back(
 			std::make_unique<NullPipelineState>(desc)).get();
+	}
+
+	RHI::PipelineHandle NullDevice::CreateMeshPipelineNative(
+		const RHI::MeshPipelineDesc& desc)
+	{
+		auto pipeline = std::make_unique<NullPipelineState>(desc);
+		NullPipelineState* result = pipeline.get();
+		m_impl->livePipelines.push_back(std::move(pipeline));
+		return result;
 	}
 
 	RHI::ResourceSetHandle NullDevice::CreateResourceSetNative(const RHI::ResourceSetDesc& desc)
