@@ -684,7 +684,7 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
 	depth.state = RHI::ResourceState::DepthWrite;
 	depth.depthLoadOp = RHI::LoadOp::Clear;
 	depth.depthStoreOp = RHI::StoreOp::Discard;
-	if(depthStencilTarget->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT)
+	if(RHI::HasStencil(depthStencilTarget->GetDesc().format))
 	{
 		depth.stencilLoadOp = RHI::LoadOp::Discard;
 		depth.stencilStoreOp = RHI::StoreOp::Discard;

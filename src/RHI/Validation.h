@@ -46,6 +46,7 @@ namespace dyf::RHI
     		return 4;
     	case RHI::Format::R16G16B16A16_FLOAT:
     	case RHI::Format::R32G32_FLOAT:
+        case RHI::Format::D32_FLOAT_S8_UINT:
     		return 8;
     	case RHI::Format::R32G32B32_FLOAT:
     		return 12;
@@ -61,7 +62,7 @@ namespace dyf::RHI
     [[nodiscard]] inline bool IsDepthFormat(RHI::Format format)
     {
     	return format == RHI::Format::D32_FLOAT ||
-    		format == RHI::Format::D24_UNORM_S8_UINT;
+            HasStencil(format);
     }
 
     [[nodiscard]] inline bool IsColorFormat(RHI::Format format)
@@ -346,7 +347,7 @@ namespace dyf::RHI
     					(face.passOp > RHI::StencilOp::Undefined && face.passOp <= RHI::StencilOp::DecrementWrap) &&
     					(face.compareOp > RHI::CompareOp::Undefined && face.compareOp <= RHI::CompareOp::Always);
     			};
-    			if(desc.depthStencil.format != RHI::Format::D24_UNORM_S8_UINT ||
+                if(!HasStencil(desc.depthStencil.format) ||
     				!validFace(desc.depthStencil.front) ||
     				!validFace(desc.depthStencil.back))
     			{
@@ -433,7 +434,7 @@ namespace dyf::RHI
                         (face.passOp > RHI::StencilOp::Undefined && face.passOp <= RHI::StencilOp::DecrementWrap) &&
                         (face.compareOp > RHI::CompareOp::Undefined && face.compareOp <= RHI::CompareOp::Always);
                 };
-                if (desc.depthStencil.format != RHI::Format::D24_UNORM_S8_UINT ||
+                if (!RHI::HasStencil(desc.depthStencil.format) ||
                     !validFace(desc.depthStencil.front) || !validFace(desc.depthStencil.back))
                     return false;
             }

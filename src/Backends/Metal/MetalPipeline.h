@@ -22,6 +22,8 @@ namespace dyf::Backends
 	public:
 		MetalPipeline(const RHI::GraphicsPipelineDesc& desc, void* device);
 		MetalPipeline(const RHI::MeshPipelineDesc& desc, void* device);
+		MetalPipeline(const RHI::ComputePipelineDesc& desc, void* device);
+		[[nodiscard]] const uint32_t* GetThreadGroupSize() const { return m_threadGroupSize; }
 
         // 생성 전 조회와 실제 생성이 같은 Metal slot 제약을 사용한다.
         [[nodiscard]] static bool SupportsSampler(const RHI::SamplerDesc& desc);
@@ -52,6 +54,7 @@ namespace dyf::Backends
 		std::unique_ptr<Impl> m_impl;
 		RHI::GraphicsPipelineDesc m_desc = {};
 		RHI::MeshPipelineDesc m_meshDesc = {};
+		uint32_t m_threadGroupSize[3] = {1, 1, 1};
 		std::vector<RHI::VertexBufferLayout> m_vertexBuffers;
 		std::vector<RHI::VertexAttribute> m_vertexAttributes;
 		std::vector<RHI::ColorAttachmentDesc> m_colorAttachments;

@@ -33,6 +33,7 @@ namespace dyf::Backends
 		RHI::ShaderHandle        CreateShaderNative(const RHI::ShaderDesc& desc) override;
         RHI::PipelineHandle CreateGraphicsPipelineNative(const RHI::GraphicsPipelineDesc& desc) override;
         RHI::PipelineHandle CreateMeshPipelineNative(const RHI::MeshPipelineDesc& desc) override;
+        RHI::PipelineHandle CreateComputePipelineNative(const RHI::ComputePipelineDesc& desc) override;
 		RHI::ResourceSetHandle   CreateResourceSetNative(const RHI::ResourceSetDesc& desc) override;
 
         void DestroyBufferNative(RHI::BufferHandle buffer) override;

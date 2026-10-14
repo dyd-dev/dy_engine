@@ -1,4 +1,5 @@
 #include <dyf/RHI.h>
+#include "../src/RHI/Validation.h"
 
 #ifdef DY_TEST_NATIVE_SHADERS
 #include "mesh_test_ms.h"
@@ -55,6 +56,22 @@ int main()
         Check(device->Supports(desc), "Valid mesh pipeline was rejected");
         auto* pipeline = device->CreateMeshPipeline(desc);
         Check(pipeline && pipeline->IsMesh() && !pipeline->IsCompute(), "Mesh pipeline was confused with compute");
+
+        auto stencil = desc;
+        stencil.depthStencil.stencilEnabled = true;
+        stencil.depthStencil.stencilReadMask = stencil.depthStencil.stencilWriteMask = 255;
+        stencil.depthStencil.front = stencil.depthStencil.back = {
+            RHI::StencilOp::Keep, RHI::StencilOp::Keep, RHI::StencilOp::Replace, RHI::CompareOp::Always};
+        for(auto format : {RHI::Format::D24_UNORM_S8_UINT, RHI::Format::D32_FLOAT_S8_UINT})
+        {
+            stencil.depthStencil.format = format;
+            Check(RHI::ValidateMeshPipelineDesc(stencil), "Mesh validation rejected a depth/stencil format");
+        }
+        stencil.depthStencil.format = RHI::Format::D32_FLOAT;
+        Check(!RHI::ValidateMeshPipelineDesc(stencil), "Mesh stencil accepted a depth-only format");
+        stencil.depthStencil.format = RHI::Format::D32_FLOAT_S8_UINT;
+        stencil.depthStencil.front.passOp = RHI::StencilOp::Undefined;
+        Check(!RHI::ValidateMeshPipelineDesc(stencil), "D32S8 bypassed stencil operation validation");
 
         for(auto stage : {RHI::ShaderStageFlags::Vertex, RHI::ShaderStageFlags::Hull,
                 RHI::ShaderStageFlags::Domain, RHI::ShaderStageFlags::Compute})

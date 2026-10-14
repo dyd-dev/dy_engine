@@ -136,7 +136,7 @@ int main(int argc, char** argv) try {
 
     // 컴퓨트 지원 여부 확인
     if (!device.Supports(Feature::Compute)) {
-        std::puts("Unsupported: this RHI backend has no Compute dispatch/storage-buffer implementation. Use the Vulkan backend. No CPU fallback is substituted.");
+        std::puts("Unsupported: this RHI backend has no Compute dispatch/storage-buffer implementation. No CPU fallback is substituted.");
         return 77;
     }
 
@@ -214,6 +214,7 @@ int main(int argc, char** argv) try {
     computeDesc.computeShader = clusterShader;
     computeDesc.layout = {&computeBinding, 1, sizeof(Params), ShaderStageFlags::Compute, 15};
 
+    computeDesc.threadGroupSize[0] = 64;
     auto clusterPipeline = resources.Keep(device.CreateComputePipeline(computeDesc));
 
     ResourceBinding listBinding{0, 0, lightLists, nullptr, 0, listDesc.size, {}};

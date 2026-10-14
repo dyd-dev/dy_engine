@@ -265,7 +265,7 @@
       ],
       "coverage": "default stencil mask remains visibly rendered on the supported depth-stencil format",
       "unsupported_markers": [
-        "UNSUPPORTED: stencil requires D24_UNORM_S8_UINT; current RHI has no D32S8/S8 alternative (including Apple Silicon)."
+        "UNSUPPORTED: no supported depth/stencil format."
       ]
     },
     "examples/advanced/05_ResourceBarriers": {
@@ -328,7 +328,7 @@
       ],
       "coverage": "default compute-backed clustered lighting remains visibly rendered",
       "unsupported_markers": [
-        "Unsupported: this RHI backend has no Compute dispatch/storage-buffer implementation. Use the Vulkan backend. No CPU fallback is substituted."
+        "Unsupported: this RHI backend has no Compute dispatch/storage-buffer implementation. No CPU fallback is substituted."
       ]
     },
     "examples/advanced/10_DeferredLighting": {
