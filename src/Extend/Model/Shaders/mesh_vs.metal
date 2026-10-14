@@ -76,21 +76,27 @@ vertex RasterData RENDERER_VERTEX_ENTRY(
     LoadSkinning(skinInfluences, skinPalette, vertexId, drawConstants.influenceOffset, drawConstants.paletteOffset, skin, skinNormal);
     const float4x4 world = drawConstants.modelMatrix * skin;
     const float4 worldPosition = world * float4(input.position, 1.0f);
-    const float4x4 normal = SkinNormalMatrix(world, skinNormal);
-    const float3x3 normalMatrix = float3x3(
-        normal[0].xyz,
-        normal[1].xyz,
-        normal[2].xyz);
+    const float4x4 modelNormal = SkinNormalMatrix(drawConstants.modelMatrix, SkinIdentity());
+    // Resolve skin fallbacks before the model transform, as CPU/compute do.
+    const float3x3 skinNormalMatrix(skinNormal[0].xyz, skinNormal[1].xyz, skinNormal[2].xyz);
+    const float3 skinnedNormal = SkinNormalizeOr(skinNormalMatrix * input.normal, float3(0,0,1));
+    const float3x3 skinLinear(skin[0].xyz, skin[1].xyz, skin[2].xyz);
+    float3 skinnedTangent = skinLinear * input.tangent.xyz;
+    skinnedTangent = SkinNormalizeOr(skinnedTangent - skinnedNormal * dot(skinnedNormal, skinnedTangent), SkinFallbackTangent(skinnedNormal));
+    const float3x3 normalMatrix(modelNormal[0].xyz, modelNormal[1].xyz, modelNormal[2].xyz);
 
     RasterData output;
     output.position = drawConstants.viewProjectionMatrix * worldPosition;
     output.uv = input.uv;
     output.worldPosition = worldPosition.xyz;
-    output.worldNormal = normalize(normalMatrix * input.normal);
-    const float3x3 linear(world[0].xyz, world[1].xyz, world[2].xyz);
-    float3 tangent = linear * input.tangent.xyz;
-    tangent = normalize(tangent - output.worldNormal * dot(output.worldNormal, tangent));
-    output.worldTangent = float4(tangent, determinant(linear) < 0.0 ? -input.tangent.w : input.tangent.w);
+    const float3 fallbackNormal = SkinNormalizeOr(SkinColumn(modelNormal, 2).xyz, float3(0,0,1));
+    output.worldNormal = SkinNormalizeOr(normalMatrix * skinnedNormal, fallbackNormal);
+    const float3x3 linear(drawConstants.modelMatrix[0].xyz, drawConstants.modelMatrix[1].xyz, drawConstants.modelMatrix[2].xyz);
+    float3 tangent = linear * skinnedTangent;
+    tangent = SkinNormalizeOr(tangent - output.worldNormal * dot(output.worldNormal, tangent), SkinFallbackTangent(output.worldNormal));
+    float orientation = (determinant(skinLinear) < 0.0 ? -1.0 : 1.0) *
+        (determinant(linear) < 0.0 ? -1.0 : 1.0);
+    output.worldTangent = float4(tangent, orientation * input.tangent.w);
 #if RENDERER_ENABLE_SHADOWS
     output.lightSpacePosition = shadowMatrix.lightViewProjectionMatrix[0] * worldPosition;
 #endif

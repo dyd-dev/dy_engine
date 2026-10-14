@@ -4,6 +4,7 @@
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/RHI/Texture.h"
+#include "dyf/RHI/ResourceScope.h"
 
 #include <limits>
 #include <vector>
@@ -39,6 +40,7 @@ namespace dyf
 		m_textures.resize(images.size());
 
 		bool uploadFailed = false;
+		RHI::ResourceScope resources(*device);
 		RHI::ICommandList* commandList = nullptr;
 		// 기록한 상태는 제출이 성공한 뒤에만 캐시에 반영한다.
 		std::vector<RHI::ResourceState> submittedStates(images.size(), RHI::ResourceState::Undefined);
@@ -67,7 +69,6 @@ namespace dyf
 			RHI::TextureDesc textureDesc;
 			textureDesc.width = image.GetWidth();
 			textureDesc.height = image.GetHeight();
-			textureDesc.depthOrArraySize = textureDesc.mipLevels = 1;
 			textureDesc.format = image.GetColorSpace() == ColorSpace::Srgb
 				? RHI::Format::R8G8B8A8_UNORM_SRGB : RHI::Format::R8G8B8A8_UNORM;
 			textureDesc.usage = RHI::TextureUsage::ShaderResource;
@@ -79,7 +80,11 @@ namespace dyf
 				uploadFailed = true;
 				continue;
 			}
-			if(commandList == nullptr) commandList = device->AcquireCommandList();
+			if(commandList == nullptr)
+			{
+				commandList = device->AcquireCommandList();
+				if(commandList) resources.Keep(commandList);
+			}
 			if(commandList == nullptr)
 			{
 				uploadFailed = true;
@@ -99,14 +104,13 @@ namespace dyf
 				*commandList, slot.texture, 0, 0, pixels.data(), uploadSize, rowPitch, uploadSize);
 			uploadFailed = uploadFailed || !uploaded;
 			barrier.before = RHI::ResourceState::CopyDestination;
-			barrier.after = uploaded ? RHI::ResourceState::ShaderResource : RHI::ResourceState::Common;
+			barrier.after = RHI::ResourceState::ShaderResource;
 			commandList->ResourceBarrier(&barrier, 1);
 			submittedStates[textureIndex] = barrier.after;
 		}
 
 		if(commandList == nullptr) return !uploadFailed;
 		const bool submitted = commandList->Close() && device->Submit(&commandList, 1);
-		device->DestroyCommandList(commandList);
 		if(!submitted) return false;
 
 		for(uint32_t textureIndex = 0; textureIndex < submittedStates.size(); ++textureIndex)
@@ -119,7 +123,6 @@ namespace dyf
 
 	void Renderer::ReleaseTextures(RHI::IDevice* device)
 	{
-		if(device == nullptr) return;
 		for(TextureSlot& slot : m_textures)
 		{
 			if(slot.texture) device->DestroyTexture(slot.texture);

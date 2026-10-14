@@ -6,7 +6,6 @@
 #include "dyf/Core/ThreadPool.h"
 #include <chrono>
 #include <thread>
-#include <cstdio>
 
 namespace dyf::RHI
 {
@@ -54,6 +53,19 @@ bool IDevice::Supports(const GraphicsPipelineDesc& desc) const
     if(std::trunc(desc.raster.depthBiasConstant) != desc.raster.depthBiasConstant &&
         !Supports(Feature::FractionalDepthBias)) return false;
     return SupportsGraphicsPipelineNative(desc);
+}
+
+bool IDevice::Supports(const MeshPipelineDesc& desc) const
+{
+    std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+    if(!Supports(Feature::MeshShader)) return false;
+    if(!Reference(desc.meshShader) || (desc.fragmentShader && !Reference(desc.fragmentShader))) return false;
+    if(!Supports(desc.layout) || !ValidateMeshPipelineDesc(desc)) return false;
+    if(desc.raster.fillMode == FillMode::Wireframe && !Supports(Feature::Wireframe)) return false;
+    if(desc.raster.depthBiasClamp != 0 && !Supports(Feature::DepthBiasClamp)) return false;
+    if(std::trunc(desc.raster.depthBiasConstant) != desc.raster.depthBiasConstant &&
+        !Supports(Feature::FractionalDepthBias)) return false;
+    return SupportsMeshPipelineNative(desc);
 }
 
 TimestampQueryHandle IDevice::CreateTimestampQuery(const TimestampQueryDesc& desc)
@@ -209,14 +221,16 @@ void IDevice::ReleaseResources()
 ICommandList* IDevice::AcquireCommandList()
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
-    auto* commands = ICommandList::CreateRecorded();
+    const auto rollback = [this](ICommandList* value) {
+        m_userCommands.erase(value);
+        delete value;
+    };
+    std::unique_ptr<ICommandList, decltype(rollback)> owner(ICommandList::CreateRecorded(), rollback);
+    auto* commands = owner.get();
+    commands->m_owner = this;
     m_userCommands.insert(commands);
-    if(commands)
-    {
-        commands->m_owner = this;
-        m_recordedCommands.insert(commands);
-    }
-    return commands;
+    m_recordedCommands.insert(commands);
+    return owner.release();
 }
 
 TextureHandle IDevice::GetBackBuffer()
@@ -319,7 +333,9 @@ bool IDevice::PrepareCommandLists(ICommandList* const* commands, uint32_t count,
             {
                 if(!commands[i] || !m_userCommands.count(commands[i]) ||
                     !commands[i]->m_recordingClosed || commands[i]->m_recordingFailed ||
-                    commands[i]->m_completion > completed) return false;
+                    commands[i]->m_completion > completed ||
+                    (commands[i]->m_imageGeneration && !m_frameActive) ||
+                    (commands[i]->m_imageGeneration && commands[i]->m_imageGeneration != m_imageGeneration)) return false;
                 for(uint32_t j = 0; j < i; ++j) if(commands[i] == commands[j]) return false;
             }
             // Native pools/allocators are allocated under the device lock. Each list
@@ -398,10 +414,13 @@ bool IDevice::Submit(ICommandList** commands, uint32_t count)
         commands[i]->m_preparedNative=nullptr;
     }
     const auto discard=[&] {for(auto* list:native) DiscardCommandListNative(list);};
-    if(!SubmitNative(native.data(),count))
+    bool submitted=false;
+    try { submitted=SubmitNative(native.data(),count); }
+    catch(...) { discard(); throw; }
+    if(!submitted)
     {
-        ReportDiagnostic(DiagnosticSeverity::Error,"Submit: native submission failed.");
         discard();
+        ReportDiagnostic(DiagnosticSeverity::Error,"Submit: native submission failed.");
         return false;
     }
     for(const auto& entry:states) {
@@ -424,7 +443,8 @@ BufferHandle IDevice::CreateBuffer(const BufferDesc& desc)
         device.DestroyBufferNative(static_cast<BufferHandle>(handle));
         --device.m_allocationCounters.buffers.live; ++device.m_allocationCounters.buffers.destroyed;
     });
-    if(buffer)m_resourceStates[{reinterpret_cast<uintptr_t>(buffer),0,0}]=desc.initialState;
+    try { if(buffer)m_resourceStates[{reinterpret_cast<uintptr_t>(buffer),0,0}]=desc.initialState; }
+    catch(...) { m_resources.erase(buffer); throw; }
     return buffer;
 }
 
@@ -442,8 +462,12 @@ TextureHandle IDevice::CreateTexture(const TextureDesc& desc)
         device.DestroyTextureNative(static_cast<TextureHandle>(handle));
         --device.m_allocationCounters.textures.live; ++device.m_allocationCounters.textures.destroyed;
     });
-    if(texture)for(uint32_t layer=0;layer<desc.depthOrArraySize;++layer)for(uint32_t mip=0;mip<desc.mipLevels;++mip)
-        m_resourceStates[{reinterpret_cast<uintptr_t>(texture),mip,layer}]=ResourceState::Undefined;
+    try
+    {
+        if(texture)for(uint32_t layer=0;layer<desc.depthOrArraySize;++layer)for(uint32_t mip=0;mip<desc.mipLevels;++mip)
+            m_resourceStates[{reinterpret_cast<uintptr_t>(texture),mip,layer}]=ResourceState::Undefined;
+    }
+    catch(...) { m_resources.erase(texture); throw; }
     return texture;
 }
 
@@ -451,8 +475,10 @@ ShaderHandle IDevice::CreateShader(const ShaderDesc& desc)
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
     const bool validStage = desc.stage == ShaderStage::Vertex || desc.stage == ShaderStage::Hull ||
-        desc.stage == ShaderStage::Domain || desc.stage == ShaderStage::Fragment || desc.stage == ShaderStage::Compute;
+        desc.stage == ShaderStage::Domain || desc.stage == ShaderStage::Fragment ||
+        desc.stage == ShaderStage::Compute || desc.stage == ShaderStage::Mesh;
     if((desc.stage==ShaderStage::Compute && !Supports(Feature::Compute)) || !validStage ||
+        (desc.stage==ShaderStage::Mesh && !Supports(Feature::MeshShader)) ||
         !desc.binary || !desc.binarySize || !desc.entryPoint || !*desc.entryPoint) return nullptr;
     auto* shader = CreateShaderNative(desc);
     if(!shader) ReportDiagnostic(DiagnosticSeverity::Error,"CreateShader: native shader creation failed; no substitute shader was selected.");
@@ -472,13 +498,14 @@ PipelineHandle IDevice::CreateComputePipeline(const ComputePipelineDesc& desc)
         (desc.layout.inlineConstantSize && desc.layout.inlineConstantStages!=ShaderStageFlags::Compute))return nullptr;
     for(uint32_t i=0;i<desc.layout.bindingCount;++i)
         if(desc.layout.bindings[i].stages!=ShaderStageFlags::Compute)return nullptr;
+    std::vector<std::shared_ptr<void>> dependencies{shader};
     auto* pipeline=CreateComputePipelineNative(desc);
     if(!pipeline) ReportDiagnostic(DiagnosticSeverity::Error,"CreateComputePipeline: native creation failed; no substitute pipeline was selected.");
     if(pipeline) { ++m_allocationCounters.pipelines.live; ++m_allocationCounters.pipelines.created; }
     Track(pipeline,[](IDevice& device,void* handle){
         device.DestroyPipelineNative(static_cast<PipelineHandle>(handle));
         --device.m_allocationCounters.pipelines.live; ++device.m_allocationCounters.pipelines.destroyed;
-    },{shader});
+    },std::move(dependencies));
     return pipeline;
 }
 
@@ -487,28 +514,59 @@ PipelineHandle IDevice::CreateGraphicsPipeline(const GraphicsPipelineDesc& desc)
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
     auto vertex = Reference(desc.vertexShader), hull = Reference(desc.hullShader);
     auto domain = Reference(desc.domainShader), fragment = Reference(desc.fragmentShader);
-    if(!vertex || (desc.hullShader && !hull) || (desc.domainShader && !domain) ||
-        (desc.fragmentShader && !fragment) || !Supports(desc))
+    if(!Supports(desc))
     {ReportDiagnostic(DiagnosticSeverity::Error,"CreateGraphicsPipeline: unsupported description or device limit. Query Supports(desc) before creation.");return nullptr;}
+    // Complete fallible metadata allocation before acquiring the native object.
+    // Track owns all failures once its shared_ptr construction begins.
+    std::vector<std::shared_ptr<void>> dependencies{vertex, hull, domain, fragment};
+    std::vector<uint32_t> requiredVertexBindings;
+    std::vector<Format> colorFormats;
+    for(uint32_t i=0;i<desc.vertexAttributeCount;++i)
+    {
+        const uint32_t binding=desc.vertexAttributes[i].binding;
+        if(std::find(requiredVertexBindings.begin(),requiredVertexBindings.end(),binding)==requiredVertexBindings.end())
+            requiredVertexBindings.push_back(binding);
+    }
+    for(uint32_t i=0;i<desc.colorAttachmentCount;++i)
+        colorFormats.push_back(desc.colorAttachments[i].format);
     auto* pipeline = CreateGraphicsPipelineNative(desc);
     if(!pipeline) ReportDiagnostic(DiagnosticSeverity::Error,"CreateGraphicsPipeline: native creation failed; no fallback pipeline was substituted.");
     if(pipeline)
     {
-        for(uint32_t i=0;i<desc.vertexAttributeCount;++i)
-        {
-            const uint32_t binding=desc.vertexAttributes[i].binding;
-            if(std::find(pipeline->m_requiredVertexBindings.begin(),pipeline->m_requiredVertexBindings.end(),binding)==pipeline->m_requiredVertexBindings.end())
-                pipeline->m_requiredVertexBindings.push_back(binding);
-        }
-        for(uint32_t i=0;i<desc.colorAttachmentCount;++i)
-            pipeline->m_colorFormats.push_back(desc.colorAttachments[i].format);
+        pipeline->m_requiredVertexBindings = std::move(requiredVertexBindings);
+        pipeline->m_colorFormats = std::move(colorFormats);
         pipeline->m_depthStencilFormat=desc.depthStencil.format;
     }
     if(pipeline) { ++m_allocationCounters.pipelines.live; ++m_allocationCounters.pipelines.created; }
     Track(pipeline, [](IDevice& device, void* handle) {
         device.DestroyPipelineNative(static_cast<PipelineHandle>(handle));
         --device.m_allocationCounters.pipelines.live; ++device.m_allocationCounters.pipelines.destroyed;
-    }, {vertex, hull, domain, fragment});
+    }, std::move(dependencies));
+    return pipeline;
+}
+
+PipelineHandle IDevice::CreateMeshPipeline(const MeshPipelineDesc& desc)
+{
+    std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+    auto mesh = Reference(desc.meshShader), fragment = Reference(desc.fragmentShader);
+    if(!mesh || (desc.fragmentShader && !fragment) || !Supports(desc))
+    {ReportDiagnostic(DiagnosticSeverity::Error,"CreateMeshPipeline: unsupported description or device limit. Query Supports(desc) before creation.");return nullptr;}
+    std::vector<std::shared_ptr<void>> dependencies{mesh, fragment};
+    std::vector<Format> colorFormats;
+    for(uint32_t i=0;i<desc.colorAttachmentCount;++i)
+        colorFormats.push_back(desc.colorAttachments[i].format);
+    auto* pipeline = CreateMeshPipelineNative(desc);
+    if(!pipeline) ReportDiagnostic(DiagnosticSeverity::Error,"CreateMeshPipeline: native creation failed; no fallback pipeline was substituted.");
+    if(pipeline)
+    {
+        pipeline->m_colorFormats = std::move(colorFormats);
+        pipeline->m_depthStencilFormat=desc.depthStencil.format;
+    }
+    if(pipeline) { ++m_allocationCounters.pipelines.live; ++m_allocationCounters.pipelines.created; }
+    Track(pipeline, [](IDevice& device, void* handle) {
+        device.DestroyPipelineNative(static_cast<PipelineHandle>(handle));
+        --device.m_allocationCounters.pipelines.live; ++device.m_allocationCounters.pipelines.destroyed;
+    }, std::move(dependencies));
     return pipeline;
 }
 
@@ -522,18 +580,14 @@ ResourceSetHandle IDevice::CreateResourceSet(const ResourceSetDesc& desc)
     for(uint32_t i = 0; i < desc.bindingCount; ++i)
     {
         const auto& binding = desc.bindings[i];
-        if(binding.buffer)
-        {
-            auto reference = Reference(binding.buffer);
-            if(!reference) return nullptr;
-            dependencies.push_back(std::move(reference));
-        }
-        if(binding.texture)
-        {
-            auto reference = Reference(binding.texture);
-            if(!reference) return nullptr;
-            dependencies.push_back(std::move(reference));
-        }
+        const void* handles[] = {binding.buffer, binding.texture};
+        for(const void* handle : handles)
+            if(handle)
+            {
+                auto reference = Reference(handle);
+                if(!reference) return nullptr;
+                dependencies.push_back(std::move(reference));
+            }
     }
     if(!ValidateResourceSetDesc(desc)) return nullptr;
     const auto& layout = desc.pipeline->GetLayout();
@@ -541,9 +595,8 @@ ResourceSetHandle IDevice::CreateResourceSet(const ResourceSetDesc& desc)
     {
         const auto& binding = desc.bindings[i];
         if(!binding.buffer) continue;
-        const auto found = std::find_if(layout.bindings, layout.bindings + layout.bindingCount,
-            [&](const auto& entry) { return entry.binding == binding.binding; });
-        if(found == layout.bindings + layout.bindingCount) return nullptr;
+        const auto* found = FindLayoutBinding(layout, binding.binding);
+        if(!found) return nullptr;
         const bool uniform = found->type == ResourceBindingType::ConstantBuffer;
         const auto alignment = GetLimit(uniform ? Limit::UniformBufferOffsetAlignment : Limit::StorageBufferOffsetAlignment);
         const auto maximum = GetLimit(uniform ? Limit::UniformBufferBytes : Limit::StorageBufferBytes);
@@ -567,6 +620,7 @@ void IDevice::DestroyPipeline(PipelineHandle handle) { std::lock_guard<std::recu
 void IDevice::DestroyResourceSet(ResourceSetHandle handle) { std::lock_guard<std::recursive_mutex> lock(m_resourceMutex); m_resources.erase(handle); }
 
 bool IDevice::UpdateBuffer(ICommandList& commands, BufferHandle buffer, uint32_t offset, const void* data, uint32_t size)
+try
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
     if(commands.m_owner != this || !commands.Track(buffer) || !data || !size
@@ -583,9 +637,11 @@ bool IDevice::UpdateBuffer(ICommandList& commands, BufferHandle buffer, uint32_t
     });
     return true;
 }
+catch(...) { commands.m_recordingFailed=true; throw; }
 
 bool IDevice::UpdateTexture(ICommandList& commands, TextureHandle texture, uint32_t mip, uint32_t layer,
     const void* data, uint32_t size, uint32_t rowPitch, uint32_t slicePitch)
+try
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
     if(commands.m_owner != this || !commands.Track(texture) || !data || !size
@@ -609,6 +665,7 @@ bool IDevice::UpdateTexture(ICommandList& commands, TextureHandle texture, uint3
     });
     return true;
 }
+catch(...) { commands.m_recordingFailed=true; throw; }
 
 bool IDevice::ReadTexture(TextureHandle texture, TextureReadback& result)
 {

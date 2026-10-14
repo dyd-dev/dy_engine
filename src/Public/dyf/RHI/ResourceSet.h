@@ -19,6 +19,8 @@ namespace dyf::RHI
 	class ResourceSet
 	{
 	public:
+		ResourceSet(const ResourceSet&) = delete;
+		ResourceSet& operator=(const ResourceSet&) = delete;
 		[[nodiscard]] PipelineHandle GetPipeline() const { return m_pipeline; }
 		[[nodiscard]] const ResourceBinding* GetBindings() const { return m_bindings.data(); }
 		[[nodiscard]] uint32_t GetBindingCount() const { return static_cast<uint32_t>(m_bindings.size()); }

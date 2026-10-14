@@ -36,8 +36,8 @@ namespace dyf::Backends
         void SetBackBuffer(void* texture, const RHI::TextureDesc& desc);
 
         struct Impl;
-        Impl* m_impl = nullptr;
 		std::vector<RHI::ResourceState> m_states;
+        Impl* m_impl = nullptr;
     };
 
 }

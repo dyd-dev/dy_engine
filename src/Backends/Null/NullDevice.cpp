@@ -12,10 +12,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <memory>
-#include <set>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -106,32 +106,7 @@ namespace dyf::Backends
 				m_states[static_cast<size_t>(arrayLayer) * GetDesc().mipLevels + mipLevel] = state;
 			}
 
-			void Write(
-				uint32_t mipLevel,
-				uint32_t arrayLayer,
-				uint32_t rowPitch,
-				uint32_t slicePitch,
-				const std::vector<uint8_t>& data)
-			{
-				const size_t index = static_cast<size_t>(arrayLayer) * GetDesc().mipLevels + mipLevel;
-				if(m_subresources.size() <
-					static_cast<size_t>(GetDesc().depthOrArraySize) * GetDesc().mipLevels)
-				{
-					m_subresources.resize(
-						static_cast<size_t>(GetDesc().depthOrArraySize) * GetDesc().mipLevels);
-				}
-				m_subresources[index] = {rowPitch, slicePitch, data};
-			}
-
 		private:
-			struct SubresourceData
-			{
-				uint32_t rowPitch = 0;
-				uint32_t slicePitch = 0;
-				std::vector<uint8_t> data;
-			};
-
-			std::vector<SubresourceData> m_subresources;
 			std::vector<RHI::ResourceState> m_states;
 			bool m_swapchainImage = false;
 		};
@@ -185,6 +160,19 @@ namespace dyf::Backends
 				m_desc.vertexBuffers = m_vertexBuffers.empty() ? nullptr : m_vertexBuffers.data();
 				m_desc.vertexAttributes = m_vertexAttributes.empty() ? nullptr : m_vertexAttributes.data();
 				m_desc.colorAttachments = m_colorAttachments.empty() ? nullptr : m_colorAttachments.data();
+				m_desc.layout = GetLayout();
+			}
+
+			explicit NullPipelineState(const RHI::MeshPipelineDesc& desc)
+				: RHI::Pipeline(desc.layout, false, true)
+			{
+				if(desc.colorAttachmentCount != 0)
+					m_colorAttachments.assign(
+						desc.colorAttachments, desc.colorAttachments + desc.colorAttachmentCount);
+				m_desc.raster = desc.raster;
+				m_desc.depthStencil = desc.depthStencil;
+				m_desc.colorAttachments = m_colorAttachments.empty() ? nullptr : m_colorAttachments.data();
+				m_desc.colorAttachmentCount = desc.colorAttachmentCount;
 				m_desc.layout = GetLayout();
 			}
 
@@ -315,13 +303,8 @@ namespace dyf::Backends
 					return;
 				}
 				m_pipeline = nullptr;
-				m_resourceSet = nullptr;
 				m_vertexBindings.clear();
 				m_indexBuffer = nullptr;
-				m_indexFormat = RHI::Format::Unknown;
-				m_indexOffset = 0;
-				m_inlineConstants.clear();
-				m_inlineConstantCoverage.clear();
 				m_viewportSet = false;
 				m_scissorSet = false;
 				m_stencilReferenceSet = false;
@@ -331,12 +314,9 @@ namespace dyf::Backends
 				{
 					const RHI::ColorAttachment& attachment = desc.colorAttachments[index];
 					auto* texture = dynamic_cast<NullTexture*>(attachment.texture);
-					bool clearValueValid = true;
-					if(attachment.loadOp == RHI::LoadOp::Clear)
-					{
-						for(float component : attachment.clearColor)
-							clearValueValid = clearValueValid && std::isfinite(component);
-					}
+					const bool clearValueValid = attachment.loadOp != RHI::LoadOp::Clear ||
+						std::all_of(std::begin(attachment.clearColor), std::end(attachment.clearColor),
+							[](float component) { return std::isfinite(component); });
 					if(texture == nullptr || !RHI::HasUsage(texture->GetDesc().usage, RHI::TextureUsage::RenderTarget) ||
 						attachment.mipLevel >= texture->GetDesc().mipLevels ||
 						attachment.arrayLayer >= texture->GetDesc().depthOrArraySize ||
@@ -355,8 +335,6 @@ namespace dyf::Backends
 
 				m_depthFormat = RHI::Format::Unknown;
 				m_depthTexture = nullptr;
-				m_depthMipLevel = 0;
-				m_depthArrayLayer = 0;
 				m_stencilConfigured = false;
 				if(desc.depthStencilAttachment != nullptr)
 				{
@@ -366,7 +344,7 @@ namespace dyf::Backends
 						attachment.mipLevel < texture->GetDesc().mipLevels &&
 						attachment.arrayLayer < texture->GetDesc().depthOrArraySize;
 					const bool hasStencil = texture != nullptr &&
-						texture->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT;
+						RHI::HasStencil(texture->GetDesc().format);
 					const bool declaredStateValid =
 						attachment.state == RHI::ResourceState::DepthRead ||
 						attachment.state == RHI::ResourceState::DepthWrite;
@@ -439,7 +417,7 @@ namespace dyf::Backends
 				m_inlineConstantCoverage.assign(
 					pipeline->GetLayout().inlineConstantSize, 0);
 				if((pipeline->GetDesc().depthStencil.depthWriteEnabled ||
-					pipeline->GetDesc().depthStencil.stencilEnabled) &&
+					RHI::MayWriteStencil(pipeline->GetDesc().depthStencil)) &&
 					m_depthTexture != nullptr &&
 					!RequireTextureState(
 						m_depthTexture,
@@ -523,19 +501,13 @@ namespace dyf::Backends
 				auto* nullBuffer = dynamic_cast<NullBuffer*>(buffer);
 				const RHI::GraphicsPipelineDesc* pipelineDesc = m_pipeline == nullptr
 					? nullptr : &m_pipeline->GetDesc();
-				const RHI::VertexBufferLayout* layout = nullptr;
-				if(pipelineDesc != nullptr)
-				{
-					for(uint32_t index = 0; index < pipelineDesc->vertexBufferCount; ++index)
-					{
-						if(pipelineDesc->vertexBuffers[index].binding == binding)
-						{
-							layout = &pipelineDesc->vertexBuffers[index];
-							break;
-						}
-					}
-				}
-				if(m_closed || !m_rendering || pipelineDesc == nullptr || layout == nullptr ||
+				const bool hasLayout = pipelineDesc != nullptr &&
+					pipelineDesc->vertexBufferCount != 0 &&
+					std::any_of(
+						pipelineDesc->vertexBuffers,
+						pipelineDesc->vertexBuffers + pipelineDesc->vertexBufferCount,
+						[binding](const RHI::VertexBufferLayout& candidate) { return candidate.binding == binding; });
+				if(m_closed || !m_rendering || pipelineDesc == nullptr || !hasLayout ||
 					nullBuffer == nullptr || offset >= nullBuffer->GetDesc().size ||
 					!RHI::HasUsage(nullBuffer->GetDesc().usage, RHI::BufferUsage::Vertex) ||
 					!RequireBufferState(
@@ -657,10 +629,16 @@ namespace dyf::Backends
 					static_cast<uint64_t>(indexCount) * indexSize;
 				if(indexCount == 0 || instanceCount == 0 ||
 					!ValidateDraw(true, 0, instanceCount, 0, firstInstance) ||
-					m_indexBuffer == nullptr || end > m_indexBuffer->GetDesc().size)
+					end > m_indexBuffer->GetDesc().size)
 				{
 					Invalidate();
 				}
+			}
+
+			void DispatchMeshNative(uint32_t x, uint32_t y, uint32_t z) override
+			{
+				if(!x || !y || !z || !m_pipeline || !m_pipeline->IsMesh() ||
+					!ValidateDraw(false, 0, 1, 0, 0)) Invalidate();
 			}
 
 			bool CloseNative() override
@@ -730,7 +708,6 @@ namespace dyf::Backends
 				operation.data.resize(dataSize);
 				std::memcpy(operation.data.data(), data, operation.data.size());
 				m_operations.push_back(std::move(operation));
-				TrackSwapchainImage(texture);
 				return true;
 			}
 
@@ -773,9 +750,7 @@ namespace dyf::Backends
 						const auto found = state.buffers.find(operation.buffer);
 						const RHI::ResourceState current = found == state.buffers.end()
 							? operation.buffer->GetState() : found->second;
-						if(current != operation.before &&
-							(operation.after == RHI::ResourceState::Undefined ||
-								current != operation.after))
+						if(current != operation.before)
 							return false;
 						break;
 					}
@@ -787,9 +762,7 @@ namespace dyf::Backends
 						const RHI::ResourceState current = found == state.textures.end()
 							? operation.texture->GetState(
 								operation.mipLevel, operation.arrayLayer) : found->second;
-						if(current != operation.before &&
-							(operation.after == RHI::ResourceState::Undefined ||
-								current != operation.after))
+						if(current != operation.before)
 							return false;
 						break;
 					}
@@ -832,17 +805,11 @@ namespace dyf::Backends
 						break;
 					case OperationKind::BufferRequirement:
 					case OperationKind::TextureRequirement:
+					case OperationKind::TextureWrite:
+						// Texture uploads are validated; Null has no pixel readback.
 						break;
 					case OperationKind::BufferWrite:
 						operation.buffer->Write(operation.offset, operation.data);
-						break;
-					case OperationKind::TextureWrite:
-						operation.texture->Write(
-							operation.mipLevel,
-							operation.arrayLayer,
-							operation.rowPitch,
-							operation.slicePitch,
-							operation.data);
 						break;
 					}
 				}
@@ -884,13 +851,11 @@ namespace dyf::Backends
 
 			[[nodiscard]] bool RequireBufferState(
 				NullBuffer* buffer,
-				RHI::ResourceState first,
-				RHI::ResourceState second = RHI::ResourceState::Undefined)
+				RHI::ResourceState first)
 			{
 				const auto found = m_bufferStates.find(buffer);
 				if(found != m_bufferStates.end() &&
-					found->second != first &&
-					(second == RHI::ResourceState::Undefined || found->second != second))
+					found->second != first)
 				{
 					return false;
 				}
@@ -898,7 +863,6 @@ namespace dyf::Backends
 				operation.kind = OperationKind::BufferRequirement;
 				operation.buffer = buffer;
 				operation.before = first;
-				operation.after = second;
 				m_operations.push_back(std::move(operation));
 				return true;
 			}
@@ -907,14 +871,12 @@ namespace dyf::Backends
 				NullTexture* texture,
 				uint32_t mipLevel,
 				uint32_t arrayLayer,
-				RHI::ResourceState first,
-				RHI::ResourceState second = RHI::ResourceState::Undefined)
+				RHI::ResourceState first)
 			{
 				const auto key = TextureKey(texture, mipLevel, arrayLayer);
 				const auto found = m_textureStates.find(key);
 				if(found != m_textureStates.end() &&
-					found->second != first &&
-					(second == RHI::ResourceState::Undefined || found->second != second))
+					found->second != first)
 				{
 					return false;
 				}
@@ -924,7 +886,6 @@ namespace dyf::Backends
 				operation.mipLevel = mipLevel;
 				operation.arrayLayer = arrayLayer;
 				operation.before = first;
-				operation.after = second;
 				m_operations.push_back(std::move(operation));
 				return true;
 			}
@@ -1004,20 +965,16 @@ namespace dyf::Backends
 						first = startVertex;
 						count = vertexCount;
 					}
-					const uint64_t requiredEnd = static_cast<uint64_t>(found->second.offset) +
-						(first + count) * layout.stride;
-					if(requiredEnd > found->second.buffer->GetDesc().size) return false;
+					const uint64_t size = found->second.buffer->GetDesc().size;
+					if(layout.stride == 0 || found->second.offset > size ||
+						first + count > (size - found->second.offset) / layout.stride) return false;
 				}
-				bool resourceSetRequired = false;
-				for(uint32_t index = 0; index < desc.layout.bindingCount; ++index)
-				{
-					if(desc.layout.bindings[index].type !=
-						RHI::ResourceBindingType::StaticSampler)
-					{
-						resourceSetRequired = true;
-						break;
-					}
-				}
+				const bool resourceSetRequired = desc.layout.bindingCount != 0 &&
+					std::any_of(desc.layout.bindings, desc.layout.bindings + desc.layout.bindingCount,
+						[](const RHI::ResourceBindingLayout& binding)
+						{
+							return binding.type != RHI::ResourceBindingType::StaticSampler;
+						});
 				if(resourceSetRequired && m_resourceSet == nullptr) return false;
 				if(desc.layout.inlineConstantSize != 0 &&
 					(m_inlineConstantCoverage.size() != desc.layout.inlineConstantSize ||
@@ -1060,7 +1017,6 @@ namespace dyf::Backends
 
 	struct NullDevice::Impl
 	{
-		const void* windowHandle = nullptr;
 		std::vector<std::unique_ptr<NullTexture>> backBuffers;
 		std::vector<uint64_t> imageCompletionValues;
 		std::vector<uint64_t> frames;
@@ -1072,7 +1028,6 @@ namespace dyf::Backends
 		std::vector<std::unique_ptr<NullResourceSet>> liveResourceSets;
 		uint64_t nextCompletionValue = 1;
 		uint64_t completedValue = 0;
-		uint64_t lastSubmittedValue = 0;
 		uint32_t nextFrameIndex = 0;
 		uint32_t activeFrameIndex = 0;
 		uint32_t activeImageIndex = 0;
@@ -1092,16 +1047,11 @@ namespace dyf::Backends
 	{
         ReleaseResources();
 		m_impl->activeCommandLists.clear();
-		m_impl->liveResourceSets.clear();
-		m_impl->livePipelines.clear();
-		m_impl->liveShaders.clear();
-		m_impl->liveTextures.clear();
-		m_impl->liveBuffers.clear();
 		delete m_impl;
 	}
 
 
-uint64_t NullDevice::GetLastSubmissionNative() const {return m_impl->lastSubmittedValue;}
+uint64_t NullDevice::GetLastSubmissionNative() const {return m_impl->completedValue;}
 uint64_t NullDevice::GetCompletedSubmissionNative() {return m_impl->completedValue;}
 void NullDevice::DiscardCommandListNative(RHI::ICommandList* list) {auto& active=m_impl->activeCommandLists; active.erase(std::remove_if(active.begin(),active.end(),[list](const auto& value){return value.get()==list;}),active.end());}
 
@@ -1114,7 +1064,9 @@ bool NullDevice::SupportsNative(RHI::Feature feature) const
     case RHI::Feature::FractionalDepthBias:
     case RHI::Feature::Wireframe:
     case RHI::Feature::DepthBiasClamp:
-    case RHI::Feature::Tessellation: return true;
+    case RHI::Feature::Tessellation:
+    case RHI::Feature::MeshShader: return true;
+    case RHI::Feature::TaskShader: return false;
     default: return false;
     }
 }
@@ -1140,10 +1092,14 @@ bool NullDevice::SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc&) co
 {return true;}
 bool NullDevice::SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc&) const
 {
+    return m_impl->initialized;
+}
+bool NullDevice::SupportsMeshPipelineNative(const RHI::MeshPipelineDesc&) const
+{
     return m_impl && m_impl->initialized;
 }
 bool NullDevice::IsLostNative() const {return false;}
-bool NullDevice::WaitIdleNative() { return m_impl && m_impl->initialized; }
+bool NullDevice::WaitIdleNative() { return m_impl->initialized; }
 void NullDevice::DestroySwapchainNative()
 {
     m_impl->backBuffers.clear();
@@ -1153,14 +1109,13 @@ void NullDevice::DestroySwapchainNative()
 
     bool NullDevice::CreateSwapchainNative(const RHI::SwapchainDesc& desc)
 	{
-		if(m_impl == nullptr || !m_impl->initialized || m_impl->swapchainReady ||
+		if(!m_impl->initialized || m_impl->swapchainReady ||
 			desc.minimumImageCount == 0 || desc.initialWidth == 0 || desc.initialHeight == 0)
 		{
 			return false;
 		}
 
 		RHI::Format format = desc.format;
-		if(format == RHI::Format::Unknown) return false;
 		switch(desc.presentMode)
 		{
 		case RHI::PresentMode::Immediate:
@@ -1184,8 +1139,7 @@ void NullDevice::DestroySwapchainNative()
 		backBuffers.reserve(desc.minimumImageCount);
 		for(uint32_t index = 0; index < desc.minimumImageCount; ++index)
 		{
-			auto backBuffer = std::make_unique<NullTexture>(backBufferDesc, true);
-			backBuffers.push_back(std::move(backBuffer));
+			backBuffers.push_back(std::make_unique<NullTexture>(backBufferDesc, true));
 		}
 
 		m_impl->backBuffers = std::move(backBuffers);
@@ -1197,7 +1151,7 @@ void NullDevice::DestroySwapchainNative()
 
 	bool NullDevice::BeginFrameNative()
 	{
-		if(m_impl == nullptr || !m_impl->swapchainReady ||
+		if(!m_impl->swapchainReady ||
 			m_impl->frames.empty() || m_impl->backBuffers.empty())
 		{
 			return false;
@@ -1224,7 +1178,7 @@ void NullDevice::DestroySwapchainNative()
 
 	RHI::ICommandList* NullDevice::AcquireCommandListNative()
 	{
-		if(m_impl == nullptr || !m_impl->initialized) return nullptr;
+		if(!m_impl->initialized) return nullptr;
 		auto commandList = std::make_unique<NullCommandList>();
 		NullCommandList* result = commandList.get();
 		m_impl->activeCommandLists.push_back(std::move(commandList));
@@ -1233,7 +1187,7 @@ void NullDevice::DestroySwapchainNative()
 
 	bool NullDevice::SubmitNative(RHI::ICommandList** cmdLists, uint32_t count)
 	{
-		if(m_impl == nullptr || cmdLists == nullptr || count == 0)
+		if(cmdLists == nullptr || count == 0)
 			return false;
 
 		NullTexture* activeBackBuffer = nullptr;
@@ -1290,7 +1244,6 @@ void NullDevice::DestroySwapchainNative()
 		for(NullCommandList* commandList : submitted) commandList->Apply();
 		const uint64_t completionValue = m_impl->nextCompletionValue++;
 		m_impl->completedValue = completionValue;
-		m_impl->lastSubmittedValue = completionValue;
 		if(m_impl->frameReady)
 			m_impl->frames[m_impl->activeFrameIndex] = completionValue;
 		if(frameSubmission)
@@ -1300,7 +1253,7 @@ void NullDevice::DestroySwapchainNative()
 
 	bool NullDevice::PresentNative()
 	{
-		if(m_impl == nullptr || !m_impl->frameReady) return false;
+		if(!m_impl->frameReady) return false;
         // 제출 횟수와 관계없이 Present가 프레임을 마감한다. 최종 상태 검사는 RHI가 담당한다.
 		m_impl->nextFrameIndex = (m_impl->activeFrameIndex + 1) %
 			static_cast<uint32_t>(m_impl->frames.size());
@@ -1312,10 +1265,8 @@ void NullDevice::DestroySwapchainNative()
 
 	RHI::BufferHandle NullDevice::CreateBufferNative(const RHI::BufferDesc& desc)
 	{
-		auto buffer = std::make_unique<NullBuffer>(desc);
-		NullBuffer* result = buffer.get();
-		m_impl->liveBuffers.push_back(std::move(buffer));
-		return result;
+		return m_impl->liveBuffers.emplace_back(
+			std::make_unique<NullBuffer>(desc)).get();
 	}
 
 	RHI::TextureHandle NullDevice::CreateTextureNative(const RHI::TextureDesc& desc)
@@ -1325,22 +1276,25 @@ void NullDevice::DestroySwapchainNative()
 		{
 			return nullptr;
 		}
-		auto texture = std::make_unique<NullTexture>(desc);
-		NullTexture* result = texture.get();
-		m_impl->liveTextures.push_back(std::move(texture));
-		return result;
+		return m_impl->liveTextures.emplace_back(
+			std::make_unique<NullTexture>(desc)).get();
 	}
 
 	RHI::ShaderHandle NullDevice::CreateShaderNative(const RHI::ShaderDesc& desc)
 	{
-		auto shader = std::make_unique<NullShader>(desc);
-		NullShader* result = shader.get();
-		m_impl->liveShaders.push_back(std::move(shader));
-		return result;
+		return m_impl->liveShaders.emplace_back(
+			std::make_unique<NullShader>(desc)).get();
 	}
 
 	RHI::PipelineHandle NullDevice::CreateGraphicsPipelineNative(
 		const RHI::GraphicsPipelineDesc& desc)
+	{
+		return m_impl->livePipelines.emplace_back(
+			std::make_unique<NullPipelineState>(desc)).get();
+	}
+
+	RHI::PipelineHandle NullDevice::CreateMeshPipelineNative(
+		const RHI::MeshPipelineDesc& desc)
 	{
 		auto pipeline = std::make_unique<NullPipelineState>(desc);
 		NullPipelineState* result = pipeline.get();
@@ -1350,15 +1304,12 @@ void NullDevice::DestroySwapchainNative()
 
 	RHI::ResourceSetHandle NullDevice::CreateResourceSetNative(const RHI::ResourceSetDesc& desc)
 	{
-		auto resourceSet = std::make_unique<NullResourceSet>(desc);
-		NullResourceSet* result = resourceSet.get();
-		m_impl->liveResourceSets.push_back(std::move(resourceSet));
-		return result;
+		return m_impl->liveResourceSets.emplace_back(
+			std::make_unique<NullResourceSet>(desc)).get();
 	}
 
 	void NullDevice::DestroyBufferNative(RHI::BufferHandle buffer)
 	{
-        if(!m_impl) return;
         auto& objects = m_impl->liveBuffers;
         objects.erase(std::remove_if(objects.begin(), objects.end(),
             [buffer](const auto& object) { return object.get() == buffer; }), objects.end());
@@ -1366,7 +1317,6 @@ void NullDevice::DestroySwapchainNative()
 
 	void NullDevice::DestroyTextureNative(RHI::TextureHandle texture)
 	{
-        if(!m_impl) return;
         auto& objects = m_impl->liveTextures;
         objects.erase(std::remove_if(objects.begin(), objects.end(),
             [texture](const auto& object) { return object.get() == texture; }), objects.end());
@@ -1374,7 +1324,6 @@ void NullDevice::DestroySwapchainNative()
 
 	void NullDevice::DestroyShaderNative(RHI::ShaderHandle shader)
 	{
-        if(!m_impl) return;
         auto& objects = m_impl->liveShaders;
         objects.erase(std::remove_if(objects.begin(), objects.end(),
             [shader](const auto& object) { return object.get() == shader; }), objects.end());
@@ -1382,7 +1331,6 @@ void NullDevice::DestroySwapchainNative()
 
 	void NullDevice::DestroyPipelineNative(RHI::PipelineHandle pipeline)
 	{
-        if(!m_impl) return;
         auto& objects = m_impl->livePipelines;
         objects.erase(std::remove_if(objects.begin(), objects.end(),
             [pipeline](const auto& object) { return object.get() == pipeline; }), objects.end());
@@ -1390,7 +1338,6 @@ void NullDevice::DestroySwapchainNative()
 
 	void NullDevice::DestroyResourceSetNative(RHI::ResourceSetHandle resourceSet)
 	{
-        if(!m_impl) return;
         auto& objects = m_impl->liveResourceSets;
         objects.erase(std::remove_if(objects.begin(), objects.end(),
             [resourceSet](const auto& object) { return object.get() == resourceSet; }), objects.end());
@@ -1403,7 +1350,6 @@ void NullDevice::DestroySwapchainNative()
 		const void* data,
 		uint32_t size)
 	{
-		if(m_impl == nullptr) return false;
 		const auto ownedCommandList = std::find_if(
 			m_impl->activeCommandLists.begin(), m_impl->activeCommandLists.end(),
 			[requested = &commandList](const std::unique_ptr<NullCommandList>& candidate)
@@ -1432,7 +1378,6 @@ void NullDevice::DestroySwapchainNative()
 		uint32_t rowPitch,
 		uint32_t slicePitch)
 	{
-		if(m_impl == nullptr) return false;
 		const auto ownedCommandList = std::find_if(
 			m_impl->activeCommandLists.begin(), m_impl->activeCommandLists.end(),
 			[requested = &commandList](const std::unique_ptr<NullCommandList>& candidate)
@@ -1459,7 +1404,7 @@ void NullDevice::DestroySwapchainNative()
 
 	RHI::TextureHandle NullDevice::GetBackBufferNative()
 	{
-		if(m_impl == nullptr || !m_impl->swapchainReady || m_impl->backBuffers.empty())
+		if(!m_impl->swapchainReady || m_impl->backBuffers.empty())
 			return nullptr;
 		const uint32_t imageIndex = m_impl->frameReady
 			? m_impl->activeImageIndex : m_impl->nextImageIndex;
@@ -1467,11 +1412,10 @@ void NullDevice::DestroySwapchainNative()
 			? m_impl->backBuffers[imageIndex].get() : nullptr;
 	}
 
-	int NullDevice::Initialize(const void* windowHandle, const RHI::DeviceDesc& desc)
+	int NullDevice::Initialize(const void*, const RHI::DeviceDesc& desc)
 	{
-		if(m_impl == nullptr || desc.maxFramesInFlight == 0 || desc.adapterIndex!=0)
+		if(desc.maxFramesInFlight == 0 || desc.adapterIndex!=0)
 			return -1;
-		m_impl->windowHandle = windowHandle;
 		m_impl->frames.resize(desc.maxFramesInFlight);
 		m_impl->initialized = true;
 		return 0;

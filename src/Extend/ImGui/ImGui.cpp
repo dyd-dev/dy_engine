@@ -271,13 +271,17 @@ bool Gui::Record(RHI::ICommandList& commands, RHI::TextureHandle target)
         }
         indices.insert(indices.end(), list->IdxBuffer.begin(), list->IdxBuffer.end());
     }
-    auto* vb = state.device.CreateBuffer({static_cast<uint32_t>(vertexBytes), sizeof(Vertex), BufferUsage::Vertex, ResourceState::CopyDestination});
-    auto* ib = state.device.CreateBuffer({static_cast<uint32_t>(indexBytes), sizeof(ImDrawIdx), BufferUsage::Index, ResourceState::CopyDestination});
-    const auto release = [&] { state.device.DestroyBuffer(vb); state.device.DestroyBuffer(ib); };
-    if(!vb || !ib) { release(); return Fail("Geometry buffer creation failed."); }
+    const auto destroyBuffer = [&state](Buffer* buffer) { state.device.DestroyBuffer(buffer); };
+    std::unique_ptr<Buffer, decltype(destroyBuffer)> vertexBuffer(state.device.CreateBuffer(
+        {static_cast<uint32_t>(vertexBytes), sizeof(Vertex), BufferUsage::Vertex, ResourceState::CopyDestination}), destroyBuffer);
+    std::unique_ptr<Buffer, decltype(destroyBuffer)> indexBuffer(state.device.CreateBuffer(
+        {static_cast<uint32_t>(indexBytes), sizeof(ImDrawIdx), BufferUsage::Index, ResourceState::CopyDestination}), destroyBuffer);
+    auto* vb = vertexBuffer.get();
+    auto* ib = indexBuffer.get();
+    if(!vb || !ib) return Fail("Geometry buffer creation failed.");
     if(!state.device.UpdateBuffer(commands, vb, 0, vertices.data(), static_cast<uint32_t>(vertexBytes)) ||
         !state.device.UpdateBuffer(commands, ib, 0, indices.data(), static_cast<uint32_t>(indexBytes)))
-    { release(); return Fail("Geometry upload recording failed."); }
+        return Fail("Geometry upload recording failed.");
     const ResourceBarrierDesc barriers[] = {{vb, nullptr, ResourceState::CopyDestination, ResourceState::VertexBuffer, {}},
         {ib, nullptr, ResourceState::CopyDestination, ResourceState::IndexBuffer, {}},
         {nullptr, target, ResourceState::Present, ResourceState::RenderTarget, {}}};
@@ -321,7 +325,6 @@ bool Gui::Record(RHI::ICommandList& commands, RHI::TextureHandle target)
     commands.EndRendering();
     const ResourceBarrierDesc after{nullptr, target, ResourceState::RenderTarget, ResourceState::Present, {}};
     commands.ResourceBarrier(&after, 1);
-    release();
     state.stats.vertices = static_cast<uint32_t>(data->TotalVtxCount);
     state.stats.indices = static_cast<uint32_t>(data->TotalIdxCount);
     state.stats.uploadBytes = vertexBytes + indexBytes;
@@ -340,7 +343,8 @@ uint64_t Gui::RegisterTexture(RHI::TextureHandle texture)
     auto* set = impl->pipeline ? impl->CreateTextureSet(texture) : nullptr;
     if(impl->pipeline && !set) { Fail("Texture registration binding failed."); return 0; }
     const uint64_t id = nextTextureId++;
-    impl->textures.emplace(id, Impl::RegisteredTexture{texture, set});
+    try { impl->textures.emplace(id, Impl::RegisteredTexture{texture, set}); }
+    catch(...) { impl->device.DestroyResourceSet(set); throw; }
     return id;
 }
 

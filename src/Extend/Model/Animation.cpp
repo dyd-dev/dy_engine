@@ -10,9 +10,21 @@ namespace dyf
 		template<typename Key>
 		bool HasValidTimes(const std::vector<Key>& keys)
 		{
-			for(size_t index = 1; index < keys.size(); ++index)
-				if(keys[index].time < keys[index - 1].time) return false;
+			for(size_t index = 0; index < keys.size(); ++index)
+				if(!std::isfinite(keys[index].time)
+					|| (index && keys[index].time < keys[index - 1].time)) return false;
 			return true;
+		}
+
+		bool IsFinite(const Math::float3& value)
+		{
+			return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+		}
+
+		bool IsFinite(const Math::quat& value)
+		{
+			return std::isfinite(value.x) && std::isfinite(value.y)
+				&& std::isfinite(value.z) && std::isfinite(value.w);
 		}
 
 		template<typename Key>
@@ -55,11 +67,11 @@ namespace dyf
 			const float h10 = t3 - 2.0f * t2 + t;
 			const float h01 = -2.0f * t3 + 3.0f * t2;
 			const float h11 = t3 - t2;
-			return Math::Normalize(Math::quat(
+			return Math::quat(
 				from.x * h00 + fromTangent.x * h10 * duration + to.x * h01 + toTangent.x * h11 * duration,
 				from.y * h00 + fromTangent.y * h10 * duration + to.y * h01 + toTangent.y * h11 * duration,
 				from.z * h00 + fromTangent.z * h10 * duration + to.z * h01 + toTangent.z * h11 * duration,
-				from.w * h00 + fromTangent.w * h10 * duration + to.w * h01 + toTangent.w * h11 * duration));
+				from.w * h00 + fromTangent.w * h10 * duration + to.w * h01 + toTangent.w * h11 * duration);
 		}
 
 		float Hermite(float from, float fromTangent, float to, float toTangent, float t, float duration)
@@ -82,6 +94,9 @@ namespace dyf
 		{
 			if(keys.empty()) return true;
 			if(!HasValidTimes(keys)) return false;
+			for(const Vec3Key& key : keys)
+				if(!IsFinite(key.value) || (interpolation == AnimationInterpolation::CubicSpline
+					&& (!IsFinite(key.inTangent) || !IsFinite(key.outTangent)))) return false;
 			if(keys.size() == 1 || time <= keys.front().time)
 			{
 				outValue = keys.front().value;
@@ -103,6 +118,7 @@ namespace dyf
 			}
 
 			const float duration = right.time - left.time;
+			if(!std::isfinite(duration)) return false;
 			if(duration <= 0.0f)
 			{
 				outValue = right.value;
@@ -113,7 +129,7 @@ namespace dyf
 				outValue = Hermite(left.value, left.outTangent, right.value, right.inTangent, alpha, duration);
 			else
 				outValue = left.value + (right.value - left.value) * alpha;
-			return true;
+			return IsFinite(outValue);
 		}
 
 		bool SampleQuatKeys(
@@ -124,6 +140,9 @@ namespace dyf
 		{
 			if(keys.empty()) return true;
 			if(!HasValidTimes(keys)) return false;
+			for(const QuatKey& key : keys)
+				if(!IsFinite(key.value) || (interpolation == AnimationInterpolation::CubicSpline
+					&& (!IsFinite(key.inTangent) || !IsFinite(key.outTangent)))) return false;
 			if(keys.size() == 1 || time <= keys.front().time)
 			{
 				outValue = Math::Normalize(keys.front().value);
@@ -145,6 +164,7 @@ namespace dyf
 			}
 
 			const float duration = right.time - left.time;
+			if(!std::isfinite(duration)) return false;
 			if(duration <= 0.0f)
 			{
 				outValue = Math::Normalize(right.value);
@@ -155,7 +175,9 @@ namespace dyf
 				outValue = Hermite(left.value, left.outTangent, right.value, right.inTangent, alpha, duration);
 			else
 				outValue = Math::Slerp(Math::Normalize(left.value), Math::Normalize(right.value), alpha);
-			return true;
+			if(!IsFinite(outValue)) return false;
+			outValue = Math::Normalize(outValue);
+			return IsFinite(outValue);
 		}
 
 		bool SampleFloatKeys(

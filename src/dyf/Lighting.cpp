@@ -32,14 +32,13 @@ namespace
 		const Math::float3 forward = Math::NormalizeOr(Math::float3(-camera.view.m[2], -camera.view.m[6], -camera.view.m[10]), Math::float3(0.0f, 1.0f, 0.0f));
 		const Math::float3 right = Math::NormalizeOr(Math::Cross(forward, Math::float3(camera.view.m[1], camera.view.m[5], camera.view.m[9])), Math::float3(1.0f, 0.0f, 0.0f));
 		const Math::float3 up = Math::NormalizeOr(Math::Cross(right, forward), Math::float3(0.0f, 0.0f, 1.0f));
-		const float fovYRadians = 2 * std::atan(1 / camera.projection.m[5]);
-		const float tangent = std::tan(std::clamp(fovYRadians * 0.5f, 0.05f, 1.5f));
-		const float safeAspect = std::max(camera.projection.m[5] / camera.projection.m[0], 0.0001f);
+		const float tangentY = 1 / camera.projection.m[5];
+		const float tangentX = 1 / camera.projection.m[0];
 		for(uint32_t planeIndex = 0u; planeIndex < 2u; ++planeIndex)
 		{
 			const float distance = planeIndex == 0u ? sliceNear : sliceFar;
-			const float halfHeight = tangent * distance;
-			const float halfWidth = halfHeight * safeAspect;
+			const float halfHeight = tangentY * distance;
+			const float halfWidth = tangentX * distance;
 			const Math::float3 center = camera.position + forward * distance;
 			bounds.Include(center + right * halfWidth + up * halfHeight);
 			bounds.Include(center + right * halfWidth - up * halfHeight);
@@ -60,27 +59,18 @@ namespace
 		float farPlane = 20.0f;
 		const auto& boundsMin = bounds.min;
 		const auto& boundsMax = bounds.max;
+		const Math::float3 normalizedDirection = Math::NormalizeOr(lightDirection, {0,0,-1});
 		if(bounds.valid && !(boundsMin.x > boundsMax.x || boundsMin.y > boundsMax.y || boundsMin.z > boundsMax.z))
 		{
-			const Math::float3 center(
-				(boundsMin.x + boundsMax.x) * 0.5f,
-				(boundsMin.y + boundsMax.y) * 0.5f,
-				(boundsMin.z + boundsMax.z) * 0.5f);
-			const Math::float3 halfExtent(
-				(boundsMax.x - boundsMin.x) * 0.5f,
-				(boundsMax.y - boundsMin.y) * 0.5f,
-				(boundsMax.z - boundsMin.z) * 0.5f);
+			const Math::float3 center = bounds.Center();
+			const Math::float3 halfExtent = bounds.Extent();
 			const float radius = std::max(Length(halfExtent), 0.1f);
 
-			const Math::float3 lightForward = Normalize(lightDirection);
 			sceneCenter = center;
 			lightDistance = std::max(radius + 0.25f + 0.1f, 0.5f);
 
-			const Math::float3 lightOrigin(
-				sceneCenter.x + lightForward.x * lightDistance,
-				sceneCenter.y + lightForward.y * lightDistance,
-				sceneCenter.z + lightForward.z * lightDistance);
-			const Math::float4x4 view = Math::LookAtRH(lightOrigin, sceneCenter, SelectUpVector(lightForward));
+			const Math::float3 lightOrigin = sceneCenter + normalizedDirection * lightDistance;
+			const Math::float4x4 view = Math::LookAtRH(lightOrigin, sceneCenter, SelectUpVector(normalizedDirection));
 
 			const Math::float3 corners[] = {
 				Math::float3(boundsMin.x, boundsMin.y, boundsMin.z),
@@ -93,57 +83,43 @@ namespace
 				Math::float3(boundsMax.x, boundsMax.y, boundsMax.z)
 			};
 
-			float minX = std::numeric_limits<float>::max();
-			float minY = std::numeric_limits<float>::max();
-			float minZ = std::numeric_limits<float>::max();
-			float maxX = -std::numeric_limits<float>::max();
-			float maxY = -std::numeric_limits<float>::max();
-			float maxZ = -std::numeric_limits<float>::max();
+			const float limit = std::numeric_limits<float>::max();
+			Math::Bounds3 lightBounds{{limit, limit, limit}, {-limit, -limit, -limit}, true};
 			for(const Math::float3& corner : corners)
 			{
-				const Math::float3 lightSpace = Math::TransformPoint(view, corner);
-				minX = std::min(minX, lightSpace.x);
-				minY = std::min(minY, lightSpace.y);
-				minZ = std::min(minZ, lightSpace.z);
-				maxX = std::max(maxX, lightSpace.x);
-				maxY = std::max(maxY, lightSpace.y);
-				maxZ = std::max(maxZ, lightSpace.z);
+				lightBounds.Include(Math::TransformPoint(view, corner));
 			}
 
-			orthoWidth = std::max(maxX - minX + 0.25f * 2.0f, 0.1f);
-			orthoHeight = std::max(maxY - minY + 0.25f * 2.0f, 0.1f);
-			const float depthRange = std::max(maxZ - minZ + 0.25f * 2.0f, 0.1f);
+			orthoWidth = std::max(lightBounds.max.x - lightBounds.min.x + 0.25f * 2.0f, 0.1f);
+			orthoHeight = std::max(lightBounds.max.y - lightBounds.min.y + 0.25f * 2.0f, 0.1f);
+			const float depthRange = std::max(lightBounds.max.z - lightBounds.min.z + 0.25f * 2.0f, 0.1f);
 			farPlane = std::max(0.1f + depthRange + lightDistance, 0.1f + 0.1f);
 		}
 
 		// 캐스케이드 타일의 텍셀에 중심을 맞춘 뒤 최종 광원 행렬을 만든다.
-		if(tileResolution != 0u)
+		if(tileResolution > 1u)
 		{
-			const Math::float3 lightForward = Math::NormalizeOr(lightDirection, Math::float3(0.0f, 0.0f, 1.0f));
+			// Reserve half a texel on each side for the largest center snap.
+			const float snapPadding = float(tileResolution) / float(tileResolution - 1u);
+			orthoWidth *= snapPadding;
+			orthoHeight *= snapPadding;
+			const Math::float3 lightForward = normalizedDirection;
 			const Math::float3 viewForward = lightForward * -1.0f;
 			const Math::float3 right = Math::NormalizeOr(Math::Cross(viewForward, SelectUpVector(lightForward)), Math::float3(1.0f, 0.0f, 0.0f));
 			const Math::float3 up = Math::NormalizeOr(Math::Cross(right, viewForward), Math::float3(0.0f, 1.0f, 0.0f));
 			const float texelX = orthoWidth / static_cast<float>(tileResolution);
 			const float texelY = orthoHeight / static_cast<float>(tileResolution);
-			if(!(texelX <= 0.0f || texelY <= 0.0f))
-			{
-				const float centerX = Math::Dot(sceneCenter, right);
-				const float centerY = Math::Dot(sceneCenter, up);
-				const float snappedX = std::round(centerX / texelX) * texelX;
-				const float snappedY = std::round(centerY / texelY) * texelY;
-				sceneCenter = sceneCenter + right * (snappedX - centerX) + up * (snappedY - centerY);
-			}
+			const float centerX = Math::Dot(sceneCenter, right);
+			const float centerY = Math::Dot(sceneCenter, up);
+			const float snappedX = std::round(centerX / texelX) * texelX;
+			const float snappedY = std::round(centerY / texelY) * texelY;
+			sceneCenter = sceneCenter + right * (snappedX - centerX) + up * (snappedY - centerY);
 		}
 
-		const Math::float3 lightForward = Normalize(lightDirection);
-
 		// lightDirection은 표면에서 광원으로 향하므로 광원 카메라를 그 방향에 둔다.
-		const Math::float3 lightOrigin(
-			sceneCenter.x + lightForward.x * lightDistance,
-			sceneCenter.y + lightForward.y * lightDistance,
-			sceneCenter.z + lightForward.z * lightDistance);
+		const Math::float3 lightOrigin = sceneCenter + normalizedDirection * lightDistance;
 
-		const Math::float3 up = SelectUpVector(lightForward);
+		const Math::float3 up = SelectUpVector(normalizedDirection);
 		const Math::float4x4 view = Math::LookAtRH(lightOrigin, sceneCenter, up);
 		// 그림자 깊이 패스/샘플링은 Y-down 광원 투영 기준으로 튜닝돼 있다(카메라 캐노니컬과 무관).
 		Math::float4x4 proj = Math::OrthographicRH_ZO(orthoWidth, orthoHeight, 0.1f, farPlane);
@@ -185,14 +161,14 @@ namespace
 		float farPlane)
 	{
 		const Math::float3 lightForward = Normalize(lightDirection);
-		const Math::float3 target(
-			lightPosition.x + lightForward.x,
-			lightPosition.y + lightForward.y,
-			lightPosition.z + lightForward.z);
+		const Math::float3 target = lightPosition + lightForward;
 		const Math::float4x4 view = Math::LookAtRH(lightPosition, target, SelectUpVector(lightForward));
 		// 그림자 깊이 패스/샘플링은 Y-down 광원 투영 기준으로 튜닝돼 있다(카메라 캐노니컬과 무관).
 		Math::float4x4 proj = Math::PerspectiveRH_ZO(fovYRadians, 1.0f, 0.1f, farPlane);
-		proj.m[5] = -proj.m[5];
+		// The shared math helper caps FOV at 3 radians. A spot cone can reach
+		// 89 degrees per side, so retain its actual focal coefficient here.
+		proj.m[0] = 1.f/std::tan(fovYRadians*.5f);
+		proj.m[5] = -proj.m[0];
 		return proj * view;
 	}
 
@@ -214,7 +190,19 @@ void Renderer::BuildShadows(ShadowData& state,const Scene& scene,const Camera& c
     const auto directional=SelectActiveLightIndices(scene.DirectionalLights(),static_cast<uint32_t>(std::size(constants.directionalViews)));
     const auto points=SelectActiveLightIndices(scene.PointLights(),static_cast<uint32_t>(std::size(constants.pointViews)));
     const auto spots=SelectActiveLightIndices(scene.SpotLights(),static_cast<uint32_t>(std::size(constants.spotViews)));
-    const bool useCascades=cascadeCount>1 && camera.projection.m[11]==-1.f;
+    const auto& projection=camera.projection;
+    const float cameraNear=projection.m[14]/projection.m[10];
+    const float cameraFar=projection.m[14]/(projection.m[10]+1);
+    // Public matrices may be edited directly. Unsupported/non-finite projection
+    // inputs fall back to scene bounds instead of producing invalid cascades.
+    const bool useCascades=cascadeCount>1 && projection.m[11]==-1.f &&
+        std::all_of(std::begin(projection.m),std::end(projection.m),[](float value){return std::isfinite(value);}) &&
+        projection.m[0]>0 && projection.m[5]>0 &&
+        projection.m[1]==0 && projection.m[2]==0 && projection.m[3]==0 &&
+        projection.m[4]==0 && projection.m[6]==0 && projection.m[7]==0 &&
+        projection.m[8]==0 && projection.m[9]==0 && projection.m[12]==0 && projection.m[13]==0 && projection.m[15]==0 &&
+        std::isfinite(1/projection.m[0]) && std::isfinite(1/projection.m[5]) &&
+        std::isfinite(cameraNear) && std::isfinite(cameraFar) && cameraNear>0 && cameraFar>cameraNear;
     uint32_t expectedViewCount=0;
     for(const auto index:directional)
         if(scene.DirectionalLights()[index].castShadow)expectedViewCount+=useCascades?cascadeCount:1;
@@ -229,7 +217,12 @@ void Renderer::BuildShadows(ShadowData& state,const Scene& scene,const Camera& c
     const auto atlasLimit=std::min<uint64_t>(atlasResolution,device->GetLimit(RHI::Limit::Texture2DDimension));
     state.resolution=static_cast<uint32_t>(std::min<uint64_t>(resolution,atlasLimit/std::max(columns,rows)));
     Math::Bounds3 bounds;
-    for(uint32_t i=0;i<scene.GetEntityCount();++i)
+    // Only a non-cascaded directional light uses scene bounds. Keep its exact
+    // vertex-derived fit; replacing it with a looser box changes shadow quality.
+    const bool needsSceneBounds=!useCascades && std::any_of(directional.begin(),directional.end(),[&](uint32_t index) {
+        return scene.DirectionalLights()[index].castShadow;
+    });
+    if(needsSceneBounds)for(uint32_t i=0;i<scene.GetEntityCount();++i)
     {
         const auto entity=static_cast<EntityID>(i);
         const auto mesh=scene.GetEntityMesh(entity);
@@ -246,12 +239,10 @@ void Renderer::BuildShadows(ShadowData& state,const Scene& scene,const Camera& c
         const uint32_t first=viewCount;
         if(useCascades)
         {
-            const float cameraNear=camera.projection.m[14]/camera.projection.m[10];
             // 캐스케이드 범위는 카메라의 가시 범위를 따른다. 내부 초기값 20으로 자르지 않는다.
-            const float cameraFar=camera.projection.m[14]/(camera.projection.m[10]+1);
             const float nearPlane=std::max(cameraNear,0.0001f);
             const float farPlane=std::max(cameraFar,nearPlane+0.0001f);
-            count=std::clamp(cascadeCount,1u,4u);
+            count=cascadeCount;
             auto& splits=constants.directionalSplits[i];
             for(uint32_t c=0;c<count;++c)
             {
@@ -260,7 +251,6 @@ void Renderer::BuildShadows(ShadowData& state,const Scene& scene,const Camera& c
                 const float uniform=nearPlane+(farPlane-nearPlane)*fraction;
                 splits[c]=logarithmic*.65f+uniform*(1.0f-.65f);
             }
-            for(uint32_t c=count;c<4;++c)splits[c]=farPlane;
             splits[count-1u]=farPlane;
             float sliceNear=std::max(cameraNear,0.0001f);
             for(uint32_t c=0;c<count;++c)
@@ -290,8 +280,9 @@ void Renderer::BuildShadows(ShadowData& state,const Scene& scene,const Camera& c
         const auto& light=scene.SpotLights()[spots[i]];
         if(!light.castShadow)continue;
         constants.spotViews[i]={static_cast<float>(viewCount),1,light.shadowStrength,0};
+        const auto cone=EffectiveSpotCone(light.innerConeRadians,light.outerConeRadians);
         constants.lightViewProjectionMatrix[viewCount++]=ComputeSpotLightViewProj(light.position,light.direction,
-            std::clamp(light.outerConeRadians*2,.001f,3.13f),std::max(light.range,.1f+.001f));
+            std::max(cone.outer*2,.001f),std::max(light.range,.1f+.001f));
     }
     for(uint32_t i=0;i<viewCount;++i)
         constants.atlasRect[i]={static_cast<float>(i%columns)/columns,static_cast<float>(i/columns)/rows,1.f/columns,1.f/rows};

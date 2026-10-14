@@ -49,5 +49,8 @@ namespace dyf
         // Disabled or null uses the same graph with serial recording.
         bool enableParallelRenderGraph = false;
         Core::ThreadPool* threadPool = nullptr;
+		// Stock Scene path only. Disable independently for output/performance comparisons.
+		bool enableInstancing = true;
+		bool enableFrustumCulling = true;
 	};
 }

@@ -5,6 +5,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <memory>
@@ -107,30 +108,6 @@ namespace dyf
 			default: return SkinningMethod::Linear;
 			}
 		}
-		[[nodiscard]] SkinInfluence MakeSkinInfluence(
-			std::vector<std::pair<uint32_t, float>> values,
-			bool& truncated)
-		{
-			values.erase(std::remove_if(values.begin(), values.end(), [](const auto& value) {
-				return value.second <= 0.0f;
-			}), values.end());
-			std::stable_sort(values.begin(), values.end(), [](const auto& lhs, const auto& rhs) {
-				return lhs.second > rhs.second;
-			});
-			truncated = values.size() > 4;
-			if(values.size() > 4) values.resize(4);
-
-			SkinInfluence result;
-			float total = 0.0f;
-			for(const auto& value : values) total += value.second;
-			if(total <= 1.0e-6f) return result;
-			for(size_t index = 0; index < values.size(); ++index)
-			{
-				result.jointIndices[index] = values[index].first;
-				result.weights[index] = values[index].second / total;
-			}
-			return result;
-		}
 		[[nodiscard]] bool IsFinite(const Math::float2& value)
 		{
 			return std::isfinite(value.x) && std::isfinite(value.y);
@@ -195,9 +172,12 @@ namespace dyf
 			const std::string& filepath,
 			const ufbx_scene& scene,
 			const ModelLoadOptions& options,
-			double bakeRate)
+			double bakeRate,
+			std::vector<size_t>& sampleCounts,
+			uint64_t& decodedBytes)
 		{
 			ModelLoadBudget budget(filepath, options);
+			sampleCounts.assign(scene.anim_stacks.count, 0u);
 			if(!budget.CheckNodes(scene.nodes.count)
 				|| !budget.AddBytes(scene.nodes.count, sizeof(ModelNode), "nodes")
 				|| !budget.AddBytes(scene.materials.count, sizeof(ModelMaterialInfo), "materials")) return false;
@@ -231,9 +211,16 @@ namespace dyf
 			{
 				const ufbx_anim_stack* stack = scene.anim_stacks.data[stackIndex];
 				if(stack->anim == nullptr) continue;
-				const double duration = std::max(0.0, stack->time_end - stack->time_begin);
-				const uint64_t sampleCount = duration > 0.0
-					? static_cast<uint64_t>(std::ceil(duration * bakeRate)) + 1u : 1u;
+				const double span = stack->time_end - stack->time_begin;
+				const double duration = std::max(0.0, span);
+				const double intervals = std::ceil(duration * bakeRate);
+				// The per-track cap is below both size_t and uint64_t limits on supported platforms.
+				// Check while still floating point; conversion and +1 are then bounded.
+				if(!std::isfinite(stack->time_begin) || !std::isfinite(stack->time_end)
+					|| !std::isfinite(span) || !std::isfinite(intervals) || intervals > 99999.0)
+					return ReportModelError(filepath, "FBX animation exceeds the per-track bake sample limit");
+				const size_t sampleCount = static_cast<size_t>(intervals) + 1u;
+				sampleCounts[stackIndex] = sampleCount;
 				if(scene.nodes.count != 0u
 					&& sampleCount > std::numeric_limits<uint64_t>::max() / scene.nodes.count)
 					return false;
@@ -294,6 +281,7 @@ namespace dyf
 						"FBX morph deltas")) return false;
 				}
 			}
+			decodedBytes = budget.DecodedBytes();
 			return true;
 		}
 		[[nodiscard]] bool NearlyEqual(const Math::float3& lhs, const Math::float3& rhs, float tolerance)
@@ -331,62 +319,59 @@ namespace dyf
 			uint32_t targetCount = 0u;
 		};
 
-		[[nodiscard]] std::vector<float> EvaluateUfbxBlendKeyframeWeights(
+		[[nodiscard]] bool EvaluateUfbxBlendKeyframeWeights(
 			const ufbx_blend_channel& channel,
-			float channelWeight)
+			double channelWeight,
+			std::vector<float>& weights)
 		{
-			std::vector<float> weights(channel.keyframes.count, 0.0f);
-			if(channel.keyframes.count == 0u || !std::isfinite(channelWeight)) return weights;
-			auto targetWeight = [&](size_t keyframeIndex) {
-				return static_cast<float>(channel.keyframes.data[keyframeIndex].target_weight * 0.01);
+			weights.assign(channel.keyframes.count, 0.0f);
+			if(!std::isfinite(channelWeight)) return false;
+			// Match pinned ufbx's zero anchor, signed traversal and final-segment extrapolation.
+			const size_t zero = channel.keyframes.count;
+			size_t firstNonnegative = 0u;
+			for(size_t index = 0; index < zero; ++index)
+			{
+				if(!std::isfinite(channel.keyframes.data[index].target_weight)) return false;
+				if(channel.keyframes.data[index].target_weight < 0.0) firstNonnegative = index + 1u;
+			}
+			size_t previous = zero, next = zero;
+			if(channelWeight > 0.0)
+			{
+				if(firstNonnegative > 0u) previous = firstNonnegative - 1u;
+				for(size_t index = firstNonnegative; index < zero; ++index)
+				{
+					previous = next; next = index;
+					if(channel.keyframes.data[next].target_weight > channelWeight) break;
+				}
+			}
+			else
+			{
+				if(firstNonnegative < zero) previous = firstNonnegative;
+				for(size_t index = firstNonnegative; index > 0u;)
+				{
+					previous = next; next = --index;
+					if(channel.keyframes.data[next].target_weight < channelWeight) break;
+				}
+			}
+			const auto target = [&](size_t index) -> double {
+				return index == zero ? 0.0 : channel.keyframes.data[index].target_weight;
 			};
-
-			const float firstTargetWeight = targetWeight(0u);
-			if(channel.keyframes.count == 1u || channelWeight <= firstTargetWeight)
+			const double delta = target(next) - target(previous);
+			if(!std::isfinite(delta)) return false;
+			if(delta != 0.0)
 			{
-				weights[0] = std::fabs(firstTargetWeight) > 1.0e-8f
-					? channelWeight / firstTargetWeight
-					: 1.0f;
-				return weights;
+				const double alpha = (channelWeight - target(previous)) / delta;
+				const double previousWeight = 1.0 - alpha;
+				const auto fitsFloat = [](double value) {
+					return std::isfinite(value) && std::fabs(value) <= std::numeric_limits<float>::max();
+				};
+				// Validate both stored endpoints before either narrowing conversion. The virtual
+				// zero anchor has no output coefficient and remains outside the model data.
+				if((previous != zero && !fitsFloat(previousWeight)) || (next != zero && !fitsFloat(alpha)))
+					return false;
+				if(previous != zero) weights[previous] = static_cast<float>(previousWeight);
+				if(next != zero) weights[next] = static_cast<float>(alpha);
 			}
-
-			for(size_t keyframeIndex = 1u; keyframeIndex < channel.keyframes.count; ++keyframeIndex)
-			{
-				const float leftTargetWeight = targetWeight(keyframeIndex - 1u);
-				const float rightTargetWeight = targetWeight(keyframeIndex);
-				if(channelWeight > rightTargetWeight) continue;
-				const float width = rightTargetWeight - leftTargetWeight;
-				const float alpha = std::fabs(width) > 1.0e-8f
-					? (channelWeight - leftTargetWeight) / width
-					: 1.0f;
-				weights[keyframeIndex - 1u] = 1.0f - alpha;
-				weights[keyframeIndex] = alpha;
-				return weights;
-			}
-
-			const float lastTargetWeight = targetWeight(channel.keyframes.count - 1u);
-			weights.back() = std::fabs(lastTargetWeight) > 1.0e-8f
-				? channelWeight / lastTargetWeight
-				: 1.0f;
-			return weights;
-		}
-		[[nodiscard]] bool IsPathInsideDirectory(
-			const std::filesystem::path& directory,
-			const std::filesystem::path& candidate,
-			std::error_code& error)
-		{
-			error.clear();
-			const std::filesystem::path canonicalDirectory =
-				std::filesystem::weakly_canonical(directory, error);
-			if(error) return false;
-			const std::filesystem::path canonicalCandidate =
-				std::filesystem::weakly_canonical(candidate, error);
-			if(error) return false;
-			const std::filesystem::path relative =
-				canonicalCandidate.lexically_relative(canonicalDirectory);
-			if(relative.empty() || relative.is_absolute()) return false;
-			for(const std::filesystem::path& component : relative)
-				if(component == "..") return false;
 			return true;
 		}
 		struct UfbxExternalFileContext
@@ -409,8 +394,6 @@ namespace dyf
 		{
 			auto* context = static_cast<UfbxExternalFileContext*>(user);
 			if(context == nullptr || stream == nullptr || path == nullptr || info == nullptr) return false;
-			if(info->type == UFBX_OPEN_FILE_MAIN_MODEL)
-				return ufbx_default_open_file(nullptr, stream, path, pathLength, info);
 
 			const size_t actualPathLength = pathLength == SIZE_MAX ? std::strlen(path) : pathLength;
 			const std::string pathString(path, actualPathLength);
@@ -481,6 +464,7 @@ namespace dyf
 			outModel.textures.reserve(scene.textures.count);
 			textureIndices.clear();
 			decodedTextureBytes = 0u;
+			std::map<std::filesystem::path, size_t> decodedExternalTextures;
 
 			for(size_t textureIndex = 0; textureIndex < scene.textures.count; ++textureIndex)
 			{
@@ -539,21 +523,18 @@ namespace dyf
 					std::error_code pathError;
 					for(const std::filesystem::path& candidate : candidates)
 					{
-						pathError.clear();
 						if(!IsPathInsideDirectory(externalFileContext.modelDirectory, candidate, pathError)) continue;
-						pathError.clear();
 						if(!std::filesystem::is_regular_file(candidate, pathError) || pathError) continue;
 
-						pathError.clear();
 						const std::filesystem::path canonicalPath =
 							std::filesystem::weakly_canonical(candidate, pathError);
 						if(pathError) continue;
+						const uintmax_t fileBytes = std::filesystem::file_size(canonicalPath, pathError);
+						if(pathError || fileBytes > std::numeric_limits<uint64_t>::max()) continue;
 						const bool alreadyAccounted = externalFileContext.accountedPaths.find(canonicalPath)
 							!= externalFileContext.accountedPaths.end();
 						if(!alreadyAccounted)
 						{
-							const uintmax_t fileBytes = std::filesystem::file_size(canonicalPath, pathError);
-							if(pathError || fileBytes > std::numeric_limits<uint64_t>::max()) continue;
 							const uint64_t sourceBytes = static_cast<uint64_t>(fileBytes);
 							if(externalFileContext.sourceBytes > externalFileContext.sourceByteLimit
 								|| sourceBytes > externalFileContext.sourceByteLimit - externalFileContext.sourceBytes)
@@ -565,7 +546,36 @@ namespace dyf
 							externalFileContext.sourceBytes += sourceBytes;
 							externalFileContext.accountedPaths.insert(canonicalPath);
 						}
+						const auto existing = decodedExternalTextures.find(canonicalPath);
+						if(existing != decodedExternalTextures.end())
+						{
+							texture = outModel.textures[existing->second];
+							break;
+						}
 						texture.SetSourcePath(canonicalPath.string());
+						// Read only the accounted source size and use the allocation-bounded decoder.
+						if(fileBytes > std::numeric_limits<int>::max()
+							|| fileBytes > externalFileContext.sourceByteLimit)
+							return ReportModelError(filepath, "external texture source size is invalid");
+						std::ifstream stream(canonicalPath, std::ios::binary);
+						std::vector<uint8_t> encoded(static_cast<size_t>(fileBytes));
+						bool limitExceeded = false;
+						if(stream.read(reinterpret_cast<char*>(encoded.data()), static_cast<std::streamsize>(encoded.size()))
+							&& stream.peek() == std::char_traits<char>::eof())
+						{
+							Image decoded;
+							if(LoadImage(encoded.data(), encoded.size(), decoded,
+								options.maxDecodedBytes - decodedTextureBytes, &limitExceeded))
+							{
+								decodedTextureBytes += decoded.GetPixels().size();
+								decoded.SetSourcePath(canonicalPath.string());
+								texture = std::move(decoded);
+							}
+							else if(limitExceeded)
+								return ReportModelError(filepath, "external texture exceeds maxDecodedBytes");
+						}
+						// Missing/unsupported pixels remain invalid as before; asset creation will reject them.
+						decodedExternalTextures.emplace(canonicalPath, outModel.textures.size());
 						break;
 					}
 				}
@@ -578,8 +588,9 @@ namespace dyf
 
 	}
 
-		[[nodiscard]] bool LoadUfbxModel(const std::string& filepath, ModelData& outModel, const ModelLoadOptions& options)
+		[[nodiscard]] bool LoadUfbxModel(const std::string& filepath, ModelData& outModel, const ModelLoadOptions& options, uint64_t* decodedBytes)
 		{
+			if(decodedBytes) *decodedBytes=0;
 			if(options.maxNodeDepth == 0u)
 				return ReportModelError(
 					filepath,
@@ -603,7 +614,9 @@ namespace dyf
 			sharedAllocator.free_fn = UfbxBudgetFree;
 			sharedAllocator.user = &allocatorBudget;
 			std::error_code sourceSizeError;
-			const uintmax_t mainSourceSize = std::filesystem::file_size(filepath, sourceSizeError);
+			const auto sourcePath = std::filesystem::absolute(filepath, sourceSizeError);
+			if(sourceSizeError) return ReportModelError(filepath, "failed to resolve ufbx source path");
+			const uintmax_t mainSourceSize = std::filesystem::file_size(sourcePath, sourceSizeError);
 			if(sourceSizeError || mainSourceSize > std::numeric_limits<uint64_t>::max())
 			{
 				return ReportModelError(
@@ -611,7 +624,7 @@ namespace dyf
 					"failed to query ufbx model source size");
 			}
 			UfbxExternalFileContext externalFileContext{};
-			externalFileContext.modelDirectory = std::filesystem::path(filepath).parent_path();
+			externalFileContext.modelDirectory = sourcePath.parent_path();
 			externalFileContext.sourceByteLimit = options.maxSourceBytes;
 			externalFileContext.sourceBytes = static_cast<uint64_t>(mainSourceSize);
 			ufbx_load_opts opts = {};
@@ -630,21 +643,15 @@ namespace dyf
 			opts.scale_helper_name.length = SIZE_MAX;
 
 			ufbx_error error;
-			ufbx_scene* scene = ufbx_load_file(filepath.c_str(), &opts, &error);
-			if(externalFileContext.pathRejected)
+			ufbx_scene* scene = ufbx_load_file(sourcePath.string().c_str(), &opts, &error);
+			if(externalFileContext.pathRejected || externalFileContext.sourceLimitExceeded)
 			{
 				if(scene != nullptr) ufbx_free_scene(scene);
 				return ReportModelError(
 					filepath,
-					"ufbx external file path escapes the model directory: "
-						+ externalFileContext.rejectedPath);
-			}
-			if(externalFileContext.sourceLimitExceeded)
-			{
-				if(scene != nullptr) ufbx_free_scene(scene);
-				return ReportModelError(
-					filepath,
-					"ufbx source bytes exceed maxSourceBytes while accounting for external files");
+					externalFileContext.pathRejected
+						? "ufbx external file path escapes the model directory: " + externalFileContext.rejectedPath
+						: "ufbx source bytes exceed maxSourceBytes while accounting for external files");
 			}
 			if(scene == nullptr)
 			{
@@ -667,22 +674,24 @@ namespace dyf
 					std::string("failed to load model through ufbx: ") + error.info);
 			}
 			std::unique_ptr<ufbx_scene, void(*)(ufbx_scene*)> sceneOwner(scene, ufbx_free_scene);
+			const double fbxBakeRate = static_cast<double>(options.fbxBakeRate);
+			std::vector<size_t> sampleCounts;
+			uint64_t geometryBytes = 0u;
+			if(!ValidateFbxLoadLimits(filepath, *scene, options, fbxBakeRate, sampleCounts, geometryBytes)) return false;
+			ModelLoadOptions textureOptions = options;
+			textureOptions.maxDecodedBytes -= geometryBytes;
 			outModel = {};
 			std::map<const ufbx_texture*, uint32_t> textureIndices;
 			uint64_t decodedTextureBytes = 0u;
 			if(!LoadUfbxTextureAssets(
 				filepath,
 				*scene,
-				options,
+				textureOptions,
 				externalFileContext,
 				outModel,
 				textureIndices,
 				decodedTextureBytes)) return false;
 
-			ModelLoadOptions geometryOptions = options;
-			geometryOptions.maxDecodedBytes -= decodedTextureBytes;
-			const double fbxBakeRate = static_cast<double>(options.fbxBakeRate);
-			if(!ValidateFbxLoadLimits(filepath, *scene, geometryOptions, fbxBakeRate)) return false;
 			const bool animatedModel = scene->skin_deformers.count > 0
 				|| scene->anim_stacks.count > 0
 				|| scene->blend_deformers.count > 0;
@@ -729,15 +738,16 @@ namespace dyf
 							|| channel->keyframes.count > std::numeric_limits<uint32_t>::max() - morphSources.size())
 							return false;
 						const uint32_t firstTargetIndex = static_cast<uint32_t>(morphSources.size());
-						const float channelWeight = static_cast<float>(channel->weight * 0.01);
+						const double channelWeight = channel->weight;
 						if(!std::isfinite(channelWeight))
 						{
 							return ReportModelError(
 								filepath,
 								"FBX blend channel weight is non-finite");
 						}
-						const std::vector<float> defaultWeights =
-							EvaluateUfbxBlendKeyframeWeights(*channel, channelWeight);
+						std::vector<float> defaultWeights;
+						if(!EvaluateUfbxBlendKeyframeWeights(*channel, channelWeight, defaultWeights))
+							return ReportModelError(filepath, "FBX blend coefficients are non-finite or exceed float range");
 						for(size_t keyframeIndex = 0; keyframeIndex < channel->keyframes.count; ++keyframeIndex)
 						{
 							const ufbx_blend_keyframe& keyframe = channel->keyframes.data[keyframeIndex];
@@ -803,15 +813,7 @@ namespace dyf
 				if(stack->anim == nullptr) continue;
 				const double beginTime = stack->time_begin;
 				const double duration = std::max(0.0, stack->time_end - beginTime);
-				const size_t sampleCount = duration > 0.0
-					? static_cast<size_t>(std::ceil(duration * fbxBakeRate)) + 1u
-					: 1u;
-				if(sampleCount > 100000u)
-				{
-					return ReportModelError(
-						filepath,
-						"FBX animation exceeds the per-track bake sample limit");
-				}
+				const size_t sampleCount = sampleCounts[stackIndex];
 
 				AnimationClip clip;
 				clip.name = stack->name.length > 0 ? stack->name.data : ("Animation_" + std::to_string(stackIndex));
@@ -827,9 +829,7 @@ namespace dyf
 					Math::quat previousRotation = Math::quat::Identity();
 					for(size_t sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
 					{
-						const double relativeTime = sampleCount > 1
-							? std::min(duration, static_cast<double>(sampleIndex) / fbxBakeRate)
-							: 0.0;
+						const double relativeTime = std::min(duration, static_cast<double>(sampleIndex) / fbxBakeRate);
 						const ufbx_transform transform = ufbx_evaluate_transform(
 							stack->anim,
 							scene->nodes.data[nodeIndex],
@@ -873,7 +873,6 @@ namespace dyf
 				}
 				for(const UfbxBlendChannelBinding& binding : blendChannelBindings)
 				{
-					if(binding.channel == nullptr || binding.targetCount == 0u) continue;
 					std::vector<MorphWeightTrack> tracks(binding.targetCount);
 					for(uint32_t targetOffset = 0u; targetOffset < binding.targetCount; ++targetOffset)
 					{
@@ -884,21 +883,20 @@ namespace dyf
 					}
 					for(size_t sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
 					{
-						const double relativeTime = sampleCount > 1
-							? std::min(duration, static_cast<double>(sampleIndex) / fbxBakeRate)
-							: 0.0;
-						const float channelWeight = static_cast<float>(ufbx_evaluate_blend_weight(
+						const double relativeTime = std::min(duration, static_cast<double>(sampleIndex) / fbxBakeRate);
+						const double channelWeight = ufbx_evaluate_blend_weight(
 							stack->anim,
 							binding.channel,
-							beginTime + relativeTime));
+							beginTime + relativeTime);
 						if(!std::isfinite(channelWeight))
 						{
 							return ReportModelError(
 								filepath,
 								"FBX blend animation sample is non-finite");
 						}
-						const std::vector<float> effectiveWeights =
-							EvaluateUfbxBlendKeyframeWeights(*binding.channel, channelWeight);
+						std::vector<float> effectiveWeights;
+						if(!EvaluateUfbxBlendKeyframeWeights(*binding.channel, channelWeight, effectiveWeights))
+							return ReportModelError(filepath, "FBX animated blend coefficients are non-finite or exceed float range");
 						if(effectiveWeights.size() != binding.targetCount) return false;
 						for(uint32_t targetOffset = 0u; targetOffset < binding.targetCount; ++targetOffset)
 						{
@@ -922,8 +920,9 @@ namespace dyf
 
 			outModel.materials.reserve(scene->materials.count);
 			std::map<const ufbx_material*, uint32_t> materialIndices;
-			auto applyTexture = [&](ModelMaterialInfo& material, MaterialTextureKind kind, const ufbx_texture* source) {
-				if(source == nullptr) return;
+			auto applyTexture = [&](ModelMaterialInfo& material, MaterialTextureKind kind, const ufbx_material_map& map) {
+				const ufbx_texture* source = map.texture;
+				if(source == nullptr || !map.texture_enabled) return;
 				const auto texture = textureIndices.find(source);
 				if(texture == textureIndices.end() || texture->second >= outModel.textures.size()) return;
 				const Image& asset = outModel.textures[texture->second];
@@ -957,25 +956,24 @@ namespace dyf
 						"ufbx material contains non-finite values");
 				}
 
-				const ufbx_texture* baseColorTexture = mat->pbr.base_color.texture != nullptr
-					? mat->pbr.base_color.texture
-					: mat->fbx.diffuse_color.texture;
+				const ufbx_material_map& baseColorTexture = mat->pbr.base_color.texture != nullptr
+					? mat->pbr.base_color
+					: mat->fbx.diffuse_color;
 				applyTexture(material, MaterialTextureKind::BaseColor, baseColorTexture);
-				if(mat->pbr.metalness.texture != nullptr
-					&& mat->pbr.metalness.texture == mat->pbr.roughness.texture)
+				if(mat->pbr.metalness.texture == mat->pbr.roughness.texture && mat->pbr.roughness.texture_enabled)
 				{
-					applyTexture(material, MaterialTextureKind::MetallicRoughness, mat->pbr.metalness.texture);
+					applyTexture(material, MaterialTextureKind::MetallicRoughness, mat->pbr.metalness);
 				}
-				const ufbx_texture* normalTexture = mat->pbr.normal_map.texture != nullptr
-					? mat->pbr.normal_map.texture
+				const ufbx_material_map& normalTexture = mat->pbr.normal_map.texture != nullptr
+					? mat->pbr.normal_map
 					: (mat->fbx.normal_map.texture != nullptr
-						? mat->fbx.normal_map.texture
-						: mat->fbx.bump.texture);
+						? mat->fbx.normal_map
+						: mat->fbx.bump);
 				applyTexture(material, MaterialTextureKind::Normal, normalTexture);
-				applyTexture(material, MaterialTextureKind::Occlusion, mat->pbr.ambient_occlusion.texture);
-				const ufbx_texture* emissiveTexture = mat->pbr.emission_color.texture != nullptr
-					? mat->pbr.emission_color.texture
-					: mat->fbx.emission_color.texture;
+				applyTexture(material, MaterialTextureKind::Occlusion, mat->pbr.ambient_occlusion);
+				const ufbx_material_map& emissiveTexture = mat->pbr.emission_color.texture != nullptr
+					? mat->pbr.emission_color
+					: mat->fbx.emission_color;
 				applyTexture(material, MaterialTextureKind::Emissive, emissiveTexture);
 				materialIndices[mat] = static_cast<uint32_t>(outModel.materials.size());
 				outModel.materials.push_back(std::move(material));
@@ -1007,6 +1005,7 @@ namespace dyf
 				const ufbx_skin_deformer* skinDeformer = sourceMesh->skin_deformers.count > 0
 					? sourceMesh->skin_deformers.data[0]
 					: nullptr;
+				uint32_t modelSkinIndex = UINT32_MAX;
 				if(skinDeformer != nullptr)
 				{
 					for(size_t deformerIndex = 1u; deformerIndex < sourceMesh->skin_deformers.count; ++deformerIndex)
@@ -1019,10 +1018,6 @@ namespace dyf
 								"FBX mesh uses incompatible multiple skin deformers");
 						}
 					}
-				}
-				uint32_t modelSkinIndex = UINT32_MAX;
-				if(skinDeformer != nullptr)
-				{
 					const auto skin = skinIndices.find(skinDeformer);
 					if(skin == skinIndices.end()) return false;
 					modelSkinIndex = skin->second;
@@ -1091,12 +1086,18 @@ namespace dyf
 								"ufbx vertex position contains non-finite values");
 						}
 
+						double normalDeltaScale = 1.0;
 						if(sourceMesh->vertex_normal.exists)
 						{
 							const ufbx_vec3 localNormal = ufbx_get_vertex_vec3(&sourceMesh->vertex_normal, index);
 							const ufbx_vec3 worldNormal = ufbx_transform_direction(&normalMatrix, localNormal);
+							const Math::float3 rawNormal(static_cast<float>(worldNormal.x), static_cast<float>(worldNormal.y), static_cast<float>(worldNormal.z));
+							if(!IsFinite(rawNormal)) return ReportModelError(filepath, "ufbx vertex normal contains non-finite values");
+							const double lengthSquared = double(rawNormal.x) * rawNormal.x
+								+ double(rawNormal.y) * rawNormal.y + double(rawNormal.z) * rawNormal.z;
+							if(lengthSquared > 1.0e-8f) normalDeltaScale = 1.0 / std::sqrt(lengthSquared);
 							vertex.normal = NormalizeOr(
-								Math::float3(static_cast<float>(worldNormal.x), static_cast<float>(worldNormal.y), static_cast<float>(worldNormal.z)),
+								rawNormal,
 								Math::float3(0.0f, 1.0f, 0.0f));
 							if(!IsFinite(vertex.normal))
 							{
@@ -1173,13 +1174,11 @@ namespace dyf
 						if(skinDeformer != nullptr)
 						{
 							std::map<uint32_t, float> combinedInfluences;
-							const ufbx_skin_vertex* primarySkinVertex = nullptr;
 							for(size_t deformerIndex = 0u; deformerIndex < sourceMesh->skin_deformers.count; ++deformerIndex)
 							{
 								const ufbx_skin_deformer* deformer = sourceMesh->skin_deformers.data[deformerIndex];
 								if(deformer == nullptr || logicalVertex >= deformer->vertices.count) return false;
 								const ufbx_skin_vertex& skinVertex = deformer->vertices.data[logicalVertex];
-								if(primarySkinVertex == nullptr) primarySkinVertex = &skinVertex;
 								if(static_cast<size_t>(skinVertex.weight_begin) + skinVertex.num_weights > deformer->weights.count)
 									return false;
 								for(uint32_t weightIndex = 0; weightIndex < skinVertex.num_weights; ++weightIndex)
@@ -1187,16 +1186,20 @@ namespace dyf
 									const ufbx_skin_weight& weight =
 										deformer->weights.data[skinVertex.weight_begin + weightIndex];
 									if(weight.cluster_index >= deformer->clusters.count) return false;
-									if(!std::isfinite(weight.weight) || weight.weight < 0.0)
+									if(!std::isfinite(weight.weight) || weight.weight < 0.0
+										|| weight.weight > std::numeric_limits<float>::max())
 									{
 										return ReportModelError(
 											filepath,
-											"ufbx skin weight must be finite and non-negative");
+											"ufbx skin weight must be finite, non-negative and representable as float");
 									}
-									combinedInfluences[weight.cluster_index] += static_cast<float>(weight.weight);
+									float& combined = combinedInfluences[weight.cluster_index];
+									const double sum = double(combined) + weight.weight;
+									if(sum > std::numeric_limits<float>::max())
+										return ReportModelError(filepath, "ufbx combined skin weight exceeds float range");
+									combined = static_cast<float>(sum);
 								}
 							}
-							if(primarySkinVertex == nullptr) return false;
 							std::vector<std::pair<uint32_t, float>> influences(
 								combinedInfluences.begin(),
 								combinedInfluences.end());
@@ -1208,7 +1211,7 @@ namespace dyf
 							}
 							else if(skinDeformer->skinning_method == UFBX_SKINNING_METHOD_BLENDED_DQ_LINEAR)
 							{
-								const float dqBlendWeight = static_cast<float>(primarySkinVertex->dq_weight);
+								const float dqBlendWeight = static_cast<float>(skinDeformer->vertices.data[logicalVertex].dq_weight);
 								if(!std::isfinite(dqBlendWeight) || dqBlendWeight < 0.0f || dqBlendWeight > 1.0f)
 								{
 									return ReportModelError(
@@ -1227,13 +1230,18 @@ namespace dyf
 							}
 						}
 
-						if(mesh.morphTargets.size() != morphSourcesByNode[ni].size()) return false;
 						for(size_t targetIndex = 0; targetIndex < mesh.morphTargets.size(); ++targetIndex)
 						{
 							const ufbx_blend_shape* shape = morphSourcesByNode[ni][targetIndex].shape;
-							if(shape == nullptr) return false;
-							const ufbx_vec3 sourcePositionDelta =
-								ufbx_get_blend_shape_vertex_offset(shape, logicalVertex);
+							const uint32_t offsetIndex = ufbx_get_blend_shape_offset_index(shape, logicalVertex);
+							const ufbx_real offsetWeight = offsetIndex < shape->offset_weights.count
+								? shape->offset_weights.data[offsetIndex] : 1.0;
+							ufbx_vec3 sourcePositionDelta = {};
+							if(offsetIndex != UFBX_NO_INDEX && offsetIndex < shape->position_offsets.count)
+								sourcePositionDelta = shape->position_offsets.data[offsetIndex];
+							sourcePositionDelta.x *= offsetWeight;
+							sourcePositionDelta.y *= offsetWeight;
+							sourcePositionDelta.z *= offsetWeight;
 							const ufbx_vec3 transformedPositionDelta =
 								ufbx_transform_direction(&vertexMatrix, sourcePositionDelta);
 							const Math::float3 positionDelta(
@@ -1252,25 +1260,19 @@ namespace dyf
 							if(shape->normal_offsets.count > 0u)
 							{
 								ufbx_vec3 sourceNormalDelta = {};
-								const uint32_t offsetIndex =
-									ufbx_get_blend_shape_offset_index(shape, logicalVertex);
 								if(offsetIndex != UFBX_NO_INDEX && offsetIndex < shape->normal_offsets.count)
 								{
 									sourceNormalDelta = shape->normal_offsets.data[offsetIndex];
-									if(offsetIndex < shape->offset_weights.count)
-									{
-										const ufbx_real offsetWeight = shape->offset_weights.data[offsetIndex];
-										sourceNormalDelta.x *= offsetWeight;
-										sourceNormalDelta.y *= offsetWeight;
-										sourceNormalDelta.z *= offsetWeight;
-									}
+									sourceNormalDelta.x *= offsetWeight;
+									sourceNormalDelta.y *= offsetWeight;
+									sourceNormalDelta.z *= offsetWeight;
 								}
 								const ufbx_vec3 transformedNormalDelta =
 									ufbx_transform_direction(&normalMatrix, sourceNormalDelta);
 								const Math::float3 normalDelta(
-									static_cast<float>(transformedNormalDelta.x),
-									static_cast<float>(transformedNormalDelta.y),
-									static_cast<float>(transformedNormalDelta.z));
+									static_cast<float>(transformedNormalDelta.x * normalDeltaScale),
+									static_cast<float>(transformedNormalDelta.y * normalDeltaScale),
+									static_cast<float>(transformedNormalDelta.z * normalDeltaScale));
 								if(!IsFinite(normalDelta))
 								{
 									return ReportModelError(
@@ -1290,11 +1292,16 @@ namespace dyf
 				{
 					(void)materialIndex;
 					if(mesh.mesh.indices.empty()) continue;
-					if(!hasAuthoredTangents) CalculateTangents(mesh.mesh);
+					if(ufbx_matrix_determinant(&vertexMatrix) < 0.0)
+						for(size_t index = 0; index < mesh.mesh.indices.size(); index += 3)
+							std::swap(mesh.mesh.indices[index + 1], mesh.mesh.indices[index + 2]);
+					if(!hasAuthoredTangents && !CalculateTangents(mesh.mesh))
+						return ReportModelError(filepath, "ufbx generated normal or tangent is non-finite");
 					outModel.meshes.push_back(std::move(mesh));
 				}
 			}
 
+			if(decodedBytes) *decodedBytes=geometryBytes+decodedTextureBytes;
 			return !outModel.meshes.empty();
 		}
 }

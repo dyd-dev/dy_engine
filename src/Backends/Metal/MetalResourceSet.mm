@@ -55,6 +55,7 @@ namespace dyf::Backends
 
 	struct MetalResourceSet::Impl
 	{
+		~Impl();
 		std::vector<MetalTextureBinding> textures;
 		std::vector<void*> ownedTextureViews;
 	};
@@ -69,6 +70,8 @@ namespace dyf::Backends
 				pipeline->GetNativeDepthStencil() == nullptr) ||
 			(desc.bindingCount != 0 && desc.bindings == nullptr)) return;
 		const RHI::PipelineLayoutDesc& layout = pipeline->GetLayout();
+		m_impl->textures.reserve(GetBindingCount());
+		m_impl->ownedTextureViews.reserve(GetBindingCount());
 
 		for(uint32_t index = 0; index < GetBindingCount(); ++index)
 		{
@@ -127,21 +130,20 @@ namespace dyf::Backends
 		}
 	}
 
-	MetalResourceSet::~MetalResourceSet()
+	MetalResourceSet::~MetalResourceSet() = default;
+
+	MetalResourceSet::Impl::~Impl()
 	{
-		if(m_impl == nullptr) return;
 #if __has_feature(objc_arc)
-		for(void* view : m_impl->ownedTextureViews)
+		for(void* view : ownedTextureViews)
 		{
 			id<MTLTexture> released = (__bridge_transfer id<MTLTexture>)view;
 			(void)released;
 		}
 #else
-		for(void* view : m_impl->ownedTextureViews)
+		for(void* view : ownedTextureViews)
 			[(__bridge id<MTLTexture>)view release];
 #endif
-		m_impl->ownedTextureViews.clear();
-		delete m_impl;
 	}
 
 	const std::vector<MetalTextureBinding>& MetalResourceSet::GetTextureBindings() const

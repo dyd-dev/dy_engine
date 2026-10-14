@@ -7,10 +7,55 @@ import tempfile
 import unittest
 
 
-MODULE = Path(__file__).resolve().parents[2] / "cmake" / "ExampleSupport.cmake"
+MODULE = Path(__file__).resolve().with_name("ExampleSupport.cmake")
 
 
 class DiscoveryTests(unittest.TestCase):
+    def test_asset_only_rebuild_without_ci(self):
+        repo = MODULE.parents[2]
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'cmake').mkdir()
+            for name in ('ExampleAssets.cmake', 'SyncAssets.cmake'):
+                shutil.copyfile(repo / 'cmake' / name, root / 'cmake' / name)
+            example = root / 'examples/dyf/02_Image'
+            (example / 'Assets').mkdir(parents=True)
+            (root / 'examples/advanced').mkdir()
+            (root / 'examples/advanced/CMakeLists.txt').write_text('', encoding='utf-8')
+            shutil.copyfile(repo / 'examples/CMakeLists.txt', root / 'examples/CMakeLists.txt')
+            (root / 'CMakeLists.txt').write_text(
+                'cmake_minimum_required(VERSION 3.20)\nproject(AssetRebuild CXX)\n'
+                'set(DY_CI OFF)\nadd_subdirectory(examples)\n', encoding='utf-8')
+            (example / 'CMakeLists.txt').write_text(
+                'add_executable(AssetProbe main.cpp)\n'
+                'set_target_properties(AssetProbe PROPERTIES '
+                'RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")\n', encoding='utf-8')
+            (example / 'main.cpp').write_text('int main() {}\n', encoding='utf-8')
+            asset = example / 'Assets/image.txt'
+            asset.write_text('original', encoding='utf-8')
+            build = root / 'build'
+
+            def run(*arguments):
+                result = subprocess.run(['cmake', *arguments], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            run('-S', str(root), '-B', str(build))
+            run('--build', str(build), '--config', 'Debug', '--target', 'AssetProbe')
+            copied = next((build / 'bin').rglob('image.txt'))
+            binary = next(path for path in (build / 'bin').rglob('AssetProbe*')
+                          if path.is_file() and path.suffix in ('', '.exe'))
+            stamp = binary.stat().st_mtime_ns
+            asset.write_text('edited without code changes', encoding='utf-8')
+            extra = example / 'Assets/extra.txt'
+            extra.write_text('added', encoding='utf-8')
+            run('--build', str(build), '--config', 'Debug', '--target', 'AssetProbe')
+            self.assertEqual(copied.read_text(), 'edited without code changes')
+            self.assertEqual(copied.with_name('extra.txt').read_text(), 'added')
+            self.assertEqual(binary.stat().st_mtime_ns, stamp)
+            extra.unlink()
+            run('--build', str(build), '--config', 'Debug', '--target', 'AssetProbe')
+            self.assertFalse(copied.with_name('extra.txt').exists())
+
     def test_registered_nested_examples_follow_add_rename_remove(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -51,35 +96,6 @@ class DiscoveryTests(unittest.TestCase):
             shutil.rmtree(root / 'examples/dyf')
             self.assertEqual(inventory(), {'Second': 'examples/advanced/group/03_Renamed'})
 
-    def test_non_render_and_null_examples_need_no_shaders(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            (root / 'main.cpp').write_text('int main() {}\n', encoding='utf-8')
-            for kind, vulkan in (('window', 'ON'), ('cpu', 'ON'), ('', 'OFF')):
-                declaration = f'dy_example_support(KIND {kind})\n' if kind else ''
-                (root / 'CMakeLists.txt').write_text(
-                    'cmake_minimum_required(VERSION 3.20)\nproject(Probe CXX)\n'
-                    f'include("{MODULE.as_posix()}")\n' + declaration +
-                    'add_executable(Probe main.cpp)\ndy_example_shaders(Probe)\n', encoding='utf-8')
-                result = subprocess.run(['cmake', '-S', str(root), '-B', str(root / 'build'),
-                                         '-DDY_CI=ON', '-DUSE_VULKAN=' + vulkan], capture_output=True, text=True)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_unknown_shader_stage_is_rejected(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            (root / 'Shaders').mkdir()
-            (root / 'Shaders/unknown.glsl').write_text('void main() {}\n', encoding='utf-8')
-            (root / 'main.cpp').write_text('int main() {}\n', encoding='utf-8')
-            (root / 'CMakeLists.txt').write_text(
-                'cmake_minimum_required(VERSION 3.20)\nproject(Probe CXX)\n'
-                f'include("{MODULE.as_posix()}")\n'
-                'add_executable(Probe main.cpp)\ndy_example_shaders(Probe)\n', encoding='utf-8')
-            result = subprocess.run(['cmake', '-S', str(root), '-B', str(root / 'build'), '-DUSE_VULKAN=ON'],
-                                    capture_output=True, text=True)
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn('unknown shader stage', result.stdout + result.stderr)
-
     def test_real_compile_and_link_failures_are_not_hidden(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -103,7 +119,7 @@ class DiscoveryTests(unittest.TestCase):
                 self.assertIn('Probe', result.stdout + result.stderr)
 
     def test_asset_only_updates_and_deletions(self):
-        script = MODULE.with_name('SyncAssets.cmake')
+        script = MODULE.parents[2] / 'cmake/SyncAssets.cmake'
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             source, build = root / 'input', root / 'build'

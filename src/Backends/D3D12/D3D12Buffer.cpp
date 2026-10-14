@@ -1,4 +1,5 @@
 #include "D3D12Buffer.h"
+#include "d3dx12.h"
 
 #include <d3d12.h>
 #include <wrl.h>
@@ -9,11 +10,6 @@ namespace dyf::Backends
 {
     namespace
     {
-        bool HasUsage(RHI::BufferUsage usage, RHI::BufferUsage flag)
-        {
-            return (static_cast<uint32_t>(usage) & static_cast<uint32_t>(flag)) != 0;
-        }
-
         D3D12_RESOURCE_STATES ToNativeState(RHI::ResourceState state)
         {
             switch (state)
@@ -51,23 +47,17 @@ namespace dyf::Backends
         D3D12_HEAP_PROPERTIES heapProperties = {};
         heapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
 
-        D3D12_RESOURCE_DESC resourceDesc = {};
-        resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        resourceDesc.Width = HasUsage(desc.usage, RHI::BufferUsage::Constant)
+        const uint64_t resourceWidth = (desc.usage & RHI::BufferUsage::Constant) != RHI::BufferUsage::None
             ? (static_cast<uint64_t>(desc.size) +
                 D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT - 1) &
                 ~(static_cast<uint64_t>(
                     D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT) - 1)
             : desc.size;
-        resourceDesc.Height = 1;
-        resourceDesc.DepthOrArraySize = 1;
-        resourceDesc.MipLevels = 1;
-        resourceDesc.Format = DXGI_FORMAT_UNKNOWN;
-        resourceDesc.SampleDesc.Count = 1;
-        resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        resourceDesc.Flags = HasUsage(desc.usage, RHI::BufferUsage::Storage)
+        const D3D12_RESOURCE_FLAGS flags =
+            (desc.usage & RHI::BufferUsage::Storage) != RHI::BufferUsage::None
             ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
             : D3D12_RESOURCE_FLAG_NONE;
+        const auto resourceDesc = CD3DX12_RESOURCE_DESC::Buffer(resourceWidth, flags);
 
         device->CreateCommittedResource(
             &heapProperties,

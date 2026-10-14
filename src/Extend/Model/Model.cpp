@@ -1,9 +1,12 @@
 #include <dyf/Extends/Model/Model.h>
+#include "ModelLoader.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 
 #include <dyf/Extends/Model/ModelScene.h>
@@ -12,14 +15,6 @@ namespace dyf
 {
 	namespace
 	{
-		[[nodiscard]] Math::float3 BuildFallbackTangent(const Math::float3& normal)
-		{
-			const Math::float3 up = std::fabs(normal.z) < 0.999f
-				? Math::float3(0.0f, 0.0f, 1.0f)
-				: Math::float3(0.0f, 1.0f, 0.0f);
-			return NormalizeOr(Cross(up, normal), Math::float3(1.0f, 0.0f, 0.0f));
-		}
-
 		struct ModelBounds
 		{
 			Math::float3 min;
@@ -67,7 +62,7 @@ namespace dyf
 
 		[[nodiscard]] Math::float4x4 BuildModelSceneTransform(const ModelAsset& asset, const ModelSceneDesc& desc)
 		{
-			Math::float4x4 transform = Math::Translation(desc.position);
+			Math::float4x4 transform = Math::Translation(desc.position) * desc.transform;
 			if(desc.normalize && asset.hasBounds)
 			{
 				const float scale = asset.boundsLargestAxis > 0.0001f
@@ -78,13 +73,33 @@ namespace dyf
 					-asset.boundsCenter.y,
 					-asset.boundsCenter.z));
 			}
-			return transform * desc.transform * asset.assetTransform;
+			return transform * asset.assetTransform;
 		}
 
+        bool LoadExternalImage(const std::string& path, Image& image,
+            const ModelLoadOptions& options, ModelLoadBudget& budget)
+        {
+            std::error_code error;
+            const auto size=std::filesystem::file_size(path,error);
+            if(error || !size || size>options.maxSourceBytes || size>options.maxParserInputBytes ||
+                size>static_cast<uint64_t>(std::numeric_limits<int>::max()))
+                return ReportModelError(path,"external image source size is invalid or exceeds its byte limit");
+            std::ifstream file(path,std::ios::binary);
+            std::vector<uint8_t> encoded(static_cast<size_t>(size));
+            if(!file.read(reinterpret_cast<char*>(encoded.data()),static_cast<std::streamsize>(encoded.size())))
+                return ReportModelError(path,"failed to read external image");
+            bool exceeded=false;
+            if(!LoadImage(encoded.data(),encoded.size(),image,
+                options.maxDecodedBytes-budget.DecodedBytes(),&exceeded))
+                return ReportModelError(path,exceeded ? "external image pixels exceed maxDecodedBytes" : "failed to decode external image");
+            if(!budget.AddBytes(image.GetPixels().size(),1,"external image pixels")) return false;
+            image.SetSourcePath(path);
+            return true;
+        }
 		[[nodiscard]] Image CreateTextureIfPresent(
 			const ModelMaterialInfo& material,
 			MaterialTextureKind kind,
-			const std::vector<Image>& importedTextures)
+			const std::vector<Image>& importedTextures, const ModelLoadOptions& options, ModelLoadBudget& budget)
 		{
 			const uint32_t slot = static_cast<uint32_t>(kind);
 			const uint32_t textureIndex = material.textureIndices[slot];
@@ -96,7 +111,7 @@ namespace dyf
 			}
 			else if(material.hasTexture[slot] && !material.texturePaths[slot].empty())
 			{
-				if(!LoadImage(material.texturePaths[slot], texture)) return {};
+				if(!LoadExternalImage(material.texturePaths[slot], texture, options, budget)) return {};
 			}
 			else return {};
 			// 재질별 색 공간만 바꾸며 이미 디코딩한 픽셀은 같은 저장소를 공유한다.
@@ -107,17 +122,18 @@ namespace dyf
 
 		[[nodiscard]] bool BuildSceneMaterial(
 			const ModelMaterialInfo& source,
-			const std::vector<Image>& importedTextures, MaterialDesc& material)
+			const std::vector<Image>& importedTextures, MaterialDesc& material,
+            const ModelLoadOptions& options, ModelLoadBudget& budget)
 		{
 			material = source.material;
-			material.baseColorTexture = CreateTextureIfPresent(source, MaterialTextureKind::BaseColor, importedTextures);
-			material.metallicRoughnessTexture = CreateTextureIfPresent(source, MaterialTextureKind::MetallicRoughness, importedTextures);
-			material.normalTexture = CreateTextureIfPresent(source, MaterialTextureKind::Normal, importedTextures);
-			material.occlusionTexture = CreateTextureIfPresent(source, MaterialTextureKind::Occlusion, importedTextures);
-			material.emissiveTexture = CreateTextureIfPresent(source, MaterialTextureKind::Emissive, importedTextures);
-			const Image textures[]={material.baseColorTexture,material.metallicRoughnessTexture,material.normalTexture,material.occlusionTexture,material.emissiveTexture};
+			material.baseColorTexture = CreateTextureIfPresent(source, MaterialTextureKind::BaseColor, importedTextures, options, budget);
+			material.metallicRoughnessTexture = CreateTextureIfPresent(source, MaterialTextureKind::MetallicRoughness, importedTextures, options, budget);
+			material.normalTexture = CreateTextureIfPresent(source, MaterialTextureKind::Normal, importedTextures, options, budget);
+			material.occlusionTexture = CreateTextureIfPresent(source, MaterialTextureKind::Occlusion, importedTextures, options, budget);
+			material.emissiveTexture = CreateTextureIfPresent(source, MaterialTextureKind::Emissive, importedTextures, options, budget);
+			const Image* textures[]={&material.baseColorTexture,&material.metallicRoughnessTexture,&material.normalTexture,&material.occlusionTexture,&material.emissiveTexture};
             for(uint32_t slot=0;slot<5;++slot)
-                if((source.textureIndices[slot]<importedTextures.size() || (source.hasTexture[slot] && !source.texturePaths[slot].empty())) && !textures[slot].IsValid())return false;
+                if((source.textureIndices[slot]<importedTextures.size() || (source.hasTexture[slot] && !source.texturePaths[slot].empty())) && !textures[slot]->IsValid())return false;
             return true;
 		}
 
@@ -129,7 +145,6 @@ namespace dyf
 			std::filesystem::path canonicalPath = std::filesystem::weakly_canonical(path, error);
 			if(error)
 			{
-				error.clear();
 				canonicalPath = std::filesystem::absolute(path, error).lexically_normal();
 				if(error) canonicalPath = std::filesystem::path(path).lexically_normal();
 			}
@@ -150,8 +165,15 @@ namespace dyf
 			key += "|maxNodeDepth=" + std::to_string(options.maxNodeDepth);
 			key += "|maxJointsPerSkin=" + std::to_string(options.maxJointsPerSkin);
 			key += "|maxAnimationKeys=" + std::to_string(options.maxAnimationKeys);
-			key += "|fbxBakeRate=" + std::to_string(options.fbxBakeRate);
-			key += "|fbxConstantTrackTolerance=" + std::to_string(options.fbxConstantTrackTolerance);
+			// Preserve every float bit (including signed zero) without locale or decimal rounding.
+			const auto floatIdentity = [](float value) {
+				uint32_t bits;
+				static_assert(sizeof(bits) == sizeof(value));
+				std::memcpy(&bits, &value, sizeof(bits));
+				return std::to_string(bits);
+			};
+			key += "|fbxBakeRate=" + floatIdentity(options.fbxBakeRate);
+			key += "|fbxConstantTrackTolerance=" + floatIdentity(options.fbxConstantTrackTolerance);
 			return key;
 		}
 	}
@@ -229,7 +251,7 @@ namespace dyf
 		if(!std::isfinite(influence.dqBlendWeight)
 			|| influence.dqBlendWeight < 0.0f
 			|| influence.dqBlendWeight > 1.0f) return false;
-		float totalWeight = 0.0f;
+		double totalWeight = 0.0;
 		for(size_t component = 0u; component < 4u; ++component)
 		{
 			const float weight = influence.weights[component];
@@ -255,7 +277,7 @@ namespace dyf
 		{
 			const float rawWeight = influence.weights[component];
 			if(rawWeight <= 0.0f) continue;
-			const float weight = rawWeight / totalWeight;
+			const float weight = static_cast<float>(rawWeight / totalWeight);
 			const SkinJointMatrices& joint = palette[influence.jointIndices[component]];
 			for(size_t matrixIndex = 0u; matrixIndex < 16u; ++matrixIndex)
 			{
@@ -352,10 +374,13 @@ namespace dyf
 		}
 
 		ModelData model = {};
-		if(!LoadModel(path, model, options)) return false;
+        uint64_t decodedBytes=0;
+		if(!LoadModel(path, model, options, decodedBytes)) return false;
+        ModelLoadBudget budget(path,options);
+        if(!budget.AddBytes(decodedBytes,1,"decoded model data")) return false;
 		const bool animatedModel = !model.skins.empty() || !model.animations.empty()
 			|| std::any_of(model.meshes.begin(), model.meshes.end(), [](const ModelMesh& mesh) {
-				return !mesh.morphTargets.empty();
+				return mesh.nodeIndex != UINT32_MAX || !mesh.morphTargets.empty();
 			});
 		for(const ModelMesh& modelMesh : model.meshes)
 		{
@@ -367,24 +392,29 @@ namespace dyf
 		}
 
 		const ModelBounds bounds = ComputeModelBounds(model);
-		std::vector<Image> importedTextures;
-		importedTextures.reserve(model.textures.size());
-		for(const Image& texture : model.textures)
+		std::string extension = std::filesystem::path(path).extension().string();
+		std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char value) {
+			return static_cast<char>(std::tolower(value));
+		});
+		const bool ufbxTexturesDecoded = extension == ".fbx" || extension == ".obj";
+		for(Image& texture : model.textures)
 		{
-			Image prepared = texture;
-			if(!prepared.IsValid())
+			if(!texture.IsValid())
 			{
-				if(texture.GetSourcePath().empty() || !LoadImage(texture.GetSourcePath(), prepared)) return false;
-				prepared.SetColorSpace(texture.GetColorSpace());
+				// The ufbx loader already attempted bounded decoding. Do not retry without its budget.
+				if(ufbxTexturesDecoded) return false;
+				const ColorSpace colorSpace = texture.GetColorSpace();
+				const std::string path = texture.GetSourcePath();
+				if(path.empty() || !LoadExternalImage(path, texture, options, budget)) return false;
+				texture.SetColorSpace(colorSpace);
 			}
-			importedTextures.push_back(std::move(prepared));
 		}
 		std::vector<MaterialID> materials;
 		materials.reserve(model.materials.size());
 		for(const ModelMaterialInfo& material : model.materials)
         {
             MaterialDesc prepared;
-            if(!BuildSceneMaterial(material,importedTextures,prepared))return false;
+            if(!BuildSceneMaterial(material,model.textures,prepared,options,budget))return false;
             materials.push_back(scene.CreateMaterial(prepared));
         }
 		if(materials.empty()) materials.push_back(scene.CreateMaterial(MaterialDesc{}));
@@ -398,10 +428,7 @@ namespace dyf
 		asset.hasBounds = bounds.valid;
 		if(bounds.valid)
 		{
-			asset.boundsCenter = Math::float3(
-				(bounds.min.x + bounds.max.x) * 0.5f,
-				(bounds.min.y + bounds.max.y) * 0.5f,
-				(bounds.min.z + bounds.max.z) * 0.5f);
+			asset.boundsCenter = (bounds.min + bounds.max) * 0.5f;
 			asset.boundsLargestAxis = std::max(
 				std::max(bounds.max.x - bounds.min.x, bounds.max.y - bounds.min.y),
 				bounds.max.z - bounds.min.z);
@@ -416,9 +443,7 @@ namespace dyf
 			ModelAssetMesh assetMesh;
 			assetMesh.mesh = scene.CreateMesh(modelMesh.mesh);
             scene.m_meshSkinInfluences.resize(scene.Meshes().size());
-            auto& gpuInfluences=scene.m_meshSkinInfluences[ToIndex(assetMesh.mesh)];
-            for(const auto& input:modelMesh.skinInfluences)
-                gpuInfluences.push_back(input);
+            scene.m_meshSkinInfluences[ToIndex(assetMesh.mesh)] = std::move(modelMesh.skinInfluences);
 			assetMesh.material = material;
 			assetMesh.nodeIndex = modelMesh.nodeIndex;
 			assetMesh.skinIndex = modelMesh.skinIndex;
@@ -443,7 +468,7 @@ namespace dyf
 		if(asset == nullptr) return false;
 		const bool animatedModel = !asset->skins.empty() || !asset->animations.empty()
 			|| std::any_of(asset->meshes.begin(), asset->meshes.end(), [](const ModelAssetMesh& mesh) {
-				return !mesh.morphTargets.empty();
+				return mesh.nodeIndex != UINT32_MAX || !mesh.morphTargets.empty();
 			});
 		const Math::float4x4 transform = BuildModelSceneTransform(*asset, desc);
 
@@ -484,7 +509,7 @@ namespace dyf
 		}
 		if(animatedModel)
 		{
-			if(!scene.UpdateAnimations(0.0f)) return false;
+			if(!scene.UpdateAnimations(0.0f,instanceId)) return false;
 			if(outInstance != nullptr) *outInstance = instanceId;
 		}
 		return createdAny;
@@ -540,6 +565,7 @@ namespace dyf
 				meshNodeGlobal = bindGlobals[sourceMesh.nodeIndex];
 			}
 			const Math::float4x4 outerTransform = model.assetTransform * meshNodeGlobal;
+			const bool reflected = Math::Determinant3x3(outerTransform) < 0.0f;
 			Math::float4x4 outerNormalTransform = {};
 			if(!Math::InverseTranspose(outerTransform, outerNormalTransform)) return {};
 
@@ -561,33 +587,24 @@ namespace dyf
 			const uint32_t vertexOffset = static_cast<uint32_t>(merged.vertices.size());
 			for(size_t vertexIndex = 0; vertexIndex < sourceGeometry->vertices.size(); ++vertexIndex)
 			{
-				Vertex vertex = sourceGeometry->vertices[vertexIndex];
-				Math::float3 localPosition = vertex.position;
-				Math::float3 localNormal = vertex.normal;
-				Math::float3 localTangent(vertex.tangent.x, vertex.tangent.y, vertex.tangent.z);
+				const Vertex& sourceVertex = sourceGeometry->vertices[vertexIndex];
+				Vertex vertex = sourceVertex;
 				if(hasSkin)
 				{
 					const SkinInfluence& influence = sourceMesh.skinInfluences[vertexIndex];
-					Vertex skinnedVertex;
-					if(!SkinVertex(vertex, influence, bindPalette, skinnedVertex)) return {};
-					localPosition = skinnedVertex.position;
-					localNormal = skinnedVertex.normal;
-					localTangent = Math::float3(
-						skinnedVertex.tangent.x,
-						skinnedVertex.tangent.y,
-						skinnedVertex.tangent.z);
-					vertex.tangent.w = skinnedVertex.tangent.w;
+					if(!SkinVertex(sourceVertex, influence, bindPalette, vertex)) return {};
 				}
 
-				vertex.position = Math::TransformPoint(outerTransform, localPosition);
+				vertex.position = Math::TransformPoint(outerTransform, vertex.position);
 				vertex.normal = NormalizeOr(
-					Math::TransformVector(outerNormalTransform, localNormal),
+					Math::TransformVector(outerNormalTransform, vertex.normal),
 					Math::float3(0.0f, 0.0f, 1.0f));
-				const Math::float3 rawTransformedTangent = Math::TransformVector(outerTransform, localTangent);
+				const Math::float3 rawTransformedTangent = Math::TransformVector(
+					outerTransform, Math::float3(vertex.tangent.x, vertex.tangent.y, vertex.tangent.z));
 				const Math::float3 transformedTangent = NormalizeOr(
 					rawTransformedTangent - vertex.normal * Dot(vertex.normal, rawTransformedTangent),
 					BuildFallbackTangent(vertex.normal));
-				if(Math::Determinant3x3(outerTransform) < 0.0f) vertex.tangent.w = -vertex.tangent.w;
+				if(reflected) vertex.tangent.w = -vertex.tangent.w;
 				vertex.tangent = Math::float4(
 					transformedTangent.x,
 					transformedTangent.y,
@@ -595,11 +612,15 @@ namespace dyf
 					vertex.tangent.w);
 				merged.vertices.push_back(vertex);
 			}
+			const size_t indexOffset = merged.indices.size();
 			for(const uint32_t index : sourceGeometry->indices)
 			{
 				if(index >= sourceGeometry->vertices.size()) return {};
 				merged.indices.push_back(vertexOffset + index);
 			}
+			if(reflected)
+				for(size_t index = indexOffset; index + 2 < merged.indices.size(); index += 3)
+					std::swap(merged.indices[index + 1], merged.indices[index + 2]);
 		}
 		return merged;
 	}

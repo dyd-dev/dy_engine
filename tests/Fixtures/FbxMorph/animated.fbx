@@ -1,0 +1,85 @@
+; Handwritten FBX 7.4 fixture: +2 X morph, 50% default, linear 0/50/100% at 0/0.5/1s.
+FBXHeaderExtension: {
+    FBXHeaderVersion: 1003
+    FBXVersion: 7400
+}
+Objects: {
+    Model: 1, "Model::Triangle", "Mesh" {
+        Version: 232
+    }
+    Geometry: 2, "Geometry::Triangle", "Mesh" {
+        Vertices: *9 {
+            a: 0,0,0,1,0,0,0,1,0
+        }
+        PolygonVertexIndex: *3 {
+            a: 0,1,-3
+        }
+    }
+    Geometry: 3, "Geometry::TranslateX", "Shape" {
+        Version: 100
+        Indexes: *3 {
+            a: 0,1,2
+        }
+        Vertices: *9 {
+            a: 2,0,0,2,0,0,2,0,0
+        }
+    }
+    Deformer: 4, "Deformer::Morph", "BlendShape" {
+        Version: 100
+    }
+    Deformer: 5, "SubDeformer::TranslateX", "BlendShapeChannel" {
+        Version: 100
+        Properties70: {
+            P: "DeformPercent", "Number", "", "A",50
+        }
+        DeformPercent: 50
+        FullWeights: *1 {
+            a: 100
+        }
+    }
+    AnimationStack: 6, "AnimStack::Morph", "" {
+        Properties70: {
+            P: "LocalStart", "KTime", "Time", "",0
+            P: "LocalStop", "KTime", "Time", "",46186158000
+            P: "ReferenceStart", "KTime", "Time", "",0
+            P: "ReferenceStop", "KTime", "Time", "",46186158000
+        }
+    }
+    AnimationLayer: 7, "AnimLayer::BaseLayer", "" {
+    }
+    AnimationCurveNode: 8, "AnimCurveNode::TranslateX", "" {
+        Properties70: {
+            P: "d|DeformPercent", "Number", "", "A",0
+        }
+    }
+    AnimationCurve: 9, "AnimCurve::TranslateX", "" {
+        Default: 0
+        KeyVer: 4008
+        KeyTime: *3 {
+            a: 0,23093079000,46186158000
+        }
+        KeyValueFloat: *3 {
+            a: 0,50,100
+        }
+        KeyAttrFlags: *3 {
+            a: 4,4,4
+        }
+        KeyAttrDataFloat: *12 {
+            a: 0,0,0,0,0,0,0,0,0,0,0,0
+        }
+        KeyAttrRefCount: *3 {
+            a: 1,1,1
+        }
+    }
+}
+Connections: {
+    C: "OO",1,0
+    C: "OO",2,1
+    C: "OO",4,2
+    C: "OO",5,4
+    C: "OO",3,5
+    C: "OO",7,6
+    C: "OO",8,7
+    C: "OP",8,5,"DeformPercent"
+    C: "OP",9,8,"d|DeformPercent"
+}

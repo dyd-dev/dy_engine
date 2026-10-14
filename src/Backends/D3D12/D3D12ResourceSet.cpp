@@ -1,6 +1,7 @@
 #include "D3D12ResourceSet.h"
 
 #include <d3d12.h>
+#include <memory>
 #include <wrl.h>
 
 using Microsoft::WRL::ComPtr;
@@ -20,15 +21,12 @@ namespace dyf::Backends
         uint32_t descriptorSize,
         const std::vector<ID3D12Resource*>& resources)
         : RHI::ResourceSet(desc)
-        , m_internal(new D3D12ResourceSetInternal())
     {
-        m_internal->descriptorHeap = descriptorHeap;
-        m_internal->descriptorSize = descriptorSize;
-        m_internal->resources.reserve(resources.size());
-        for (ID3D12Resource* resource : resources)
-        {
-            m_internal->resources.emplace_back(resource);
-        }
+        auto internal = std::make_unique<D3D12ResourceSetInternal>();
+        internal->descriptorHeap = descriptorHeap;
+        internal->descriptorSize = descriptorSize;
+        internal->resources.assign(resources.begin(), resources.end());
+        m_internal = internal.release();
     }
 
     D3D12ResourceSet::~D3D12ResourceSet()

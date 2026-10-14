@@ -2,17 +2,20 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "dyf/RHI/ICommandList.h"
+#include "../../RHI/UploadPool.h"
 
 namespace dyf::Backends
 {
 	class MetalBuffer;
 	class MetalTexture;
 	struct MetalObjectDeleter;
+	struct MetalUploadPage;
 
 	struct MetalSubmissionState
 	{
@@ -23,7 +26,8 @@ namespace dyf::Backends
 	class MetalCommandList final : public RHI::ICommandList
 	{
 	public:
-		explicit MetalCommandList(void* commandQueue);
+		explicit MetalCommandList(void* commandQueue,
+			std::shared_ptr<RHI::Detail::UploadPagePool<MetalUploadPage>> uploadPool = {});
         bool ReplayNative(const std::vector<std::function<bool(ICommandList&)>>& commands) override;
         void GlobalBarrierNative() override;
 
@@ -34,6 +38,8 @@ namespace dyf::Backends
 		void EndRenderingNative() override;
 
 		void BindGraphicsPipelineNative(RHI::PipelineHandle pipelineState) override;
+		void BindComputePipelineNative(RHI::PipelineHandle pipelineState) override;
+		void DispatchNative(uint32_t x, uint32_t y, uint32_t z) override;
 		void BindResourceSetNative(RHI::ResourceSetHandle resourceSet) override;
 		void BindVertexBufferNative(
 			uint32_t binding,
@@ -63,6 +69,10 @@ namespace dyf::Backends
 			uint32_t firstIndex,
 			int32_t vertexOffset,
 			uint32_t firstInstance) override;
+		void DispatchMeshNative(
+			uint32_t threadGroupCountX,
+			uint32_t threadGroupCountY,
+			uint32_t threadGroupCountZ) override;
 
 		bool CloseNative() override;
 

@@ -5,6 +5,7 @@
 #include "MetalCommandList.h"
 #include "MetalResourceSet.h"
 #include "MetalShader.h"
+#include "MetalUpload.h"
 #include "dyf/RHI/Readback.h"
 
 #include <algorithm>
@@ -80,6 +81,7 @@ namespace dyf::Backends
 
         id<MTLDevice> device = nil;
         id<MTLCommandQueue> commandQueue = nil;
+        std::shared_ptr<MetalUploadPool> uploadPool;
         const void* windowHandle = nullptr;
 
         CAMetalLayer* metalLayer = nil;
@@ -252,6 +254,12 @@ namespace dyf::Backends
     {
     }
 
+    RHI::UploadMemoryStatistics MetalDevice::GetUploadMemoryStatisticsNative() const
+    {
+        return m_impl != nullptr && m_impl->uploadPool ?
+            m_impl->uploadPool->GetStatistics() : RHI::UploadMemoryStatistics{};
+    }
+
     MetalDevice::~MetalDevice()
     {
         if(m_impl == nullptr) return;
@@ -287,6 +295,7 @@ namespace dyf::Backends
 
         if(m_impl->metalLayer != nil)
             m_impl->metalLayer.device = nil;
+        m_impl->uploadPool.reset();
 #if !__has_feature(objc_arc)
         [m_impl->metalLayer release];
         if(m_impl->drawableQueue != nullptr)
@@ -323,6 +332,7 @@ namespace dyf::Backends
 
         m_impl->commandQueue = [device newCommandQueue];
         if(m_impl->commandQueue == nil) return -1;
+        m_impl->uploadPool = MakeMetalUploadPool(device);
 
         m_impl->frameSlots.resize(desc.maxFramesInFlight);
         m_impl->activeCommandLists.reserve(desc.maxFramesInFlight);
@@ -345,6 +355,7 @@ bool MetalDevice::SupportsNative(RHI::Feature feature) const
     if(!m_impl || m_impl->device == nil) return false;
     switch(feature)
     {
+    case RHI::Feature::Compute:
     case RHI::Feature::Rasterization:
     case RHI::Feature::Tessellation:
     case RHI::Feature::DescriptorIndexing:
@@ -352,6 +363,14 @@ bool MetalDevice::SupportsNative(RHI::Feature feature) const
     case RHI::Feature::Wireframe:
     case RHI::Feature::DepthBiasClamp:
         return true;
+    case RHI::Feature::MeshShader:
+        if(@available(macOS 13.0, iOS 16.0, *))
+        {
+            return [m_impl->device supportsFamily:MTLGPUFamilyMetal3];
+        }
+        return false;
+    case RHI::Feature::TaskShader:
+        return false;
     // 이 구현은 shader bias 인자를 추가하지 않으므로 sampler LOD bias는 지원하지 않는다.
     default: return false;
     }
@@ -415,6 +434,10 @@ bool MetalDevice::SupportsSamplerNative(const RHI::SamplerDesc& desc) const
 bool MetalDevice::SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc& desc) const
 {
     return m_impl && MetalPipeline::SupportsGraphics(desc, (__bridge void*)m_impl->device);
+}
+bool MetalDevice::SupportsMeshPipelineNative(const RHI::MeshPipelineDesc& desc) const
+{
+    return m_impl && MetalPipeline::SupportsMesh(desc, (__bridge void*)m_impl->device);
 }
 bool MetalDevice::IsLostNative() const {return !m_impl || m_impl->asyncWorkFailed;}
 bool MetalDevice::WaitIdleNative()
@@ -670,7 +693,7 @@ void MetalDevice::DestroySwapchainNative()
         }
 
         auto commandList = std::unique_ptr<MetalCommandList, MetalObjectDeleter>(
-            new MetalCommandList((__bridge void*)m_impl->commandQueue));
+            new MetalCommandList((__bridge void*)m_impl->commandQueue, m_impl->uploadPool));
         if(!commandList->Begin()) return nullptr;
 
         MetalCommandList* result = commandList.get();
@@ -838,6 +861,16 @@ void MetalDevice::DestroySwapchainNative()
 		return result;
 	}
 
+    RHI::PipelineHandle MetalDevice::CreateComputePipelineNative(const RHI::ComputePipelineDesc& desc)
+    {
+        auto pipeline = std::unique_ptr<MetalPipeline, MetalObjectDeleter>(
+            new MetalPipeline(desc, (__bridge void*)m_impl->device));
+        if(pipeline->GetNativePipeline() == nullptr) return nullptr;
+        auto* result = pipeline.get();
+        m_impl->livePipelines.push_back(std::move(pipeline));
+        return result;
+    }
+
     RHI::PipelineHandle MetalDevice::CreateGraphicsPipelineNative(
         const RHI::GraphicsPipelineDesc& desc)
     {
@@ -861,6 +894,33 @@ void MetalDevice::DestroySwapchainNative()
             new MetalPipeline(desc, (__bridge void*)m_impl->device));
 		if(pipeline->GetNativePipeline() == nullptr ||
 			(pipeline->IsTessellated() && pipeline->GetNativeHullPipeline() == nullptr) ||
+			(desc.depthStencil.format != RHI::Format::Unknown &&
+				pipeline->GetNativeDepthStencil() == nullptr)) return nullptr;
+		MetalPipeline* result = pipeline.get();
+		m_impl->livePipelines.push_back(std::move(pipeline));
+		return result;
+    }
+
+    RHI::PipelineHandle MetalDevice::CreateMeshPipelineNative(
+        const RHI::MeshPipelineDesc& desc)
+    {
+		const auto ownsShader = [this](RHI::ShaderHandle shader)
+		{
+			return std::find_if(
+				m_impl->liveShaders.begin(), m_impl->liveShaders.end(),
+				[shader](const std::unique_ptr<MetalShader, MetalObjectDeleter>& candidate)
+				{
+					return static_cast<RHI::ShaderHandle>(candidate.get()) == shader;
+				}) != m_impl->liveShaders.end();
+		};
+		if(!ownsShader(desc.meshShader) ||
+			(desc.fragmentShader != nullptr && !ownsShader(desc.fragmentShader)))
+		{
+			return nullptr;
+		}
+        auto pipeline = std::unique_ptr<MetalPipeline, MetalObjectDeleter>(
+            new MetalPipeline(desc, (__bridge void*)m_impl->device));
+		if(pipeline->GetNativePipeline() == nullptr ||
 			(desc.depthStencil.format != RHI::Format::Unknown &&
 				pipeline->GetNativeDepthStencil() == nullptr)) return nullptr;
 		MetalPipeline* result = pipeline.get();
@@ -1105,7 +1165,9 @@ void MetalDevice::DestroySwapchainNative()
 
     bool MetalDevice::ReadTextureNative(RHI::TextureHandle texture, RHI::TextureReadback& result)
     {
-        if(!m_impl || !texture || m_impl->asyncWorkFailed || !m_impl->activeCommandLists.empty()) return false;
+        if(!m_impl || !texture) return false;
+        m_impl->CollectCompletedSubmissions();
+        if(m_impl->asyncWorkFailed || !m_impl->activeCommandLists.empty()) return false;
         const bool backBuffer = texture == m_impl->backBufferTex;
         id<MTLTexture> image = nil;
         if(backBuffer)
@@ -1156,7 +1218,9 @@ void MetalDevice::DestroySwapchainNative()
             [blit endEncoding];
             [command commit];
             [command waitUntilCompleted];
-            const bool succeeded = command.status == MTLCommandBufferStatusCompleted && buffer.contents != nullptr;
+            m_impl->CollectCompletedSubmissions();
+            const bool succeeded = !m_impl->asyncWorkFailed &&
+                command.status == MTLCommandBufferStatusCompleted && buffer.contents != nullptr;
             if(succeeded)
                 for(uint32_t row = 0; row < desc.height; ++row)
                     std::memcpy(output.pixels.data() + static_cast<size_t>(row) * output.rowPitch,

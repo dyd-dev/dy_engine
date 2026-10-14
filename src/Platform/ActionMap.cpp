@@ -7,12 +7,11 @@ using namespace dyf::Platform;
 ActionMap::Action& ActionMap::AddAction(ActionId id, bool axis)
 {
 	if(m_updated) throw std::logic_error("Configure action bindings before the first Update.");
-	auto found = m_actions.find(id);
-	if(found != m_actions.end() && found->second.axis != axis)
+	auto [found, inserted] = m_actions.try_emplace(id);
+	if(!inserted && found->second.axis != axis)
 		throw std::invalid_argument("An action cannot mix button and axis bindings.");
-	auto& action = m_actions[id];
-	action.axis = axis;
-	return action;
+	found->second.axis = axis;
+	return found->second;
 }
 
 void ActionMap::BindButton(ActionId action, Key key)
@@ -95,7 +94,11 @@ void ActionMap::Update(InputCapture capture)
 			if(m_suppressed[index] && m_input.m_lastReleaseFrame[index] > m_frameNumber &&
 				m_input.m_lastReleaseFrame[index] < m_input.m_frameNumber) m_suppressed.reset(index);
 		m_startSuppressed = m_suppressed;
-		for(auto& entry : m_actions) entry.second.startValue = entry.second.state.value;
+		for(auto& entry : m_actions)
+		{
+			entry.second.startValue = entry.second.state.value;
+			entry.second.captureReleased = false;
+		}
 	}
 	m_updated = true;
 	m_frameNumber = m_input.m_frameNumber;
@@ -135,5 +138,11 @@ void ActionMap::Update(InputCapture capture)
 	Evaluate(m_input.m_frame.down, m_input.m_frame.focused, capture);
 	if(sameFrame)
 		for(auto& entry : m_actions)
-			entry.second.state.released |= entry.second.previousDown && entry.second.state.value == 0;
+		{
+			auto& action = entry.second;
+			// Keep cancellation edges across later capture changes, not raw tap edges
+			// that replay intentionally hides when their input kind is newly captured.
+			action.captureReleased |= action.previousDown && action.state.value == 0;
+			action.state.released |= action.captureReleased;
+		}
 }

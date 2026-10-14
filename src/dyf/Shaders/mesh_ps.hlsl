@@ -96,17 +96,9 @@ cbuffer RendererLighting : register(b1, space0) { RendererLightingConstants ligh
 
 #if !RENDERER_BINDLESS
 Texture2D BaseColorTexture : register(t0, space0);
-#endif
-#if !RENDERER_BINDLESS
 Texture2D MetallicRoughnessTexture : register(t4, space0);
-#endif
-#if !RENDERER_BINDLESS
 Texture2D NormalTexture : register(t5, space0);
-#endif
-#if !RENDERER_BINDLESS
 Texture2D OcclusionTexture : register(t6, space0);
-#endif
-#if !RENDERER_BINDLESS
 Texture2D EmissiveTexture : register(t7, space0);
 #endif
 #if RENDERER_ENABLE_SHADOWS
@@ -139,10 +131,11 @@ float DistributionGGX(float3 normal, float3 halfway, float roughness)
 {
     float a = roughness * roughness;
     float a2 = a * a;
-    float ndoth = max(dot(normal, halfway), 0.0);
+    float ndoth = clamp(dot(normal, halfway), 0.0, 1.0);
     float ndoth2 = ndoth * ndoth;
-    float denom = ndoth2 * (a2 - 1.0) + 1.0;
-    return a2 / max(PI * denom * denom, 0.0001);
+    // roughness >= .01; this form retains a2 at the specular peak.
+    float denom = (1.0 - ndoth2) + ndoth2 * a2;
+    return a2 / (PI * denom * denom);
 }
 
 float GeometrySchlickGGX(float ndotv, float roughness)
@@ -150,13 +143,6 @@ float GeometrySchlickGGX(float ndotv, float roughness)
     float r = roughness + 1.0;
     float k = (r * r) / 8.0;
     return ndotv / max(ndotv * (1.0 - k) + k, 0.0001);
-}
-
-float GeometrySmith(float3 normal, float3 viewDir, float3 lightDir, float roughness)
-{
-    float ndotv = max(dot(normal, viewDir), 0.0);
-    float ndotl = max(dot(normal, lightDir), 0.0);
-    return GeometrySchlickGGX(ndotv, roughness) * GeometrySchlickGGX(ndotl, roughness);
 }
 
 float3 FresnelSchlick(float cosTheta, float3 f0)
@@ -188,20 +174,11 @@ float4 SampleMaterial(uint kind,float2 uv)
 #endif
 }
 
-float4 SampleBaseColorTexture(float2 uv)
-{
-    return SampleMaterial(0u,uv);
-}
-
 float3 GetNormal(PSInput input, uint textureFlags)
 {
     float3 normal = normalize(input.worldNormal);
-    if ((textureFlags & RENDERER_TEXTURE_FLAG_NORMAL) == 0u)
-    {
-        return normal;
-    }
     float normalScale = materialParams.z;
-    if (normalScale <= 0.0001)
+    if ((textureFlags & RENDERER_TEXTURE_FLAG_NORMAL) == 0u || abs(normalScale) <= 0.0001)
     {
         return normal;
     }
@@ -289,7 +266,6 @@ float SampleShadow(int type,int lightIndex,float3 worldPosition,float3 normal,fl
     return 1.0-clamp(views.z,0.0,1.0)*(1.0-visible/max(samples,1.0));
 }
 
-#else
 #endif
 
 // 현재 언어의 조명 계산을 직접 작성한다.
@@ -332,7 +308,7 @@ inline float3 EvaluateDirectLight(
     float3 halfway = halfwayVector * rsqrt(halfwayLengthSquared);
     float3 f0 = lerp(float3(0.04,0.04,0.04), albedo, metallic);
     float ndf = DistributionGGX(normal, halfway, roughness);
-    float geometry = GeometrySmith(normal, viewDir, lightDir, roughness);
+    float geometry = GeometrySchlickGGX(ndotv, roughness) * GeometrySchlickGGX(ndotl, roughness);
     float3 fresnel = FresnelSchlick(max(dot(halfway, viewDir), 0.0), f0);
     float3 specular = (ndf * geometry * fresnel) / max(4.0 * ndotv * ndotl, 0.0001);
     float3 diffuseWeight = (float3(1.0,1.0,1.0) - fresnel) * (1.0 - metallic);
@@ -486,14 +462,14 @@ float4 main(PSInput input) : SV_TARGET
     float3 albedo = baseColor.rgb;
     if ((textureFlags & RENDERER_TEXTURE_FLAG_BASE_COLOR) != 0u)
     {
-        albedo *= SampleBaseColorTexture(input.uv).rgb;
+        albedo *= SampleMaterial(0u,input.uv).rgb;
     }
 
     float minRoughness = clamp(lighting.pbrParams.x, 0.01, 1.0);
     float ambientSpecularStrength = max(lighting.pbrParams.y, 0.0);
     float metallic = clamp(materialParams.x, 0.0, 1.0);
     float roughness = clamp(materialParams.y, minRoughness, 1.0);
-    float occlusion = clamp(materialParams.w, 0.0, 1.0);
+    float occlusion = 1.0;
     if ((textureFlags & RENDERER_TEXTURE_FLAG_METALLIC_ROUGHNESS) != 0u)
     {
         float4 metallicRoughness = SampleMaterial(1u,input.uv);
@@ -502,7 +478,7 @@ float4 main(PSInput input) : SV_TARGET
     }
     if ((textureFlags & RENDERER_TEXTURE_FLAG_OCCLUSION) != 0u)
     {
-        occlusion *= SampleMaterial(3u,input.uv).r;
+        occlusion = lerp(1.0, SampleMaterial(3u,input.uv).r, clamp(materialParams.w, 0.0, 1.0));
     }
     float3 emissive = emissiveColor.rgb;
     if ((textureFlags & RENDERER_TEXTURE_FLAG_EMISSIVE) != 0u)
@@ -512,30 +488,17 @@ float4 main(PSInput input) : SV_TARGET
 
     float3 normal = GetNormal(input, textureFlags);
     float3 viewDir = normalize(lighting.cameraPosition.xyz - input.worldPosition);
-    bool usePointLight = lighting.pointLightColorIntensity.a > 0.0 && lighting.pointLightPositionRange.w > 0.0;
-    float3 lightDir = normalize(lighting.directionalLightDirection.xyz);
-    if (usePointLight)
-    {
-        float3 toLight = lighting.pointLightPositionRange.xyz - input.worldPosition;
-        float distanceToLight = length(toLight);
-        lightDir = distanceToLight > 0.0001 ? toLight / distanceToLight : float3(0.0, 0.0, 1.0);
-    }
-
-    float3 halfway = normalize(viewDir + lightDir);
     float3 f0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
-    float3 fresnel = FresnelSchlick(max(dot(halfway, viewDir), 0.0), f0);
-
-    float3 kS = fresnel;
-    float3 kD = (float3(1.0, 1.0, 1.0) - kS) * (1.0 - metallic);
     float3 directLight = EvaluateLights(lighting, input.worldPosition, normal, viewDir, albedo, metallic, roughness);
     float3 ambientFresnel = FresnelSchlickRoughness(max(dot(normal, viewDir), 0.0), f0, roughness);
+    float3 kD = (float3(1.0, 1.0, 1.0) - ambientFresnel) * (1.0 - metallic);
     float3 ambientDiffuse = kD * albedo * lighting.ambientColor.rgb * lighting.ambientColor.a;
     float3 ambientSpecular = ambientFresnel * lighting.environmentColor.rgb * lighting.environmentColor.a * ambientSpecularStrength;
     float3 ambient = (ambientDiffuse + ambientSpecular) * occlusion;
     float3 color = lighting.lightCounts.w > 0.5 ? ambient + directLight + emissive : albedo + emissive;
 
     if(lighting.pbrParams.z >= 0.0) {
-        color *= lighting.pbrParams.w;
+        color = min(color * lighting.pbrParams.w, 16777216.0);
     color = color / (color + float3(1.0, 1.0, 1.0));
     if (lighting.pbrParams.z > 0.5) color = pow(color, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
     }

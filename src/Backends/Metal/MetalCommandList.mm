@@ -4,8 +4,12 @@
 #include "MetalPipeline.h"
 #include "MetalResourceSet.h"
 #include "MetalTexture.h"
+#include "MetalTessellation.h"
+#include "MetalUpload.h"
+#include "../../RHI/Validation.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -19,96 +23,11 @@ namespace dyf::Backends
 {
 	namespace
 	{
-		[[nodiscard]] bool HasUsage(RHI::BufferUsage value, RHI::BufferUsage usage)
-		{
-			return (value & usage) != RHI::BufferUsage::None;
-		}
-
-		[[nodiscard]] bool HasUsage(RHI::TextureUsage value, RHI::TextureUsage usage)
-		{
-			return (value & usage) != RHI::TextureUsage::None;
-		}
-
 		[[nodiscard]] bool HasStage(
 			RHI::ShaderStageFlags stages,
 			RHI::ShaderStageFlags stage)
 		{
 			return (stages & stage) != RHI::ShaderStageFlags::None;
-		}
-
-		[[nodiscard]] uint32_t FormatSize(RHI::Format format)
-		{
-			switch(format)
-			{
-			case RHI::Format::R8G8B8A8_UNORM:
-			case RHI::Format::B8G8R8A8_UNORM:
-			case RHI::Format::R8G8B8A8_UNORM_SRGB:
-			case RHI::Format::B8G8R8A8_UNORM_SRGB:
-			case RHI::Format::D32_FLOAT:
-			case RHI::Format::D24_UNORM_S8_UINT:
-			case RHI::Format::R32_UINT:
-				return 4;
-			case RHI::Format::R16G16B16A16_FLOAT:
-			case RHI::Format::R32G32_FLOAT:
-				return 8;
-			case RHI::Format::R32G32B32_FLOAT:
-				return 12;
-			case RHI::Format::R32G32B32A32_FLOAT:
-				return 16;
-			case RHI::Format::R16_UINT:
-				return 2;
-			default:
-				return 0;
-			}
-		}
-
-		[[nodiscard]] bool IsBufferStateAllowed(
-			const RHI::BufferDesc& desc,
-			RHI::ResourceState state)
-		{
-			switch(state)
-			{
-			case RHI::ResourceState::Undefined:
-			case RHI::ResourceState::Common:
-			case RHI::ResourceState::CopyDestination:
-				return true;
-			case RHI::ResourceState::VertexBuffer:
-				return HasUsage(desc.usage, RHI::BufferUsage::Vertex);
-			case RHI::ResourceState::IndexBuffer:
-				return HasUsage(desc.usage, RHI::BufferUsage::Index);
-			case RHI::ResourceState::ConstantBuffer:
-				return HasUsage(desc.usage, RHI::BufferUsage::Constant);
-			case RHI::ResourceState::ShaderResource:
-			case RHI::ResourceState::UnorderedAccess:
-				return HasUsage(desc.usage, RHI::BufferUsage::Storage);
-			default:
-				return false;
-			}
-		}
-
-		[[nodiscard]] bool IsTextureStateAllowed(
-			const RHI::TextureDesc& desc,
-			RHI::ResourceState state)
-		{
-			switch(state)
-			{
-			case RHI::ResourceState::Undefined:
-			case RHI::ResourceState::Common:
-			case RHI::ResourceState::CopyDestination:
-				return true;
-			case RHI::ResourceState::ShaderResource:
-				return HasUsage(desc.usage, RHI::TextureUsage::ShaderResource);
-			case RHI::ResourceState::UnorderedAccess:
-				return HasUsage(desc.usage, RHI::TextureUsage::Storage);
-			case RHI::ResourceState::RenderTarget:
-			case RHI::ResourceState::Present:
-				return HasUsage(desc.usage, RHI::TextureUsage::RenderTarget);
-			case RHI::ResourceState::DepthRead:
-			case RHI::ResourceState::DepthWrite:
-				return HasUsage(desc.usage, RHI::TextureUsage::DepthStencil);
-			default:
-				return false;
-			}
 		}
 
 		[[nodiscard]] id<MTLBuffer> NativeBuffer(MetalBuffer* buffer)
@@ -131,29 +50,6 @@ namespace dyf::Backends
 			return {texture, arrayLayer * texture->GetDesc().mipLevels + mipLevel};
 		}
 
-		[[nodiscard]] bool ResolveSubresources(
-			MetalTexture* texture,
-			const RHI::TextureSubresourceRange& range,
-			uint32_t& firstMip,
-			uint32_t& mipCount,
-			uint32_t& firstLayer,
-			uint32_t& layerCount)
-		{
-			firstMip = range.firstMipLevel;
-			firstLayer = range.firstArrayLayer;
-			if(firstMip >= texture->GetDesc().mipLevels ||
-				firstLayer >= texture->GetDesc().depthOrArraySize)
-			{
-				return false;
-			}
-			mipCount = range.mipLevelCount == 0
-				? texture->GetDesc().mipLevels - firstMip : range.mipLevelCount;
-			layerCount = range.arrayLayerCount == 0
-				? texture->GetDesc().depthOrArraySize - firstLayer : range.arrayLayerCount;
-			return mipCount <= texture->GetDesc().mipLevels - firstMip &&
-				layerCount <= texture->GetDesc().depthOrArraySize - firstLayer;
-		}
-
 		[[nodiscard]] MTLLoadAction ToLoadAction(RHI::LoadOp operation)
 		{
 			switch(operation)
@@ -173,19 +69,6 @@ namespace dyf::Backends
 			case RHI::StoreOp::Discard: return MTLStoreActionDontCare;
 			default: return MTLStoreActionDontCare;
 			}
-		}
-
-		[[nodiscard]] const RHI::ResourceBindingLayout* FindLayoutBinding(
-			const RHI::PipelineLayoutDesc& layout,
-			uint32_t binding)
-		{
-			for(uint32_t index = 0; index < layout.bindingCount; ++index)
-			{
-				const RHI::ResourceBindingLayout& candidate = layout.bindings[index];
-				if(candidate.binding == binding)
-					return &candidate;
-			}
-			return nullptr;
 		}
 
 		enum class OperationKind : uint8_t
@@ -223,7 +106,13 @@ namespace dyf::Backends
 		id<MTLRenderCommandEncoder> renderEncoder = nil;
 		id<MTLBlitCommandEncoder> blitEncoder = nil;
 		MTLRenderPassDescriptor* resumePass = nil;
+		std::array<MTLStoreAction, 8> finalColorStoreActions = {};
+		MTLStoreAction finalDepthStoreAction = MTLStoreActionDontCare;
+		MTLStoreAction finalStencilStoreAction = MTLStoreActionDontCare;
 		NSMutableArray<id<MTLResource>>* retainedResources = nil;
+		std::shared_ptr<MetalUploadPool> uploadPool;
+		std::shared_ptr<MetalUploadArena> uploadArena;
+		std::shared_ptr<std::shared_ptr<MetalUploadArena>> uploadCompletionLease;
 
 		std::vector<MetalOperation> operations;
 		std::unordered_map<MetalBuffer*, RHI::ResourceState> bufferStates;
@@ -260,6 +149,23 @@ namespace dyf::Backends
 
 	namespace
 	{
+		[[nodiscard]] bool IsNativePending(id<MTLCommandBuffer> buffer)
+		{
+			if(buffer == nil) return false;
+			const auto status = buffer.status;
+			return status != MTLCommandBufferStatusNotEnqueued &&
+				status != MTLCommandBufferStatusCompleted && status != MTLCommandBufferStatusError;
+		}
+
+		template<class T>
+		void ReserveForAppend(std::vector<T>& values)
+		{
+			if(values.size() < values.capacity()) return;
+			const auto capacity = values.size() <= values.max_size() / 2 ?
+				std::max(size_t{1}, values.size() * 2) : values.max_size();
+			values.reserve(capacity);
+		}
+
 		template<typename ImplType>
 		void Invalidate(ImplType* impl)
 		{
@@ -278,9 +184,20 @@ namespace dyf::Backends
 		}
 
 		template<typename ImplType>
-		void EndRenderEncoding(ImplType* impl)
+		void EndRenderEncoding(ImplType* impl, bool preserveAttachments = false)
 		{
 			if(impl->renderEncoder == nil) return;
+			// Every encoder starts with Unknown so intermediate splits may Store,
+			// while final, close, reset, and discard paths honor the declared action.
+			for(uint32_t index = 0; index < impl->colorFormats.size(); ++index)
+				[impl->renderEncoder setColorStoreAction:preserveAttachments
+					? MTLStoreActionStore : impl->finalColorStoreActions[index] atIndex:index];
+			if(impl->depthTexture != nullptr)
+				[impl->renderEncoder setDepthStoreAction:preserveAttachments
+					? MTLStoreActionStore : impl->finalDepthStoreAction];
+			if(RHI::HasStencil(impl->depthFormat))
+				[impl->renderEncoder setStencilStoreAction:preserveAttachments
+					? MTLStoreActionStore : impl->finalStencilStoreAction];
 			[impl->renderEncoder endEncoding];
 #if !__has_feature(objc_arc)
 			[impl->renderEncoder release];
@@ -396,27 +313,54 @@ namespace dyf::Backends
 		}
 	}
 
-	MetalCommandList::MetalCommandList(void* commandQueue)
-		: m_impl(new Impl())
+	MetalCommandList::MetalCommandList(void* commandQueue,
+		std::shared_ptr<MetalUploadPool> uploadPool)
 	{
-		m_impl->commandQueue = (__bridge id<MTLCommandQueue>)commandQueue;
+		auto impl = std::make_unique<Impl>();
+		impl->commandQueue = (__bridge id<MTLCommandQueue>)commandQueue;
+		impl->uploadPool = uploadPool ? std::move(uploadPool) :
+			MakeMetalUploadPool(impl->commandQueue.device);
+		m_impl = impl.release();
 	}
 
 	MetalCommandList::~MetalCommandList()
 	{
-		Reset();
+		if(IsNativePending(m_impl->commandBuffer))
+		{
+			// Begin registered the arena retention before any possible commit.
+			// Even a direct native submission keeps its pages until completion.
+			EndRenderEncoding(m_impl);
+			EndBlitEncoding(m_impl);
+#if !__has_feature(objc_arc)
+			[m_impl->resumePass release];
+			[m_impl->retainedResources release];
+			[m_impl->commandBuffer release];
+#endif
+		}
+		else Reset();
 		delete m_impl;
 	}
 
 	bool MetalCommandList::Begin()
 	{
+		if(IsNativePending(m_impl->commandBuffer)) return false;
 		Reset();
+		m_impl->uploadArena = std::make_shared<MetalUploadArena>(m_impl->uploadPool);
 		id<MTLCommandBuffer> commandBuffer = [m_impl->commandQueue commandBuffer];
 		if(commandBuffer == nil) return false;
 #if !__has_feature(objc_arc)
 		[commandBuffer retain];
 #endif
 		m_impl->commandBuffer = commandBuffer;
+		// Completion handlers must be registered before commit. The device's
+		// normal retirement still owns the arena; this also covers direct use.
+		m_impl->uploadCompletionLease =
+			std::make_shared<std::shared_ptr<MetalUploadArena>>(m_impl->uploadArena);
+		auto uploads = m_impl->uploadCompletionLease;
+		[commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
+			(void)completed;
+			uploads->reset();
+		}];
 		m_impl->retainedResources = [NSMutableArray new];
 		m_impl->valid = true;
 		return true;
@@ -425,6 +369,13 @@ namespace dyf::Backends
 	void MetalCommandList::Reset()
 	{
 		if(m_impl == nullptr) return;
+		if(IsNativePending(m_impl->commandBuffer)) return;
+		// A discarded autoreleased command buffer may stay alive until its pool
+		// drains. Cancel its unused completion lease so reuse can happen now.
+		if(m_impl->uploadCompletionLease && (m_impl->commandBuffer == nil ||
+			m_impl->commandBuffer.status == MTLCommandBufferStatusNotEnqueued))
+			m_impl->uploadCompletionLease->reset();
+		m_impl->uploadCompletionLease.reset();
 		EndRenderEncoding(m_impl);
 		EndBlitEncoding(m_impl);
 #if !__has_feature(objc_arc)
@@ -435,6 +386,7 @@ namespace dyf::Backends
 		m_impl->retainedResources = nil;
 		m_impl->resumePass = nil;
 		m_impl->commandBuffer = nil;
+		m_impl->uploadArena.reset();
 		m_impl->operations.clear();
 		m_impl->bufferStates.clear();
 		m_impl->textureStates.clear();
@@ -658,7 +610,7 @@ namespace dyf::Backends
 				attachment.mipLevel < texture->GetDesc().mipLevels &&
 				attachment.arrayLayer < texture->GetDesc().depthOrArraySize;
 			const bool hasStencil = texture != nullptr &&
-				texture->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT;
+				RHI::HasStencil(texture->GetDesc().format);
 			const bool declaredStateValid =
 				attachment.state == RHI::ResourceState::DepthRead ||
 				attachment.state == RHI::ResourceState::DepthWrite;
@@ -734,22 +686,32 @@ namespace dyf::Backends
 
 		if(valid)
 		{
-			m_impl->resumePass = [pass copy];
+#if !__has_feature(objc_arc)
+			[m_impl->resumePass release];
+#endif
+			m_impl->resumePass = nil;
 			for(uint32_t index = 0; index < desc.colorAttachmentCount; ++index)
 			{
-				m_impl->resumePass.colorAttachments[index].loadAction = MTLLoadActionLoad;
-				pass.colorAttachments[index].storeAction = MTLStoreActionStore;
+				m_impl->finalColorStoreActions[index] = pass.colorAttachments[index].storeAction;
+				pass.colorAttachments[index].storeAction = MTLStoreActionUnknown;
 			}
 			if(desc.depthStencilAttachment != nullptr)
 			{
-				m_impl->resumePass.depthAttachment.loadAction = MTLLoadActionLoad;
-				pass.depthAttachment.storeAction = MTLStoreActionStore;
-				if(m_impl->stencilConfigured)
+				m_impl->finalDepthStoreAction = pass.depthAttachment.storeAction;
+				pass.depthAttachment.storeAction = MTLStoreActionUnknown;
+				if(pass.stencilAttachment.texture != nil)
 				{
-					m_impl->resumePass.stencilAttachment.loadAction = MTLLoadActionLoad;
-					pass.stencilAttachment.storeAction = MTLStoreActionStore;
+					m_impl->finalStencilStoreAction = pass.stencilAttachment.storeAction;
+					pass.stencilAttachment.storeAction = MTLStoreActionUnknown;
 				}
 			}
+			m_impl->resumePass = [pass copy];
+			for(uint32_t index = 0; index < desc.colorAttachmentCount; ++index)
+				m_impl->resumePass.colorAttachments[index].loadAction = MTLLoadActionLoad;
+			if(pass.depthAttachment.texture != nil)
+				m_impl->resumePass.depthAttachment.loadAction = MTLLoadActionLoad;
+			if(pass.stencilAttachment.texture != nil)
+				m_impl->resumePass.stencilAttachment.loadAction = MTLLoadActionLoad;
 		}
 		id<MTLRenderCommandEncoder> encoder = valid
 			? [m_impl->commandBuffer renderCommandEncoderWithDescriptor:pass] : nil;
@@ -779,6 +741,71 @@ namespace dyf::Backends
 		m_impl->rendering = false;
 	}
 
+	void MetalCommandList::BindComputePipelineNative(RHI::PipelineHandle pipelineState)
+	{
+		auto* pipeline = dynamic_cast<MetalPipeline*>(pipelineState);
+		if(m_impl->closed || m_impl->rendering || pipeline == nullptr ||
+			!pipeline->IsCompute() || pipeline->GetNativePipeline() == nullptr)
+		{
+			Invalidate(m_impl);
+			return;
+		}
+		m_impl->pipeline = pipeline;
+		m_impl->resourceSet = nullptr;
+		m_impl->inlineConstants.assign(pipeline->GetLayout().inlineConstantSize, 0);
+		m_impl->inlineConstantCoverage.assign(pipeline->GetLayout().inlineConstantSize, 0);
+	}
+
+	void MetalCommandList::DispatchNative(uint32_t x, uint32_t y, uint32_t z)
+	{
+		auto* pipeline = m_impl->pipeline;
+		if(m_impl->closed || m_impl->rendering || !pipeline || !pipeline->IsCompute() ||
+			!x || !y || !z || (pipeline->GetLayout().bindingCount && !m_impl->resourceSet) ||
+			std::any_of(m_impl->inlineConstantCoverage.begin(), m_impl->inlineConstantCoverage.end(),
+				[](uint8_t byte) { return !byte; }))
+		{
+			Invalidate(m_impl);
+			return;
+		}
+		EndBlitEncoding(m_impl);
+		id<MTLComputeCommandEncoder> encoder = [m_impl->commandBuffer computeCommandEncoder];
+		if(encoder == nil) { Invalidate(m_impl); return; }
+		[encoder setComputePipelineState:(__bridge id<MTLComputePipelineState>)pipeline->GetNativePipeline()];
+		const auto& layout = pipeline->GetLayout();
+		if(m_impl->resourceSet)
+			for(uint32_t i = 0; i < m_impl->resourceSet->GetBindingCount(); ++i)
+			{
+				const auto& binding = m_impl->resourceSet->GetBindings()[i];
+				const auto* declaration = FindLayoutBinding(layout, binding.binding);
+				auto* buffer = dynamic_cast<MetalBuffer*>(binding.buffer);
+				if(!declaration || !buffer) { Invalidate(m_impl); break; }
+				const auto required = declaration->type == RHI::ResourceBindingType::ConstantBuffer
+					? RHI::ResourceState::ConstantBuffer : declaration->type == RHI::ResourceBindingType::ReadOnlyStorageBuffer
+					? RHI::ResourceState::ShaderResource : RHI::ResourceState::UnorderedAccess;
+				if(!RequireBufferState(m_impl, buffer, required)) { Invalidate(m_impl); break; }
+				[encoder setBuffer:NativeBuffer(buffer) offset:binding.offset atIndex:binding.binding + binding.arrayElement];
+			}
+		if(!m_impl->inlineConstants.empty())
+		{
+			id<MTLBuffer> constants = [m_impl->commandQueue.device newBufferWithBytes:m_impl->inlineConstants.data()
+				length:m_impl->inlineConstants.size() options:MTLResourceStorageModeShared];
+			if(constants == nil) Invalidate(m_impl);
+			else
+			{
+				RetainResource(m_impl, constants);
+				[encoder setBuffer:constants offset:0 atIndex:layout.inlineConstantBinding];
+#if !__has_feature(objc_arc)
+				[constants release];
+#endif
+			}
+		}
+		const auto* size = pipeline->GetThreadGroupSize();
+		if(m_impl->valid)
+			[encoder dispatchThreadgroups:MTLSizeMake(x, y, z) threadsPerThreadgroup:MTLSizeMake(size[0], size[1], size[2])];
+		// Tracked buffer hazards synchronize this pass with subsequent compute/render/blit passes.
+		[encoder endEncoding];
+	}
+
 	void MetalCommandList::BindGraphicsPipelineNative(RHI::PipelineHandle pipelineState)
 	{
 		auto* pipeline = dynamic_cast<MetalPipeline*>(pipelineState);
@@ -796,7 +823,7 @@ namespace dyf::Backends
 		m_impl->inlineConstantCoverage.assign(
 			pipeline->GetLayout().inlineConstantSize, 0);
 		if((pipeline->GetDesc().depthStencil.depthWriteEnabled ||
-			pipeline->GetDesc().depthStencil.stencilEnabled) &&
+			RHI::MayWriteStencil(pipeline->GetDesc().depthStencil)) &&
 			m_impl->depthTexture != nullptr &&
 			!RequireTextureState(
 				m_impl,
@@ -822,6 +849,15 @@ namespace dyf::Backends
 		[encoder setDepthBias:raster.depthBiasConstant
 			slopeScale:raster.depthBiasSlope
 			clamp:raster.depthBiasClamp];
+		for(uint32_t index = 0; index < pipeline->GetDesc().vertexBufferCount; ++index)
+		{
+			const uint32_t binding = pipeline->GetDesc().vertexBuffers[index].binding;
+			const auto found = m_impl->vertexBindings.find(binding);
+			if(found == m_impl->vertexBindings.end()) continue;
+			id<MTLBuffer> native = NativeBuffer(found->second.buffer);
+			[encoder setVertexBuffer:native offset:found->second.offset atIndex:binding];
+			[encoder useResource:native usage:MTLResourceUsageRead];
+		}
 		for(const MetalStaticSamplerBinding& binding :
 			pipeline->GetStaticSamplerBindings())
 		{
@@ -830,6 +866,9 @@ namespace dyf::Backends
 			if(HasStage(binding.stages, RHI::ShaderStageFlags::Vertex) ||
 				HasStage(binding.stages, RHI::ShaderStageFlags::Domain))
 				[encoder setVertexSamplerState:sampler atIndex:binding.index];
+			if(HasStage(binding.stages, RHI::ShaderStageFlags::Mesh))
+				if(@available(macOS 13.0, iOS 16.0, *))
+					[encoder setMeshSamplerState:sampler atIndex:binding.index];
 			if(HasStage(binding.stages, RHI::ShaderStageFlags::Fragment))
 				[encoder setFragmentSamplerState:sampler atIndex:binding.index];
 		}
@@ -838,12 +877,15 @@ namespace dyf::Backends
 	void MetalCommandList::BindResourceSetNative(RHI::ResourceSetHandle resourceSet)
 	{
 		auto* set = dynamic_cast<MetalResourceSet*>(resourceSet);
-		if(m_impl->closed || !m_impl->rendering || m_impl->pipeline == nullptr ||
+		if(m_impl->closed || m_impl->pipeline == nullptr ||
+			(!m_impl->rendering && !m_impl->pipeline->IsCompute()) ||
 			set == nullptr || set->GetPipeline() != m_impl->pipeline)
 		{
 			Invalidate(m_impl);
 			return;
 		}
+
+		if(m_impl->pipeline->IsCompute()) { m_impl->resourceSet = set; return; }
 
 		const RHI::PipelineLayoutDesc& layout = m_impl->pipeline->GetLayout();
 		id<MTLRenderCommandEncoder> encoder = m_impl->renderEncoder;
@@ -879,6 +921,9 @@ namespace dyf::Backends
 				if(HasStage(declaration->stages, RHI::ShaderStageFlags::Vertex) ||
 					HasStage(declaration->stages, RHI::ShaderStageFlags::Domain))
 					[encoder setVertexBuffer:native offset:binding.offset atIndex:nativeIndex];
+				if(HasStage(declaration->stages, RHI::ShaderStageFlags::Mesh))
+					if(@available(macOS 13.0, iOS 16.0, *))
+						[encoder setMeshBuffer:native offset:binding.offset atIndex:nativeIndex];
 				if(HasStage(declaration->stages, RHI::ShaderStageFlags::Fragment))
 					[encoder setFragmentBuffer:native offset:binding.offset atIndex:nativeIndex];
 				const MTLResourceUsage usage =
@@ -907,6 +952,9 @@ namespace dyf::Backends
 			if(HasStage(binding.stages, RHI::ShaderStageFlags::Vertex) ||
 				HasStage(binding.stages, RHI::ShaderStageFlags::Domain))
 				[encoder setVertexTexture:native atIndex:binding.index];
+			if(HasStage(binding.stages, RHI::ShaderStageFlags::Mesh))
+				if(@available(macOS 13.0, iOS 16.0, *))
+					[encoder setMeshTexture:native atIndex:binding.index];
 			if(HasStage(binding.stages, RHI::ShaderStageFlags::Fragment))
 				[encoder setFragmentTexture:native atIndex:binding.index];
 			const MTLResourceUsage usage =
@@ -984,7 +1032,8 @@ namespace dyf::Backends
 		uint32_t size,
 		const void* data)
 	{
-		if(m_impl->closed || !m_impl->rendering || m_impl->pipeline == nullptr ||
+		if(m_impl->closed || m_impl->pipeline == nullptr ||
+			(!m_impl->rendering && !m_impl->pipeline->IsCompute()) ||
 			data == nullptr || size == 0 ||
 			(offset % sizeof(uint32_t)) != 0 || (size % sizeof(uint32_t)) != 0 ||
 			offset > m_impl->inlineConstants.size() ||
@@ -998,6 +1047,7 @@ namespace dyf::Backends
 			m_impl->inlineConstantCoverage.begin() + offset,
 			m_impl->inlineConstantCoverage.begin() + offset + size,
 			1);
+		if(m_impl->pipeline->IsCompute()) return;
 		id<MTLDevice> device = m_impl->commandQueue.device;
 		id<MTLBuffer> constants = [device newBufferWithBytes:m_impl->inlineConstants.data()
 			length:m_impl->inlineConstants.size()
@@ -1013,6 +1063,9 @@ namespace dyf::Backends
 			HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Domain))
 			[m_impl->renderEncoder setVertexBuffer:constants
 				offset:0 atIndex:layout.inlineConstantBinding];
+		if(HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Mesh))
+			if(@available(macOS 13.0, iOS 16.0, *))
+				[m_impl->renderEncoder setMeshBuffer:constants offset:0 atIndex:layout.inlineConstantBinding];
 		if(HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Fragment))
 			[m_impl->renderEncoder setFragmentBuffer:constants
 				offset:0 atIndex:layout.inlineConstantBinding];
@@ -1148,16 +1201,20 @@ namespace dyf::Backends
 			}
 			const uint32_t patchCount = vertexCount / desc.patchControlPoints;
 			const uint32_t factorCount = desc.tessellation.domain == RHI::TessellationDomain::Quad ? 6u : 4u;
-			const uint64_t factorStride = uint64_t(factorCount) * sizeof(uint16_t);
-			const uint64_t factorBytes = factorStride * patchCount * instanceCount;
-			if(factorBytes == 0 || factorBytes > std::numeric_limits<NSUInteger>::max() ||
+			const uint32_t factorStride = factorCount * sizeof(uint16_t);
+			uint64_t maxFactorBytes = std::numeric_limits<NSUInteger>::max();
+			if(@available(macOS 10.14, *))
+				maxFactorBytes = m_impl->commandQueue.device.maxBufferLength;
+			MetalTessellationFactorRange factorRange;
+			if(!GetMetalTessellationFactorRange(factorStride, patchCount, instanceCount,
+				startVertex / desc.patchControlPoints, startInstance, maxFactorBytes, factorRange) ||
 				m_impl->resumePass == nil)
 			{
 				Invalidate(m_impl);
 				return;
 			}
 			id<MTLBuffer> factorBuffer = [m_impl->commandQueue.device
-				newBufferWithLength:static_cast<NSUInteger>(factorBytes)
+				newBufferWithLength:static_cast<NSUInteger>(factorRange.bytes)
 				options:MTLResourceStorageModeShared];
 			if(factorBuffer == nil)
 			{
@@ -1168,15 +1225,15 @@ namespace dyf::Backends
 
 			MetalPipeline* pipeline = m_impl->pipeline;
 			MetalResourceSet* resourceSet = m_impl->resourceSet;
-			const auto vertexBindings = m_impl->vertexBindings;
 			const auto inlineConstants = m_impl->inlineConstants;
-			EndRenderEncoding(m_impl);
+			EndRenderEncoding(m_impl, true);
 
 			id<MTLComputeCommandEncoder> compute = [m_impl->commandBuffer computeCommandEncoder];
 			id<MTLComputePipelineState> hull =
 				(__bridge id<MTLComputePipelineState>)pipeline->GetNativeHullPipeline();
 			if(compute == nil || hull == nil)
 			{
+				if(compute != nil) [compute endEncoding];
 				Invalidate(m_impl);
 #if !__has_feature(objc_arc)
 				[factorBuffer release];
@@ -1184,8 +1241,12 @@ namespace dyf::Backends
 				return;
 			}
 			[compute setComputePipelineState:hull];
-			for(const auto& [binding, value] : vertexBindings)
+			for(uint32_t index = 0; index < desc.vertexBufferCount; ++index)
+			{
+				const uint32_t binding = desc.vertexBuffers[index].binding;
+				const auto& value = m_impl->vertexBindings.at(binding);
 				[compute setBuffer:NativeBuffer(value.buffer) offset:value.offset atIndex:binding];
+			}
 			if(resourceSet != nullptr)
 			{
 				const auto& layout = pipeline->GetLayout();
@@ -1213,10 +1274,26 @@ namespace dyf::Backends
 				(HasStage(pipeline->GetLayout().inlineConstantStages, RHI::ShaderStageFlags::Vertex) ||
 				 HasStage(pipeline->GetLayout().inlineConstantStages, RHI::ShaderStageFlags::Hull)))
 			{
-				[compute setBytes:inlineConstants.data() length:inlineConstants.size()
-					atIndex:pipeline->GetLayout().inlineConstantBinding];
+				id<MTLBuffer> constants = [m_impl->commandQueue.device
+					newBufferWithBytes:inlineConstants.data() length:inlineConstants.size()
+					options:MTLResourceStorageModeShared];
+				if(constants == nil)
+				{
+					[compute endEncoding];
+					Invalidate(m_impl);
+#if !__has_feature(objc_arc)
+					[factorBuffer release];
+#endif
+					return;
+				}
+				RetainResource(m_impl, constants);
+				[compute setBuffer:constants offset:0 atIndex:pipeline->GetLayout().inlineConstantBinding];
+#if !__has_feature(objc_arc)
+				[constants release];
+#endif
 			}
-			[compute setBuffer:factorBuffer offset:0 atIndex:MetalPipeline::TessellationFactorBufferIndex];
+			[compute setBuffer:factorBuffer offset:static_cast<NSUInteger>(factorRange.writeOffset)
+				atIndex:MetalPipeline::TessellationFactorBufferIndex];
 			const NSUInteger threadCount = static_cast<NSUInteger>(patchCount) * instanceCount;
 			const NSUInteger width = std::min(threadCount, hull.threadExecutionWidth);
 			[compute dispatchThreads:MTLSizeMake(threadCount, 1, 1)
@@ -1239,8 +1316,6 @@ namespace dyf::Backends
 			m_impl->renderEncoder = resumed;
 			BindGraphicsPipelineNative(pipeline);
 			if(resourceSet != nullptr) BindResourceSetNative(resourceSet);
-			for(const auto& [binding, value] : vertexBindings)
-				BindVertexBufferNative(binding, value.buffer, value.offset);
 			if(!inlineConstants.empty())
 				SetInlineConstantsNative(0, static_cast<uint32_t>(inlineConstants.size()), inlineConstants.data());
 			SetViewportNative(m_impl->viewport);
@@ -1254,7 +1329,7 @@ namespace dyf::Backends
 				return;
 			}
 			[m_impl->renderEncoder setTessellationFactorBuffer:factorBuffer
-				offset:0 instanceStride:static_cast<NSUInteger>(factorStride * patchCount)];
+				offset:0 instanceStride:static_cast<NSUInteger>(factorRange.instanceStride)];
 			[m_impl->renderEncoder
 				drawPatches:desc.patchControlPoints
 				patchStart:startVertex / desc.patchControlPoints
@@ -1314,6 +1389,52 @@ namespace dyf::Backends
 			baseInstance:firstInstance];
 	}
 
+	void MetalCommandList::DispatchMeshNative(
+		uint32_t threadGroupCountX,
+		uint32_t threadGroupCountY,
+		uint32_t threadGroupCountZ)
+	{
+		if(m_impl->closed || !m_impl->rendering || m_impl->renderEncoder == nil ||
+			!ValidateDrawState(m_impl) || !m_impl->pipeline->IsMesh() ||
+			threadGroupCountX == 0 || threadGroupCountY == 0 || threadGroupCountZ == 0)
+		{
+			Invalidate(m_impl);
+			return;
+		}
+		if(@available(macOS 13.0, iOS 16.0, *))
+		{
+			if(m_impl->pipeline == nullptr || m_impl->pipeline->GetNativePipeline() == nullptr)
+			{
+				Invalidate(m_impl);
+				return;
+			}
+			id<MTLRenderPipelineState> pipelineState =
+				(__bridge id<MTLRenderPipelineState>)m_impl->pipeline->GetNativePipeline();
+			NSUInteger meshThreads = pipelineState.maxTotalThreadsPerMeshThreadgroup;
+			if(meshThreads == 0)
+			{
+				Invalidate(m_impl);
+				return;
+			}
+			NSUInteger objectThreads = pipelineState.maxTotalThreadsPerObjectThreadgroup;
+			if(objectThreads == 0)
+			{
+				objectThreads = 1;
+			}
+			MTLSize threadgroups = MTLSizeMake(threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+			MTLSize threadsPerObjectThreadgroup = MTLSizeMake(objectThreads, 1, 1);
+			MTLSize threadsPerMeshThreadgroup = MTLSizeMake(meshThreads, 1, 1);
+			[m_impl->renderEncoder
+				drawMeshThreadgroups:threadgroups
+				threadsPerObjectThreadgroup:threadsPerObjectThreadgroup
+				threadsPerMeshThreadgroup:threadsPerMeshThreadgroup];
+		}
+		else
+		{
+			Invalidate(m_impl);
+		}
+	}
+
 	bool MetalCommandList::CloseNative()
 	{
 		if(m_impl->closed) Invalidate(m_impl);
@@ -1348,24 +1469,22 @@ namespace dyf::Backends
 				offset, size);
 			return false;
 		}
+		if(!m_impl->uploadArena) return false;
+		// Finish fallible host bookkeeping before issuing an irreversible copy.
+		ReserveForAppend(m_impl->operations);
+		const auto upload = m_impl->uploadArena->Allocate(size, 16);
+		if(!upload) return false;
+		std::memcpy(upload.data, data, size);
 		if(!EnsureBlitEncoder(m_impl)) return false;
-
-		id<MTLBuffer> staging = [m_impl->commandQueue.device newBufferWithBytes:data
-			length:size options:MTLResourceStorageModeShared];
-		if(staging == nil) return false;
-		RetainResource(m_impl, staging);
-		[m_impl->blitEncoder copyFromBuffer:staging
-			sourceOffset:0
-			toBuffer:NativeBuffer(buffer)
-			destinationOffset:offset
-			size:size];
-#if !__has_feature(objc_arc)
-		[staging release];
-#endif
 		MetalOperation operation = {};
 		operation.kind = OperationKind::BufferWrite;
 		operation.buffer = buffer;
 		m_impl->operations.push_back(operation);
+		[m_impl->blitEncoder copyFromBuffer:upload.page->buffer
+			sourceOffset:static_cast<NSUInteger>(upload.offset)
+			toBuffer:NativeBuffer(buffer)
+			destinationOffset:offset
+			size:size];
 		return true;
 	}
 
@@ -1400,47 +1519,31 @@ namespace dyf::Backends
 			return false;
 		}
 
-		if(texture->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT) return false;
+		if(RHI::HasStencil(texture->GetDesc().format) ||
+			(pixelSize & (pixelSize - 1u)) != 0) return false;
 
 		id<MTLTexture> nativeTexture = NativeTexture(texture);
-		id<MTLDevice> device = m_impl->commandQueue.device;
 		const uint64_t stagingSize64 = static_cast<uint64_t>(tightRowPitch) * mipHeight;
 		if(stagingSize64 > std::numeric_limits<NSUInteger>::max())
 		{
 			return false;
 		}
-		const NSUInteger stagingSize = static_cast<NSUInteger>(stagingSize64);
-		id<MTLBuffer> staging = [device newBufferWithLength:stagingSize
-			options:MTLResourceStorageModeShared];
-		if(staging == nil) return false;
-		auto* destination = static_cast<uint8_t*>(staging.contents);
+		if(!m_impl->uploadArena) return false;
+		ReserveForAppend(m_impl->operations);
+		if(texture->IsSwapchainImage())
+			ReserveForAppend(m_impl->referencedSwapchainImages);
+		// Metal blit offsets and row pitches are multiples of the pixel size.
+		// Accepted native texture formats are 2/4/8/16-byte pixels, so 16 covers all.
+		const auto upload = m_impl->uploadArena->Allocate(stagingSize64, 16);
+		if(!upload) return false;
+		auto* destination = upload.data;
 		const auto* source = static_cast<const uint8_t*>(data);
 		// 입력 행 사이의 패딩만 건너뛴다. 마지막 행 뒤의 패딩은 요구하거나 읽지 않는다.
 		for(uint32_t row = 0; row < mipHeight; ++row)
 			std::memcpy(destination + static_cast<size_t>(row) * tightRowPitch,
 				source + static_cast<size_t>(row) * rowPitch, tightRowPitch);
 
-		if(!EnsureBlitEncoder(m_impl))
-		{
-#if !__has_feature(objc_arc)
-			[staging release];
-#endif
-			return false;
-		}
-		RetainResource(m_impl, staging);
-		[m_impl->blitEncoder
-			copyFromBuffer:staging
-			sourceOffset:0
-			sourceBytesPerRow:tightRowPitch
-			sourceBytesPerImage:0
-			sourceSize:MTLSizeMake(mipWidth, mipHeight, 1)
-			toTexture:nativeTexture
-			destinationSlice:arrayLayer
-			destinationLevel:mipLevel
-			destinationOrigin:MTLOriginMake(0, 0, 0)];
-#if !__has_feature(objc_arc)
-		[staging release];
-#endif
+		if(!EnsureBlitEncoder(m_impl)) return false;
 		MetalOperation operation = {};
 		operation.kind = OperationKind::TextureWrite;
 		operation.texture = texture;
@@ -1448,6 +1551,16 @@ namespace dyf::Backends
 		operation.arrayLayer = arrayLayer;
 		m_impl->operations.push_back(operation);
 		TrackSwapchainImage(m_impl, texture);
+		[m_impl->blitEncoder
+			copyFromBuffer:upload.page->buffer
+			sourceOffset:static_cast<NSUInteger>(upload.offset)
+			sourceBytesPerRow:tightRowPitch
+			sourceBytesPerImage:0
+			sourceSize:MTLSizeMake(mipWidth, mipHeight, 1)
+			toTexture:nativeTexture
+			destinationSlice:arrayLayer
+			destinationLevel:mipLevel
+			destinationOrigin:MTLOriginMake(0, 0, 0)];
 		return true;
 	}
 

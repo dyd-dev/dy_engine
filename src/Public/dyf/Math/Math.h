@@ -189,9 +189,10 @@ namespace dyf::Math
 
 	[[nodiscard]] inline float3 NormalizeOr(const float3& value, const float3& fallback)
 	{
-		const float lengthSquared = LengthSquared(value);
+		const double lengthSquared = double(value.x)*value.x + double(value.y)*value.y + double(value.z)*value.z;
 		if(lengthSquared <= 1.0e-8f) return fallback;
-		return value * (1.0f / std::sqrt(lengthSquared));
+		const double inverseLength = 1.0 / std::sqrt(lengthSquared);
+		return {float(value.x*inverseLength), float(value.y*inverseLength), float(value.z*inverseLength)};
 	}
 
 	[[nodiscard]] inline float3 Normalize(const float3& value)
@@ -386,7 +387,8 @@ namespace dyf::Math
 	[[nodiscard]] inline float4x4 LookAtRH(const float3& eye, const float3& target, const float3& up)
 	{
 		const float3 forward = NormalizeOr(target - eye, float3(0.0f, 0.0f, -1.0f));
-		const float3 right = NormalizeOr(Cross(forward, up), float3(1.0f, 0.0f, 0.0f));
+		const float3 fallbackUp = std::abs(forward.z) > .95f ? float3(0,1,0) : float3(0,0,1);
+		const float3 right = NormalizeOr(Cross(forward, Normalize(up)), Normalize(Cross(forward, fallbackUp)));
 		const float3 cameraUp = Cross(right, forward);
 
 		float4x4 view = float4x4::Identity();
@@ -408,7 +410,8 @@ namespace dyf::Math
 	[[nodiscard]] inline float4x4 LookAtLH(const float3& eye, const float3& target, const float3& up)
 	{
 		const float3 forward = NormalizeOr(target - eye, float3(0.0f, 0.0f, 1.0f));
-		const float3 right = NormalizeOr(Cross(up, forward), float3(1.0f, 0.0f, 0.0f));
+		const float3 fallbackUp = std::abs(forward.z) > .95f ? float3(0,1,0) : float3(0,0,1);
+		const float3 right = NormalizeOr(Cross(Normalize(up), forward), Normalize(Cross(fallbackUp, forward)));
 		const float3 cameraUp = Cross(forward, right);
 
 		float4x4 view = float4x4::Identity();
@@ -508,10 +511,10 @@ namespace dyf::Math
 
 	[[nodiscard]] inline quat Normalize(const quat& q)
 	{
-		const float lengthSquared = Dot(q, q);
+		const double lengthSquared = double(q.x)*q.x + double(q.y)*q.y + double(q.z)*q.z + double(q.w)*q.w;
 		if(lengthSquared <= 1.0e-12f) return quat::Identity();
-		const float inv = 1.0f / std::sqrt(lengthSquared);
-		return quat(q.x * inv, q.y * inv, q.z * inv, q.w * inv);
+		const double inv = 1.0 / std::sqrt(lengthSquared);
+		return quat(float(q.x*inv), float(q.y*inv), float(q.z*inv), float(q.w*inv));
 	}
 
 	// Hamilton 곱 a*b (a 를 적용한 뒤 b 가 아니라, 회전 합성 R(a)·R(b) 의 쿼터니언).

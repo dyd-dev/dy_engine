@@ -13,7 +13,7 @@ bool Renderer::PreparePostProcess(RHI::TextureHandle output)
 {
     using namespace RHI;
     if(tonePipeline && toneColorFormat!=output->GetDesc().format)
-    {device->DestroyPipeline(tonePipeline);tonePipeline=nullptr;}
+    {device->DestroyResourceSet(toneSet);toneSet=nullptr;device->DestroyPipeline(tonePipeline);tonePipeline=nullptr;}
     if(!tonePipeline)
     {
         const auto shaders=DefaultShaders();
@@ -37,7 +37,7 @@ bool Renderer::PreparePostProcess(RHI::TextureHandle output)
         toneColorFormat=output->GetDesc().format;
     }
     if(hdrTarget && (hdrTarget->GetDesc().width!=output->GetDesc().width || hdrTarget->GetDesc().height!=output->GetDesc().height))
-    {device->DestroyTexture(hdrTarget);hdrTarget=nullptr;}
+    {device->DestroyResourceSet(toneSet);toneSet=nullptr;device->DestroyTexture(hdrTarget);hdrTarget=nullptr;}
     if(!hdrTarget)
     {
         TextureDesc desc;
@@ -53,19 +53,22 @@ bool Renderer::RecordToneMap(RHI::ICommandList& commands,RHI::TextureHandle outp
 {
     using namespace RHI;
     ResourceBinding image;image.binding=0;image.texture=hdrTarget;
-    auto* set=device->CreateResourceSet({tonePipeline,&image,1});
-    if(!set)return false;
+    // Immutable descriptors may remain referenced by earlier submissions. Retire
+    // the previous owner through RHI; never mutate a descriptor in flight.
+    if(toneSet && (toneSet->GetPipeline()!=tonePipeline || toneSet->GetBindings()[0].texture!=hdrTarget))
+    {device->DestroyResourceSet(toneSet);toneSet=nullptr;}
+    if(!toneSet)toneSet=device->CreateResourceSet({tonePipeline,&image,1});
+    if(!toneSet)return false;
     ColorAttachment color; color.texture=output;color.loadOp=LoadOp::Discard;color.storeOp=StoreOp::Store;
     commands.BeginRendering({&color,1,nullptr});
     commands.BindGraphicsPipeline(tonePipeline);
-    commands.BindResourceSet(set);
+    commands.BindResourceSet(toneSet);
     commands.SetViewport({0,0,static_cast<float>(output->GetDesc().width),static_cast<float>(output->GetDesc().height),0,1});
     commands.SetScissor({0,0,output->GetDesc().width,output->GetDesc().height});
     const float settings[4]={exposure,IsSrgbFormat(output->GetDesc().format)?0.f:1.f,0,0};
     commands.SetInlineConstants(0,sizeof(settings),settings);
     commands.DrawInstanced(3,1,0,0);
     commands.EndRendering();
-    device->DestroyResourceSet(set);
     return true;
 }
 }

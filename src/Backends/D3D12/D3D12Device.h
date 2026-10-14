@@ -24,9 +24,11 @@ namespace dyf::Backends
         uint64_t GetLimitNative(RHI::Limit) const override;
         bool SupportsSamplerNative(const RHI::SamplerDesc&) const override;
         bool SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc&) const override;
-        bool SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc&) const override;
+        bool SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc& desc) const override;
+        bool SupportsMeshPipelineNative(const RHI::MeshPipelineDesc& desc) const override;
         uint64_t GetCompletedSubmissionNative() override;
         uint64_t GetLastSubmissionNative() const override;
+        RHI::UploadMemoryStatistics GetUploadMemoryStatisticsNative() const override;
 
         bool CreateSwapchainNative(const RHI::SwapchainDesc& desc) override;
         bool BeginFrameNative() override;
@@ -42,6 +44,10 @@ namespace dyf::Backends
         RHI::ShaderHandle CreateShaderNative(const RHI::ShaderDesc& desc) override;
         RHI::PipelineHandle CreateGraphicsPipelineNative(
             const RHI::GraphicsPipelineDesc& desc) override;
+        RHI::PipelineHandle CreateComputePipelineNative(
+            const RHI::ComputePipelineDesc& desc) override;
+        RHI::PipelineHandle CreateMeshPipelineNative(
+            const RHI::MeshPipelineDesc& desc) override;
         RHI::ResourceSetHandle CreateResourceSetNative(
             const RHI::ResourceSetDesc& desc) override;
 
@@ -71,6 +77,9 @@ namespace dyf::Backends
         int Initialize(const void* windowHandle, const RHI::DeviceDesc& desc) override;
 
     private:
+        RHI::PipelineHandle CreatePipeline(
+            const RHI::GraphicsPipelineDesc& desc, RHI::ShaderHandle computeShader);
+
         D3D12InternalState* m_internal = nullptr;
     };
 }

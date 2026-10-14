@@ -1,5 +1,6 @@
 #include "ModelLoader.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <sstream>
@@ -7,6 +8,50 @@
 
 namespace dyf
 {
+	[[nodiscard]] SkinInfluence MakeSkinInfluence(
+		std::vector<std::pair<uint32_t, float>> values,
+		bool& truncated)
+	{
+		values.erase(std::remove_if(values.begin(), values.end(), [](const auto& value) {
+			return value.second <= 0.0f;
+		}), values.end());
+		std::stable_sort(values.begin(), values.end(), [](const auto& lhs, const auto& rhs) {
+			return lhs.second > rhs.second;
+		});
+		truncated = values.size() > 4;
+		if(values.size() > 4) values.resize(4);
+
+		SkinInfluence result;
+		double total = 0.0;
+		for(const auto& value : values) total += value.second;
+		if(total <= 1.0e-6f) return result;
+		for(size_t index = 0; index < values.size(); ++index)
+		{
+			result.jointIndices[index] = values[index].first;
+			result.weights[index] = static_cast<float>(values[index].second / total);
+		}
+		return result;
+	}
+	[[nodiscard]] bool IsPathInsideDirectory(
+		const std::filesystem::path& directory,
+		const std::filesystem::path& candidate,
+		std::error_code& error)
+	{
+		error.clear();
+		const std::filesystem::path canonicalDirectory =
+			std::filesystem::weakly_canonical(directory, error);
+		if(error) return false;
+		const std::filesystem::path canonicalCandidate =
+			std::filesystem::weakly_canonical(candidate, error);
+		if(error) return false;
+		const std::filesystem::path relative =
+			canonicalCandidate.lexically_relative(canonicalDirectory);
+		if(relative.empty() || relative.is_absolute()) return false;
+		for(const std::filesystem::path& component : relative)
+			if(component == "..") return false;
+		return true;
+	}
+
 	ModelLoadBudget::ModelLoadBudget(const std::string& path, const ModelLoadOptions& options)
 		: m_path(path), m_options(options)
 	{
@@ -79,8 +124,11 @@ namespace dyf
 			Math::float3(1.0f, 0.0f, 0.0f));
 	}
 
-	void CalculateTangents(MeshData& data, bool generateMissingNormals)
+	bool CalculateTangents(MeshData& data, bool generateMissingNormals)
 	{
+		const auto finite3 = [](const Math::float3& value) {
+			return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+		};
 		std::vector<Math::float3> tangents(data.vertices.size(), Math::float3(0.0f, 0.0f, 0.0f));
 		std::vector<Math::float3> bitangents(data.vertices.size(), Math::float3(0.0f, 0.0f, 0.0f));
 		std::vector<Math::float3> normals;
@@ -99,9 +147,11 @@ namespace dyf
 			const Vertex& v2 = data.vertices[i2];
 			const Math::float3 edge1 = v1.position - v0.position;
 			const Math::float3 edge2 = v2.position - v0.position;
+			if(!finite3(edge1) || !finite3(edge2)) return false;
 			if(generateMissingNormals)
 			{
 				const Math::float3 faceNormal = Math::Cross(edge1, edge2);
+				if(!finite3(faceNormal)) return false;
 				normals[i0] = normals[i0] + faceNormal;
 				normals[i1] = normals[i1] + faceNormal;
 				normals[i2] = normals[i2] + faceNormal;
@@ -112,11 +162,13 @@ namespace dyf
 			const float du2 = v2.uv.x - v0.uv.x;
 			const float dv2 = v2.uv.y - v0.uv.y;
 			const float determinant = du1 * dv2 - du2 * dv1;
+			if(!std::isfinite(determinant)) return false;
 			if(std::fabs(determinant) <= 1.0e-8f) continue;
 
 			const float inverseDeterminant = 1.0f / determinant;
 			const Math::float3 tangent = ((edge1 * dv2) - (edge2 * dv1)) * inverseDeterminant;
 			const Math::float3 bitangent = ((edge2 * du1) - (edge1 * du2)) * inverseDeterminant;
+			if(!finite3(tangent) || !finite3(bitangent)) return false;
 			tangents[i0] = tangents[i0] + tangent;
 			tangents[i1] = tangents[i1] + tangent;
 			tangents[i2] = tangents[i2] + tangent;
@@ -129,20 +181,25 @@ namespace dyf
 		{
 			Vertex& vertex = data.vertices[i];
 			const Math::float3 sourceNormal = generateMissingNormals ? normals[i] : vertex.normal;
+			if(!finite3(sourceNormal) || !finite3(tangents[i]) || !finite3(bitangents[i])) return false;
 			const Math::float3 normal = Math::NormalizeOr(
 				sourceNormal,
 				Math::float3(0.0f, 0.0f, 1.0f));
 			const Math::float3 rawTangent = tangents[i];
 			const Math::float3 orthogonalTangent = rawTangent
 				- normal * Math::Dot(normal, rawTangent);
+			if(!finite3(orthogonalTangent)) return false;
 			const Math::float3 tangent = Math::NormalizeOr(
 				orthogonalTangent,
 				BuildFallbackTangent(normal));
-			const float handedness = Math::Dot(
+			const float orientation = Math::Dot(
 				Math::Cross(normal, tangent),
-				bitangents[i]) < 0.0f ? -1.0f : 1.0f;
+				bitangents[i]);
+			if(!finite3(normal) || !finite3(tangent) || !std::isfinite(orientation)) return false;
+			const float handedness = orientation < 0.0f ? -1.0f : 1.0f;
 			vertex.normal = normal;
 			vertex.tangent = Math::float4(tangent.x, tangent.y, tangent.z, handedness);
 		}
+		return true;
 	}
 }

@@ -41,7 +41,16 @@ namespace dyf::Backends
         }
     }
     void VulkanCommandList::ResetTimestampsNative(RHI::TimestampQueryHandle query,uint32_t first,uint32_t count)
-    {vkCmdResetQueryPool(m_commandBuffer,static_cast<VulkanTimestampQuery*>(query)->pool,first,count);}
+    {
+        auto* native=static_cast<VulkanTimestampQuery*>(query);
+        m_queryResets.push_back({native,first,count});
+        vkCmdResetQueryPool(m_commandBuffer,native->pool,first,count);
+    }
+    void VulkanCommandList::CompleteTimestampResets()
+    {
+        for(const auto& reset:m_queryResets)
+            std::fill_n(reset.query->initialized.begin()+reset.first,reset.count,uint8_t{1});
+    }
     void VulkanCommandList::WriteTimestampNative(RHI::TimestampQueryHandle query,uint32_t index)
     {vkCmdWriteTimestamp2(m_commandBuffer,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,static_cast<VulkanTimestampQuery*>(query)->pool,index);}
 	namespace
@@ -52,8 +61,10 @@ namespace dyf::Backends
 			VkAccessFlags2 access = VK_ACCESS_2_NONE;
 		};
 
-		StateInfo GetStateInfo(dyf::RHI::ResourceState state)
+		StateInfo GetStateInfo(dyf::RHI::ResourceState state, bool supportsCompute)
 		{
+			const VkPipelineStageFlags2 shaderStages = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+				(supportsCompute ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE);
 			switch (state)
 			{
 			case dyf::RHI::ResourceState::Undefined:
@@ -67,11 +78,11 @@ namespace dyf::Backends
 			case dyf::RHI::ResourceState::IndexBuffer:
 				return { VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT, VK_ACCESS_2_INDEX_READ_BIT };
 			case dyf::RHI::ResourceState::ConstantBuffer:
-				return { VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_UNIFORM_READ_BIT };
+				return { shaderStages, VK_ACCESS_2_UNIFORM_READ_BIT };
 			case dyf::RHI::ResourceState::ShaderResource:
-				return { VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT };
+				return { shaderStages, VK_ACCESS_2_SHADER_READ_BIT };
 			case dyf::RHI::ResourceState::UnorderedAccess:
-				return { VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT };
+				return { shaderStages, VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT };
 			case dyf::RHI::ResourceState::RenderTarget:
 				return { VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT };
 			case dyf::RHI::ResourceState::DepthRead:
@@ -85,16 +96,6 @@ namespace dyf::Backends
 			}
 		}
 
-		VkShaderStageFlags ToShaderStages(dyf::RHI::ShaderStageFlags stages)
-		{
-			VkShaderStageFlags result = 0;
-			if ((stages & dyf::RHI::ShaderStageFlags::Vertex) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_VERTEX_BIT;
-			if ((stages & dyf::RHI::ShaderStageFlags::Hull) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
-			if ((stages & dyf::RHI::ShaderStageFlags::Domain) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
-			if ((stages & dyf::RHI::ShaderStageFlags::Fragment) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_FRAGMENT_BIT;
-            if((stages & RHI::ShaderStageFlags::Compute)!=RHI::ShaderStageFlags::None)result|=VK_SHADER_STAGE_COMPUTE_BIT;
-			return result;
-		}
 
 		VkAttachmentLoadOp ToLoadOp(dyf::RHI::LoadOp op)
 		{
@@ -199,14 +200,68 @@ namespace dyf::Backends
 			return nullptr;
 		}
 
+		bool RequiresResourceSet(const RHI::PipelineLayoutDesc& layout)
+		{
+			return layout.bindingCount != 0 &&
+				std::any_of(layout.bindings, layout.bindings + layout.bindingCount,
+					[](const RHI::ResourceBindingLayout& binding)
+					{ return binding.type != RHI::ResourceBindingType::StaticSampler; });
+		}
 	}
 
-	VulkanCommandList::VulkanCommandList(const VulkanContext& context)
+	std::shared_ptr<VulkanUploadPool> CreateVulkanUploadPool(const VulkanContext& context)
+	{
+		// Capture handles by value: no factory refers to the owning Impl's address.
+		const VkDevice device = context.device;
+		const VkPhysicalDevice physicalDevice = context.physicalDevice;
+		return std::make_shared<VulkanUploadPool>([device, physicalDevice](uint64_t capacity)
+			-> std::unique_ptr<VulkanUploadPage>
+		{
+			if (!device || !physicalDevice || capacity == 0 || capacity > std::numeric_limits<size_t>::max()) return {};
+			auto page = std::make_unique<VulkanUploadPage>();
+			page->device = device;
+			page->capacity = capacity;
+			VkBufferCreateInfo bufferInfo{};
+			bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+			bufferInfo.size = capacity;
+			bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+			bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+			if (vkCreateBuffer(device, &bufferInfo, nullptr, &page->buffer) != VK_SUCCESS) return {};
+			VkMemoryRequirements requirements{};
+			vkGetBufferMemoryRequirements(device, page->buffer, &requirements);
+			if (requirements.size < capacity) return {};
+			const uint32_t memoryType = FindHostMemoryType(physicalDevice, requirements.memoryTypeBits);
+			if (memoryType == std::numeric_limits<uint32_t>::max()) return {};
+			VkMemoryAllocateInfo allocation{};
+			allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+			allocation.allocationSize = requirements.size;
+			allocation.memoryTypeIndex = memoryType;
+			if (vkAllocateMemory(device, &allocation, nullptr, &page->memory) != VK_SUCCESS ||
+				vkBindBufferMemory(device, page->buffer, page->memory, 0) != VK_SUCCESS) return {};
+			void* mapped = nullptr;
+			if (vkMapMemory(device, page->memory, 0, capacity, 0, &mapped) != VK_SUCCESS) return {};
+			page->mapped = static_cast<uint8_t*>(mapped);
+			return page;
+		});
+	}
+
+	VulkanCommandList::VulkanCommandList(const VulkanContext& context, std::shared_ptr<VulkanUploadPool> uploadPool)
 		: m_context(context)
+		, m_uploadArena(uploadPool ? std::move(uploadPool) : CreateVulkanUploadPool(context))
 	{
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(context.physicalDevice, &properties);
         std::copy_n(properties.limits.maxComputeWorkGroupCount, 3, m_maxComputeGroups);
+        m_maxColorAttachments=properties.limits.maxColorAttachments;
+        std::copy_n(properties.limits.maxViewportDimensions,2,m_maxViewportDimensions);
+        std::copy_n(properties.limits.viewportBoundsRange,2,m_viewportBounds);
+		uint32_t familyCount = 0;
+		vkGetPhysicalDeviceQueueFamilyProperties(context.physicalDevice, &familyCount, nullptr);
+		std::vector<VkQueueFamilyProperties> families(familyCount);
+		vkGetPhysicalDeviceQueueFamilyProperties(context.physicalDevice, &familyCount, families.data());
+		if (context.queueIndices.graphicsFamily >= familyCount)
+			throw std::runtime_error("Vulkan command queue family is unavailable");
+		m_supportsCompute = (families[context.queueIndices.graphicsFamily].queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
 		VkCommandPoolCreateInfo poolInfo{};
 		poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
 		poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
@@ -242,11 +297,8 @@ namespace dyf::Backends
 
 	VulkanCommandList::~VulkanCommandList()
 	{
-		for (const StagingAllocation& allocation : m_stagingAllocations)
-		{
-			if (allocation.buffer != VK_NULL_HANDLE) vkDestroyBuffer(m_context.device, allocation.buffer, nullptr);
-			if (allocation.memory != VK_NULL_HANDLE) vkFreeMemory(m_context.device, allocation.memory, nullptr);
-		}
+		// Destruction follows completed-submission retirement, or an unsubmitted discard.
+		// The arena returns mapped pages only after this native command pool is released.
 		if (m_commandPool != VK_NULL_HANDLE) vkDestroyCommandPool(m_context.device, m_commandPool, nullptr);
 	}
 
@@ -273,6 +325,17 @@ namespace dyf::Backends
 		std::vector<VkImageMemoryBarrier2> imageBarriers;
 		bufferBarriers.reserve(count);
 		imageBarriers.reserve(count);
+        const auto flush=[&] {
+            if(bufferBarriers.empty() && imageBarriers.empty()) return;
+            VkDependencyInfo dependency{};
+            dependency.sType=VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            dependency.bufferMemoryBarrierCount=static_cast<uint32_t>(bufferBarriers.size());
+            dependency.pBufferMemoryBarriers=bufferBarriers.data();
+            dependency.imageMemoryBarrierCount=static_cast<uint32_t>(imageBarriers.size());
+            dependency.pImageMemoryBarriers=imageBarriers.data();
+            vkCmdPipelineBarrier2(m_commandBuffer,&dependency);
+            bufferBarriers.clear(); imageBarriers.clear();
+        };
 		for (uint32_t i = 0; i < count; ++i)
 		{
 			const dyf::RHI::ResourceBarrierDesc& source = barriers[i];
@@ -284,8 +347,8 @@ namespace dyf::Backends
 				Fail();
 				return;
 			}
-			StateInfo before = GetStateInfo(source.before);
-			StateInfo after = GetStateInfo(source.after);
+			StateInfo before = GetStateInfo(source.before, m_supportsCompute);
+			StateInfo after = GetStateInfo(source.after, m_supportsCompute);
 			// 같은 상태도 복사/attachment 쓰기 사이의 메모리 의존성을 기록한다.
 			// 이미지 레이아웃은 유지하고 해당 상태의 stage/access 범위를 사용한다.
 			if (unorderedAccessBarrier)
@@ -372,6 +435,14 @@ namespace dyf::Backends
 				barrier.subresourceRange.levelCount = mipLevelCount;
 				barrier.subresourceRange.baseArrayLayer = source.subresources.firstArrayLayer;
 				barrier.subresourceRange.layerCount = arrayLayerCount;
+                // Successive layout transitions of an overlapping range are
+                // ordered commands; independent ranges can share one dependency.
+                if(std::any_of(imageBarriers.begin(),imageBarriers.end(),[&](const VkImageMemoryBarrier2& prior) {
+                    const auto& a=prior.subresourceRange; const auto& b=barrier.subresourceRange;
+                    return prior.image==barrier.image && (a.aspectMask&b.aspectMask)!=0 &&
+                        a.baseMipLevel<b.baseMipLevel+b.levelCount && b.baseMipLevel<a.baseMipLevel+a.levelCount &&
+                        a.baseArrayLayer<b.baseArrayLayer+b.layerCount && b.baseArrayLayer<a.baseArrayLayer+a.layerCount;
+                })) flush();
 				imageBarriers.push_back(barrier);
 				for (uint32_t layer = source.subresources.firstArrayLayer;
 					layer < source.subresources.firstArrayLayer + arrayLayerCount; ++layer)
@@ -394,18 +465,12 @@ namespace dyf::Backends
 			}
 		}
 
-		VkDependencyInfo dependency{};
-		dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-		dependency.bufferMemoryBarrierCount = static_cast<uint32_t>(bufferBarriers.size());
-		dependency.pBufferMemoryBarriers = bufferBarriers.empty() ? nullptr : bufferBarriers.data();
-		dependency.imageMemoryBarrierCount = static_cast<uint32_t>(imageBarriers.size());
-		dependency.pImageMemoryBarriers = imageBarriers.empty() ? nullptr : imageBarriers.data();
-		vkCmdPipelineBarrier2(m_commandBuffer, &dependency);
+        flush();
 	}
 
 	void VulkanCommandList::BeginRenderingNative(const dyf::RHI::RenderingDesc& desc)
 	{
-		if (m_closed || m_rendering ||
+		if (m_closed || m_rendering || desc.colorAttachmentCount>m_maxColorAttachments ||
 			(desc.colorAttachmentCount > 0 && desc.colorAttachments == nullptr) ||
 			(desc.colorAttachmentCount == 0 && desc.depthStencilAttachment == nullptr))
 		{
@@ -448,29 +513,23 @@ namespace dyf::Backends
 				: std::max(1u, texture->GetDesc().height >> source.mipLevel);
 			const VkAttachmentLoadOp loadOp = ToLoadOp(source.loadOp);
 			const VkAttachmentStoreOp storeOp = ToStoreOp(source.storeOp);
-			bool clearValueValid = true;
 			const bool integerColor = texture != nullptr && (texture->GetDesc().format == RHI::Format::R32_UINT ||
 				texture->GetDesc().format == RHI::Format::R16_UINT);
-			if (source.loadOp == dyf::RHI::LoadOp::Clear)
-			{
-				for (uint32_t channel = 0; channel < (integerColor ? 1u : 4u); ++channel)
+			const bool clearValueValid = source.loadOp != dyf::RHI::LoadOp::Clear ||
+				std::all_of(source.clearColor, source.clearColor + (integerColor ? 1u : 4u), [&](float component)
 				{
-					const float component = source.clearColor[channel];
-					clearValueValid = clearValueValid && std::isfinite(component);
-					if (integerColor)
-					{
-						const double maximum = texture->GetDesc().format == RHI::Format::R16_UINT ? UINT16_MAX : UINT32_MAX;
-						clearValueValid = clearValueValid && component >= 0.0f &&
-							static_cast<double>(component) <= maximum && std::trunc(component) == component;
-					}
-				}
-			}
+					if (!std::isfinite(component)) return false;
+					if (!integerColor) return true;
+					const double maximum = texture->GetDesc().format == RHI::Format::R16_UINT ? UINT16_MAX : UINT32_MAX;
+					return component >= 0.0f && static_cast<double>(component) <= maximum && std::trunc(component) == component;
+				});
 			if (texture == nullptr || imageView == VK_NULL_HANDLE || attachmentWidth == 0 || attachmentHeight == 0 ||
 				source.arrayLayer >= texture->GetDesc().depthOrArraySize ||
 				loadOp == VK_ATTACHMENT_LOAD_OP_MAX_ENUM || storeOp == VK_ATTACHMENT_STORE_OP_MAX_ENUM ||
 				(texture->GetDesc().usage & dyf::RHI::TextureUsage::RenderTarget) == dyf::RHI::TextureUsage::None ||
 				!RequireTextureState(texture, source.mipLevel, source.arrayLayer, dyf::RHI::ResourceState::RenderTarget) ||
 				!clearValueValid ||
+                std::any_of(colorAttachments.begin(),colorAttachments.end(),[imageView](const VkRenderingAttachmentInfo& previous) { return previous.imageView==imageView; }) ||
 				(i > 0 && (attachmentWidth != width || attachmentHeight != height)))
 			{
 				Fail();
@@ -612,7 +671,7 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 {
     if(m_closed || m_rendering || !m_boundPipeline || !m_boundPipeline->IsCompute() ||
         !x || !y || !z || x>m_maxComputeGroups[0] || y>m_maxComputeGroups[1] || z>m_maxComputeGroups[2] ||
-        (m_boundPipeline->GetLayout().bindingCount && !m_boundResourceSet) ||
+        (RequiresResourceSet(m_boundPipeline->GetLayout()) && !m_boundResourceSet) ||
         std::any_of(m_inlineConstantCoverage.begin(),m_inlineConstantCoverage.end(),[](uint8_t byte){return !byte;}))
     {Fail();return;}
     vkCmdDispatch(m_commandBuffer,x,y,z);
@@ -721,19 +780,10 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 	void VulkanCommandList::BindVertexBufferNative(uint32_t binding, dyf::RHI::BufferHandle buffer, uint32_t offset)
 	{
 		VulkanBuffer* nativeBuffer = dynamic_cast<VulkanBuffer*>(buffer);
-		const dyf::RHI::VertexBufferLayout* layout = nullptr;
-		if (m_boundPipeline != nullptr)
-		{
-			for (const dyf::RHI::VertexBufferLayout& candidate : m_boundPipeline->GetVertexBuffers())
-			{
-				if (candidate.binding == binding)
-				{
-					layout = &candidate;
-					break;
-				}
-			}
-		}
-		if (m_closed || !m_rendering || m_boundPipeline == nullptr || layout == nullptr ||
+		const bool hasLayout = m_boundPipeline != nullptr &&
+			std::any_of(m_boundPipeline->GetVertexBuffers().begin(), m_boundPipeline->GetVertexBuffers().end(),
+				[binding](const dyf::RHI::VertexBufferLayout& layout) { return layout.binding == binding; });
+		if (m_closed || !m_rendering || m_boundPipeline == nullptr || !hasLayout ||
 			nativeBuffer == nullptr || offset >= nativeBuffer->GetDesc().size ||
 			(nativeBuffer->GetDesc().usage & dyf::RHI::BufferUsage::Vertex) == dyf::RHI::BufferUsage::None)
 		{
@@ -825,13 +875,19 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 		native.height = -viewport.height;
 		native.minDepth = viewport.minDepth;
 		native.maxDepth = viewport.maxDepth;
+        if(!std::isfinite(native.y) || native.width>m_maxViewportDimensions[0] || -native.height>m_maxViewportDimensions[1] ||
+            native.x<m_viewportBounds[0] || double(native.x)+native.width>m_viewportBounds[1] ||
+            native.y<m_viewportBounds[0] || native.y>m_viewportBounds[1] ||
+            double(native.y)+native.height<m_viewportBounds[0])
+        { Fail(); return; }
 		vkCmdSetViewport(m_commandBuffer, 0, 1, &native);
 		m_hasViewport = true;
 	}
 
 	void VulkanCommandList::SetScissorNative(const dyf::RHI::Rect& rect)
 	{
-		if (m_closed || !m_rendering || rect.x < 0 || rect.y < 0 || rect.width == 0 || rect.height == 0)
+		if (m_closed || !m_rendering || rect.x < 0 || rect.y < 0 || rect.width == 0 || rect.height == 0 ||
+            uint64_t(rect.x)+rect.width>INT32_MAX || uint64_t(rect.y)+rect.height>INT32_MAX)
 		{
 			Fail();
 			return;
@@ -880,6 +936,18 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 		vkCmdDrawIndexed(m_commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 	}
 
+	void VulkanCommandList::DispatchMeshNative(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
+	{
+		if (m_closed || !m_rendering || !m_context.vkCmdDrawMeshTasksEXT ||
+			threadGroupCountX == 0 || threadGroupCountY == 0 || threadGroupCountZ == 0 ||
+			!ValidateDraw(false, 0, 1, 0, 0))
+		{
+			Fail();
+			return;
+		}
+		m_context.vkCmdDrawMeshTasksEXT(m_commandBuffer, threadGroupCountX, threadGroupCountY, threadGroupCountZ);
+	}
+
 	bool VulkanCommandList::CloseNative()
 	{
 		if (m_closed) return !m_failed;
@@ -895,51 +963,6 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
         return !m_failed;
     }
 
-	bool VulkanCommandList::CreateStagingAllocation(const void* data, uint32_t size, StagingAllocation& allocation)
-	{
-		if (data == nullptr || size == 0) return false;
-		VkBufferCreateInfo bufferInfo{};
-		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-		bufferInfo.size = size;
-		bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-		bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-		if (vkCreateBuffer(m_context.device, &bufferInfo, nullptr, &allocation.buffer) != VK_SUCCESS) return false;
-
-		VkMemoryRequirements requirements{};
-		vkGetBufferMemoryRequirements(m_context.device, allocation.buffer, &requirements);
-		const uint32_t memoryType = FindHostMemoryType(m_context.physicalDevice, requirements.memoryTypeBits);
-		if (memoryType == std::numeric_limits<uint32_t>::max())
-		{
-			vkDestroyBuffer(m_context.device, allocation.buffer, nullptr);
-			allocation.buffer = VK_NULL_HANDLE;
-			return false;
-		}
-		VkMemoryAllocateInfo memoryInfo{};
-		memoryInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-		memoryInfo.allocationSize = requirements.size;
-		memoryInfo.memoryTypeIndex = memoryType;
-		if (vkAllocateMemory(m_context.device, &memoryInfo, nullptr, &allocation.memory) != VK_SUCCESS ||
-			vkBindBufferMemory(m_context.device, allocation.buffer, allocation.memory, 0) != VK_SUCCESS)
-		{
-			if (allocation.memory != VK_NULL_HANDLE) vkFreeMemory(m_context.device, allocation.memory, nullptr);
-			vkDestroyBuffer(m_context.device, allocation.buffer, nullptr);
-			allocation = {};
-			return false;
-		}
-
-		void* mapped = nullptr;
-		if (vkMapMemory(m_context.device, allocation.memory, 0, size, 0, &mapped) != VK_SUCCESS)
-		{
-			vkFreeMemory(m_context.device, allocation.memory, nullptr);
-			vkDestroyBuffer(m_context.device, allocation.buffer, nullptr);
-			allocation = {};
-			return false;
-		}
-		std::memcpy(mapped, data, size);
-		vkUnmapMemory(m_context.device, allocation.memory);
-		return true;
-	}
-
 	bool VulkanCommandList::RecordBufferUpdate(VulkanBuffer& buffer, uint32_t offset, const void* data, uint32_t size)
 	{
 		if (m_closed || m_failed || m_rendering || data == nullptr || size == 0 ||
@@ -947,18 +970,20 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 		{
 			return false;
 		}
-		StagingAllocation staging{};
-		if (!CreateStagingAllocation(data, size, staging)) return false;
-		VkBufferCopy region{};
-		region.srcOffset = 0;
-		region.dstOffset = offset;
-		region.size = size;
-		vkCmdCopyBuffer(m_commandBuffer, staging.buffer, buffer.GetHandle(), 1, &region);
-		m_stagingAllocations.push_back(staging);
+		const auto staging = m_uploadArena.Allocate(size, 16);
+		if (!staging) return false;
+		std::memcpy(staging.data, data, size);
+		// Register the operation before recording the copy. A host exception leaves
+		// the lease owned by this command, so no recorded command loses its source.
 		Operation operation{};
 		operation.kind = OperationKind::BufferWrite;
 		operation.buffer = &buffer;
 		m_operations.push_back(operation);
+		VkBufferCopy region{};
+		region.srcOffset = staging.offset;
+		region.dstOffset = offset;
+		region.size = size;
+		vkCmdCopyBuffer(m_commandBuffer, staging.page->buffer, buffer.GetHandle(), 1, &region);
 		return true;
 	}
 
@@ -977,8 +1002,8 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 		{
 			return false;
 		}
-		const uint32_t width = std::max(1u, texture.GetDesc().width >> mipLevel);
-		const uint32_t height = std::max(1u, texture.GetDesc().height >> mipLevel);
+		const uint32_t width = std::max(1u, mipLevel < 32 ? texture.GetDesc().width >> mipLevel : 0u);
+		const uint32_t height = std::max(1u, mipLevel < 32 ? texture.GetDesc().height >> mipLevel : 0u);
 		const uint64_t minimumRowPitch = static_cast<uint64_t>(width) * bytesPerPixel;
 		const uint64_t requiredSlicePitch = static_cast<uint64_t>(rowPitch) * height;
 		const uint64_t requiredBytes = static_cast<uint64_t>(rowPitch) * (height - 1) + minimumRowPitch;
@@ -987,27 +1012,35 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 			return false;
 		}
 
-		const void* uploadData = data;
-		uint32_t uploadBytes = static_cast<uint32_t>(requiredBytes);
-		uint32_t nativeRowLength = rowPitch / bytesPerPixel;
-		std::vector<uint8_t> packed;
-		if (rowPitch % bytesPerPixel != 0)
+		const bool packed = rowPitch % bytesPerPixel != 0;
+		const uint64_t uploadBytes = packed ? minimumRowPitch * height : requiredBytes;
+		// RGB32 texels have a 12-byte block. Reserve up to two 4-byte padding units
+		// because the shared arena accepts power-of-two alignment only.
+		const uint64_t extraPadding = bytesPerPixel == 12 ? 8 : 0;
+		if (uploadBytes > std::numeric_limits<size_t>::max() - extraPadding) return false;
+		const auto staging = m_uploadArena.Allocate(uploadBytes + extraPadding,
+			bytesPerPixel == 12 ? 4 : std::max(4u, bytesPerPixel));
+		if (!staging) return false;
+		const uint64_t padding = bytesPerPixel == 12 ? (12 - staging.offset % 12) % 12 : 0;
+		uint8_t* destination = staging.data + padding;
+		if (packed)
 		{
-			// Vulkan의 row length는 바이트가 아닌 texel 단위다. byte padding만 제거한다.
-			packed.resize(static_cast<size_t>(minimumRowPitch * height));
+			// Vulkan row length is in texels. Remove byte padding directly into the page.
 			for (uint32_t row = 0; row < height; ++row)
-				std::memcpy(packed.data() + static_cast<size_t>(row * minimumRowPitch),
+				std::memcpy(destination + static_cast<size_t>(row * minimumRowPitch),
 					static_cast<const uint8_t*>(data) + static_cast<size_t>(row) * rowPitch,
 					static_cast<size_t>(minimumRowPitch));
-			uploadData = packed.data();
-			uploadBytes = static_cast<uint32_t>(packed.size());
-			nativeRowLength = 0;
 		}
-		StagingAllocation staging{};
-		if (!CreateStagingAllocation(uploadData, uploadBytes, staging)) return false;
+		else std::memcpy(destination, data, static_cast<size_t>(uploadBytes));
+		Operation operation{};
+		operation.kind = OperationKind::TextureWrite;
+		operation.texture = &texture;
+		operation.mipLevel = mipLevel;
+		operation.arrayLayer = arrayLayer;
+		m_operations.push_back(operation);
 		VkBufferImageCopy region{};
-		region.bufferOffset = 0;
-		region.bufferRowLength = nativeRowLength;
+		region.bufferOffset = staging.offset + padding;
+		region.bufferRowLength = packed ? 0 : rowPitch / bytesPerPixel;
 		region.bufferImageHeight = height;
 		region.imageSubresource.aspectMask = texture.GetAspectMask();
 		region.imageSubresource.mipLevel = mipLevel;
@@ -1016,18 +1049,11 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 		region.imageExtent = { width, height, 1 };
 		vkCmdCopyBufferToImage(
 			m_commandBuffer,
-			staging.buffer,
+			staging.page->buffer,
 			texture.GetImage(),
 			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 			1,
 			&region);
-		m_stagingAllocations.push_back(staging);
-		Operation operation{};
-		operation.kind = OperationKind::TextureWrite;
-		operation.texture = &texture;
-		operation.mipLevel = mipLevel;
-		operation.arrayLayer = arrayLayer;
-		m_operations.push_back(operation);
 		return true;
 	}
 
@@ -1142,17 +1168,8 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 			const uint64_t available = found->second.buffer->GetDesc().size - found->second.offset;
 			if (first + count > available / layout.stride) return false;
 		}
-		bool resourceSetRequired = false;
 		const dyf::RHI::PipelineLayoutDesc& layout = m_boundPipeline->GetLayout();
-		for (uint32_t index = 0; index < layout.bindingCount; ++index)
-		{
-			if (layout.bindings[index].type != dyf::RHI::ResourceBindingType::StaticSampler)
-			{
-				resourceSetRequired = true;
-				break;
-			}
-		}
-		if (resourceSetRequired && m_boundResourceSet == nullptr) return false;
+		if (RequiresResourceSet(layout) && m_boundResourceSet == nullptr) return false;
 		return std::find(m_inlineConstantCoverage.begin(), m_inlineConstantCoverage.end(), 0) ==
 			m_inlineConstantCoverage.end();
 	}
@@ -1165,51 +1182,20 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 			switch (operation.kind)
 			{
 			case OperationKind::BufferBarrier:
-			{
-				const auto found = state.buffers.find(operation.buffer);
-				const dyf::RHI::ResourceState current = found == state.buffers.end()
-					? operation.buffer->GetState() : found->second;
-				if (current != operation.before) return false;
-				state.buffers[operation.buffer] = operation.after;
-				break;
-			}
-			case OperationKind::TextureBarrier:
-			{
-				const auto key = TextureKey(operation.texture, operation.mipLevel, operation.arrayLayer);
-				const auto found = state.textureSubresources.find(key);
-				const dyf::RHI::ResourceState current = found == state.textureSubresources.end()
-					? operation.texture->GetState(operation.mipLevel, operation.arrayLayer)
-					: found->second;
-				if (current != operation.before) return false;
-				state.textureSubresources[key] = operation.after;
-				break;
-			}
 			case OperationKind::BufferRequirement:
-			{
-				const auto found = state.buffers.find(operation.buffer);
-				const dyf::RHI::ResourceState current = found == state.buffers.end()
-					? operation.buffer->GetState() : found->second;
-				if (current != operation.before) return false;
-				break;
-			}
-			case OperationKind::TextureRequirement:
-			{
-				const auto key = TextureKey(operation.texture, operation.mipLevel, operation.arrayLayer);
-				const auto found = state.textureSubresources.find(key);
-				const dyf::RHI::ResourceState current = found == state.textureSubresources.end()
-					? operation.texture->GetState(operation.mipLevel, operation.arrayLayer)
-					: found->second;
-				if (current != operation.before) return false;
-				break;
-			}
 			case OperationKind::BufferWrite:
 			{
 				const auto found = state.buffers.find(operation.buffer);
 				const dyf::RHI::ResourceState current = found == state.buffers.end()
 					? operation.buffer->GetState() : found->second;
-				if (current != dyf::RHI::ResourceState::CopyDestination) return false;
+				const dyf::RHI::ResourceState required = operation.kind == OperationKind::BufferWrite
+					? dyf::RHI::ResourceState::CopyDestination : operation.before;
+				if (current != required) return false;
+				if (operation.kind == OperationKind::BufferBarrier) state.buffers[operation.buffer] = operation.after;
 				break;
 			}
+			case OperationKind::TextureBarrier:
+			case OperationKind::TextureRequirement:
 			case OperationKind::TextureWrite:
 			{
 				const auto key = TextureKey(operation.texture, operation.mipLevel, operation.arrayLayer);
@@ -1217,7 +1203,10 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 				const dyf::RHI::ResourceState current = found == state.textureSubresources.end()
 					? operation.texture->GetState(operation.mipLevel, operation.arrayLayer)
 					: found->second;
-				if (current != dyf::RHI::ResourceState::CopyDestination) return false;
+				const dyf::RHI::ResourceState required = operation.kind == OperationKind::TextureWrite
+					? dyf::RHI::ResourceState::CopyDestination : operation.before;
+				if (current != required) return false;
+				if (operation.kind == OperationKind::TextureBarrier) state.textureSubresources[key] = operation.after;
 				break;
 			}
 			}

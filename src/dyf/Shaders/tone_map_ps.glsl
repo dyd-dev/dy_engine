@@ -6,7 +6,8 @@ layout(set=0,binding=1) uniform sampler hdrSampler;
 layout(push_constant) uniform Settings {vec4 values;} settings;
 void main() {
     vec4 hdr=texture(sampler2D(hdrImage,hdrSampler),uv);
-    vec3 mapped=max(hdr.rgb*settings.values.x,vec3(0));
+    // At 2^24, x + 1 rounds to x in float; brighter values already map to 1.
+    vec3 mapped=min(max(hdr.rgb*settings.values.x,vec3(0)),vec3(16777216.0));
     mapped=mapped/(mapped+vec3(1));
     if(settings.values.y>.5)mapped=pow(mapped,vec3(1./2.2));
     color=vec4(mapped,hdr.a);

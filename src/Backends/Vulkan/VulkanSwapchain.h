@@ -60,15 +60,13 @@ public:
     static SwapchainSupportDetails QuerySwapchainSupport(VkPhysicalDevice device, VkSurfaceKHR surface, InitializationStatus& status);
 
 private:
-    static bool ChooseSwapSurfaceFormat(
+    static bool SupportsSurfaceFormat(
         const std::vector<VkSurfaceFormatKHR>& availableFormats,
         VkFormat requestedFormat,
-        VkColorSpaceKHR requestedColorSpace,
-        VkSurfaceFormatKHR& selectedFormat);
-    static bool ChoosePresentMode(
+        VkColorSpaceKHR requestedColorSpace);
+    static bool SupportsPresentMode(
         const std::vector<VkPresentModeKHR>& availablePresentModes,
-        VkPresentModeKHR requestedPresentMode,
-        VkPresentModeKHR& selectedPresentMode);
+        VkPresentModeKHR requestedPresentMode);
     static bool ChooseSwapExtent(
         const VkSurfaceCapabilitiesKHR& capabilities,
         void* windowHandle,

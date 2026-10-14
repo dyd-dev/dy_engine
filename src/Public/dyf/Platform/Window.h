@@ -1,5 +1,6 @@
 #pragma once
 #include "dyf/Platform/Input.h"
+#include <exception>
 struct GLFWwindow;
 
 namespace dyf::Platform
@@ -22,8 +23,10 @@ namespace dyf::Platform
 		bool IsRunning() const;
 		void RequestClose() const;
 		// Call once per application frame, even when rendering multiple windows.
+		// Input snapshots are published before a native callback failure is rethrown.
 		static void PollEvents();
 		// Wait without publishing input. Call PollEvents afterwards to read the events.
+		// Callback failures are rethrown here instead of crossing the native dispatcher.
 		static void WaitEvents(double timeoutSeconds = 0.1);
 		void Resize(unsigned int width, unsigned int height) const;
 		[[nodiscard]] WindowSize GetSize() const;
@@ -48,8 +51,11 @@ namespace dyf::Platform
 
 	private:
 		void ResetCursorDelta();
+		void HandleInputEvent(const InputEvent& event) noexcept;
+		static void RethrowCallbackError();
 		struct GLFWwindow* m_window = nullptr;
 		Input m_input;
         bool m_profilerToggle = false;
+		std::exception_ptr m_callbackError;
 	};
 }

@@ -6,6 +6,7 @@
 #include "D3D12Shader.h"
 #include "D3D12Texture.h"
 #include "D3D12Query.h"
+#include "../../RHI/Validation.h"
 #include "dyf/RHI/ResourceSet.h"
 #include "dyf/RHI/Shader.h"
 #include "dyf/RHI/Pipeline.h"
@@ -29,6 +30,11 @@ using Microsoft::WRL::ComPtr;
 
 namespace dyf::Backends
 {
+    namespace
+    {
+        D3D12_SHADER_VISIBILITY ToShaderVisibility(RHI::ShaderStageFlags stages);
+    }
+
     struct D3D12ObjectDeleter
     {
         template<typename Object>
@@ -48,6 +54,7 @@ namespace dyf::Backends
     struct D3D12InternalState
     {
         ComPtr<ID3D12Device> device;
+        std::shared_ptr<D3D12UploadPool> uploadPool;
         D3D12_RESOURCE_BINDING_TIER resourceBindingTier = D3D12_RESOURCE_BINDING_TIER_1;
         D3D_FEATURE_LEVEL resourceBindingFeatureLevel = D3D_FEATURE_LEVEL_11_0;
         ComPtr<ID3D12InfoQueue> infoQueue; // 디버그 빌드: D3D12 검증 메시지 수집
@@ -83,12 +90,22 @@ namespace dyf::Backends
         UINT swapchainFlags = 0;
         DXGI_FORMAT swapchainResourceFormat = DXGI_FORMAT_UNKNOWN;
         DXGI_FORMAT swapchainRtvFormat = DXGI_FORMAT_UNKNOWN;
-        RHI::Format swapchainFormat = RHI::Format::Unknown;
         RHI::SwapchainDesc swapchainDesc = {};
         bool swapchainReady = false;
         bool frameReady = false;
         bool frameSubmitted = false;
         bool submissionFaulted = false;
+
+        auto FindActiveCommandList(const RHI::ICommandList* command)
+        {
+            return std::find_if(
+                activeCommandLists.begin(),
+                activeCommandLists.end(),
+                [command](const auto& candidate)
+                {
+                    return candidate.get() == command;
+                });
+        }
 
         bool CollectCompletedWork(uint64_t& completedValue)
         {
@@ -176,17 +193,15 @@ namespace dyf::Backends
         output.pixels.resize(static_cast<size_t>(bytes));
         D3D12_RESOURCE_BARRIER barrier = CD3DX12_RESOURCE_BARRIER::Transition(resource, before, D3D12_RESOURCE_STATE_COPY_SOURCE, 0);
         commands->ResourceBarrier(1, &barrier);
-        D3D12_TEXTURE_COPY_LOCATION source{};
-        source.pResource = resource; source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-        D3D12_TEXTURE_COPY_LOCATION destination{};
-        destination.pResource = buffer.Get(); destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        destination.PlacedFootprint = footprint;
+        const CD3DX12_TEXTURE_COPY_LOCATION source(resource, 0u);
+        const CD3DX12_TEXTURE_COPY_LOCATION destination(buffer.Get(), footprint);
         commands->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
         std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
         commands->ResourceBarrier(1, &barrier);
         if(FAILED(commands->Close())) return false;
         const size_t retirementBase = m_internal->readbackResources.size();
-        m_internal->readbackResources.reserve(retirementBase + 4);
+        m_internal->readbackResources.reserve(retirementBase + 5);
+        m_internal->readbackResources.emplace_back(resource);
         m_internal->readbackResources.emplace_back(buffer.Get());
         m_internal->readbackResources.emplace_back(allocator.Get());
         m_internal->readbackResources.emplace_back(commands.Get());
@@ -336,10 +351,9 @@ namespace dyf::Backends
         delete m_internal;
     }
 
-    int D3D12Device::Initialize(const void* windowHandle, const RHI::DeviceDesc& desc)
+    int D3D12Device::Initialize(const void*, const RHI::DeviceDesc& desc)
     {
         if (desc.maxFramesInFlight == 0) return -1;
-        m_internal->windowHandle = static_cast<HWND>(const_cast<void*>(windowHandle));
 
         if(desc.enableValidation)
         {
@@ -356,6 +370,7 @@ namespace dyf::Backends
         if (FAILED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_internal->device)))) {
             return -1;
         }
+        m_internal->uploadPool = MakeD3D12UploadPool(m_internal->device.Get());
 
         D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
         const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
@@ -407,6 +422,11 @@ namespace dyf::Backends
 
 
 uint64_t D3D12Device::GetLastSubmissionNative() const {return m_internal->lastSubmittedValue;}
+RHI::UploadMemoryStatistics D3D12Device::GetUploadMemoryStatisticsNative() const
+{
+    return m_internal && m_internal->uploadPool
+        ? m_internal->uploadPool->GetStatistics() : RHI::UploadMemoryStatistics{};
+}
 uint64_t D3D12Device::GetCompletedSubmissionNative() {uint64_t value=0; return m_internal->CollectCompletedWork(value)?value:0;}
 void D3D12Device::DiscardCommandListNative(RHI::ICommandList* list) {auto& active=m_internal->activeCommandLists; active.erase(std::remove_if(active.begin(),active.end(),[list](const auto& value){return value.get()==list;}),active.end());}
 
@@ -417,16 +437,8 @@ RHI::TimestampQueryHandle D3D12Device::CreateTimestampQueryNative(const RHI::Tim
     heap.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
     heap.Count = desc.count;
     if(FAILED(m_internal->device->CreateQueryHeap(&heap, IID_PPV_ARGS(&query->heap)))) return nullptr;
-    D3D12_HEAP_PROPERTIES properties{};
-    properties.Type = D3D12_HEAP_TYPE_READBACK;
-    properties.CreationNodeMask = properties.VisibleNodeMask = 1;
-    D3D12_RESOURCE_DESC buffer{};
-    buffer.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    buffer.Width = uint64_t(desc.count) * sizeof(uint64_t);
-    buffer.Height = 1;
-    buffer.DepthOrArraySize = buffer.MipLevels = 1;
-    buffer.SampleDesc.Count = 1;
-    buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    const auto properties = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_READBACK);
+    const auto buffer = CD3DX12_RESOURCE_DESC::Buffer(uint64_t(desc.count) * sizeof(uint64_t));
     if(FAILED(m_internal->device->CreateCommittedResource(&properties, D3D12_HEAP_FLAG_NONE,
         &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&query->readback)))) return nullptr;
     return query.release();
@@ -438,7 +450,7 @@ void D3D12Device::DestroyTimestampQueryNative(RHI::TimestampQueryHandle query)
 bool D3D12Device::ReadTimestampsNative(RHI::TimestampQueryHandle handle, uint32_t first,
     uint32_t count, uint64_t* ticks)
 {
-    if(m_internal->submissionFaulted || IsLostNative()) return false;
+    if(IsLostNative()) return false;
     auto& query = *static_cast<D3D12TimestampQuery*>(handle);
     for(uint32_t index = first; index < first + count; ++index)
         if(!query.completions[index] || query.InFlight(index)) return false;
@@ -463,6 +475,7 @@ bool D3D12Device::SupportsNative(RHI::Feature feature) const
     if(feature == RHI::Feature::TimestampQuery) return m_internal->timestampFrequency != 0;
     switch(feature)
     {
+    case RHI::Feature::Compute:
     case RHI::Feature::Rasterization:
     case RHI::Feature::Tessellation:
     case RHI::Feature::DescriptorIndexing:
@@ -470,6 +483,19 @@ bool D3D12Device::SupportsNative(RHI::Feature feature) const
     case RHI::Feature::Wireframe:
     case RHI::Feature::DepthBiasClamp:
         return true;
+    case RHI::Feature::MeshShader:
+    {
+        if (!m_internal || !m_internal->device) return false;
+        D3D12_FEATURE_DATA_D3D12_OPTIONS7 options7{};
+        if (SUCCEEDED(m_internal->device->CheckFeatureSupport(
+            D3D12_FEATURE_D3D12_OPTIONS7, &options7, sizeof(options7))))
+        {
+            return options7.MeshShaderTier >= D3D12_MESH_SHADER_TIER_1;
+        }
+        return false;
+    }
+    case RHI::Feature::TaskShader:
+        return false;
     default:
         return false;
     }
@@ -503,21 +529,21 @@ uint64_t D3D12Device::GetLimitNative(RHI::Limit limit) const
 bool D3D12Device::SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc& desc) const
 {
     if(!m_internal || !m_internal->device) return false;
-    const auto graphicsStages = static_cast<uint32_t>(RHI::ShaderStageFlags::Vertex |
+    const auto supportedStages = static_cast<uint32_t>(RHI::ShaderStageFlags::Vertex |
         RHI::ShaderStageFlags::Hull | RHI::ShaderStageFlags::Domain |
-        RHI::ShaderStageFlags::Fragment);
+        RHI::ShaderStageFlags::Fragment | RHI::ShaderStageFlags::Compute | RHI::ShaderStageFlags::Mesh);
     if(desc.inlineConstantSize &&
-        (static_cast<uint32_t>(desc.inlineConstantStages) & ~graphicsStages)) return false;
+        (static_cast<uint32_t>(desc.inlineConstantStages) & ~supportedStages)) return false;
     uint64_t rootCost = desc.inlineConstantSize / sizeof(uint32_t);
     uint64_t descriptorCount = 0;
     uint64_t samplerCount = 0;
-    uint64_t constantBuffers[4] = {};
-    uint64_t shaderResources[4] = {};
+    uint64_t constantBuffers[6] = {};
+    uint64_t shaderResources[6] = {};
     uint64_t unorderedAccessViews = 0;
     for(uint32_t index = 0; index < desc.bindingCount; ++index)
     {
         const auto& binding = desc.bindings[index];
-        if(static_cast<uint32_t>(binding.stages) & ~graphicsStages) return false;
+        if(static_cast<uint32_t>(binding.stages) & ~supportedStages) return false;
         if(binding.type == RHI::ResourceBindingType::StaticSampler)
             samplerCount += binding.count;
         else
@@ -527,11 +553,15 @@ bool D3D12Device::SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc& de
             descriptorCount += binding.count;
             constexpr RHI::ShaderStageFlags stageFlags[] = {
                 RHI::ShaderStageFlags::Vertex, RHI::ShaderStageFlags::Hull,
-                RHI::ShaderStageFlags::Domain, RHI::ShaderStageFlags::Fragment};
-            for (uint32_t stage = 0; stage < 4; ++stage)
+                RHI::ShaderStageFlags::Domain, RHI::ShaderStageFlags::Fragment,
+                RHI::ShaderStageFlags::Compute, RHI::ShaderStageFlags::Mesh};
+            const auto visibility = ToShaderVisibility(binding.stages);
+            for (uint32_t stage = 0; stage < 6; ++stage)
             {
                 const auto flag = stageFlags[stage];
-                if ((binding.stages & flag) == RHI::ShaderStageFlags::None) continue;
+                // Multiple RHI stages become one native ALL-visible table.
+                if (visibility != D3D12_SHADER_VISIBILITY_ALL &&
+                    visibility != ToShaderVisibility(flag)) continue;
                 if (binding.type == RHI::ResourceBindingType::ConstantBuffer)
                     constantBuffers[stage] += binding.count;
                 else if (binding.type == RHI::ResourceBindingType::SampledTexture ||
@@ -607,35 +637,24 @@ void D3D12Device::DestroySwapchainNative()
             return false;
         }
 
-        RHI::Format actualFormat = desc.format;
-        DXGI_FORMAT resourceFormat = DXGI_FORMAT_UNKNOWN;
-        DXGI_FORMAT rtvFormat = DXGI_FORMAT_UNKNOWN;
         switch (desc.format)
         {
-        case RHI::Format::Unknown: return false;
         case RHI::Format::R8G8B8A8_UNORM:
-            resourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-            rtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-            break;
         case RHI::Format::B8G8R8A8_UNORM:
-            resourceFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
-            rtvFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
-            break;
         case RHI::Format::R8G8B8A8_UNORM_SRGB:
-            resourceFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
-            rtvFormat = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-            break;
         case RHI::Format::B8G8R8A8_UNORM_SRGB:
-            resourceFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
-            rtvFormat = DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
-            break;
         case RHI::Format::R16G16B16A16_FLOAT:
-            resourceFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
-            rtvFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
             break;
         default:
             return false;
         }
+        const DXGI_FORMAT rtvFormat = static_cast<DXGI_FORMAT>(
+            D3D12Texture::ToDxgiFormat(desc.format));
+        const DXGI_FORMAT resourceFormat = desc.format == RHI::Format::R8G8B8A8_UNORM_SRGB
+            ? DXGI_FORMAT_R8G8B8A8_UNORM
+            : desc.format == RHI::Format::B8G8R8A8_UNORM_SRGB
+                ? DXGI_FORMAT_B8G8R8A8_UNORM
+                : rtvFormat;
 
         ComPtr<IDXGIFactory4> factory;
         if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return false;
@@ -726,7 +745,7 @@ void D3D12Device::DestroySwapchainNative()
         if (!CreateBackBufferViews(
                 m_internal,
                 swapchain3.Get(),
-                actualFormat,
+                desc.format,
                 resourceFormat,
                 rtvFormat,
                 rtvHeap,
@@ -750,7 +769,6 @@ void D3D12Device::DestroySwapchainNative()
         m_internal->swapchainFlags = swapchainFlags;
         m_internal->swapchainResourceFormat = resourceFormat;
         m_internal->swapchainRtvFormat = rtvFormat;
-        m_internal->swapchainFormat = actualFormat;
         m_internal->swapchainDesc = desc;
         m_internal->activeImageIndex = m_internal->swapChain->GetCurrentBackBufferIndex();
         m_internal->swapchainReady =
@@ -801,21 +819,17 @@ void D3D12Device::DestroySwapchainNative()
 
         if (m_internal->backBufferTextures.empty())
         {
-            ComPtr<ID3D12DescriptorHeap> rtvHeap;
-            std::vector<std::unique_ptr<D3D12Texture, D3D12ObjectDeleter>> backBufferTextures;
             if (!CreateBackBufferViews(
                     m_internal,
                     m_internal->swapChain.Get(),
-                    m_internal->swapchainFormat,
+                    m_internal->swapchainDesc.format,
                     m_internal->swapchainResourceFormat,
                     m_internal->swapchainRtvFormat,
-                    rtvHeap,
-                    backBufferTextures))
+                    m_internal->rtvHeap,
+                    m_internal->backBufferTextures))
             {
                 return false;
             }
-            m_internal->rtvHeap = std::move(rtvHeap);
-            m_internal->backBufferTextures = std::move(backBufferTextures);
             m_internal->imageCompletionValues.assign(
                 m_internal->backBufferTextures.size(), 0);
         }
@@ -854,44 +868,32 @@ void D3D12Device::DestroySwapchainNative()
                     m_internal->swapchainResourceFormat,
                     m_internal->swapchainFlags)))
             {
-                ComPtr<ID3D12DescriptorHeap> rtvHeap;
-                std::vector<std::unique_ptr<D3D12Texture, D3D12ObjectDeleter>> backBufferTextures;
                 if (CreateBackBufferViews(
                         m_internal,
                         m_internal->swapChain.Get(),
-                        m_internal->swapchainFormat,
+                        m_internal->swapchainDesc.format,
                         m_internal->swapchainResourceFormat,
                         m_internal->swapchainRtvFormat,
-                        rtvHeap,
-                        backBufferTextures))
+                        m_internal->rtvHeap,
+                        m_internal->backBufferTextures))
                 {
-                    m_internal->rtvHeap = std::move(rtvHeap);
-                    m_internal->backBufferTextures = std::move(backBufferTextures);
                     m_internal->imageCompletionValues.assign(
                         m_internal->backBufferTextures.size(), 0);
                 }
                 return false;
             }
 
-            ComPtr<ID3D12DescriptorHeap> rtvHeap;
-            std::vector<std::unique_ptr<D3D12Texture, D3D12ObjectDeleter>> backBufferTextures;
-            const RHI::Format format =
-                m_internal->swapchainDesc.format == RHI::Format::Unknown
-                    ? m_internal->swapchainFormat
-                    : m_internal->swapchainDesc.format;
             if (!CreateBackBufferViews(
                     m_internal,
                     m_internal->swapChain.Get(),
-                    format,
+                    m_internal->swapchainDesc.format,
                     m_internal->swapchainResourceFormat,
                     m_internal->swapchainRtvFormat,
-                    rtvHeap,
-                    backBufferTextures))
+                    m_internal->rtvHeap,
+                    m_internal->backBufferTextures))
             {
                 return false;
             }
-            m_internal->rtvHeap = std::move(rtvHeap);
-            m_internal->backBufferTextures = std::move(backBufferTextures);
             m_internal->imageCompletionValues.assign(
                 m_internal->backBufferTextures.size(), 0);
         }
@@ -921,12 +923,14 @@ void D3D12Device::DestroySwapchainNative()
 
         if (!m_internal->CollectCompletedWork()) return nullptr;
 
+        // Also supports native fixtures that supply a device without Initialize.
+        if (!m_internal->uploadPool)
+            m_internal->uploadPool = MakeD3D12UploadPool(m_internal->device.Get());
+
         auto commandList = std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>(
-            new D3D12CommandList(m_internal->device.Get()));
+            new D3D12CommandList(m_internal->device.Get(), m_internal->uploadPool));
         if (commandList->GetNativeList() == nullptr) return nullptr;
-        D3D12CommandList* result = commandList.get();
-        m_internal->activeCommandLists.push_back(std::move(commandList));
-        return result;
+        return m_internal->activeCommandLists.emplace_back(std::move(commandList)).get();
     }
 
     bool D3D12Device::SubmitNative(RHI::ICommandList** cmdLists, uint32_t count)
@@ -954,19 +958,10 @@ void D3D12Device::DestroySwapchainNative()
         for (uint32_t index = 0; index < count; ++index)
         {
             if (cmdLists[index] == nullptr) return false;
-            for (uint32_t previous = 0; previous < index; ++previous)
-            {
-                if (cmdLists[previous] == cmdLists[index]) return false;
-            }
+            if (std::find(cmdLists, cmdLists + index, cmdLists[index]) != cmdLists + index)
+                return false;
 
-            const auto owned = std::find_if(
-                m_internal->activeCommandLists.begin(),
-                m_internal->activeCommandLists.end(),
-                [command = cmdLists[index]](
-                    const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& candidate)
-                {
-                    return candidate.get() == command;
-                });
+            const auto owned = m_internal->FindActiveCommandList(cmdLists[index]);
             if (owned == m_internal->activeCommandLists.end()) return false;
 
             D3D12CommandList* commandList = owned->get();
@@ -1006,16 +1001,7 @@ void D3D12Device::DestroySwapchainNative()
         {
             for (D3D12CommandList* commandList : submittedCommandLists)
             {
-                const auto owned = std::find_if(
-                    m_internal->activeCommandLists.begin(),
-                    m_internal->activeCommandLists.end(),
-                    [commandList](
-                        const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& candidate)
-                    {
-                        return candidate.get() == commandList;
-                    });
-                if (owned != m_internal->activeCommandLists.end())
-                    m_internal->activeCommandLists.erase(owned);
+                DiscardCommandListNative(commandList);
             }
             return false;
         }
@@ -1026,14 +1012,7 @@ void D3D12Device::DestroySwapchainNative()
         submission.commandLists.reserve(count);
         for (D3D12CommandList* commandList : submittedCommandLists)
         {
-            const auto owned = std::find_if(
-                m_internal->activeCommandLists.begin(),
-                m_internal->activeCommandLists.end(),
-                [commandList](
-                    const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& candidate)
-                {
-                    return candidate.get() == commandList;
-                });
+            const auto owned = m_internal->FindActiveCommandList(commandList);
             submission.commandLists.push_back(std::move(*owned));
             m_internal->activeCommandLists.erase(owned);
         }
@@ -1118,11 +1097,6 @@ void D3D12Device::DestroySwapchainNative()
 
     namespace
     {
-        bool HasUsage(RHI::TextureUsage usage, RHI::TextureUsage flag)
-        {
-            return (static_cast<uint32_t>(usage) & static_cast<uint32_t>(flag)) != 0;
-        }
-
         bool IsDefaultSubresourceRange(
             const RHI::TextureSubresourceRange& range)
         {
@@ -1130,24 +1104,27 @@ void D3D12Device::DestroySwapchainNative()
                 range.firstArrayLayer == 0 && range.arrayLayerCount == 0;
         }
 
-        bool HasStage(RHI::ShaderStageFlags stages, RHI::ShaderStageFlags stage)
+        bool IsStorageBufferViewRangeValid(uint32_t stride, uint32_t offset, uint32_t size)
         {
-            return (static_cast<uint32_t>(stages) & static_cast<uint32_t>(stage)) != 0;
+            const uint32_t elementSize = stride != 0 ? stride : 4;
+            return stride <= D3D12_REQ_MULTI_ELEMENT_STRUCTURE_SIZE_IN_BYTES &&
+                offset % elementSize == 0 && size % elementSize == 0;
         }
 
         D3D12_SHADER_VISIBILITY ToShaderVisibility(RHI::ShaderStageFlags stages)
         {
-            const bool vertex = HasStage(stages, RHI::ShaderStageFlags::Vertex);
-            const bool hull = HasStage(stages, RHI::ShaderStageFlags::Hull);
-            const bool domain = HasStage(stages, RHI::ShaderStageFlags::Domain);
-            const bool fragment = HasStage(stages, RHI::ShaderStageFlags::Fragment);
-            const uint32_t count = static_cast<uint32_t>(vertex) + static_cast<uint32_t>(hull) +
-                static_cast<uint32_t>(domain) + static_cast<uint32_t>(fragment);
-            if (count == 1 && vertex) return D3D12_SHADER_VISIBILITY_VERTEX;
-            if (count == 1 && hull) return D3D12_SHADER_VISIBILITY_HULL;
-            if (count == 1 && domain) return D3D12_SHADER_VISIBILITY_DOMAIN;
-            if (count == 1 && fragment) return D3D12_SHADER_VISIBILITY_PIXEL;
-            return D3D12_SHADER_VISIBILITY_ALL;
+            const auto graphicsStages = stages & (RHI::ShaderStageFlags::Vertex |
+                RHI::ShaderStageFlags::Hull | RHI::ShaderStageFlags::Domain |
+                RHI::ShaderStageFlags::Fragment | RHI::ShaderStageFlags::Mesh);
+            switch (graphicsStages)
+            {
+            case RHI::ShaderStageFlags::Vertex: return D3D12_SHADER_VISIBILITY_VERTEX;
+            case RHI::ShaderStageFlags::Hull: return D3D12_SHADER_VISIBILITY_HULL;
+            case RHI::ShaderStageFlags::Domain: return D3D12_SHADER_VISIBILITY_DOMAIN;
+            case RHI::ShaderStageFlags::Fragment: return D3D12_SHADER_VISIBILITY_PIXEL;
+            case RHI::ShaderStageFlags::Mesh: return D3D12_SHADER_VISIBILITY_MESH;
+            default: return D3D12_SHADER_VISIBILITY_ALL;
+            }
         }
 
         DXGI_FORMAT ToVertexFormat(RHI::Format format)
@@ -1432,9 +1409,7 @@ void D3D12Device::DestroySwapchainNative()
         auto buffer = std::unique_ptr<D3D12Buffer, D3D12ObjectDeleter>(
             new D3D12Buffer(m_internal->device.Get(), desc));
         if (buffer->GetNativeResource() == nullptr) return nullptr;
-        D3D12Buffer* result = buffer.get();
-        m_internal->liveBuffers.push_back(std::move(buffer));
-        return result;
+        return m_internal->liveBuffers.emplace_back(std::move(buffer)).get();
     }
 
     RHI::TextureHandle D3D12Device::CreateTextureNative(const RHI::TextureDesc& desc)
@@ -1468,9 +1443,7 @@ void D3D12Device::DestroySwapchainNative()
         {
             return nullptr;
         }
-        D3D12Texture* result = texture.get();
-        m_internal->liveTextures.push_back(std::move(texture));
-        return result;
+        return m_internal->liveTextures.emplace_back(std::move(texture)).get();
     }
 
     RHI::ShaderHandle D3D12Device::CreateShaderNative(const RHI::ShaderDesc& desc)
@@ -1478,23 +1451,36 @@ void D3D12Device::DestroySwapchainNative()
         if (desc.stage != RHI::ShaderStage::Vertex &&
             desc.stage != RHI::ShaderStage::Hull &&
             desc.stage != RHI::ShaderStage::Domain &&
-            desc.stage != RHI::ShaderStage::Fragment)
+            desc.stage != RHI::ShaderStage::Fragment &&
+            desc.stage != RHI::ShaderStage::Compute &&
+            desc.stage != RHI::ShaderStage::Mesh)
         {
             return nullptr;
         }
         auto shader = std::unique_ptr<D3D12Shader, D3D12ObjectDeleter>(
             new D3D12Shader(desc));
-        D3D12Shader* result = shader.get();
-        m_internal->liveShaders.push_back(std::move(shader));
-        return result;
+        return m_internal->liveShaders.emplace_back(std::move(shader)).get();
     }
 
     RHI::PipelineHandle D3D12Device::CreateGraphicsPipelineNative(
         const RHI::GraphicsPipelineDesc& desc)
     {
-        if (m_internal == nullptr || m_internal->device == nullptr ||
-            !SupportsPipelineLayoutNative(desc.layout) ||
-            !SupportsGraphicsPipelineNative(desc))
+        return CreatePipeline(desc, nullptr);
+    }
+
+    RHI::PipelineHandle D3D12Device::CreateComputePipelineNative(
+        const RHI::ComputePipelineDesc& desc)
+    {
+        RHI::GraphicsPipelineDesc pipelineDesc;
+        pipelineDesc.layout = desc.layout;
+        return CreatePipeline(pipelineDesc, desc.computeShader);
+    }
+
+    RHI::PipelineHandle D3D12Device::CreatePipeline(
+        const RHI::GraphicsPipelineDesc& desc, RHI::ShaderHandle computeShader)
+    {
+        if (!computeShader && (!SupportsPipelineLayoutNative(desc.layout) ||
+            !SupportsGraphicsPipelineNative(desc)))
         {
             return nullptr;
         }
@@ -1503,7 +1489,7 @@ void D3D12Device::DestroySwapchainNative()
         auto* hullShader = dynamic_cast<D3D12Shader*>(desc.hullShader);
         auto* domainShader = dynamic_cast<D3D12Shader*>(desc.domainShader);
         auto* fragmentShader = dynamic_cast<D3D12Shader*>(desc.fragmentShader);
-        if (vertexShader == nullptr ||
+        if (!computeShader && (vertexShader == nullptr ||
             vertexShader->GetBinarySize() == 0 ||
             (desc.hullShader != nullptr &&
                 (hullShader == nullptr || hullShader->GetBinarySize() == 0)) ||
@@ -1511,7 +1497,7 @@ void D3D12Device::DestroySwapchainNative()
                 (domainShader == nullptr || domainShader->GetBinarySize() == 0)) ||
             (desc.fragmentShader != nullptr &&
                 (fragmentShader == nullptr ||
-                    fragmentShader->GetBinarySize() == 0)))
+                    fragmentShader->GetBinarySize() == 0))))
         {
             return nullptr;
         }
@@ -1593,8 +1579,7 @@ void D3D12Device::DestroySwapchainNative()
                 continue;
             }
 
-            descriptorRanges.emplace_back();
-            descriptorRanges.back().Init(
+            descriptorRanges.emplace_back(
                 ToDescriptorRangeType(binding.type),
                 binding.count,
                 binding.binding,
@@ -1602,8 +1587,7 @@ void D3D12Device::DestroySwapchainNative()
                 D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE |
                     D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
                 0);
-            rootParameters.emplace_back();
-            rootParameters.back().InitAsDescriptorTable(
+            rootParameters.emplace_back().InitAsDescriptorTable(
                 1,
                 &descriptorRanges.back(),
                 ToShaderVisibility(binding.stages));
@@ -1623,8 +1607,7 @@ void D3D12Device::DestroySwapchainNative()
         {
             inlineConstantRootParameter =
                 static_cast<uint32_t>(rootParameters.size());
-            rootParameters.emplace_back();
-            rootParameters.back().InitAsConstants(
+            rootParameters.emplace_back().InitAsConstants(
                 rootConstantDwords,
                 desc.layout.inlineConstantBinding,
                 0,
@@ -1647,7 +1630,8 @@ void D3D12Device::DestroySwapchainNative()
             rootParameters.empty() ? nullptr : rootParameters.data(),
             static_cast<UINT>(staticSamplers.size()),
             staticSamplers.empty() ? nullptr : staticSamplers.data(),
-            D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+            computeShader ? D3D12_ROOT_SIGNATURE_FLAG_NONE :
+                D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
         ComPtr<ID3DBlob> serializedRootSignature;
         ComPtr<ID3DBlob> rootSignatureError;
         if (FAILED(D3DX12SerializeVersionedRootSignature(
@@ -1676,15 +1660,39 @@ void D3D12Device::DestroySwapchainNative()
             return nullptr;
         }
 
+        if (computeShader)
+        {
+            auto* shader = static_cast<D3D12Shader*>(computeShader);
+            D3D12_COMPUTE_PIPELINE_STATE_DESC pipelineDesc = {};
+            pipelineDesc.pRootSignature = rootSignature.Get();
+            pipelineDesc.CS = {shader->GetBinary(), shader->GetBinarySize()};
+            ComPtr<ID3D12PipelineState> pipelineState;
+            if (FAILED(m_internal->device->CreateComputePipelineState(
+                    &pipelineDesc, IID_PPV_ARGS(&pipelineState))))
+            {
+                return nullptr;
+            }
+            auto pipeline = std::unique_ptr<D3D12PipelineState, D3D12ObjectDeleter>(
+                new D3D12PipelineState(
+                    desc.layout,
+                    pipelineState.Get(),
+                    rootSignature.Get(),
+                    std::move(pipelineBindings),
+                    {},
+                    inlineConstantRootParameter,
+                    descriptorCount,
+                    D3D_PRIMITIVE_TOPOLOGY_UNDEFINED,
+                    false,
+                    false,
+                    true));
+            return m_internal->livePipelines.emplace_back(std::move(pipeline)).get();
+        }
+
         std::vector<D3D12VertexBinding> vertexBindings;
         vertexBindings.reserve(desc.vertexBufferCount);
         for (uint32_t index = 0; index < desc.vertexBufferCount; ++index)
         {
             const RHI::VertexBufferLayout& layout = desc.vertexBuffers[index];
-            if (layout.binding >= D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT)
-            {
-                return nullptr;
-            }
             vertexBindings.push_back({ layout.binding, layout.stride });
         }
 
@@ -1811,6 +1819,7 @@ void D3D12Device::DestroySwapchainNative()
             }
         }
 
+        pipelineDesc.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(D3D12_DEFAULT);
         pipelineDesc.DepthStencilState.DepthEnable =
             desc.depthStencil.depthTestEnabled ||
             desc.depthStencil.depthWriteEnabled;
@@ -1847,17 +1856,6 @@ void D3D12Device::DestroySwapchainNative()
             pipelineDesc.DepthStencilState.BackFace.StencilFunc =
                 ToCompareOp(desc.depthStencil.back.compareOp);
         }
-        else
-        {
-            pipelineDesc.DepthStencilState.FrontFace = {
-                D3D12_STENCIL_OP_KEEP,
-                D3D12_STENCIL_OP_KEEP,
-                D3D12_STENCIL_OP_KEEP,
-                D3D12_COMPARISON_FUNC_ALWAYS
-            };
-            pipelineDesc.DepthStencilState.BackFace =
-                pipelineDesc.DepthStencilState.FrontFace;
-        }
         pipelineDesc.DSVFormat = static_cast<DXGI_FORMAT>(
             D3D12Texture::ToDxgiFormat(
                 desc.depthStencil.format));
@@ -1890,11 +1888,334 @@ void D3D12Device::DestroySwapchainNative()
                 static_cast<uint32_t>(ToPrimitiveTopology(desc.topology, desc.patchControlPoints)),
                 desc.depthStencil.stencilEnabled,
                 desc.depthStencil.depthWriteEnabled ||
-                    desc.depthStencil.stencilEnabled));
+                    RHI::MayWriteStencil(desc.depthStencil)));
+        auto* result = m_internal->livePipelines.emplace_back(std::move(pipeline)).get();
+        if (alphaFactorsTranslated)
+		ReportDiagnostic(DiagnosticSeverity::Info,
+                "D3D12: Alpha blend color factors were translated to equivalent alpha factors.");
+        return result;
+    }
+
+    bool D3D12Device::SupportsMeshPipelineNative(const RHI::MeshPipelineDesc& desc) const
+    {
+        if (m_internal == nullptr || m_internal->device == nullptr ||
+            !Supports(RHI::Feature::MeshShader))
+        {
+            return false;
+        }
+        if (!SupportsPipelineLayoutNative(desc.layout)) return false;
+        RHI::GraphicsPipelineDesc graphics;
+        graphics.raster = desc.raster;
+        graphics.depthStencil = desc.depthStencil;
+        graphics.colorAttachments = desc.colorAttachments;
+        graphics.colorAttachmentCount = desc.colorAttachmentCount;
+        graphics.layout = desc.layout;
+        return SupportsGraphicsPipelineNative(graphics);
+    }
+
+    RHI::PipelineHandle D3D12Device::CreateMeshPipelineNative(
+        const RHI::MeshPipelineDesc& desc)
+    {
+        if (m_internal == nullptr || m_internal->device == nullptr ||
+            !Supports(RHI::Feature::MeshShader) ||
+            !SupportsPipelineLayoutNative(desc.layout) ||
+            !SupportsMeshPipelineNative(desc))
+        {
+            return nullptr;
+        }
+
+        auto* meshShader = dynamic_cast<D3D12Shader*>(desc.meshShader);
+        auto* fragmentShader = dynamic_cast<D3D12Shader*>(desc.fragmentShader);
+        if (meshShader == nullptr ||
+            meshShader->GetBinarySize() == 0 ||
+            (desc.fragmentShader != nullptr &&
+                (fragmentShader == nullptr ||
+                    fragmentShader->GetBinarySize() == 0)))
+        {
+            return nullptr;
+        }
+
+        uint32_t tableCount = 0;
+        uint32_t descriptorCount = 0;
+        uint32_t staticSamplerCount = 0;
+        for (uint32_t index = 0; index < desc.layout.bindingCount; ++index)
+        {
+            const RHI::ResourceBindingLayout& binding = desc.layout.bindings[index];
+            if (binding.type == RHI::ResourceBindingType::StaticSampler)
+            {
+                if (binding.count > std::numeric_limits<uint32_t>::max() - staticSamplerCount)
+                    return nullptr;
+                staticSamplerCount += binding.count;
+            }
+            else
+            {
+                if (descriptorCount > std::numeric_limits<uint32_t>::max() - binding.count)
+                    return nullptr;
+                descriptorCount += binding.count;
+                ++tableCount;
+            }
+        }
+        const uint32_t rootConstantDwords = desc.layout.inlineConstantSize / 4;
+        std::vector<CD3DX12_DESCRIPTOR_RANGE1> descriptorRanges;
+        std::vector<CD3DX12_ROOT_PARAMETER1> rootParameters;
+        std::vector<D3D12PipelineBinding> pipelineBindings;
+        std::vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers;
+        descriptorRanges.reserve(tableCount);
+        rootParameters.reserve(tableCount + (rootConstantDwords != 0 ? 1u : 0u));
+        pipelineBindings.reserve(tableCount);
+        staticSamplers.reserve(staticSamplerCount);
+
+        uint32_t descriptorOffset = 0;
+        for (uint32_t index = 0; index < desc.layout.bindingCount; ++index)
+        {
+            const RHI::ResourceBindingLayout& binding = desc.layout.bindings[index];
+            if (binding.type == RHI::ResourceBindingType::StaticSampler)
+            {
+                D3D12_FILTER filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+                if (!ToSamplerFilter(binding.staticSampler, filter)) return nullptr;
+                const D3D12_STATIC_BORDER_COLOR borderColor =
+                    binding.staticSampler.borderColor == RHI::SamplerBorderColor::Undefined
+                    ? D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK
+                    : ToBorderColor(binding.staticSampler.borderColor);
+                if (static_cast<int>(borderColor) < 0) return nullptr;
+
+                for (uint32_t arrayIndex = 0; arrayIndex < binding.count; ++arrayIndex)
+                {
+                    D3D12_STATIC_SAMPLER_DESC sampler = {};
+                    sampler.Filter = filter;
+                    sampler.AddressU = ToAddressMode(binding.staticSampler.addressU);
+                    sampler.AddressV = ToAddressMode(binding.staticSampler.addressV);
+                    sampler.AddressW = ToAddressMode(binding.staticSampler.addressW);
+                    sampler.MaxAnisotropy = binding.staticSampler.maxAnisotropy;
+                    sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+                    sampler.BorderColor = borderColor;
+                    sampler.MipLODBias = binding.staticSampler.mipLodBias;
+                    sampler.MinLOD = binding.staticSampler.minLod;
+                    sampler.MaxLOD = binding.staticSampler.maxLod;
+                    sampler.ShaderRegister = binding.binding + arrayIndex;
+                    sampler.RegisterSpace = 0;
+                    sampler.ShaderVisibility = ToShaderVisibility(binding.stages);
+                    staticSamplers.push_back(sampler);
+                }
+                continue;
+            }
+
+            descriptorRanges.emplace_back();
+            descriptorRanges.back().Init(
+                ToDescriptorRangeType(binding.type),
+                binding.count,
+                binding.binding,
+                0,
+                D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE |
+                    D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
+                0);
+            rootParameters.emplace_back();
+            rootParameters.back().InitAsDescriptorTable(
+                1,
+                &descriptorRanges.back(),
+                ToShaderVisibility(binding.stages));
+
+            D3D12PipelineBinding pipelineBinding = {};
+            pipelineBinding.layout = binding;
+            pipelineBinding.rootParameter = static_cast<uint32_t>(rootParameters.size() - 1);
+            pipelineBinding.descriptorOffset = descriptorOffset;
+            pipelineBindings.push_back(pipelineBinding);
+            descriptorOffset += binding.count;
+        }
+
+        uint32_t inlineConstantRootParameter = std::numeric_limits<uint32_t>::max();
+        if (rootConstantDwords != 0)
+        {
+            inlineConstantRootParameter = static_cast<uint32_t>(rootParameters.size());
+            rootParameters.emplace_back();
+            rootParameters.back().InitAsConstants(
+                rootConstantDwords,
+                desc.layout.inlineConstantBinding,
+                0,
+                ToShaderVisibility(desc.layout.inlineConstantStages));
+        }
+
+        CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc = {};
+        rootSignatureDesc.Init_1_1(
+            static_cast<UINT>(rootParameters.size()),
+            rootParameters.empty() ? nullptr : rootParameters.data(),
+            static_cast<UINT>(staticSamplers.size()),
+            staticSamplers.empty() ? nullptr : staticSamplers.data(),
+            D3D12_ROOT_SIGNATURE_FLAG_NONE);
+
+        ComPtr<ID3DBlob> serializedRootSignature;
+        ComPtr<ID3DBlob> rootSignatureErrors;
+        if (FAILED(D3D12SerializeVersionedRootSignature(
+                &rootSignatureDesc,
+                &serializedRootSignature,
+                &rootSignatureErrors)))
+        {
+            if (rootSignatureErrors != nullptr &&
+                rootSignatureErrors->GetBufferPointer() != nullptr)
+            {
+                DumpInfoQueue(m_internal, "SerializeRootSignature");
+            }
+            return nullptr;
+        }
+
+        ComPtr<ID3D12RootSignature> rootSignature;
+        if (FAILED(m_internal->device->CreateRootSignature(
+                0,
+                serializedRootSignature->GetBufferPointer(),
+                serializedRootSignature->GetBufferSize(),
+                IID_PPV_ARGS(&rootSignature))))
+        {
+            return nullptr;
+        }
+
+#ifndef D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS
+#define D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS static_cast<D3D12_PIPELINE_STATE_SUBOBJECT_TYPE>(25)
+#endif
+
+        struct alignas(void*) MeshPipelineStateStream
+        {
+            CD3DX12_PIPELINE_STATE_STREAM_ROOT_SIGNATURE RootSignature;
+            CD3DX12_PIPELINE_STATE_STREAM_SUBOBJECT<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS> MS;
+            CD3DX12_PIPELINE_STATE_STREAM_PS PS;
+            CD3DX12_PIPELINE_STATE_STREAM_RASTERIZER RasterizerState;
+            CD3DX12_PIPELINE_STATE_STREAM_BLEND_DESC BlendState;
+            CD3DX12_PIPELINE_STATE_STREAM_DEPTH_STENCIL DepthStencilState;
+            CD3DX12_PIPELINE_STATE_STREAM_DEPTH_STENCIL_FORMAT DSVFormat;
+            CD3DX12_PIPELINE_STATE_STREAM_RENDER_TARGET_FORMATS RTVFormats;
+            CD3DX12_PIPELINE_STATE_STREAM_SAMPLE_MASK SampleMask;
+            CD3DX12_PIPELINE_STATE_STREAM_SAMPLE_DESC SampleDesc;
+        } stream{};
+
+        stream.RootSignature = rootSignature.Get();
+        stream.MS = { meshShader->GetBinary(), meshShader->GetBinarySize() };
+        if (fragmentShader != nullptr)
+        {
+            stream.PS = { fragmentShader->GetBinary(), fragmentShader->GetBinarySize() };
+        }
+
+        D3D12_RASTERIZER_DESC rasterDesc = {};
+        rasterDesc.FillMode = ToFillMode(desc.raster.fillMode);
+        rasterDesc.CullMode = ToCullMode(desc.raster.cullMode);
+        rasterDesc.FrontCounterClockwise = desc.raster.frontFace == RHI::FrontFace::CounterClockwise;
+        if (!ToDepthBias(desc.raster.depthBiasConstant, rasterDesc.DepthBias)) return nullptr;
+        rasterDesc.DepthBiasClamp = desc.raster.depthBiasClamp;
+        rasterDesc.SlopeScaledDepthBias = desc.raster.depthBiasSlope;
+        rasterDesc.DepthClipEnable = TRUE;
+        stream.RasterizerState = CD3DX12_RASTERIZER_DESC(rasterDesc);
+
+        D3D12_BLEND_DESC blendDesc = {};
+        blendDesc.AlphaToCoverageEnable = FALSE;
+        blendDesc.IndependentBlendEnable = desc.colorAttachmentCount > 1;
+        D3D12_RT_FORMAT_ARRAY rtvFormats = {};
+        rtvFormats.NumRenderTargets = desc.colorAttachmentCount;
+        bool alphaFactorsTranslated = false;
+        for (uint32_t index = 0; index < desc.colorAttachmentCount; ++index)
+        {
+            const RHI::ColorAttachmentDesc& attachment = desc.colorAttachments[index];
+            const DXGI_FORMAT format = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(attachment.format));
+            if (format == DXGI_FORMAT_UNKNOWN) return nullptr;
+            rtvFormats.RTFormats[index] = format;
+
+            D3D12_RENDER_TARGET_BLEND_DESC& blend = blendDesc.RenderTarget[index];
+            blend.BlendEnable = attachment.blend.enabled;
+            blend.LogicOpEnable = FALSE;
+            blend.LogicOp = D3D12_LOGIC_OP_NOOP;
+            blend.RenderTargetWriteMask = static_cast<UINT8>(attachment.writeMask);
+            if (attachment.blend.enabled)
+            {
+                blend.SrcBlend = ToBlendFactor(attachment.blend.sourceColor);
+                blend.DestBlend = ToBlendFactor(attachment.blend.destinationColor);
+                blend.BlendOp = ToBlendOp(attachment.blend.colorOp);
+                blend.SrcBlendAlpha = ToAlphaBlendFactor(attachment.blend.sourceAlpha);
+                blend.DestBlendAlpha = ToAlphaBlendFactor(attachment.blend.destinationAlpha);
+                if (blend.SrcBlendAlpha != ToBlendFactor(attachment.blend.sourceAlpha) ||
+                    blend.DestBlendAlpha != ToBlendFactor(attachment.blend.destinationAlpha))
+                {
+                    alphaFactorsTranslated = true;
+                }
+                blend.BlendOpAlpha = ToBlendOp(attachment.blend.alphaOp);
+            }
+            else
+            {
+                blend.SrcBlend = D3D12_BLEND_ONE;
+                blend.DestBlend = D3D12_BLEND_ZERO;
+                blend.BlendOp = D3D12_BLEND_OP_ADD;
+                blend.SrcBlendAlpha = D3D12_BLEND_ONE;
+                blend.DestBlendAlpha = D3D12_BLEND_ZERO;
+                blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+            }
+        }
+        stream.BlendState = CD3DX12_BLEND_DESC(blendDesc);
+        stream.RTVFormats = rtvFormats;
+
+        D3D12_DEPTH_STENCIL_DESC depthStencilDesc = {};
+        depthStencilDesc.DepthEnable = desc.depthStencil.depthTestEnabled || desc.depthStencil.depthWriteEnabled;
+        depthStencilDesc.DepthWriteMask = desc.depthStencil.depthWriteEnabled ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+        depthStencilDesc.DepthFunc = desc.depthStencil.depthTestEnabled ? ToCompareOp(desc.depthStencil.depthCompareOp) : D3D12_COMPARISON_FUNC_ALWAYS;
+        depthStencilDesc.StencilEnable = desc.depthStencil.stencilEnabled;
+        depthStencilDesc.StencilReadMask = desc.depthStencil.stencilReadMask;
+        depthStencilDesc.StencilWriteMask = desc.depthStencil.stencilWriteMask;
+        if (desc.depthStencil.stencilEnabled)
+        {
+            depthStencilDesc.FrontFace.StencilFailOp = ToStencilOp(desc.depthStencil.front.failOp);
+            depthStencilDesc.FrontFace.StencilDepthFailOp = ToStencilOp(desc.depthStencil.front.depthFailOp);
+            depthStencilDesc.FrontFace.StencilPassOp = ToStencilOp(desc.depthStencil.front.passOp);
+            depthStencilDesc.FrontFace.StencilFunc = ToCompareOp(desc.depthStencil.front.compareOp);
+            depthStencilDesc.BackFace.StencilFailOp = ToStencilOp(desc.depthStencil.back.failOp);
+            depthStencilDesc.BackFace.StencilDepthFailOp = ToStencilOp(desc.depthStencil.back.depthFailOp);
+            depthStencilDesc.BackFace.StencilPassOp = ToStencilOp(desc.depthStencil.back.passOp);
+            depthStencilDesc.BackFace.StencilFunc = ToCompareOp(desc.depthStencil.back.compareOp);
+        }
+        else
+        {
+            depthStencilDesc.FrontFace = { D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS };
+            depthStencilDesc.BackFace = depthStencilDesc.FrontFace;
+        }
+        stream.DepthStencilState = CD3DX12_DEPTH_STENCIL_DESC(depthStencilDesc);
+
+        const DXGI_FORMAT dsvFormat = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(desc.depthStencil.format));
+        if (desc.depthStencil.format != RHI::Format::Unknown && dsvFormat == DXGI_FORMAT_UNKNOWN) return nullptr;
+        stream.DSVFormat = dsvFormat;
+
+        stream.SampleMask = UINT_MAX;
+        DXGI_SAMPLE_DESC sampleDesc = { 1, 0 };
+        stream.SampleDesc = sampleDesc;
+
+        ComPtr<ID3D12Device2> device2;
+        if (FAILED(m_internal->device.As(&device2)) || device2 == nullptr)
+        {
+            return nullptr;
+        }
+
+        D3D12_PIPELINE_STATE_STREAM_DESC streamDesc = {
+            sizeof(stream),
+            &stream
+        };
+
+        ComPtr<ID3D12PipelineState> pipelineState;
+        if (FAILED(device2->CreatePipelineState(&streamDesc, IID_PPV_ARGS(&pipelineState))))
+        {
+            DumpInfoQueue(m_internal, "CreateMeshPipeline");
+            return nullptr;
+        }
+
+        auto pipeline = std::unique_ptr<D3D12PipelineState, D3D12ObjectDeleter>(
+            new D3D12PipelineState(
+                desc.layout,
+                pipelineState.Get(),
+                rootSignature.Get(),
+                std::move(pipelineBindings),
+                {},
+                inlineConstantRootParameter,
+                descriptorCount,
+                D3D_PRIMITIVE_TOPOLOGY_UNDEFINED,
+                desc.depthStencil.stencilEnabled,
+                desc.depthStencil.depthWriteEnabled || RHI::MayWriteStencil(desc.depthStencil),
+                false, true));
         D3D12PipelineState* result = pipeline.get();
         m_internal->livePipelines.push_back(std::move(pipeline));
         if (alphaFactorsTranslated)
-		ReportDiagnostic(DiagnosticSeverity::Info,
+            ReportDiagnostic(DiagnosticSeverity::Info,
                 "D3D12: Alpha blend color factors were translated to equivalent alpha factors.");
         return result;
     }
@@ -1983,7 +2304,8 @@ void D3D12Device::DestroySwapchainNative()
                 RHI::ResourceBindingType::ReadOnlyStorageBuffer)
             {
                 auto* buffer = dynamic_cast<D3D12Buffer*>(binding.buffer);
-                if (buffer == nullptr || !IsDefaultSubresourceRange(binding.subresources))
+                if (buffer == nullptr || !IsDefaultSubresourceRange(binding.subresources) ||
+                    !IsStorageBufferViewRangeValid(buffer->GetDesc().stride, binding.offset, binding.size))
                 {
                     return nullptr;
                 }
@@ -1993,11 +2315,6 @@ void D3D12Device::DestroySwapchainNative()
                     D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
                 if (buffer->GetDesc().stride != 0)
                 {
-                    if ((binding.offset % buffer->GetDesc().stride) != 0 ||
-                        (binding.size % buffer->GetDesc().stride) != 0)
-                    {
-                        return nullptr;
-                    }
                     view.Format = DXGI_FORMAT_UNKNOWN;
                     view.Buffer.FirstElement =
                         binding.offset / buffer->GetDesc().stride;
@@ -2007,11 +2324,6 @@ void D3D12Device::DestroySwapchainNative()
                 }
                 else
                 {
-                    if ((binding.offset % 4) != 0 ||
-                        (binding.size % 4) != 0)
-                    {
-                        return nullptr;
-                    }
                     view.Format = DXGI_FORMAT_R32_TYPELESS;
                     view.Buffer.FirstElement = binding.offset / 4;
                     view.Buffer.NumElements = binding.size / 4;
@@ -2028,38 +2340,20 @@ void D3D12Device::DestroySwapchainNative()
                 RHI::ResourceBindingType::ReadWriteStorageBuffer)
             {
                 auto* buffer = dynamic_cast<D3D12Buffer*>(binding.buffer);
-                if (buffer == nullptr || !IsDefaultSubresourceRange(binding.subresources))
+                if (buffer == nullptr || !IsDefaultSubresourceRange(binding.subresources) ||
+                    !IsStorageBufferViewRangeValid(buffer->GetDesc().stride, binding.offset, binding.size))
                 {
                     return nullptr;
                 }
+                const uint32_t stride = buffer->GetDesc().stride;
+                const uint32_t elementSize = stride != 0 ? stride : 4;
                 D3D12_UNORDERED_ACCESS_VIEW_DESC view = {};
                 view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-                if (buffer->GetDesc().stride != 0)
-                {
-                    if ((binding.offset % buffer->GetDesc().stride) != 0 ||
-                        (binding.size % buffer->GetDesc().stride) != 0)
-                    {
-                        return nullptr;
-                    }
-                    view.Format = DXGI_FORMAT_UNKNOWN;
-                    view.Buffer.FirstElement =
-                        binding.offset / buffer->GetDesc().stride;
-                    view.Buffer.NumElements =
-                        binding.size / buffer->GetDesc().stride;
-                    view.Buffer.StructureByteStride = buffer->GetDesc().stride;
-                }
-                else
-                {
-                    if ((binding.offset % 4) != 0 ||
-                        (binding.size % 4) != 0)
-                    {
-                        return nullptr;
-                    }
-                    view.Format = DXGI_FORMAT_R32_TYPELESS;
-                    view.Buffer.FirstElement = binding.offset / 4;
-                    view.Buffer.NumElements = binding.size / 4;
-                    view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-                }
+                view.Format = stride != 0 ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_TYPELESS;
+                view.Buffer.FirstElement = binding.offset / elementSize;
+                view.Buffer.NumElements = binding.size / elementSize;
+                view.Buffer.StructureByteStride = stride;
+                view.Buffer.Flags = stride != 0 ? D3D12_BUFFER_UAV_FLAG_NONE : D3D12_BUFFER_UAV_FLAG_RAW;
 
                 auto* resource = static_cast<ID3D12Resource*>(
                     buffer->GetNativeResource());
@@ -2163,9 +2457,7 @@ void D3D12Device::DestroySwapchainNative()
                 descriptorHeap.Get(),
                 descriptorSize,
                 resources));
-        D3D12ResourceSet* result = resourceSet.get();
-        m_internal->liveResourceSets.push_back(std::move(resourceSet));
-        return result;
+        return m_internal->liveResourceSets.emplace_back(std::move(resourceSet)).get();
     }
 
     void D3D12Device::DestroyBufferNative(RHI::BufferHandle buffer)
@@ -2218,14 +2510,7 @@ void D3D12Device::DestroySwapchainNative()
         if (m_internal == nullptr) return false;
         auto* d3dCommandList = dynamic_cast<D3D12CommandList*>(&commandList);
         auto* d3dBuffer = dynamic_cast<D3D12Buffer*>(buffer);
-        const auto owned = std::find_if(
-            m_internal->activeCommandLists.begin(),
-            m_internal->activeCommandLists.end(),
-            [d3dCommandList](
-                const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& candidate)
-            {
-                return candidate.get() == d3dCommandList;
-            });
+        const auto owned = m_internal->FindActiveCommandList(d3dCommandList);
         return d3dCommandList != nullptr && d3dBuffer != nullptr &&
             owned != m_internal->activeCommandLists.end() &&
             d3dCommandList->RecordBufferUpload(
@@ -2245,14 +2530,7 @@ void D3D12Device::DestroySwapchainNative()
         if (m_internal == nullptr) return false;
         auto* d3dCommandList = dynamic_cast<D3D12CommandList*>(&commandList);
         auto* d3dTexture = dynamic_cast<D3D12Texture*>(texture);
-        const auto owned = std::find_if(
-            m_internal->activeCommandLists.begin(),
-            m_internal->activeCommandLists.end(),
-            [d3dCommandList](
-                const std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>& candidate)
-            {
-                return candidate.get() == d3dCommandList;
-            });
+        const auto owned = m_internal->FindActiveCommandList(d3dCommandList);
         return d3dCommandList != nullptr && d3dTexture != nullptr &&
             owned != m_internal->activeCommandLists.end() &&
             d3dCommandList->RecordTextureUpload(

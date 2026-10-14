@@ -67,6 +67,18 @@ namespace dyf::Backends
 		}
 	}
 
+	VkShaderStageFlags ToShaderStages(dyf::RHI::ShaderStageFlags stages)
+	{
+		VkShaderStageFlags result = 0;
+		if ((stages & dyf::RHI::ShaderStageFlags::Vertex) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_VERTEX_BIT;
+		if ((stages & dyf::RHI::ShaderStageFlags::Hull) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT;
+		if ((stages & dyf::RHI::ShaderStageFlags::Domain) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+		if ((stages & dyf::RHI::ShaderStageFlags::Fragment) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_FRAGMENT_BIT;
+		if ((stages & dyf::RHI::ShaderStageFlags::Compute) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_COMPUTE_BIT;
+		if ((stages & dyf::RHI::ShaderStageFlags::Mesh) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_MESH_BIT_EXT;
+		return result;
+	}
+
 	VkFormat ToVulkanFormat(dyf::RHI::Format format)
 	{
 		switch (format)
@@ -197,7 +209,6 @@ namespace dyf::Backends
 		: dyf::RHI::Texture(desc)
 		, m_device(context.device)
 		, m_aspectMask(ToImageAspectMask(desc.format))
-		, m_states(static_cast<size_t>(desc.mipLevels) * desc.depthOrArraySize, dyf::RHI::ResourceState::Undefined)
 		, m_ownsImage(true)
 	{
 		const VkFormat format = ToVulkanFormat(desc.format);
@@ -219,6 +230,14 @@ namespace dyf::Backends
 		imageInfo.usage = ToImageUsage(desc.usage);
 		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 		imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkImageFormatProperties supported{};
+        if(vkGetPhysicalDeviceImageFormatProperties(context.physicalDevice,format,imageInfo.imageType,imageInfo.tiling,
+            imageInfo.usage,imageInfo.flags,&supported)!=VK_SUCCESS ||
+            desc.width>supported.maxExtent.width || desc.height>supported.maxExtent.height ||
+            desc.mipLevels>supported.maxMipLevels || desc.depthOrArraySize>supported.maxArrayLayers ||
+            (supported.sampleCounts&imageInfo.samples)==0)
+            throw std::runtime_error("Unsupported Vulkan texture format or limits");
+        m_states.assign(static_cast<size_t>(desc.mipLevels)*desc.depthOrArraySize,dyf::RHI::ResourceState::Undefined);
 		if (vkCreateImage(m_device, &imageInfo, nullptr, &m_image) != VK_SUCCESS)
 		{
 			throw std::runtime_error("Failed to create Vulkan image");

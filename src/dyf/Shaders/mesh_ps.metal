@@ -135,20 +135,17 @@ constant uint kTextureFlagOcclusion =
     uint(RENDERER_TEXTURE_FLAG_OCCLUSION);
 constant uint kTextureFlagEmissive =
     uint(RENDERER_TEXTURE_FLAG_EMISSIVE);
-#if RENDERER_ENABLE_SHADOWS
-constant uint kTextureFlagReceiveShadow =
-    uint(RENDERER_TEXTURE_FLAG_RECEIVE_SHADOW);
-#endif
 constant float kPi = 3.14159265359f;
 
 inline float DistributionGGX(float3 normal, float3 halfway, float roughness)
 {
     const float a = roughness * roughness;
     const float a2 = a * a;
-    const float ndoth = max(dot(normal, halfway), 0.0f);
+    const float ndoth = clamp(dot(normal, halfway), 0.0f, 1.0f);
     const float ndoth2 = ndoth * ndoth;
-    const float denominator = ndoth2 * (a2 - 1.0f) + 1.0f;
-    return a2 / max(kPi * denominator * denominator, 0.0001f);
+    // roughness >= .01; this form retains a2 at the specular peak.
+    const float denominator = (1.0f - ndoth2) + ndoth2 * a2;
+    return a2 / (kPi * denominator * denominator);
 }
 
 inline float GeometrySchlickGGX(float ndotv, float roughness)
@@ -156,18 +153,6 @@ inline float GeometrySchlickGGX(float ndotv, float roughness)
     const float r = roughness + 1.0f;
     const float k = (r * r) / 8.0f;
     return ndotv / max(ndotv * (1.0f - k) + k, 0.0001f);
-}
-
-inline float GeometrySmith(
-    float3 normal,
-    float3 viewDirection,
-    float3 lightDirection,
-    float roughness)
-{
-    const float ndotv = max(dot(normal, viewDirection), 0.0f);
-    const float ndotl = max(dot(normal, lightDirection), 0.0f);
-    return GeometrySchlickGGX(ndotv, roughness) *
-        GeometrySchlickGGX(ndotl, roughness);
 }
 
 inline float3 FresnelSchlick(float cosTheta, float3 f0)
@@ -261,7 +246,6 @@ float SampleShadow(int type,int lightIndex,float3 worldPosition,float3 normal,fl
     return 1.0-clamp(views.z,0.0,1.0)*(1.0-visible/max(samples,1.0));
 }
 
-#else
 #endif
 
 // 현재 언어의 조명 계산을 직접 작성한다.
@@ -304,7 +288,7 @@ inline float3 EvaluateDirectLight(
     float3 halfway = halfwayVector * rsqrt(halfwayLengthSquared);
     float3 f0 = mix(float3(0.04,0.04,0.04), albedo, metallic);
     float ndf = DistributionGGX(normal, halfway, roughness);
-    float geometry = GeometrySmith(normal, viewDir, lightDir, roughness);
+    float geometry = GeometrySchlickGGX(ndotv, roughness) * GeometrySchlickGGX(ndotl, roughness);
     float3 fresnel = FresnelSchlick(max(dot(halfway, viewDir), 0.0), f0);
     float3 specular = (ndf * geometry * fresnel) / max(4.0 * ndotv * ndotl, 0.0001);
     float3 diffuseWeight = (float3(1.0,1.0,1.0) - fresnel) * (1.0 - metallic);
@@ -465,7 +449,7 @@ inline float3 ResolveNormal(
     float3 normal = normalize(input.worldNormal);
     const uint textureFlags = drawConstants.textureFlags;
     if ((textureFlags & kTextureFlagNormal) == 0u ||
-        drawConstants.materialParams.z <= 0.0001f)
+        abs(drawConstants.materialParams.z) <= 0.0001f)
     {
         return normal;
     }
@@ -515,8 +499,7 @@ inline float4 RunFragmentShader(
         clamp(drawConstants.materialParams.x, 0.0f, 1.0f);
     float roughness =
         clamp(drawConstants.materialParams.y, minRoughness, 1.0f);
-    float occlusion =
-        clamp(drawConstants.materialParams.w, 0.0f, 1.0f);
+    float occlusion = 1.0f;
 
     if ((textureFlags & kTextureFlagMetallicRoughness) != 0u)
     {
@@ -533,8 +516,8 @@ inline float4 RunFragmentShader(
     }
     if ((textureFlags & kTextureFlagOcclusion) != 0u)
     {
-        occlusion *=
-            occlusionTexture.sample(materialSampler, input.uv).r;
+        occlusion = mix(1.0f, occlusionTexture.sample(materialSampler, input.uv).r,
+            clamp(drawConstants.materialParams.w, 0.0f, 1.0f));
     }
 
     const float3 normal =
@@ -542,32 +525,8 @@ inline float4 RunFragmentShader(
     const float3 viewDirection =
         normalize(lighting.cameraPosition.xyz - input.worldPosition);
 
-    const bool usePointLight =
-        lighting.pointLightColorIntensity.a > 0.0f &&
-        lighting.pointLightPositionRange.w > 0.0f;
-    float3 lightDirection =
-        normalize(lighting.directionalLightDirection.xyz);
-
-    if (usePointLight)
-    {
-        const float3 toLight =
-            lighting.pointLightPositionRange.xyz - input.worldPosition;
-        const float distanceToLight = length(toLight);
-        lightDirection = distanceToLight > 0.0001f
-            ? toLight / distanceToLight
-            : float3(0.0f, 0.0f, 1.0f);
-    }
-
-    const float3 halfway =
-        normalize(viewDirection + lightDirection);
     const float3 f0 =
         mix(float3(0.04f), albedo, metallic);
-    const float3 fresnel =
-        FresnelSchlick(max(dot(halfway, viewDirection), 0.0f), f0);
-
-    const float3 kS = fresnel;
-    const float3 kD =
-        (float3(1.0f) - kS) * (1.0f - metallic);
     const float3 directLight = EvaluateLights(lighting,
 #if RENDERER_ENABLE_SHADOWS
         shadowMatrix,shadowMap,shadowSampler,drawConstants.textureFlags,
@@ -578,6 +537,7 @@ inline float4 RunFragmentShader(
         max(dot(normal, viewDirection), 0.0f),
         f0,
         roughness);
+    const float3 kD = (float3(1.0f) - ambientFresnel) * (1.0f - metallic);
     const float3 ambientDiffuse =
         kD *
         albedo *
@@ -600,7 +560,7 @@ inline float4 RunFragmentShader(
 
     float3 color = lighting.lightCounts.w > 0.5 ? ambient + directLight + emissive : albedo + emissive;
     if(lighting.pbrParams.z >= 0.0f) {
-        color *= lighting.pbrParams.w;
+        color = min(color * lighting.pbrParams.w, 16777216.0f);
         color = color / (color + 1.0f);
         if (lighting.pbrParams.z > 0.5f) color = pow(color, float3(1.0f / 2.2f));
     }

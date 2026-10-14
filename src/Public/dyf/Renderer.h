@@ -18,7 +18,7 @@
 #include "dyf/RHI/Binding.h"
 #include "dyf/RHI/Format.h"
 
-namespace dyf::RHI { class IDevice; class ICommandList; struct PipelineLayoutDesc; }
+namespace dyf::RHI { class IDevice; class ICommandList; class ResourceScope; struct PipelineLayoutDesc; }
 namespace dyf
 {
 class Image;
@@ -51,6 +51,10 @@ class Scene;
 class Canvas;
 
 // 쉬운 설정과 CPU 입력을 공개 RHI 명령으로 조합한다. GPU 자원은 이 객체가 직접 소유한다.
+struct RendererStatistics
+{
+    uint32_t mainDrawCount=0,mainInstanceCount=0,culledEntityCount=0;
+};
 class Renderer
 {
 public:
@@ -88,6 +92,15 @@ public:
         const Canvas* overlay = nullptr, Image* readback = nullptr);
     [[nodiscard]] RHI::IDevice& GetDevice() const { return *device; }
 
+    // Published Scene timings: CPU preparation/recording, GPU main pass, and frame cadence.
+    // The existing sampler updates approximately every 200 ms; no readback or wait is performed.
+    [[nodiscard]] const Platform::ProfilerTimingSnapshot& GetProfilerTimingSnapshot() const { return m_profilerSnapshot; }
+
+    // Most recent Scene call: submitted main counts, or zero if skipped/failed before submission.
+    // Excludes shadows, Canvas and HUD.
+    [[nodiscard]] const RendererStatistics& GetLastRenderStatistics() const { return lastStatistics; }
+    // Published at draw submission, even when later readback/Present fails. Survives setting swaps.
+    [[nodiscard]] RHI::FenceHandle GetLastRenderCompletion() const { return lastRenderCompletion; }
     bool SetClearColor(Math::float4);
     bool SetVSync(bool);
     // 조명 설정을 읽거나 교체한다. 변경은 다음 Render에서 적용한다.
@@ -103,7 +116,7 @@ public:
     bool SetConfig(const RendererConfig&);
     // 선택적 셰이더 교체다. 입력 바이트와 진입점은 복사하며 다음 Render에서 적용한다.
     bool SetShaders(const RendererShaderDesc&);
-    // 반환한 셰이더 바이트는 다음 설정 적용까지 유효한 읽기 뷰다.
+    // 반환한 셰이더 바이트와 진입점은 다음 설정 적용까지 유효한 읽기 뷰다.
     [[nodiscard]] RendererShaderDesc GetShaders() const;
 
 private:
@@ -118,14 +131,45 @@ private:
     {
         RHI::BufferHandle vertexBuffer=nullptr,indexBuffer=nullptr;
         uint32_t indexCount=0;
+        Math::Bounds3 bounds;
         std::weak_ptr<const MeshData> source;
         bool vertexReady=false,indexReady=false,prepared=false;
     };
+    struct ShadowBounds
+    {
+        Math::Bounds3 bounds;
+        std::array<double,3> magnitude={};
+    };
+    struct CachedSet { RHI::ResourceSetHandle set=nullptr; uint32_t unusedFrames=0; };
     struct TextureSlot
     {
         Image source;
         RHI::TextureHandle texture=nullptr;
         RHI::ResourceState state=RHI::ResourceState::Undefined;
+    };
+    struct CanvasImageSlot
+    {
+        Image source;
+        RHI::TextureHandle texture=nullptr;
+        RHI::ResourceSetHandle set=nullptr;
+        uint32_t unusedFrames=0;
+        bool used=false;
+    };
+    struct CanvasVertexSlot { RHI::BufferHandle buffer=nullptr; bool ready=false; };
+    struct CanvasFrame
+    {
+        Renderer& owner;
+        size_t imageCount;
+        bool committed=false;
+        explicit CanvasFrame(Renderer&);
+        ~CanvasFrame();
+        void Commit();
+    };
+    struct FrameEnd
+    {
+        RHI::IDevice& device;
+        bool& pending;
+        ~FrameEnd();
     };
     struct GpuSample {RHI::TimestampQueryHandle query;RHI::FenceHandle completion;uint32_t slot;};
     enum ShaderSlot : uint32_t {MeshVertex,MeshFragment,ShadowVertex,CanvasVertex,CanvasFragment,ToneVertex,ToneFragment,ShaderCount};
@@ -135,14 +179,21 @@ private:
         std::array<std::string,ShaderCount> entries;
         std::vector<RHI::ResourceBindingLayout> vertexBindings;
         uint32_t additionalConstantBytes = 0;
+        bool operator==(const ShaderSources&) const;
     };
 
     Renderer(RHI::IDevice&,const void* window,const RendererConfig&);
-    static RendererShaderDesc DefaultShaders(bool shadows = false, bool bindless = false);
+    static RendererShaderDesc DefaultShaders(bool shadows = false, bool bindless = false, bool instanced = false);
     bool CaptureFrame(Image&);
     bool Initialize();
     bool InitializeMesh(RHI::TextureHandle output = nullptr,bool compositeAlpha = false);
     bool UsesBindlessMaterials() const;
+    bool UsesStockGeometry() const;
+    bool UsesInstanceStream() const;
+    bool UpdateInstanceBuffer(const Scene&,RHI::ICommandList&);
+    void CommitFrameData();
+    RHI::ResourceSetHandle CachedResourceSet(RHI::PipelineHandle,const std::vector<RHI::ResourceBinding>&,std::vector<CachedSet>&);
+    void PruneResourceSets(std::vector<CachedSet>&);
     RHI::PipelineLayoutDesc MeshLayout(bool bindless, std::vector<RHI::ResourceBindingLayout>& bindings) const;
     void Shutdown();
     bool RenderScene(const Scene&,const Camera*,const Canvas*,Image*,const std::vector<RendererDrawDesc>* = nullptr,
@@ -161,7 +212,7 @@ private:
 
     // 메시·텍스처 업로드와 draw에 필요한 RHI 호출을 cpp 파일별로 나눈 멤버 함수다.
     bool PrepareGeometry(const Scene&,RHI::IDevice*);
-    bool CreateMaterialResourceSets(const Scene&,RHI::ICommandList&,const std::vector<RendererDrawDesc>*,std::vector<RHI::ResourceSetHandle>&);
+    bool CreateMaterialResourceSets(const Scene&,RHI::ICommandList&,const std::vector<RendererDrawDesc>*,std::vector<RHI::ResourceSetHandle>&,RHI::ResourceScope&);
     bool RecordShadowPass(const Scene&,const Camera&,const ShadowData&,RHI::ICommandList&,
         const std::vector<RendererDrawDesc>*,RHI::TimestampQueryHandle);
     bool RecordMainPass(const Scene&,const Camera&,RHI::ICommandList&,
@@ -188,12 +239,23 @@ private:
     std::unique_ptr<RendererConfig> pendingConfig;
     // GPU 셰이더 핸들과 달리 이것은 선택적 사용자 입력의 CPU 복사본이다.
     ShaderSources shaderSources,pendingShaderSources;
+    // SetShaders로 교체한 pending 입력의 이전 읽기 뷰도 적용 성공까지 유지한다.
+    mutable std::deque<ShaderSources> shaderViews;
+    mutable const ShaderSources* shaderView=nullptr;
     bool shadersPending=false;
+    bool framePending=false;
     RHI::ShaderHandle vertexShader=nullptr,fragmentShader=nullptr,shadowVertexShader=nullptr;
     RHI::ShaderHandle canvasVertexShader=nullptr,canvasFragmentShader=nullptr;
     RHI::ShaderHandle toneVertexShader=nullptr,toneFragmentShader=nullptr;
     RHI::PipelineHandle pipeline=nullptr,shadowPipeline=nullptr;
     RHI::PipelineHandle canvasPipeline=nullptr,tonePipeline=nullptr;
+    Image canvasWhite;
+    std::vector<CanvasImageSlot> canvasImages;
+    // Overlay and profiler HUD have separate vertex slots, including when both
+    // are recorded in one frame. Pending replacements commit only after Submit.
+    std::vector<CanvasVertexSlot> canvasVertices,canvasPendingVertices;
+    std::vector<uint32_t> canvasDrawImages;
+    size_t canvasVertexCursor=0;
     RHI::Format meshColorFormat=RHI::Format::Unknown,toneColorFormat=RHI::Format::Unknown;
     bool meshCompositeAlpha=false;
     RHI::TextureHandle depthStencilTarget=nullptr,shadowDepthTarget=nullptr,hdrTarget=nullptr;
@@ -201,6 +263,31 @@ private:
     RHI::ResourceState depthStencilState=RHI::ResourceState::Undefined;
     RHI::ResourceState shadowDepthState=RHI::ResourceState::Undefined,hdrState=RHI::ResourceState::Undefined;
     RHI::BufferHandle lightingBuffer=nullptr,shadowMatrixBuffer=nullptr;
+    RHI::BufferHandle instanceBuffer=nullptr,materialIndexBuffer=nullptr;
+    bool lightingReady=false,shadowReady=false,instanceReady=false,materialIndexReady=false;
+    bool materialIndexRecorded=false;
+    std::weak_ptr<Scene> instanceScene,pendingInstanceScene;
+    uint64_t instanceRevision=0,pendingInstanceRevision=0;
+    uint32_t instanceCount=0,pendingInstanceCount=0;
+    std::vector<Math::float4x4> instanceScratch;
+    struct InstanceRange {uint32_t first,count;};
+    std::vector<InstanceRange> instanceRanges;
+    // Pending bytes are reusable scratch; committed bytes change only after Submit.
+    std::vector<uint8_t> lightingBytes,pendingLightingBytes,shadowBytes,pendingShadowBytes;
+    std::vector<uint32_t> materialIndexBytes,materialIndexScratch;
+    std::array<std::vector<uint32_t>,5> lightingIndexScratch;
+    struct MaterialPageScratch {
+        std::vector<RHI::TextureHandle> textures;
+        std::vector<uint32_t> materials;
+    };
+    std::vector<MaterialPageScratch> materialPages;
+    // RenderGraph may record Main and Shadow simultaneously: each owns its arrays.
+    std::vector<RHI::ResourceSetHandle> mainSetScratch,shadowSetScratch;
+    std::vector<RHI::ResourceBinding> mainBindingScratch,mainCombinedBindingScratch,shadowBindingScratch;
+    std::vector<ShadowBounds> shadowBoundsScratch;
+    std::vector<CachedSet> mainSets,shadowSets;
+    RendererStatistics recordingStatistics,lastStatistics;
+    RHI::FenceHandle lastRenderCompletion;
     std::vector<SceneMeshState> m_meshes;
     std::vector<TextureSlot> m_textures;
     std::map<std::pair<const uint8_t*,ColorSpace>,uint32_t> m_indices;
@@ -215,9 +302,10 @@ private:
     std::array<uint8_t,120> m_gpuHistoryValid={};
     float m_graphScaleMilliseconds=33.33f;
     uint32_t m_cursor=0,m_count=0,m_entities=0;
-    double m_cpuMilliseconds=0;
     Platform::ProfilerSampler m_profilerSampler;
     Platform::ProfilerTimingSnapshot m_profilerSnapshot;
     RHI::ResourceAllocationCounters m_profilerResourceSnapshot;
+    // One immutable tone-map binding: exact pipeline + current HDR texture.
+    RHI::ResourceSetHandle toneSet=nullptr;
 };
 }

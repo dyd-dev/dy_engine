@@ -15,6 +15,7 @@
 #include "Submission.h"
 #include "Feature.h"
 #include "Query.h"
+#include "UploadMemory.h"
 
 namespace dyf::Core { class ThreadPool; }
 
@@ -26,6 +27,7 @@ namespace dyf::RHI
     struct PipelineLayoutDesc;
     struct SamplerDesc;
     struct ComputePipelineDesc;
+    struct MeshPipelineDesc;
 	struct ResourceSetDesc;
 	struct ShaderDesc;
 	struct TextureDesc;
@@ -53,10 +55,14 @@ namespace dyf::RHI
         // Counts device-created resources, including resources retained by pending GPU work.
         // Swapchain-owned images are excluded.
         [[nodiscard]] ResourceAllocationCounters GetResourceAllocationCounters() const;
+        // Thread-safe native staging snapshot; backends without staging report zero.
+        [[nodiscard]] UploadMemoryStatistics GetUploadMemoryStatistics() const
+        { std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);return GetUploadMemoryStatisticsNative(); }
         // 설정의 공통 규칙과 장치 한도를 검사한다. 셰이더는 이 장치에서 생성한 핸들을 사용한다.
         // 조회는 자원을 생성하지 않으며, 이후 생성 시 메모리·셰이더 오류까지 보장하지는 않는다.
         [[nodiscard]] bool Supports(const PipelineLayoutDesc&) const;
         [[nodiscard]] bool Supports(const GraphicsPipelineDesc&) const;
+        [[nodiscard]] bool Supports(const MeshPipelineDesc&) const;
         [[nodiscard]] bool Supports(const SamplerDesc&) const;
         [[nodiscard]] uint64_t GetLimit(Limit) const;
         [[nodiscard]] bool IsLost() const;
@@ -110,6 +116,7 @@ namespace dyf::RHI
 		[[nodiscard]] ShaderHandle CreateShader(const ShaderDesc& desc);
 		[[nodiscard]] PipelineHandle CreateGraphicsPipeline(const GraphicsPipelineDesc& desc);
         [[nodiscard]] PipelineHandle CreateComputePipeline(const ComputePipelineDesc& desc);
+        [[nodiscard]] PipelineHandle CreateMeshPipeline(const MeshPipelineDesc& desc);
 		[[nodiscard]] ResourceSetHandle CreateResourceSet(const ResourceSetDesc& desc);
 
 		void DestroyBuffer(BufferHandle buffer);
@@ -140,6 +147,7 @@ namespace dyf::RHI
 			uint32_t slicePitch);
 
 	protected:
+        virtual UploadMemoryStatistics GetUploadMemoryStatisticsNative() const { return {}; }
         enum class DiagnosticSeverity : uint8_t { Info, Warning, Error };
         void ReportDiagnostic(DiagnosticSeverity severity, const char* message) const;
 		// Release common references while the native device is still alive.
@@ -159,6 +167,7 @@ namespace dyf::RHI
     virtual bool SupportsSamplerNative(const SamplerDesc&) const = 0;
         virtual bool SupportsPipelineLayoutNative(const PipelineLayoutDesc&) const = 0;
         virtual bool SupportsGraphicsPipelineNative(const GraphicsPipelineDesc&) const = 0;
+        virtual bool SupportsMeshPipelineNative(const MeshPipelineDesc&) const { return false; }
         virtual uint64_t GetCompletedSubmissionNative() = 0;
         virtual uint64_t GetLastSubmissionNative() const = 0;
 		virtual bool BeginFrameNative() = 0;
@@ -172,6 +181,7 @@ namespace dyf::RHI
 		virtual ShaderHandle CreateShaderNative(const ShaderDesc& desc) = 0;
 		virtual PipelineHandle CreateGraphicsPipelineNative(const GraphicsPipelineDesc& desc) = 0;
         virtual PipelineHandle CreateComputePipelineNative(const ComputePipelineDesc&) {return nullptr;}
+        virtual PipelineHandle CreateMeshPipelineNative(const MeshPipelineDesc&) {return nullptr;}
 		virtual ResourceSetHandle CreateResourceSetNative(const ResourceSetDesc& desc) = 0;
 		virtual void DestroyBufferNative(BufferHandle buffer) = 0;
 		virtual void DestroyTextureNative(TextureHandle texture) = 0;

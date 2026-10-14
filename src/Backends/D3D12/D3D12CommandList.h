@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dyf/RHI/ICommandList.h"
+#include "D3D12Upload.h"
 
 #include <cstdint>
 #include <map>
@@ -25,7 +26,8 @@ namespace dyf::Backends
     class D3D12CommandList final : public RHI::ICommandList
     {
     public:
-        explicit D3D12CommandList(void* nativeDevice);
+        explicit D3D12CommandList(void* nativeDevice,
+            std::shared_ptr<D3D12UploadPool> uploadPool = {});
         void ResetTimestampsNative(RHI::TimestampQueryHandle, uint32_t, uint32_t) override;
         void WriteTimestampNative(RHI::TimestampQueryHandle, uint32_t) override;
         void MarkTimestampsSubmitted(uint64_t completion);
@@ -39,6 +41,8 @@ namespace dyf::Backends
         void EndRenderingNative() override;
 
         void BindGraphicsPipelineNative(RHI::PipelineHandle pipelineState) override;
+        void BindComputePipelineNative(RHI::PipelineHandle pipelineState) override;
+        void DispatchNative(uint32_t x, uint32_t y, uint32_t z) override;
         void BindResourceSetNative(RHI::ResourceSetHandle resourceSet) override;
         void BindVertexBufferNative(uint32_t binding, RHI::BufferHandle buffer, uint32_t offset) override;
         void BindIndexBufferNative(RHI::BufferHandle buffer, RHI::Format format, uint32_t offset) override;
@@ -50,6 +54,7 @@ namespace dyf::Backends
 
         void DrawInstancedNative(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
         void DrawIndexedInstancedNative(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
+        void DispatchMeshNative(uint32_t x, uint32_t y, uint32_t z) override;
 
         bool CloseNative() override;
 

@@ -25,9 +25,9 @@ void main()
     vec3 normal=vec3(sourceVertices.values[base+3],sourceVertices.values[base+4],sourceVertices.values[base+5]);
     vec3 tangent=vec3(sourceVertices.values[base+8],sourceVertices.values[base+9],sourceVertices.values[base+10]);
     position=(skin*vec4(position,1)).xyz;
-    normal=normalize((normalSkin*vec4(normal,0)).xyz);
+    normal=SkinNormalizeOr((normalSkin*vec4(normal,0)).xyz,vec3(0,0,1));
     tangent=(skin*vec4(tangent,0)).xyz;
-    tangent=normalize(tangent-normal*dot(normal,tangent));
+    tangent=SkinNormalizeOr(tangent-normal*dot(normal,tangent),SkinFallbackTangent(normal));
     for(uint i=0;i<3;++i)
     {
         skinnedVertices.values[base+i]=position[i];

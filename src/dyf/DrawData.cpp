@@ -3,18 +3,17 @@
 #include "dyf/Scene.h"
 
 #include <algorithm>
-#include <array>
 #include <cstdint>
+#include <cmath>
 #include <limits>
 #include <vector>
 
 #include "ShaderLayout.h"
-#include "ShaderLayout.h"
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/IDevice.h"
-#include "dyf/RHI/Pipeline.h"
 #include "dyf/RHI/ResourceSet.h"
+#include "dyf/RHI/ResourceScope.h"
 #include "dyf/RHI/Texture.h"
 
 namespace dyf
@@ -33,11 +32,6 @@ namespace
 		uint32_t sizeBytes, uint32_t stride, RHI::BufferUsage usage)
 	{
 		if(device == nullptr) return false;
-		if(sizeBytes == 0)
-		{
-			DestroyBuffer(device, buffer, ready);
-			return true;
-		}
 		if(buffer != nullptr && buffer->GetDesc().size == sizeBytes) return true;
 		DestroyBuffer(device, buffer, ready);
 		buffer = device->CreateBuffer({sizeBytes, stride, usage, RHI::ResourceState::CopyDestination});
@@ -56,13 +50,6 @@ namespace
 		return true;
 	}
 
-	void DestroyResourceSets(RHI::IDevice* device, std::vector<RHI::ResourceSetHandle>& sets)
-	{
-		if(device != nullptr)
-			for(auto* set : sets) if(set != nullptr) device->DestroyResourceSet(set);
-		sets.clear();
-	}
-
 	DrawConstants MakeDrawConstants(const Math::float4x4& viewProjection,
 		const MaterialDesc& material, const Transform& transform, uint32_t textureFlags)
 	{
@@ -78,8 +65,217 @@ namespace
 	}
 }
 
+// CPU bytes are captured by UpdateBuffer. Only GPU copies touch these persistent
+// buffers; upload and draw submissions use the same queue, so no CPU wait is needed.
+bool Renderer::UpdateInstanceBuffer(const Scene& scene,RHI::ICommandList& commands)
+{
+    pendingInstanceScene=scene.m_lifetime;
+    pendingInstanceRevision=scene.m_transformRevision;
+    pendingInstanceCount=scene.GetEntityCount();
+    if(!UsesInstanceStream() || !pendingInstanceCount) {
+        instanceBuffer=nullptr;instanceReady=false;return true;
+    }
+    if(pendingInstanceCount>UINT32_MAX/sizeof(Math::float4x4))return false;
+    const auto bytes=static_cast<uint32_t>(pendingInstanceCount*sizeof(Math::float4x4));
+    if(!instanceBuffer || instanceBuffer->GetDesc().size!=bytes) {
+        instanceBuffer=device->CreateBuffer({bytes,sizeof(Math::float4x4),RHI::BufferUsage::Vertex,RHI::ResourceState::CopyDestination});
+        instanceReady=false;
+    }
+    if(!instanceBuffer)return false;
+    const bool sameScene=!instanceScene.expired() &&
+        !instanceScene.owner_before(pendingInstanceScene) && !pendingInstanceScene.owner_before(instanceScene);
+    bool full=!instanceReady || !sameScene || instanceCount!=pendingInstanceCount;
+    if(!full && instanceRevision==pendingInstanceRevision)return true;
+
+    instanceScratch.resize(pendingInstanceCount);
+    instanceRanges.clear();
+    if(!full) {
+        for(uint32_t i=0;i<pendingInstanceCount;++i) {
+            if(scene.m_entityTransformRevisions[i]<=instanceRevision)continue;
+            if(!instanceRanges.empty() && instanceRanges.back().first+instanceRanges.back().count==i)
+                ++instanceRanges.back().count;
+            else instanceRanges.push_back({i,1});
+            // Bound fragmented work rather than issuing hundreds of tiny copies.
+            if(instanceRanges.size()>32) {full=true;break;}
+        }
+    }
+    if(full) {
+        instanceRanges.clear();instanceRanges.push_back({0,pendingInstanceCount});
+    }
+    for(const auto& range:instanceRanges)
+        for(uint32_t i=range.first;i<range.first+range.count;++i)
+            instanceScratch[i]=scene.GetTransform(static_cast<EntityID>(i)).worldMatrix;
+    if(instanceRanges.empty())return true;
+    if(instanceReady) {
+        const RHI::ResourceBarrierDesc barrier={instanceBuffer,nullptr,RHI::ResourceState::VertexBuffer,RHI::ResourceState::CopyDestination,{}};
+        commands.ResourceBarrier(&barrier,1);
+    }
+    for(const auto& range:instanceRanges)
+        if(!device->UpdateBuffer(commands,instanceBuffer,range.first*sizeof(Math::float4x4),
+            instanceScratch.data()+range.first,range.count*sizeof(Math::float4x4)))return false;
+    const RHI::ResourceBarrierDesc ready={instanceBuffer,nullptr,RHI::ResourceState::CopyDestination,RHI::ResourceState::VertexBuffer,{}};
+    commands.ResourceBarrier(&ready,1);
+    return true;
+}
+
+void Renderer::CommitFrameData()
+{
+    instanceScene=pendingInstanceScene;instanceRevision=pendingInstanceRevision;instanceCount=pendingInstanceCount;
+    lightingBytes.swap(pendingLightingBytes);
+    if(config.lighting.enabled && config.lighting.shadows)shadowBytes.swap(pendingShadowBytes);
+}
+
+RHI::ResourceSetHandle Renderer::CachedResourceSet(RHI::PipelineHandle selectedPipeline,
+    const std::vector<RHI::ResourceBinding>& bindings,std::vector<CachedSet>& cache)
+{
+    for(auto& entry:cache) {
+        if(entry.set->GetPipeline()!=selectedPipeline || entry.set->GetBindingCount()!=bindings.size())continue;
+        bool same=true;
+        for(size_t i=0;i<bindings.size() && same;++i) {
+            const auto& a=bindings[i];const auto& b=entry.set->GetBindings()[i];
+            same=a.binding==b.binding && a.arrayElement==b.arrayElement && a.buffer==b.buffer && a.texture==b.texture &&
+                a.offset==b.offset && a.size==b.size && a.subresources.firstMipLevel==b.subresources.firstMipLevel &&
+                a.subresources.mipLevelCount==b.subresources.mipLevelCount &&
+                a.subresources.firstArrayLayer==b.subresources.firstArrayLayer && a.subresources.arrayLayerCount==b.subresources.arrayLayerCount;
+        }
+        if(same) {entry.unusedFrames=0;return entry.set;}
+    }
+    auto* set=device->CreateResourceSet({selectedPipeline,bindings.data(),static_cast<uint32_t>(bindings.size())});
+    if(!set)return nullptr;
+    try {cache.push_back({set,0});} catch(...) {device->DestroyResourceSet(set);throw;}
+    return set;
+}
+void Renderer::PruneResourceSets(std::vector<CachedSet>& cache)
+{
+    // Keep the bounded live frame window so rotating Model palette/output slots
+    // can reuse descriptors. RHI retains submitted references beyond eviction.
+    const auto frameWindow=std::max(1u,device->GetDesc().maxFramesInFlight);
+    cache.erase(std::remove_if(cache.begin(),cache.end(),[&](const CachedSet& entry){
+        if(entry.unusedFrames<frameWindow)return false;device->DestroyResourceSet(entry.set);return true;
+    }),cache.end());
+}
+
+namespace {
+Math::Bounds3 ShadowWorldBounds(const Math::Bounds3& local,const Math::float4x4& world,std::array<double,3>& magnitude)
+{
+    if(!local.valid || world.m[3]!=0 || world.m[7]!=0 || world.m[11]!=0 || world.m[15]!=1)return {};
+    for(float value:world.m)if(!std::isfinite(value))return {};
+    const double minimum[]={local.min.x,local.min.y,local.min.z};
+    const double maximum[]={local.max.x,local.max.y,local.max.z};
+    double center[3],extent[3];
+    for(uint32_t axis=0;axis<3;++axis) {
+        if(!std::isfinite(minimum[axis]) || !std::isfinite(maximum[axis]) || minimum[axis]>maximum[axis])return {};
+        center[axis]=(minimum[axis]+maximum[axis])*.5;
+        extent[axis]=(maximum[axis]-minimum[axis])*.5;
+    }
+    float lower[3],upper[3];
+    for(uint32_t row=0;row<3;++row) {
+        double position=world.m[12+row],radius=0;
+        magnitude[row]=std::abs(position);
+        for(uint32_t column=0;column<3;++column) {
+            const double coefficient=world.m[column*4+row];
+            position+=coefficient*center[column];radius+=std::abs(coefficient)*extent[column];
+            magnitude[row]+=std::abs(coefficient)*std::max(std::abs(minimum[column]),std::abs(maximum[column]));
+        }
+        // Round outwards when storing the conservative transformed box as floats.
+        lower[row]=std::nextafter(static_cast<float>(position-radius),-std::numeric_limits<float>::infinity());
+        upper[row]=std::nextafter(static_cast<float>(position+radius),std::numeric_limits<float>::infinity());
+        if(!std::isfinite(lower[row]) || !std::isfinite(upper[row]))return {};
+    }
+    return {{lower[0],lower[1],lower[2]},{upper[0],upper[1],upper[2]},true};
+}
+
+struct ShadowFrustum
+{
+    std::array<std::array<double,4>,6> planes={},magnitudes={};
+    bool valid=false;
+    explicit ShadowFrustum(const Math::float4x4& matrix)
+    {
+        for(float value:matrix.m)if(!std::isfinite(value))return;
+        for(uint32_t plane=0;plane<6;++plane) {
+            const uint32_t row=plane/2;
+            const double sign=plane%2?-1:1;
+            for(uint32_t column=0;column<4;++column) {
+                const double a=matrix.m[column*4+3],b=matrix.m[column*4+row];
+                planes[plane][column]=plane==4?b:a+sign*b;
+                magnitudes[plane][column]=plane==4?std::abs(b):std::abs(a)+std::abs(b);
+            }
+            if(planes[plane][0]==0 && planes[plane][1]==0 && planes[plane][2]==0)return;
+        }
+        valid=true;
+    }
+    bool Outside(const Math::Bounds3& bounds,const std::array<double,3>& worldMagnitude) const
+    {
+        if(!valid || !bounds.valid)return false;
+        const double minimum[]={bounds.min.x,bounds.min.y,bounds.min.z};
+        const double maximum[]={bounds.max.x,bounds.max.y,bounds.max.z};
+        for(uint32_t plane=0;plane<6;++plane) {
+            double distance=planes[plane][3],scale=magnitudes[plane][3];
+            for(uint32_t axis=0;axis<3;++axis) {
+                distance+=planes[plane][axis]*(planes[plane][axis]>=0?maximum[axis]:minimum[axis]);
+                // Preserve the pre-cancellation world terms, including when a
+                // shader multiplies light*world before applying the local vertex.
+                scale+=magnitudes[plane][axis]*worldMagnitude[axis];
+            }
+            if(distance < -1e-5*std::max(1.0,scale))return true;
+        }
+        return false;
+    }
+};
+
+bool OutsideCamera(const Math::Bounds3& bounds,const Math::float4x4& world,const Camera& camera)
+{
+    if(!bounds.valid)return false;
+    // Unknown projective world/view contracts fail open. Standard perspective and
+    // orthographic projections (including reversed axes) use homogeneous ZO planes.
+    const auto affine=[](const Math::float4x4& m) {return m.m[3]==0 && m.m[7]==0 && m.m[11]==0 && m.m[15]==1;};
+    const auto& p=camera.projection;
+    if(!affine(world) || !affine(camera.view) ||
+        !((p.m[11]==-1 && p.m[15]==0) || (p.m[11]==0 && p.m[15]==1)) ||
+        p.m[1]!=0 || p.m[2]!=0 || p.m[3]!=0 || p.m[4]!=0 || p.m[6]!=0 || p.m[7]!=0 ||
+        p.m[0]==0 || p.m[5]==0 || p.m[10]==0)return false;
+    const auto viewProjection=p*camera.view;
+    for(float v:viewProjection.m)if(!std::isfinite(v))return false;
+    for(float v:world.m)if(!std::isfinite(v))return false;
+    bool outside[6]={true,true,true,true,true,true};
+    for(uint32_t corner=0;corner<8;++corner) {
+        const double x=(corner&1)?bounds.max.x:bounds.min.x;
+        const double y=(corner&2)?bounds.max.y:bounds.min.y;
+        const double z=(corner&4)?bounds.max.z:bounds.min.z;
+        const double point[]={x,y,z,1};
+        double transformed[4]={},magnitude[4]={},clip[4]={};
+        for(uint32_t row=0;row<4;++row)for(uint32_t column=0;column<4;++column) {
+            const double term=world.m[column*4+row]*point[column];
+            transformed[row]+=term;magnitude[row]+=std::abs(term);
+        }
+        double errorScale=1;
+        for(uint32_t row=0;row<4;++row) {
+            double sum=0;
+            for(uint32_t column=0;column<4;++column) {
+                const double coefficient=viewProjection.m[column*4+row];
+                clip[row]+=coefficient*transformed[column];sum+=std::abs(coefficient)*magnitude[column];
+            }
+            errorScale=std::max(errorScale,sum);
+        }
+        for(double v:clip)if(!std::isfinite(v))return false;
+        // Includes cancellation at large world coordinates, not just final clip size.
+        const double epsilon=1e-5*errorScale;
+        const double distances[]={clip[3]+clip[0],clip[3]-clip[0],clip[3]+clip[1],clip[3]-clip[1],clip[2],clip[3]-clip[2]};
+        for(uint32_t plane=0;plane<6;++plane)outside[plane]=outside[plane] && distances[plane]<-epsilon;
+    }
+    return std::any_of(std::begin(outside),std::end(outside),[](bool value){return value;});
+}
+bool EqualMaterial(const MaterialDesc& a,const MaterialDesc& b)
+{
+    return a.baseColor.x==b.baseColor.x && a.baseColor.y==b.baseColor.y && a.baseColor.z==b.baseColor.z && a.baseColor.w==b.baseColor.w &&
+        a.emissiveColor.x==b.emissiveColor.x && a.emissiveColor.y==b.emissiveColor.y && a.emissiveColor.z==b.emissiveColor.z &&
+        a.metallicFactor==b.metallicFactor && a.roughnessFactor==b.roughnessFactor && a.normalScale==b.normalScale && a.occlusionStrength==b.occlusionStrength;
+}
+}
+
 bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList& commands,
-	const std::vector<RendererDrawDesc>* draws, std::vector<RHI::ResourceSetHandle>& sets)
+	const std::vector<RendererDrawDesc>* draws, std::vector<RHI::ResourceSetHandle>& sets,
+	RHI::ResourceScope& resources)
 {
 	if(device == nullptr || pipeline == nullptr || lightingBuffer == nullptr) return false;
 	const bool shadowsEnabled = shadowDepthTarget != nullptr;
@@ -87,53 +283,60 @@ bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList&
 
 	if(UsesBindlessMaterials())
 	{
-		if(materialStates.empty()) return true;
+		if(materialStates.empty()) {materialIndexBuffer=nullptr;materialIndexReady=false;return true;}
 		// 기본 셰이더의 28개 텍스처 단위로 묶어 재질 수와 관계없이 바인딩한다.
-		struct Page
-		{
-			std::vector<RHI::TextureHandle> textures;
-			std::vector<uint32_t> materials;
-		};
-		std::vector<Page> pages(1);
-		std::vector<uint32_t> indices(materialStates.size() * 8, 0);
+        if(materialPages.empty())materialPages.emplace_back();
+        for(auto& page:materialPages) {page.textures.clear();page.materials.clear();}
+        uint32_t pageCount=1;
+        auto& indices=materialIndexScratch;
+        indices.assign(materialStates.size()*8,0);
 		for(uint32_t i = 0; i < materialStates.size(); ++i)
 		{
-			auto textures = pages.back().textures;
-			for(auto* texture : materialStates[i].textures)
-				if(std::find(textures.begin(), textures.end(), texture) == textures.end()) textures.push_back(texture);
-			if(textures.size() > 28) pages.emplace_back();
-			auto& page = pages.back();
+			auto& current=materialPages[pageCount-1];
+            uint32_t textureCount=static_cast<uint32_t>(current.textures.size());
+            // The five slots may repeat textures; count each new handle once.
+            for(uint32_t slot=0;slot<kMaterialTextureCount;++slot) {
+                const auto texture=materialStates[i].textures[slot];
+                if(std::find(current.textures.begin(),current.textures.end(),texture)!=current.textures.end())continue;
+                bool seen=false;
+                for(uint32_t earlier=0;earlier<slot;++earlier)seen=seen || materialStates[i].textures[earlier]==texture;
+                if(!seen)++textureCount;
+            }
+            if(textureCount>28) {
+                ++pageCount;
+                if(materialPages.size()<pageCount)materialPages.emplace_back();
+            }
+            auto& page=materialPages[pageCount-1];
 			page.materials.push_back(i);
 			for(uint32_t slot = 0; slot < kMaterialTextureCount; ++slot)
 			{
 				const auto texture = materialStates[i].textures[slot];
 				const auto found = std::find(page.textures.begin(), page.textures.end(), texture);
-				if(found == page.textures.end())
-				{
-					indices[i * 8 + slot] = static_cast<uint32_t>(page.textures.size());
-					page.textures.push_back(texture);
-				}
-				else indices[i * 8 + slot] = static_cast<uint32_t>(found - page.textures.begin());
+				indices[i * 8 + slot] = static_cast<uint32_t>(found - page.textures.begin());
+				if(found == page.textures.end()) page.textures.push_back(texture);
 			}
 		}
 		if(indices.size() > UINT32_MAX / sizeof(uint32_t)) return false;
-		auto* materialBuffer = device->CreateBuffer({static_cast<uint32_t>(indices.size() * sizeof(uint32_t)),
-			16, RHI::BufferUsage::Storage, RHI::ResourceState::CopyDestination});
-		if(!materialBuffer) return false;
-		// 재질 인덱스 업로드를 장면 명령의 앞부분에 기록한다.
-		if(!device->UpdateBuffer(commands, materialBuffer, 0, indices.data(), materialBuffer->GetDesc().size))
-		{
-			device->DestroyBuffer(materialBuffer);
-			return false;
-		}
-		const RHI::ResourceBarrierDesc ready = {
-			materialBuffer, nullptr, RHI::ResourceState::CopyDestination, RHI::ResourceState::ShaderResource, {}
-		};
-		commands.ResourceBarrier(&ready, 1);
+        const auto bytes=static_cast<uint32_t>(indices.size()*sizeof(uint32_t));
+        if(!materialIndexBuffer || materialIndexBuffer->GetDesc().size!=bytes) {
+            materialIndexBuffer=device->CreateBuffer({bytes,16,RHI::BufferUsage::Storage,RHI::ResourceState::CopyDestination});
+            materialIndexReady=false;
+        }
+        if(!materialIndexBuffer)return false;
+        auto* materialBuffer=materialIndexBuffer;
+        if(!materialIndexReady || indices!=materialIndexBytes) {
+            if(materialIndexReady) {
+                const RHI::ResourceBarrierDesc barrier={materialBuffer,nullptr,RHI::ResourceState::ShaderResource,RHI::ResourceState::CopyDestination,{}};
+                commands.ResourceBarrier(&barrier,1);
+            }
+            if(!RecordBufferUpload(device,commands,materialBuffer,indices.data(),bytes,RHI::ResourceState::ShaderResource))return false;
+            materialIndexRecorded=true;
+        }
 		sets.assign(draws ? scene.GetEntityCount() : materialStates.size(), nullptr);
-		for(const auto& page : pages)
-		{
-			std::vector<RHI::ResourceBinding> bindings;
+		for(uint32_t pageIndex=0;pageIndex<pageCount;++pageIndex)
+        {
+            const auto& page=materialPages[pageIndex];
+            auto& bindings=mainBindingScratch;bindings.clear();
 			for(uint32_t i = 0; i < 28; ++i)
 				bindings.push_back({0, i, nullptr, page.textures[i < page.textures.size() ? i : 0], 0, 0, {}});
 			bindings.push_back({1u, 0, lightingBuffer, nullptr,
@@ -152,31 +355,26 @@ bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList&
 				{
 					const auto material = ToIndex(scene.GetEntityMaterial(static_cast<EntityID>(entity)));
 					if(std::find(page.materials.begin(), page.materials.end(), material) == page.materials.end()) continue;
-					auto combined = bindings;
+					auto& combined=mainCombinedBindingScratch;combined.assign(bindings.begin(),bindings.end());
 					const auto& extra = (*draws)[entity].vertexResources;
 					combined.insert(combined.end(), extra.begin(), extra.end());
-					sets[entity] = device->CreateResourceSet({pipeline, combined.data(), static_cast<uint32_t>(combined.size())});
+					sets[entity] = CachedResourceSet(pipeline,combined,mainSets);
 					if(!sets[entity])
 					{
-						DestroyResourceSets(device, sets);
-						device->DestroyBuffer(materialBuffer);
 						return false;
 					}
 				}
 			}
 			else
 			{
-				auto* table = device->CreateResourceSet({pipeline, bindings.data(), static_cast<uint32_t>(bindings.size())});
+				auto* table = CachedResourceSet(pipeline,bindings,mainSets);
 				if(!table)
 				{
-					DestroyResourceSets(device, sets);
-					device->DestroyBuffer(materialBuffer);
 					return false;
 				}
 				for(auto index : page.materials) sets[index] = table;
 			}
 		}
-		device->DestroyBuffer(materialBuffer);
 		return true;
 	}
 
@@ -187,7 +385,7 @@ bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList&
 			? ToIndex(scene.GetEntityMaterial(static_cast<EntityID>(setIndex))) : setIndex;
 		if(materialIndex >= materialStates.size()) continue;
 		const auto& material = materialStates[materialIndex];
-		std::vector<RHI::ResourceBinding> bindings = {
+		auto& bindings=mainBindingScratch;bindings = {
 			{0u, 0, nullptr, material.textures[ToIndex(MaterialTextureKind::BaseColor)], 0, 0, {}},
 			{1u, 0, lightingBuffer, nullptr, 0, static_cast<uint32_t>(sizeof(RendererLightingConstants)), {}},
 			{4u, 0, nullptr, material.textures[ToIndex(MaterialTextureKind::MetallicRoughness)], 0, 0, {}},
@@ -203,10 +401,9 @@ bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList&
 			const auto& extra = (*draws)[setIndex].vertexResources;
 			bindings.insert(bindings.end(), extra.begin(), extra.end());
 		}
-		sets[setIndex] = device->CreateResourceSet({pipeline, bindings.data(), static_cast<uint32_t>(bindings.size())});
+		sets[setIndex] = CachedResourceSet(pipeline,bindings,mainSets);
 		if(!sets[setIndex])
 		{
-			DestroyResourceSets(device, sets);
 			return false;
 		}
 	}
@@ -218,6 +415,7 @@ void Renderer::DestroyMeshState(RHI::IDevice* device, SceneMeshState& mesh)
 	DestroyBuffer(device, mesh.vertexBuffer, mesh.vertexReady);
 	DestroyBuffer(device, mesh.indexBuffer, mesh.indexReady);
 	mesh.indexCount = 0;
+    mesh.bounds={};
 	mesh.prepared = false;
 }
 
@@ -233,6 +431,7 @@ bool Renderer::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 	m_meshes.resize(scene.Meshes().size());
 
 	RHI::ICommandList* commands = nullptr;
+	RHI::ResourceScope resources(*device);
 	bool uploadFailed = false;
 	std::vector<bool*> uploaded;
 	for(uint32_t meshIndex = 0; meshIndex < scene.Meshes().size(); ++meshIndex)
@@ -245,11 +444,16 @@ bool Renderer::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 			mesh.source = sourceMesh;
 		}
 		if(mesh.prepared) continue;
-		const MeshData& source = *sourceMesh;
+        const MeshData& source = *sourceMesh;
+        mesh.bounds={};
+        for(const auto& vertex:source.vertices) {
+            const auto& p=vertex.position;
+            if(!std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)) {mesh.bounds={};break;}
+            mesh.bounds.Include(p);
+        }
 		if(source.vertices.size() > UINT32_MAX / sizeof(RendererVertex) ||
 			source.indices.size() > UINT32_MAX / sizeof(uint32_t))
 		{
-			if(commands) device->DestroyCommandList(commands);
 			return false;
 		}
 		std::vector<RendererVertex> vertices;
@@ -267,7 +471,7 @@ bool Renderer::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 			for(uint32_t index = 0; index < source.vertices.size(); ++index) sequentialIndices.push_back(index);
 		}
 		const auto& indices = source.indices.empty() ? sequentialIndices : source.indices;
-		if(vertices.empty() || indices.empty())
+		if(vertices.empty())
 		{
 			DestroyMeshState(device, mesh);
 			mesh.prepared = true;
@@ -280,16 +484,14 @@ bool Renderer::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 			!EnsureBuffer(device, mesh.indexBuffer, mesh.indexReady, indexBytes,
 				sizeof(uint32_t), RHI::BufferUsage::Index))
 		{
-			if(commands) device->DestroyCommandList(commands);
 			return false;
 		}
 		mesh.indexCount = static_cast<uint32_t>(indices.size());
-		if(mesh.vertexReady && mesh.indexReady)
+		if(!commands)
 		{
-			mesh.prepared = true;
-			continue;
+			commands = device->AcquireCommandList();
+			if(commands) resources.Keep(commands);
 		}
-		if(!commands) commands = device->AcquireCommandList();
 		if(!commands) return false;
 		if(!mesh.vertexReady)
 		{
@@ -316,7 +518,6 @@ bool Renderer::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 	if(!commands) return true;
 	const bool closed = commands->Close();
 	const bool submitted = closed && device->Submit(&commands, 1);
-	device->DestroyCommandList(commands);
 	if(submitted)
 	{
 		// 실패한 제출은 준비 완료로 표시하지 않아 다음 프레임에서 다시 업로드한다.
@@ -331,23 +532,36 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 	RHI::ICommandList& commands, const std::vector<RendererDrawDesc>* draws,
 	RHI::TimestampQueryHandle shadowQuery)
 {
-	std::vector<RHI::ResourceSetHandle> shadowSets;
+	RHI::ResourceScope resources(*device);
+	const bool stock=UsesStockGeometry() && !draws;
+	const bool instanced=UsesInstanceStream();
+	const bool cull=stock && config.enableFrustumCulling;
+	if(cull) {
+        shadowBoundsScratch.resize(scene.GetEntityCount());
+        for(uint32_t i=0;i<scene.GetEntityCount();++i) {
+            auto& bounds=shadowBoundsScratch[i];bounds={};
+            const auto entity=static_cast<EntityID>(i);
+            const auto meshId=scene.GetEntityMesh(entity);
+            if(scene.GetEntityLighting(entity).castShadow && IsValid(meshId) && ToIndex(meshId)<m_meshes.size())
+                bounds.bounds=ShadowWorldBounds(m_meshes[ToIndex(meshId)].bounds,scene.GetTransform(entity).worldMatrix,bounds.magnitude);
+        }
+    }
+	auto& shadowSets=shadowSetScratch;
 	{
 		commands.BeginDebugEvent("Shadow");
 		shadowSets.resize(draws ? scene.GetEntityCount() : 1, nullptr);
 		for(uint32_t i = 0; i < shadowSets.size(); ++i)
 		{
-			std::vector<RHI::ResourceBinding> bindings = {{3u,
+			auto& bindings=shadowBindingScratch;bindings = {{3u,
 				0, shadowMatrixBuffer, nullptr, 0, static_cast<uint32_t>(sizeof(RendererShadowConstants)), {}}};
 			if(draws)
 			{
 				const auto& extra = (*draws)[i].vertexResources;
 				bindings.insert(bindings.end(), extra.begin(), extra.end());
 			}
-			shadowSets[i] = device->CreateResourceSet({shadowPipeline, bindings.data(), static_cast<uint32_t>(bindings.size())});
+			shadowSets[i] = CachedResourceSet(shadowPipeline,bindings,this->shadowSets);
 			if(!shadowSets[i])
 			{
-				DestroyResourceSets(device, shadowSets);
 				return false;
 			}
 		}
@@ -360,16 +574,15 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 		depth.state = RHI::ResourceState::DepthWrite;
 		depth.depthLoadOp = RHI::LoadOp::Clear;
 		depth.depthStoreOp = RHI::StoreOp::Store;
-		depth.clearDepth = 1;
-		if(shadowDepthTarget->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT)
-		{
-			depth.stencilLoadOp = RHI::LoadOp::Discard;
-			depth.stencilStoreOp = RHI::StoreOp::Discard;
-		}
 		commands.BeginRendering({nullptr, 0, &depth});
 		commands.BindGraphicsPipeline(shadowPipeline);
 		for(uint32_t view = 0; view < shadows.viewCount; ++view)
 		{
+			const ShadowFrustum frustum(shadows.constants.lightViewProjectionMatrix[view]);
+			const auto outside=[&](uint32_t index) {
+                const auto& bounds=shadowBoundsScratch[index];
+                return frustum.Outside(bounds.bounds,bounds.magnitude);
+            };
 			const uint32_t x = (view % shadows.columns) * shadows.resolution;
 			const uint32_t y = (view / shadows.columns) * shadows.resolution;
 			commands.SetViewport({static_cast<float>(x), static_cast<float>(y),
@@ -387,9 +600,24 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 				if(meshIndex >= m_meshes.size() || materialIndex >= materialStates.size()) continue;
 				const auto& mesh = m_meshes[meshIndex];
 				if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount) continue;
+				if(cull && outside(entityIndex))continue;
+				uint32_t count=1;
+				if(stock && instanced) {
+                    // The stock depth shader only consumes the mesh, instance matrix
+                    // and light view. Materials cannot change its depth output.
+                    while(entityIndex+count<scene.GetEntityCount()) {
+                        const auto next=static_cast<EntityID>(entityIndex+count);
+                        const auto material=scene.GetEntityMaterial(next);
+                        if(scene.GetEntityMesh(next)!=meshId || !scene.GetEntityLighting(next).castShadow ||
+                            !IsValid(material) || ToIndex(material)>=materialStates.size() ||
+                            (cull && outside(entityIndex+count)))break;
+                        ++count;
+                    }
+                }
 				const auto* input = draws ? &(*draws)[entityIndex] : nullptr;
 				commands.BindResourceSet(shadowSets[input ? entityIndex : 0]);
 				commands.BindVertexBuffer(0, input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer, 0);
+				if(instanced)commands.BindVertexBuffer(1,instanceBuffer,entityIndex*sizeof(Math::float4x4));
 				commands.BindIndexBuffer(mesh.indexBuffer, RHI::Format::R32_UINT, 0);
 				const uint32_t flags = materialStates[materialIndex].textureFlags |
 					(lighting.receiveShadow ? 32u : 0u);
@@ -398,7 +626,8 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 				commands.SetInlineConstants(0, sizeof(constants), &constants);
 				if(input && !input->inlineConstants.empty())
 					commands.SetInlineConstants(sizeof(constants), static_cast<uint32_t>(input->inlineConstants.size()), input->inlineConstants.data());
-				commands.DrawIndexedInstanced(mesh.indexCount, 1, 0, 0, 0);
+				commands.DrawIndexedInstanced(mesh.indexCount,count,0,0,0);
+				entityIndex+=count-1;
 			}
 		}
 		commands.EndRendering();
@@ -406,7 +635,6 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 	}
 	if(shadowQuery) commands.WriteTimestamp(shadowQuery, 1);
 	commands.EndDebugEvent();
-	DestroyResourceSets(device, shadowSets);
 	return true;
 }
 
@@ -414,8 +642,23 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
 	RHI::ICommandList& commands, const std::vector<RendererDrawDesc>* draws,
 	RHI::TimestampQueryHandle mainQuery, RHI::TextureHandle output)
 {
-	std::vector<RHI::ResourceSetHandle> materialSets;
-	if(!CreateMaterialResourceSets(scene, commands, draws, materialSets)) return false;
+	RHI::ResourceScope resources(*device);
+	auto& materialSets=mainSetScratch;
+    struct MaterialBufferTransaction {
+        Renderer& r;
+        RHI::BufferHandle previous;
+        bool ready,committed=false;
+        explicit MaterialBufferTransaction(Renderer& owner):r(owner),previous(r.materialIndexBuffer),ready(r.materialIndexReady) {}
+        ~MaterialBufferTransaction() {
+            if(committed) {if(previous!=r.materialIndexBuffer)r.device->DestroyBuffer(previous);}
+            else {
+                if(previous!=r.materialIndexBuffer)r.device->DestroyBuffer(r.materialIndexBuffer);
+                r.materialIndexBuffer=previous;r.materialIndexReady=ready;
+            }
+        }
+    } materialTransaction(*this);
+	if(!CreateMaterialResourceSets(scene, commands, draws, materialSets, resources)) return false;
+    materialTransaction.committed=true;
 	auto* target = config.enableHdrRendering ? hdrTarget : output;
 	const auto viewProjection = camera.projection * camera.view;
 	if(mainQuery) { commands.ResetTimestamps(mainQuery, 0, 2); commands.WriteTimestamp(mainQuery, 0); }
@@ -441,8 +684,7 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
 	depth.state = RHI::ResourceState::DepthWrite;
 	depth.depthLoadOp = RHI::LoadOp::Clear;
 	depth.depthStoreOp = RHI::StoreOp::Discard;
-	depth.clearDepth = 1;
-	if(depthStencilTarget->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT)
+	if(RHI::HasStencil(depthStencilTarget->GetDesc().format))
 	{
 		depth.stencilLoadOp = RHI::LoadOp::Discard;
 		depth.stencilStoreOp = RHI::StoreOp::Discard;
@@ -451,6 +693,8 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
 	commands.BindGraphicsPipeline(pipeline);
 	commands.SetViewport({0, 0, static_cast<float>(target->GetDesc().width), static_cast<float>(target->GetDesc().height), 0, 1});
 	commands.SetScissor({0, 0, target->GetDesc().width, target->GetDesc().height});
+    const bool stock=UsesStockGeometry() && !draws;
+    const bool instanced=UsesInstanceStream();
 	const bool batchBindings = shaderSources.bytes[MeshFragment].empty();
 	RHI::ResourceSetHandle boundMaterial = nullptr;
 	for(uint32_t entityIndex = 0; entityIndex < scene.GetEntityCount(); ++entityIndex)
@@ -464,6 +708,25 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
 		if(meshIndex >= m_meshes.size() || materialIndex >= materialStates.size() || setIndex >= materialSets.size()) continue;
 		const auto& mesh = m_meshes[meshIndex];
 		if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount) continue;
+        if(stock && config.enableFrustumCulling && OutsideCamera(mesh.bounds,scene.GetTransform(entity).worldMatrix,camera)) {
+            ++recordingStatistics.culledEntityCount;continue;
+        }
+        uint32_t count=1;
+        if(stock && instanced) {
+            while(entityIndex+count<scene.GetEntityCount()) {
+                const auto next=static_cast<EntityID>(entityIndex+count);
+                const auto nextMaterial=scene.GetEntityMaterial(next);
+                if(scene.GetEntityMesh(next)!=meshId || !IsValid(nextMaterial) || ToIndex(nextMaterial)>=materialStates.size())break;
+                const auto index=ToIndex(nextMaterial);
+                if(scene.GetEntityLighting(next).receiveShadow!=scene.GetEntityLighting(entity).receiveShadow ||
+                    materialStates[index].textures!=materialStates[materialIndex].textures ||
+                    materialStates[index].textureFlags!=materialStates[materialIndex].textureFlags ||
+                    !EqualMaterial(scene.Materials()[index],scene.Materials()[materialIndex]) ||
+                    (config.enableFrustumCulling && OutsideCamera(mesh.bounds,scene.GetTransform(next).worldMatrix,camera)))break;
+                ++count;
+            }
+        }
+        if(instanced)commands.BindVertexBuffer(1,instanceBuffer,entityIndex*sizeof(Math::float4x4));
 		if(!batchBindings || boundMaterial != materialSets[setIndex])
 		{
 			boundMaterial = materialSets[setIndex];
@@ -479,11 +742,12 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
 		commands.SetInlineConstants(0, sizeof(constants), &constants);
 		if(input && !input->inlineConstants.empty())
 			commands.SetInlineConstants(sizeof(constants), static_cast<uint32_t>(input->inlineConstants.size()), input->inlineConstants.data());
-		commands.DrawIndexedInstanced(mesh.indexCount, 1, 0, 0, 0);
+        commands.DrawIndexedInstanced(mesh.indexCount,count,0,0,0);
+        ++recordingStatistics.mainDrawCount;recordingStatistics.mainInstanceCount+=count;
+        entityIndex+=count-1;
 	}
 	commands.EndRendering();
 	commands.EndDebugEvent();
-	DestroyResourceSets(device, materialSets);
 	return true;
 }
 

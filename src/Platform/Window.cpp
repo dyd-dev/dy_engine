@@ -1,11 +1,11 @@
 #include "dyf/Platform/Log.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/Platform/RenderDocCapture.h"
-#include <cstdio>
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 #include <GLFW/glfw3.h>
 // Expose native window handles for RHI Device initialization
@@ -20,7 +20,6 @@ using namespace dyf::Platform;
 
 namespace
 {
-	unsigned int windowCount = 0;
 	std::vector<Window*> windows;
 
 	void ValidateSize(unsigned int width, unsigned int height)
@@ -39,7 +38,7 @@ Window::Window(unsigned int width, unsigned int height, const char* title)
     Log::Initialize();
 	if(!width || !height || width > static_cast<unsigned>((std::numeric_limits<int>::max)()) || height > static_cast<unsigned>((std::numeric_limits<int>::max)()))
     { dyf::Platform::Log::Writef(dyf::Platform::LogLevel::Error, "Platform", __FILE__, __LINE__, "dyf: invalid window dimensions."); return; }
-    if(windowCount == 0 && !glfwInit())
+    if(windows.empty() && !glfwInit())
     { dyf::Platform::Log::Writef(dyf::Platform::LogLevel::Error, "Platform", __FILE__, __LINE__, "dyf: failed to initialize GLFW."); return; }
 	
 	// Tell GLFW to NOT create an OpenGL context
@@ -48,56 +47,86 @@ Window::Window(unsigned int width, unsigned int height, const char* title)
 	m_window = glfwCreateWindow(width, height, title ? title : "New Window", nullptr, nullptr);
 	if(!m_window)
 	{
-		if(windowCount == 0) glfwTerminate();
+		if(windows.empty()) glfwTerminate();
 		dyf::Platform::Log::Writef(dyf::Platform::LogLevel::Error, "Platform", __FILE__, __LINE__, "dyf: failed to create GLFW window.");
 		return;
 	}
-    try { windows.push_back(this); }
-    catch(...) { glfwDestroyWindow(m_window); if(windowCount == 0) glfwTerminate(); throw; }
-    ++windowCount;
+    try
+    {
+    windows.push_back(this);
     glfwSetWindowUserPointer(m_window, this);
     (void)RenderDocCapture::Initialize();
 	glfwSetKeyCallback(m_window, [](GLFWwindow* handle, int key, int scan, int action, int mods)
 	{
-		auto& input = static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input;
 		InputEvent event; event.type = InputEventType::Key; event.code = key; event.scancode = scan;
         event.action = static_cast<InputAction>(action); event.modifiers = mods;
-        input.OnEvent(event);
-        if(key == GLFW_KEY_F11 && action == GLFW_PRESS)
-            static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_profilerToggle = true;
-        if(key == GLFW_KEY_F12 && action == GLFW_PRESS) (void)RenderDocCapture::TriggerNextFrame();
+        if(auto* window = static_cast<Window*>(glfwGetWindowUserPointer(handle))) window->HandleInputEvent(event);
 	});
 	glfwSetMouseButtonCallback(m_window, [](GLFWwindow* handle, int button, int action, int mods)
 	{
-		auto& input = static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input;
 		InputEvent event; event.type = InputEventType::MouseButton; event.code = button;
 		event.action = static_cast<InputAction>(action); event.modifiers = mods;
-		input.OnEvent(event);
+		if(auto* window = static_cast<Window*>(glfwGetWindowUserPointer(handle))) window->HandleInputEvent(event);
 	});
 	glfwSetCursorPosCallback(m_window, [](GLFWwindow* handle, double x, double y)
 	{
 		InputEvent event; event.type = InputEventType::Cursor; event.x = x; event.y = y;
-		static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input.OnEvent(event);
+		if(auto* window = static_cast<Window*>(glfwGetWindowUserPointer(handle))) window->HandleInputEvent(event);
 	});
 	glfwSetScrollCallback(m_window, [](GLFWwindow* handle, double x, double y)
 	{
 		InputEvent event; event.type = InputEventType::Scroll; event.x = x; event.y = y;
-		static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input.OnEvent(event);
+		if(auto* window = static_cast<Window*>(glfwGetWindowUserPointer(handle))) window->HandleInputEvent(event);
 	});
 	glfwSetCharCallback(m_window, [](GLFWwindow* handle, unsigned int codepoint)
 	{
 		InputEvent event; event.type = InputEventType::Text; event.codepoint = codepoint;
-		static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input.OnEvent(event);
+		if(auto* window = static_cast<Window*>(glfwGetWindowUserPointer(handle))) window->HandleInputEvent(event);
 	});
 	glfwSetWindowFocusCallback(m_window, [](GLFWwindow* handle, int focused)
 	{
 		InputEvent event; event.type = InputEventType::Focus; event.focused = focused != 0;
-		static_cast<Window*>(glfwGetWindowUserPointer(handle))->m_input.OnEvent(event);
+		if(auto* window = static_cast<Window*>(glfwGetWindowUserPointer(handle))) window->HandleInputEvent(event);
 	});
 	m_input.m_pending.focused = HasFocus();
 	glfwGetCursorPos(m_window, &m_input.m_pending.position.x, &m_input.m_pending.position.y);
 	m_input.m_hasCursorPosition = true;
 	m_input.PublishFrame();
+    }
+    catch(...)
+    {
+        windows.erase(std::remove(windows.begin(), windows.end(), this), windows.end());
+        glfwSetWindowUserPointer(m_window, nullptr);
+        glfwDestroyWindow(m_window);
+        m_window = nullptr;
+        if(windows.empty()) glfwTerminate();
+        throw;
+    }
+}
+
+void Window::HandleInputEvent(const InputEvent& event) noexcept
+{
+    try
+    {
+        m_input.OnEvent(event);
+        if(event.type == InputEventType::Key && event.action == InputAction::Press)
+        {
+            if(event.code == GLFW_KEY_F11) m_profilerToggle = true;
+            if(event.code == GLFW_KEY_F12) (void)RenderDocCapture::TriggerNextFrame();
+        }
+    }
+    catch(...)
+    {
+        // Keep the first error without allocating/logging from a native callback.
+        if(!m_callbackError) m_callbackError = std::current_exception();
+    }
+}
+
+void Window::RethrowCallbackError()
+{
+    for(auto* window : windows)
+        if(window->m_callbackError)
+            std::rethrow_exception(std::exchange(window->m_callbackError, {}));
 }
 
 Window::~Window()
@@ -106,7 +135,7 @@ Window::~Window()
     {
 		glfwDestroyWindow(m_window);
         windows.erase(std::remove(windows.begin(),windows.end(),this),windows.end());
-        if(--windowCount == 0) glfwTerminate();
+        if(windows.empty()) glfwTerminate();
     }
 }
 
@@ -118,7 +147,12 @@ void Window::PollEvents()
 {
 	if(windows.empty()) return;
 	glfwPollEvents();
-	for(auto* window : windows) window->m_input.PublishFrame();
+	for(auto* window : windows)
+    {
+        try { window->m_input.PublishFrame(); }
+        catch(...) { if(!window->m_callbackError) window->m_callbackError = std::current_exception(); }
+    }
+    RethrowCallbackError();
 }
 
 void Window::WaitEvents(double timeoutSeconds)
@@ -126,6 +160,7 @@ void Window::WaitEvents(double timeoutSeconds)
 	if(!std::isfinite(timeoutSeconds) || timeoutSeconds <= 0)
 		throw std::invalid_argument("Event wait timeout must be finite and positive.");
 	if(!windows.empty()) glfwWaitEventsTimeout(timeoutSeconds);
+    RethrowCallbackError();
 }
 
 void Window::Resize(unsigned int width, unsigned int height) const

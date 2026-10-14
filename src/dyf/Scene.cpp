@@ -1,8 +1,11 @@
 #include "dyf/Scene.h"
 #include <cmath>
+#include <algorithm>
+#include <iterator>
 #include <cstdio>
 #include <exception>
 #include <type_traits>
+#include <utility>
 
 namespace dyf
 {
@@ -22,12 +25,26 @@ MeshID Scene::CreateMesh(const MeshData& mesh)
 EntityID Scene::CreateEntity(MeshID mesh, MaterialID material,
     const Math::float4x4& transform, const EntityLightingDesc& lighting)
 {
-    const auto entity = static_cast<EntityID>(m_entityMeshes.size());
-    m_entityMeshes.push_back(mesh);
-    m_entityMaterials.push_back(material);
-    m_entityTransforms.push_back(Transform{transform});
-    m_entityLighting.push_back(lighting);
-    return entity;
+    const auto count = m_entityMeshes.size();
+    try
+    {
+        m_entityMeshes.push_back(mesh);
+        m_entityMaterials.push_back(material);
+        m_entityTransforms.push_back(Transform{transform});
+        m_entityLighting.push_back(lighting);
+        m_entityTransformRevisions.push_back(m_transformRevision+1);
+    }
+    catch(...)
+    {
+        m_entityMeshes.resize(count);
+        m_entityMaterials.resize(count);
+        m_entityTransforms.resize(count);
+        m_entityLighting.resize(count);
+        m_entityTransformRevisions.resize(count);
+        throw;
+    }
+    ++m_transformRevision;
+    return static_cast<EntityID>(count);
 }
 
 uint32_t Scene::GetEntityCount() const { return static_cast<uint32_t>(m_entityMeshes.size()); }
@@ -45,7 +62,12 @@ MaterialID Scene::GetEntityMaterial(EntityID entity) const { return m_entityMate
 const Transform& Scene::GetTransform(EntityID entity) const { return m_entityTransforms[ToIndex(entity)]; }
 const EntityLightingDesc& Scene::GetEntityLighting(EntityID entity) const { return m_entityLighting[ToIndex(entity)]; }
 void Scene::SetEntityLighting(EntityID entity, const EntityLightingDesc& lighting) { m_entityLighting[ToIndex(entity)] = lighting; }
-void Scene::SetMaterial(MaterialID material, const MaterialDesc& value) { m_materials[ToIndex(material)] = value; }
+void Scene::SetMaterial(MaterialID material, const MaterialDesc& value)
+{
+    static_assert(std::is_nothrow_move_assignable_v<MaterialDesc>);
+    auto replacement=value;
+    m_materials[ToIndex(material)]=std::move(replacement);
+}
 
 const std::vector<std::shared_ptr<const MeshData>>& Scene::Meshes() const { return m_meshes; }
 const std::vector<MaterialDesc>& Scene::Materials() const { return m_materials; }
@@ -59,7 +81,7 @@ namespace
 {
     bool InvalidHandle(const char* kind) { std::fprintf(stderr, "dyf: invalid %s handle.\n", kind); return false; }
     bool ValidEntity(const std::shared_ptr<Scene>& data, EntityID id)
-    { return data && IsValid(id); }
+    { return data && IsValid(id) && ToIndex(id)<data->GetEntityCount(); }
     bool Finite(const Math::float4x4& value)
     { for(float v:value.m) if(!std::isfinite(v)) return false; return true; }
 
@@ -69,6 +91,7 @@ Scene::Scene() : m_lifetime(this, [](Scene*) {}) {}
 Scene::~Scene() = default;
 EntityHandle Scene::Add(const MeshData& mesh,const MaterialDesc& material,const Math::float4x4& transform)
 {
+    const auto meshCount=m_meshes.size(), materialCount=m_materials.size();
     try
     {
         if(mesh.vertices.empty() || mesh.indices.empty() || !Finite(transform))
@@ -79,35 +102,60 @@ EntityHandle Scene::Add(const MeshData& mesh,const MaterialDesc& material,const 
         handle.m_id=this->CreateEntity(this->CreateMesh(mesh),this->CreateMaterial(material),transform);
         return handle;
     }
-    catch(const std::exception& error) {std::fprintf(stderr,"dyf: Scene::Add: %s\n",error.what());return {};}
+    catch(const std::exception& error)
+    {
+        m_meshes.resize(meshCount); m_materials.resize(materialCount);
+        std::fprintf(stderr,"dyf: Scene::Add: %s\n",error.what());return {};
+    }
 }
-EntityHandle::operator bool() const { const auto data=m_scene.lock();return ValidEntity(data,m_id) && ToIndex(m_id)<data->GetEntityCount(); }
+EntityHandle Scene::AddInstance(const EntityHandle& source,const Math::float4x4& transform)
+{
+    const auto owner=source.m_scene.lock();
+    if(owner.get()!=this || !ValidEntity(owner,source.m_id) || !Finite(transform))
+    { std::fprintf(stderr,"dyf: AddInstance requires a live local entity and finite transform.\n"); return {}; }
+    const auto count=m_materials.size();
+    try
+    {
+        // Copy before vector growth: the source material may be inside m_materials.
+        const auto material=m_materials[ToIndex(GetEntityMaterial(source.m_id))];
+        const auto lighting=GetEntityLighting(source.m_id);
+        const auto id=CreateMaterial(material);
+        return GetEntity(CreateEntity(GetEntityMesh(source.m_id),id,transform,lighting));
+    }
+    catch(const std::exception& error)
+    { m_materials.resize(count);std::fprintf(stderr,"dyf: AddInstance: %s\n",error.what());return {}; }
+}
+EntityHandle::operator bool() const { const auto data=m_scene.lock();return ValidEntity(data,m_id); }
 Math::float4x4 EntityHandle::GetTransform() const
-{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id) || ToIndex(m_id)>=data->GetEntityCount()){InvalidHandle("entity");return Math::float4x4::Identity();}return data->GetTransform(m_id).worldMatrix; }
+{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id)){InvalidHandle("entity");return Math::float4x4::Identity();}return data->GetTransform(m_id).worldMatrix; }
 MaterialDesc EntityHandle::GetMaterial() const
-{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id) || ToIndex(m_id)>=data->GetEntityCount()){InvalidHandle("entity");return {};}return data->Materials()[ToIndex(data->GetEntityMaterial(m_id))]; }
+{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id)){InvalidHandle("entity");return {};}return data->Materials()[ToIndex(data->GetEntityMaterial(m_id))]; }
 bool EntityHandle::SetTransform(const Math::float4x4& value)
 {
-    const auto data=m_scene.lock();if(!ValidEntity(data,m_id) || ToIndex(m_id)>=data->GetEntityCount())return InvalidHandle("entity");
+    const auto data=m_scene.lock();if(!ValidEntity(data,m_id))return InvalidHandle("entity");
     if(!Finite(value)){std::fprintf(stderr,"dyf: transform must be finite.\n");return false;}
-    data->m_entityTransforms[ToIndex(m_id)].worldMatrix=value;return true;
+    auto& current=data->m_entityTransforms[ToIndex(m_id)].worldMatrix;
+    if(std::equal(std::begin(current.m),std::end(current.m),std::begin(value.m)))return true;
+    current=value;
+    data->m_entityTransformRevisions[ToIndex(m_id)]=++data->m_transformRevision;
+    return true;
 }
 bool EntityHandle::SetPosition(Math::float3 value)
 {
-    const auto data=m_scene.lock();if(!ValidEntity(data,m_id) || ToIndex(m_id)>=data->GetEntityCount())return InvalidHandle("entity");
+    const auto data=m_scene.lock();if(!ValidEntity(data,m_id))return InvalidHandle("entity");
     auto transform=data->GetTransform(m_id).worldMatrix;transform.m[12]=value.x;transform.m[13]=value.y;transform.m[14]=value.z;
     return SetTransform(transform);
 }
 bool EntityHandle::SetMaterial(const MaterialDesc& value)
 {
-    const auto data=m_scene.lock();if(!ValidEntity(data,m_id) || ToIndex(m_id)>=data->GetEntityCount())return InvalidHandle("entity");
+    const auto data=m_scene.lock();if(!ValidEntity(data,m_id))return InvalidHandle("entity");
     try {data->SetMaterial(data->GetEntityMaterial(m_id),value);return true;}
     catch(const std::exception& error){std::fprintf(stderr,"dyf: material update: %s\n",error.what());return false;}
 }
 EntityLightingDesc EntityHandle::GetLighting() const
-{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id) || ToIndex(m_id)>=data->GetEntityCount()){InvalidHandle("entity");return {};}return data->GetEntityLighting(m_id); }
+{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id)){InvalidHandle("entity");return {};}return data->GetEntityLighting(m_id); }
 bool EntityHandle::SetLighting(const EntityLightingDesc& lighting)
-{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id) || ToIndex(m_id)>=data->GetEntityCount())return InvalidHandle("entity");data->SetEntityLighting(m_id,lighting);return true; }
+{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id))return InvalidHandle("entity");data->SetEntityLighting(m_id,lighting);return true; }
 template<typename T> std::vector<T>& Scene::Lights()
 {
     if constexpr(std::is_same_v<T,DirectionalLight>)return m_directionalLights;

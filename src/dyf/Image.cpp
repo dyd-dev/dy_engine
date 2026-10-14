@@ -31,8 +31,8 @@ namespace
 static bool DecodeImage(const std::string& path, Image& result)
 {
     if(path.empty()) return false;
-    int width = 0, height = 0, channels = 0;
-    DecodedPixels pixels(stbi_load(path.c_str(), &width, &height, &channels, 4), stbi_image_free);
+    int width = 0, height = 0;
+    DecodedPixels pixels(stbi_load(path.c_str(), &width, &height, nullptr, 4), stbi_image_free);
     size_t bytes = 0;
     if(!pixels || !DecodedByteSize(width, height, UINT64_MAX, bytes)) return false;
 
@@ -50,16 +50,16 @@ static bool DecodeImage(const uint8_t* encodedBytes, size_t encodedSize, Image& 
     if(!encodedBytes || !encodedSize || encodedSize > static_cast<size_t>(std::numeric_limits<int>::max()))
         return false;
 
-    int width = 0, height = 0, channels = 0;
+    int width = 0, height = 0;
     const auto size = static_cast<int>(encodedSize);
-    if(!stbi_info_from_memory(encodedBytes, size, &width, &height, &channels)) return false;
+    if(!stbi_info_from_memory(encodedBytes, size, &width, &height, nullptr)) return false;
     size_t bytes = 0;
     if(!DecodedByteSize(width, height, maxDecodedBytes, bytes))
     {
         if(outLimitExceeded && width > 0 && height > 0) *outLimitExceeded = true;
         return false;
     }
-    DecodedPixels pixels(stbi_load_from_memory(encodedBytes, size, &width, &height, &channels, 4), stbi_image_free);
+    DecodedPixels pixels(stbi_load_from_memory(encodedBytes, size, &width, &height, nullptr, 4), stbi_image_free);
     if(!pixels) return false;
     if(!DecodedByteSize(width, height, maxDecodedBytes, bytes))
     {

@@ -245,18 +245,34 @@ namespace dyf::RHI
     {
         ShaderHandle computeShader=nullptr;
         PipelineLayoutDesc layout={};
+        // Metal dispatch geometry; match the shader local_size/numthreads on other backends.
+        uint32_t threadGroupSize[3]={1,1,1};
+    };
+
+    struct MeshPipelineDesc
+    {
+        ShaderHandle meshShader = nullptr;
+        ShaderHandle fragmentShader = nullptr;
+        RasterState raster = {};
+        DepthStencilState depthStencil = {};
+        const ColorAttachmentDesc* colorAttachments = nullptr;
+        uint32_t colorAttachmentCount = 0;
+        PipelineLayoutDesc layout = {};
     };
 
 	class Pipeline
 	{
 	public:
+		Pipeline(const Pipeline&) = delete;
+		Pipeline& operator=(const Pipeline&) = delete;
 		[[nodiscard]] bool IsCompute() const {return m_compute;}
+		[[nodiscard]] bool IsMesh() const {return m_mesh;}
         [[nodiscard]] const PipelineLayoutDesc& GetLayout() const { return m_layout; }
 
 	protected:
 		virtual ~Pipeline() = default;
-		explicit Pipeline(const PipelineLayoutDesc& layout,bool compute=false)
-			: m_layout(layout),m_compute(compute)
+		explicit Pipeline(const PipelineLayoutDesc& layout,bool compute=false,bool mesh=false)
+			: m_layout(layout),m_compute(compute),m_mesh(mesh)
 		{
 			if(layout.bindings != nullptr && layout.bindingCount != 0)
 			{
@@ -279,6 +295,7 @@ namespace dyf::RHI
 		Format m_depthStencilFormat = Format::Unknown;
 		PipelineLayoutDesc m_layout = {};
         bool m_compute=false;
+        bool m_mesh=false;
 		std::vector<ResourceBindingLayout> m_bindings;
 	};
 }

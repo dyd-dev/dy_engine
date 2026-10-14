@@ -1,5 +1,3 @@
-# ===== ===== Requirements ===== =====
-# message(STATUS "[${PROJECT_NAME}] Find DirectX 12...")
 
 # ===== ===== Backend Target ===== =====
 set(BACKEND_NAME "dy_backend_d3d12")

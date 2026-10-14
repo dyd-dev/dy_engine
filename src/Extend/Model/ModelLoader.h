@@ -1,12 +1,24 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
+#include <system_error>
+#include <utility>
+#include <vector>
 #include <string>
 
 #include <dyf/Extends/Model/Model.h>
 
 namespace dyf
 {
+    // Internal loader accounting for deferred external-image decoding.
+    [[nodiscard]] bool LoadModel(const std::string& path, ModelData& outModel,
+        const ModelLoadOptions& options, uint64_t& decodedBytes);
+	[[nodiscard]] SkinInfluence MakeSkinInfluence(
+		std::vector<std::pair<uint32_t, float>> values, bool& truncated);
+	[[nodiscard]] bool IsPathInsideDirectory(
+		const std::filesystem::path& directory, const std::filesystem::path& candidate, std::error_code& error);
+
 	class ModelLoadBudget
 	{
 	public:
@@ -15,6 +27,7 @@ namespace dyf
 		[[nodiscard]] bool CheckJoints(uint64_t count) const;
 		[[nodiscard]] bool AddAnimationKeys(uint64_t count);
 		[[nodiscard]] bool AddBytes(uint64_t count, uint64_t stride, const char* category);
+		[[nodiscard]] uint64_t DecodedBytes() const { return m_decodedBytes; }
 
 	private:
 		const std::string& m_path;
@@ -30,14 +43,14 @@ namespace dyf
 		const std::string& path,
 		const std::string& message);
 	[[nodiscard]] Math::float3 BuildFallbackTangent(const Math::float3& normal);
-	void CalculateTangents(MeshData& data, bool generateMissingNormals = false);
+	[[nodiscard]] bool CalculateTangents(MeshData& data, bool generateMissingNormals = false);
 	[[nodiscard]] uint32_t EnsureDefaultMaterial(ModelData& model);
 	[[nodiscard]] bool LoadGltfModel(
 		const std::string& filepath,
 		ModelData& outModel,
-		const ModelLoadOptions& options);
+		const ModelLoadOptions& options, uint64_t* decodedBytes = nullptr);
 	[[nodiscard]] bool LoadUfbxModel(
 		const std::string& filepath,
 		ModelData& outModel,
-		const ModelLoadOptions& options);
+		const ModelLoadOptions& options, uint64_t* decodedBytes = nullptr);
 }

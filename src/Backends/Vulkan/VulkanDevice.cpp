@@ -90,6 +90,8 @@ namespace dyf::Backends
 		explicit Impl(VulkanDevice& owner) : m_owner(owner) {}
 		~Impl();
         const VulkanContext& Context() const {return m_context;}
+		RHI::UploadMemoryStatistics GetUploadMemoryStatistics() const
+		{ return m_uploadPool ? m_uploadPool->GetStatistics() : RHI::UploadMemoryStatistics{}; }
 		bool IsLost() const {return m_submissionFaulted;}
         bool Supports(RHI::Feature feature) const
         {
@@ -111,6 +113,8 @@ namespace dyf::Backends
             case RHI::Feature::DescriptorIndexing: return supported.shaderSampledImageArrayDynamicIndexing == VK_TRUE;
             case RHI::Feature::Wireframe: return supported.fillModeNonSolid == VK_TRUE;
             case RHI::Feature::DepthBiasClamp: return supported.depthBiasClamp == VK_TRUE;
+            case RHI::Feature::MeshShader: return m_context.meshShaderSupported;
+            case RHI::Feature::TaskShader: return false;
             default: return false;
             }
         }
@@ -118,7 +122,25 @@ namespace dyf::Backends
         uint64_t GetCompletedSubmission() {CollectCompletedSubmissions(); return m_submissionFaulted?0:m_completedSubmission;}
         void DiscardCommandList(RHI::ICommandList* list) {auto& active=m_acquiredCommandLists;active.erase(std::remove_if(active.begin(),active.end(),[list](const auto& value){return value.get()==list;}),active.end());}
         VkResult WaitForShutdown() { return m_context.device == VK_NULL_HANDLE ? VK_SUCCESS : vkDeviceWaitIdle(m_context.device); }
-        bool WaitIdle() { if(m_context.device == VK_NULL_HANDLE || vkDeviceWaitIdle(m_context.device) != VK_SUCCESS) return false; CollectCompletedSubmissions(); return !m_submissionFaulted; }
+        bool WaitIdle()
+        {
+            if(m_context.device==VK_NULL_HANDLE) return false;
+            const VkResult result=vkDeviceWaitIdle(m_context.device);
+            if(result==VK_ERROR_DEVICE_LOST) m_submissionFaulted=true;
+            if(result!=VK_SUCCESS) return false;
+            CollectCompletedSubmissions();
+            return !m_submissionFaulted;
+        }
+        bool ReadTimestamps(VulkanTimestampQuery& query,uint32_t first,uint32_t count,uint64_t* ticks)
+        {
+            CollectCompletedSubmissions();
+            if(m_submissionFaulted || !std::all_of(query.initialized.begin()+first,query.initialized.begin()+first+count,
+                [](uint8_t initialized) { return initialized!=0; })) return false;
+            const VkResult result=vkGetQueryPoolResults(m_context.device,query.pool,first,count,
+                size_t(count)*sizeof(uint64_t),ticks,sizeof(uint64_t),VK_QUERY_RESULT_64_BIT);
+            if(result==VK_ERROR_DEVICE_LOST) m_submissionFaulted=true;
+            return result==VK_SUCCESS;
+        }
         void ClearSwapchain() { DestroyCurrentSwapchain(); DestroyRetiredSwapchains(); m_hasSwapchainDesc = false; }
 
 		int Initialize(const void* windowHandle, const dyf::RHI::DeviceDesc& desc);
@@ -133,8 +155,27 @@ namespace dyf::Backends
 		dyf::RHI::BufferHandle CreateBuffer(const dyf::RHI::BufferDesc& desc);
 		dyf::RHI::TextureHandle CreateTexture(const dyf::RHI::TextureDesc& desc);
 		dyf::RHI::ShaderHandle CreateShader(const dyf::RHI::ShaderDesc& desc);
-		RHI::PipelineHandle CreateComputePipeline(const RHI::ComputePipelineDesc& desc) {try {auto* pipeline=new VulkanPipeline(m_context,desc);m_pipelines.push_back(pipeline);return pipeline;}catch(const std::exception&){return nullptr;}}
+		RHI::PipelineHandle CreateComputePipeline(const RHI::ComputePipelineDesc& desc)
+		{
+			try
+			{
+				std::unique_ptr<VulkanPipeline, VulkanObjectDeleter> pipeline(new VulkanPipeline(m_context, desc));
+				m_pipelines.push_back(pipeline.get());
+				return pipeline.release();
+			}
+			catch (const std::exception&) { return nullptr; }
+		}
         dyf::RHI::PipelineHandle CreateGraphicsPipeline(const dyf::RHI::GraphicsPipelineDesc& desc);
+        dyf::RHI::PipelineHandle CreateMeshPipeline(const dyf::RHI::MeshPipelineDesc& desc)
+        {
+            try
+            {
+                std::unique_ptr<VulkanPipeline, VulkanObjectDeleter> pipeline(new VulkanPipeline(m_context, desc));
+                m_pipelines.push_back(pipeline.get());
+                return pipeline.release();
+            }
+            catch(const std::exception&) { return nullptr; }
+        }
 		dyf::RHI::ResourceSetHandle CreateResourceSet(const dyf::RHI::ResourceSetDesc& desc);
 		void DestroyBuffer(dyf::RHI::BufferHandle buffer);
 		void DestroyTexture(dyf::RHI::TextureHandle texture);
@@ -170,11 +211,9 @@ namespace dyf::Backends
 		void DestroyDeviceResources();
 
 		VulkanContext m_context;
+		std::shared_ptr<VulkanUploadPool> m_uploadPool;
 		VulkanSwapchain m_swapchain;
 		void* m_windowHandle = nullptr;
-		uint32_t m_maxFramesInFlight = 0;
-        uint32_t m_adapterIndex=0;
-        bool m_enableValidation=false;
         VkDebugUtilsMessengerEXT m_debugMessenger = VK_NULL_HANDLE;
 
 		std::vector<VkSemaphore> m_imageAvailableSemaphores;
@@ -193,6 +232,24 @@ namespace dyf::Backends
 		};
 		std::vector<SubmissionRecord> m_submissions;
 		std::vector<std::unique_ptr<VulkanCommandList, VulkanObjectDeleter>> m_acquiredCommandLists;
+		struct ReadbackResources
+		{
+			VkDevice device = VK_NULL_HANDLE;
+			VkBuffer buffer = VK_NULL_HANDLE;
+			VkDeviceMemory memory = VK_NULL_HANDLE;
+			VkCommandPool pool = VK_NULL_HANDLE;
+			VulkanTexture* source = nullptr;
+			std::unique_ptr<VulkanTexture, VulkanObjectDeleter> retiredSource;
+			~ReadbackResources()
+			{
+				if(pool) vkDestroyCommandPool(device, pool, nullptr);
+				if(buffer) vkDestroyBuffer(device, buffer, nullptr);
+				if(memory) vkFreeMemory(device, memory, nullptr);
+			}
+		};
+		// An uncertain completion faults the device and prevents another readback.
+		// Keep its resources until shutdown has established idle or device loss.
+		std::unique_ptr<ReadbackResources> m_failedReadback;
 
 		struct RetiredSwapchainGeneration
 		{
@@ -250,6 +307,8 @@ namespace dyf::Backends
 
 
 uint64_t VulkanDevice::GetLastSubmissionNative() const {return m_impl->GetLastSubmission();}
+RHI::UploadMemoryStatistics VulkanDevice::GetUploadMemoryStatisticsNative() const
+{ return m_impl->GetUploadMemoryStatistics(); }
 uint64_t VulkanDevice::GetCompletedSubmissionNative() {return m_impl->GetCompletedSubmission();}
 void VulkanDevice::DiscardCommandListNative(RHI::ICommandList* list) {m_impl->DiscardCommandList(list);}
 
@@ -264,8 +323,7 @@ void VulkanDevice::DestroyTimestampQueryNative(RHI::TimestampQueryHandle query)
 {delete static_cast<VulkanTimestampQuery*>(query);}
 bool VulkanDevice::ReadTimestampsNative(RHI::TimestampQueryHandle query,uint32_t first,uint32_t count,uint64_t* ticks)
 {
-    return vkGetQueryPoolResults(m_impl->Context().device,static_cast<VulkanTimestampQuery*>(query)->pool,
-        first,count,count*sizeof(uint64_t),ticks,sizeof(uint64_t),VK_QUERY_RESULT_64_BIT)==VK_SUCCESS;
+    return m_impl->ReadTimestamps(*static_cast<VulkanTimestampQuery*>(query),first,count,ticks);
 }
 double VulkanDevice::GetTimestampPeriodNative() const
 {
@@ -325,7 +383,7 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
         VkPhysicalDeviceFeatures features{};
         vkGetPhysicalDeviceFeatures(m_impl->Context().physicalDevice,&features);
         // 레이아웃 전체와 각 셰이더 단계의 실제 디스크립터 수를 네이티브 한도와 비교한다.
-        uint64_t counts[6][5]={};
+        uint64_t counts[7][5]={};
         for(uint32_t i=0;i<desc.bindingCount;++i)
         {
             const auto& binding=desc.bindings[i];
@@ -343,11 +401,8 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
             if(binding.type==RHI::ResourceBindingType::ReadWriteStorageBuffer ||
                 binding.type==RHI::ResourceBindingType::StorageTexture)
             {
-                if((binding.stages&RHI::ShaderStageFlags::Vertex)!=RHI::ShaderStageFlags::None &&
-                    !features.vertexPipelineStoresAndAtomics)return false;
-                if((binding.stages&RHI::ShaderStageFlags::Hull)!=RHI::ShaderStageFlags::None &&
-                    !features.vertexPipelineStoresAndAtomics)return false;
-                if((binding.stages&RHI::ShaderStageFlags::Domain)!=RHI::ShaderStageFlags::None &&
+                if((binding.stages&(RHI::ShaderStageFlags::Vertex | RHI::ShaderStageFlags::Hull |
+                    RHI::ShaderStageFlags::Domain))!=RHI::ShaderStageFlags::None &&
                     !features.vertexPipelineStoresAndAtomics)return false;
                 if((binding.stages&RHI::ShaderStageFlags::Fragment)!=RHI::ShaderStageFlags::None &&
                     !features.fragmentStoresAndAtomics)return false;
@@ -356,8 +411,8 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
             constexpr RHI::ShaderStageFlags stages[] = {
                 RHI::ShaderStageFlags::Vertex, RHI::ShaderStageFlags::Hull,
                 RHI::ShaderStageFlags::Domain, RHI::ShaderStageFlags::Fragment,
-                RHI::ShaderStageFlags::Compute};
-            for(uint32_t stage=0;stage<5;++stage)
+                RHI::ShaderStageFlags::Compute, RHI::ShaderStageFlags::Mesh};
+            for(uint32_t stage=0;stage<6;++stage)
                 if((binding.stages&stages[stage])!=RHI::ShaderStageFlags::None) counts[stage+1][kind]+=binding.count;
         }
         const uint64_t totalLimits[]={limits.maxDescriptorSetSamplers,limits.maxDescriptorSetUniformBuffers,
@@ -365,7 +420,7 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
         const uint64_t stageLimits[]={limits.maxPerStageDescriptorSamplers,limits.maxPerStageDescriptorUniformBuffers,
             limits.maxPerStageDescriptorStorageBuffers,limits.maxPerStageDescriptorSampledImages,limits.maxPerStageDescriptorStorageImages};
         for(uint32_t kind=0;kind<5;++kind) if(counts[0][kind]>totalLimits[kind])return false;
-        for(uint32_t stage=1;stage<6;++stage)
+        for(uint32_t stage=1;stage<7;++stage)
         {
             uint64_t resources=0;
             for(uint32_t kind=0;kind<5;++kind)
@@ -386,6 +441,15 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
         const auto& limits=properties.limits;
         if(desc.vertexBufferCount>limits.maxVertexInputBindings || desc.vertexAttributeCount>limits.maxVertexInputAttributes ||
             desc.colorAttachmentCount>limits.maxColorAttachments)return false;
+        uint64_t fragmentResources=desc.colorAttachmentCount;
+        for(uint32_t i=0;i<desc.layout.bindingCount;++i)
+        {
+            const auto& binding=desc.layout.bindings[i];
+            if(binding.type!=RHI::ResourceBindingType::StaticSampler &&
+                (binding.stages&RHI::ShaderStageFlags::Fragment)!=RHI::ShaderStageFlags::None)
+                fragmentResources+=binding.count;
+        }
+        if(fragmentResources>limits.maxPerStageResources) return false;
         for(uint32_t i=0;i<desc.vertexBufferCount;++i)
             if(desc.vertexBuffers[i].binding>=limits.maxVertexInputBindings ||
                 desc.vertexBuffers[i].stride>limits.maxVertexInputBindingStride)return false;
@@ -404,9 +468,9 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
         vkGetPhysicalDeviceFeatures(physical,&features);
         const auto sameBlend=[](const RHI::ColorAttachmentDesc& a,const RHI::ColorAttachmentDesc& b) {
             return a.writeMask==b.writeMask && a.blend.enabled==b.blend.enabled &&
-                a.blend.sourceColor==b.blend.sourceColor && a.blend.destinationColor==b.blend.destinationColor &&
+                (!a.blend.enabled || (a.blend.sourceColor==b.blend.sourceColor && a.blend.destinationColor==b.blend.destinationColor &&
                 a.blend.colorOp==b.blend.colorOp && a.blend.sourceAlpha==b.blend.sourceAlpha &&
-                a.blend.destinationAlpha==b.blend.destinationAlpha && a.blend.alphaOp==b.blend.alphaOp;
+                a.blend.destinationAlpha==b.blend.destinationAlpha && a.blend.alphaOp==b.blend.alphaOp));
         };
         for(uint32_t i=0;i<desc.colorAttachmentCount;++i)
         {
@@ -418,6 +482,40 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
         }
         return desc.depthStencil.format==RHI::Format::Unknown ||
             hasFormat(desc.depthStencil.format,VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT,false);
+    }
+
+    bool VulkanDevice::SupportsMeshPipelineNative(const RHI::MeshPipelineDesc& desc) const
+    {
+        if (!m_impl->Context().meshShaderSupported) return false;
+        const auto physical = m_impl->Context().physicalDevice;
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(physical, &properties);
+        const auto& limits = properties.limits;
+        if (desc.colorAttachmentCount > limits.maxColorAttachments) return false;
+
+        const auto hasFormat = [&](RHI::Format format, VkFormatFeatureFlags feature) {
+            VkFormatProperties supported{};
+            vkGetPhysicalDeviceFormatProperties(physical, ToVulkanFormat(format), &supported);
+            return (supported.optimalTilingFeatures & feature) == feature;
+        };
+        VkPhysicalDeviceFeatures features{};
+        vkGetPhysicalDeviceFeatures(physical, &features);
+        const auto sameBlend = [](const RHI::ColorAttachmentDesc& a, const RHI::ColorAttachmentDesc& b) {
+            return a.writeMask == b.writeMask && a.blend.enabled == b.blend.enabled &&
+                a.blend.sourceColor == b.blend.sourceColor && a.blend.destinationColor == b.blend.destinationColor &&
+                a.blend.colorOp == b.blend.colorOp && a.blend.sourceAlpha == b.blend.sourceAlpha &&
+                a.blend.destinationAlpha == b.blend.destinationAlpha && a.blend.alphaOp == b.blend.alphaOp;
+        };
+        for (uint32_t i = 0; i < desc.colorAttachmentCount; ++i)
+        {
+            const auto& attachment = desc.colorAttachments[i];
+            if (i && !features.independentBlend && !sameBlend(attachment, desc.colorAttachments[0])) return false;
+            VkFormatFeatureFlags required = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+            if (attachment.blend.enabled) required |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+            if (!hasFormat(attachment.format, required)) return false;
+        }
+        return desc.depthStencil.format == RHI::Format::Unknown ||
+            hasFormat(desc.depthStencil.format, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
     }
 
     bool VulkanDevice::CreateSwapchainNative(const dyf::RHI::SwapchainDesc& desc)
@@ -469,6 +567,11 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 	dyf::RHI::PipelineHandle VulkanDevice::CreateGraphicsPipelineNative(const dyf::RHI::GraphicsPipelineDesc& desc)
 	{
 		return m_impl->CreateGraphicsPipeline(desc);
+	}
+
+	dyf::RHI::PipelineHandle VulkanDevice::CreateMeshPipelineNative(const dyf::RHI::MeshPipelineDesc& desc)
+	{
+		return m_impl->CreateMeshPipeline(desc);
 	}
 
 	dyf::RHI::ResourceSetHandle VulkanDevice::CreateResourceSetNative(const dyf::RHI::ResourceSetDesc& desc)
@@ -532,13 +635,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 	int VulkanDevice::Impl::Initialize(const void* windowHandle, const dyf::RHI::DeviceDesc& desc)
 	{
 		m_windowHandle = const_cast<void*>(windowHandle);
-		m_maxFramesInFlight = desc.maxFramesInFlight;
-        m_adapterIndex=desc.adapterIndex;
-        m_enableValidation=desc.enableValidation;
-		if (m_maxFramesInFlight == 0) return -1;
+		if (desc.maxFramesInFlight == 0) return -1;
 
 		if (!CreateInstance() || !PickPhysicalDevice() || !CreateLogicalDevice()) return -1;
-		m_frameSlots.assign(m_maxFramesInFlight, VK_NULL_HANDLE);
+		m_frameSlots.assign(m_owner.GetDesc().maxFramesInFlight, VK_NULL_HANDLE);
 		return 0;
 	}
 
@@ -547,13 +647,13 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		if (status.retryLater) return false;
 		if (status.operation != nullptr)
 		{
-			LogVulkanFailure(status.operation, status.result);
 			m_submissionFaulted = true;
+			LogVulkanFailure(status.operation, status.result);
 		}
 		else if (m_hasSwapchainDesc)
 		{
-			Platform::Log::Writef(Platform::LogLevel::Error, "Vulkan", __FILE__, __LINE__, "Vulkan swapchain recreation cannot satisfy the requested configuration.");
 			m_submissionFaulted = true;
+			Platform::Log::Writef(Platform::LogLevel::Error, "Vulkan", __FILE__, __LINE__, "Vulkan swapchain recreation cannot satisfy the requested configuration.");
 		}
 		return false;
 	}
@@ -630,10 +730,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		}
 		catch (const std::exception& exception)
 		{
-			Platform::Log::Writef(Platform::LogLevel::Error, "Vulkan", __FILE__, __LINE__, "Vulkan swapchain creation failed: %s", exception.what());
 			m_submissionFaulted = true;
 			if (oldSwapchainRetired) m_recreationOldSwapchain = VK_NULL_HANDLE;
 			DestroyCurrentSwapchain();
+			Platform::Log::Writef(Platform::LogLevel::Error, "Vulkan", __FILE__, __LINE__, "Vulkan swapchain creation failed: %s", exception.what());
 			return false;
 		}
 
@@ -703,8 +803,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			if (result == VK_NOT_READY || result == VK_TIMEOUT) return false;
 			if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
 			{
-				LogVulkanFailure("vkAcquireNextImageKHR", result);
 				m_submissionFaulted = true;
+				LogVulkanFailure("vkAcquireNextImageKHR", result);
 				return false;
 			}
 			m_imageAcquired = true;
@@ -726,7 +826,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         if(m_backBuffers[m_currentImageIndex]->GetBarrierOldLayout(RHI::ResourceState::Present)==VK_IMAGE_LAYOUT_UNDEFINED)
         {
             auto* command=static_cast<VulkanCommandList*>(AcquireCommandList());
-            if(!command)return false;
+            if(!command) { m_frameReady=false;return false; }
             RHI::ResourceBarrierDesc barrier{};
             barrier.texture=m_backBuffer;
             barrier.before=RHI::ResourceState::Present;
@@ -746,8 +846,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		if (m_context.device == VK_NULL_HANDLE || m_submissionFaulted) return nullptr;
 		try
 		{
+			if (!m_uploadPool) m_uploadPool = CreateVulkanUploadPool(m_context);
 			std::unique_ptr<VulkanCommandList, VulkanObjectDeleter> commandList(
-				new VulkanCommandList(m_context));
+				new VulkanCommandList(m_context, m_uploadPool));
 			VulkanCommandList* result = commandList.get();
 			m_acquiredCommandLists.push_back(std::move(commandList));
 			return result;
@@ -861,10 +962,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		const VkResult result = vkQueueSubmit(m_context.graphicsQueue, 1, &submitInfo, submission.fence);
 		if (result != VK_SUCCESS)
 		{
-			LogVulkanFailure("vkQueueSubmit", result);
             m_submissionFaulted = true;
             // Keep an uncertain submission alive until shutdown drains the device.
             m_submissions.push_back(std::move(submission));
+			LogVulkanFailure("vkQueueSubmit", result);
 			return false;
 		}
 		for (VulkanCommandList* commandList : selected) commandList->CommitResourceStates();
@@ -893,8 +994,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         const VkResult fenceCreated=vkCreateFence(m_context.device,&fenceInfo,nullptr,&completion.fence);
         if(fenceCreated!=VK_SUCCESS)
         {
-            LogVulkanFailure("vkCreateFence(Present)",fenceCreated);
             m_submissionFaulted=true;
+            LogVulkanFailure("vkCreateFence(Present)",fenceCreated);
             return false;
         }
         const VkPipelineStageFlags waitStage=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -912,9 +1013,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         const VkResult submitted=vkQueueSubmit(m_context.graphicsQueue,1,&submit,completion.fence);
         if(submitted!=VK_SUCCESS)
         {
-            LogVulkanFailure("vkQueueSubmit(Present)",submitted);
             m_submissionFaulted=true;
             m_submissions.push_back(std::move(completion));
+            LogVulkanFailure("vkQueueSubmit(Present)",submitted);
             return false;
         }
         completion.serial=++m_lastSubmission;
@@ -941,7 +1042,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         m_presentPending=false;
         m_frameReady=false;
         m_imageAcquired=false;
-        m_currentFrameSlot=(m_currentFrameSlot+1)%m_maxFramesInFlight;
+        m_currentFrameSlot=(m_currentFrameSlot+1)%m_owner.GetDesc().maxFramesInFlight;
         const bool recreateRequestedByAcquire=m_recreateAfterPresent;
         m_recreateAfterPresent=false;
         if(result==VK_SUCCESS || result==VK_SUBOPTIMAL_KHR || result==VK_ERROR_OUT_OF_DATE_KHR)
@@ -952,9 +1053,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
             return true;
         }
         // acquire의 SUBOPTIMAL 신호가 뒤따른 present의 실제 실패를 가리지 않게 한다.
-        LogVulkanFailure("vkQueuePresentKHR",result);
         if(result==VK_ERROR_DEVICE_LOST)m_submissionFaulted=true;
         else m_swapchainNeedsRecreate=true;
+        LogVulkanFailure("vkQueuePresentKHR",result);
         return false;
     }
 
@@ -981,19 +1082,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		const auto state = image->GetState(0, 0);
 		if(state == dyf::RHI::ResourceState::Undefined) return false;
 
-		struct Resources
-		{
-			VkDevice device;
-			VkBuffer buffer = VK_NULL_HANDLE;
-			VkDeviceMemory memory = VK_NULL_HANDLE;
-			VkCommandPool pool = VK_NULL_HANDLE;
-			~Resources()
-			{
-				if(pool) vkDestroyCommandPool(device, pool, nullptr);
-				if(buffer) vkDestroyBuffer(device, buffer, nullptr);
-				if(memory) vkFreeMemory(device, memory, nullptr);
-			}
-		} resources{m_context.device};
+		auto readback = std::make_unique<ReadbackResources>();
+		auto& resources = *readback;
+		resources.device = m_context.device;
+		resources.source = image;
 		VkBufferCreateInfo bufferInfo{};
 		bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
 		bufferInfo.size = bytes;
@@ -1074,10 +1166,26 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 		submit.commandBufferCount = 1;
 		submit.pCommandBuffers = &command;
-		if(vkQueueSubmit(m_context.graphicsQueue, 1, &submit, VK_NULL_HANDLE) != VK_SUCCESS) return false;
-		if(vkQueueWaitIdle(m_context.graphicsQueue) != VK_SUCCESS)
+		const VkResult submitted = vkQueueSubmit(m_context.graphicsQueue, 1, &submit, VK_NULL_HANDLE);
+		if(submitted != VK_SUCCESS)
+		{
+			// OOM submit failures leave the commands unsubmitted. Other failures
+			// do not provide that guarantee, so use the shutdown retention path.
+			if(submitted != VK_ERROR_OUT_OF_HOST_MEMORY && submitted != VK_ERROR_OUT_OF_DEVICE_MEMORY)
+			{
+				m_submissionFaulted = true;
+				m_failedReadback = std::move(readback);
+			}
+			LogVulkanFailure("vkQueueSubmit(readback)", submitted);
+			return false;
+		}
+		const VkResult waited = vkQueueWaitIdle(m_context.graphicsQueue);
+		if(waited != VK_SUCCESS)
 		{
 			m_submissionFaulted = true;
+			m_failedReadback = std::move(readback);
+			// A log callback may reenter the device, so publish failure ownership first.
+			LogVulkanFailure("vkQueueWaitIdle(readback)", waited);
 			return false;
 		}
 		dyf::RHI::TextureReadback output;
@@ -1228,7 +1336,11 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		const auto found = std::find(m_textures.begin(), m_textures.end(), texture);
 		if(found == m_textures.end()) return;
 		m_textures.erase(found);
-		VulkanObjectDeleter{}(static_cast<VulkanTexture*>(texture));
+		auto* native = static_cast<VulkanTexture*>(texture);
+		if(m_failedReadback && m_failedReadback->source == native)
+			m_failedReadback->retiredSource.reset(native);
+		else
+			VulkanObjectDeleter{}(native);
     }
 
 	void VulkanDevice::Impl::DestroyShader(dyf::RHI::ShaderHandle shader)
@@ -1331,8 +1443,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 #endif
         if(supported(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME))
             extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
-        const bool captureValidation = m_enableValidation && m_context.debugUtilsEnabled;
-        if (m_enableValidation && !captureValidation)
+        const bool captureValidation = m_owner.GetDesc().enableValidation && m_context.debugUtilsEnabled;
+        if (m_owner.GetDesc().enableValidation && !captureValidation)
             Platform::Log::Write(Platform::LogLevel::Warning, "Vulkan", "Validation log capture unavailable: VK_EXT_debug_utils is missing");
         VkDebugUtilsMessengerCreateInfoEXT debugInfo{};
         debugInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
@@ -1342,7 +1454,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         const uint32_t extensionCount=static_cast<uint32_t>(extensions.size());
 
 		std::vector<const char*> layers;
-		if(m_enableValidation) {if(!ValidationLayerAvailable())return false;layers.push_back(kValidationLayerName);}
+		if(m_owner.GetDesc().enableValidation) {if(!ValidationLayerAvailable())return false;layers.push_back(kValidationLayerName);}
 
 		VkApplicationInfo application{};
 		application.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
@@ -1400,67 +1512,52 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		std::vector<VkPhysicalDevice> devices(deviceCount);
 		if (vkEnumeratePhysicalDevices(m_context.instance, &deviceCount, devices.data()) != VK_SUCCESS) return false;
 
-		if(m_adapterIndex>=devices.size())return false;
-        const std::array<VkPhysicalDevice,1> selected={devices[m_adapterIndex]};
-        for (VkPhysicalDevice device : selected)
+		if(m_owner.GetDesc().adapterIndex>=deviceCount)return false;
+		const VkPhysicalDevice device = devices[m_owner.GetDesc().adapterIndex];
+		VkPhysicalDeviceProperties properties{};
+		vkGetPhysicalDeviceProperties(device, &properties);
+		if (properties.apiVersion < VK_API_VERSION_1_3) return false;
+
+		VkPhysicalDeviceVulkan13Features vulkan13{};
+		vulkan13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+		VkPhysicalDeviceFeatures2 features{};
+		features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+		features.pNext = &vulkan13;
+		vkGetPhysicalDeviceFeatures2(device, &features);
+		if (!vulkan13.dynamicRendering || !vulkan13.synchronization2) return false;
+
+		uint32_t familyCount = 0;
+		vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, nullptr);
+		std::vector<VkQueueFamilyProperties> families(familyCount);
+		vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, families.data());
+		VulkanContext::QueueFamilyIndices indices{};
+		for (uint32_t i = 0; i < familyCount; ++i)
 		{
-			VkPhysicalDeviceProperties properties{};
-			vkGetPhysicalDeviceProperties(device, &properties);
-			if (properties.apiVersion < VK_API_VERSION_1_3) continue;
+			if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) indices.graphicsFamily = i;
+			if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) indices.presentFamily = i;
+			if (indices.IsComplete()) break;
+		}
 
-			VkPhysicalDeviceVulkan13Features vulkan13{};
-			vulkan13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-			VkPhysicalDeviceFeatures2 features{};
-			features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-			features.pNext = &vulkan13;
-			vkGetPhysicalDeviceFeatures2(device, &features);
-			if (!vulkan13.dynamicRendering || !vulkan13.synchronization2) continue;
-
-			uint32_t familyCount = 0;
-			vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, nullptr);
-			std::vector<VkQueueFamilyProperties> families(familyCount);
-			vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, families.data());
-			VulkanContext::QueueFamilyIndices indices{};
-			for (uint32_t i = 0; i < familyCount; ++i)
-			{
-				if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) indices.graphicsFamily = i;
-				if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) indices.presentFamily = i;
-				if (indices.IsComplete()) break;
-			}
-
-			if (!indices.IsComplete()) continue;
+		if (!indices.IsComplete()) return false;
 
             Platform::Log::Writef(Platform::LogLevel::Info, "Vulkan", nullptr, 0,
                 "GPU=%s vendor=%u device=%u driverVersionRaw=%u api=%u.%u.%u validation=%s capture=%s",
                 properties.deviceName, properties.vendorID, properties.deviceID, properties.driverVersion,
                 VK_API_VERSION_MAJOR(properties.apiVersion), VK_API_VERSION_MINOR(properties.apiVersion), VK_API_VERSION_PATCH(properties.apiVersion),
-                m_enableValidation ? "on" : "off", m_debugMessenger != VK_NULL_HANDLE ? "on" : "off");
-			m_context.physicalDevice = device;
-			m_context.queueIndices = indices;
-			return true;
-		}
-		return false;
+                m_owner.GetDesc().enableValidation ? "on" : "off", m_debugMessenger != VK_NULL_HANDLE ? "on" : "off");
+		m_context.physicalDevice = device;
+		m_context.queueIndices = indices;
+		return true;
 	}
 
 	bool VulkanDevice::Impl::CreateLogicalDevice()
 	{
-		std::vector<uint32_t> queueFamilies = { m_context.queueIndices.graphicsFamily };
-		if (m_context.queueIndices.presentFamily != m_context.queueIndices.graphicsFamily)
-		{
-			queueFamilies.push_back(m_context.queueIndices.presentFamily);
-		}
 		const float priority = 1.0f;
-		std::vector<VkDeviceQueueCreateInfo> queueInfos;
-		queueInfos.reserve(queueFamilies.size());
-		for (uint32_t family : queueFamilies)
-		{
-			VkDeviceQueueCreateInfo queueInfo{};
-			queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-			queueInfo.queueFamilyIndex = family;
-			queueInfo.queueCount = 1;
-			queueInfo.pQueuePriorities = &priority;
-			queueInfos.push_back(queueInfo);
-		}
+		VkDeviceQueueCreateInfo queueInfo{};
+		queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+		queueInfo.queueFamilyIndex = m_context.queueIndices.graphicsFamily;
+		queueInfo.queueCount = 1;
+		queueInfo.pQueuePriorities = &priority;
 
 		VkPhysicalDeviceFeatures supported{};
 		vkGetPhysicalDeviceFeatures(m_context.physicalDevice, &supported);
@@ -1478,51 +1575,100 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		vulkan13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 		vulkan13.dynamicRendering = VK_TRUE;
 		vulkan13.synchronization2 = VK_TRUE;
-		const char* extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+		vulkan13.maintenance4 = VK_TRUE;
+
+		uint32_t extensionCount = 0;
+		vkEnumerateDeviceExtensionProperties(m_context.physicalDevice, nullptr, &extensionCount, nullptr);
+		std::vector<VkExtensionProperties> availableExtensions(extensionCount);
+		vkEnumerateDeviceExtensionProperties(m_context.physicalDevice, nullptr, &extensionCount, availableExtensions.data());
+
+		bool hasMeshShaderExtension = false;
+		for (const auto& ext : availableExtensions)
+		{
+			if (std::strcmp(ext.extensionName, VK_EXT_MESH_SHADER_EXTENSION_NAME) == 0)
+			{
+				hasMeshShaderExtension = true;
+				break;
+			}
+		}
+
+		VkPhysicalDeviceMeshShaderFeaturesEXT meshFeaturesSupported{};
+		meshFeaturesSupported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+		VkPhysicalDeviceMeshShaderFeaturesEXT meshFeaturesToEnable{};
+		meshFeaturesToEnable.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+		bool enableMeshShader = false;
+
+		if (hasMeshShaderExtension)
+		{
+			VkPhysicalDeviceFeatures2 features2{};
+			features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+			features2.pNext = &meshFeaturesSupported;
+			vkGetPhysicalDeviceFeatures2(m_context.physicalDevice, &features2);
+			if (meshFeaturesSupported.meshShader == VK_TRUE)
+			{
+				enableMeshShader = true;
+				meshFeaturesToEnable.meshShader = VK_TRUE;
+				meshFeaturesToEnable.taskShader = VK_FALSE;
+			}
+		}
+
+		std::vector<const char*> extensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+		if (enableMeshShader)
+		{
+			extensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
+			vulkan13.pNext = &meshFeaturesToEnable;
+		}
+
 		VkDeviceCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 		info.pNext = &vulkan13;
-		info.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
-		info.pQueueCreateInfos = queueInfos.data();
-		info.enabledExtensionCount = 1;
-		info.ppEnabledExtensionNames = extensions;
+		info.queueCreateInfoCount = 1;
+		info.pQueueCreateInfos = &queueInfo;
+		info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+		info.ppEnabledExtensionNames = extensions.data();
 		info.pEnabledFeatures = &enabled;
 		if (vkCreateDevice(m_context.physicalDevice, &info, nullptr, &m_context.device) != VK_SUCCESS) return false;
 		vkGetDeviceQueue(m_context.device, m_context.queueIndices.graphicsFamily, 0, &m_context.graphicsQueue);
 		vkGetDeviceQueue(m_context.device, m_context.queueIndices.presentFamily, 0, &m_context.presentQueue);
+
+		if (enableMeshShader)
+		{
+			m_context.vkCmdDrawMeshTasksEXT = reinterpret_cast<PFN_vkCmdDrawMeshTasksEXT>(
+				vkGetDeviceProcAddr(m_context.device, "vkCmdDrawMeshTasksEXT"));
+			m_context.meshShaderSupported = (m_context.vkCmdDrawMeshTasksEXT != nullptr);
+		}
+		else
+		{
+			m_context.meshShaderSupported = false;
+			m_context.vkCmdDrawMeshTasksEXT = nullptr;
+		}
 		return true;
 	}
 
 	bool VulkanDevice::Impl::CreateSwapchainSyncObjects()
 	{
-		m_imageAvailableSemaphores.assign(m_maxFramesInFlight, VK_NULL_HANDLE);
+		m_imageAvailableSemaphores.assign(m_owner.GetDesc().maxFramesInFlight, VK_NULL_HANDLE);
 		m_renderFinishedSemaphores.assign(m_swapchain.GetImageCount(), VK_NULL_HANDLE);
 		m_imagesInFlight.assign(m_swapchain.GetImageCount(), VK_NULL_HANDLE);
 		VkSemaphoreCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-		for (VkSemaphore& semaphore : m_imageAvailableSemaphores)
+		const auto createSemaphores = [&](std::vector<VkSemaphore>& semaphores, const char* operation)
 		{
-			const VkResult result = vkCreateSemaphore(m_context.device, &info, nullptr, &semaphore);
-			if (result != VK_SUCCESS)
+			for (VkSemaphore& semaphore : semaphores)
 			{
-				LogVulkanFailure("vkCreateSemaphore(acquire)", result);
-				m_submissionFaulted = true;
-				DestroySwapchainSyncObjects();
-				return false;
+				const VkResult result = vkCreateSemaphore(m_context.device, &info, nullptr, &semaphore);
+				if (result != VK_SUCCESS)
+				{
+					m_submissionFaulted = true;
+					DestroySwapchainSyncObjects();
+					LogVulkanFailure(operation, result);
+					return false;
+				}
 			}
-		}
-		for (VkSemaphore& semaphore : m_renderFinishedSemaphores)
-		{
-			const VkResult result = vkCreateSemaphore(m_context.device, &info, nullptr, &semaphore);
-			if (result != VK_SUCCESS)
-			{
-				LogVulkanFailure("vkCreateSemaphore(present)", result);
-				m_submissionFaulted = true;
-				DestroySwapchainSyncObjects();
-				return false;
-			}
-		}
-		return true;
+			return true;
+		};
+		return createSemaphores(m_imageAvailableSemaphores, "vkCreateSemaphore(acquire)") &&
+			createSemaphores(m_renderFinishedSemaphores, "vkCreateSemaphore(present)");
 	}
 
 	void VulkanDevice::Impl::UpdateBackBuffers()
@@ -1553,7 +1699,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 	void VulkanDevice::Impl::CollectCompletedSubmissions()
 	{
-		if (m_context.device == VK_NULL_HANDLE) return;
+		if (m_context.device == VK_NULL_HANDLE || m_submissionFaulted) return;
 		for (size_t i = 0; i < m_submissions.size();)
 		{
 			SubmissionRecord& submission = m_submissions[i];
@@ -1562,10 +1708,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
             if(status==VK_NOT_READY)break;
 			if (status != VK_SUCCESS)
 			{
-				LogVulkanFailure("vkGetFenceStatus", status);
 				m_submissionFaulted = true;
-				++i;
-				continue;
+				LogVulkanFailure("vkGetFenceStatus", status);
+				return;
 			}
 
 			if (submission.frameSlot < m_frameSlots.size() && m_frameSlots[submission.frameSlot] == submission.fence)
@@ -1576,6 +1721,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			{
 				m_imagesInFlight[submission.imageIndex] = VK_NULL_HANDLE;
 			}
+            for(const auto& commands:submission.commandLists) commands->CompleteTimestampResets();
 			m_completedSubmission=std::max(m_completedSubmission,submission.serial);
             vkDestroyFence(m_context.device, submission.fence, nullptr);
 			m_submissions.erase(m_submissions.begin() + static_cast<std::ptrdiff_t>(i));
@@ -1598,7 +1744,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 	VkSwapchainKHR VulkanDevice::Impl::RetireSwapchainGeneration()
 	{
-		RetiredSwapchainGeneration generation{};
+		// Allocate the retirement record before moving any native ownership.
+		auto& generation = m_retiredSwapchains.emplace_back();
 		const VkSwapchainKHR handle = m_swapchain.GetHandle();
 		generation.swapchain = std::move(m_swapchain);
 		generation.imageAvailableSemaphores = std::move(m_imageAvailableSemaphores);
@@ -1608,7 +1755,6 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		m_imagesInFlight.clear();
 		m_currentImageIndex = 0;
 		m_recreateAfterPresent = false;
-		m_retiredSwapchains.push_back(std::move(generation));
 		return handle;
 	}
 
@@ -1665,7 +1811,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		if (m_context.device != VK_NULL_HANDLE)
 		{
 			// 소유 장치의 소멸자가 큐 완료 또는 실제 DEVICE_LOST를 확인한 뒤에만 호출된다.
-			CollectCompletedSubmissions();
+            // Public resources (including queries) were already released. Retire
+            // native records without publishing query initialization during teardown.
 			for (SubmissionRecord& submission : m_submissions)
 			{
 				if (submission.fence != VK_NULL_HANDLE) vkDestroyFence(m_context.device, submission.fence, nullptr);
@@ -1673,6 +1820,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			m_submissions.clear();
 		}
 		m_acquiredCommandLists.clear();
+		// Commands have retired under their fences (or shutdown established idle/loss).
+		// Drop cached native pages while VkDevice still exists.
+		m_uploadPool.reset();
+		m_failedReadback.reset();
 		std::fill(m_frameSlots.begin(), m_frameSlots.end(), VK_NULL_HANDLE);
 
 		for (dyf::RHI::ResourceSetHandle resourceSet : m_resourceSets)

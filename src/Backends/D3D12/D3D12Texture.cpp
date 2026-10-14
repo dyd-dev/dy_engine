@@ -1,4 +1,5 @@
 #include "D3D12Texture.h"
+#include "d3dx12.h"
 
 #include <d3d12.h>
 #include <limits>
@@ -25,26 +26,6 @@ namespace dyf::Backends
             if (HasUsage(usage, RHI::TextureUsage::Storage))
                 flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
             return flags;
-        }
-
-        D3D12_RESOURCE_STATES ToNativeState(RHI::ResourceState state)
-        {
-            switch (state)
-            {
-            case RHI::ResourceState::CopyDestination: return D3D12_RESOURCE_STATE_COPY_DEST;
-            case RHI::ResourceState::ShaderResource:
-                return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-                    D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-            case RHI::ResourceState::UnorderedAccess: return D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-            case RHI::ResourceState::RenderTarget: return D3D12_RESOURCE_STATE_RENDER_TARGET;
-            case RHI::ResourceState::DepthRead: return D3D12_RESOURCE_STATE_DEPTH_READ;
-            case RHI::ResourceState::DepthWrite: return D3D12_RESOURCE_STATE_DEPTH_WRITE;
-            case RHI::ResourceState::Present: return D3D12_RESOURCE_STATE_PRESENT;
-            case RHI::ResourceState::Undefined:
-            case RHI::ResourceState::Common:
-            default:
-                return D3D12_RESOURCE_STATE_COMMON;
-            }
         }
 
         DXGI_FORMAT ToResourceFormat(RHI::Format format, RHI::TextureUsage usage)
@@ -105,11 +86,11 @@ namespace dyf::Backends
 
     D3D12Texture::D3D12Texture(ID3D12Device* device, const RHI::TextureDesc& desc)
         : RHI::Texture(desc)
-        , m_internal(new D3D12TextureInternal())
         , m_states(
             static_cast<std::size_t>(desc.mipLevels) * desc.depthOrArraySize,
             RHI::ResourceState::Undefined)
     {
+        m_internal = new D3D12TextureInternal();
         if (device == nullptr || desc.width == 0 || desc.height == 0 ||
             desc.depthOrArraySize == 0 || desc.mipLevels == 0)
         {
@@ -119,23 +100,20 @@ namespace dyf::Backends
         D3D12_HEAP_PROPERTIES heapProperties = {};
         heapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;
 
-        D3D12_RESOURCE_DESC resourceDesc = {};
-        resourceDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        resourceDesc.Width = desc.width;
-        resourceDesc.Height = desc.height;
-        resourceDesc.DepthOrArraySize = static_cast<UINT16>(desc.depthOrArraySize);
-        resourceDesc.MipLevels = static_cast<UINT16>(desc.mipLevels);
-        resourceDesc.Format = ToResourceFormat(desc.format, desc.usage);
-        resourceDesc.SampleDesc.Count = 1;
-        resourceDesc.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-        resourceDesc.Flags = ToResourceFlags(desc.usage);
+        const auto resourceDesc = CD3DX12_RESOURCE_DESC::Tex2D(
+            ToResourceFormat(desc.format, desc.usage),
+            desc.width,
+            desc.height,
+            static_cast<UINT16>(desc.depthOrArraySize),
+            static_cast<UINT16>(desc.mipLevels),
+            1, 0, ToResourceFlags(desc.usage));
         if (resourceDesc.Format == DXGI_FORMAT_UNKNOWN) return;
 
         if (FAILED(device->CreateCommittedResource(
                 &heapProperties,
                 D3D12_HEAP_FLAG_NONE,
                 &resourceDesc,
-                ToNativeState(RHI::ResourceState::Undefined),
+                D3D12_RESOURCE_STATE_COMMON,
                 nullptr,
                 IID_PPV_ARGS(&m_internal->resource))))
         {
@@ -219,9 +197,7 @@ namespace dyf::Backends
                                 view.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;
                                 if (desc.format == RHI::Format::D24_UNORM_S8_UINT)
                                 {
-                                    view.Flags = static_cast<D3D12_DSV_FLAGS>(
-                                        view.Flags |
-                                        D3D12_DSV_FLAG_READ_ONLY_STENCIL);
+                                    view.Flags |= D3D12_DSV_FLAG_READ_ONLY_STENCIL;
                                 }
                             }
                             if (desc.depthOrArraySize > 1)
@@ -253,13 +229,13 @@ namespace dyf::Backends
         std::size_t rtvHandle,
         bool swapchainImage)
         : RHI::Texture(desc)
-        , m_internal(new D3D12TextureInternal())
         , m_states(
             static_cast<std::size_t>(desc.mipLevels) * desc.depthOrArraySize,
             swapchainImage
                 ? RHI::ResourceState::Present
                 : RHI::ResourceState::Undefined)
     {
+        m_internal = new D3D12TextureInternal();
         m_internal->resource = resource;
         m_internal->rtvHandle.ptr = rtvHandle;
         m_internal->swapchainImage = swapchainImage;

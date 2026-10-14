@@ -47,6 +47,8 @@ namespace dyf::RHI
 	class Buffer
 	{
 	public:
+		Buffer(const Buffer&) = delete;
+		Buffer& operator=(const Buffer&) = delete;
 		[[nodiscard]] const BufferDesc& GetDesc() const { return m_desc; }
 
 	protected:

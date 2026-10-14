@@ -24,6 +24,13 @@ namespace dyf
 {
 	bool LoadModel(const std::string& path, ModelData& outModel, const ModelLoadOptions& options)
 	{
+        uint64_t decodedBytes=0;
+        return LoadModel(path,outModel,options,decodedBytes);
+    }
+
+    bool LoadModel(const std::string& path, ModelData& outModel, const ModelLoadOptions& options, uint64_t& decodedBytes)
+    {
+        decodedBytes=0;
 		const std::string extension = std::filesystem::path(path).extension().string();
 		std::string lowerExtension = extension;
 		std::transform(lowerExtension.begin(), lowerExtension.end(), lowerExtension.begin(), [](unsigned char c) {
@@ -59,10 +66,11 @@ namespace dyf
 
 		ModelData loadedModel = {};
 		const bool loaded = lowerExtension == ".gltf" || lowerExtension == ".glb"
-			? LoadGltfModel(path, loadedModel, options)
-			: LoadUfbxModel(path, loadedModel, options);
+			? LoadGltfModel(path, loadedModel, options, &decodedBytes)
+			: LoadUfbxModel(path, loadedModel, options, &decodedBytes);
 		if(!loaded)
 		{
+            decodedBytes=0;
 			ReportModelError(path, "model load failed because the asset data is invalid");
 			outModel = {};
 			return false;
@@ -78,6 +86,8 @@ namespace dyf
 		ModelData model = {};
 		if(!LoadModel(path, model, options)) return false;
 		outMesh = MergeModelMeshes(model);
+		if(outMesh.vertices.empty() || outMesh.indices.empty())
+			return ReportModelError(path, "mesh merge failed or produced no geometry");
 		if(outMaterial != nullptr)
 		{
 			*outMaterial = !model.materials.empty() ? model.materials.front() : ModelMaterialInfo{};
