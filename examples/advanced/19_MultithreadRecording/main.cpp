@@ -4,7 +4,6 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
-#include <fstream>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -13,9 +12,16 @@
 
 namespace RHI = dyf::RHI;
 using Clock = std::chrono::steady_clock;
+
 namespace
 {
+// =============================================================================
+// [오류 검사 및 유틸리티 함수]
+// =============================================================================
+// 조건이 거짓이면 런타임 예외를 발생시킵니다.
 void Check(bool value, const char* message) { if(!value) throw std::runtime_error(message); }
+
+// 문자열을 부호 없는 32비트 정수로 변환합니다.
 uint32_t Number(const std::string& value)
 {
     char* end = nullptr;
@@ -23,6 +29,11 @@ uint32_t Number(const std::string& value)
     Check(!value.empty() && value[0] != '-' && end && !*end && number <= UINT32_MAX, "Expected an unsigned integer");
     return uint32_t(number);
 }
+
+// =============================================================================
+// [명령 리스트 RAII 관리 구조체]
+// 생성된 커맨드 리스트들을 보관하고 소멸 시 안전하게 파괴합니다.
+// =============================================================================
 struct CommandLists
 {
     RHI::IDevice& device;
@@ -32,11 +43,15 @@ struct CommandLists
 };
 }
 
+// =============================================================================
+// [메인 진입점]
+// =============================================================================
 int main(int argc, char** argv)
 {
     try
     {
-        std::string mode = "parallel", capture;
+        // 1. 명령행 인자 파싱 및 기본값 설정
+        std::string mode = "parallel";
         uint32_t frames = 3, workers = 2;
         bool validation = false;
         for(int i = 1; i < argc; ++i)
@@ -44,7 +59,7 @@ int main(int argc, char** argv)
             const std::string argument = argv[i];
             if(argument == "--help")
             {
-                std::puts("AdvancedMultithreadRecording --mode serial|parallel --workers N --frames N --capture image.ppm --validation\n"
+                std::puts("AdvancedMultithreadRecording --mode serial|parallel --workers N --frames N --validation\n"
                     "Records two independent texture uploads and a dependent reader; submits in graph order and waits for a completion fence.\n"
                     "Native backends check GPU readback. Null validates command/state/fence contracts without GPU pixels.\n"
                     "--workers 0 selects hardware concurrency; 1 records on the calling thread. --frames must be positive.\n"
@@ -52,11 +67,10 @@ int main(int argc, char** argv)
                 return 0;
             }
             if(argument == "--validation") validation = true;
-            else if((argument == "--mode" || argument == "--workers" || argument == "--frames" || argument == "--capture") && i + 1 < argc)
+            else if((argument == "--mode" || argument == "--workers" || argument == "--frames") && i + 1 < argc)
             {
                 const std::string value = argv[++i];
                 if(argument == "--mode") mode = value;
-                else if(argument == "--capture") capture = value;
                 else if(argument == "--workers") workers = Number(value);
                 else frames = Number(value);
             }
@@ -64,13 +78,19 @@ int main(int argc, char** argv)
         }
         Check(mode == "serial" || mode == "parallel", "Invalid --mode");
         Check(frames > 0 && workers <= 64, "--frames must be positive and --workers must be 0..64");
+
+        // 2. RHI 디바이스 초기화
         RHI::DeviceDesc deviceDesc;
         deviceDesc.enableValidation = validation;
         std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(deviceDesc));
         Check(bool(device), "Device creation failed");
         RHI::ResourceScope resources(*device);
+
+        // 3. 작업자 스레드 풀 생성 (병렬 모드일 경우 지정된 작업자 수 사용)
         dyf::Core::ThreadPool pool(mode == "parallel" ? workers : 1);
         constexpr uint32_t width = 256, height = 256;
+
+        // 4. 대상 텍스처 리소스 생성 (2개의 256x256 RGBA8 텍스처)
         std::array<RHI::TextureHandle, 2> textures{};
         for(auto& texture : textures)
         {
@@ -86,8 +106,11 @@ int main(int argc, char** argv)
         std::mutex threadMutex;
         double recordMilliseconds = 0, submitMilliseconds = 0;
         size_t submittedLists = 0;
+
+        // 5. 프레임 반복 루프 (렌더그래프 구성 및 녹화 실행)
         for(uint32_t frame = 0; frame < frames; ++frame)
         {
+            // 5-1. 렌더그래프(RenderGraph) 구성
             RHI::RenderGraph graph;
             std::array<RHI::RGResourceHandle, 2> imports;
             for(uint32_t i = 0; i < 2; ++i)
@@ -96,6 +119,7 @@ int main(int argc, char** argv)
                     frame == 0 ? RHI::ResourceState::Undefined : RHI::ResourceState::ShaderResource,
                     RHI::ResourceState::ShaderResource);
                 Check(imports[i].IsValid(), "Texture import failed");
+                // 독립적인 텍스처 픽셀 생성 및 업로드 패스 등록
                 graph.AddPass("generate-and-upload-" + std::to_string(i))
                     .Write(imports[i], RHI::ResourceState::CopyDestination)
                     .SetExecute([&, i, frame](RHI::ICommandList* list) {
@@ -116,11 +140,16 @@ int main(int argc, char** argv)
                         recordingThreads.insert(std::this_thread::get_id());
                     });
             }
+            // 두 업로드 패스의 완료를 동기화하고 읽는 조인(Join) 패스 등록
             graph.AddPass("join-and-read").GlobalBarrier()
                 .Read(imports[0], RHI::ResourceState::ShaderResource)
                 .Read(imports[1], RHI::ResourceState::ShaderResource)
                 .SetExecute([](RHI::ICommandList*) {});
+
+            // 렌더그래프 컴파일 (패스 의존성 및 리소스 배리어 자동 계산)
             Check(graph.Compile(), "RenderGraph compilation failed");
+
+            // 5-2. 커맨드 리스트 녹화 (병렬 스레드 풀 또는 단일 스레드)
             CommandLists commands(*device);
             const auto recordStart = Clock::now();
             if(mode == "parallel")
@@ -134,6 +163,8 @@ int main(int argc, char** argv)
                 Check(device->PrepareCommandLists(&list, 1), "Serial native recording failed");
             }
             recordMilliseconds += std::chrono::duration<double, std::milli>(Clock::now() - recordStart).count();
+
+            // 5-3. 녹화된 커맨드 리스트를 GPU 큐에 제출하고 펜스로 동기화
             RHI::FenceHandle completion;
             const auto submitStart = Clock::now();
             Check(device->Submit({commands.lists.data(), uint32_t(commands.lists.size()), nullptr, 0}, completion), "Submit failed");
@@ -141,6 +172,8 @@ int main(int argc, char** argv)
             Check(device->Wait(completion, 5000000000ull), "Submission did not complete within five seconds");
             submittedLists += commands.lists.size();
         }
+
+        // 6. 결과 검증 (래스터화 지원 백엔드인 경우 GPU 리드백 및 원본 데이터 비교)
         if(device->Supports(RHI::Feature::Rasterization))
         {
             std::array<RHI::TextureReadback, 2> readbacks;
@@ -155,24 +188,14 @@ int main(int argc, char** argv)
                         Check(pixels.pixels[size_t(y) * pixels.rowPitch + x] == inputs[i][size_t(y) * width * 4 + x],
                             "GPU pixels differ from the recorded upload");
             }
-            if(!capture.empty())
-            {
-                std::ofstream output(capture, std::ios::binary);
-                Check(bool(output), "Cannot open capture path");
-                output << "P6\n" << width * 2 << ' ' << height << "\n255\n";
-                for(uint32_t y = 0; y < height; ++y)
-                    for(const auto& pixels : readbacks)
-                        for(uint32_t x = 0; x < width; ++x)
-                            output.write(reinterpret_cast<const char*>(pixels.pixels.data() + size_t(y) * pixels.rowPitch + x * 4), 3);
-                Check(bool(output), "Capture write failed");
-            }
             std::puts("GPU readback matches both recorded texture uploads.");
         }
         else
         {
-            Check(capture.empty(), "This backend cannot capture GPU pixels");
             std::puts("Null backend: command/state/fence contracts completed; GPU pixels were not rendered or read back.");
         }
+
+        // 7. 디바이스 유휴 대기 및 성능 측정 요약 정보 출력
         Check(device->WaitIdle(), "WaitIdle failed");
         std::printf("mode=%s frames=%u workers=%u observed_recording_threads=%zu command_lists=%zu cpu_record_ms=%.3f cpu_submit_ms=%.3f\n",
             mode.c_str(), frames, pool.GetThreadCount(), recordingThreads.size(), submittedLists, recordMilliseconds, submitMilliseconds);
