@@ -7,6 +7,9 @@
 #include <ctime>
 #include <iomanip>
 #include <sstream>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 
 namespace dyf::Platform
 {
@@ -135,8 +138,22 @@ namespace dyf::Platform
                 {
                     const auto text = Format(record);
                     if (state.output) {
+#if defined(__ANDROID__)
+                        android_LogPriority prio = ANDROID_LOG_INFO;
+                        switch (record.level) {
+                            case LogLevel::Debug: prio = ANDROID_LOG_DEBUG; break;
+                            case LogLevel::Info: prio = ANDROID_LOG_INFO; break;
+                            case LogLevel::Warning: prio = ANDROID_LOG_WARN; break;
+                            case LogLevel::Error: prio = ANDROID_LOG_ERROR; break;
+                            case LogLevel::Fatal: prio = ANDROID_LOG_FATAL; break;
+                            default: prio = ANDROID_LOG_INFO; break;
+                        }
+                        std::string tag = record.category.empty() ? "dy_engine" : std::string(record.category);
+                        __android_log_print(prio, tag.c_str(), "%s", record.message.data());
+#else
                         std::fwrite(text.data(), 1, text.size(), stderr);
                         std::fflush(stderr);
+#endif
                     }
                     LogInternal::WriteSession(text);
                 }

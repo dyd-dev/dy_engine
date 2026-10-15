@@ -3,8 +3,20 @@ out*/
 
 .vs/
 .vscode/
+.idea/
 
 *.sln
 *.slnx
 
 *.DS_Store
+
+# Android & Gradle
+.gradle/
+**/build/
+**/.cxx/
+android/local.properties
+android/.idea/
+android/*.iml
+android/app/*.iml
+*.apk
+*.aab

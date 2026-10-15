@@ -1,0 +1,75 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.dyengine.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.dyengine.app"
+        minSdk 34
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_STL=c++_shared",
+                          "-DUSE_VULKAN=ON",
+                          "-DDY_BUILD_EXAMPLES=OFF",
+                          "-DDY_BUILD_TESTS=OFF"
+                abiFilters 'arm64-v8a', 'x86_64'
+            }
+        }
+        ndk {
+            abiFilters 'arm64-v8a', 'x86_64'
+        }
+    }
+
+    flavorDimensions += "sample"
+    productFlavors {
+        pbr {
+            dimension "sample"
+            applicationIdSuffix ".pbr"
+            manifestPlaceholders = [appName: "dy_engine PBR"]
+            externalNativeBuild {
+                cmake {
+                    arguments "-DDY_ACTIVE_SAMPLE=07_PBRLighting"
+                }
+            }
+        }
+        shadow {
+            dimension "sample"
+            applicationIdSuffix ".shadow"
+            manifestPlaceholders = [appName: "dy_engine Shadow"]
+            externalNativeBuild {
+                cmake {
+                    arguments "-DDY_ACTIVE_SAMPLE=08_ShadowMapping"
+                }
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            debuggable true
+            jniDebuggable true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('src/main/cpp/CMakeLists.txt')
+        }
+    }
+}

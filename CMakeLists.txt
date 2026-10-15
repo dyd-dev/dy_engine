@@ -84,7 +84,9 @@ if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
 endif()
 
 # ===== Configuration Messages =====
-if(WIN32)
+if(ANDROID)
+    message(STATUS "Android 환경 감지됨! (API ${ANDROID_PLATFORM_LEVEL}, ABI ${ANDROID_ABI})")
+elseif(WIN32)
     message(STATUS "Windows 환경 감지됨!")
 elseif(APPLE)
     message(STATUS "macOS 환경 감지됨!")

@@ -1,8 +1,13 @@
 #include "VulkanSwapchain.h"
+#if !defined(__ANDROID__)
 #include <GLFW/glfw3.h>
+#else
+#include <android/native_window.h>
+#endif
 #include <algorithm>
 #include <limits>
 #include <utility>
+#include "dyf/Platform/Log.h"
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -75,21 +80,70 @@ bool VulkanSwapchain::Initialize(
     if (status.result != VK_SUCCESS) return false;
     if (swapchainSupport.formats.empty() || swapchainSupport.presentModes.empty()) return false;
 
+    Platform::Log::Writef(Platform::LogLevel::Info, "VulkanSwapchain", __FILE__, __LINE__,
+        "requested: format=%d, colorSpace=%d, compositeAlpha=%d, presentMode=%d",
+        requestedFormat, requestedColorSpace, requestedCompositeAlpha, requestedPresentMode);
+    for (size_t i = 0; i < swapchainSupport.formats.size(); ++i) {
+        Platform::Log::Writef(Platform::LogLevel::Info, "VulkanSwapchain", __FILE__, __LINE__,
+            "  Surface format[%zu]: format=%d, colorSpace=%d",
+            i, swapchainSupport.formats[i].format, swapchainSupport.formats[i].colorSpace);
+    }
+    Platform::Log::Writef(Platform::LogLevel::Info, "VulkanSwapchain", __FILE__, __LINE__,
+        "Surface caps: minImages=%u, maxImages=%u, currentExtent=(%u,%u), supportedAlpha=0x%x",
+        swapchainSupport.capabilities.minImageCount, swapchainSupport.capabilities.maxImageCount,
+        swapchainSupport.capabilities.currentExtent.width, swapchainSupport.capabilities.currentExtent.height,
+        swapchainSupport.capabilities.supportedCompositeAlpha);
+
     VkExtent2D extent{};
-    if (!SupportsSurfaceFormat(swapchainSupport.formats, requestedFormat, requestedColorSpace) ||
-        !SupportsPresentMode(swapchainSupport.presentModes, requestedPresentMode) ||
-        !ChooseSwapExtent(swapchainSupport.capabilities, windowHandle, extent, status)) {
+    if (!SupportsSurfaceFormat(swapchainSupport.formats, requestedFormat, requestedColorSpace)) {
+        Platform::Log::Writef(Platform::LogLevel::Error, "VulkanSwapchain", __FILE__, __LINE__, "SupportsSurfaceFormat failed");
+        return false;
+    }
+    if (!SupportsPresentMode(swapchainSupport.presentModes, requestedPresentMode)) {
+        Platform::Log::Writef(Platform::LogLevel::Error, "VulkanSwapchain", __FILE__, __LINE__, "SupportsPresentMode failed");
+        return false;
+    }
+    if (!ChooseSwapExtent(swapchainSupport.capabilities, windowHandle, extent, status)) {
+        Platform::Log::Writef(Platform::LogLevel::Error, "VulkanSwapchain", __FILE__, __LINE__, "ChooseSwapExtent failed");
         return false;
     }
 
+    Platform::Log::Writef(Platform::LogLevel::Info, "VulkanSwapchain", __FILE__, __LINE__,
+        "Selected extent=(%u,%u)", extent.width, extent.height);
+
     uint32_t imageCount = std::max(requestedMinimumImageCount, swapchainSupport.capabilities.minImageCount);
+#if defined(__ANDROID__)
+    imageCount = std::max(imageCount, 3u);
+#endif
+    if (swapchainSupport.capabilities.maxImageCount > 0 && imageCount > swapchainSupport.capabilities.maxImageCount) {
+        imageCount = swapchainSupport.capabilities.maxImageCount;
+    }
     if((initialWidth && initialWidth != extent.width) || (initialHeight && initialHeight != extent.height))
         return false;
-    if (swapchainSupport.capabilities.maxImageCount > 0 && imageCount > swapchainSupport.capabilities.maxImageCount) return false;
     const uint32_t minimumImageCount = imageCount;
 
-    const VkCompositeAlphaFlagBitsKHR compositeAlpha = requestedCompositeAlpha;
-    if ((swapchainSupport.capabilities.supportedCompositeAlpha & compositeAlpha) == 0) return false;
+    VkCompositeAlphaFlagBitsKHR compositeAlpha = requestedCompositeAlpha;
+    if ((swapchainSupport.capabilities.supportedCompositeAlpha & compositeAlpha) == 0) {
+        if (swapchainSupport.capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) {
+            compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+        } else if (swapchainSupport.capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) {
+            compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        } else {
+            for (VkCompositeAlphaFlagBitsKHR flag : {
+                VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+                VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+                VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR})
+            {
+                if (swapchainSupport.capabilities.supportedCompositeAlpha & flag) {
+                    compositeAlpha = flag;
+                    break;
+                }
+            }
+        }
+        Platform::Log::Writef(Platform::LogLevel::Info, "VulkanSwapchain", __FILE__, __LINE__,
+            "Fallback compositeAlpha to 0x%x (surface supports 0x%x)", compositeAlpha, swapchainSupport.capabilities.supportedCompositeAlpha);
+    }
     VkSwapchainCreateInfoKHR createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
     createInfo.surface = context.surface;
@@ -100,8 +154,10 @@ bool VulkanSwapchain::Initialize(
     createInfo.imageArrayLayers = 1;
     createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if(allowReadback) createInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    if((swapchainSupport.capabilities.supportedUsageFlags & createInfo.imageUsage) != createInfo.imageUsage)
+    if((swapchainSupport.capabilities.supportedUsageFlags & createInfo.imageUsage) != createInfo.imageUsage) {
+        Platform::Log::Writef(Platform::LogLevel::Error, "VulkanSwapchain", __FILE__, __LINE__, "imageUsage not supported");
         return false;
+    }
 
     uint32_t queueFamilyIndices[] = { context.queueIndices.graphicsFamily, context.queueIndices.presentFamily };
 
@@ -113,7 +169,13 @@ bool VulkanSwapchain::Initialize(
         createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     }
 
-    createInfo.preTransform = swapchainSupport.capabilities.currentTransform;
+    VkSurfaceTransformFlagBitsKHR preTransform = (swapchainSupport.capabilities.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+        ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+        : swapchainSupport.capabilities.currentTransform;
+    Platform::Log::Writef(Platform::LogLevel::Info, "VulkanSwapchain", __FILE__, __LINE__,
+        "preTransform: selected=0x%x, currentTransform=0x%x, supported=0x%x",
+        preTransform, swapchainSupport.capabilities.currentTransform, swapchainSupport.capabilities.supportedTransforms);
+    createInfo.preTransform = preTransform;
     createInfo.compositeAlpha = compositeAlpha;
     createInfo.presentMode = requestedPresentMode;
     createInfo.clipped = allowReadback ? VK_FALSE : VK_TRUE;
@@ -121,7 +183,13 @@ bool VulkanSwapchain::Initialize(
 
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     oldSwapchainRetired = oldSwapchain != VK_NULL_HANDLE;
-    if (!status.Check(vkCreateSwapchainKHR(context.device, &createInfo, nullptr, &swapchain), "vkCreateSwapchainKHR")) return false;
+    Platform::Log::Writef(Platform::LogLevel::Info, "VulkanSwapchain", __FILE__, __LINE__,
+        "Calling vkCreateSwapchainKHR: imageFormat=%d, extent=(%u,%u), compositeAlpha=0x%x, minImageCount=%u",
+        createInfo.imageFormat, createInfo.imageExtent.width, createInfo.imageExtent.height, createInfo.compositeAlpha, createInfo.minImageCount);
+    VkResult vkRes = vkCreateSwapchainKHR(context.device, &createInfo, nullptr, &swapchain);
+    Platform::Log::Writef(Platform::LogLevel::Info, "VulkanSwapchain", __FILE__, __LINE__,
+        "vkCreateSwapchainKHR result=%d", vkRes);
+    if (!status.Check(vkRes, "vkCreateSwapchainKHR")) return false;
     std::vector<VkImageView> imageViews;
     struct PendingSwapchain {
         VkDevice device;
@@ -241,6 +309,10 @@ bool VulkanSwapchain::ChooseSwapExtent(
             width = clientRect.right - clientRect.left;
             height = clientRect.bottom - clientRect.top;
         } else return false;
+#elif defined(__ANDROID__)
+        if (windowHandle == nullptr) return false;
+        width = ANativeWindow_getWidth(static_cast<ANativeWindow*>(windowHandle));
+        height = ANativeWindow_getHeight(static_cast<ANativeWindow*>(windowHandle));
 #else
         if (windowHandle == nullptr) return false;
         glfwGetFramebufferSize(static_cast<GLFWwindow*>(windowHandle), &width, &height);
