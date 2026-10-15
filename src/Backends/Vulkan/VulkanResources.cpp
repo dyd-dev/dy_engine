@@ -66,6 +66,7 @@ namespace dyf::Backends
 		if ((stages & dyf::RHI::ShaderStageFlags::Domain) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
 		if ((stages & dyf::RHI::ShaderStageFlags::Fragment) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_FRAGMENT_BIT;
 		if ((stages & dyf::RHI::ShaderStageFlags::Compute) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_COMPUTE_BIT;
+		if ((stages & dyf::RHI::ShaderStageFlags::Mesh) != dyf::RHI::ShaderStageFlags::None) result |= VK_SHADER_STAGE_MESH_BIT_EXT;
 		return result;
 	}
 

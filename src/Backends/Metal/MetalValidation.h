@@ -44,6 +44,7 @@ namespace dyf::Backends::MetalValidation
             return 4;
         case RHI::Format::R16G16B16A16_FLOAT:
         case RHI::Format::R32G32_FLOAT:
+        case RHI::Format::D32_FLOAT_S8_UINT:
             return 8;
         case RHI::Format::R32G32B32_FLOAT:
             return 12;
@@ -59,7 +60,7 @@ namespace dyf::Backends::MetalValidation
     [[nodiscard]] inline bool IsDepthFormat(RHI::Format format)
     {
         return format == RHI::Format::D32_FLOAT ||
-            format == RHI::Format::D24_UNORM_S8_UINT;
+            RHI::HasStencil(format);
     }
 
     [[nodiscard]] inline uint32_t MaximumMipCount(uint32_t width, uint32_t height)

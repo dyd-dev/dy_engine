@@ -13,7 +13,7 @@ class SelectionTests(unittest.TestCase):
         backend = selection.plan(['src/Backends/Vulkan/VulkanDevice.cpp'])
         self.assertEqual(backend['apis'], ['vulkan'])
         self.assertFalse(backend['cpu'])
-        for path in ('src/RHI/IDevice.cpp', 'cmake/ExampleSupport.cmake', 'new-config.toml',
+        for path in ('src/RHI/IDevice.cpp', '.github/ci/ExampleSupport.cmake', 'new-config.toml',
                      'examples/Cube/shared.h'):
             self.assertEqual(selection.plan([path])['mode'], 'all')
 
@@ -75,14 +75,12 @@ class SelectionTests(unittest.TestCase):
         import json
         import subprocess
         import tempfile
-        module = Path(__file__).resolve().parents[2] / 'cmake/ExampleSupport.cmake'
+        module = Path(__file__).resolve().with_name('ExampleSupport.cmake')
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / 'examples/A').mkdir(parents=True)
             (root / 'examples/B').mkdir()
             (root / 'shared/Models').mkdir(parents=True)
-            (root / 'cmake').mkdir()
-            (root / 'cmake/SyncAssets.cmake').write_bytes(module.with_name('SyncAssets.cmake').read_bytes())
             (root / 'shared/lib.cpp').write_text('int helper() { return 0; }')
             (root / 'examples/A/main.cpp').write_text('extern int helper(); int main() { return helper(); }')
             (root / 'examples/B/main.cpp').write_text('unrelated deliberate syntax error')

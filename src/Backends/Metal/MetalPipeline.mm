@@ -2,6 +2,7 @@
 
 #include "MetalShader.h"
 
+#include <algorithm>
 #include <set>
 
 #import <Metal/Metal.h>
@@ -23,6 +24,7 @@ namespace dyf::Backends
 			case RHI::Format::R32G32B32A32_FLOAT: return MTLPixelFormatRGBA32Float;
 			case RHI::Format::D32_FLOAT: return MTLPixelFormatDepth32Float;
 			case RHI::Format::D24_UNORM_S8_UINT: return MTLPixelFormatDepth24Unorm_Stencil8;
+			case RHI::Format::D32_FLOAT_S8_UINT: return MTLPixelFormatDepth32Float_Stencil8;
 			case RHI::Format::R32_UINT: return MTLPixelFormatR32Uint;
 			case RHI::Format::R16_UINT: return MTLPixelFormatR16Uint;
 			default: return MTLPixelFormatInvalid;
@@ -187,7 +189,7 @@ namespace dyf::Backends
 		}
 
 		[[nodiscard]] bool ValidateMetalLayout(
-			const RHI::GraphicsPipelineDesc& desc, id<MTLDevice> device)
+			const RHI::GraphicsPipelineDesc& desc, id<MTLDevice> device, bool compute = false)
 		{
 			if(device == nil) return false;
 			bool appleGpu = false;
@@ -235,15 +237,20 @@ namespace dyf::Backends
 			std::set<uint32_t> vertexSamplerSlots;
 			std::set<uint32_t> computeSamplerSlots;
 			std::set<uint32_t> fragmentSamplerSlots;
-			constexpr auto renderVertexStages = RHI::ShaderStageFlags::Vertex | RHI::ShaderStageFlags::Domain;
+			constexpr auto renderVertexStages = RHI::ShaderStageFlags::Vertex |
+				RHI::ShaderStageFlags::Domain | RHI::ShaderStageFlags::Mesh;
 			constexpr auto tessellationComputeStages = RHI::ShaderStageFlags::Vertex | RHI::ShaderStageFlags::Hull;
 			constexpr auto graphicsStages = RHI::ShaderStageFlags::Vertex |
 				RHI::ShaderStageFlags::Hull | RHI::ShaderStageFlags::Domain |
-				RHI::ShaderStageFlags::Fragment;
+				RHI::ShaderStageFlags::Fragment | RHI::ShaderStageFlags::Mesh;
+			const auto allowedStages = compute ? RHI::ShaderStageFlags::Compute : graphicsStages;
 			for(uint32_t index = 0; index < desc.layout.bindingCount; ++index)
 			{
 				const RHI::ResourceBindingLayout& binding = desc.layout.bindings[index];
-				if((binding.stages & graphicsStages) != binding.stages)
+				if(compute && binding.type != RHI::ResourceBindingType::ConstantBuffer &&
+					binding.type != RHI::ResourceBindingType::ReadOnlyStorageBuffer &&
+					binding.type != RHI::ResourceBindingType::ReadWriteStorageBuffer) return false;
+				if((binding.stages & allowedStages) != binding.stages)
 				{
 					return false;
 				}
@@ -268,7 +275,7 @@ namespace dyf::Backends
 				{
 					if(HasStage(binding.stages, renderVertexStages))
 						vertexConstantArguments += binding.count;
-					if(HasStage(binding.stages, tessellationComputeStages))
+					if(compute || HasStage(binding.stages, tessellationComputeStages))
 						computeConstantArguments += binding.count;
 					if(HasStage(binding.stages, RHI::ShaderStageFlags::Fragment))
 						fragmentConstantArguments += binding.count;
@@ -298,7 +305,7 @@ namespace dyf::Backends
 					{
 						return false;
 					}
-					if(HasStage(binding.stages, tessellationComputeStages) &&
+					if((compute || HasStage(binding.stages, tessellationComputeStages)) &&
 						!computeSlots->insert(slot).second)
 					{
 						return false;
@@ -315,7 +322,7 @@ namespace dyf::Backends
 			{
 				if(HasStage(desc.layout.inlineConstantStages, renderVertexStages))
 					++vertexConstantArguments;
-				if(HasStage(desc.layout.inlineConstantStages, tessellationComputeStages))
+				if(compute || HasStage(desc.layout.inlineConstantStages, tessellationComputeStages))
 					++computeConstantArguments;
 				if(HasStage(desc.layout.inlineConstantStages, RHI::ShaderStageFlags::Fragment))
 					++fragmentConstantArguments;
@@ -327,7 +334,7 @@ namespace dyf::Backends
 					desc.layout.inlineConstantBinding == MetalPipeline::TessellationFactorBufferIndex &&
 					(HasStage(desc.layout.inlineConstantStages, RHI::ShaderStageFlags::Vertex) ||
 					 HasStage(desc.layout.inlineConstantStages, RHI::ShaderStageFlags::Hull))) return false;
-				if((desc.layout.inlineConstantStages & graphicsStages) !=
+				if((desc.layout.inlineConstantStages & allowedStages) !=
 					desc.layout.inlineConstantStages)
 				{
 					return false;
@@ -337,7 +344,7 @@ namespace dyf::Backends
 				{
 					return false;
 				}
-				if(HasStage(desc.layout.inlineConstantStages, tessellationComputeStages) &&
+				if((compute || HasStage(desc.layout.inlineConstantStages, tessellationComputeStages)) &&
 					!computeBufferSlots.insert(desc.layout.inlineConstantBinding).second)
 				{
 					return false;
@@ -361,7 +368,10 @@ namespace dyf::Backends
     {
         RHI::GraphicsPipelineDesc graphics;
         graphics.layout = desc;
-        return ValidateMetalLayout(graphics, (__bridge id<MTLDevice>)device);
+        bool compute = HasStage(desc.inlineConstantStages, RHI::ShaderStageFlags::Compute);
+        for(uint32_t i = 0; i < desc.bindingCount; ++i)
+            compute = compute || HasStage(desc.bindings[i].stages, RHI::ShaderStageFlags::Compute);
+        return ValidateMetalLayout(graphics, (__bridge id<MTLDevice>)device, compute);
     }
 
     bool MetalPipeline::SupportsGraphics(const RHI::GraphicsPipelineDesc& desc, void* device)
@@ -391,6 +401,7 @@ namespace dyf::Backends
 		~Impl();
 		id<MTLRenderPipelineState> pipelineState = nil;
 		id<MTLComputePipelineState> hullPipelineState = nil;
+		id<MTLComputePipelineState> computePipelineState = nil;
 		id<MTLDepthStencilState> depthStencilState = nil;
 		MTLPrimitiveType primitiveType = MTLPrimitiveTypeTriangle;
 		MTLCullMode cullMode = MTLCullModeNone;
@@ -579,12 +590,13 @@ namespace dyf::Backends
 		if(desc.depthStencil.format != RHI::Format::Unknown)
 		{
 			if(depthStencilFormat != MTLPixelFormatDepth32Float &&
-				depthStencilFormat != MTLPixelFormatDepth24Unorm_Stencil8)
+				depthStencilFormat != MTLPixelFormatDepth24Unorm_Stencil8 &&
+				depthStencilFormat != MTLPixelFormatDepth32Float_Stencil8)
 			{
 				descriptorValid = false;
 			}
 			pipelineDesc.depthAttachmentPixelFormat = depthStencilFormat;
-			if(desc.depthStencil.format == RHI::Format::D24_UNORM_S8_UINT)
+			if(RHI::HasStencil(desc.depthStencil.format))
 				pipelineDesc.stencilAttachmentPixelFormat = depthStencilFormat;
 		}
 
@@ -651,6 +663,43 @@ namespace dyf::Backends
 #endif
 			if(m_impl->depthStencilState == nil) return;
 		}
+		else
+		{
+			MTLDepthStencilDescriptor* depthDesc = [MTLDepthStencilDescriptor new];
+			depthDesc.depthCompareFunction = MTLCompareFunctionAlways;
+			depthDesc.depthWriteEnabled = NO;
+			m_impl->depthStencilState =
+				[metalDevice newDepthStencilStateWithDescriptor:depthDesc];
+#if !__has_feature(objc_arc)
+			[depthDesc release];
+#endif
+			if(m_impl->depthStencilState == nil) return;
+		}
+	}
+
+	MetalPipeline::MetalPipeline(const RHI::ComputePipelineDesc& desc, void* device)
+		: RHI::Pipeline(desc.layout, true), m_impl(new Impl())
+	{
+		id<MTLDevice> metalDevice = (__bridge id<MTLDevice>)device;
+		auto* shader = dynamic_cast<MetalShader*>(desc.computeShader);
+		if(metalDevice == nil || shader == nullptr || shader->GetNativeFunction() == nullptr ||
+			!SupportsLayout(desc.layout, device)) return;
+		const MTLSize limit = metalDevice.maxThreadsPerThreadgroup;
+		const auto* size = desc.threadGroupSize;
+		if(!size[0] || !size[1] || !size[2] ||
+			size[0] > limit.width || size[1] > limit.height || size[2] > limit.depth) return;
+		id<MTLComputePipelineState> state = [metalDevice newComputePipelineStateWithFunction:
+			(__bridge id<MTLFunction>)shader->GetNativeFunction() error:nullptr];
+		if(state == nil) return;
+		if(uint64_t(size[0]) * size[1] * size[2] > state.maxTotalThreadsPerThreadgroup)
+		{
+#if !__has_feature(objc_arc)
+			[state release];
+#endif
+			return;
+		}
+		m_impl->computePipelineState = state;
+		std::copy(size, size + 3, m_threadGroupSize);
 	}
 
 	MetalPipeline::~MetalPipeline() = default;
@@ -671,6 +720,7 @@ namespace dyf::Backends
 #if !__has_feature(objc_arc)
 		[depthStencilState release];
 		[hullPipelineState release];
+		[computePipelineState release];
 		[pipelineState release];
 #endif
 	}
@@ -678,7 +728,8 @@ namespace dyf::Backends
 	const RHI::GraphicsPipelineDesc& MetalPipeline::GetDesc() const { return m_desc; }
 	void* MetalPipeline::GetNativePipeline() const
 	{
-		return m_impl == nullptr ? nullptr : (__bridge void*)m_impl->pipelineState;
+		if(m_impl == nullptr) return nullptr;
+		return IsCompute() ? (__bridge void*)m_impl->computePipelineState : (__bridge void*)m_impl->pipelineState;
 	}
 	void* MetalPipeline::GetNativeDepthStencil() const
 	{
@@ -713,5 +764,248 @@ namespace dyf::Backends
 	MetalPipeline::GetStaticSamplerBindings() const
 	{
 		return m_impl->staticSamplers;
+	}
+
+	const RHI::MeshPipelineDesc& MetalPipeline::GetMeshDesc() const { return m_meshDesc; }
+
+	bool MetalPipeline::SupportsMesh(
+		const RHI::MeshPipelineDesc& desc, void* device)
+	{
+		id<MTLDevice> metalDevice = (__bridge id<MTLDevice>)device;
+		if(metalDevice == nil) return false;
+		if(@available(macOS 13.0, iOS 16.0, *))
+		{
+			if(![metalDevice supportsFamily:MTLGPUFamilyMetal3])
+				return false;
+		}
+		else
+		{
+			return false;
+		}
+
+		if(desc.meshShader == nullptr || desc.meshShader->GetStage() != RHI::ShaderStage::Mesh)
+			return false;
+		if(desc.fragmentShader != nullptr && desc.fragmentShader->GetStage() != RHI::ShaderStage::Fragment)
+			return false;
+
+		RHI::GraphicsPipelineDesc graphics;
+		graphics.raster = desc.raster;
+		graphics.depthStencil = desc.depthStencil;
+		graphics.colorAttachments = desc.colorAttachments;
+		graphics.colorAttachmentCount = desc.colorAttachmentCount;
+		graphics.layout = desc.layout;
+		return SupportsGraphics(graphics, device);
+	}
+
+	MetalPipeline::MetalPipeline(const RHI::MeshPipelineDesc& desc, void* device)
+		: RHI::Pipeline(desc.layout, false, true)
+		, m_impl(new Impl())
+		, m_meshDesc(desc)
+	{
+		if(desc.colorAttachments != nullptr && desc.colorAttachmentCount != 0)
+			m_colorAttachments.assign(
+				desc.colorAttachments, desc.colorAttachments + desc.colorAttachmentCount);
+		m_meshDesc.colorAttachments = m_colorAttachments.empty() ? nullptr : m_colorAttachments.data();
+		m_meshDesc.layout = GetLayout();
+		// The shared draw-state checks also apply to mesh pipelines without vertex inputs.
+		m_desc.raster = desc.raster;
+		m_desc.depthStencil = desc.depthStencil;
+		m_desc.colorAttachments = m_meshDesc.colorAttachments;
+		m_desc.colorAttachmentCount = desc.colorAttachmentCount;
+		m_desc.layout = GetLayout();
+
+		id<MTLDevice> metalDevice = (__bridge id<MTLDevice>)device;
+		auto* meshShader = dynamic_cast<MetalShader*>(desc.meshShader);
+		auto* fragmentShader = dynamic_cast<MetalShader*>(desc.fragmentShader);
+		if(metalDevice == nil || meshShader == nullptr ||
+			meshShader->GetNativeFunction() == nullptr ||
+			(desc.fragmentShader != nullptr &&
+				(fragmentShader == nullptr || fragmentShader->GetNativeFunction() == nullptr)) ||
+			!SupportsMesh(desc, device))
+		{
+			return;
+		}
+
+		m_impl->primitiveType = MTLPrimitiveTypeTriangle;
+
+		switch(desc.raster.cullMode)
+		{
+		case RHI::CullMode::None: m_impl->cullMode = MTLCullModeNone; break;
+		case RHI::CullMode::Front: m_impl->cullMode = MTLCullModeFront; break;
+		case RHI::CullMode::Back: m_impl->cullMode = MTLCullModeBack; break;
+		default: return;
+		}
+		switch(desc.raster.frontFace)
+		{
+		case RHI::FrontFace::CounterClockwise: m_impl->frontFace = MTLWindingCounterClockwise; break;
+		case RHI::FrontFace::Clockwise: m_impl->frontFace = MTLWindingClockwise; break;
+		default: return;
+		}
+		switch(desc.raster.fillMode)
+		{
+		case RHI::FillMode::Solid: m_impl->fillMode = MTLTriangleFillModeFill; break;
+		case RHI::FillMode::Wireframe: m_impl->fillMode = MTLTriangleFillModeLines; break;
+		default: return;
+		}
+
+		for(uint32_t index = 0; index < desc.layout.bindingCount; ++index)
+		{
+			const RHI::ResourceBindingLayout& binding = desc.layout.bindings[index];
+			if(binding.type != RHI::ResourceBindingType::StaticSampler) continue;
+			MTLSamplerDescriptor* samplerDesc = [MTLSamplerDescriptor new];
+			samplerDesc.minFilter = ToMinMagFilter(binding.staticSampler.minFilter);
+			samplerDesc.magFilter = ToMinMagFilter(binding.staticSampler.magFilter);
+			samplerDesc.mipFilter = ToMipFilter(binding.staticSampler.mipFilter);
+			samplerDesc.sAddressMode = ToAddressMode(binding.staticSampler.addressU);
+			samplerDesc.tAddressMode = ToAddressMode(binding.staticSampler.addressV);
+			samplerDesc.rAddressMode = ToAddressMode(binding.staticSampler.addressW);
+			samplerDesc.maxAnisotropy = binding.staticSampler.maxAnisotropy;
+			samplerDesc.lodMinClamp = binding.staticSampler.minLod;
+			samplerDesc.lodMaxClamp = binding.staticSampler.maxLod;
+			if(UsesBorder(binding.staticSampler))
+				samplerDesc.borderColor = ToBorderColor(binding.staticSampler.borderColor);
+			id<MTLSamplerState> sampler =
+				[metalDevice newSamplerStateWithDescriptor:samplerDesc];
+#if !__has_feature(objc_arc)
+			[samplerDesc release];
+#endif
+			if(sampler == nil) return;
+			void* storedSampler = nullptr;
+#if __has_feature(objc_arc)
+			storedSampler = (__bridge_retained void*)sampler;
+#else
+			storedSampler = (__bridge void*)sampler;
+#endif
+			m_impl->ownedStaticSamplers.push_back(storedSampler);
+			for(uint32_t element = 0; element < binding.count; ++element)
+			{
+				m_impl->staticSamplers.push_back({
+					binding.binding + element,
+					binding.stages,
+					storedSampler});
+			}
+		}
+
+		if(@available(macOS 13.0, iOS 16.0, *))
+		{
+			MTLMeshRenderPipelineDescriptor* pipelineDesc = [MTLMeshRenderPipelineDescriptor new];
+			pipelineDesc.meshFunction = (__bridge id<MTLFunction>)meshShader->GetNativeFunction();
+			pipelineDesc.fragmentFunction = fragmentShader == nullptr
+				? nil : (__bridge id<MTLFunction>)fragmentShader->GetNativeFunction();
+
+			bool descriptorValid = true;
+			for(uint32_t index = 0; index < desc.colorAttachmentCount; ++index)
+			{
+				const RHI::ColorAttachmentDesc& attachment = desc.colorAttachments[index];
+				MTLRenderPipelineColorAttachmentDescriptor* native =
+					pipelineDesc.colorAttachments[index];
+				native.pixelFormat = ToPixelFormat(attachment.format);
+				if(native.pixelFormat == MTLPixelFormatInvalid)
+				{
+					descriptorValid = false;
+					break;
+				}
+				native.writeMask = ToColorWriteMask(attachment.writeMask);
+				native.blendingEnabled = attachment.blend.enabled;
+				if(attachment.blend.enabled)
+				{
+					native.sourceRGBBlendFactor = ToBlendFactor(attachment.blend.sourceColor);
+					native.destinationRGBBlendFactor = ToBlendFactor(attachment.blend.destinationColor);
+					native.rgbBlendOperation = ToBlendOperation(attachment.blend.colorOp);
+					native.sourceAlphaBlendFactor = ToBlendFactor(attachment.blend.sourceAlpha);
+					native.destinationAlphaBlendFactor = ToBlendFactor(attachment.blend.destinationAlpha);
+					native.alphaBlendOperation = ToBlendOperation(attachment.blend.alphaOp);
+				}
+			}
+
+			const MTLPixelFormat depthStencilFormat = ToPixelFormat(desc.depthStencil.format);
+			if(desc.depthStencil.format != RHI::Format::Unknown)
+			{
+				if(depthStencilFormat != MTLPixelFormatDepth32Float &&
+					depthStencilFormat != MTLPixelFormatDepth24Unorm_Stencil8 &&
+					depthStencilFormat != MTLPixelFormatDepth32Float_Stencil8)
+				{
+					descriptorValid = false;
+				}
+				pipelineDesc.depthAttachmentPixelFormat = depthStencilFormat;
+				if(RHI::HasStencil(desc.depthStencil.format))
+					pipelineDesc.stencilAttachmentPixelFormat = depthStencilFormat;
+			}
+
+			NSError* error = nil;
+			if(descriptorValid)
+			{
+				m_impl->pipelineState =
+					[metalDevice newRenderPipelineStateWithMeshDescriptor:pipelineDesc
+																  options:MTLPipelineOptionNone
+															   reflection:nil
+																	error:&error];
+			}
+#if !__has_feature(objc_arc)
+			[pipelineDesc release];
+#endif
+			if(m_impl->pipelineState == nil) return;
+
+			if(desc.depthStencil.format != RHI::Format::Unknown)
+			{
+				MTLDepthStencilDescriptor* depthDesc = [MTLDepthStencilDescriptor new];
+				depthDesc.depthCompareFunction = desc.depthStencil.depthTestEnabled
+					? ToCompareFunction(desc.depthStencil.depthCompareOp)
+					: MTLCompareFunctionAlways;
+				depthDesc.depthWriteEnabled = desc.depthStencil.depthWriteEnabled;
+				if(desc.depthStencil.stencilEnabled)
+				{
+					const auto makeStencil = [](
+						const RHI::StencilFaceState& face) -> MTLStencilDescriptor*
+					{
+						MTLStencilDescriptor* result = [MTLStencilDescriptor new];
+						result.stencilFailureOperation = ToStencilOperation(face.failOp);
+						result.depthFailureOperation = ToStencilOperation(face.depthFailOp);
+						result.depthStencilPassOperation = ToStencilOperation(face.passOp);
+						result.stencilCompareFunction = ToCompareFunction(face.compareOp);
+						return result;
+					};
+					MTLStencilDescriptor* front = makeStencil(desc.depthStencil.front);
+					MTLStencilDescriptor* back = makeStencil(desc.depthStencil.back);
+					if(front == nil || back == nil)
+					{
+#if !__has_feature(objc_arc)
+						[front release];
+						[back release];
+						[depthDesc release];
+#endif
+						return;
+					}
+					front.readMask = desc.depthStencil.stencilReadMask;
+					front.writeMask = desc.depthStencil.stencilWriteMask;
+					back.readMask = desc.depthStencil.stencilReadMask;
+					back.writeMask = desc.depthStencil.stencilWriteMask;
+					depthDesc.frontFaceStencil = front;
+					depthDesc.backFaceStencil = back;
+#if !__has_feature(objc_arc)
+					[front release];
+					[back release];
+#endif
+				}
+				m_impl->depthStencilState =
+					[metalDevice newDepthStencilStateWithDescriptor:depthDesc];
+#if !__has_feature(objc_arc)
+				[depthDesc release];
+#endif
+				if(m_impl->depthStencilState == nil) return;
+			}
+			else
+			{
+				MTLDepthStencilDescriptor* depthDesc = [MTLDepthStencilDescriptor new];
+				depthDesc.depthCompareFunction = MTLCompareFunctionAlways;
+				depthDesc.depthWriteEnabled = NO;
+				m_impl->depthStencilState =
+					[metalDevice newDepthStencilStateWithDescriptor:depthDesc];
+#if !__has_feature(objc_arc)
+				[depthDesc release];
+#endif
+				if(m_impl->depthStencilState == nil) return;
+			}
+		}
 	}
 }

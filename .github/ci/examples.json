@@ -265,7 +265,7 @@
       ],
       "coverage": "default stencil mask remains visibly rendered on the supported depth-stencil format",
       "unsupported_markers": [
-        "UNSUPPORTED: stencil requires D24_UNORM_S8_UINT; current RHI has no D32S8/S8 alternative (including Apple Silicon)."
+        "UNSUPPORTED: no supported depth/stencil format."
       ]
     },
     "examples/advanced/05_ResourceBarriers": {
@@ -328,7 +328,7 @@
       ],
       "coverage": "default compute-backed clustered lighting remains visibly rendered",
       "unsupported_markers": [
-        "Unsupported: this RHI backend has no Compute dispatch/storage-buffer implementation. Use the Vulkan backend. No CPU fallback is substituted."
+        "Unsupported: this RHI backend has no Compute dispatch/storage-buffer implementation. No CPU fallback is substituted."
       ]
     },
     "examples/advanced/10_DeferredLighting": {
@@ -487,11 +487,11 @@
       "kind": "headless-compare",
       "markers": [
         "GPU readback matches both recorded texture uploads.",
-        "CPU recording and CPU native replay/submission are measured separately."
+        "CPU recording includes native translation; submission is measured separately. These are not GPU timings."
       ],
       "dimensions": [512, 256],
       "pixels": [[0.125, 0.25, 78, 64, 0], [0.375, 0.75, 206, 192, 0], [0.625, 0.25, 78, 135, 113], [0.875, 0.75, 206, 7, 113]],
-      "coverage": "headless serial and parallel CPU recording both complete GPU uploads and fences; independent expected pixels and complete readback equality; no native recording or GPU speedup assertion",
+      "coverage": "headless serial and parallel RHI/native recording both complete GPU uploads and fences; independent expected pixels and complete readback equality; timings do not assert a native recording or GPU speedup",
       "cases": [
         {
           "name": "serial",
@@ -544,14 +544,19 @@
       ]
     },
     "examples/advanced/22_MeshShaderBasics": {
-      "kind": "capability",
-      "expected_exit": 77,
-      "markers": [
-        "Supports(MeshShader)",
-        "Supports(TaskShader)",
-        "종료 코드 77"
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [
+        0.15,
+        0.15,
+        0.85,
+        0.85
       ],
-      "coverage": "backend capability report and explicit unavailable-example exit; GPU rendering is not implemented"
+      "unsupported_markers": [
+        "Current RHI backend or GPU does not support Mesh Shader"
+      ],
+      "coverage": "mesh shader generates a visible colored triangle; devices without MeshShader support report exit 77"
     },
     "examples/advanced/23_MeshletCullingLOD": {
       "kind": "capability",

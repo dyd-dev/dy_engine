@@ -161,8 +161,20 @@ if(DY_BUILD_TESTS)
 
     add_executable(TessellationTests TessellationTests.cpp)
     target_link_libraries(TessellationTests PRIVATE dy_engine)
+    add_executable(MeshShaderTests MeshShaderTests.cpp)
+    target_link_libraries(MeshShaderTests PRIVATE dy_engine)
+    add_test(NAME MeshShaderContracts COMMAND MeshShaderTests)
+    set_tests_properties(MeshShaderContracts PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77 ENVIRONMENT "DY_LOG_AUTO=0")
     if(USE_D3D12 OR USE_METAL OR USE_VULKAN)
         include(CompileShaders)
+        set(mesh_shader_dir "${PROJECT_SOURCE_DIR}/examples/advanced/22_MeshShaderBasics/Shaders")
+        dy_compile_shader(MeshShaderTests mesh_test_ms mesh
+            GLSL "${mesh_shader_dir}/basic_ms.glsl" HLSL "${mesh_shader_dir}/basic_ms.hlsl"
+            METAL "${mesh_shader_dir}/basic.metal" METAL_ENTRY meshMain)
+        dy_compile_shader(MeshShaderTests mesh_test_ps frag
+            GLSL "${mesh_shader_dir}/basic_ps.glsl" HLSL "${mesh_shader_dir}/basic_ps.hlsl"
+            METAL "${mesh_shader_dir}/basic.metal" METAL_ENTRY fragmentMain)
+        target_compile_definitions(MeshShaderTests PRIVATE DY_TEST_NATIVE_SHADERS=1)
         set(tessellation_shader_dir "${CMAKE_CURRENT_SOURCE_DIR}/Shaders/Tessellation")
         foreach(shader IN ITEMS vertex hull domain fragment)
             if(shader STREQUAL "vertex")
@@ -190,4 +202,19 @@ if(DY_BUILD_TESTS)
     endif()
     add_test(NAME TessellationContracts COMMAND TessellationTests)
     set_tests_properties(TessellationContracts PROPERTIES TIMEOUT 30)
+endif()
+
+if(DY_BUILD_TESTS AND USE_METAL)
+    include(MetalToolchain)
+    set(compute_source "${CMAKE_CURRENT_SOURCE_DIR}/Shaders/Compute/buffers.metal")
+    set(compute_library "${CMAKE_CURRENT_BINARY_DIR}/compute-tests.metallib")
+    add_custom_command(OUTPUT "${compute_library}"
+        BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/compute-tests.air"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal -c "${compute_source}" -o "${CMAKE_CURRENT_BINARY_DIR}/compute-tests.air"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metallib "${CMAKE_CURRENT_BINARY_DIR}/compute-tests.air" -o "${compute_library}"
+        DEPENDS "${compute_source}" VERBATIM)
+    add_executable(MetalComputeTests MetalComputeTests.cpp "${compute_library}")
+    target_link_libraries(MetalComputeTests PRIVATE dy_engine)
+    add_test(NAME MetalComputeContracts COMMAND MetalComputeTests "${compute_library}")
+    set_tests_properties(MetalComputeContracts PROPERTIES TIMEOUT 30 ENVIRONMENT "MTL_DEBUG_LAYER=1")
 endif()

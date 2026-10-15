@@ -17,8 +17,14 @@ namespace dyf::RHI
 		D32_FLOAT,
 		D24_UNORM_S8_UINT,
 		R32_UINT,
-		R16_UINT
+		R16_UINT,
+		D32_FLOAT_S8_UINT
 	};
+
+	[[nodiscard]] inline constexpr bool HasStencil(Format format)
+	{
+		return format == Format::D24_UNORM_S8_UINT || format == Format::D32_FLOAT_S8_UINT;
+	}
 
 	// sRGB(하드웨어 감마) 포맷인지. 셰이더 수동 감마 vs 하드웨어 감마 분기에 사용.
 	[[nodiscard]] inline constexpr bool IsSrgbFormat(Format format)

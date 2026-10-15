@@ -46,6 +46,7 @@ namespace dyf::RHI
     		return 4;
     	case RHI::Format::R16G16B16A16_FLOAT:
     	case RHI::Format::R32G32_FLOAT:
+        case RHI::Format::D32_FLOAT_S8_UINT:
     		return 8;
     	case RHI::Format::R32G32B32_FLOAT:
     		return 12;
@@ -61,7 +62,7 @@ namespace dyf::RHI
     [[nodiscard]] inline bool IsDepthFormat(RHI::Format format)
     {
     	return format == RHI::Format::D32_FLOAT ||
-    		format == RHI::Format::D24_UNORM_S8_UINT;
+            HasStencil(format);
     }
 
     [[nodiscard]] inline bool IsColorFormat(RHI::Format format)
@@ -172,7 +173,8 @@ namespace dyf::RHI
     {
 		constexpr auto all = RHI::ShaderStageFlags::Vertex |
 			RHI::ShaderStageFlags::Hull | RHI::ShaderStageFlags::Domain |
-			RHI::ShaderStageFlags::Fragment | RHI::ShaderStageFlags::Compute;
+			RHI::ShaderStageFlags::Fragment | RHI::ShaderStageFlags::Compute |
+			RHI::ShaderStageFlags::Mesh;
     	return stages != RHI::ShaderStageFlags::None &&
     		(stages & all) == stages;
     }
@@ -250,11 +252,11 @@ namespace dyf::RHI
     [[nodiscard]] inline bool ValidateGraphicsPipelineDesc(
     	const RHI::GraphicsPipelineDesc& desc)
     {
-		if ((desc.layout.inlineConstantStages & ShaderStageFlags::Compute) != ShaderStageFlags::None)
+		if ((desc.layout.inlineConstantStages & (ShaderStageFlags::Compute | ShaderStageFlags::Mesh)) != ShaderStageFlags::None)
             return false;
         if (desc.layout.bindings)
             for (uint32_t i = 0; i < desc.layout.bindingCount; ++i)
-                if ((desc.layout.bindings[i].stages & ShaderStageFlags::Compute) != ShaderStageFlags::None)
+                if ((desc.layout.bindings[i].stages & (ShaderStageFlags::Compute | ShaderStageFlags::Mesh)) != ShaderStageFlags::None)
                     return false;
     	if((desc.vertexBufferCount != 0 && desc.vertexBuffers == nullptr) ||
     		(desc.vertexAttributeCount != 0 && desc.vertexAttributes == nullptr) ||
@@ -344,7 +346,7 @@ namespace dyf::RHI
     					(face.passOp > RHI::StencilOp::Undefined && face.passOp <= RHI::StencilOp::DecrementWrap) &&
     					(face.compareOp > RHI::CompareOp::Undefined && face.compareOp <= RHI::CompareOp::Always);
     			};
-    			if(desc.depthStencil.format != RHI::Format::D24_UNORM_S8_UINT ||
+                if(!HasStencil(desc.depthStencil.format) ||
     				!validFace(desc.depthStencil.front) ||
     				!validFace(desc.depthStencil.back))
     			{
@@ -374,6 +376,90 @@ namespace dyf::RHI
     		}
     	}
     	return true;
+    }
+
+    [[nodiscard]] inline bool ValidateMeshPipelineDesc(
+        const RHI::MeshPipelineDesc& desc)
+    {
+        constexpr auto stages = ShaderStageFlags::Mesh | ShaderStageFlags::Fragment;
+        if (desc.layout.inlineConstantSize &&
+            (desc.layout.inlineConstantStages & stages) != desc.layout.inlineConstantStages)
+            return false;
+        if (desc.layout.bindings)
+            for (uint32_t i = 0; i < desc.layout.bindingCount; ++i)
+                if ((desc.layout.bindings[i].stages & stages) != desc.layout.bindings[i].stages)
+                    return false;
+        if (desc.colorAttachmentCount != 0 && desc.colorAttachments == nullptr)
+            return false;
+
+        auto* meshShader = dynamic_cast<RHI::Shader*>(desc.meshShader);
+        if (meshShader == nullptr || meshShader->GetStage() != RHI::ShaderStage::Mesh ||
+            (desc.raster.fillMode == RHI::FillMode::Undefined || desc.raster.fillMode > RHI::FillMode::Wireframe) ||
+            (desc.raster.cullMode == RHI::CullMode::Undefined || desc.raster.cullMode > RHI::CullMode::Back) ||
+            (desc.raster.frontFace == RHI::FrontFace::Undefined || desc.raster.frontFace > RHI::FrontFace::Clockwise) ||
+            !std::isfinite(desc.raster.depthBiasConstant) ||
+            !std::isfinite(desc.raster.depthBiasSlope) ||
+            !std::isfinite(desc.raster.depthBiasClamp))
+        {
+            return false;
+        }
+
+        if (desc.fragmentShader != nullptr)
+        {
+            auto* fragmentShader = dynamic_cast<RHI::Shader*>(desc.fragmentShader);
+            if (fragmentShader == nullptr ||
+                fragmentShader->GetStage() != RHI::ShaderStage::Fragment)
+            {
+                return false;
+            }
+        }
+        if (desc.colorAttachmentCount != 0 && desc.fragmentShader == nullptr)
+            return false;
+
+        if (desc.depthStencil.format != RHI::Format::Unknown)
+        {
+            if (!IsDepthFormat(desc.depthStencil.format)) return false;
+            if (desc.depthStencil.depthTestEnabled &&
+                (desc.depthStencil.depthCompareOp == RHI::CompareOp::Undefined || desc.depthStencil.depthCompareOp > RHI::CompareOp::Always))
+            {
+                return false;
+            }
+            if (desc.depthStencil.stencilEnabled)
+            {
+                const auto validFace = [](const RHI::StencilFaceState& face)
+                {
+                    return (face.failOp > RHI::StencilOp::Undefined && face.failOp <= RHI::StencilOp::DecrementWrap) &&
+                        (face.depthFailOp > RHI::StencilOp::Undefined && face.depthFailOp <= RHI::StencilOp::DecrementWrap) &&
+                        (face.passOp > RHI::StencilOp::Undefined && face.passOp <= RHI::StencilOp::DecrementWrap) &&
+                        (face.compareOp > RHI::CompareOp::Undefined && face.compareOp <= RHI::CompareOp::Always);
+                };
+                if (!RHI::HasStencil(desc.depthStencil.format) ||
+                    !validFace(desc.depthStencil.front) || !validFace(desc.depthStencil.back))
+                    return false;
+            }
+        }
+
+        else if(desc.depthStencil.depthTestEnabled ||
+            desc.depthStencil.depthWriteEnabled || desc.depthStencil.stencilEnabled)
+            return false;
+
+        for (uint32_t index = 0; index < desc.colorAttachmentCount; ++index)
+        {
+            const RHI::ColorAttachmentDesc& attachment = desc.colorAttachments[index];
+            if (!IsColorFormat(attachment.format) ||
+                static_cast<uint8_t>(attachment.writeMask) > static_cast<uint8_t>(ColorWriteMask::All) ||
+                (attachment.blend.enabled &&
+                    ((attachment.blend.sourceColor == RHI::BlendFactor::Undefined || attachment.blend.sourceColor > RHI::BlendFactor::OneMinusDestinationAlpha) ||
+                    (attachment.blend.destinationColor == RHI::BlendFactor::Undefined || attachment.blend.destinationColor > RHI::BlendFactor::OneMinusDestinationAlpha) ||
+                    (attachment.blend.colorOp == RHI::BlendOp::Undefined || attachment.blend.colorOp > RHI::BlendOp::Max) ||
+                    (attachment.blend.sourceAlpha == RHI::BlendFactor::Undefined || attachment.blend.sourceAlpha > RHI::BlendFactor::OneMinusDestinationAlpha) ||
+                    (attachment.blend.destinationAlpha == RHI::BlendFactor::Undefined || attachment.blend.destinationAlpha > RHI::BlendFactor::OneMinusDestinationAlpha) ||
+                    (attachment.blend.alphaOp == RHI::BlendOp::Undefined || attachment.blend.alphaOp > RHI::BlendOp::Max))))
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     [[nodiscard]] inline const RHI::ResourceBindingLayout* FindLayoutBinding(

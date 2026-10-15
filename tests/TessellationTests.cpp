@@ -72,7 +72,8 @@ int main()
         desc.topology = RHI::PrimitiveTopology::PatchList;
         desc.patchControlPoints = 3;
         desc.raster.fillMode = RHI::FillMode::Solid;
-        desc.raster.cullMode = RHI::CullMode::Back;
+        // Verify tessellation output independently of the patch's raster winding.
+        desc.raster.cullMode = RHI::CullMode::None;
         desc.raster.frontFace = RHI::FrontFace::CounterClockwise;
 #ifdef DY_TEST_NATIVE_SHADERS
         const RHI::VertexBufferLayout input{0, sizeof(float) * 2, RHI::VertexStepMode::Vertex};

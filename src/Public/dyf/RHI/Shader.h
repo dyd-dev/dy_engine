@@ -15,7 +15,8 @@ namespace dyf::RHI
 		Fragment,
 		Compute,
 		Hull,
-		Domain
+		Domain,
+		Mesh
 	};
 
 	struct ShaderDesc

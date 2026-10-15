@@ -355,6 +355,7 @@ bool MetalDevice::SupportsNative(RHI::Feature feature) const
     if(!m_impl || m_impl->device == nil) return false;
     switch(feature)
     {
+    case RHI::Feature::Compute:
     case RHI::Feature::Rasterization:
     case RHI::Feature::Tessellation:
     case RHI::Feature::DescriptorIndexing:
@@ -362,6 +363,14 @@ bool MetalDevice::SupportsNative(RHI::Feature feature) const
     case RHI::Feature::Wireframe:
     case RHI::Feature::DepthBiasClamp:
         return true;
+    case RHI::Feature::MeshShader:
+        if(@available(macOS 13.0, iOS 16.0, *))
+        {
+            return [m_impl->device supportsFamily:MTLGPUFamilyMetal3];
+        }
+        return false;
+    case RHI::Feature::TaskShader:
+        return false;
     // 이 구현은 shader bias 인자를 추가하지 않으므로 sampler LOD bias는 지원하지 않는다.
     default: return false;
     }
@@ -425,6 +434,10 @@ bool MetalDevice::SupportsSamplerNative(const RHI::SamplerDesc& desc) const
 bool MetalDevice::SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc& desc) const
 {
     return m_impl && MetalPipeline::SupportsGraphics(desc, (__bridge void*)m_impl->device);
+}
+bool MetalDevice::SupportsMeshPipelineNative(const RHI::MeshPipelineDesc& desc) const
+{
+    return m_impl && MetalPipeline::SupportsMesh(desc, (__bridge void*)m_impl->device);
 }
 bool MetalDevice::IsLostNative() const {return !m_impl || m_impl->asyncWorkFailed;}
 bool MetalDevice::WaitIdleNative()
@@ -848,6 +861,16 @@ void MetalDevice::DestroySwapchainNative()
 		return result;
 	}
 
+    RHI::PipelineHandle MetalDevice::CreateComputePipelineNative(const RHI::ComputePipelineDesc& desc)
+    {
+        auto pipeline = std::unique_ptr<MetalPipeline, MetalObjectDeleter>(
+            new MetalPipeline(desc, (__bridge void*)m_impl->device));
+        if(pipeline->GetNativePipeline() == nullptr) return nullptr;
+        auto* result = pipeline.get();
+        m_impl->livePipelines.push_back(std::move(pipeline));
+        return result;
+    }
+
     RHI::PipelineHandle MetalDevice::CreateGraphicsPipelineNative(
         const RHI::GraphicsPipelineDesc& desc)
     {
@@ -871,6 +894,33 @@ void MetalDevice::DestroySwapchainNative()
             new MetalPipeline(desc, (__bridge void*)m_impl->device));
 		if(pipeline->GetNativePipeline() == nullptr ||
 			(pipeline->IsTessellated() && pipeline->GetNativeHullPipeline() == nullptr) ||
+			(desc.depthStencil.format != RHI::Format::Unknown &&
+				pipeline->GetNativeDepthStencil() == nullptr)) return nullptr;
+		MetalPipeline* result = pipeline.get();
+		m_impl->livePipelines.push_back(std::move(pipeline));
+		return result;
+    }
+
+    RHI::PipelineHandle MetalDevice::CreateMeshPipelineNative(
+        const RHI::MeshPipelineDesc& desc)
+    {
+		const auto ownsShader = [this](RHI::ShaderHandle shader)
+		{
+			return std::find_if(
+				m_impl->liveShaders.begin(), m_impl->liveShaders.end(),
+				[shader](const std::unique_ptr<MetalShader, MetalObjectDeleter>& candidate)
+				{
+					return static_cast<RHI::ShaderHandle>(candidate.get()) == shader;
+				}) != m_impl->liveShaders.end();
+		};
+		if(!ownsShader(desc.meshShader) ||
+			(desc.fragmentShader != nullptr && !ownsShader(desc.fragmentShader)))
+		{
+			return nullptr;
+		}
+        auto pipeline = std::unique_ptr<MetalPipeline, MetalObjectDeleter>(
+            new MetalPipeline(desc, (__bridge void*)m_impl->device));
+		if(pipeline->GetNativePipeline() == nullptr ||
 			(desc.depthStencil.format != RHI::Format::Unknown &&
 				pipeline->GetNativeDepthStencil() == nullptr)) return nullptr;
 		MetalPipeline* result = pipeline.get();

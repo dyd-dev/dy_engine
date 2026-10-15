@@ -163,6 +163,19 @@ namespace dyf::Backends
 				m_desc.layout = GetLayout();
 			}
 
+			explicit NullPipelineState(const RHI::MeshPipelineDesc& desc)
+				: RHI::Pipeline(desc.layout, false, true)
+			{
+				if(desc.colorAttachmentCount != 0)
+					m_colorAttachments.assign(
+						desc.colorAttachments, desc.colorAttachments + desc.colorAttachmentCount);
+				m_desc.raster = desc.raster;
+				m_desc.depthStencil = desc.depthStencil;
+				m_desc.colorAttachments = m_colorAttachments.empty() ? nullptr : m_colorAttachments.data();
+				m_desc.colorAttachmentCount = desc.colorAttachmentCount;
+				m_desc.layout = GetLayout();
+			}
+
 			[[nodiscard]] const RHI::GraphicsPipelineDesc& GetDesc() const { return m_desc; }
 
 		private:
@@ -331,7 +344,7 @@ namespace dyf::Backends
 						attachment.mipLevel < texture->GetDesc().mipLevels &&
 						attachment.arrayLayer < texture->GetDesc().depthOrArraySize;
 					const bool hasStencil = texture != nullptr &&
-						texture->GetDesc().format == RHI::Format::D24_UNORM_S8_UINT;
+						RHI::HasStencil(texture->GetDesc().format);
 					const bool declaredStateValid =
 						attachment.state == RHI::ResourceState::DepthRead ||
 						attachment.state == RHI::ResourceState::DepthWrite;
@@ -618,6 +631,12 @@ namespace dyf::Backends
 				{
 					Invalidate();
 				}
+			}
+
+			void DispatchMeshNative(uint32_t x, uint32_t y, uint32_t z) override
+			{
+				if(!x || !y || !z || !m_pipeline || !m_pipeline->IsMesh() ||
+					!ValidateDraw(false, 0, 1, 0, 0)) Invalidate();
 			}
 
 			bool CloseNative() override
@@ -1042,7 +1061,9 @@ bool NullDevice::SupportsNative(RHI::Feature feature) const
     case RHI::Feature::FractionalDepthBias:
     case RHI::Feature::Wireframe:
     case RHI::Feature::DepthBiasClamp:
-    case RHI::Feature::Tessellation: return true;
+    case RHI::Feature::Tessellation:
+    case RHI::Feature::MeshShader: return true;
+    case RHI::Feature::TaskShader: return false;
     default: return false;
     }
 }
@@ -1069,6 +1090,10 @@ bool NullDevice::SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc&) co
 bool NullDevice::SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc&) const
 {
     return m_impl->initialized;
+}
+bool NullDevice::SupportsMeshPipelineNative(const RHI::MeshPipelineDesc&) const
+{
+    return m_impl && m_impl->initialized;
 }
 bool NullDevice::IsLostNative() const {return false;}
 bool NullDevice::WaitIdleNative() { return m_impl->initialized; }
@@ -1263,6 +1288,15 @@ void NullDevice::DestroySwapchainNative()
 	{
 		return m_impl->livePipelines.emplace_back(
 			std::make_unique<NullPipelineState>(desc)).get();
+	}
+
+	RHI::PipelineHandle NullDevice::CreateMeshPipelineNative(
+		const RHI::MeshPipelineDesc& desc)
+	{
+		auto pipeline = std::make_unique<NullPipelineState>(desc);
+		NullPipelineState* result = pipeline.get();
+		m_impl->livePipelines.push_back(std::move(pipeline));
+		return result;
 	}
 
 	RHI::ResourceSetHandle NullDevice::CreateResourceSetNative(const RHI::ResourceSetDesc& desc)

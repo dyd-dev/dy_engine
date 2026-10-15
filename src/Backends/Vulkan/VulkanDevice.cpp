@@ -113,6 +113,8 @@ namespace dyf::Backends
             case RHI::Feature::DescriptorIndexing: return supported.shaderSampledImageArrayDynamicIndexing == VK_TRUE;
             case RHI::Feature::Wireframe: return supported.fillModeNonSolid == VK_TRUE;
             case RHI::Feature::DepthBiasClamp: return supported.depthBiasClamp == VK_TRUE;
+            case RHI::Feature::MeshShader: return m_context.meshShaderSupported;
+            case RHI::Feature::TaskShader: return false;
             default: return false;
             }
         }
@@ -164,6 +166,16 @@ namespace dyf::Backends
 			catch (const std::exception&) { return nullptr; }
 		}
         dyf::RHI::PipelineHandle CreateGraphicsPipeline(const dyf::RHI::GraphicsPipelineDesc& desc);
+        dyf::RHI::PipelineHandle CreateMeshPipeline(const dyf::RHI::MeshPipelineDesc& desc)
+        {
+            try
+            {
+                std::unique_ptr<VulkanPipeline, VulkanObjectDeleter> pipeline(new VulkanPipeline(m_context, desc));
+                m_pipelines.push_back(pipeline.get());
+                return pipeline.release();
+            }
+            catch(const std::exception&) { return nullptr; }
+        }
 		dyf::RHI::ResourceSetHandle CreateResourceSet(const dyf::RHI::ResourceSetDesc& desc);
 		void DestroyBuffer(dyf::RHI::BufferHandle buffer);
 		void DestroyTexture(dyf::RHI::TextureHandle texture);
@@ -371,7 +383,7 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
         VkPhysicalDeviceFeatures features{};
         vkGetPhysicalDeviceFeatures(m_impl->Context().physicalDevice,&features);
         // 레이아웃 전체와 각 셰이더 단계의 실제 디스크립터 수를 네이티브 한도와 비교한다.
-        uint64_t counts[6][5]={};
+        uint64_t counts[7][5]={};
         for(uint32_t i=0;i<desc.bindingCount;++i)
         {
             const auto& binding=desc.bindings[i];
@@ -399,8 +411,8 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
             constexpr RHI::ShaderStageFlags stages[] = {
                 RHI::ShaderStageFlags::Vertex, RHI::ShaderStageFlags::Hull,
                 RHI::ShaderStageFlags::Domain, RHI::ShaderStageFlags::Fragment,
-                RHI::ShaderStageFlags::Compute};
-            for(uint32_t stage=0;stage<5;++stage)
+                RHI::ShaderStageFlags::Compute, RHI::ShaderStageFlags::Mesh};
+            for(uint32_t stage=0;stage<6;++stage)
                 if((binding.stages&stages[stage])!=RHI::ShaderStageFlags::None) counts[stage+1][kind]+=binding.count;
         }
         const uint64_t totalLimits[]={limits.maxDescriptorSetSamplers,limits.maxDescriptorSetUniformBuffers,
@@ -408,7 +420,7 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
         const uint64_t stageLimits[]={limits.maxPerStageDescriptorSamplers,limits.maxPerStageDescriptorUniformBuffers,
             limits.maxPerStageDescriptorStorageBuffers,limits.maxPerStageDescriptorSampledImages,limits.maxPerStageDescriptorStorageImages};
         for(uint32_t kind=0;kind<5;++kind) if(counts[0][kind]>totalLimits[kind])return false;
-        for(uint32_t stage=1;stage<6;++stage)
+        for(uint32_t stage=1;stage<7;++stage)
         {
             uint64_t resources=0;
             for(uint32_t kind=0;kind<5;++kind)
@@ -472,6 +484,40 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
             hasFormat(desc.depthStencil.format,VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT,false);
     }
 
+    bool VulkanDevice::SupportsMeshPipelineNative(const RHI::MeshPipelineDesc& desc) const
+    {
+        if (!m_impl->Context().meshShaderSupported) return false;
+        const auto physical = m_impl->Context().physicalDevice;
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(physical, &properties);
+        const auto& limits = properties.limits;
+        if (desc.colorAttachmentCount > limits.maxColorAttachments) return false;
+
+        const auto hasFormat = [&](RHI::Format format, VkFormatFeatureFlags feature) {
+            VkFormatProperties supported{};
+            vkGetPhysicalDeviceFormatProperties(physical, ToVulkanFormat(format), &supported);
+            return (supported.optimalTilingFeatures & feature) == feature;
+        };
+        VkPhysicalDeviceFeatures features{};
+        vkGetPhysicalDeviceFeatures(physical, &features);
+        const auto sameBlend = [](const RHI::ColorAttachmentDesc& a, const RHI::ColorAttachmentDesc& b) {
+            return a.writeMask == b.writeMask && a.blend.enabled == b.blend.enabled &&
+                a.blend.sourceColor == b.blend.sourceColor && a.blend.destinationColor == b.blend.destinationColor &&
+                a.blend.colorOp == b.blend.colorOp && a.blend.sourceAlpha == b.blend.sourceAlpha &&
+                a.blend.destinationAlpha == b.blend.destinationAlpha && a.blend.alphaOp == b.blend.alphaOp;
+        };
+        for (uint32_t i = 0; i < desc.colorAttachmentCount; ++i)
+        {
+            const auto& attachment = desc.colorAttachments[i];
+            if (i && !features.independentBlend && !sameBlend(attachment, desc.colorAttachments[0])) return false;
+            VkFormatFeatureFlags required = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+            if (attachment.blend.enabled) required |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+            if (!hasFormat(attachment.format, required)) return false;
+        }
+        return desc.depthStencil.format == RHI::Format::Unknown ||
+            hasFormat(desc.depthStencil.format, VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT);
+    }
+
     bool VulkanDevice::CreateSwapchainNative(const dyf::RHI::SwapchainDesc& desc)
 	{
 		return m_impl->CreateSwapchain(desc);
@@ -521,6 +567,11 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 	dyf::RHI::PipelineHandle VulkanDevice::CreateGraphicsPipelineNative(const dyf::RHI::GraphicsPipelineDesc& desc)
 	{
 		return m_impl->CreateGraphicsPipeline(desc);
+	}
+
+	dyf::RHI::PipelineHandle VulkanDevice::CreateMeshPipelineNative(const dyf::RHI::MeshPipelineDesc& desc)
+	{
+		return m_impl->CreateMeshPipeline(desc);
 	}
 
 	dyf::RHI::ResourceSetHandle VulkanDevice::CreateResourceSetNative(const dyf::RHI::ResourceSetDesc& desc)
@@ -1524,18 +1575,73 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		vulkan13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 		vulkan13.dynamicRendering = VK_TRUE;
 		vulkan13.synchronization2 = VK_TRUE;
-		const char* extensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+		vulkan13.maintenance4 = VK_TRUE;
+
+		uint32_t extensionCount = 0;
+		vkEnumerateDeviceExtensionProperties(m_context.physicalDevice, nullptr, &extensionCount, nullptr);
+		std::vector<VkExtensionProperties> availableExtensions(extensionCount);
+		vkEnumerateDeviceExtensionProperties(m_context.physicalDevice, nullptr, &extensionCount, availableExtensions.data());
+
+		bool hasMeshShaderExtension = false;
+		for (const auto& ext : availableExtensions)
+		{
+			if (std::strcmp(ext.extensionName, VK_EXT_MESH_SHADER_EXTENSION_NAME) == 0)
+			{
+				hasMeshShaderExtension = true;
+				break;
+			}
+		}
+
+		VkPhysicalDeviceMeshShaderFeaturesEXT meshFeaturesSupported{};
+		meshFeaturesSupported.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+		VkPhysicalDeviceMeshShaderFeaturesEXT meshFeaturesToEnable{};
+		meshFeaturesToEnable.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+		bool enableMeshShader = false;
+
+		if (hasMeshShaderExtension)
+		{
+			VkPhysicalDeviceFeatures2 features2{};
+			features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+			features2.pNext = &meshFeaturesSupported;
+			vkGetPhysicalDeviceFeatures2(m_context.physicalDevice, &features2);
+			if (meshFeaturesSupported.meshShader == VK_TRUE)
+			{
+				enableMeshShader = true;
+				meshFeaturesToEnable.meshShader = VK_TRUE;
+				meshFeaturesToEnable.taskShader = VK_FALSE;
+			}
+		}
+
+		std::vector<const char*> extensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+		if (enableMeshShader)
+		{
+			extensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
+			vulkan13.pNext = &meshFeaturesToEnable;
+		}
+
 		VkDeviceCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 		info.pNext = &vulkan13;
 		info.queueCreateInfoCount = 1;
 		info.pQueueCreateInfos = &queueInfo;
-		info.enabledExtensionCount = 1;
-		info.ppEnabledExtensionNames = extensions;
+		info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+		info.ppEnabledExtensionNames = extensions.data();
 		info.pEnabledFeatures = &enabled;
 		if (vkCreateDevice(m_context.physicalDevice, &info, nullptr, &m_context.device) != VK_SUCCESS) return false;
 		vkGetDeviceQueue(m_context.device, m_context.queueIndices.graphicsFamily, 0, &m_context.graphicsQueue);
 		vkGetDeviceQueue(m_context.device, m_context.queueIndices.presentFamily, 0, &m_context.presentQueue);
+
+		if (enableMeshShader)
+		{
+			m_context.vkCmdDrawMeshTasksEXT = reinterpret_cast<PFN_vkCmdDrawMeshTasksEXT>(
+				vkGetDeviceProcAddr(m_context.device, "vkCmdDrawMeshTasksEXT"));
+			m_context.meshShaderSupported = (m_context.vkCmdDrawMeshTasksEXT != nullptr);
+		}
+		else
+		{
+			m_context.meshShaderSupported = false;
+			m_context.vkCmdDrawMeshTasksEXT = nullptr;
+		}
 		return true;
 	}
 
