@@ -4,6 +4,7 @@
 #include <string_view>
 #include "dyf/Math/Math.h"
 #include "dyf/Types.h"
+#include "dyf/Diagnostics/LiveProfiling.h"
 
 namespace dyf
 {
@@ -53,6 +54,7 @@ private:
     Rectangle viewport, clip;
     std::vector<Vertex> vertices;
     std::vector<Draw> draws;
+    Diagnostics::LiveId liveId=0;
 
     void Triangle(Math::float2 a, Math::float2 b, Math::float2 c, Math::float4 color);
     void Quad(Rectangle rectangle, Rectangle uv, Math::float4 color, const dyf::Image& image = {});

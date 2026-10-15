@@ -1,5 +1,6 @@
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI.h"
+#include "dyf/Diagnostics/LiveProfiling.h"
 #include "vertex.h"
 #include "fragment.h"
 #include <array>
@@ -14,6 +15,7 @@
 #include <vector>
 
 namespace RHI = dyf::RHI;
+namespace Live = dyf::Diagnostics;
 using Clock = std::chrono::steady_clock;
 
 namespace {
@@ -161,6 +163,20 @@ int main(int argc, char** argv) {
         pipelineDesc.colorAttachments = &output;
         pipelineDesc.colorAttachmentCount = 1;
         auto* pipeline = resources.Keep(device.CreateGraphicsPipeline(pipelineDesc));
+        const auto liveOwner=Live::FindLiveObject(&device);
+        Live::ControlDesc instancing;instancing.device=instancing.source=instancing.owner=liveOwner;
+        instancing.key="example14.instancing";instancing.label="인스턴싱 · 동일한 256개 인스턴스";
+        instancing.category=Live::ControlCategory::Optimization;
+        instancing.description="같은 정점·인스턴스 데이터로 사각형 256개를 그리며, 화면 결과를 유지한 채 draw 묶음과 CPU 명령 기록 비용을 비교합니다.";
+        instancing.onPath="인스턴스 256개를 DrawInstanced(6, 256, 0, 0) 1회와 배치 1개로 기록합니다.";
+        instancing.offPath="같은 속성의 firstInstance 0..255를 순서대로 선택하여 DrawInstanced(6, 1, 0, i) 256회와 배치 256개로 기록합니다.";
+        instancing.conditions="정점·인스턴스 데이터는 최초 제출 프레임에만 업로드합니다. 이후 고정 장면에서는 RHI 업로드 페이지 재사용·서브할당 정책의 효과가 거의 나타나지 않을 수 있습니다. 같은 backend·창 크기·계측 설정의 완료된 1초 구간을 비교합니다.";
+        instancing.tradeoffs="draw/batch 기록 수가 줄어도 FPS 개선을 보장하지 않습니다. 기본 FIFO는 표시 주기에 맞춰 FPS를 제한할 수 있습니다. Live 계측 ON/OFF의 수집 오버헤드를 구분합니다. 종료 로그의 CPU 기록 시간은 첫 업로드·계측 기록을 포함하고 native 변환·GPU·Present·캡처는 제외합니다.";
+        instancing.appliedValue=options.mode=="instanced";
+        auto instancingControl=Live::RegisterControl(instancing,[&](const Live::ControlRequest& request,Live::LiveFrameKey){
+            const bool enabled=std::get<bool>(request.value);options.mode=enabled?"instanced":"draws";
+            return Live::ControlApplyResult{Live::ControlState::Applied,enabled,{}};
+        });
 
         uint32_t frame = 0;
         uint64_t drawCalls = 0;
@@ -175,6 +191,9 @@ int main(int argc, char** argv) {
                 Check(!device.IsLost(), "Device lost during BeginFrame");
                 continue; // 최소화·크기 변경으로 준비되지 않은 프레임은 세지 않는다.
             }
+            const auto liveFrame=Live::GetLiveContext().frame;
+            Live::PollControls(liveOwner,liveFrame);
+            Live::SetLiveObjectGauge(liveFrame,{Live::LiveValueState::Ready,objectCount});
             // 제출한 명령이 GPU 완료까지 자원을 유지하므로 이 프레임의 ResourceScope는 끝에서 해제할 수 있다.
             RHI::ResourceScope frameResources(device);
             auto* commands = frameResources.Keep(device.AcquireCommandList());
@@ -217,13 +236,26 @@ int main(int argc, char** argv) {
             commands->SetScissor({0, 0, extent.width, extent.height});
 
             // 인스턴싱은 전체 객체를 한 번에 그린다. 개별 모드는 같은 데이터를 객체마다 한 번씩 호출한다.
+            const auto drawBatch=[&](uint32_t first,uint32_t count){
+#ifdef DY_LIVE_PROFILING_ENABLED
+                auto context=Live::GetLiveContext();context.batch=Live::GetLiveBatchId(liveOwner,count==objectCount?0:uint64_t(first)+1);
+                Live::LiveContextScope batchContext(context);
+                Live::LiveEvent batch;batch.id=context.batch;batch.context=context;
+                batch.kind=Live::LiveEventKind::Batch;batch.stage=Live::LiveStage::Data;batch.elements=count;
+                batch.bytes=uint64_t(count)*sizeof(Instance);batch.first=first;batch.stride=sizeof(Instance);
+                batch.reason=count==objectCount?Live::LiveSplitReason::EndOfInput:Live::LiveSplitReason::InstancingDisabled;
+                batch.resource=Live::FindLiveObject(instanceBuffer);Live::RecordLiveEvent(batch);
+                Live::RecordLiveLink({batch.id,batch.resource});
+#endif
+                commands->DrawInstanced(uint32_t(vertices.size()),count,0,first);
+            };
             if (options.mode == "instanced") {
-                commands->DrawInstanced(uint32_t(vertices.size()), objectCount, 0, 0);
+                drawBatch(0,objectCount);
                 ++drawCalls;
             } else {
                 // firstInstance로 같은 인스턴스 속성의 i번째 원소를 선택한다.
                 for (uint32_t i = 0; i < objectCount; ++i)
-                    commands->DrawInstanced(uint32_t(vertices.size()), 1, 0, i);
+                    drawBatch(i,1);
                 drawCalls += objectCount;
             }
             commands->EndRendering();
@@ -245,11 +277,11 @@ int main(int argc, char** argv) {
 
         // GPU 작업 완료를 기다린 뒤 호출 횟수와 CPU 기록 시간을 출력한다. GPU 실행 시간은 측정하지 않는다.
         Check(device.WaitIdle(), "WaitIdle failed");
-        std::printf("mode=%s frames=%u objects=%u draw_calls=%llu cpu_record_ms=%.3f avg_record_us=%.3f\n",
+        std::printf("final_mode=%s totals_scope=all_frames frames=%u objects=%u draw_calls=%llu cpu_record_ms=%.3f avg_record_us=%.3f\n",
                     options.mode.c_str(), frame, objectCount, static_cast<unsigned long long>(drawCalls),
                     recordMilliseconds, frame ? recordMilliseconds * 1000.0 / frame : 0.0);
-        std::puts(
-            "Both modes use the same instance-rate attributes and pixels; only draw grouping differs. CPU recording time excludes GPU execution, present and capture.");
+        std::puts("누적값과 평균은 집계된 모든 프레임 기준이며, Live로 모드를 전환했다면 두 모드의 결과가 함께 포함됩니다.");
+        std::puts("같은 인스턴스 속성과 화면에서 draw 묶음만 비교합니다. CPU 기록 시간은 첫 업로드와 Live 계측 비용을 포함하며 native 변환·GPU 실행·Present·캡처는 제외합니다. 기본 FIFO는 FPS를 제한할 수 있습니다.");
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());

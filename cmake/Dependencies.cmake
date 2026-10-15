@@ -124,6 +124,8 @@ FetchContent_Declare(
 	GIT_TAG "3.4"
 )
 FetchContent_MakeAvailable(glfw)
+include("${CMAKE_CURRENT_LIST_DIR}/PatchGlfwWin32.cmake")
+dy_patch_glfw_win32()
 
 # stb_image 자동 다운로드 설정
 FetchContent_Declare(

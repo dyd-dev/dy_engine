@@ -235,8 +235,11 @@ namespace dyf::Backends
 	}
 
 	VulkanCommandList::VulkanCommandList(const VulkanContext& context, std::shared_ptr<VulkanUploadPool> uploadPool)
+        :VulkanCommandList(context,uploadPool,uploadPool?uploadPool->GetPolicy():VulkanDetail::UploadPolicy{}) {}
+
+	VulkanCommandList::VulkanCommandList(const VulkanContext& context, std::shared_ptr<VulkanUploadPool> uploadPool,VulkanDetail::UploadPolicy policy)
 		: m_context(context)
-		, m_uploadArena(uploadPool ? std::move(uploadPool) : CreateVulkanUploadPool(context))
+		, m_uploadArena(uploadPool ? std::move(uploadPool) : CreateVulkanUploadPool(context),policy)
 	{
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(context.physicalDevice, &properties);
