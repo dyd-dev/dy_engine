@@ -27,6 +27,7 @@ namespace dyf::Backends
         uint64_t GetLastSubmissionNative() const override; bool CreateSwapchainNative(const dyf::RHI::SwapchainDesc& desc) override;
 		[[nodiscard]] bool BeginFrameNative() override;
 		[[nodiscard]] dyf::RHI::ICommandList* AcquireCommandListNative() override;
+        RHI::ICommandList* AcquireCommandListNative(bool reusePages,bool suballocate) override;
         void DiscardCommandListNative(RHI::ICommandList*) override;
 		[[nodiscard]] bool SubmitNative(dyf::RHI::ICommandList** commandLists, uint32_t count) override;
 		bool PresentNative() override;
@@ -61,6 +62,7 @@ namespace dyf::Backends
 
 	protected:
 		RHI::UploadMemoryStatistics GetUploadMemoryStatisticsNative() const override;
+        bool SetUploadMemoryPolicyNative(bool reusePages,bool suballocate) override;
 		int Initialize(const void* windowHandle, const dyf::RHI::DeviceDesc& desc) override;
 
 	private:
@@ -69,6 +71,7 @@ namespace dyf::Backends
         bool ReadTimestampsNative(RHI::TimestampQueryHandle,uint32_t,uint32_t,uint64_t*) override;
         double GetTimestampPeriodNative() const override;
         uint32_t GetTimestampValidBitsNative() const override;
+        bool GetTimestampCalibrationNative(RHI::TimestampCalibration&) const override;
 		std::unique_ptr<Impl> m_impl;
 	};
 }

@@ -199,8 +199,8 @@ namespace dyf::Backends
 
     struct D3D12CommandListInternal
     {
-        explicit D3D12CommandListInternal(std::shared_ptr<D3D12UploadPool> pool)
-            : uploads(std::move(pool)) {}
+        D3D12CommandListInternal(std::shared_ptr<D3D12UploadPool> pool,RHI::Detail::UploadPolicy policy)
+            : uploads(std::move(pool),policy) {}
 
         struct DiscardRequest
         {
@@ -336,8 +336,12 @@ namespace dyf::Backends
 
     D3D12CommandList::D3D12CommandList(void* nativeDevice,
         std::shared_ptr<D3D12UploadPool> uploadPool)
+        :D3D12CommandList(nativeDevice,uploadPool,uploadPool?uploadPool->GetPolicy():RHI::Detail::UploadPolicy{}) {}
+
+    D3D12CommandList::D3D12CommandList(void* nativeDevice,
+        std::shared_ptr<D3D12UploadPool> uploadPool,RHI::Detail::UploadPolicy policy)
         : m_internal(new D3D12CommandListInternal(uploadPool ? std::move(uploadPool)
-            : MakeD3D12UploadPool(static_cast<ID3D12Device*>(nativeDevice))))
+            : MakeD3D12UploadPool(static_cast<ID3D12Device*>(nativeDevice)),policy))
     {
         auto* device = static_cast<ID3D12Device*>(nativeDevice);
         if (device == nullptr)

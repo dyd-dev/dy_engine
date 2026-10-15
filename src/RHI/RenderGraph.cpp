@@ -163,6 +163,7 @@ namespace dyf::RHI
         m_compiledRevisions.clear();
         m_executionOrder.clear();
         m_executionStages.clear();
+        m_dependencies.clear();
         m_passBarriers.clear();
         m_finalBarriers.clear();
         const uint32_t passCount = static_cast<uint32_t>(m_passes.size());
@@ -256,6 +257,8 @@ namespace dyf::RHI
             }
         }
         if(m_executionOrder.size() != passCount) return Fail("resource dependencies contain a cycle.");
+        for(uint32_t before=0;before<passCount;++before)
+            for(uint32_t after:edges[before])m_dependencies.push_back({before,after});
         for(const auto& pass : m_passes) m_compiledRevisions.push_back(pass->GetRevision());
         m_compiled = true;
         return true;
@@ -295,12 +298,38 @@ namespace dyf::RHI
         return true;
     }
 
-    bool RenderGraph::RecordPass(ICommandList* commands, uint32_t pass) const
+    bool RenderGraph::RecordPass(ICommandList* commands, uint32_t pass,uint64_t eventId) const
     {
         if(m_passes[pass]->HasGlobalBarrier()) commands->GlobalBarrier();
         const auto& barriers = m_passBarriers[pass];
         commands->ResourceBarrier(barriers.data(), static_cast<uint32_t>(barriers.size()));
-        if(!m_passes[pass]->Execute(commands)) return false;
+        if(!eventId)
+        {
+            if(!m_passes[pass]->Execute(commands))return false;
+        }
+        else
+        {
+            Diagnostics::LiveEvent event;event.id=eventId;event.kind=Diagnostics::LiveEventKind::CpuWork;
+            event.stage=Diagnostics::LiveStage::CpuPrepare;event.arguments={pass,
+                static_cast<int64_t>(m_passes[pass]->GetReads().size()),static_cast<int64_t>(m_passes[pass]->GetWrites().size())};
+            const auto& name=m_passes[pass]->GetName();
+            for(size_t i=0;i<name.size()&&i+1<sizeof(event.label);++i)event.label[i]=name[i];
+            event.beginNs=Diagnostics::LiveNowNs();
+            bool executed=false;
+            try{executed=m_passes[pass]->Execute(commands);}
+            catch(...){event.endNs=Diagnostics::LiveNowNs();event.outcome=Diagnostics::LiveOutcome::Failed;commands->RecordLiveInfo(event);throw;}
+            event.endNs=Diagnostics::LiveNowNs();event.outcome=executed?Diagnostics::LiveOutcome::Observed:Diagnostics::LiveOutcome::Failed;
+            commands->RecordLiveInfo(event);
+            if(!executed)return false;
+            const auto linkResource=[&](const RGResourceBinding& binding,bool write)
+            {
+                const auto& resource=m_resources[m_resourceIndices.at(binding.handle.id)];
+                const auto id=Diagnostics::FindLiveObject(resource.buffer?static_cast<const void*>(resource.buffer):resource.texture);
+                commands->RecordLiveResourceLink(write?eventId:id,write?id:eventId);
+            };
+            for(const auto& binding:m_passes[pass]->GetReads())linkResource(binding,false);
+            for(const auto& binding:m_passes[pass]->GetWrites())linkResource(binding,true);
+        }
         for(const auto& binding : m_passes[pass]->GetReads())
             if(!RequireResource(commands, m_resources[m_resourceIndices.at(binding.handle.id)], binding.state)) return false;
         for(const auto& binding : m_passes[pass]->GetWrites())
@@ -317,8 +346,13 @@ namespace dyf::RHI
             return Fail("Compile must succeed before recording on an open command list outside rendering.");
         }
         if(!RecordBoundary(commands)) return false;
+        const bool live=Diagnostics::IsLiveCollectorEnabled();
+        std::vector<uint64_t> passEvents;
+        if(live){passEvents.resize(m_passes.size());for(auto& id:passEvents)id=Diagnostics::AllocateLiveId();}
         for(uint32_t pass : m_executionOrder)
-            if(!RecordPass(commands, pass)) return false;
+            if(!RecordPass(commands, pass,live?passEvents[pass]:0)) return false;
+        if(live)for(const auto& dependency:m_dependencies)
+            commands->RecordLiveResourceLink(passEvents[dependency.before],passEvents[dependency.after]);
         commands->ResourceBarrier(m_finalBarriers.data(), static_cast<uint32_t>(m_finalBarriers.size()));
         return commands->CanRecordCommands();
     }
@@ -358,8 +392,17 @@ namespace dyf::RHI
         final->m_references = boundary->m_references;
         final->m_imageGeneration = boundary->m_imageGeneration;
         std::vector<uint8_t> recorded(m_passes.size(), 0);
+        const bool live=Diagnostics::IsLiveCollectorEnabled();
+        std::vector<uint64_t> passEvents;
+        if(live){passEvents.resize(m_passes.size());for(auto& id:passEvents)id=Diagnostics::AllocateLiveId();}
+        const auto context=Diagnostics::GetLiveContext();
         const auto record = [&](uint32_t pass) {
-            recorded[pass] = RecordPass(passes[pass], pass) && passes[pass]->Close();
+            if(live)
+            {
+                Diagnostics::LiveContextScope restore(context);
+                recorded[pass]=RecordPass(passes[pass],pass,passEvents[pass])&&passes[pass]->Close();
+            }
+            else recorded[pass]=RecordPass(passes[pass],pass)&&passes[pass]->Close();
         };
         const bool parallel = pool && pool->GetThreadCount() > 1 && !pool->IsWorkerThread();
         for(const auto& stage : m_executionStages)
@@ -388,6 +431,8 @@ namespace dyf::RHI
             for(uint32_t pass : stage.passIndices) if(!recorded[pass]) return false;
         }
         final->ResourceBarrier(m_finalBarriers.data(), static_cast<uint32_t>(m_finalBarriers.size()));
+        if(live)for(const auto& dependency:m_dependencies)
+            passes[dependency.after]->RecordLiveResourceLink(passEvents[dependency.before],passEvents[dependency.after]);
         if(!final->Close()) return false;
         if(!device->PrepareCommandLists(recording.lists.data(),
             static_cast<uint32_t>(recording.lists.size()), pool)) return false;
@@ -404,6 +449,7 @@ namespace dyf::RHI
         m_compiledRevisions.clear();
         m_executionOrder.clear();
         m_executionStages.clear();
+        m_dependencies.clear();
         m_passBarriers.clear();
         m_finalBarriers.clear();
         m_compiled = false;

@@ -19,6 +19,8 @@ struct VulkanContext {
     VkQueue graphicsQueue = VK_NULL_HANDLE;
     VkQueue presentQueue = VK_NULL_HANDLE;
     bool debugUtilsEnabled = false;
+    PFN_vkGetCalibratedTimestampsEXT getCalibratedTimestamps = nullptr;
+    uint64_t cpuTimestampFrequency = 0;
 
     struct QueueFamilyIndices {
         uint32_t graphicsFamily = UINT32_MAX;

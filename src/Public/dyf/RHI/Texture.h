@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include "Format.h"
+#include "dyf/Diagnostics/LiveProfiling.h"
 
 namespace dyf::RHI
 {
@@ -63,7 +64,7 @@ namespace dyf::RHI
 		[[nodiscard]] const TextureDesc& GetDesc() const { return m_desc; }
 
 	protected:
-		virtual ~Texture() = default;
+		virtual ~Texture() {Diagnostics::RetireLiveObject(Diagnostics::FindLiveObject(this));}
 		explicit Texture(const TextureDesc& desc) : m_desc(desc) {}
 		void SetDesc(const TextureDesc& desc) { m_desc = desc; }
 

@@ -35,6 +35,7 @@ IDevice* IDevice::Create(const DeviceDesc& desc)
 		dyf::Platform::Log::Write(dyf::Platform::LogLevel::Error, "RHI", "Device initialization failed");
 		device.reset();
 	}
+    if(device)device->GetLiveState();
 	return device.release();
 }
 

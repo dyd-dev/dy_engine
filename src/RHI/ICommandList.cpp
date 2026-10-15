@@ -1,10 +1,132 @@
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/IDevice.h"
 #include "RHI/Validation.h"
+#include <algorithm>
 #include <string>
 
 namespace dyf::RHI
 {
+namespace D=Diagnostics;
+namespace
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+template<class T> void DeferDetail(std::vector<T>& values,const T& value,size_t limit,uint64_t& omitted) noexcept
+{
+    if(values.size()>=limit){++omitted;return;}
+    if(values.size()==values.capacity())
+    {
+        const auto oldBytes=values.capacity()*sizeof(T);
+        const auto capacity=(std::min)(limit,(std::max)(size_t{16},values.capacity()*2));
+        const auto extra=capacity*sizeof(T)-oldBytes;
+        if(!D::ReserveLiveDetailBytes(extra)){++omitted;return;}
+        try{values.reserve(capacity);}
+        catch(...){D::ReleaseLiveDetailBytes(extra);++omitted;return;}
+        const auto allocated=values.capacity()*sizeof(T)-oldBytes;
+        if(allocated>extra&&!D::ReserveLiveDetailBytes(allocated-extra))
+        {
+            omitted+=values.size()+1;std::vector<T>().swap(values);
+            D::ReleaseLiveDetailBytes(oldBytes+extra);return;
+        }
+    }
+    values.push_back(value);
+}
+#endif
+}
+void ICommandList::DeferLiveEvent(const D::LiveEvent& event) noexcept
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+    D::AccumulateLiveEventSummary(m_liveDeferredSummary,event);
+    DeferDetail(m_liveDeferred,event,8192,m_liveDeferredSummary.omittedEvents);
+#else
+    (void)event;
+#endif
+}
+void ICommandList::DiscardLiveDeferred() noexcept
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+    const auto bytes=m_liveDeferred.capacity()*sizeof(D::LiveEvent)+m_liveDeferredLinks.capacity()*sizeof(D::LiveFlowLink);
+    std::vector<D::LiveEvent>().swap(m_liveDeferred);std::vector<D::LiveFlowLink>().swap(m_liveDeferredLinks);
+    if(bytes)D::ReleaseLiveDetailBytes(bytes);m_liveDeferredSummary={};
+#endif
+}
+void ICommandList::FlushLiveDeferred(D::LiveContext context) noexcept
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+    if(m_liveDeferred.empty()&&m_liveDeferredLinks.empty()&&!m_liveDeferredSummary.omittedEvents&&!m_liveDeferredSummary.omittedLinks)return;
+    D::LiveContextScope restore(context);m_liveContext=context;
+    // Fixed counters never depend on retained detail or space remaining for publication.
+    D::RecordLiveEventSummary(m_livePosition,m_liveDeferredSummary);
+    for(auto event:m_liveDeferred){event.context=context;D::RecordLiveEvent(event,false);}
+    for(const auto& link:m_liveDeferredLinks)D::RecordLiveLink(link);
+    DiscardLiveDeferred();
+#else
+    (void)context;
+#endif
+}
+void ICommandList::RecordLiveInfo(D::LiveEvent event) noexcept
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+    if(!m_livePosition.commandList||!D::IsLiveCollectorEnabled())return;
+    try
+    {
+        auto context=D::GetLiveContext();
+        if(context.frame.frame&&context.frame.device==m_liveContext.frame.device&&
+            (!m_liveContext.frame.frame||context.frame==m_liveContext.frame))
+        {if(!m_liveContext.frame.frame){FlushLiveDeferred(context);m_liveContext=context;}}
+        else context=m_liveContext;
+        event.context=context;
+        if(context.frame.frame)D::RecordLiveEvent(event);else DeferLiveEvent(event);
+    }
+    catch(...){}
+#else
+    (void)event;
+#endif
+}
+void ICommandList::RecordLiveResourceLink(D::LiveId from,D::LiveId to) noexcept
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+    if(!from||!to||!D::IsLiveCollectorEnabled())return;
+    try
+    {
+        if(!m_liveContext.frame.frame)DeferDetail(m_liveDeferredLinks,D::LiveFlowLink{from,to},16384,m_liveDeferredSummary.omittedLinks);
+        else {D::LiveContextScope context(m_liveContext);D::RecordLiveLink({from,to});}
+    }
+    catch(...){}
+#else
+    (void)from;(void)to;
+#endif
+}
+void ICommandList::RecordLiveCommand(D::LiveCommandKind commandKind,std::array<int64_t,5> arguments,
+    const void* resource,uint64_t elements,uint64_t bytes,uint64_t operations,D::LiveEventKind kind,bool fullUpload,const char* label) noexcept
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+    if(!m_livePosition.commandList||m_recordingFailed||!D::IsLiveCollectorEnabled())return;
+    try
+    {
+        auto context=D::GetLiveContext();
+        if(context.frame.frame&&context.frame.device==m_liveContext.frame.device&&
+            (!m_liveContext.frame.frame||context.frame==m_liveContext.frame))
+        {if(!m_liveContext.frame.frame)FlushLiveDeferred(context);if(!m_livePosition.index||!m_liveContext.frame.frame)m_liveContext=context;}
+        else context=m_liveContext;
+        D::LiveEvent event;event.id=D::AllocateLiveId();event.context=context;
+        event.command=m_livePosition;event.command.index=++m_livePosition.index;
+        event.resource=D::FindLiveObject(resource);event.kind=kind;event.commandKind=commandKind;
+        event.stage=kind==D::LiveEventKind::Upload?D::LiveStage::Upload:D::LiveStage::Record;
+        event.beginNs=m_liveCommandBeginNs;event.endNs=D::LiveNowNs();event.arguments=arguments;
+        event.elements=elements;event.bytes=bytes;event.operations=operations;event.fullUpload=fullUpload;
+        for(size_t i=0;label&&label[i]&&i+1<sizeof(event.label);++i)event.label[i]=label[i];
+        if(!event.beginNs)event.beginNs=event.endNs;
+        if(context.frame.frame)D::RecordLiveEvent(event);else DeferLiveEvent(event);
+        RecordLiveResourceLink(event.resource,event.id);
+        RecordLiveResourceLink(context.batch,event.id);
+        RecordLiveResourceLink(m_livePreviousEvent,event.id);
+        m_livePreviousEvent=event.id;m_liveCommandBeginNs=0;
+    }
+    catch(...) {m_liveCommandBeginNs=0;}
+#else
+    (void)commandKind;(void)arguments;(void)resource;(void)elements;(void)bytes;(void)operations;(void)kind;(void)fullUpload;(void)label;
+#endif
+}
 void ICommandList::BeginDebugEvent(const char* name, const DebugLabelColor& color)
 try
 {
@@ -54,22 +176,31 @@ ICommandList::~ICommandList()
     if(m_owner)
     {
         std::lock_guard<std::recursive_mutex> lock(m_owner->m_resourceMutex);
+        m_owner->DiscardLivePrepared(this,D::LiveOutcome::Discarded);
         if(m_preparedNative) m_owner->DiscardCommandListNative(m_preparedNative);
         m_owner->m_recordedCommands.erase(this);
         m_references.clear();
     }
+    DiscardLiveDeferred();
+    D::RetireLiveObject(m_livePosition.commandList);
 }
 
 bool ICommandList::CanRecordCommands()
 {
     if(!m_owner || m_recordingClosed) m_recordingFailed = true;
+#ifdef DY_LIVE_PROFILING_ENABLED
+    if(!m_recordingFailed&&m_livePosition.commandList&&!m_liveCommandBeginNs)m_liveCommandBeginNs=D::LiveNowNs();
+#endif
     return !m_recordingFailed;
 }
 
 bool ICommandList::ReplayNative(const std::vector<std::function<bool(ICommandList&)>>& commands)
 {
+    if(m_liveReplayQuery)
+    {ResetTimestampsNative(m_liveReplayQuery,m_liveFirstQuery,2);WriteTimestampNative(m_liveReplayQuery,m_liveFirstQuery);}
     for(const auto& record : commands)
         if(!record(*this)) return false;
+    if(m_liveReplayQuery)WriteTimestampNative(m_liveReplayQuery,m_liveFirstQuery+1);
     return !m_recordingFailed && CloseNative();
 }
 
@@ -433,18 +564,27 @@ namespace dyf::RHI
 class RecordedCommandList final : public ICommandList
 {
     void GlobalBarrierNative() override
-    { m_commands.push_back([](ICommandList& native) { native.GlobalBarrierNative(); return true; }); }
+    { m_commands.push_back([](ICommandList& native) { native.GlobalBarrierNative(); return true; });
+      RecordLiveCommand(D::LiveCommandKind::Barrier,{},nullptr,0,0,1,D::LiveEventKind::Command,false,"Global barrier"); }
     void BeginDebugEventNative(const char* name, const DebugLabelColor& color) override
-    { m_commands.push_back([name=std::string(name),color](ICommandList& n) { n.BeginDebugEventNative(name.c_str(),color); return true; }); }
+    { m_commands.push_back([name=std::string(name),color](ICommandList& n) { n.BeginDebugEventNative(name.c_str(),color); return true; });
+      RecordLiveCommand(D::LiveCommandKind::None,{},nullptr,0,0,1,D::LiveEventKind::Command,false,name); }
     void EndDebugEventNative() override
-    { m_commands.push_back([](ICommandList& n) { n.EndDebugEventNative(); return true; }); }
+    { m_commands.push_back([](ICommandList& n) { n.EndDebugEventNative(); return true; });
+      RecordLiveCommand(D::LiveCommandKind::None,{},nullptr,0,0,1,D::LiveEventKind::Command,false,"End debug event"); }
     void InsertDebugMarkerNative(const char* name, const DebugLabelColor& color) override
-    { m_commands.push_back([name=std::string(name),color](ICommandList& n) { n.InsertDebugMarkerNative(name.c_str(),color); return true; }); }
+    { m_commands.push_back([name=std::string(name),color](ICommandList& n) { n.InsertDebugMarkerNative(name.c_str(),color); return true; });
+      RecordLiveCommand(D::LiveCommandKind::None,{},nullptr,0,0,1,D::LiveEventKind::Command,false,name); }
     void ResourceBarrierNative(const ResourceBarrierDesc* values, uint32_t count) override
     {
         std::vector<ResourceBarrierDesc> copy;
         if(count) copy.assign(values,values+count);
         m_commands.push_back([copy=std::move(copy)](ICommandList& native) { native.ResourceBarrierNative(copy.data(),static_cast<uint32_t>(copy.size())); return true; });
+        for(uint32_t i=0;i<count;++i)RecordLiveCommand(D::LiveCommandKind::Barrier,
+            {static_cast<int64_t>(values[i].before),static_cast<int64_t>(values[i].after),values[i].subresources.firstMipLevel,
+             values[i].subresources.firstArrayLayer,values[i].subresources.mipLevelCount},
+            values[i].buffer?static_cast<const void*>(values[i].buffer):values[i].texture,
+            values[i].subresources.arrayLayerCount,0,1,D::LiveEventKind::Command,false,"Resource barrier");
     }
     void BeginRenderingNative(const RenderingDesc& desc) override
     {
@@ -461,6 +601,9 @@ class RecordedCommandList final : public ICommandList
             if(pipeline)native.BindGraphicsPipelineNative(pipeline);
             return true;
         });
+        RecordLiveCommand(D::LiveCommandKind::None,{desc.colorAttachmentCount},
+            desc.colorAttachmentCount?static_cast<const void*>(desc.colorAttachments[0].texture):desc.depthStencilAttachment->texture,
+            0,0,1,D::LiveEventKind::Command,false,"Begin rendering");
     }
     void EndRenderingNative() override
     {
@@ -472,59 +615,83 @@ class RecordedCommandList final : public ICommandList
         m_indexBuffer=nullptr;
         m_viewport=m_scissor=false;
         m_commands.push_back([](ICommandList& n){n.EndRenderingNative();return true;});
+        RecordLiveCommand(D::LiveCommandKind::None,{},nullptr,0,0,1,D::LiveEventKind::Command,false,"End rendering");
     }
     void BindComputePipelineNative(PipelineHandle pipeline) override
     {
         m_pipeline=pipeline;
         m_commands.push_back([=](ICommandList& n){n.BindComputePipelineNative(pipeline);return true;});
+        RecordLiveCommand(D::LiveCommandKind::Bind,{},pipeline,0,0,1,D::LiveEventKind::Command,false,"Compute pipeline");
     }
     void ResetTimestampsNative(TimestampQueryHandle query,uint32_t first,uint32_t count) override
-    {m_commands.push_back([=](ICommandList& n){n.ResetTimestampsNative(query,first,count);return true;});}
+    {m_commands.push_back([=](ICommandList& n){n.ResetTimestampsNative(query,first,count);return true;});
+     RecordLiveCommand(D::LiveCommandKind::None,{first,count},query,0,0,1,D::LiveEventKind::Command,false,"Reset timestamps");}
     void WriteTimestampNative(TimestampQueryHandle query,uint32_t index) override
-    {m_commands.push_back([=](ICommandList& n){n.WriteTimestampNative(query,index);return true;});}
+    {m_commands.push_back([=](ICommandList& n){n.WriteTimestampNative(query,index);return true;});
+     RecordLiveCommand(D::LiveCommandKind::None,{index},query,0,0,1,D::LiveEventKind::Command,false,"GPU timestamp");}
     void DispatchNative(uint32_t x,uint32_t y,uint32_t z) override
-    {m_commands.push_back([=](ICommandList& n){n.DispatchNative(x,y,z);return true;});}
+    {m_commands.push_back([=](ICommandList& n){n.DispatchNative(x,y,z);return true;});
+     RecordLiveCommand(D::LiveCommandKind::Dispatch,{x,y,z});}
     void BindGraphicsPipelineNative(PipelineHandle pipeline) override
     {
         m_pipeline=pipeline;
         // A graph may select its pipeline before the callback opens rendering.
         if(m_rendering)m_commands.push_back([=](ICommandList& n){n.BindGraphicsPipelineNative(pipeline);return true;});
+        RecordLiveCommand(D::LiveCommandKind::Bind,{},pipeline,0,0,1,D::LiveEventKind::Command,false,"Graphics pipeline");
     }
     void BindResourceSetNative(ResourceSetHandle resources) override
-    { m_commands.push_back([=](ICommandList& n){n.BindResourceSetNative(resources);return true;}); }
+    {
+        m_commands.push_back([=](ICommandList& n){n.BindResourceSetNative(resources);return true;});
+        RecordLiveCommand(D::LiveCommandKind::Bind,{},resources,resources->GetBindingCount(),0,1,D::LiveEventKind::Command,false,"Resource set");
+        for(uint32_t i=0;i<resources->GetBindingCount();++i)
+        {
+            const auto& binding=resources->GetBindings()[i];
+            RecordLiveResourceLink(D::FindLiveObject(binding.buffer),D::FindLiveObject(resources));
+            RecordLiveResourceLink(D::FindLiveObject(binding.texture),D::FindLiveObject(resources));
+        }
+    }
     void BindVertexBufferNative(uint32_t binding, BufferHandle buffer, uint32_t offset) override
-    { m_commands.push_back([=](ICommandList& n){n.BindVertexBufferNative(binding,buffer,offset);return true;}); }
+    { m_commands.push_back([=](ICommandList& n){n.BindVertexBufferNative(binding,buffer,offset);return true;});
+      RecordLiveCommand(D::LiveCommandKind::Bind,{binding,offset},buffer,0,0,1,D::LiveEventKind::Command,false,"Vertex buffer"); }
     void BindIndexBufferNative(BufferHandle buffer, Format format, uint32_t offset) override
     {
         m_indexBuffer=buffer;
         m_commands.push_back([=](ICommandList& n){n.BindIndexBufferNative(buffer,format,offset);return true;});
+        RecordLiveCommand(D::LiveCommandKind::Bind,{static_cast<int64_t>(format),offset},buffer,0,0,1,D::LiveEventKind::Command,false,"Index buffer");
     }
     void SetInlineConstantsNative(uint32_t offset,uint32_t size,const void* data) override
     {
         const auto* first=static_cast<const uint8_t*>(data);
         std::vector<uint8_t> bytes(first,first+size);
         m_commands.push_back([offset,bytes=std::move(bytes)](ICommandList& n){n.SetInlineConstantsNative(offset,static_cast<uint32_t>(bytes.size()),bytes.data());return true;});
+        RecordLiveCommand(D::LiveCommandKind::Bind,{offset,size},nullptr,0,size,1,D::LiveEventKind::Command,false,"Inline constants");
     }
     void SetViewportNative(const Viewport& viewport) override
-    { m_viewport=true; m_commands.push_back([=](ICommandList& n){n.SetViewportNative(viewport);return true;}); }
+    { m_viewport=true; m_commands.push_back([=](ICommandList& n){n.SetViewportNative(viewport);return true;});
+      RecordLiveCommand(D::LiveCommandKind::None,{},nullptr,0,0,1,D::LiveEventKind::Command,false,"Viewport"); }
     void SetScissorNative(const Rect& rect) override
-    { m_scissor=true; m_commands.push_back([=](ICommandList& n){n.SetScissorNative(rect);return true;}); }
+    { m_scissor=true; m_commands.push_back([=](ICommandList& n){n.SetScissorNative(rect);return true;});
+      RecordLiveCommand(D::LiveCommandKind::None,{rect.x,rect.y,rect.width,rect.height},nullptr,0,0,1,D::LiveEventKind::Command,false,"Scissor"); }
     void SetStencilReferenceNative(uint32_t reference) override
-    { m_commands.push_back([=](ICommandList& n){n.SetStencilReferenceNative(reference);return true;}); }
+    { m_commands.push_back([=](ICommandList& n){n.SetStencilReferenceNative(reference);return true;});
+      RecordLiveCommand(D::LiveCommandKind::Bind,{reference},nullptr,0,0,1,D::LiveEventKind::Command,false,"Stencil reference"); }
     void DrawInstancedNative(uint32_t vertices,uint32_t instances,uint32_t firstVertex,uint32_t firstInstance) override
     {
         if(!m_rendering || !m_pipeline || !m_viewport || !m_scissor) {m_recordingFailed=true;return;}
         m_commands.push_back([=](ICommandList& n){n.DrawInstancedNative(vertices,instances,firstVertex,firstInstance);return true;});
+        RecordLiveCommand(D::LiveCommandKind::Draw,{vertices,instances,firstVertex,firstInstance},nullptr,uint64_t(vertices)*instances);
     }
     void DrawIndexedInstancedNative(uint32_t indices,uint32_t instances,uint32_t firstIndex,int32_t vertexOffset,uint32_t firstInstance) override
     {
         if(!m_rendering || !m_pipeline || !m_indexBuffer || !m_viewport || !m_scissor) {m_recordingFailed=true;return;}
         m_commands.push_back([=](ICommandList& n){n.DrawIndexedInstancedNative(indices,instances,firstIndex,vertexOffset,firstInstance);return true;});
+        RecordLiveCommand(D::LiveCommandKind::DrawIndexed,{indices,instances,firstIndex,vertexOffset,firstInstance},nullptr,uint64_t(indices)*instances);
     }
     void DispatchMeshNative(uint32_t x,uint32_t y,uint32_t z) override
     {
         if(!m_rendering || !m_pipeline || !m_viewport || !m_scissor) {m_recordingFailed=true;return;}
         m_commands.push_back([=](ICommandList& n){n.DispatchMeshNative(x,y,z);return true;});
+        RecordLiveCommand(D::LiveCommandKind::DispatchMesh,{x,y,z});
     }
     bool CloseNative() override {return !m_rendering && !m_recordingFailed;}
 };

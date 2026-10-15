@@ -7,6 +7,7 @@
 #include <map>
 #include <vector>
 #include "dyf/RendererConfig.h"
+#include "dyf/Diagnostics/LiveProfiling.h"
 #include "dyf/Platform/ProfilerSampler.h"
 #include "dyf/Material.h"
 #include "dyf/RHI/IDevice.h"
@@ -113,6 +114,8 @@ public:
     bool SetProfilerVisible(bool);
     bool SetReadbackEnabled(bool);
     [[nodiscard]] const RendererConfig& GetConfig() const { return pendingConfig ? *pendingConfig : config; }
+    [[nodiscard]] const RendererConfig& GetAppliedConfig() const { return config; }
+    [[nodiscard]] Diagnostics::LiveId GetLiveSourceId() const noexcept { return liveId; }
     bool SetConfig(const RendererConfig&);
     // 선택적 셰이더 교체다. 입력 바이트와 진입점은 복사하며 다음 Render에서 적용한다.
     bool SetShaders(const RendererShaderDesc&);
@@ -120,6 +123,33 @@ public:
     [[nodiscard]] RendererShaderDesc GetShaders() const;
 
 private:
+    friend class ModelRenderer;
+    void InitializeLiveProfiling() noexcept;
+    bool PrepareLiveFrame(Diagnostics::LiveFrameKey) noexcept;
+    void FinishLiveSettings(bool,Diagnostics::LiveFrameKey) noexcept;
+    void PublishLiveGeometryAvailability(bool customDraws) noexcept;
+    void CollectLiveGpuSamples() noexcept;
+    void SubmitLiveGpuSamples(RHI::FenceHandle,Diagnostics::LiveFrameKey) noexcept;
+    struct LiveGpuPass
+    {
+        Renderer& renderer;
+        RHI::ICommandList& commands;
+        RHI::TimestampQueryHandle query=nullptr;
+        Diagnostics::LiveGpuSpan span;
+        LiveGpuPass(Renderer&,RHI::ICommandList&,Diagnostics::LiveGpuScope) noexcept;
+        ~LiveGpuPass();
+    };
+    struct LiveGpuSample { RHI::TimestampQueryHandle query=nullptr; RHI::FenceHandle completion; Diagnostics::LiveGpuSpan span; std::optional<RHI::TimestampCalibration> calibration; std::uint64_t submittedNs=0; };
+    Diagnostics::LiveId liveId=0;
+    std::array<Diagnostics::ControlRegistration,16> liveControls;
+    std::array<Diagnostics::LiveId,16> liveRequests{};
+    std::array<Diagnostics::ControlRegistration,5> liveCatalog;
+    bool liveCustomDraws=false;
+    Diagnostics::LiveId livePreparedFrame=0;
+    RendererConfig liveAppliedConfig;
+    std::vector<LiveGpuSample> liveGpuSamples;
+    std::vector<RHI::TimestampQueryHandle> liveFreeQueries;
+    std::uint32_t liveQueryCount=0;
     // 한 호출에서만 사용하는 명령 구성 데이터다. 구현 클래스나 PImpl을 소유하지 않는다.
     struct ShadowData;
     struct SceneMaterialState
@@ -188,6 +218,7 @@ private:
     bool Initialize();
     bool InitializeMesh(RHI::TextureHandle output = nullptr,bool compositeAlpha = false);
     bool UsesBindlessMaterials() const;
+    bool SupportsBindlessMaterials() const;
     bool UsesStockGeometry() const;
     bool UsesInstanceStream() const;
     bool UpdateInstanceBuffer(const Scene&,RHI::ICommandList&);

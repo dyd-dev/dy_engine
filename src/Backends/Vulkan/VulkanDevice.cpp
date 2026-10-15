@@ -92,6 +92,12 @@ namespace dyf::Backends
         const VulkanContext& Context() const {return m_context;}
 		RHI::UploadMemoryStatistics GetUploadMemoryStatistics() const
 		{ return m_uploadPool ? m_uploadPool->GetStatistics() : RHI::UploadMemoryStatistics{}; }
+        bool SetUploadMemoryPolicy(bool reusePages,bool suballocate)
+        {
+            if(!m_context.device||m_submissionFaulted)return false;
+            if(!m_uploadPool)m_uploadPool=CreateVulkanUploadPool(m_context);
+            m_uploadPool->SetPolicy({reusePages,suballocate});return true;
+        }
 		bool IsLost() const {return m_submissionFaulted;}
         bool Supports(RHI::Feature feature) const
         {
@@ -141,12 +147,38 @@ namespace dyf::Backends
             if(result==VK_ERROR_DEVICE_LOST) m_submissionFaulted=true;
             return result==VK_SUCCESS;
         }
+        bool GetTimestampCalibration(RHI::TimestampCalibration& calibration)
+        {
+#if defined(_WIN32)
+            if(m_submissionFaulted || !m_context.getCalibratedTimestamps || !m_context.cpuTimestampFrequency) return false;
+            const VkCalibratedTimestampInfoEXT clocks[2] = {
+                {VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, nullptr, VK_TIME_DOMAIN_DEVICE_EXT},
+                {VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, nullptr, VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT}};
+            uint64_t ticks[2]{}, deviation = 0;
+            const VkResult result = m_context.getCalibratedTimestamps(m_context.device, 2, clocks, ticks, &deviation);
+            if(result == VK_ERROR_DEVICE_LOST) m_submissionFaulted = true;
+            if(result != VK_SUCCESS || !deviation) return false;
+            calibration = {};
+            calibration.cpuDomain = RHI::CpuTimestampDomain::QueryPerformanceCounter;
+            calibration.cpuTicks = ticks[1];
+            calibration.cpuFrequency = m_context.cpuTimestampFrequency;
+            calibration.gpuTicks = ticks[0];
+            calibration.gpuPeriodNanoseconds = m_owner.GetTimestampPeriodNanoseconds();
+            calibration.gpuValidBits = m_owner.GetTimestampValidBits();
+            calibration.maximumDeviationNanoseconds = deviation;
+            return true;
+#else
+            (void)calibration;
+            return false;
+#endif
+        }
         void ClearSwapchain() { DestroyCurrentSwapchain(); DestroyRetiredSwapchains(); m_hasSwapchainDesc = false; }
 
 		int Initialize(const void* windowHandle, const dyf::RHI::DeviceDesc& desc);
 		bool CreateSwapchain(const dyf::RHI::SwapchainDesc& desc, VkSwapchainKHR oldSwapchain = VK_NULL_HANDLE);
 		bool BeginFrame();
 		dyf::RHI::ICommandList* AcquireCommandList();
+        RHI::ICommandList* AcquireCommandList(RHI::Detail::UploadPolicy);
 		bool Submit(dyf::RHI::ICommandList** commandLists, uint32_t count);
 		bool Present();
 		dyf::RHI::TextureHandle GetBackBuffer() const { return m_backBuffer; }
@@ -294,6 +326,7 @@ namespace dyf::Backends
 
 	VulkanDevice::~VulkanDevice()
 	{
+        StopLiveProfiling();
 		const VkResult result = m_impl->WaitForShutdown();
 		if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST)
 		{
@@ -309,11 +342,20 @@ namespace dyf::Backends
 uint64_t VulkanDevice::GetLastSubmissionNative() const {return m_impl->GetLastSubmission();}
 RHI::UploadMemoryStatistics VulkanDevice::GetUploadMemoryStatisticsNative() const
 { return m_impl->GetUploadMemoryStatistics(); }
+bool VulkanDevice::SetUploadMemoryPolicyNative(bool reusePages,bool suballocate)
+{return m_impl->SetUploadMemoryPolicy(reusePages,suballocate);}
 uint64_t VulkanDevice::GetCompletedSubmissionNative() {return m_impl->GetCompletedSubmission();}
 void VulkanDevice::DiscardCommandListNative(RHI::ICommandList* list) {m_impl->DiscardCommandList(list);}
 
 bool VulkanDevice::SupportsNative(RHI::Feature feature) const
-{return feature==RHI::Feature::TimestampQuery ? GetTimestampValidBitsNative()!=0 : m_impl->Supports(feature);}
+{
+    if(feature == RHI::Feature::TimestampQuery) return GetTimestampValidBitsNative() != 0;
+    if(feature == RHI::Feature::TimestampCalibration)
+        return m_impl->Context().getCalibratedTimestamps && m_impl->Context().cpuTimestampFrequency && GetTimestampValidBitsNative();
+    return m_impl->Supports(feature);
+}
+bool VulkanDevice::GetTimestampCalibrationNative(RHI::TimestampCalibration& calibration) const
+{ return m_impl->GetTimestampCalibration(calibration); }
 RHI::TimestampQueryHandle VulkanDevice::CreateTimestampQueryNative(const RHI::TimestampQueryDesc& desc)
 {
     try {return new VulkanTimestampQuery(m_impl->Context().device,desc.count);}
@@ -532,6 +574,8 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
 	{
 		return m_impl->AcquireCommandList();
 	}
+    RHI::ICommandList* VulkanDevice::AcquireCommandListNative(bool reusePages,bool suballocate)
+    {return m_impl->AcquireCommandList({reusePages,suballocate});}
 
 	bool VulkanDevice::SubmitNative(dyf::RHI::ICommandList** commandLists, uint32_t count)
 	{
@@ -841,6 +885,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 	}
 
 	dyf::RHI::ICommandList* VulkanDevice::Impl::AcquireCommandList()
+    {return AcquireCommandList(m_uploadPool?m_uploadPool->GetPolicy():RHI::Detail::UploadPolicy{});}
+
+	dyf::RHI::ICommandList* VulkanDevice::Impl::AcquireCommandList(RHI::Detail::UploadPolicy policy)
 	{
 		CollectCompletedSubmissions();
 		if (m_context.device == VK_NULL_HANDLE || m_submissionFaulted) return nullptr;
@@ -848,7 +895,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		{
 			if (!m_uploadPool) m_uploadPool = CreateVulkanUploadPool(m_context);
 			std::unique_ptr<VulkanCommandList, VulkanObjectDeleter> commandList(
-				new VulkanCommandList(m_context, m_uploadPool));
+				new VulkanCommandList(m_context, m_uploadPool,policy));
 			VulkanCommandList* result = commandList.get();
 			m_acquiredCommandLists.push_back(std::move(commandList));
 			return result;
@@ -1613,6 +1660,38 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		}
 
 		std::vector<const char*> extensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+        const char* calibrationFunction = nullptr;
+#if defined(_WIN32)
+        const char* calibrationExtension = nullptr;
+        for(const auto& extension : availableExtensions)
+        {
+            if(std::strcmp(extension.extensionName, "VK_KHR_calibrated_timestamps") == 0)
+            { calibrationExtension = "VK_KHR_calibrated_timestamps"; break; }
+            if(std::strcmp(extension.extensionName, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) == 0)
+                calibrationExtension = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
+        }
+        if(calibrationExtension && m_owner.GetTimestampValidBits())
+        {
+            const bool khr = std::strcmp(calibrationExtension, "VK_KHR_calibrated_timestamps") == 0;
+            const auto getDomains = reinterpret_cast<PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsEXT>(
+                vkGetInstanceProcAddr(m_context.instance, khr ? "vkGetPhysicalDeviceCalibrateableTimeDomainsKHR" : "vkGetPhysicalDeviceCalibrateableTimeDomainsEXT"));
+            uint32_t domainCount = 0;
+            LARGE_INTEGER frequency;
+            if(getDomains && getDomains(m_context.physicalDevice, &domainCount, nullptr) == VK_SUCCESS && domainCount &&
+                QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0)
+            {
+                std::vector<VkTimeDomainEXT> domains(domainCount);
+                if(getDomains(m_context.physicalDevice, &domainCount, domains.data()) == VK_SUCCESS &&
+                    std::find(domains.begin(), domains.begin() + domainCount, VK_TIME_DOMAIN_DEVICE_EXT) != domains.begin() + domainCount &&
+                    std::find(domains.begin(), domains.begin() + domainCount, VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT) != domains.begin() + domainCount)
+                {
+                    extensions.push_back(calibrationExtension);
+                    m_context.cpuTimestampFrequency = static_cast<uint64_t>(frequency.QuadPart);
+                    calibrationFunction = khr ? "vkGetCalibratedTimestampsKHR" : "vkGetCalibratedTimestampsEXT";
+                }
+            }
+        }
+#endif
 		if (enableMeshShader)
 		{
 			extensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
@@ -1630,6 +1709,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		if (vkCreateDevice(m_context.physicalDevice, &info, nullptr, &m_context.device) != VK_SUCCESS) return false;
 		vkGetDeviceQueue(m_context.device, m_context.queueIndices.graphicsFamily, 0, &m_context.graphicsQueue);
 		vkGetDeviceQueue(m_context.device, m_context.queueIndices.presentFamily, 0, &m_context.presentQueue);
+        if(calibrationFunction)
+            m_context.getCalibratedTimestamps = reinterpret_cast<PFN_vkGetCalibratedTimestampsEXT>(
+                vkGetDeviceProcAddr(m_context.device, calibrationFunction));
 
 		if (enableMeshShader)
 		{

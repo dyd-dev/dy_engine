@@ -52,5 +52,12 @@ namespace dyf
 		// Stock Scene path only. Disable independently for output/performance comparisons.
 		bool enableInstancing = true;
 		bool enableFrustumCulling = true;
+        // Equivalent-output reference paths for live optimization comparisons.
+        bool enableIncrementalTransformUploads = true;
+        bool enableResourceSetCache = true;
+        bool enableBindlessMaterials = true;
+        bool enableCanvasBatching = true;
+        bool enableCanvasImageCache = true;
+        bool enableCanvasVertexBufferReuse = true;
 	};
 }

@@ -69,6 +69,7 @@ namespace
 // buffers; upload and draw submissions use the same queue, so no CPU wait is needed.
 bool Renderer::UpdateInstanceBuffer(const Scene& scene,RHI::ICommandList& commands)
 {
+    Diagnostics::LiveCpuScope dataTiming(Diagnostics::LiveStage::Data,"Instance transform ranges");
     pendingInstanceScene=scene.m_lifetime;
     pendingInstanceRevision=scene.m_transformRevision;
     pendingInstanceCount=scene.GetEntityCount();
@@ -84,7 +85,8 @@ bool Renderer::UpdateInstanceBuffer(const Scene& scene,RHI::ICommandList& comman
     if(!instanceBuffer)return false;
     const bool sameScene=!instanceScene.expired() &&
         !instanceScene.owner_before(pendingInstanceScene) && !pendingInstanceScene.owner_before(instanceScene);
-    bool full=!instanceReady || !sameScene || instanceCount!=pendingInstanceCount;
+    bool full=!config.enableIncrementalTransformUploads || !instanceReady || !sameScene || instanceCount!=pendingInstanceCount;
+    auto fullReason=!instanceReady?Diagnostics::LiveSplitReason::NewResource:!sameScene?Diagnostics::LiveSplitReason::SceneChanged:instanceCount!=pendingInstanceCount?Diagnostics::LiveSplitReason::ElementCountChanged:Diagnostics::LiveSplitReason::None;
     if(!full && instanceRevision==pendingInstanceRevision)return true;
 
     instanceScratch.resize(pendingInstanceCount);
@@ -96,7 +98,7 @@ bool Renderer::UpdateInstanceBuffer(const Scene& scene,RHI::ICommandList& comman
                 ++instanceRanges.back().count;
             else instanceRanges.push_back({i,1});
             // Bound fragmented work rather than issuing hundreds of tiny copies.
-            if(instanceRanges.size()>32) {full=true;break;}
+            if(instanceRanges.size()>32) {full=true;fullReason=Diagnostics::LiveSplitReason::DirtyRangeLimit;break;}
         }
     }
     if(full) {
@@ -109,6 +111,9 @@ bool Renderer::UpdateInstanceBuffer(const Scene& scene,RHI::ICommandList& comman
     if(instanceReady) {
         const RHI::ResourceBarrierDesc barrier={instanceBuffer,nullptr,RHI::ResourceState::VertexBuffer,RHI::ResourceState::CopyDestination,{}};
         commands.ResourceBarrier(&barrier,1);
+    }
+    for(const auto& range:instanceRanges){
+        Diagnostics::LiveEvent event;event.context=Diagnostics::GetLiveContext();event.context.object=scene.m_liveId;event.kind=Diagnostics::LiveEventKind::DataRange;event.stage=Diagnostics::LiveStage::Data;event.resource=Diagnostics::FindLiveObject(instanceBuffer);event.first=range.first;event.elements=range.count;event.bytes=std::uint64_t(range.count)*sizeof(Math::float4x4);event.stride=sizeof(Math::float4x4);event.operations=1;event.fullUpload=full;event.reason=full?fullReason:Diagnostics::LiveSplitReason::None;Diagnostics::RecordLiveEvent(event);
     }
     for(const auto& range:instanceRanges)
         if(!device->UpdateBuffer(commands,instanceBuffer,range.first*sizeof(Math::float4x4),
@@ -128,7 +133,7 @@ void Renderer::CommitFrameData()
 RHI::ResourceSetHandle Renderer::CachedResourceSet(RHI::PipelineHandle selectedPipeline,
     const std::vector<RHI::ResourceBinding>& bindings,std::vector<CachedSet>& cache)
 {
-    for(auto& entry:cache) {
+    if(config.enableResourceSetCache)for(auto& entry:cache) {
         if(entry.set->GetPipeline()!=selectedPipeline || entry.set->GetBindingCount()!=bindings.size())continue;
         bool same=true;
         for(size_t i=0;i<bindings.size() && same;++i) {
@@ -330,6 +335,7 @@ bool Renderer::CreateMaterialResourceSets(const Scene& scene, RHI::ICommandList&
                 commands.ResourceBarrier(&barrier,1);
             }
             if(!RecordBufferUpload(device,commands,materialBuffer,indices.data(),bytes,RHI::ResourceState::ShaderResource))return false;
+            Diagnostics::LiveEvent range;range.context=Diagnostics::GetLiveContext();range.context.object=scene.m_liveId;range.kind=Diagnostics::LiveEventKind::DataRange;range.stage=Diagnostics::LiveStage::Data;range.resource=Diagnostics::FindLiveObject(materialBuffer);range.elements=indices.size()/8;range.bytes=bytes;range.stride=8*sizeof(uint32_t);range.operations=1;range.fullUpload=true;Diagnostics::RecordLiveEvent(range);
             materialIndexRecorded=true;
         }
 		sets.assign(draws ? scene.GetEntityCount() : materialStates.size(), nullptr);
@@ -532,6 +538,8 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 	RHI::ICommandList& commands, const std::vector<RendererDrawDesc>* draws,
 	RHI::TimestampQueryHandle shadowQuery)
 {
+    Diagnostics::LiveCpuScope cpuScope(Diagnostics::LiveStage::Record,"Shadow recording");
+    LiveGpuPass liveGpu(*this,commands,Diagnostics::LiveGpuScope::RendererShadow);
 	RHI::ResourceScope resources(*device);
 	const bool stock=UsesStockGeometry() && !draws;
 	const bool instanced=UsesInstanceStream();
@@ -602,19 +610,29 @@ bool Renderer::RecordShadowPass(const Scene& scene, const Camera& camera, const 
 				if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount) continue;
 				if(cull && outside(entityIndex))continue;
 				uint32_t count=1;
+                auto splitReason=!stock?Diagnostics::LiveSplitReason::CustomGeometry:!instanced?Diagnostics::LiveSplitReason::InstancingDisabled:Diagnostics::LiveSplitReason::EndOfInput;
 				if(stock && instanced) {
                     // The stock depth shader only consumes the mesh, instance matrix
                     // and light view. Materials cannot change its depth output.
                     while(entityIndex+count<scene.GetEntityCount()) {
                         const auto next=static_cast<EntityID>(entityIndex+count);
                         const auto material=scene.GetEntityMaterial(next);
-                        if(scene.GetEntityMesh(next)!=meshId || !scene.GetEntityLighting(next).castShadow ||
-                            !IsValid(material) || ToIndex(material)>=materialStates.size() ||
-                            (cull && outside(entityIndex+count)))break;
+                        if(scene.GetEntityMesh(next)!=meshId){splitReason=Diagnostics::LiveSplitReason::Mesh;break;}
+                        if(!scene.GetEntityLighting(next).castShadow){splitReason=Diagnostics::LiveSplitReason::ShadowFlags;break;}
+                        if(!IsValid(material)||ToIndex(material)>=materialStates.size()){splitReason=Diagnostics::LiveSplitReason::Material;break;}
+                        if(cull&&outside(entityIndex+count)){splitReason=Diagnostics::LiveSplitReason::Culled;break;}
                         ++count;
                     }
                 }
 				const auto* input = draws ? &(*draws)[entityIndex] : nullptr;
+                auto batchContext=Diagnostics::GetLiveContext();
+                if(Diagnostics::IsLiveCollectorEnabled()){
+                    const auto sceneBatch=Diagnostics::GetLiveBatchId(liveId,scene.m_liveId);const auto passBatch=Diagnostics::GetLiveBatchId(sceneBatch,100+view);
+                    batchContext.batch=Diagnostics::GetLiveBatchId(passBatch,(std::uint64_t(entityIndex)<<32)|count);batchContext.object=entityIndex<scene.m_liveEntities.size()?scene.m_liveEntities[entityIndex]:scene.m_liveId;
+                    Diagnostics::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;batch.kind=Diagnostics::LiveEventKind::Batch;batch.stage=Diagnostics::LiveStage::Data;batch.first=entityIndex;batch.elements=count;batch.bytes=std::uint64_t(count)*sizeof(Math::float4x4);batch.stride=sizeof(Math::float4x4);batch.reason=splitReason;batch.resource=instanced?Diagnostics::FindLiveObject(instanceBuffer):0;Diagnostics::RecordLiveEvent(batch);
+                    for(std::uint32_t i=0;i<count&&entityIndex+i<scene.m_liveEntities.size();++i)Diagnostics::RecordLiveLink({scene.m_liveEntities[entityIndex+i],batch.id});
+                }
+                Diagnostics::LiveContextScope linkedBatch(batchContext);
 				commands.BindResourceSet(shadowSets[input ? entityIndex : 0]);
 				commands.BindVertexBuffer(0, input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer, 0);
 				if(instanced)commands.BindVertexBuffer(1,instanceBuffer,entityIndex*sizeof(Math::float4x4));
@@ -642,6 +660,8 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
 	RHI::ICommandList& commands, const std::vector<RendererDrawDesc>* draws,
 	RHI::TimestampQueryHandle mainQuery, RHI::TextureHandle output)
 {
+    Diagnostics::LiveCpuScope cpuScope(Diagnostics::LiveStage::Record,"MainForward recording");
+    LiveGpuPass liveGpu(*this,commands,Diagnostics::LiveGpuScope::RendererMainForward);
 	RHI::ResourceScope resources(*device);
 	auto& materialSets=mainSetScratch;
     struct MaterialBufferTransaction {
@@ -712,20 +732,30 @@ bool Renderer::RecordMainPass(const Scene& scene, const Camera& camera,
             ++recordingStatistics.culledEntityCount;continue;
         }
         uint32_t count=1;
+        auto splitReason=!stock?Diagnostics::LiveSplitReason::CustomGeometry:!instanced?Diagnostics::LiveSplitReason::InstancingDisabled:Diagnostics::LiveSplitReason::EndOfInput;
         if(stock && instanced) {
             while(entityIndex+count<scene.GetEntityCount()) {
                 const auto next=static_cast<EntityID>(entityIndex+count);
                 const auto nextMaterial=scene.GetEntityMaterial(next);
-                if(scene.GetEntityMesh(next)!=meshId || !IsValid(nextMaterial) || ToIndex(nextMaterial)>=materialStates.size())break;
+                if(scene.GetEntityMesh(next)!=meshId){splitReason=Diagnostics::LiveSplitReason::Mesh;break;}
+                if(!IsValid(nextMaterial) || ToIndex(nextMaterial)>=materialStates.size()){splitReason=Diagnostics::LiveSplitReason::Material;break;}
                 const auto index=ToIndex(nextMaterial);
-                if(scene.GetEntityLighting(next).receiveShadow!=scene.GetEntityLighting(entity).receiveShadow ||
-                    materialStates[index].textures!=materialStates[materialIndex].textures ||
-                    materialStates[index].textureFlags!=materialStates[materialIndex].textureFlags ||
-                    !EqualMaterial(scene.Materials()[index],scene.Materials()[materialIndex]) ||
-                    (config.enableFrustumCulling && OutsideCamera(mesh.bounds,scene.GetTransform(next).worldMatrix,camera)))break;
+                if(scene.GetEntityLighting(next).receiveShadow!=scene.GetEntityLighting(entity).receiveShadow){splitReason=Diagnostics::LiveSplitReason::ShadowFlags;break;}
+                if(materialStates[index].textures!=materialStates[materialIndex].textures){splitReason=Diagnostics::LiveSplitReason::Texture;break;}
+                if(materialStates[index].textureFlags!=materialStates[materialIndex].textureFlags||!EqualMaterial(scene.Materials()[index],scene.Materials()[materialIndex])){splitReason=Diagnostics::LiveSplitReason::Material;break;}
+                if(config.enableFrustumCulling && OutsideCamera(mesh.bounds,scene.GetTransform(next).worldMatrix,camera)){splitReason=Diagnostics::LiveSplitReason::Culled;break;}
                 ++count;
             }
         }
+        auto batchContext=Diagnostics::GetLiveContext();
+        if(Diagnostics::IsLiveCollectorEnabled()){
+            const auto sceneBatch=Diagnostics::GetLiveBatchId(liveId,scene.m_liveId);const auto passBatch=Diagnostics::GetLiveBatchId(sceneBatch,1);
+            batchContext.batch=Diagnostics::GetLiveBatchId(passBatch,(std::uint64_t(entityIndex)<<32)|count);
+            batchContext.object=entityIndex<scene.m_liveEntities.size()?scene.m_liveEntities[entityIndex]:scene.m_liveId;
+            Diagnostics::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;batch.kind=Diagnostics::LiveEventKind::Batch;batch.stage=Diagnostics::LiveStage::Data;batch.first=entityIndex;batch.elements=count;batch.bytes=std::uint64_t(count)*sizeof(Math::float4x4);batch.stride=sizeof(Math::float4x4);batch.reason=splitReason;batch.resource=instanced?Diagnostics::FindLiveObject(instanceBuffer):0;Diagnostics::RecordLiveEvent(batch);
+            for(std::uint32_t i=0;i<count&&entityIndex+i<scene.m_liveEntities.size();++i)Diagnostics::RecordLiveLink({scene.m_liveEntities[entityIndex+i],batch.id});
+        }
+        Diagnostics::LiveContextScope linkedBatch(batchContext);
         if(instanced)commands.BindVertexBuffer(1,instanceBuffer,entityIndex*sizeof(Math::float4x4));
 		if(!batchBindings || boundMaterial != materialSets[setIndex])
 		{
