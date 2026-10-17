@@ -51,7 +51,13 @@ double Number(const std::string& value, double minimum, double maximum) {
 // =============================================================================
 // [메인 진입점]
 // =============================================================================
+#if defined(__ANDROID__)
+int RunPBRLighting() try {
+    int argc = 1;
+    char* argv[] = { const_cast<char*>("PBRLighting"), nullptr };
+#else
 int main(int argc, char** argv) try {
+#endif
     Params params;
 
     uint64_t frameLimit = 0;
@@ -136,10 +142,21 @@ int main(int argc, char** argv) try {
     dyf::RHI::ResourceScope resources(device);
 
     // 3. 스왑체인 생성
+#if defined(__ANDROID__)
+    constexpr Format swapchainFormat = Format::R8G8B8A8_UNORM;
+    constexpr CompositeAlpha swapchainAlpha = CompositeAlpha::Inherit;
+    constexpr uint32_t minImageCount = 3;
+#else
+    constexpr Format swapchainFormat = Format::B8G8R8A8_UNORM;
+    constexpr CompositeAlpha swapchainAlpha = CompositeAlpha::Opaque;
+    constexpr uint32_t minImageCount = 2;
+#endif
+
     SwapchainDesc swap;
     swap.window = window.GetHandle();
-    swap.format = Format::B8G8R8A8_UNORM;
-    swap.minimumImageCount = 2;
+    swap.format = swapchainFormat;
+    swap.compositeAlpha = swapchainAlpha;
+    swap.minimumImageCount = minImageCount;
     swap.presentMode = PresentMode::Fifo;
 
     if (!device.CreateSwapchain(swap)) {
@@ -160,7 +177,7 @@ int main(int argc, char** argv) try {
         ShaderData::lightingSize
     }));
 
-    ColorAttachmentDesc colorDesc{Format::B8G8R8A8_UNORM, {}, ColorWriteMask::All};
+    ColorAttachmentDesc colorDesc{swapchainFormat, {}, ColorWriteMask::All};
 
     GraphicsPipelineDesc lightingDesc;
     lightingDesc.vertexShader = vertexShader;

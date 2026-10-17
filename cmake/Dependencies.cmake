@@ -4,7 +4,7 @@ set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
 set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
 
-if(UNIX AND NOT APPLE)
+if(UNIX AND NOT APPLE AND NOT ANDROID)
     set(DY_LINUX_WINDOW_SYSTEM "AUTO" CACHE STRING "Linux window system for GLFW: AUTO, X11, WAYLAND")
     set_property(CACHE DY_LINUX_WINDOW_SYSTEM PROPERTY STRINGS AUTO X11 WAYLAND)
 
@@ -118,6 +118,7 @@ if(USE_D3D12 AND WIN32 AND DY_ENABLE_PIX)
     target_link_libraries(${PROJECT_NAME} PRIVATE WinPixEventRuntime::WinPixEventRuntime)
 endif()
 
+if(NOT ANDROID)
 FetchContent_Declare(
 	glfw
 	GIT_REPOSITORY "https://github.com/glfw/glfw.git"
@@ -126,8 +127,9 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(glfw)
 include("${CMAKE_CURRENT_LIST_DIR}/PatchGlfwWin32.cmake")
 dy_patch_glfw_win32()
+endif()
 
-# stb_image 자동 다운로드 설정
+# stb 자동 다운로드 설정
 FetchContent_Declare(
     stb
     GIT_REPOSITORY "https://github.com/nothings/stb.git"
@@ -143,8 +145,13 @@ FetchContent_Declare(bcdec
 )
 FetchContent_MakeAvailable(bcdec)
 
-target_link_libraries(${PROJECT_NAME} PRIVATE glfw)
-target_compile_definitions(${PROJECT_NAME} PRIVATE GLFW_INCLUDE_NONE)
+if(ANDROID)
+    target_link_libraries(${PROJECT_NAME} PRIVATE android log)
+    target_include_directories(${PROJECT_NAME} PRIVATE "${ANDROID_NDK}/sources/android/native_app_glue")
+else()
+    target_link_libraries(${PROJECT_NAME} PRIVATE glfw)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE GLFW_INCLUDE_NONE)
+endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${stb_SOURCE_DIR} ${bcdec_SOURCE_DIR})
 

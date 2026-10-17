@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
+#if !defined(__ANDROID__)
 #include <GLFW/glfw3.h>
 // Expose native window handles for RHI Device initialization
 #if defined(_WIN32)
@@ -15,6 +16,10 @@
 	#define GLFW_EXPOSE_NATIVE_COCOA
 #endif
 #include <GLFW/glfw3native.h>
+#else
+#include <android/native_window.h>
+#include <android_native_app_glue.h>
+#endif
 
 using namespace dyf::Platform;
 
@@ -22,17 +27,118 @@ namespace
 {
 	std::vector<Window*> windows;
 
+#if defined(__ANDROID__)
+	static struct android_app* s_androidApp = nullptr;
+
+	int32_t AndroidInputCallback(struct android_app*, AInputEvent* event)
+	{
+		const int32_t eventType = AInputEvent_getType(event);
+		if(eventType == AINPUT_EVENT_TYPE_MOTION)
+		{
+			const int32_t action = AMotionEvent_getAction(event);
+			const int32_t actionMasked = action & AMOTION_EVENT_ACTION_MASK;
+			const float x = AMotionEvent_getX(event, 0);
+			const float y = AMotionEvent_getY(event, 0);
+
+			for(auto* window : windows)
+			{
+				InputEvent cursorEv{};
+				cursorEv.type = InputEventType::Cursor;
+				cursorEv.x = x;
+				cursorEv.y = y;
+				window->HandleInputEvent(cursorEv);
+
+				if(actionMasked == AMOTION_EVENT_ACTION_DOWN || actionMasked == AMOTION_EVENT_ACTION_POINTER_DOWN)
+				{
+					InputEvent btnEv{};
+					btnEv.type = InputEventType::MouseButton;
+					btnEv.code = static_cast<int>(MouseButton::Left);
+					btnEv.action = InputAction::Press;
+					window->HandleInputEvent(btnEv);
+				}
+				else if(actionMasked == AMOTION_EVENT_ACTION_UP || actionMasked == AMOTION_EVENT_ACTION_POINTER_UP || actionMasked == AMOTION_EVENT_ACTION_CANCEL)
+				{
+					InputEvent btnEv{};
+					btnEv.type = InputEventType::MouseButton;
+					btnEv.code = static_cast<int>(MouseButton::Left);
+					btnEv.action = InputAction::Release;
+					window->HandleInputEvent(btnEv);
+				}
+			}
+			return 1;
+		}
+		else if(eventType == AINPUT_EVENT_TYPE_KEY)
+		{
+			const int32_t keyCode = AKeyEvent_getKeyCode(event);
+			const int32_t action = AKeyEvent_getAction(event);
+			if(keyCode == AKEYCODE_BACK && action == AKEY_EVENT_ACTION_UP)
+			{
+				for(auto* window : windows)
+				{
+					window->RequestClose();
+				}
+				return 1;
+			}
+		}
+		return 0;
+	}
+#else
 	void ValidateSize(unsigned int width, unsigned int height)
 	{
 		const auto maxSize = static_cast<unsigned int>((std::numeric_limits<int>::max)());
 		if(width == 0 || height == 0 || width > maxSize || height > maxSize)
 			throw std::invalid_argument("Window dimensions must be positive and fit in int.");
 	}
+#endif
 }
 
 Window::Window(unsigned int width, unsigned int height)
 	: Window(width, height, "New Window") {}
 
+#if defined(__ANDROID__)
+void Window::SetAndroidApp(struct android_app* app)
+{
+	s_androidApp = app;
+	if(s_androidApp)
+	{
+		s_androidApp->onInputEvent = AndroidInputCallback;
+	}
+}
+
+struct android_app* Window::GetAndroidApp()
+{
+	return s_androidApp;
+}
+
+Window::Window(unsigned int width, unsigned int height, const char* title)
+{
+	(void)width; (void)height; (void)title;
+	Log::Initialize();
+	if(s_androidApp)
+	{
+		// Wait for ANativeWindow to become available
+		while(!s_androidApp->window && !s_androidApp->destroyRequested)
+		{
+			int events = 0;
+			struct android_poll_source* source = nullptr;
+			while(ALooper_pollOnce(-1, nullptr, &events, (void**)&source) >= 0)
+			{
+				if(source) source->process(s_androidApp, source);
+				if(s_androidApp->window || s_androidApp->destroyRequested) break;
+			}
+		}
+		m_nativeWindow = s_androidApp->window;
+		if(m_nativeWindow)
+		{
+			ANativeWindow_setBuffersGeometry(static_cast<ANativeWindow*>(m_nativeWindow), 0, 0, WINDOW_FORMAT_RGBA_8888);
+		}
+		s_androidApp->onInputEvent = AndroidInputCallback;
+	}
+	windows.push_back(this);
+	m_input.m_pending.focused = true;
+	m_input.PublishFrame();
+}
+#else
 Window::Window(unsigned int width, unsigned int height, const char* title)
 {
     Log::Initialize();
@@ -103,17 +209,20 @@ Window::Window(unsigned int width, unsigned int height, const char* title)
         throw;
     }
 }
+#endif
 
 void Window::HandleInputEvent(const InputEvent& event) noexcept
 {
     try
     {
         m_input.OnEvent(event);
+#if !defined(__ANDROID__)
         if(event.type == InputEventType::Key && event.action == InputAction::Press)
         {
             if(event.code == GLFW_KEY_F11) m_profilerToggle = true;
             if(event.code == GLFW_KEY_F12) (void)RenderDocCapture::TriggerNextFrame();
         }
+#endif
     }
     catch(...)
     {
@@ -128,6 +237,97 @@ void Window::RethrowCallbackError()
         if(window->m_callbackError)
             std::rethrow_exception(std::exchange(window->m_callbackError, {}));
 }
+
+#if defined(__ANDROID__)
+Window::~Window()
+{
+	windows.erase(std::remove(windows.begin(), windows.end(), this), windows.end());
+	m_nativeWindow = nullptr;
+}
+
+bool Window::IsRunning() const { return !m_shouldClose && (!s_androidApp || !s_androidApp->destroyRequested); }
+
+void Window::RequestClose() const
+{
+	m_shouldClose = true;
+	if(s_androidApp && s_androidApp->activity)
+		ANativeActivity_finish(s_androidApp->activity);
+}
+
+void Window::PollEvents()
+{
+	if(s_androidApp)
+	{
+		int events = 0;
+		struct android_poll_source* source = nullptr;
+		while(ALooper_pollOnce(0, nullptr, &events, (void**)&source) >= 0)
+		{
+			if(source) source->process(s_androidApp, source);
+		}
+	}
+	for(auto* window : windows)
+	{
+		try { window->m_input.PublishFrame(); }
+		catch(...) { if(!window->m_callbackError) window->m_callbackError = std::current_exception(); }
+	}
+	RethrowCallbackError();
+}
+
+void Window::WaitEvents(double timeoutSeconds)
+{
+	if(!std::isfinite(timeoutSeconds) || timeoutSeconds <= 0)
+		throw std::invalid_argument("Event wait timeout must be finite and positive.");
+	if(s_androidApp)
+	{
+		int events = 0;
+		struct android_poll_source* source = nullptr;
+		const int timeoutMs = static_cast<int>(timeoutSeconds * 1000.0);
+		if(ALooper_pollOnce(timeoutMs, nullptr, &events, (void**)&source) >= 0)
+		{
+			if(source) source->process(s_androidApp, source);
+		}
+	}
+	RethrowCallbackError();
+}
+
+void Window::Resize(unsigned int, unsigned int) const {}
+
+WindowSize Window::GetSize() const
+{
+	WindowSize size;
+	auto* handle = static_cast<ANativeWindow*>(GetHandle());
+	if(handle)
+	{
+		size.width = ANativeWindow_getWidth(handle);
+		size.height = ANativeWindow_getHeight(handle);
+	}
+	return size;
+}
+
+WindowSize Window::GetFramebufferSize() const { return GetSize(); }
+
+ContentScale Window::GetContentScale() const { return {1.0f, 1.0f}; }
+
+bool Window::HasFocus() const { return true; }
+bool Window::IsMinimized() const { return false; }
+
+void Window::SetCursorMode(CursorMode) {}
+void Window::ResetCursorDelta() {}
+CursorMode Window::GetCursorMode() const { return CursorMode::Normal; }
+
+bool Window::IsRawMouseMotionSupported() const { return false; }
+bool Window::SetRawMouseMotion(bool) { return false; }
+bool Window::IsRawMouseMotionEnabled() const { return false; }
+
+bool Window::ConsumeKeyPress(Key, const void*) { return false; }
+
+void* Window::GetHandle() const
+{
+	if(s_androidApp && s_androidApp->window) return s_androidApp->window;
+	return m_nativeWindow;
+}
+
+#else
 
 Window::~Window()
 {
@@ -266,3 +466,4 @@ void* Window::GetHandle() const
 	return static_cast<void*>(m_window);
 #endif
 }
+#endif

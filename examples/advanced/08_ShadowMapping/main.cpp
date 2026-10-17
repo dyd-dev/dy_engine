@@ -58,7 +58,13 @@ void Capture(IDevice& device, TextureHandle texture, const std::string& path) {
 
 }
 
+#if defined(__ANDROID__)
+int RunShadowMapping() try {
+    int argc = 1;
+    char* argv[] = { const_cast<char*>("ShadowMapping"), nullptr };
+#else
 int main(int argc, char** argv) try {
+#endif
     // 그림자의 바이어스·필터 범위·종류와 분할 거리·광원 높이의 기본값을 준비한다.
     Params params;
     params.settings[1] = 0.0015f;
@@ -151,10 +157,20 @@ int main(int argc, char** argv) try {
     auto& device = *owner;
 
     dyf::RHI::ResourceScope resources(device);
+#if defined(__ANDROID__)
+    constexpr Format swapchainFormat = Format::R8G8B8A8_UNORM;
+    constexpr CompositeAlpha swapchainAlpha = CompositeAlpha::Inherit;
+    constexpr uint32_t minImageCount = 3;
+#else
+    constexpr Format swapchainFormat = Format::B8G8R8A8_UNORM;
+    constexpr CompositeAlpha swapchainAlpha = CompositeAlpha::Opaque;
+    constexpr uint32_t minImageCount = 2;
+#endif
     SwapchainDesc swap;
     swap.window = window.GetHandle();
-    swap.format = Format::B8G8R8A8_UNORM;
-    swap.minimumImageCount = 2;
+    swap.format = swapchainFormat;
+    swap.compositeAlpha = swapchainAlpha;
+    swap.minimumImageCount = minImageCount;
     swap.presentMode = PresentMode::Fifo;
     swap.allowReadback = !capture.empty();
     if (!device.CreateSwapchain(swap)) throw std::runtime_error("Swapchain creation failed.");
@@ -200,7 +216,7 @@ int main(int argc, char** argv) try {
     lightingBindings.push_back({8, ResourceBindingType::StaticSampler, 1, ShaderStageFlags::Fragment, sampler});
     std::array<ColorAttachmentDesc, 1> lightingColors{};
     for (auto& attachment : lightingColors)
-        attachment = {Format::B8G8R8A8_UNORM, {}, ColorWriteMask::All};
+        attachment = {swapchainFormat, {}, ColorWriteMask::All};
     GraphicsPipelineDesc lightingDesc;
     lightingDesc.vertexShader = vertexShader;
     lightingDesc.fragmentShader = lightingShader;

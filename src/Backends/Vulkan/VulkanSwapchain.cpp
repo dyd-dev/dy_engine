@@ -1,5 +1,9 @@
 #include "VulkanSwapchain.h"
+#if !defined(__ANDROID__)
 #include <GLFW/glfw3.h>
+#else
+#include <android/native_window.h>
+#endif
 #include <algorithm>
 #include <limits>
 #include <utility>
@@ -85,13 +89,36 @@ bool VulkanSwapchain::Initialize(
     }
 
     uint32_t imageCount = std::max(requestedMinimumImageCount, swapchainSupport.capabilities.minImageCount);
+#if defined(__ANDROID__)
+    imageCount = std::max(imageCount, 3u);
+#endif
+    if (swapchainSupport.capabilities.maxImageCount > 0 && imageCount > swapchainSupport.capabilities.maxImageCount) {
+        imageCount = swapchainSupport.capabilities.maxImageCount;
+    }
     if((initialWidth && initialWidth != extent.width) || (initialHeight && initialHeight != extent.height))
         return false;
-    if (swapchainSupport.capabilities.maxImageCount > 0 && imageCount > swapchainSupport.capabilities.maxImageCount) return false;
     const uint32_t minimumImageCount = imageCount;
 
-    const VkCompositeAlphaFlagBitsKHR compositeAlpha = requestedCompositeAlpha;
-    if ((swapchainSupport.capabilities.supportedCompositeAlpha & compositeAlpha) == 0) return false;
+    VkCompositeAlphaFlagBitsKHR compositeAlpha = requestedCompositeAlpha;
+    if ((swapchainSupport.capabilities.supportedCompositeAlpha & compositeAlpha) == 0) {
+        if (swapchainSupport.capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) {
+            compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+        } else if (swapchainSupport.capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) {
+            compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        } else {
+            for (VkCompositeAlphaFlagBitsKHR flag : {
+                VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+                VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+                VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR})
+            {
+                if (swapchainSupport.capabilities.supportedCompositeAlpha & flag) {
+                    compositeAlpha = flag;
+                    break;
+                }
+            }
+        }
+    }
     VkSwapchainCreateInfoKHR createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
     createInfo.surface = context.surface;
@@ -115,7 +142,9 @@ bool VulkanSwapchain::Initialize(
         createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     }
 
-    createInfo.preTransform = swapchainSupport.capabilities.currentTransform;
+    createInfo.preTransform = (swapchainSupport.capabilities.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+        ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+        : swapchainSupport.capabilities.currentTransform;
     createInfo.compositeAlpha = compositeAlpha;
     createInfo.presentMode = requestedPresentMode;
     createInfo.clipped = allowReadback ? VK_FALSE : VK_TRUE;
@@ -263,6 +292,10 @@ bool VulkanSwapchain::ChooseSwapExtent(
             width = clientRect.right - clientRect.left;
             height = clientRect.bottom - clientRect.top;
         } else return false;
+#elif defined(__ANDROID__)
+        if (windowHandle == nullptr) return false;
+        width = ANativeWindow_getWidth(static_cast<ANativeWindow*>(windowHandle));
+        height = ANativeWindow_getHeight(static_cast<ANativeWindow*>(windowHandle));
 #else
         if (windowHandle == nullptr) return false;
         glfwGetFramebufferSize(static_cast<GLFWwindow*>(windowHandle), &width, &height);

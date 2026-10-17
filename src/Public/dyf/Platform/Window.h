@@ -1,7 +1,13 @@
 #pragma once
 #include "dyf/Platform/Input.h"
 #include <exception>
+
+#if !defined(__ANDROID__)
 struct GLFWwindow;
+#else
+struct ANativeWindow;
+struct android_app;
+#endif
 
 namespace dyf::Platform
 {
@@ -19,6 +25,11 @@ namespace dyf::Platform
 		Window(unsigned int width, unsigned int height, const char *title);
 		Window(const Window&) = delete;
 		Window& operator=(const Window&) = delete;
+
+#if defined(__ANDROID__)
+		static void SetAndroidApp(struct android_app* app);
+		static struct android_app* GetAndroidApp();
+#endif
 
 		bool IsRunning() const;
 		void RequestClose() const;
@@ -46,16 +57,25 @@ namespace dyf::Platform
 		[[nodiscard]] static bool ConsumeKeyPress(Key key, const void* nativeWindow);
 
 		void* GetHandle() const;
+#if !defined(__ANDROID__)
 		// GLFW backend integration only. GetHandle remains the RHI native-window handle.
 		[[nodiscard]] GLFWwindow* GetGlfwHandle() const { return m_window; }
+#endif
+
+		void HandleInputEvent(const InputEvent& event) noexcept;
 
 	private:
 		void ResetCursorDelta();
-		void HandleInputEvent(const InputEvent& event) noexcept;
 		static void RethrowCallbackError();
+
+#if !defined(__ANDROID__)
 		struct GLFWwindow* m_window = nullptr;
+		bool m_profilerToggle = false;
+#else
+		void* m_nativeWindow = nullptr;
+		mutable bool m_shouldClose = false;
+#endif
 		Input m_input;
-        bool m_profilerToggle = false;
 		std::exception_ptr m_callbackError;
 	};
 }
