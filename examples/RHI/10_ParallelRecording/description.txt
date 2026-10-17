@@ -1,0 +1,1 @@
+각 CPU 스레드가 별도 CommandList로 독립된 텍스처에 Draw를 기록한다. CPU 작업 합류, RenderTarget→ShaderResource GPU Barrier, 순서를 지정한 제출, 프레임 슬롯의 Fence 대기를 구분한다. PrepareCommandLists로 네이티브 명령 변환도 병렬 기록한다.

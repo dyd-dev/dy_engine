@@ -1,3 +1,4 @@
+#include "dyf/RHI/ResourceScope.h"
 #include "dyf/RHI.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/Platform/Profiler.h"
@@ -129,7 +130,7 @@ int main(int argc, char** argv) try {
     }
 
     // 디바이스 리소스 자동 관리를 위한 Scope
-    ResourceScope resources(device);
+    dyf::RHI::ResourceScope resources(device);
 
     // 3. 스왑체인(Swapchain) 생성
     SwapchainDesc swapchain;

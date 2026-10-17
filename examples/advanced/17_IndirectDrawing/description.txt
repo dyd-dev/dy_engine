@@ -1,1 +1,5 @@
-현재는 간접 드로우 지원 조회와 누락 API 안내만 실행하며 간접 명령을 제출하지 않습니다.
+DispatchIndirect로 실행한 GPU compute가 비인덱스·인덱스 draw 인자와 0~64개 인스턴스 수를 직접 생성합니다.
+UAV → IndirectArgument 배리어 뒤 DrawIndirect(왼쪽 청록색)와 DrawIndexedIndirect(오른쪽 주황색)가 버퍼의 인자를 소비합니다.
+CPU는 시간과 최초 dispatch 인자 {1,1,1}만 제공하며 생성된 draw 인자를 읽지 않습니다.
+현재 예제는 명령당 인자 1개이며 multi-draw, indirect-count, GPU frustum culling, LOD 구현을 포함하지 않습니다.
+사용법: AdvancedIndirectDrawing [--frames N] [--validation]. N=0은 무제한. Escape로 종료합니다.

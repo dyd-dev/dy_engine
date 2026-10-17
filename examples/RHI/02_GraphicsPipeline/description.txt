@@ -1,0 +1,1 @@
+VS와 FS를 만들고 topology·raster·출력 포맷으로 GPU 파이프라인을 생성한다. 정점 번호로 만든 삼각형을 DrawInstanced로 실행한다.

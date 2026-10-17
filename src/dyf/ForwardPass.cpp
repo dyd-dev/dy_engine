@@ -1,0 +1,248 @@
+#include "RendererInternal.h"
+#include "DrawCommands.h"
+#include "GpuVisibility.h"
+#include "SceneAlgorithms.h"
+#include "dyf/Camera.h"
+#include "dyf/Scene.h"
+#include "dyf/RHI/Buffer.h"
+#include "dyf/RHI/Texture.h"
+#include "../RHI/ResourceSet.h"
+#include <algorithm>
+#include <cmath>
+
+namespace dyf
+{
+bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
+	RHI::ICommandList& commands, const std::vector<RendererDrawDesc>* draws,
+	RHI::TextureHandle output)
+{
+	auto& materialSets=mainSetScratch;
+    struct MaterialBufferTransaction {
+        Impl& r;
+        RHI::BufferHandle previous;
+        bool ready,committed=false;
+        explicit MaterialBufferTransaction(Impl& owner):r(owner),previous(r.materialIndexBuffer),ready(r.materialIndexReady) {}
+        ~MaterialBufferTransaction() {
+            if(committed) {if(previous!=r.materialIndexBuffer)r.device->DestroyBuffer(previous);}
+            else {
+                if(previous!=r.materialIndexBuffer)r.device->DestroyBuffer(r.materialIndexBuffer);
+                r.materialIndexBuffer=previous;r.materialIndexReady=ready;
+            }
+        }
+    } materialTransaction(*this);
+	if(!CreateMaterialResourceSets(scene, commands, draws, materialSets)) return false;
+    materialTransaction.committed=true;
+	auto* target = config.enableHdrRendering ? hdrTarget : output;
+	const auto viewProjection = camera.projection * camera.view;
+	commands.BeginDebugEvent("MainForward");
+
+	RHI::ColorAttachment color;
+	color.texture = target;
+	color.loadOp = RHI::LoadOp::Clear;
+	color.storeOp = RHI::StoreOp::Store;
+	color.clearColor[0] = config.clearColor.x;
+	color.clearColor[1] = config.clearColor.y;
+	color.clearColor[2] = config.clearColor.z;
+	color.clearColor[3] = config.clearColor.w;
+    // clearColor는 창·Canvas와 같은 디스플레이 색이다.
+    // HDR 저장 전에 출력 변환과 Reinhard·노출을 되돌려 배경과 경계 밝기를 유지한다.
+    if(config.enableHdrRendering)
+    {
+        for(uint32_t channel=0;channel<3;++channel)
+        {
+            const double value=std::clamp(static_cast<double>(color.clearColor[channel]),0.0,1.0);
+            const double linear=RHI::IsSrgbFormat(output->GetDesc().format)
+                ? (value<=0.04045 ? value/12.92 : std::pow((value+0.055)/1.055,2.4))
+                : std::pow(value,2.2);
+            color.clearColor[channel]=lodDebugActive ? static_cast<float>(linear) : config.exposure<=0 ? 0.0f : static_cast<float>(
+                linear>=1.0 ? 65504.0 : std::min(linear/((1.0-linear)*config.exposure),65504.0));
+        }
+    }
+    else if(RHI::IsSrgbFormat(target->GetDesc().format))
+    {
+        for(uint32_t channel=0;channel<3;++channel)
+        {
+            const float value=color.clearColor[channel];
+            color.clearColor[channel]=value<=0.04045f ? value/12.92f : std::pow((value+0.055f)/1.055f,2.4f);
+        }
+    }
+	RHI::DepthStencilAttachment depth;
+	depth.texture = depthStencilTarget;
+	depth.state = RHI::ResourceState::DepthWrite;
+	depth.depthLoadOp = NeedsSurfacePass() ? RHI::LoadOp::Load : RHI::LoadOp::Clear;
+	depth.depthStoreOp = UsesAdvancedRendering() || m_environmentCapture ? RHI::StoreOp::Store : RHI::StoreOp::Discard;
+	if(RHI::HasStencil(depthStencilTarget->GetDesc().format))
+	{
+		depth.stencilLoadOp = RHI::LoadOp::Discard;
+		depth.stencilStoreOp = RHI::StoreOp::Discard;
+	}
+	commands.BeginRendering({&color, 1, &depth});
+	commands.BindGraphicsPipeline(pipeline);
+	commands.SetViewport({0, 0, static_cast<float>(target->GetDesc().width), static_cast<float>(target->GetDesc().height), 0, 1});
+	commands.SetScissor({0, 0, target->GetDesc().width, target->GetDesc().height});
+    const bool stock=stockDrawInputs;
+    const bool instanced=UsesInstanceStream();
+	const bool batchBindings = shaderSources.bytes[MeshFragment].empty();
+	const bool separateTransparency=m_environmentCapture || wireframeActive || UsesSeparateTransparency();
+	const auto blended=[&](uint32_t index) {
+		const auto material=scene.GetEntityMaterial(static_cast<EntityID>(index));
+		return IsValid(material) && ToIndex(material)<scene.Materials().size() &&
+			scene.Materials()[ToIndex(material)].alphaMode==MaterialAlphaMode::Blend;
+	};
+	mainEntityOrder.clear();
+	mainEntityOrder.reserve(scene.GetEntityCount());
+	for(uint32_t i=0;i<scene.GetEntityCount();++i)
+		if((!separateTransparency || !blended(i)) && (!visibilityActive || blended(i))) mainEntityOrder.push_back(i);
+	if(batchBindings && !separateTransparency)
+	{
+		const auto transparent=std::stable_partition(mainEntityOrder.begin(),mainEntityOrder.end(),[&](uint32_t i) {return !blended(i);});
+		const auto distance=[&](uint32_t index) {
+			const auto entity=static_cast<EntityID>(index);
+			const auto mesh=scene.GetEntityMesh(entity);
+			Math::float3 local={};
+			if(IsValid(mesh) && ToIndex(mesh)<m_meshes.size() && m_meshes[ToIndex(mesh)].bounds.valid)
+			{
+				const auto& bounds=m_meshes[ToIndex(mesh)].bounds;
+				local=(bounds.min+bounds.max)*0.5f;
+			}
+			const auto center=Math::TransformPoint(scene.GetTransform(entity),local);
+			const float z=Math::TransformPoint(camera.view,center).z;
+			return std::isfinite(z) ? z : 0.0f;
+		};
+		std::stable_sort(transparent,mainEntityOrder.end(),[&](uint32_t a,uint32_t b) {return distance(a)<distance(b);});
+	}
+	RHI::ResourceSetHandle boundMaterial = nullptr;
+	RHI::PipelineHandle boundPipeline=pipeline;
+	if(visibilityActive)
+	{
+		recordingStatistics.gpuVisibility=true;
+		for(uint32_t batchIndex=0;batchIndex<visibilityDraws.size();++batchIndex)
+		{
+			const auto& draw=visibilityDraws[batchIndex];
+			const auto entity=static_cast<EntityID>(draw.entity);
+			const auto& mesh=m_meshes[draw.mesh];
+			const auto& material=scene.Materials()[draw.material];
+			const auto* input=draws ? &(*draws)[draw.entity] : nullptr;
+			const auto selectedPipeline=MaterialPipeline(material,Math::Determinant3x3(scene.GetTransform(entity))<0);
+			if(selectedPipeline!=boundPipeline)
+			{
+				commands.BindGraphicsPipeline(selectedPipeline);boundPipeline=selectedPipeline;boundMaterial=nullptr;
+			}
+			auto selectedSet=materialSets[draw.material];
+			if(selectedSet && selectedSet->GetPipeline()!=selectedPipeline)
+			{
+				mainBindingScratch.assign(selectedSet->GetBindings(),selectedSet->GetBindings()+selectedSet->GetBindingCount());
+				selectedSet=CachedResourceSet(selectedPipeline,mainBindingScratch,mainSets);
+			}
+			if(!selectedSet) return false;
+			if(boundMaterial!=selectedSet)
+			{
+				boundMaterial=selectedSet;commands.BindResourceSet(boundMaterial);
+			}
+			commands.BindVertexBuffer(0,input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer,0);
+			commands.BindVertexBuffer(1,gpuVisibility->GetInstanceBuffer(),
+				gpuVisibility->GetBatch(batchIndex).instanceOffset*sizeof(GpuVisibility::VisibleInstance));
+			commands.BindIndexBuffer(draw.level ? mesh.lods[draw.level-1].buffer : mesh.indexBuffer,RHI::Format::R32_UINT,0);
+			const uint32_t flags=materialStates[draw.material].textureFlags |
+				(scene.GetEntityLighting(entity).receiveShadow ? 32u : 0u);
+			auto constants=MakeDrawConstants(viewProjection,material,scene.GetTransform(entity),flags);
+			if(lodDebugActive)
+			{
+				const float alpha=constants.baseColor.w;
+				constants.baseColor=LodColor(draw.level);constants.baseColor.w=alpha;constants.textureFlags|=64u;
+			}
+			constants.padding2=draw.material;
+			commands.SetInlineConstants(0,sizeof(constants),&constants);
+			commands.DrawIndexedIndirect(gpuVisibility->GetArgumentsBuffer(),batchIndex*sizeof(RHI::DrawIndexedIndirectArguments));
+			++recordingStatistics.mainDrawCount;++recordingStatistics.indirectBatchCount;
+		}
+	}
+	for(uint32_t orderIndex = 0; orderIndex < mainEntityOrder.size(); ++orderIndex)
+	{
+		const uint32_t entityIndex=mainEntityOrder[orderIndex];
+		const auto entity = static_cast<EntityID>(entityIndex);
+		const auto meshId = scene.GetEntityMesh(entity);
+		const auto materialId = scene.GetEntityMaterial(entity);
+		if(!IsValid(meshId) || !IsValid(materialId)) continue;
+		const uint32_t meshIndex = ToIndex(meshId), materialIndex = ToIndex(materialId);
+		const uint32_t setIndex = draws && !stockDrawInputs ? entityIndex : materialIndex;
+		if(meshIndex >= m_meshes.size() || materialIndex >= materialStates.size() || setIndex >= materialSets.size()) continue;
+		const auto& mesh = m_meshes[meshIndex];
+		if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount) continue;
+        const auto level=std::min<uint32_t>(EntityLod(entityIndex),mesh.lods.size());
+        const auto indexBuffer=level ? mesh.lods[level-1].buffer : mesh.indexBuffer;
+        const auto indexCount=level ? mesh.lods[level-1].count : mesh.indexCount;
+        const auto& localBounds=draws && (*draws)[entityIndex].hasLocalBounds ? (*draws)[entityIndex].localBounds : mesh.bounds;
+        if(stock && config.enableFrustumCulling && OutsideCamera(localBounds,scene.GetTransform(entity),camera)) {
+            ++recordingStatistics.culledEntityCount;continue;
+        }
+        const bool mirrored=Math::Determinant3x3(scene.GetTransform(entity))<0;
+        uint32_t count=1;
+        if(stock && instanced && (!batchBindings || scene.Materials()[materialIndex].alphaMode!=MaterialAlphaMode::Blend)) {
+            while(orderIndex+count<mainEntityOrder.size() && mainEntityOrder[orderIndex+count]==entityIndex+count) {
+                const auto next=static_cast<EntityID>(entityIndex+count);
+                if((Math::Determinant3x3(scene.GetTransform(next))<0)!=mirrored) break;
+                if(draws && (*draws)[entityIndex+count].vertexBuffer!=(*draws)[entityIndex].vertexBuffer) break;
+                if(EntityLod(entityIndex+count)!=level) break;
+                const auto nextMaterial=scene.GetEntityMaterial(next);
+                if(scene.GetEntityMesh(next)!=meshId || !IsValid(nextMaterial) || ToIndex(nextMaterial)>=materialStates.size())break;
+                const auto index=ToIndex(nextMaterial);
+                if(scene.GetEntityLighting(next).receiveShadow!=scene.GetEntityLighting(entity).receiveShadow ||
+                    materialStates[index].textures!=materialStates[materialIndex].textures ||
+                    materialStates[index].textureFlags!=materialStates[materialIndex].textureFlags ||
+                    !EqualMaterial(scene.Materials()[index],scene.Materials()[materialIndex]) ||
+                    (config.enableFrustumCulling && OutsideCamera(draws && (*draws)[entityIndex+count].hasLocalBounds ?
+                        (*draws)[entityIndex+count].localBounds : mesh.bounds,scene.GetTransform(next),camera)))break;
+                ++count;
+            }
+        }
+		const auto selectedPipeline=MaterialPipeline(scene.Materials()[materialIndex],mirrored);
+		if(selectedPipeline!=boundPipeline)
+		{
+			commands.BindGraphicsPipeline(selectedPipeline);
+			boundPipeline=selectedPipeline;
+			boundMaterial=nullptr;
+		}
+        if(instanced)commands.BindVertexBuffer(1,instanceBuffer,entityIndex*2*sizeof(Math::float4x4));
+		auto selectedSet=materialSets[setIndex];
+		if(selectedSet && selectedSet->GetPipeline()!=selectedPipeline)
+		{
+			mainBindingScratch.assign(selectedSet->GetBindings(),selectedSet->GetBindings()+selectedSet->GetBindingCount());
+			selectedSet=CachedResourceSet(selectedPipeline,mainBindingScratch,mainSets);
+		}
+		if(!selectedSet) return false;
+		if(!batchBindings || boundMaterial != selectedSet)
+		{
+			boundMaterial = selectedSet;
+			commands.BindResourceSet(boundMaterial);
+		}
+		const auto* input = draws ? &(*draws)[entityIndex] : nullptr;
+		commands.BindVertexBuffer(0, input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer, 0);
+		commands.BindIndexBuffer(indexBuffer, RHI::Format::R32_UINT, 0);
+		const uint32_t flags = materialStates[materialIndex].textureFlags |
+			(scene.GetEntityLighting(entity).receiveShadow ? 32u : 0u);
+		auto constants = MakeDrawConstants(viewProjection, scene.Materials()[materialIndex], scene.GetTransform(entity), flags);
+		if(lodDebugActive)
+		{
+			const float alpha=constants.baseColor.w;
+			constants.baseColor=LodColor(level);constants.baseColor.w=alpha;
+			// 비트 0~4는 텍스처, 5는 그림자 수신, 6은 렌더러의 LOD 시각화다.
+			constants.textureFlags|=64u;
+		}
+		if(m_environmentCapture && !m_environmentCaptureEmitters) constants.emissiveColor={};
+		constants.padding2 = materialIndex;
+		commands.SetInlineConstants(0, sizeof(constants), &constants);
+		if(input && !input->inlineConstants.empty())
+			commands.SetInlineConstants(sizeof(constants), static_cast<uint32_t>(input->inlineConstants.size()), input->inlineConstants.data());
+        commands.DrawIndexedInstanced(indexCount,count,0,0,0);
+        ++recordingStatistics.mainDrawCount;recordingStatistics.mainInstanceCount+=count;
+        recordingStatistics.mainTriangleCount+=uint64_t(indexCount/3)*count;
+        recordingStatistics.mainOriginalTriangleCount+=uint64_t(mesh.indexCount/3)*count;
+        recordingStatistics.lodInstanceCounts[level]+=count;
+        orderIndex+=count-1;
+	}
+	commands.EndRendering();
+	commands.EndDebugEvent();
+	return true;
+}
+}

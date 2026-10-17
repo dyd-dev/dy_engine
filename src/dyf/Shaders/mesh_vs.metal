@@ -41,6 +41,8 @@ struct ShadowMatrix
     float4 directionalSplits[RENDERER_MAX_DIRECTIONAL_LIGHTS];
     float4x4 cameraView;
     float4 filterParams;
+    float4 viewProjectionParams[128];
+    float4 softShadowParams;
 };
 #endif
 
@@ -60,7 +62,7 @@ struct MeshVertex
 
 struct RasterData
 {
-    float4 position [[position]];
+    float4 position [[position,invariant]];
     float2 uv [[user(locn0)]];
     float3 worldPosition [[user(locn1)]];
     float3 worldNormal [[user(locn2)]];
@@ -114,10 +116,11 @@ vertex RasterData RENDERER_VERTEX_ENTRY(
     const float4x4 world = drawConstants.modelMatrix;
 #endif
     const float4 worldPosition = world * float4(input.position, 1.0f);
+    const float4 clipPosition = drawConstants.viewProjectionMatrix * worldPosition;
     const float3x3 normalMatrix = MeshNormalMatrix(world);
 
     RasterData output;
-    output.position = drawConstants.viewProjectionMatrix * worldPosition;
+    output.position = clipPosition;
     output.uv = input.uv;
     output.worldPosition = worldPosition.xyz;
     output.worldNormal = MeshNormalizeOr(normalMatrix * input.normal, float3(0,0,1));

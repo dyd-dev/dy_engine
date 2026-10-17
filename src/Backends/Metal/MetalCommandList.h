@@ -40,6 +40,7 @@ namespace dyf::Backends
 		void BindGraphicsPipelineNative(RHI::PipelineHandle pipelineState) override;
 		void BindComputePipelineNative(RHI::PipelineHandle pipelineState) override;
 		void DispatchNative(uint32_t x, uint32_t y, uint32_t z) override;
+		void DispatchIndirectNative(RHI::BufferHandle arguments, uint32_t offset) override;
 		void BindResourceSetNative(RHI::ResourceSetHandle resourceSet) override;
 		void BindVertexBufferNative(
 			uint32_t binding,
@@ -69,6 +70,8 @@ namespace dyf::Backends
 			uint32_t firstIndex,
 			int32_t vertexOffset,
 			uint32_t firstInstance) override;
+		void DrawIndirectNative(RHI::BufferHandle arguments, uint32_t offset) override;
+		void DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset) override;
 		void DispatchMeshNative(
 			uint32_t threadGroupCountX,
 			uint32_t threadGroupCountY,
@@ -104,6 +107,8 @@ namespace dyf::Backends
 		friend struct MetalObjectDeleter;
 
 		~MetalCommandList() override;
+		void DispatchCompute(uint32_t x, uint32_t y, uint32_t z,
+			MetalBuffer* arguments, uint32_t offset);
 
 		struct Impl;
 		Impl* m_impl = nullptr;

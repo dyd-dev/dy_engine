@@ -30,7 +30,7 @@ EntityID Scene::CreateEntity(MeshID mesh, MaterialID material,
     {
         m_entityMeshes.push_back(mesh);
         m_entityMaterials.push_back(material);
-        m_entityTransforms.push_back(Transform{transform});
+        m_entityTransforms.push_back(transform);
         m_entityLighting.push_back(lighting);
         m_entityTransformRevisions.push_back(m_transformRevision+1);
     }
@@ -59,7 +59,7 @@ EntityHandle Scene::GetEntity(EntityID entity)
 }
 MeshID Scene::GetEntityMesh(EntityID entity) const { return m_entityMeshes[ToIndex(entity)]; }
 MaterialID Scene::GetEntityMaterial(EntityID entity) const { return m_entityMaterials[ToIndex(entity)]; }
-const Transform& Scene::GetTransform(EntityID entity) const { return m_entityTransforms[ToIndex(entity)]; }
+const Math::float4x4& Scene::GetTransform(EntityID entity) const { return m_entityTransforms[ToIndex(entity)]; }
 const EntityLightingDesc& Scene::GetEntityLighting(EntityID entity) const { return m_entityLighting[ToIndex(entity)]; }
 void Scene::SetEntityLighting(EntityID entity, const EntityLightingDesc& lighting) { m_entityLighting[ToIndex(entity)] = lighting; }
 void Scene::SetMaterial(MaterialID material, const MaterialDesc& value)
@@ -127,14 +127,14 @@ EntityHandle Scene::AddInstance(const EntityHandle& source,const Math::float4x4&
 }
 EntityHandle::operator bool() const { const auto data=m_scene.lock();return ValidEntity(data,m_id); }
 Math::float4x4 EntityHandle::GetTransform() const
-{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id)){InvalidHandle("entity");return Math::float4x4::Identity();}return data->GetTransform(m_id).worldMatrix; }
+{ const auto data=m_scene.lock();if(!ValidEntity(data,m_id)){InvalidHandle("entity");return Math::float4x4::Identity();}return data->GetTransform(m_id); }
 MaterialDesc EntityHandle::GetMaterial() const
 { const auto data=m_scene.lock();if(!ValidEntity(data,m_id)){InvalidHandle("entity");return {};}return data->Materials()[ToIndex(data->GetEntityMaterial(m_id))]; }
 bool EntityHandle::SetTransform(const Math::float4x4& value)
 {
     const auto data=m_scene.lock();if(!ValidEntity(data,m_id))return InvalidHandle("entity");
     if(!Finite(value)){std::fprintf(stderr,"dyf: transform must be finite.\n");return false;}
-    auto& current=data->m_entityTransforms[ToIndex(m_id)].worldMatrix;
+    auto& current=data->m_entityTransforms[ToIndex(m_id)];
     if(std::equal(std::begin(current.m),std::end(current.m),std::begin(value.m)))return true;
     current=value;
     data->m_entityTransformRevisions[ToIndex(m_id)]=++data->m_transformRevision;
@@ -143,7 +143,7 @@ bool EntityHandle::SetTransform(const Math::float4x4& value)
 bool EntityHandle::SetPosition(Math::float3 value)
 {
     const auto data=m_scene.lock();if(!ValidEntity(data,m_id))return InvalidHandle("entity");
-    auto transform=data->GetTransform(m_id).worldMatrix;transform.m[12]=value.x;transform.m[13]=value.y;transform.m[14]=value.z;
+    auto transform=data->GetTransform(m_id);transform.m[12]=value.x;transform.m[13]=value.y;transform.m[14]=value.z;
     return SetTransform(transform);
 }
 bool EntityHandle::SetMaterial(const MaterialDesc& value)
@@ -166,6 +166,17 @@ template<typename T> std::vector<T>& Scene::Lights()
 }
 template<typename T> LightHandle<T>::operator bool() const
 {const auto data=m_scene.lock();return data && m_index<data->template Lights<T>().size();}
+template<typename T> LightHandle<T> Scene::GetLight(uint32_t index)
+{
+    LightHandle<T> handle;
+    if(index<Lights<T>().size()) {handle.m_scene=m_lifetime;handle.m_index=index;}
+    return handle;
+}
+template LightHandle<DirectionalLight> Scene::GetLight<DirectionalLight>(uint32_t);
+template LightHandle<PointLight> Scene::GetLight<PointLight>(uint32_t);
+template LightHandle<SpotLight> Scene::GetLight<SpotLight>(uint32_t);
+template LightHandle<RectAreaLight> Scene::GetLight<RectAreaLight>(uint32_t);
+template LightHandle<DiscAreaLight> Scene::GetLight<DiscAreaLight>(uint32_t);
 template<typename T> T LightHandle<T>::Get() const
 {const auto data=m_scene.lock();if(!data || m_index>=data->template Lights<T>().size()){InvalidHandle("light");return {};}return data->template Lights<T>()[m_index];}
 template<typename T> bool LightHandle<T>::Set(const T& value)

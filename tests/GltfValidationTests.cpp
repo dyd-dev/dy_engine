@@ -362,14 +362,32 @@ namespace
         fixture.nodes = R"([{"mesh":0,"translation":[10,0,0]},{"mesh":0,"translation":[20,0,0]}])";
         fixture.scenes = R"([{"nodes":[1,0]},{"nodes":[0]}])";
         add("valid-root-order", fixture, true).check = [](const auto& model) {
-            Require(model.meshes.size() == 2 && model.meshes[0].mesh.vertices[0].position.x == 20.f
-                && model.meshes[1].mesh.vertices[0].position.x == 10.f, "root traversal order or transform changed");
+            Require(model.meshes.size() == 2 && model.meshes[0].geometryIndex == UINT32_MAX
+                && model.meshes[1].geometryIndex == 0 && model.meshes[1].mesh.vertices.empty(),
+                "shared root geometry changed");
+            std::vector<dyf::NodeTransform> pose;
+            for(const auto& node : model.nodes) pose.push_back(node.bindTransform);
+            std::vector<dyf::Math::float4x4> globals;
+            Require(dyf::BuildGlobalNodeMatrices(model.nodes, pose, globals), "root bind transforms changed");
+            const auto vertex = model.meshes[0].mesh.vertices.at(0).position;
+            Require(dyf::Math::TransformPoint(model.assetTransform * globals.at(model.meshes[0].nodeIndex), vertex).x == 20.f
+                && dyf::Math::TransformPoint(model.assetTransform * globals.at(model.meshes[1].nodeIndex), vertex).x == 10.f,
+                "root traversal order or transform changed");
         };
         fixture.nodes = R"([{"children":[2,1],"translation":[3,0,0],"scale":[2,3,1]},{"mesh":0,"translation":[10,0,0]},{"mesh":0,"translation":[20,0,0]}])";
         fixture.scenes = R"([{"nodes":[0]}])";
         add("valid-child-order", fixture, true).check = [](const auto& model) {
-            Require(model.meshes.size() == 2 && model.meshes[0].mesh.vertices[0].position.x == 43.f
-                && model.meshes[1].mesh.vertices[0].position.x == 23.f, "child order or matrix multiplication changed");
+            Require(model.meshes.size() == 2 && model.meshes[0].geometryIndex == UINT32_MAX
+                && model.meshes[1].geometryIndex == 0 && model.meshes[1].mesh.vertices.empty(),
+                "shared child geometry changed");
+            std::vector<dyf::NodeTransform> pose;
+            for(const auto& node : model.nodes) pose.push_back(node.bindTransform);
+            std::vector<dyf::Math::float4x4> globals;
+            Require(dyf::BuildGlobalNodeMatrices(model.nodes, pose, globals), "child bind transforms changed");
+            const auto vertex = model.meshes[0].mesh.vertices.at(0).position;
+            Require(dyf::Math::TransformPoint(model.assetTransform * globals.at(model.meshes[0].nodeIndex), vertex).x == 43.f
+                && dyf::Math::TransformPoint(model.assetTransform * globals.at(model.meshes[1].nodeIndex), vertex).x == 23.f,
+                "child order or matrix multiplication changed");
         };
         fixture = {};
         fixture.scenes = R"([{"nodes":[0,0]}])";

@@ -293,6 +293,7 @@ namespace dyf::RHI
 		std::vector<uint32_t> m_requiredVertexBindings;
 		std::vector<Format> m_colorFormats;
 		Format m_depthStencilFormat = Format::Unknown;
+		PrimitiveTopology m_topology = PrimitiveTopology::Undefined;
 		PipelineLayoutDesc m_layout = {};
         bool m_compute=false;
         bool m_mesh=false;

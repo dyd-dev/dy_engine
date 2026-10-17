@@ -1,4 +1,4 @@
-#include "dyf/Renderer.h"
+#include "RendererInternal.h"
 #if defined(ENABLE_METAL)
 #include "StockMetalLibrary.h"
 #include "BindlessMetalLibrary.h"
@@ -13,6 +13,7 @@
 #include "StockFragmentShaderNoShadows.h"
 #include "StockShadowVertexShader.h"
 #include "StockInstancedShadowVertexShader.h"
+#include "StockShadowFragmentShader.h"
 #include "BindlessFragment.h"
 #include "BindlessFragmentNoShadows.h"
 #include "CanvasVertex.h"
@@ -23,8 +24,18 @@
 
 namespace dyf
 {
+RHI::ShaderDesc Renderer::Impl::DefaultShadowFragment()
+{
+#if defined(ENABLE_METAL)
+    return {RHI::ShaderStage::Fragment,"shadowFragmentShader",kStockMetalLibrary,kStockMetalLibrarySize};
+#elif defined(ENABLE_D3D12) || defined(ENABLE_VULKAN)
+    return {RHI::ShaderStage::Fragment,"main",kStockShadowFragmentShader,kStockShadowFragmentShaderSize};
+#else
+    RHI::ShaderDesc desc;desc.stage=RHI::ShaderStage::Fragment;return desc;
+#endif
+}
 // 선택한 빌드의 셰이더 바이트를 기존 RHI 입력에 직접 담는다.
-RendererShaderDesc Renderer::DefaultShaders(bool shadows, bool bindless, bool instanced)
+RendererShaderDesc Renderer::Impl::DefaultShaders(bool shadows, bool bindless, bool instanced)
 {
     RendererShaderDesc shaders;
 #if defined(ENABLE_METAL)

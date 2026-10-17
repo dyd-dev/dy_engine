@@ -1,3 +1,4 @@
+#include "dyf/RHI/ResourceScope.h"
 #include <dyf/RHI.h>
 #include <dyf/Platform/Window.h>
 
@@ -91,7 +92,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    ResourceScope resources(*device);
+    dyf::RHI::ResourceScope resources(*device);
 
     SwapchainDesc swapchain{};
     swapchain.window = window.GetHandle();
@@ -161,7 +162,7 @@ int main(int argc, char** argv)
             continue;
         }
 
-        ResourceScope frameScope(*device);
+        dyf::RHI::ResourceScope frameScope(*device);
         auto* commands = frameScope.Keep(device->AcquireCommandList());
         if(!commands)
         {

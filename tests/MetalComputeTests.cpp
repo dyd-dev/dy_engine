@@ -1,4 +1,5 @@
 #include <dyf/RHI.h>
+#include "dyf/RHI/ResourceScope.h"
 #include <cmath>
 #include <cstdio>
 #include <fstream>

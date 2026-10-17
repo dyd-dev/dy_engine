@@ -1,3 +1,4 @@
+#include "dyf/RHI/ResourceScope.h"
 #include "EditorScene.h"
 #include "dyf/Camera.h"
 #include "dyf/Extends/ImGui/ImGui.h"
@@ -508,7 +509,7 @@ int main(int argc,char** argv)
                 if(!maxFrames || !window.IsRunning() || glfwGetWindowAttrib(window.GetGlfwHandle(),GLFW_ICONIFIED))break;
             }
             if(!acquired)continue; // Retry through the event/UI loop so close always reaches the dirty-scene dialog.
-            RHI::ResourceScope resources(device);auto* commands=resources.Keep(device.AcquireCommandList());auto* target=device.GetBackBuffer();if(!commands||!target)return 1;
+            dyf::RHI::ResourceScope resources(device);auto* commands=resources.Keep(device.AcquireCommandList());auto* target=device.GetBackBuffer();if(!commands||!target)return 1;
             const RHI::ResourceBarrierDesc begin{nullptr,target,RHI::ResourceState::Present,RHI::ResourceState::RenderTarget,{}};commands->ResourceBarrier(&begin,1);
             RHI::ColorAttachment color;color.texture=target;color.loadOp=RHI::LoadOp::Clear;color.storeOp=RHI::StoreOp::Store;color.clearColor[3]=1;
             commands->BeginRendering({&color,1,nullptr});commands->EndRendering();

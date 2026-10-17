@@ -5,6 +5,8 @@
 #include "VulkanUpload.h"
 
 #include <map>
+#include <atomic>
+#include <mutex>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -17,6 +19,26 @@ namespace dyf::Backends
 	class VulkanTexture;
 	class VulkanTimestampQuery;
 	struct VulkanObjectDeleter;
+    struct VulkanCommandStorage;
+
+    class VulkanCommandPoolCache final
+    {
+    public:
+        explicit VulkanCommandPoolCache(const VulkanContext&);
+        ~VulkanCommandPoolCache();
+        std::unique_ptr<VulkanCommandStorage> Acquire();
+        void Return(std::unique_ptr<VulkanCommandStorage>) noexcept;
+        void DisableReuse() noexcept {m_reuseEnabled=false;}
+        void MarkDeviceLost() noexcept {m_deviceLost=true;DisableReuse();}
+        bool IsDeviceLost() const noexcept {return m_deviceLost;}
+    private:
+        void RequireSuccess(VkResult,const char*);
+        VkDevice m_device=VK_NULL_HANDLE;
+        uint32_t m_queueFamily=UINT32_MAX;
+        std::atomic<bool> m_reuseEnabled{true},m_deviceLost{false};
+        std::mutex m_mutex;
+        std::vector<std::unique_ptr<VulkanCommandStorage>> m_available;
+    };
 
 	struct VulkanSubmissionState
 	{
@@ -27,7 +49,8 @@ namespace dyf::Backends
 	class VulkanCommandList final : public dyf::RHI::ICommandList
 	{
 	public:
-		explicit VulkanCommandList(const VulkanContext& context, std::shared_ptr<VulkanUploadPool> uploadPool = {});
+		explicit VulkanCommandList(const VulkanContext& context, std::shared_ptr<VulkanUploadPool> uploadPool = {},
+            std::shared_ptr<VulkanCommandPoolCache> commandPools = {});
         void BeginDebugEventNative(const char*,const RHI::DebugLabelColor&) override;
         void EndDebugEventNative() override;
         void InsertDebugMarkerNative(const char*,const RHI::DebugLabelColor&) override;
@@ -39,6 +62,7 @@ namespace dyf::Backends
 
 		void BindComputePipelineNative(RHI::PipelineHandle) override;
         void DispatchNative(uint32_t,uint32_t,uint32_t) override;
+        void DispatchIndirectNative(RHI::BufferHandle arguments, uint32_t offset) override;
         void BindGraphicsPipelineNative(dyf::RHI::PipelineHandle pipelineState) override;
 		void BindResourceSetNative(dyf::RHI::ResourceSetHandle resourceSet) override;
 		void BindVertexBufferNative(uint32_t binding, dyf::RHI::BufferHandle buffer, uint32_t offset) override;
@@ -51,6 +75,8 @@ namespace dyf::Backends
 
 		void DrawInstancedNative(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
 		void DrawIndexedInstancedNative(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
+		void DrawIndirectNative(RHI::BufferHandle arguments, uint32_t offset) override;
+		void DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset) override;
 		void DispatchMeshNative(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 		bool CloseNative() override;
 
@@ -74,6 +100,7 @@ namespace dyf::Backends
 		[[nodiscard]] bool ValidateForSubmit(VulkanSubmissionState& state) const;
 		void CommitResourceStates();
         void CompleteTimestampResets();
+        void AllowPoolReuse() noexcept {m_poolReusable=true;}
         uint32_t m_maxComputeGroups[3]={};
 
 	private:
@@ -130,13 +157,15 @@ namespace dyf::Backends
 		void Fail() { m_failed = true; }
 
 		VulkanContext m_context;
+        std::shared_ptr<VulkanCommandPoolCache> m_commandPools;
+        std::unique_ptr<VulkanCommandStorage> m_commandStorage;
+        bool m_poolReusable=false;
         uint32_t m_maxColorAttachments=0;
         uint32_t m_maxViewportDimensions[2]={};
         float m_viewportBounds[2]={};
         struct QueryReset { VulkanTimestampQuery* query; uint32_t first, count; };
         std::vector<QueryReset> m_queryResets;
 		bool m_supportsCompute = false;
-		VkCommandPool m_commandPool = VK_NULL_HANDLE;
 		VkCommandBuffer m_commandBuffer = VK_NULL_HANDLE;
 		VulkanPipeline* m_boundPipeline = nullptr;
 		VulkanResourceSet* m_boundResourceSet = nullptr;

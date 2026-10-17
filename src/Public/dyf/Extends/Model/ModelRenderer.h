@@ -47,6 +47,8 @@ public:
     bool SetShaders(const ModelShaderDesc&);
     // 마지막 완료된 Compute 스키닝의 GPU 시간이다. 측정값이 없으면 -1이다.
     [[nodiscard]] double GetGpuMilliseconds() const { return m_gpuMilliseconds; }
+    // 시점 이동·재시작·비교 복원 직후 이전 변형 위치를 재사용하지 않는다.
+    void InvalidateHistory();
 
 private:
     struct MeshBuffer
@@ -65,10 +67,16 @@ private:
         std::vector<uint8_t> bytes;
         RHI::ResourceState state = RHI::ResourceState::Undefined;
     };
+    struct FrameSet
+    {
+        RHI::ResourceSetHandle handle = nullptr;
+        RHI::PipelineHandle pipeline = nullptr;
+        std::array<RHI::ResourceBinding, 4> bindings = {};
+    };
     struct FrameResources
     {
         std::vector<FrameBuffer> buffers;
-        std::vector<RHI::ResourceSetHandle> sets;
+        std::vector<FrameSet> sets;
         std::vector<uintptr_t> workingSet;
         RHI::FenceHandle completion;
     };
@@ -106,6 +114,13 @@ private:
     std::vector<uint64_t> m_requiredInfluenceJoints;
     std::vector<bool> m_validInfluences;
     std::vector<RendererDrawDesc> m_draws;
+    const ModelScene* m_historyScene = nullptr;
+    uint32_t m_historyFrame = UINT32_MAX;
+    std::vector<RendererDrawDesc> m_historyDraws;
+    std::vector<std::weak_ptr<const MeshData>> m_historyMeshes;
+    std::vector<size_t> m_historyVertexCounts;
+    std::vector<uint64_t> m_geometrySignatures, m_geometryRevisions;
+    uint64_t m_nextGeometryRevision = 1;
     std::deque<GpuSample> m_gpuSamples;
     double m_gpuMilliseconds = -1;
 };

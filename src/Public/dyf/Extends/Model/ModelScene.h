@@ -68,6 +68,8 @@ namespace dyf
         const std::vector<SkinJointMatrices>& JointPaletteMatrices() const;
         uint32_t GetEntitySkinPaletteOffset(EntityID entity) const;
         const MeshData* TryGetEntityMorphedMesh(EntityID entity) const;
+        // 가중치가 모두 0이어도 이전 모프 위치를 보존할 수 있게 원본 대상 유무를 알린다.
+        bool HasEntityMorphTargets(EntityID entity) const;
 
 	private:
 		// StopAnimation은 지정한 인스턴스의 실패 여부만 반환하며 공유 포즈 저장소는 함께 갱신한다.
@@ -79,6 +81,7 @@ namespace dyf
         std::vector<std::vector<SkinInfluence>> m_meshSkinInfluences;
         std::vector<uint32_t> m_entitySkinPaletteOffsets;
         std::vector<MeshData> m_entityMorphedMeshes;
+        std::vector<bool> m_entityHasMorphTargets;
 		std::vector<SkinJointMatrices> m_jointPaletteMatrices;
 		std::vector<ModelAsset> m_modelAssets;
 		std::vector<ModelInstance> m_modelInstances;

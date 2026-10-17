@@ -1,14 +1,14 @@
 #pragma once
 
-#include "IDevice.h"
+#include "dyf/RHI/IDevice.h"
 #include <stdexcept>
 #include <vector>
 
 namespace dyf::RHI
 {
-// Owns explicitly supplied resources. The device must outlive the scope; recorded
-// native commands retain referenced resources until their GPU work completes.
-// Allocation, descriptors, uploads, barriers and submission remain caller-owned.
+// 명시적으로 등록한 자원만 소유하며 장치는 이 객체보다 오래 유지해야 한다.
+// 기록된 네이티브 명령은 GPU 작업이 끝날 때까지 참조 자원을 유지한다.
+// 자원 생성·설정·업로드·배리어·제출은 호출자가 담당한다.
 class ResourceScope
 {
 public:
@@ -27,8 +27,8 @@ public:
         for (auto it = m_buffers.rbegin(); it != m_buffers.rend(); ++it) m_device.DestroyBuffer(*it);
     }
 
-    // Takes ownership exactly once. Null handles report allocation failure.
-    // Swapchain-owned textures must not be adopted.
+    // 소유권은 한 번만 등록하고 빈 핸들은 생성 실패로 처리한다.
+    // 스왑체인이 소유한 텍스처는 등록하지 않는다.
     ICommandList* Keep(ICommandList* value) { return Keep(value,m_commands,&IDevice::DestroyCommandList); }
     TimestampQueryHandle Keep(TimestampQueryHandle value) {return Keep(value,m_queries,&IDevice::DestroyTimestampQuery);}
     BufferHandle Keep(BufferHandle value) { return Keep(value, m_buffers, &IDevice::DestroyBuffer); }

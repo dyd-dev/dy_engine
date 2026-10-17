@@ -15,8 +15,9 @@ namespace
         std::cout <<
         "메시릿 컬링과 LOD: 현재는 지원 조회와 미지원 단계 안내를 제공하는 예제입니다.\n"
         "메시를 메시릿으로 나누거나 LOD를 고르는 계산은 CPU 또는 지원 백엔드의 compute에서 구성할 수 있습니다.\n"
-        "공개 RHI에는 mesh/task shader stage, mesh pipeline, mesh 작업 실행 명령 및 간접 드로우 명령이 없습니다.\n"
-        "선택한 메시릿/LOD를 해당 GPU 실행 경로에 연결할 수 없어 전체 메시릿 렌더링 예제는 보류합니다.\n"
+        "공개 RHI에는 mesh shader stage, mesh pipeline, DispatchMesh와 일반 draw의 indirect 명령이 있습니다.\n"
+        "이 예제에는 아직 메시릿 데이터 생성, 가시성·LOD 선택 및 실제 렌더링 연결을 구현하지 않았습니다.\n"
+        "TaskShader와 GPU count-buffer 기반 명령 목록 실행은 별도 지원이 필요합니다.\n"
         "아직 제공되지 않는 실행 API를 호출하지 않으며 GPU 결과나 성능 수치를 만들지 않습니다.\n";
     }
 
@@ -70,7 +71,7 @@ int main(int argc, char** argv)
         std::cout << "현재 장치는 GPU raster/compute 실행을 제공하지 않습니다. Null 백엔드일 수 있으며, 장치 생성 성공만으로 GPU 가용성을 보장하지 않습니다.\n";
 
     // 4. 향후 구현 경로 안내 및 미지원 종료 코드 반환
-    // 완성 경로: 메시릿 bounds/LOD 생성 → 가시성과 LOD 선택 → mesh/task 또는 간접 실행 → 선택 결과 시각 검증.
+    // 남은 구성: 메시릿 bounds/LOD → 가시성·LOD 선택 → 공개 mesh/indirect 명령 연결.
     std::cout << "결과: 이 주제의 전체 실행 예제는 현재 제공하지 않습니다(종료 코드 77).\n";
     return 77;
 }

@@ -1,3 +1,4 @@
+#include "dyf/RHI/ResourceScope.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI.h"
 #include "vertex.h"
@@ -96,7 +97,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<RHI::IDevice> deviceOwner(RHI::IDevice::Create(deviceDesc));
         Check(bool(deviceOwner), "Device creation failed");
         auto& device = *deviceOwner;
-        RHI::ResourceScope resources(device);
+        dyf::RHI::ResourceScope resources(device);
         RHI::SwapchainDesc swapchain;
         swapchain.window = window.GetHandle();
         swapchain.format = RHI::Format::B8G8R8A8_UNORM;
@@ -175,8 +176,8 @@ int main(int argc, char** argv) {
                 Check(!device.IsLost(), "Device lost during BeginFrame");
                 continue; // 최소화·크기 변경으로 준비되지 않은 프레임은 세지 않는다.
             }
-            // 제출한 명령이 GPU 완료까지 자원을 유지하므로 이 프레임의 ResourceScope는 끝에서 해제할 수 있다.
-            RHI::ResourceScope frameResources(device);
+            // 제출한 명령이 GPU 완료까지 자원을 유지하므로 이 프레임의 dyf::RHI::ResourceScope는 끝에서 해제할 수 있다.
+            dyf::RHI::ResourceScope frameResources(device);
             auto* commands = frameResources.Keep(device.AcquireCommandList());
 
             // 첫 프레임에는 정점·인스턴스 데이터를 업로드한다. 이 예제의 CPU 기록 시간에는 업로드 명령 기록도 포함된다.

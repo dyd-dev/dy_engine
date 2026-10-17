@@ -32,14 +32,19 @@ struct ModelVertex
     float px, py, pz, nx, ny, nz, u, v, tx, ty, tz, tw;
 };
 
+ModelVertex PackVertex(const Vertex& vertex)
+{
+    return {vertex.position.x, vertex.position.y, vertex.position.z,
+        vertex.normal.x, vertex.normal.y, vertex.normal.z, vertex.uv.x, vertex.uv.y,
+        vertex.tangent.x, vertex.tangent.y, vertex.tangent.z, vertex.tangent.w};
+}
+
 std::vector<ModelVertex> BuildVertices(const MeshData& mesh)
 {
     std::vector<ModelVertex> vertices;
     vertices.reserve(mesh.vertices.size());
     for(const auto& vertex : mesh.vertices)
-        vertices.push_back({vertex.position.x, vertex.position.y, vertex.position.z,
-            vertex.normal.x, vertex.normal.y, vertex.normal.z, vertex.uv.x, vertex.uv.y,
-            vertex.tangent.x, vertex.tangent.y, vertex.tangent.z, vertex.tangent.w});
+        vertices.push_back(PackVertex(vertex));
     return vertices;
 }
 
@@ -75,6 +80,7 @@ bool ModelRenderer::SetSkinningExecutionMode(SkinningExecutionMode mode)
     if(mode > SkinningExecutionMode::ComputePreSkin) return Failure("Unknown skinning execution mode.");
     if(mode == SkinningExecutionMode::ComputePreSkin && !m_renderer.GetDevice().Supports(RHI::Feature::Compute))
         return Failure("Compute skinning is not supported by this device.");
+    if(m_mode != mode) InvalidateHistory();
     m_mode = mode;
     if(mode == SkinningExecutionMode::VertexShader) m_gpuMilliseconds = -1;
     return true;
@@ -103,6 +109,7 @@ bool ModelRenderer::SetShaders(const ModelShaderDesc& desc)
         m_shaderBytes = std::move(bytes);
         m_shaderEntries = std::move(entries);
         m_computeShaderChanged = true;
+        InvalidateHistory();
         return true;
     }
     catch(const std::exception& error) { return Failure(error.what()); }
@@ -214,6 +221,7 @@ bool ModelRenderer::PrepareComputePipeline()
 
 void ModelRenderer::ReleaseFrameBuffers()
 {
+    InvalidateHistory();
     m_draws.clear();
     for(auto& frame : m_frames) ReleaseFrame(frame);
     m_frames.clear();
@@ -224,10 +232,19 @@ void ModelRenderer::ReleaseFrameBuffers()
     m_influenceCounts.clear(); m_requiredInfluenceJoints.clear(); m_validInfluences.clear();
 }
 
+void ModelRenderer::InvalidateHistory()
+{
+    m_historyScene = nullptr;
+    m_historyFrame = UINT32_MAX;
+    m_historyDraws.clear();
+    m_historyMeshes.clear();
+    m_historyVertexCounts.clear();
+}
+
 void ModelRenderer::ReleaseFrame(FrameResources& frame)
 {
     auto& device = m_renderer.GetDevice();
-    for(auto* set : frame.sets) if(set) device.DestroyResourceSet(set);
+    for(auto& set : frame.sets) if(set.handle) device.DestroyResourceSet(set.handle);
     for(auto& buffer : frame.buffers) if(buffer.buffer) device.DestroyBuffer(buffer.buffer);
     frame = {};
 }
@@ -246,7 +263,7 @@ void ModelRenderer::CollectGpuSamples()
     {
         const auto sample = m_gpuSamples.front();
         uint64_t ticks[2];
-        if(device.ReadTimestamps(sample.query, 0, 2, ticks) && m_mode == SkinningExecutionMode::ComputePreSkin)
+        if(device.ReadTimestamps(sample.query, 0, 2, ticks))
         {
             const uint32_t bits = device.GetTimestampValidBits();
             const uint64_t mask = bits == 64 ? UINT64_MAX : (uint64_t{1} << bits) - 1;
@@ -263,8 +280,15 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
     static_assert(sizeof(SkinInfluence) == 48 && offsetof(SkinInfluence, dqBlendWeight) == 32);
     static_assert(sizeof(SkinJointMatrices) == 176);
     auto& device = m_renderer.GetDevice();
-    const bool compute = m_mode == SkinningExecutionMode::ComputePreSkin;
+    const auto& config = m_renderer.GetConfig();
+    const bool stockGeometry = config.advanced.enabled && config.enableHdrRendering;
+    bool hasSkin = false;
+    for(uint32_t index = 0; index < scene.GetEntityCount(); ++index)
+        hasSkin |= scene.GetEntitySkinPaletteOffset(static_cast<EntityID>(index)) != UINT32_MAX;
+    const bool compute = stockGeometry ? hasSkin && device.Supports(RHI::Feature::Compute) :
+        m_mode == SkinningExecutionMode::ComputePreSkin;
     if(compute && !PrepareComputePipeline()) return false;
+    if(!stockGeometry || m_historyScene != &scene) InvalidateHistory();
 
     // Compare actual influence bytes, including edits made without changing mesh identity.
     // Packing and immutable validation are needed only when those bytes/counts change.
@@ -340,16 +364,17 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
             return Failure("Skin influence references an invalid joint or weight.");
     }
 
-    const uint32_t limit = std::max(1u, device.GetDesc().maxFramesInFlight);
+    const uint32_t limit = std::max(stockGeometry ? 2u : 1u, device.GetDesc().maxFramesInFlight);
     uint32_t selected = 0;
     for(; selected < m_frames.size(); ++selected)
-        if(!m_frames[selected].completion || device.IsComplete(m_frames[selected].completion)) break;
+        if(selected != m_historyFrame && (!m_frames[selected].completion || device.IsComplete(m_frames[selected].completion))) break;
     if(selected == m_frames.size())
     {
         if(m_frames.size() < limit) m_frames.emplace_back();
         else
         {
             selected = (m_frameIndex + 1) % static_cast<uint32_t>(m_frames.size());
+            if(selected == m_historyFrame) selected = (selected + 1) % static_cast<uint32_t>(m_frames.size());
             if(!device.Wait(m_frames[selected].completion, UINT64_MAX))
                 return Failure("Model frame completion wait failed.");
         }
@@ -425,7 +450,7 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
         workingSet.push_back(scene.GetEntitySkinPaletteOffset(entity) != UINT32_MAX);
     }
     for(uint32_t index = 0; index < m_frames.size(); ++index)
-        if(index != selected && m_frames[index].workingSet != workingSet &&
+        if(index != selected && index != m_historyFrame && m_frames[index].workingSet != workingSet &&
             (!m_frames[index].completion || device.IsComplete(m_frames[index].completion)))
             ReleaseFrame(m_frames[index]);
     frame.workingSet = std::move(workingSet);
@@ -472,6 +497,8 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
     if(!paletteBuffer) return Failure("Skin palette upload failed.");
     if(m_meshBuffers.size() != scene.Meshes().size()) { ReleaseMeshBuffers(); m_meshBuffers.resize(scene.Meshes().size()); }
     std::vector<bool> meshUsed(m_meshBuffers.size(), false);
+    m_geometrySignatures.resize(scene.GetEntityCount());
+    m_geometryRevisions.resize(scene.GetEntityCount());
     for(uint32_t index = 0; prepared && index < scene.GetEntityCount(); ++index)
     {
         const auto entity = static_cast<EntityID>(index);
@@ -479,7 +506,76 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
         const uint32_t paletteOffset = scene.GetEntitySkinPaletteOffset(entity);
         const auto mesh = scene.GetEntityMesh(entity);
         const uint32_t meshIndex = ToIndex(mesh);
-        if(const auto* morphed = scene.TryGetEntityMorphedMesh(entity))
+        const auto* morphed = scene.TryGetEntityMorphedMesh(entity);
+        const bool deformed = paletteOffset != UINT32_MAX || morphed || scene.HasEntityMorphTargets(entity);
+        draw.stockGeometry = stockGeometry;
+        if(stockGeometry && deformed)
+        {
+            if(!IsValid(mesh) || meshIndex >= scene.Meshes().size())
+                return Failure("A deformed entity requires valid source geometry.");
+            const auto& sourceMesh = scene.Meshes()[meshIndex];
+            const auto& input = morphed ? *morphed : *sourceMesh;
+            if(input.vertices.empty() || input.vertices.size() != sourceMesh->vertices.size())
+                return Failure("Deformation must preserve source vertex indexing.");
+            std::vector<SkinJointMatrices> entityPalette;
+            const auto& influences = scene.GetMeshSkinInfluences(mesh);
+            if(paletteOffset != UINT32_MAX)
+            {
+                const size_t count = static_cast<size_t>(m_requiredInfluenceJoints[meshIndex]);
+                if(count) entityPalette.assign(palette.begin() + paletteOffset, palette.begin() + paletteOffset + count);
+            }
+            const bool cpuVerticesNeeded = !compute || paletteOffset == UINT32_MAX;
+            std::vector<ModelVertex> cpuVertices;
+            if(cpuVerticesNeeded) cpuVertices.reserve(input.vertices.size());
+            uint64_t signature = 1469598103934665603ull;
+            const auto hashBytes = [&signature](const void* data, size_t size) {
+                const auto* bytes = static_cast<const uint8_t*>(data);
+                for(size_t byte = 0; byte < size; ++byte)
+                { signature ^= bytes[byte]; signature *= 1099511628211ull; }
+            };
+            const auto identity = reinterpret_cast<uintptr_t>(sourceMesh.get());
+            hashBytes(&identity, sizeof(identity));
+            for(size_t vertexIndex = 0; vertexIndex < input.vertices.size(); ++vertexIndex)
+            {
+                Vertex output = input.vertices[vertexIndex];
+                if(paletteOffset != UINT32_MAX &&
+                    !SkinVertex(input.vertices[vertexIndex], influences[vertexIndex], entityPalette, output))
+                    return Failure("Deformed bounds evaluation failed.");
+                if(!std::isfinite(output.position.x) || !std::isfinite(output.position.y) || !std::isfinite(output.position.z))
+                    return Failure("Deformed geometry contains a non-finite position.");
+                draw.localBounds.Include(output.position);
+                const auto packed = PackVertex(output);
+                hashBytes(&packed, sizeof(packed));
+                if(cpuVerticesNeeded) cpuVertices.push_back(packed);
+            }
+            // CPU·GPU 연산 순서 차이로 경계 정점이 컬링되지 않도록 작은 여유를 둔다.
+            const auto& bounds = draw.localBounds;
+            const float magnitude = std::max({1.f, std::fabs(bounds.min.x), std::fabs(bounds.min.y),
+                std::fabs(bounds.min.z), std::fabs(bounds.max.x), std::fabs(bounds.max.y), std::fabs(bounds.max.z)});
+            const auto padding = Math::float3(magnitude * 1e-4f, magnitude * 1e-4f, magnitude * 1e-4f);
+            draw.localBounds.min = draw.localBounds.min - padding;
+            draw.localBounds.max = draw.localBounds.max + padding;
+            draw.hasLocalBounds = true;
+            if(!m_geometryRevisions[index] || m_geometrySignatures[index] != signature)
+            {
+                m_geometrySignatures[index] = signature;
+                m_geometryRevisions[index] = m_nextGeometryRevision++;
+                if(!m_nextGeometryRevision) ++m_nextGeometryRevision;
+            }
+            draw.geometryRevision = m_geometryRevisions[index];
+            draw.deformationHistoryValid = false;
+            if(m_historyScene == &scene && index < m_historyDraws.size() && index < m_historyMeshes.size() &&
+                index < m_historyVertexCounts.size() && m_historyMeshes[index].lock() == sourceMesh &&
+                m_historyVertexCounts[index] == input.vertices.size() && m_historyDraws[index].vertexBuffer)
+            {
+                draw.previousVertexBuffer = m_historyDraws[index].vertexBuffer;
+                draw.deformationHistoryValid = true;
+            }
+            if(cpuVerticesNeeded)
+                draw.vertexBuffer = upload(cpuVertices.data(), cpuVertices.size(), sizeof(ModelVertex),
+                    RHI::BufferUsage::Vertex | RHI::BufferUsage::Storage, RHI::ResourceState::VertexBuffer);
+        }
+        if(morphed && !draw.vertexBuffer)
         {
             const auto vertices = BuildVertices(*morphed);
             draw.vertexBuffer = upload(vertices.data(), vertices.size(), sizeof(ModelVertex),
@@ -501,17 +597,20 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
             }
             draw.vertexBuffer = cached.buffer;
         }
-        draw.vertexResources = {
-            {11, 0, influenceBuffer, nullptr, 0, influenceBuffer->GetDesc().size, {}},
-            {12, 0, paletteBuffer, nullptr, 0, paletteBuffer->GetDesc().size, {}}};
-        const std::array<uint32_t, 4> constants = {
-            compute || !IsValid(mesh) || meshIndex >= m_influenceOffsets.size() ? UINT32_MAX : m_influenceOffsets[meshIndex], paletteOffset, 0, 0};
-        draw.inlineConstants.resize(sizeof(constants));
-        std::memcpy(draw.inlineConstants.data(), constants.data(), sizeof(constants));
+        if(!stockGeometry)
+        {
+            draw.vertexResources = {
+                {11, 0, influenceBuffer, nullptr, 0, influenceBuffer->GetDesc().size, {}},
+                {12, 0, paletteBuffer, nullptr, 0, paletteBuffer->GetDesc().size, {}}};
+            const std::array<uint32_t, 4> constants = {
+                compute || !IsValid(mesh) || meshIndex >= m_influenceOffsets.size() ? UINT32_MAX : m_influenceOffsets[meshIndex], paletteOffset, 0, 0};
+            draw.inlineConstants.resize(sizeof(constants));
+            std::memcpy(draw.inlineConstants.data(), constants.data(), sizeof(constants));
+        }
     }
     RHI::TimestampQueryHandle query = nullptr;
     ScopeExit discardQuery{[&] { if(query) device.DestroyTimestampQuery(query); }};
-    if(frame.sets.size() < scene.GetEntityCount()) frame.sets.resize(scene.GetEntityCount(), nullptr);
+    if(frame.sets.size() < scene.GetEntityCount()) frame.sets.resize(scene.GetEntityCount());
     for(size_t index = 0; index < m_meshBuffers.size(); ++index)
         if(!meshUsed[index])
         {
@@ -529,8 +628,8 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
             const uint32_t paletteOffset = scene.GetEntitySkinPaletteOffset(entity);
             if(paletteOffset == UINT32_MAX)
             {
-                if(frame.sets[index]) device.DestroyResourceSet(frame.sets[index]);
-                frame.sets[index] = nullptr;
+                if(frame.sets[index].handle) device.DestroyResourceSet(frame.sets[index].handle);
+                frame.sets[index] = {};
                 continue;
             }
             auto& draw = m_draws[index];
@@ -549,16 +648,18 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
                 {14, 0, source, nullptr, 0, bytes, {}}, {15, 0, output, nullptr, 0, bytes, {}}
             }};
             auto& set = frame.sets[index];
-            bool matching = set && set->GetPipeline() == m_computePipeline && set->GetBindingCount() == bindings.size();
+            bool matching = set.handle && set.pipeline == m_computePipeline;
             for(uint32_t binding = 0; matching && binding < bindings.size(); ++binding)
-                matching = set->GetBindings()[binding].buffer == bindings[binding].buffer &&
-                    set->GetBindings()[binding].size == bindings[binding].size;
+                matching = set.bindings[binding].buffer == bindings[binding].buffer &&
+                    set.bindings[binding].size == bindings[binding].size;
             if(!matching)
             {
-                if(set) device.DestroyResourceSet(set);
-                set = nullptr;
-                set = device.CreateResourceSet({m_computePipeline, bindings.data(), static_cast<uint32_t>(bindings.size())});
-                if(!set) { prepared = false; break; }
+                if(set.handle) device.DestroyResourceSet(set.handle);
+                set = {};
+                set.handle = device.CreateResourceSet({m_computePipeline, bindings.data(), static_cast<uint32_t>(bindings.size())});
+                if(!set.handle) { prepared = false; break; }
+                set.pipeline = m_computePipeline;
+                set.bindings = bindings;
             }
             const RHI::ResourceBarrierDesc before{source, nullptr, RHI::ResourceState::VertexBuffer, RHI::ResourceState::ShaderResource, {}};
             commands->ResourceBarrier(&before, 1);
@@ -567,7 +668,7 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
                 const RHI::ResourceBarrierDesc ready{output, nullptr, cached->state, RHI::ResourceState::UnorderedAccess, {}};
                 commands->ResourceBarrier(&ready, 1);
             }
-            commands->BindResourceSet(set);
+            commands->BindResourceSet(set.handle);
             const uint32_t count = bytes / sizeof(ModelVertex);
             const std::array<uint32_t, 4> constants = {count, m_influenceOffsets[ToIndex(scene.GetEntityMesh(entity))], paletteOffset, 0};
             commands->SetInlineConstants(0, sizeof(constants), constants.data());
@@ -586,9 +687,9 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
     for(size_t index = cursor; index < frame.buffers.size(); ++index) device.DestroyBuffer(frame.buffers[index].buffer);
     frame.buffers.resize(cursor);
     for(size_t index = scene.GetEntityCount(); index < frame.sets.size(); ++index)
-        if(frame.sets[index]) device.DestroyResourceSet(frame.sets[index]);
+        if(frame.sets[index].handle) device.DestroyResourceSet(frame.sets[index].handle);
     frame.sets.resize(scene.GetEntityCount());
-    if(!compute) for(auto& set : frame.sets) { if(set) device.DestroyResourceSet(set); set = nullptr; }
+    if(!compute) for(auto& set : frame.sets) { if(set.handle) device.DestroyResourceSet(set.handle); set = {}; }
     if(!commands) { submitted = prepared; return prepared; }
     const bool closed = commands->Close();
     RHI::FenceHandle completion;
@@ -605,29 +706,64 @@ bool ModelRenderer::RenderScene(const ModelScene& scene, const Camera* camera, c
     bool rendered = false;
     bool drawAttempted = false;
     RHI::FenceHandle previousDraw;
+    uint32_t consumedHistoryFrame = UINT32_MAX;
     ScopeExit retainDrawCompletion{[&] {
         if(!drawAttempted) return;
         const auto completion = m_renderer.GetLastRenderCompletion();
         if(completion && completion != previousDraw)
+        {
             m_frames[m_frameIndex].completion = completion;
+            // 이전 변형 버퍼도 이번 Surface 패스가 읽으므로 같은 완료 시점까지 보존한다.
+            if(consumedHistoryFrame < m_frames.size()) m_frames[consumedHistoryFrame].completion = completion;
+        }
     }};
     try
     {
         if(readback) *readback = {};
         CollectGpuSamples();
+        const auto& config = m_renderer.GetConfig();
+        const bool stockGeometry = config.advanced.enabled && config.enableHdrRendering;
+        if(stockGeometry && std::any_of(m_shaderBytes.begin(), m_shaderBytes.end(),
+            [](const auto& bytes) { return !bytes.empty(); }))
+        {
+            InvalidateHistory();
+            return Failure("Advanced model rendering requires the standard deformation shaders.");
+        }
         // 이전 복원 자체가 실패했다면 원래 설정을 덮어쓰지 않고 다시 복원부터 처리한다.
-        if(RestoreShaders() && ConfigureShaders() && Prepare(scene))
+        if(RestoreShaders() && (stockGeometry || ConfigureShaders()) && Prepare(scene))
         {
             previousDraw = m_renderer.GetLastRenderCompletion();
+            consumedHistoryFrame = m_historyFrame;
             drawAttempted = true;
             rendered = camera ? m_renderer.Render(scene, *camera, m_draws, overlay, readback) :
                 m_renderer.Render(scene, m_draws, overlay, readback);
+            const auto completion = m_renderer.GetLastRenderCompletion();
+            if(rendered && stockGeometry && completion && completion != previousDraw)
+            {
+                // 확보 실패로 생략한 프레임은 이전 변형 기준을 전진시키지 않는다.
+                m_historyDraws = m_draws;
+                m_historyMeshes.resize(scene.GetEntityCount());
+                m_historyVertexCounts.resize(scene.GetEntityCount());
+                for(uint32_t index = 0; index < scene.GetEntityCount(); ++index)
+                {
+                    const auto mesh = scene.GetEntityMesh(static_cast<EntityID>(index));
+                    if(IsValid(mesh) && ToIndex(mesh) < scene.Meshes().size())
+                    {
+                        m_historyMeshes[index] = scene.Meshes()[ToIndex(mesh)];
+                        m_historyVertexCounts[index] = scene.Meshes()[ToIndex(mesh)]->vertices.size();
+                    }
+                    else { m_historyMeshes[index].reset(); m_historyVertexCounts[index] = 0; }
+                }
+                m_historyScene = &scene;
+                m_historyFrame = m_frameIndex;
+            }
         }
     }
     catch(const std::exception& error) { (void)Failure(error.what()); }
     catch(...) { (void)Failure("Model rendering failed."); }
     // 성공, 준비 실패, 예외 경로 모두 복원을 예약한 후 호출자에게 돌아간다.
     const bool restored = RestoreShaders();
+    if(!rendered || !restored) InvalidateHistory();
     return rendered && restored;
 }
 

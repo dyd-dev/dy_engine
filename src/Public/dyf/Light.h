@@ -25,6 +25,8 @@ namespace dyf
 		float intensity = 4.0f;
 		bool castShadow = true;
 		float shadowStrength = 0.45f;
+		// 광원의 각반경(라디안, 0 이상 π/2 미만)이다. 0이면 기존 고정 PCF를 사용한다.
+		float angularRadius = 0.0f;
 	};
 
 	struct PointLight
@@ -37,6 +39,8 @@ namespace dyf
 		float intensity = 6.0f;
 		bool castShadow = true;
 		float shadowStrength = 0.5f;
+		// 월드 단위의 발광 반경이다. 0이면 기존 고정 PCF를 사용한다.
+		float sourceRadius = 0.0f;
 	};
 
 	struct SpotLight
@@ -52,6 +56,8 @@ namespace dyf
 		float innerConeRadians = 0.34906585f;
 		bool castShadow = false;
 		float shadowStrength = 1.0f;
+		// 월드 단위의 발광 반경이다. 0이면 기존 고정 PCF를 사용한다.
+		float sourceRadius = 0.0f;
 	};
 
 	struct RectAreaLight

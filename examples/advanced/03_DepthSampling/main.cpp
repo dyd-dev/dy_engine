@@ -1,3 +1,4 @@
+#include "dyf/RHI/ResourceScope.h"
 #include "dyf/RHI.h"
 #include "dyf/Platform/Window.h"
 #include "vertex.h"
@@ -129,7 +130,7 @@ int main(int argc, char** argv) try {
         return 77;
     }
 
-    ResourceScope resources(device);
+    dyf::RHI::ResourceScope resources(device);
 
     // 3. 스왑체인 생성
     SwapchainDesc swapchain;
@@ -253,7 +254,7 @@ int main(int argc, char** argv) try {
             intermediateState = ResourceState::Undefined;
         }
 
-        ResourceScope frameResources(device);
+        dyf::RHI::ResourceScope frameResources(device);
         auto* commands = frameResources.Keep(device.AcquireCommandList());
         const auto start = std::chrono::steady_clock::now();
 

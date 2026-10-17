@@ -1,3 +1,4 @@
+#include "dyf/RHI/ResourceScope.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI.h"
 #include "vertex.h"
@@ -82,7 +83,7 @@ int main(int argc, char** argv)
         std::unique_ptr<RHI::IDevice> deviceOwner(RHI::IDevice::Create(deviceDesc));
         Check(bool(deviceOwner), "Device creation failed");
         auto& device = *deviceOwner;
-        RHI::ResourceScope resources(device);
+        dyf::RHI::ResourceScope resources(device);
 
         // 3. 스왑체인(Swapchain) 생성
         RHI::SwapchainDesc swapchain;
@@ -138,7 +139,7 @@ int main(int argc, char** argv)
                 Check(!device.IsLost(), "Device lost during BeginFrame");
                 continue;
             }
-            RHI::ResourceScope frameResources(device);
+            dyf::RHI::ResourceScope frameResources(device);
             auto* commands = frameResources.Keep(device.AcquireCommandList());
             if (frame == 0)
             {

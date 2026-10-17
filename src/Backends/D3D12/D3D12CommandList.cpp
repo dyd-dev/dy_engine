@@ -33,6 +33,7 @@ namespace dyf::Backends
             case RHI::ResourceState::ConstantBuffer:
                 return D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
             case RHI::ResourceState::IndexBuffer: return D3D12_RESOURCE_STATE_INDEX_BUFFER;
+            case RHI::ResourceState::IndirectArgument: return D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
             case RHI::ResourceState::ShaderResource:
                 return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
                     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -170,6 +171,9 @@ namespace dyf::Backends
 
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> commandList;
+        ComPtr<ID3D12CommandSignature> drawSignature;
+        ComPtr<ID3D12CommandSignature> drawIndexedSignature;
+        ComPtr<ID3D12CommandSignature> dispatchSignature;
         // The native command is destroyed only after fence-safe retirement or discard.
         D3D12Detail::UploadArena<D3D12UploadPage> uploads;
         ID3D12Device* device = nullptr;
@@ -295,7 +299,8 @@ namespace dyf::Backends
     }
 
     D3D12CommandList::D3D12CommandList(void* nativeDevice,
-        std::shared_ptr<D3D12UploadPool> uploadPool)
+        std::shared_ptr<D3D12UploadPool> uploadPool,
+        void* drawSignature, void* drawIndexedSignature, void* dispatchSignature)
         : m_internal(new D3D12CommandListInternal(uploadPool ? std::move(uploadPool)
             : MakeD3D12UploadPool(static_cast<ID3D12Device*>(nativeDevice))))
     {
@@ -306,6 +311,9 @@ namespace dyf::Backends
             return;
         }
         m_internal->device = device;
+        m_internal->drawSignature = static_cast<ID3D12CommandSignature*>(drawSignature);
+        m_internal->drawIndexedSignature = static_cast<ID3D12CommandSignature*>(drawIndexedSignature);
+        m_internal->dispatchSignature = static_cast<ID3D12CommandSignature*>(dispatchSignature);
         if (FAILED(device->CreateCommandAllocator(
                 D3D12_COMMAND_LIST_TYPE_DIRECT,
                 IID_PPV_ARGS(&m_internal->allocator))))
@@ -944,6 +952,24 @@ namespace dyf::Backends
         m_internal->commandList->Dispatch(x, y, z);
     }
 
+    void D3D12CommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint32_t offset)
+    {
+        auto* buffer = dynamic_cast<D3D12Buffer*>(arguments);
+        if (!CanRecord(m_internal) || m_internal->rendering ||
+            m_internal->pipeline == nullptr || !m_internal->pipeline->IsCompute() ||
+            m_internal->dispatchSignature == nullptr || buffer == nullptr ||
+            buffer->GetNativeResource() == nullptr ||
+            !RequireBufferState(m_internal, buffer, RHI::ResourceState::IndirectArgument))
+        {
+            RejectRecording(m_internal);
+            return;
+        }
+        auto* resource = static_cast<ID3D12Resource*>(buffer->GetNativeResource());
+        RetainObject(m_internal->retainedObjects, resource);
+        m_internal->commandList->ExecuteIndirect(
+            m_internal->dispatchSignature.Get(), 1, resource, offset, nullptr, 0);
+    }
+
     void D3D12CommandList::BindResourceSetNative(RHI::ResourceSetHandle resourceSet)
     {
         if (!CanRecord(m_internal) ||
@@ -1272,6 +1298,42 @@ namespace dyf::Backends
         }
         m_internal->commandList->DrawIndexedInstanced(
             indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
+    }
+
+    void D3D12CommandList::DrawIndirectNative(RHI::BufferHandle arguments, uint32_t offset)
+    {
+        auto* buffer = dynamic_cast<D3D12Buffer*>(arguments);
+        if (!CanRecord(m_internal) || !m_internal->rendering ||
+            !HasCompleteDrawState(m_internal) || m_internal->pipeline->IsMesh() ||
+            m_internal->drawSignature == nullptr || buffer == nullptr ||
+            buffer->GetNativeResource() == nullptr ||
+            !RequireBufferState(m_internal, buffer, RHI::ResourceState::IndirectArgument))
+        {
+            RejectRecording(m_internal);
+            return;
+        }
+        auto* resource = static_cast<ID3D12Resource*>(buffer->GetNativeResource());
+        RetainObject(m_internal->retainedObjects, resource);
+        m_internal->commandList->ExecuteIndirect(
+            m_internal->drawSignature.Get(), 1, resource, offset, nullptr, 0);
+    }
+
+    void D3D12CommandList::DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset)
+    {
+        auto* buffer = dynamic_cast<D3D12Buffer*>(arguments);
+        if (!CanRecord(m_internal) || !m_internal->rendering ||
+            !HasCompleteDrawState(m_internal) || m_internal->pipeline->IsMesh() ||
+            m_internal->drawIndexedSignature == nullptr || buffer == nullptr ||
+            buffer->GetNativeResource() == nullptr ||
+            !RequireBufferState(m_internal, buffer, RHI::ResourceState::IndirectArgument))
+        {
+            RejectRecording(m_internal);
+            return;
+        }
+        auto* resource = static_cast<ID3D12Resource*>(buffer->GetNativeResource());
+        RetainObject(m_internal->retainedObjects, resource);
+        m_internal->commandList->ExecuteIndirect(
+            m_internal->drawIndexedSignature.Get(), 1, resource, offset, nullptr, 0);
     }
 
     void D3D12CommandList::DispatchMeshNative(uint32_t x, uint32_t y, uint32_t z)

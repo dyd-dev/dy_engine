@@ -1,3 +1,4 @@
+#include "dyf/RHI/ResourceScope.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI.h"
 #include "vertex.h"
@@ -106,7 +107,7 @@ int main(int argc, char** argv) {
             std::puts("Fixed sampled-texture array indexing is unsupported on this device. Run --mode material.");
             return 2;
         }
-        RHI::ResourceScope resources(device);
+        dyf::RHI::ResourceScope resources(device);
         RHI::SwapchainDesc swapchain;
         swapchain.window = window.GetHandle();
         swapchain.format = RHI::Format::B8G8R8A8_UNORM;
@@ -235,7 +236,7 @@ int main(int argc, char** argv) {
                 Check(!device.IsLost(), "Device lost during BeginFrame");
                 continue;
             }
-            RHI::ResourceScope frameResources(device);
+            dyf::RHI::ResourceScope frameResources(device);
             auto* commands = frameResources.Keep(device.AcquireCommandList());
 
             // 첫 프레임에 정점과 텍스처 데이터를 업로드하고, 그리기 단계에서 읽을 수 있는 상태로 전환한다.

@@ -4,7 +4,7 @@
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/Pipeline.h"
-#include "dyf/RHI/ResourceSet.h"
+#include "../../RHI/ResourceSet.h"
 #include "dyf/RHI/Shader.h"
 #include "dyf/RHI/Texture.h"
 
@@ -639,6 +639,20 @@ namespace dyf::Backends
 					!ValidateDraw(false, 0, 1, 0, 0)) Invalidate();
 			}
 
+            void DrawIndirectNative(RHI::BufferHandle arguments,uint32_t) override
+            {
+                auto* buffer=dynamic_cast<NullBuffer*>(arguments);
+                if(!buffer || !RequireBufferState(buffer,RHI::ResourceState::IndirectArgument) ||
+                    !ValidateDraw(false,0,0,0,0))Invalidate();
+            }
+
+            void DrawIndexedIndirectNative(RHI::BufferHandle arguments,uint32_t) override
+            {
+                auto* buffer=dynamic_cast<NullBuffer*>(arguments);
+                if(!buffer || !RequireBufferState(buffer,RHI::ResourceState::IndirectArgument) ||
+                    !ValidateDraw(true,0,0,0,0))Invalidate();
+            }
+
 			bool CloseNative() override
 			{
 				if(m_closed || m_rendering) Invalidate();
@@ -1062,6 +1076,9 @@ bool NullDevice::SupportsNative(RHI::Feature feature) const
     case RHI::Feature::Wireframe:
     case RHI::Feature::DepthBiasClamp:
     case RHI::Feature::Tessellation:
+    case RHI::Feature::IndirectDraw:
+    case RHI::Feature::IndirectFirstInstance:
+    case RHI::Feature::IndirectTessellation:
     case RHI::Feature::MeshShader: return true;
     case RHI::Feature::TaskShader: return false;
     default: return false;
@@ -1074,6 +1091,7 @@ uint64_t NullDevice::GetLimitNative(RHI::Limit limit) const
     {
     case RHI::Limit::InlineConstantBytes:
     case RHI::Limit::Texture2DDimension:
+    case RHI::Limit::TextureArrayLayers:
     case RHI::Limit::UniformBufferBytes:
     case RHI::Limit::StorageBufferBytes:
     case RHI::Limit::TessellationPatchControlPoints:
