@@ -1,5 +1,5 @@
 #include "../src/RHI/ThreadPool.h"
-#include "../src/RHI/ResourceScope.h"
+#include "dyf/RHI/ResourceScope.h"
 #include <dyf/RHI.h>
 #include <atomic>
 #include <chrono>

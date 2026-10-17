@@ -40,7 +40,7 @@
 #include "dyf/RHI/Pipeline.h"
 #include "dyf/RHI/Shader.h"
 #include "dyf/RHI/Texture.h"
-#include "../RHI/ResourceScope.h"
+#include "dyf/RHI/ResourceScope.h"
 
 using namespace dyf;
 

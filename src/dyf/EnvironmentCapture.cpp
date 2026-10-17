@@ -3,7 +3,7 @@
 #include "dyf/Camera.h"
 #include "dyf/RHI/Readback.h"
 #include "dyf/RHI/Texture.h"
-#include "../RHI/ResourceScope.h"
+#include "dyf/RHI/ResourceScope.h"
 #include <algorithm>
 #include <array>
 #include <cmath>

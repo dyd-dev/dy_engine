@@ -1,4 +1,4 @@
-#include "../../ResourceScope.h"
+#include "dyf/RHI/ResourceScope.h"
 #include "dyf.h"
 #include "dyf/RHI.h"
 #include "vertex.h"
@@ -133,7 +133,7 @@ int main(int argc, char** argv) try {
     }
     auto& device = *owner;
 
-    example::ResourceScope resources(device);
+    dyf::RHI::ResourceScope resources(device);
 
     // 3. 스왑체인 생성
     SwapchainDesc swap;
@@ -203,7 +203,7 @@ int main(int argc, char** argv) try {
         params.sizeTime[1] = float(dimensions.height);
         params.sizeTime[2] = fixedTime ? timeValue : float(frame) / 60.0f;
 
-        example::ResourceScope frameResources(device);
+        dyf::RHI::ResourceScope frameResources(device);
         auto* commands = frameResources.Keep(device.AcquireCommandList());
 
         // --- PBR 라이팅 렌더 패스 ---

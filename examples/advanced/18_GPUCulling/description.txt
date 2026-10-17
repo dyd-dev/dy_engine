@@ -1,1 +1,6 @@
-현재는 GPU 컬링의 계산·간접 드로우 지원을 조회하고 연결되지 않은 실행 단계를 안내합니다.
+자체 삼각형 격자의 경계 구를 compute에서 6면 frustum과 비교하고 visible ID를 atomic 연산으로 압축합니다.
+카운터 초기화 → UAV 배리어 → 컬링 → ShaderResource/IndirectArgument 배리어 → DrawIndirect 순서입니다.
+U는 같은 입력의 CPU frustum·객체별 direct draw, C는 컬링, Space는 애니메이션·카메라 정지를 전환합니다.
+GPU 가시 개수는 readback하지 않아 N/A입니다. LOD·Hi-Z는 이 독립 예제에 포함하지 않습니다.
+공개 RHI만 사용하며 자체 GLSL·HLSL·Metal 셰이더를 포함합니다.
+사용법: AdvancedGPUCulling [--objects N] [--frames N] [--validation]. Escape로 종료합니다.

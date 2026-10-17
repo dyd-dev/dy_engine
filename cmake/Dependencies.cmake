@@ -133,10 +133,18 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(stb)
 
+# DDS 압축 해제 헤더도 다른 외부 의존성과 같은 빌드 캐시에 둔다.
+FetchContent_Declare(bcdec
+    URL "https://raw.githubusercontent.com/iOrange/bcdec/80859ed3b7afb1c527a2a99d70c61457bea72d0c/bcdec.h"
+    URL_HASH "SHA256=134520764d96f70a27db814173616c89ad85db95fbd3328417c7a8c77e7ca189"
+    DOWNLOAD_NO_EXTRACT TRUE
+)
+FetchContent_MakeAvailable(bcdec)
+
 target_link_libraries(${PROJECT_NAME} PRIVATE glfw)
 target_compile_definitions(${PROJECT_NAME} PRIVATE GLFW_INCLUDE_NONE)
 
-target_include_directories(${PROJECT_NAME} PRIVATE ${stb_SOURCE_DIR})
+target_include_directories(${PROJECT_NAME} PRIVATE ${stb_SOURCE_DIR} ${bcdec_SOURCE_DIR})
 
 # Portable offline/initial-upload mesh simplification; no graphics API dependency.
 FetchContent_Declare(meshoptimizer

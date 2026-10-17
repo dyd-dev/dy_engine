@@ -1,4 +1,4 @@
-#include "../../ResourceScope.h"
+#include "dyf/RHI/ResourceScope.h"
 #include "dyf.h"
 #include "dyf/RHI.h"
 #include "vertex.h"
@@ -142,7 +142,7 @@ int main(int argc, char** argv) try {
     }
     auto& device = *owner;
 
-    example::ResourceScope resources(device);
+    dyf::RHI::ResourceScope resources(device);
 
     // 3. 스왑체인 생성
     SwapchainDesc swap;
@@ -254,7 +254,7 @@ int main(int argc, char** argv) try {
     tonemapDesc.layout = {tonemapBindings.data(), uint32_t(tonemapBindings.size()), sizeof(Params), ShaderStageFlags::Fragment, 15};
     auto tonemapPipeline = resources.Keep(device.CreateGraphicsPipeline(tonemapDesc));
 
-    std::unique_ptr<example::ResourceScope> imageResources;
+    std::unique_ptr<dyf::RHI::ResourceScope> imageResources;
     uint32_t imageWidth = 0;
     uint32_t imageHeight = 0;
     bool initializeImages = true;
@@ -296,7 +296,7 @@ int main(int argc, char** argv) try {
             if (!device.WaitIdle()) {
                 throw std::runtime_error("Resize wait failed.");
             }
-            imageResources = std::make_unique<example::ResourceScope>(device);
+            imageResources = std::make_unique<dyf::RHI::ResourceScope>(device);
             imageWidth = dimensions.width;
             imageHeight = dimensions.height;
             initializeImages = true;
@@ -340,7 +340,7 @@ int main(int argc, char** argv) try {
         params.sizeTime[1] = float(imageHeight);
         params.sizeTime[2] = fixedTime ? timeValue : float(frame) / 60.0f;
 
-        example::ResourceScope frameResources(device);
+        dyf::RHI::ResourceScope frameResources(device);
         auto* commands = frameResources.Keep(device.AcquireCommandList());
 
         // 초기 텍스처 상태 클리어

@@ -1,4 +1,4 @@
-#include "../../ResourceScope.h"
+#include "dyf/RHI/ResourceScope.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI.h"
 #include "generate.h"
@@ -59,7 +59,7 @@ int main(int argc, char** argv) try
         std::cout << "UNSUPPORTED: requires rasterization, compute, indirect drawing and indirect dispatch.\n";
         return 77;
     }
-    example::ResourceScope resources(device);
+    dyf::RHI::ResourceScope resources(device);
     SwapchainDesc swapchain;
     swapchain.window = window.GetHandle();
     swapchain.format = Format::B8G8R8A8_UNORM;
@@ -125,7 +125,7 @@ int main(int argc, char** argv) try
             window.WaitEvents(0.001);
             continue;
         }
-        example::ResourceScope frameResources(device);
+        dyf::RHI::ResourceScope frameResources(device);
         auto* commands = frameResources.Keep(device.AcquireCommandList());
         if(frame == 0)
         {

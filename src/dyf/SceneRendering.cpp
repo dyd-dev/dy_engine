@@ -12,7 +12,7 @@
 #include "dyf/Platform/Profiler.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI/Readback.h"
-#include "../RHI/ResourceScope.h"
+#include "dyf/RHI/ResourceScope.h"
 #include <algorithm>
 #include <chrono>
 #include <exception>

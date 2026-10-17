@@ -6,9 +6,9 @@ Bistro는 빛과 재질, **NVIDIA Emerald Square Day는 광역 가시성과 거�
 
 최종 목표는 Windows_DX(D3D12), Windows_VK(Vulkan), Android Vulkan, iOS Metal에서 같은 장면·동선을 보여 주는 약 5분 영상이다. **Android/iOS는 별도 브랜치에서 진행한다.** 현재 개발 환경은 Linux Wayland/Vulkan이며 셰이더 소스, 플랫폼 빌드, 실제 기기 실행을 구분한다. Ray Tracing 24–28은 제외하고 advanced 01–23은 구현 목표로 유지하되, 모든 독립 예제를 5분 안에 하나씩 설명하지는 않는다. Mesh shader는 선택 경로이고 기본 기하 경로는 indexed draw다.
 
-실행 예제는 [29_CinematicShowcase](29_CinematicShowcase/README.md)와 [30_DenseArena](30_DenseArena/README.md)다. 효과·프로파일링·프레임 구성은 공통 dyf Renderer와 공개 RHI를 사용하며 backend는 네이티브 명령으로 번역한다. A/B·Dense Arena에 이어 실내 local probe·유리의 직접광 차폐·외부 식생 움직임을 연결했고 두 실행 파일의 Linux Wayland/Vulkan 빌드를 완료했다. 프로그램 실행·실제 화질·FPS·A/B 성능 수집은 이번 변경에서 수행하지 않았다. 기존 Bistro 실행 화면 확인과 이번 변경의 실행 확인을 섞어서 표기하지 않는다.
+실행 예제는 [Cinematic Showcase](cinematic/README.md)와 [Dense Arena](arena/README.md)다. 효과·프로파일링·프레임 구성은 공통 dyf Renderer와 공개 RHI를 사용하며 backend는 네이티브 명령으로 번역한다. A/B·Dense Arena에 이어 실내 local probe·유리의 직접광 차폐·외부 식생 움직임을 연결했고 두 실행 파일의 Linux Wayland/Vulkan 빌드를 완료했다. 프로그램 실행·실제 화질·FPS·A/B 성능 수집은 이번 변경에서 수행하지 않았다. 기존 Bistro 실행 화면 확인과 이번 변경의 실행 확인을 섞어서 표기하지 않는다.
 
-공유 glTF/FBX canonical geometry·공통 indexed LOD·Emerald 인자와 동선까지 포함한 `AdvancedCinematicShowcase`·`AdvancedDenseArena` 두 target의 Linux Wayland/Vulkan 최종 빌드를 완료했다. 실행·구도·화질·성능 실측은 하지 않았다. 포맷 변환 경로는 채택하지 않으며 원본 FBX 광역 에셋으로 Emerald를 선정했다. Jungle은 원본 추출·환경 HDR 준비까지만 보관하고 Blender/USD 지원과 시연 통합은 추진하지 않는다.
+공유 glTF/FBX canonical geometry·공통 indexed LOD·Emerald 인자와 동선까지 포함한 `ShowcaseCinematic`·`ShowcaseArena` 두 target의 Linux Wayland/Vulkan 최종 빌드를 완료했다. 실행·구도·화질·성능 실측은 하지 않았다. 포맷 변환 경로는 채택하지 않으며 원본 FBX 광역 에셋으로 Emerald를 선정했다. Jungle은 원본 추출·환경 HDR 준비까지만 보관하고 Blender/USD 지원과 시연 통합은 추진하지 않는다.
 
 ## 5분 영상 구성
 
@@ -65,7 +65,7 @@ VSync는 기본적으로 켜져 있다. 표시 주기 제한 때문에 최적화
 
 ### Bistro에서 비교하기
 
-29의 F8은 정적 그림자 캐시 → 병렬 RenderGraph 기록 → instancing → indexed LOD 중 비교 항목을 고른다. F5는 해당 항목만 OFF, F6는 ON이다. Wine 기본 항목은 정적 그림자 캐시, Bistro 외부는 병렬 기록, Emerald는 `INDEXED LOD`다. 다른 지원 장면에서도 F8로 LOD 항목을 선택한다.
+Cinematic Showcase의 F8은 정적 그림자 캐시 → 병렬 RenderGraph 기록 → instancing → indexed LOD 중 비교 항목을 고른다. F5는 해당 항목만 OFF, F6는 ON이다. Wine 기본 항목은 정적 그림자 캐시, Bistro 외부는 병렬 기록, Emerald는 `INDEXED LOD`다. 다른 지원 장면에서도 F8로 LOD 항목을 선택한다.
 
 주영상의 대표 비교는 Wine의 고정 point shadow다. 캐시가 켜진 프레임의 SHADOW CACHED와 shadow draw 감소를 보고, GPU shadow 작업의 제거 및 관련 CPU 작업 변화를 읽는다. 캐시 OFF와 ON에서 조명·그림자 화질 설정과 준비된 probe는 같다. 실내에는 잎 움직임을 자동 추가하지 않아 고정 caster를 유지한다. 외부의 잎·꽃은 움직이고 방향광 CSM도 카메라에 따라 달라지므로 외부에서 같은 정적 캐시 효과를 주장하지 않는다. 외부 F5/F6은 바람 시각·상태까지 저장·복원·정지한다. 병렬 기록 비교는 CPU RECORD를 중심으로 읽고 async compute로 부르지 않는다.
 
@@ -75,7 +75,7 @@ LOD 비교는 F8로 `INDEXED LOD`를 고른 뒤 F5/F6으로 같은 시각·구�
 
 ### Dense Arena에서 비교하기
 
-30의 F5는 현재 게임 시각과 중앙 방/전체 보기 상태를 저장하고 instancing OFF로 정지한다. F6는 같은 게임 시각·카메라로 복귀해 instancing ON을 수집한다. O는 중앙 방 근경/전체 보기, R은 결정론적 초기 상태 재시작, Space는 게임·카메라 재생/정지다.
+Dense Arena의 F5는 현재 게임 시각과 중앙 방/전체 보기 상태를 저장하고 instancing OFF로 정지한다. F6는 같은 게임 시각·카메라로 복귀해 instancing ON을 수집한다. O는 중앙 방 근경/전체 보기, R은 결정론적 초기 상태 재시작, Space는 게임·카메라 재생/정지다.
 
 대표 증거는 같은 instance·triangle 수에서 main draw 수와 CPU WORK/RECORD/SUBMIT이 어떻게 바뀌는가다. GPU 시간이 그대로라면 GPU 셰이딩 비용까지 줄였다고 설명하지 않는다. CPU 컬링은 Space로 상태를 고정하고 4로 별도 수동 비교한다. F5/F6의 자동 비교 대상은 instancing이며 GPU culling이나 indirect 시연이 아니다.
 
@@ -113,7 +113,7 @@ Indirect는 GPU가 작성한 draw 인자를 CPU readback 없이 소비할 수 �
 
 ### Bistro: 빛과 재질
 
-출처는 [NVIDIA ORCA Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro)다. /home/suhan/downloads/Bistro_v5_2.zip(894,377,473B)을 내려받아 /home/suhan/downloads/Bistro_v5_2에 압축 해제했다. 번들 LICENSE.txt는 CC BY 4.0이다. 외부 약 283만·내부 약 105만·Wine 약 129만 삼각형은 배포본 전체 수치이며 실제 제출 통계와 구분한다.
+출처는 [NVIDIA ORCA Amazon Lumberyard Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro)다. /home/suhan/dev/assets/Bistro_v5_2.zip(894,377,473B)을 내려받아 /home/suhan/dev/assets/Bistro_v5_2에 압축 해제했다. 번들 LICENSE.txt는 CC BY 4.0이다. 외부 약 283만·내부 약 105만·Wine 약 129만 삼각형은 배포본 전체 수치이며 실제 제출 통계와 구분한다.
 
 카메라는 단위가 다른 legacy Position/Interest가 아니라 Camera 노드 원점·+X 전방·+Y 위쪽을 모델과 같은 계층·정규화 변환으로 계산한다. 장면은 최대 축 80단위, Y-up에서 Z-up으로 한 번 회전한다. 카메라·조상의 실제 움직이는 클립에서 해당 체인의 트랙만 보관하고, 매 프레임 60초(1분) 투어의 현재 시각을 원본 클립 시각으로 환산해 위치·회전·스케일 키와 체인 행렬을 평가한다. 원본 키의 보간 방식·부모 움직임·roll·컷을 유지하고 수직 FOV는 50도 고정이다. 종전의 301개 위치·시선·up 중간 샘플과 선형 재보간은 제거했다. FBX import 단계의 TRS bake·상수 키 정리·10,000,000개 저장 키 예산은 별도이며 유지한다. 이번 카메라 변경은 아직 실행하지 않았고 실제 끊김이나 렌더링 프레임 저하의 해결 여부는 미확인이다. 첫 업로드는 투어 시간에서 제외한다. 외부/내부는 별도 에셋이므로 출입문 통과를 약속하지 않고 컷으로 연결한다.
 
@@ -127,7 +127,7 @@ Specular DDS 201개의 R 채널은 모두 0이어서 Bistro 프리셋의 authore
 
 Glass/GlassWine IOR 1.55, 액체 1.33, Ice 1.31을 사용한다. legacy diffuse tint는 투과색으로 쓰지 않고 Beer–Lambert 흡수로 색을 처리한다. 유리 3mm·액체 4cm·얼음 3cm는 정규화 길이에 맞춘 고정 두께 근사다. 양면을 가시 법선에 정렬한 air→IOR thin-wall 모델이며 nested volume 추적이 아니다. Wine 유리는 초기 local probe에서 실내 구조·가구·발광 표면을 반사하고 box projection으로 위치 차이를 근사한다. 직접광에는 기존 shadow atlas의 PCF 차폐를 적용한다. 투명 물체는 probe 캡처에 없고 유리·액체가 겹친 다층 굴절도 남아 있다.
 
-흰 하이라이트의 시간 불안정을 줄이기 위해 GGX 정밀도와 specular AA를 수정했다. 잔여 흰 점이 모두 해결됐다고 확정하지 않는다. SSGI의 고분산 밝은 hit와 SSR HDR 샘플, 별도 GI 필터 부재는 추가 품질 과제다. 상세 구현·한계는 [실행 README](29_CinematicShowcase/README.md)에 유지한다.
+흰 하이라이트의 시간 불안정을 줄이기 위해 GGX 정밀도와 specular AA를 수정했다. 잔여 흰 점이 모두 해결됐다고 확정하지 않는다. SSGI의 고분산 밝은 hit와 SSR HDR 샘플, 별도 GI 필터 부재는 추가 품질 과제다. 상세 구현·한계는 [실행 README](cinematic/README.md)에 유지한다.
 
 고정 point/spot-only stock shadow는 성공 제출된 atlas를 재사용한다. 광원·caster·alpha 입력·atlas 변경 시 다시 그리고 카메라 이동만으로는 무효화하지 않는다. Wine의 4점광원은 24개 view가 대상이며 방향광·혼합광·custom 입력은 이 캐시 대상이 아니다. AO guide 재사용·Blend 중복 처리 제외·descriptor 검색 변경도 화질 설정을 낮추지 않는 최적화다. 효과 크기는 실측 전이다.
 
@@ -139,9 +139,9 @@ FBX도 같은 원본 mesh identity·geometry-to-node의 정확한 offset·실제
 
 ### Emerald Square Day 후보: 규모와 가시성
 
-출처는 [NVIDIA ORCA Emerald Square](https://developer.nvidia.com/orca/nvidia-emerald-square)다. `/home/suhan/downloads/EmeraldSquare_v4_1.zip`은 617,345,248B이며 `/home/suhan/downloads/EmeraldSquare_v4_1`에 362개 항목·1,544,054,516B를 추출했다. 원본 `EmeraldSquare_Day.fbx`·`EmeraldSquare_Day.pyscene`·`symmetrical_garden_4k.hdr`를 그대로 사용하고 포맷을 변환하지 않는다. 배포 README의 unique triangles 2,695,054·total triangles 10,046,405는 원본 수치이며 런타임 제출량이 아니다.
+출처는 [NVIDIA ORCA Emerald Square](https://developer.nvidia.com/orca/nvidia-emerald-square)다. `/home/suhan/dev/assets/EmeraldSquare_v4_1.zip`은 617,345,248B이며 `/home/suhan/dev/assets/EmeraldSquare_v4_1`에 362개 항목·1,544,054,516B를 추출했다. 원본 `EmeraldSquare_Day.fbx`·`EmeraldSquare_Day.pyscene`·`symmetrical_garden_4k.hdr`를 그대로 사용하고 포맷을 변환하지 않는다. 배포 README의 unique triangles 2,695,054·total triangles 10,046,405는 원본 수치이며 런타임 제출량이 아니다.
 
-CMake `DY_SHOWCASE_EMERALD_SCENE`·`DY_SHOWCASE_EMERALD_ENVIRONMENT`가 원본 FBX와 HDR를 선택하고 `AdvancedCinematicShowcase emerald`로 연결한다. 기본 A/B는 `INDEXED LOD`다. 원본 약 64.17초 Camera 클립 전체를 60초로 재생하며 끝 구도를 유지한다. 장면 경계와 HDRI를 드러내던 추가 15초 조감 동선은 제거했다. Space로 정지하고 L로 LOD ON/OFF, C로 단계색, F9로 지원 기기의 실제 삼각형 wireframe, F11로 제출량을 볼 수 있다. F5/F6 정상 렌더 비용 비교에서는 C와 F9를 끈다. 카메라 scale·PostRotation을 포함한 노드 체인을 사용하며 100배 큰 legacy Camera.Position은 사용하지 않는다. +Y up·+Z front·+X coordinate, UnitScaleFactor=100(미터)이며 ufbx의 원본 축을 유지한 뒤 예제에서 Y-up→Z-up 회전을 한 번 적용한다. 렌즈는 수직 FOV 50도 근사이며 정확한 원본 재현이나 구도·관통 없는 경로를 확인했다고 주장하지 않는다.
+CMake `DY_SHOWCASE_EMERALD_SCENE`·`DY_SHOWCASE_EMERALD_ENVIRONMENT`가 원본 FBX와 HDR를 선택하고 `build/showcase emerald`로 연결한다. 기본 A/B는 `INDEXED LOD`다. 원본 약 64.17초 Camera 클립 전체를 60초로 재생하며 끝 구도를 유지한다. 장면 경계와 HDRI를 드러내던 추가 15초 조감 동선은 제거했다. Space로 정지하고 L로 LOD ON/OFF, C로 단계색, F9로 지원 기기의 실제 삼각형 wireframe, F11로 제출량을 볼 수 있다. F5/F6 정상 렌더 비용 비교에서는 C와 F9를 끈다. 카메라 scale·PostRotation을 포함한 노드 체인을 사용하며 100배 큰 legacy Camera.Position은 사용하지 않는다. +Y up·+Z front·+X coordinate, UnitScaleFactor=100(미터)이며 ufbx의 원본 축을 유지한 뒤 예제에서 Y-up→Z-up 회전을 한 번 적용한다. 렌즈는 수직 FOV 50도 근사이며 정확한 원본 재현이나 구도·관통 없는 경로를 확인했다고 주장하지 않는다.
 
 ORM은 R=AO·G=roughness·B=metallic, normal은 DirectX 방식이며 BaseColor alpha를 opacity에 연결한다. Bistro의 비어 있는 AO 채널 보정은 Emerald에 적용하지 않는다. FBX의 광원과 HDRI intensity 1을 유지하며 고정 노출 대신 GPU 로그 평균 휘도 측광·시간 적응을 연결한다. Emerald는 `advanced.autoExposure=true`, `exposureKey=0.18`, `exposureAdaptationSpeed=1.5`이고 공통 기본 자동 노출은 OFF다. -/+는 보정값을 바꾼다. 원본 Falcor의 자동 노출 누락을 보완하는 구성이지 다른 톤매퍼의 동일 출력 재현은 아니다. 카메라·광원 포함은 배포 CHANGELOG v4의 구성이다. 원본 `.pyscene`은 실행하지 않는다.
 
@@ -149,17 +149,17 @@ ORM은 R=AO·G=roughness·B=metallic, normal은 DirectX 방식이며 BaseColor a
 
 ### 보관한 후보: Jungle Ruins
 
-출처는 [Intel 공식 장면 배포](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-research/samples.html)다. /home/suhan/downloads/JungleRuins_1_0_1b.zip은 4,254,165,506B(약 4.0GiB)로 다운로드했고, 355개 항목·약 7.44GB 원본 USD 묶음을 `/home/suhan/downloads/JungleRuins_1_0_1b`에 추출했다. 추출 완료는 엔진 로딩 완료가 아니다.
+출처는 [Intel 공식 장면 배포](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-research/samples.html)다. /home/suhan/dev/assets/JungleRuins_1_0_1b.zip은 4,254,165,506B(약 4.0GiB)로 다운로드했고, 355개 항목·약 7.44GB 원본 USD 묶음을 `/home/suhan/dev/assets/JungleRuins_1_0_1b`에 추출했다. 추출 완료는 엔진 로딩 완료가 아니다.
 
 원본 USD/Blender는 현재 모델 로더의 직접 지원 형식이 아니며 포맷 변환 경로도 채택하지 않는다. 광역 시연은 원본 FBX 에셋 Emerald로 선정했다. Jungle 원본은 보관하며 이번 시연에서 원본 로더 지원·엔진 통합·촬영을 추진하지 않는다.
 
-원본 USD가 참조한 [Poly Haven Kloppenheim 06 Pure Sky](https://polyhaven.com/a/kloppenheim_06_puresky)의 2K HDR를 `/home/suhan/downloads/JungleRuins_1_0_1b/kloppenheim_06_puresky_2k.hdr`에 별도로 내려받았다. 원본 USD의 8K 경로는 그대로다. 제작자는 Greg Zaal·Jarod Guest, 라이선스는 CC0다. 이 준비 이력은 geometry·재질 로딩이나 시연 통합 성공을 의미하지 않는다.
+원본 USD가 참조한 [Poly Haven Kloppenheim 06 Pure Sky](https://polyhaven.com/a/kloppenheim_06_puresky)의 2K HDR를 `/home/suhan/dev/assets/JungleRuins_1_0_1b/kloppenheim_06_puresky_2k.hdr`에 별도로 내려받았다. 원본 USD의 8K 경로는 그대로다. 제작자는 Greg Zaal·Jarod Guest, 라이선스는 CC0다. 이 준비 이력은 geometry·재질 로딩이나 시연 통합 성공을 의미하지 않는다.
 
 Jungle 준비 이력을 Emerald의 로딩·실행 결과와 섞지 않는다. 제작자가 설명한 instance 확장 삼각형 수를 실시간 제출량으로 쓰지 않는다.
 
 ### Dense Arena: 반복과 제출 비용
 
-[30_DenseArena](30_DenseArena/README.md)는 Enter the Gungeon처럼 탑다운에서 적·탄환·파편·소품이 많은 장면을 목표로 하며 해당 게임의 에셋을 복제하지 않는다. 현재 소스는 [Kenney Tiny Dungeon](https://kenney.nl/assets/tiny-dungeon)의 CC0 1.0 방·가구·적 이미지와 자체 탄환·파편을 사용한다. 에셋은 /home/suhan/downloads/kenney_tiny-dungeon을 참조하며 저장소로 복사하지 않는다.
+[Dense Arena](arena/README.md)는 Enter the Gungeon처럼 탑다운에서 적·탄환·파편·소품이 많은 장면을 목표로 하며 해당 게임의 에셋을 복제하지 않는다. 현재 소스는 [Kenney Tiny Dungeon](https://kenney.nl/assets/tiny-dungeon)의 CC0 1.0 방·가구·적 이미지와 자체 탄환·파편을 사용한다. 에셋은 /home/suhan/dev/assets/kenney_tiny-dungeon을 참조하며 저장소로 복사하지 않는다.
 
 연결된 9개 방에서 기본 적 600·탄환 4,500·파편 900개의 고정 풀과 별도 바닥·벽·소품·플레이어를 구성한다. 결정론적 시각에 따라 이동·수명이 순환하며 geometry·재질·이미지는 시작 시 공유하고 변환을 갱신한다. 새로운 GPU 자원을 매 프레임 생성하는 구조가 아니며 충돌·실제 플레이 구현은 아니다.
 

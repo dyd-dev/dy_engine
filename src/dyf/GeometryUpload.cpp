@@ -2,7 +2,7 @@
 #include "DrawCommands.h"
 #include "dyf/Scene.h"
 #include "dyf/RHI/Buffer.h"
-#include "../RHI/ResourceScope.h"
+#include "dyf/RHI/ResourceScope.h"
 #include <cmath>
 #include <utility>
 #include <vector>

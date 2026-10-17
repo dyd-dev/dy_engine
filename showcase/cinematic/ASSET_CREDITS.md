@@ -4,9 +4,9 @@
 
 - 저작자·자료명: **Amazon Lumberyard Bistro, Open Research Content Archive (ORCA)**, 2017.
 - 배포처와 다운로드: [NVIDIA ORCA](https://developer.nvidia.com/orca/amazon-lumberyard-bistro), [공식 다운로드](https://developer.nvidia.com/bistro).
-- 이용 조건: **Creative Commons Attribution 4.0 International**. 원문은 `/home/suhan/downloads/Bistro_v5_2/LICENSE.txt`에 보존한다.
-- 원본: `/home/suhan/downloads/Bistro_v5_2.zip`.
-- 추출 폴더: `/home/suhan/downloads/Bistro_v5_2/`.
+- 이용 조건: **Creative Commons Attribution 4.0 International**. 원문은 `/home/suhan/dev/assets/Bistro_v5_2/LICENSE.txt`에 보존한다.
+- 원본: `/home/suhan/dev/assets/Bistro_v5_2.zip`.
+- 추출 폴더: `/home/suhan/dev/assets/Bistro_v5_2/`.
 - 장면: `BistroExterior.fbx`, `BistroInterior.fbx`, `BistroInterior_Wine.fbx`.
 - 포함 하늘: `san_giuseppe_bridge_4k.hdr`. 배포본 README의 원출처는 HDRI Haven으로 표기되어 있다.
 
@@ -24,7 +24,7 @@ Wine 장면의 `.pyscene`에 명시된 transmission·IOR·흡수 계수를 형�
 
 - 배포처: [Intel GPU Research Samples](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-research/samples.html).
 - [공식 다운로드](https://cdrdv2.intel.com/v1/dl/getContent/844047).
-- 로컬 압축 파일: `/home/suhan/downloads/JungleRuins_1_0_1b.zip`.
+- 로컬 압축 파일: `/home/suhan/dev/assets/JungleRuins_1_0_1b.zip`.
 - 공식 배포 목록의 이용 조건: Creative Commons Attribution. 저작자와 적용 조건의 전체 표기는 번들의 `JungleRuins/credits_license.txt`를 따른다.
 
 이 원본은 후속 식생·LOD 장면용으로 내려받았으며 현재 실행 파일에는 연결하지 않았다. Blender·USD 입력 변환과 원본의 타일·인스턴스 보존이 필요하다.
@@ -37,9 +37,9 @@ Wine 장면의 `.pyscene`에 명시된 transmission·IOR·흡수 계수를 형�
 - 연도와 자료명: 2022, Intel Sample Library.
 - [공식 배포 페이지](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-research/samples.html)
 - [공식 기본 장면 다운로드](https://cdrdv2.intel.com/v1/dl/getContent/830833)
-- 원본 압축 파일: `/home/suhan/downloads/Sponza.zip`.
-- 실행용 장면: `/home/suhan/downloads/main_sponza/NewSponza_Main_glTF_003.gltf`.
-- 원문 크레딧과 라이선스: `/home/suhan/downloads/main_sponza/credits_license.txt`.
+- 원본 압축 파일: `/home/suhan/dev/assets/Sponza.zip`.
+- 실행용 장면: `/home/suhan/dev/assets/main_sponza/NewSponza_Main_glTF_003.gltf`.
+- 원문 크레딧과 라이선스: `/home/suhan/dev/assets/main_sponza/credits_license.txt`.
 
 원본의 glTF, 바이너리, 텍스처와 라이선스를 추출해 사용한다. 원본 메시나 텍스처는 수정하지 않는다. 예제는 실행 중 장면을 중앙으로 옮기고 크기와 위쪽 축을 맞춘 뒤 자체 조명과 카메라 경로로 렌더링한다. Add-on 패키지는 포함하지 않는다.
 
@@ -62,6 +62,6 @@ Wine 장면의 `.pyscene`에 명시된 transmission·IOR·흡수 계수를 형�
 - 제작자: **Greg Zaal, Jarod Guest**.
 - 배포처와 원본: [Poly Haven](https://polyhaven.com/a/kloppenheim_06_puresky).
 - 이용 조건: [Poly Haven CC0](https://polyhaven.com/license).
-- 로컬 파일: `/home/suhan/downloads/kloppenheim_06_puresky_4k.hdr`.
+- 로컬 파일: `/home/suhan/dev/assets/kloppenheim_06_puresky_4k.hdr`.
 
 이 HDRI는 개발 중 Sponza의 하늘 배경, 확산 환경 조명과 거칠기별 환경 반사에 사용했다. 현재 Bistro 기본 HDRI는 Bistro 번들의 `san_giuseppe_bridge_4k.hdr`이며 기존 CMake 캐시의 선택은 유지한다. Renderer가 실행 중 조명용 계수와 반사 맵을 생성하며 원본 `.hdr` 파일은 수정하지 않는다. 이 HDRI를 사용한 영상에는 위 제작자와 링크를 남긴다.

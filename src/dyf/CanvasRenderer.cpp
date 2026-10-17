@@ -10,7 +10,7 @@
 #include "dyf/RHI/ResourceSet.h"
 #include "dyf/RHI/Shader.h"
 #include "dyf/RHI/Texture.h"
-#include "../RHI/ResourceScope.h"
+#include "dyf/RHI/ResourceScope.h"
 #include <algorithm>
 #include <array>
 #include <cmath>

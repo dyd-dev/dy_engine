@@ -4,7 +4,7 @@
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/RHI/Texture.h"
-#include "../RHI/ResourceScope.h"
+#include "dyf/RHI/ResourceScope.h"
 
 #define STBIRDEF static inline
 #define STB_IMAGE_RESIZE_IMPLEMENTATION

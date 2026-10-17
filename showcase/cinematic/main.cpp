@@ -9,7 +9,7 @@
 #include "../PerformanceComparison.h"
 #include "AnimatedActor.h"
 #include "KnightMaterials.h"
-#include "../../CameraPath.h"
+#include "../CameraPath.h"
 
 #include <algorithm>
 #include <cmath>
@@ -89,7 +89,7 @@ int main(int argc, char** argv)
         uint32_t directionalShadowLights = 4, pointShadowLights = 16, spotShadowLights = 16;
         uint32_t glassLayers = 2;
         const auto usage = [] {
-            std::fputs("Usage: AdvancedCinematicShowcase [exterior|interior|emerald|comparison|scene.gltf|scene.glb|scene.fbx|scene.obj] [options]\n"
+            std::fputs("Usage: showcase [exterior|interior|emerald|comparison|scene.gltf|scene.glb|scene.fbx|scene.obj] [options]\n"
                 "  comparison               Same Sponza asset and 60 s CSV as the legacy-renderer branch\n"
                 "  --actor FILE|knight      Original animated glTF/GLB/FBX, Y-up; knight uses Intel's original FBX\n"
                 "  --actor-position X Y Z   Actor feet in normalized Z-up world; default: opening view\n"

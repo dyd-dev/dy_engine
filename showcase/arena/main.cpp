@@ -69,7 +69,7 @@ int main(int argc, char** argv)
             else if(argument == "--paused") paused = true;
             else
             {
-                std::fputs("AdvancedDenseArena [--assets KenneyTinyDungeonFolder] [--objects 6000] [--paused]\n"
+                std::fputs("arena [--assets KenneyTinyDungeonFolder] [--objects 6000] [--paused]\n"
                     "Space pause/play | R restart | O overview | 4 CPU culling | 5 instancing\n"
                     "F5 baseline | F6 instanced comparison | F7 clear\n"
                     "6 parallel recording | V VSync | M metrics | F11 profiler | Escape close\n", stderr);

@@ -1,4 +1,4 @@
-#include "../../ResourceScope.h"
+#include "dyf/RHI/ResourceScope.h"
 #include <dyf/RHI.h>
 #include <array>
 #include <chrono>
@@ -86,7 +86,7 @@ int main(int argc, char** argv)
         deviceDesc.enableValidation = validation;
         std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(deviceDesc));
         Check(bool(device), "Device creation failed");
-        example::ResourceScope resources(*device);
+        dyf::RHI::ResourceScope resources(*device);
 
         // 3. 병렬 기록 작업자는 RHI 장치가 내부에서 관리한다.
         constexpr uint32_t width = 256, height = 256;

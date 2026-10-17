@@ -3,8 +3,8 @@
 Kenney Tiny Dungeon의 방·가구·적 스프라이트와 자체 픽셀 탄환·파편을 공통 `dyf::Scene` / `Renderer`로 그리는 밀집 게임 장면이다. 연결된 방 9개에서 적, 탄막, 파편이 결정론적으로 순환한다. 기본 동적 풀은 적 600개·탄환 4,500개·파편 900개이며 바닥·벽·소품·플레이어는 별도다. 충돌 판정이나 실제 게임 플레이를 구현한 것은 아니다.
 
 ```sh
-./AdvancedDenseArena --assets /home/suhan/downloads/kenney_tiny-dungeon
-./AdvancedDenseArena --objects 12000 --paused
+./build/arena --assets /home/suhan/dev/assets/kenney_tiny-dungeon
+./build/arena --objects 12000 --paused
 ```
 
 `DY_DENSE_ARENA_ASSETS` 빌드 정의가 있으면 `--assets`를 생략할 수 있다. 경로는 압축 해제한 Tiny Dungeon의 `Tiles/` 상위 폴더다. 에셋은 저장소로 복사하지 않는다.

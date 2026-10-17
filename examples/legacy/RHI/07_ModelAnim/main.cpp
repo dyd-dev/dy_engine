@@ -1,4 +1,4 @@
-#include "../../../ResourceScope.h"
+#include "dyf/RHI/ResourceScope.h"
 #include "dyf.h"
 #include "dyf/RHI.h"
 #include <dyf/Extends/Model.h>
@@ -68,7 +68,7 @@ int main()
 		return 1;
 	}
 	auto& device = *deviceOwner;
-	example::ResourceScope resources(device);
+	dyf::RHI::ResourceScope resources(device);
 	dyf::RHI::SwapchainDesc swapchain;
 	swapchain.window = window.GetHandle();
 	swapchain.format = dyf::RHI::Format::B8G8R8A8_UNORM;
@@ -208,7 +208,7 @@ int main()
 		return 1;
 	}
 
-	example::ResourceScope uploadScope(device);
+	dyf::RHI::ResourceScope uploadScope(device);
 	auto* upload = uploadScope.Keep(device.AcquireCommandList());
 	if(!upload)
 	{
@@ -492,7 +492,7 @@ int main()
 				std::copy(joints.begin(), joints.end(), palette.begin() + batch.draw.padding1);
 			}
 		}
-		example::ResourceScope commandsScope(device);
+		dyf::RHI::ResourceScope commandsScope(device);
 		auto* commands = commandsScope.Keep(device.AcquireCommandList());
 		if(!commands)
 		{

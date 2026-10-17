@@ -1,48 +1,25 @@
-#include "dyf/Camera.h"
-#include "dyf/Extends/AdvancedRendering.h"
-#include "dyf/Platform/Time.h"
 #include "dyf/Platform/Window.h"
-#include "dyf/Renderer.h"
-#include "dyf/Scene.h"
-#include <algorithm>
-#include <array>
+#include "dyf/RHI.h"
+#include "dyf/RHI/ResourceScope.h"
+#include "cull.h"
+#include "vertex.h"
+#include "fragment.h"
+
 #include <charconv>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <memory>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
 
-using namespace dyf;
-namespace
-{
-constexpr float pi=3.14159265358979323846f;
-MeshData Sphere()
-{
-    // 간소화할 수 있는 곡면 메시를 한 번 만들고 모든 객체가 공유한다.
-    MeshData mesh;
-    constexpr uint32_t rings=16,segments=24;
-    for(uint32_t ring=0;ring<=rings;++ring) for(uint32_t segment=0;segment<=segments;++segment)
-    {
-        const float phi=pi*ring/rings,theta=2*pi*segment/segments;
-        const Math::float3 n={std::sin(phi)*std::cos(theta),std::sin(phi)*std::sin(theta),std::cos(phi)};
-        Vertex vertex;vertex.position=n;vertex.normal=n;
-        vertex.uv={float(segment)/segments,float(ring)/rings};
-        vertex.tangent={-std::sin(theta),std::cos(theta),0,-1};mesh.vertices.push_back(vertex);
-    }
-    for(uint32_t ring=0;ring<rings;++ring) for(uint32_t segment=0;segment<segments;++segment)
-    {
-        const auto a=ring*(segments+1)+segment,b=a+segments+1;
-        if(ring) mesh.indices.insert(mesh.indices.end(),{a,b,a+1});
-        if(ring+1<rings) mesh.indices.insert(mesh.indices.end(),{a+1,b,b+1});
-    }
-    return mesh;
-}
-}
+using namespace dyf::RHI;
 
 int main(int argc,char** argv) try
 {
+    const auto check=[](bool ok,const char* message) {if(!ok) throw std::runtime_error(message);};
     uint32_t objectCount=1600,frameLimit=0;
     bool validation=false;
     for(int i=1;i<argc;++i)
@@ -51,10 +28,10 @@ int main(int argc,char** argv) try
         if(argument=="--help")
         {
             std::puts("AdvancedGPUCulling [--objects N] [--frames N] [--validation]\n"
-                "GPU frustum + LOD + instance compaction + indexed indirect draws; no readback.\n"
-                "4 frustum | U GPU/CPU | L LOD | O current-depth HiZ | Space pause | F11 profiler\n"
-                "Default: 1600 moving objects. GPU visible counts are N/A; batches are CPU submissions.\n"
-                "Compute/indirect unsupported: render the same scene with CPU culling.");
+                "GPU frustum -> compact visible IDs -> DrawIndirect; no readback.\n"
+                "U GPU indirect / CPU direct | C frustum on/off | Space pause | Escape close\n"
+                "Objects: 1..4194240, default 1600. Frames: 0 = unlimited.\n"
+                "Exit codes: success 0, error 1, unsupported device 77.");
             return 0;
         }
         if(argument=="--validation") validation=true;
@@ -62,119 +39,201 @@ int main(int argc,char** argv) try
         {
             const std::string_view value=argv[++i];uint32_t number=0;
             const auto parsed=std::from_chars(value.data(),value.data()+value.size(),number);
-            if(parsed.ec!=std::errc{} || parsed.ptr!=value.data()+value.size() || (argument=="--objects" && !number))
-                throw std::runtime_error("Expected an unsigned integer; --objects must be positive.");
-            (argument=="--objects"?objectCount:frameLimit)=number;
+            check(parsed.ec==std::errc{} && parsed.ptr==value.data()+value.size(),"Expected an unsigned integer.");
+            if(argument=="--objects")
+            {
+                // 64개 스레드와 최대 65535개 작업 그룹으로 한 차원에서 처리한다.
+                check(number>0 && number<=64u*65535u,"--objects must be in 1..4194240.");
+                objectCount=number;
+            }
+            else frameLimit=number;
         }
         else throw std::runtime_error("Unknown or incomplete option; use --help.");
     }
-    Platform::Window window(1280,720,"GPU Culling / 4 frustum | U GPU/CPU | L LOD | O HiZ | Space pause | F11 profiler");
-    if(!window.GetHandle()) throw std::runtime_error("Window creation failed.");
-    RHI::DeviceDesc deviceDesc;deviceDesc.enableValidation=validation;
-    std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(deviceDesc));
-    if(!device) throw std::runtime_error("Device creation failed.");
-    if(!device->Supports(RHI::Feature::Rasterization))
+
+    dyf::Platform::Window window(1100,720,"Advanced / GPU frustum culling - U GPU/CPU | C culling | Space pause");
+    check(window.GetHandle()!=nullptr,"Window creation failed.");
+    DeviceDesc deviceDesc;deviceDesc.enableValidation=validation;
+    std::unique_ptr<IDevice> owner(IDevice::Create(deviceDesc));
+    check(bool(owner),"Device creation failed.");
+    auto& device=*owner;
+    if(!device.Supports(Feature::Rasterization) || !device.Supports(Feature::Compute) ||
+        !device.Supports(Feature::IndirectDraw))
     {
-        std::fputs("UNSUPPORTED: this example needs a rasterizing backend.\n",stderr);return 77;
+        std::puts("UNSUPPORTED: rasterization, compute and indirect drawing are required.");
+        return 77;
     }
-    const bool gpuAvailable=device->Supports(RHI::Feature::Compute) && device->Supports(RHI::Feature::IndirectDraw);
-    RendererConfig config;config.enableGpuCulling=gpuAvailable;config.enableLod=true;
-    config.enableHdrRendering=true;config.advanced.enabled=true;
-    config.advanced.ambientOcclusion=config.advanced.diffuseGI=config.advanced.reflections=false;
-    config.advanced.temporalAA=config.advanced.bloom=false;
-    config.lighting.shadows=false;config.lighting.ambientIntensity=.12f;
-    config.clearColor={.025f,.035f,.06f,1};config.enableProfilerHud=true;config.profilerStartsExpanded=true;
-    auto renderer=Renderer::Create(*device,window.GetHandle(),config);
-    if(!renderer) throw std::runtime_error("Renderer creation failed.");
-    if(!renderer->AddExtension(std::make_unique<dyf::AdvancedRendering>()))
-        throw std::runtime_error("Advanced rendering extension registration failed.");
-    if(!gpuAvailable) std::fputs("GPU culling unavailable: Compute and IndirectDraw are required; using CPU culling.\n",stderr);
-    Scene scene;const auto mesh=Sphere();
-    const std::array<Math::float4,4> colors={Math::float4{.08f,.5f,.9f,1},{.95f,.34f,.09f,1},
-        {.15f,.8f,.4f,1},{.7f,.2f,.85f,1}};
-    std::array<EntityHandle,4> sources;
-    std::vector<EntityHandle> objects;objects.reserve(objectCount);
+    ResourceScope resources(device);
+    SwapchainDesc swapchain;swapchain.window=window.GetHandle();swapchain.format=Format::B8G8R8A8_UNORM;
+    check(device.CreateSwapchain(swapchain),"Swapchain creation failed.");
+    auto* cs=resources.Keep(device.CreateShader({ShaderStage::Compute,ShaderData::cullEntryPoint,ShaderData::cull,ShaderData::cullSize}));
+    auto* vs=resources.Keep(device.CreateShader({ShaderStage::Vertex,ShaderData::vertexEntryPoint,ShaderData::vertex,ShaderData::vertexSize}));
+    auto* fs=resources.Keep(device.CreateShader({ShaderStage::Fragment,ShaderData::fragmentEntryPoint,ShaderData::fragment,ShaderData::fragmentSize}));
+
+    struct Bounds {float x,y,z,radius;};
+    struct Frame {float camera[4],projection[4];uint32_t controls[4];};
+    std::vector<Bounds> objects(objectCount);
+    std::vector<uint32_t> identity(objectCount),cpuVisible;
+    cpuVisible.reserve(objectCount);
+    const uint32_t side=uint32_t(std::ceil(std::sqrt(double(objectCount))));
     for(uint32_t i=0;i<objectCount;++i)
     {
-        const auto kind=static_cast<uint32_t>(uint64_t(i)*colors.size()/objectCount);
-        MaterialDesc material;material.baseColor=colors[kind];material.roughnessFactor=.42f;material.metallicFactor=.15f;
-        auto entity=sources[kind]?scene.AddInstance(sources[kind]):scene.Add(mesh,material);
-        if(!entity) throw std::runtime_error("Cannot create the object grid.");
-        if(!sources[kind]) sources[kind]=entity;
-        objects.push_back(entity);
+        objects[i]={(float(i%side)-float(side-1)*.5f)*1.2f,
+            (float(i/side)-float(side-1)*.5f)*1.2f,0,.38f};
+        identity[i]=i;
     }
-    const uint32_t side=static_cast<uint32_t>(std::ceil(std::sqrt(double(objectCount))));
-    MaterialDesc floor;floor.baseColor={.14f,.17f,.21f,1};floor.roughnessFactor=.9f;
-    const float span=2.6f*side+12;
-    if(!scene.Add(CreateCubeMesh(),floor,Math::Translation({0,0,-.45f})*Math::Scaling({span,span,.4f})))
-        throw std::runtime_error("Cannot create the floor.");
-    DirectionalLight sun;sun.direction={.45f,.3f,.85f};sun.intensity=3;sun.castShadow=false;
-    if(!scene.Add(sun)) throw std::runtime_error("Cannot create the light.");
-    std::fprintf(stderr,"%u shared-mesh objects | 4 frustum, U GPU/CPU, L LOD, O HiZ, Space pause, F11 profiler.\n"
-        "GPU visible counts are N/A. The profiler lists the actual GPU graph passes.\n",objectCount);
-    Camera camera;Platform::Time clock;
-    double time=0,reportTime=0;uint32_t submitted=0,reportFrames=0;
-    bool paused=false,ready=false;
-    while(window.IsRunning() && (!frameLimit || submitted<frameLimit))
+    BufferDesc inputDesc{uint32_t(objects.size()*sizeof(Bounds)),sizeof(Bounds),
+        BufferUsage::Storage,ResourceState::CopyDestination};
+    BufferDesc visibleDesc{uint32_t(identity.size()*sizeof(uint32_t)),sizeof(uint32_t),
+        BufferUsage::Storage,ResourceState::CopyDestination};
+    BufferDesc argumentDesc{sizeof(DrawIndirectArguments),sizeof(uint32_t),BufferUsage::Storage|BufferUsage::Indirect};
+    auto* inputs=resources.Keep(device.CreateBuffer(inputDesc));
+    auto* visible=resources.Keep(device.CreateBuffer(visibleDesc));
+    auto* arguments=resources.Keep(device.CreateBuffer(argumentDesc));
+
+    const ResourceBindingLayout computeBindings[]={
+        {0,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Compute,{}},
+        {1,ResourceBindingType::ReadWriteStorageBuffer,1,ShaderStageFlags::Compute,{}},
+        {2,ResourceBindingType::ReadWriteStorageBuffer,1,ShaderStageFlags::Compute,{}}
+    };
+    ComputePipelineDesc computeDesc;computeDesc.computeShader=cs;
+    computeDesc.layout={computeBindings,3,sizeof(Frame),ShaderStageFlags::Compute,15};
+    computeDesc.threadGroupSize[0]=64;
+    auto* compute=resources.Keep(device.CreateComputePipeline(computeDesc));
+    const ResourceBinding computeResources[]={
+        {0,0,inputs,nullptr,0,inputDesc.size,{}},{1,0,visible,nullptr,0,visibleDesc.size,{}},
+        {2,0,arguments,nullptr,0,argumentDesc.size,{}}
+    };
+    auto* computeSet=resources.Keep(device.CreateResourceSet({compute,computeResources,3}));
+    const ResourceBindingLayout graphicsBindings[]={
+        {0,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Vertex,{}},
+        {1,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Vertex,{}}
+    };
+    const ColorAttachmentDesc format{swapchain.format,{},ColorWriteMask::All};
+    GraphicsPipelineDesc graphicsDesc;graphicsDesc.vertexShader=vs;graphicsDesc.fragmentShader=fs;
+    graphicsDesc.topology=PrimitiveTopology::TriangleList;
+    graphicsDesc.raster={FillMode::Solid,CullMode::None,FrontFace::CounterClockwise,0,0,0};
+    graphicsDesc.colorAttachments=&format;graphicsDesc.colorAttachmentCount=1;
+    graphicsDesc.layout={graphicsBindings,2,sizeof(Frame),ShaderStageFlags::Vertex,15};
+    auto* graphics=resources.Keep(device.CreateGraphicsPipeline(graphicsDesc));
+    const ResourceBinding graphicsResources[]={
+        {0,0,inputs,nullptr,0,inputDesc.size,{}},{1,0,visible,nullptr,0,visibleDesc.size,{}}
+    };
+    auto* graphicsSet=resources.Keep(device.CreateResourceSet({graphics,graphicsResources,2}));
+
+    std::puts("GPU frustum + compact IDs + DrawIndirect | U CPU direct | C frustum | Space pause\n"
+        "GPU visible count: N/A (no readback). LOD and Hi-Z are outside this example.");
+    uint32_t frame=0;
+    bool gpu=true,culling=true,paused=false;
+    float time=0,reportTime=0;
+    auto previous=std::chrono::steady_clock::now();
+    ResourceState argumentState=ResourceState::Undefined;
+    while(window.IsRunning() && (!frameLimit || frame<frameLimit))
     {
-        window.PollEvents();const auto& input=window.GetInput();
-        if(input.WasPressed(Platform::Key::Escape)) window.RequestClose();
-        if(!window.IsRunning()) break;
-        const auto extent=window.GetFramebufferSize();
-        const bool suspended=window.IsMinimized() || extent.width<=0 || extent.height<=0 || (ready && !window.HasFocus());
-        const double dt=clock.Tick(suspended);
-        if(suspended) {Platform::Window::WaitEvents();continue;}
-        if(input.WasPressed(Platform::Key::Space)) paused=!paused;
-        config=renderer->GetConfig();bool changed=false;
-        if(input.WasPressed(Platform::Key::Num4)) {config.enableFrustumCulling=!config.enableFrustumCulling;changed=true;}
-        if(input.WasPressed(Platform::Key::L)) {config.enableLod=!config.enableLod;changed=true;}
-        if(input.WasPressed(Platform::Key::U))
+        window.PollEvents();
+        const auto& input=window.GetInput();
+        if(!window.IsRunning() || input.WasPressed(dyf::Platform::Key::Escape)) break;
+        if(input.WasPressed(dyf::Platform::Key::U)) gpu=!gpu;
+        if(input.WasPressed(dyf::Platform::Key::C)) culling=!culling;
+        if(input.WasPressed(dyf::Platform::Key::Space)) paused=!paused;
+        const auto now=std::chrono::steady_clock::now();
+        const float elapsed=std::chrono::duration<float>(now-previous).count();previous=now;
+        if(window.IsMinimized()) {window.WaitEvents(.01);continue;}
+        if(!paused) time+=elapsed;
+        if(!device.BeginFrame())
         {
-            if(gpuAvailable) {config.enableGpuCulling=!config.enableGpuCulling;changed=true;}
-            else std::fputs("GPU culling unavailable; CPU fallback remains active.\n",stderr);
+            check(!device.IsLost(),"Device lost during BeginFrame.");
+            window.WaitEvents(.001);continue;
         }
-        if(input.WasPressed(Platform::Key::O))
+        ResourceScope frameResources(device);
+        auto* commands=frameResources.Keep(device.AcquireCommandList());
+        if(frame==0)
         {
-            if(gpuAvailable) {config.enableOcclusionCulling=!config.enableOcclusionCulling;changed=true;}
-            else std::fputs("HiZ requires the GPU visibility path.\n",stderr);
+            check(device.UpdateBuffer(*commands,inputs,0,objects.data(),inputDesc.size),"Object upload failed.");
+            check(device.UpdateBuffer(*commands,visible,0,identity.data(),visibleDesc.size),"Identity upload failed.");
+            const ResourceBarrierDesc uploaded[]={
+                {inputs,nullptr,ResourceState::CopyDestination,ResourceState::ShaderResource,{}},
+                {visible,nullptr,ResourceState::CopyDestination,ResourceState::ShaderResource,{}}
+            };
+            commands->ResourceBarrier(uploaded,2);
         }
-        if(changed)
+        auto* target=device.GetBackBuffer();
+        check(target!=nullptr,"Backbuffer unavailable.");
+        const auto& extent=target->GetDesc();
+        Frame data={{8*std::sin(time*.23f),4*std::cos(time*.17f),-18,time},
+            {1.7320508f*float(extent.height)/float(extent.width),1.7320508f,.1f,80},
+            {objectCount,0,gpu?1u:0u,0}};
+        if(gpu)
         {
-            if(!renderer->SetConfig(config)) throw std::runtime_error("Renderer settings rejected.");
-            std::fprintf(stderr,"path=%s frustum=%s LOD=%s HiZ=%s\n",config.enableGpuCulling?"GPU":"CPU",
-                config.enableFrustumCulling?"on":"off",config.enableLod?"on":"off",
-                config.enableGpuCulling && config.enableOcclusionCulling?"on":"off");
+            const ResourceBarrierDesc writable[]={
+                {visible,nullptr,ResourceState::ShaderResource,ResourceState::UnorderedAccess,{}},
+                {arguments,nullptr,argumentState,ResourceState::UnorderedAccess,{}}
+            };
+            commands->ResourceBarrier(writable,2);
+            commands->BindComputePipeline(compute);commands->BindResourceSet(computeSet);
+            commands->SetInlineConstants(0,sizeof(data),&data);commands->Dispatch(1,1,1);
+            // 카운터 초기화를 모든 판정 스레드보다 먼저 끝낸다.
+            const ResourceBarrierDesc reset{arguments,nullptr,ResourceState::UnorderedAccess,ResourceState::UnorderedAccess,{}};
+            commands->ResourceBarrier(&reset,1);
+            data.controls[1]=culling?1u:2u;
+            commands->SetInlineConstants(0,sizeof(data),&data);commands->Dispatch((objectCount+63)/64,1,1);
+            const ResourceBarrierDesc generated[]={
+                {visible,nullptr,ResourceState::UnorderedAccess,ResourceState::ShaderResource,{}},
+                {arguments,nullptr,ResourceState::UnorderedAccess,ResourceState::IndirectArgument,{}}
+            };
+            commands->ResourceBarrier(generated,2);
+            argumentState=ResourceState::IndirectArgument;
         }
-        if(ready && !paused) time+=dt;
-        const float t=float(time);
-        for(uint32_t i=0;i<objectCount;++i)
+        else
         {
-            const float phase=float(i)*.37f;
-            const Math::float3 position={(float(i%side)-float(side-1)*.5f)*2.6f+.45f*std::sin(t+phase),
-                (float(i/side)-float(side-1)*.5f)*2.6f+.45f*std::cos(t*.8f+phase),1.4f+.65f*std::sin(t*1.2f+phase)};
-            const auto transform=Math::Translation(position)*Math::RotationZ(t*.4f+phase)*Math::Scaling({.65f,.8f,.75f});
-            if(!objects[i].SetTransform(transform)) throw std::runtime_error("Object transform rejected.");
+            // GPU와 같은 구·평면 판정을 사용하고 객체마다 일반 draw를 기록한다.
+            cpuVisible.clear();
+            for(uint32_t i=0;i<objectCount;++i)
+            {
+                const auto& bounds=objects[i];const float phase=.37f*i;
+                const float x=bounds.x+.25f*std::sin(time+phase)-data.camera[0];
+                const float y=bounds.y+.25f*std::cos(time*.8f+phase)-data.camera[1];
+                const float z=bounds.z-data.camera[2],r=bounds.radius;
+                const float sx=data.projection[0],sy=data.projection[1];
+                if(!culling || (z+r>=data.projection[2] && z-r<=data.projection[3] &&
+                    std::fabs(x)*sx<=z+r*std::sqrt(sx*sx+1) && std::fabs(y)*sy<=z+r*std::sqrt(sy*sy+1)))
+                    cpuVisible.push_back(i);
+            }
         }
-        if(!camera.LookAt({22*std::sin(t*.13f),22*std::cos(t*.13f),12},{0,0,1}) ||
-            !camera.SetPerspective(float(extent.width)/extent.height,pi/3,.1f,std::max(160.f,side*3.5f)))
-            throw std::runtime_error("Camera setup failed.");
-        const auto previous=renderer->GetLastRenderCompletion();
-        if(!renderer->Render(scene,camera)) throw std::runtime_error("Rendering failed.");
-        const auto completion=renderer->GetLastRenderCompletion();
-        if(completion && completion!=previous) {++submitted;++reportFrames;}
-        if(!ready && completion) {ready=true;clock.Reset();}
-        reportTime+=dt;
+
+        const ResourceBarrierDesc begin{nullptr,target,ResourceState::Present,ResourceState::RenderTarget,{}};
+        commands->ResourceBarrier(&begin,1);
+        ColorAttachment color;color.texture=target;color.loadOp=LoadOp::Clear;color.storeOp=StoreOp::Store;
+        color.clearColor[0]=.018f;color.clearColor[1]=.025f;color.clearColor[2]=.045f;color.clearColor[3]=1;
+        commands->BeginRendering({&color,1,nullptr});
+        commands->BindGraphicsPipeline(graphics);commands->BindResourceSet(graphicsSet);
+        commands->SetViewport({0,0,float(extent.width),float(extent.height),0,1});
+        commands->SetScissor({0,0,extent.width,extent.height});
+        if(gpu)
+        {
+            commands->SetInlineConstants(0,sizeof(data),&data);commands->DrawIndirect(arguments);
+        }
+        else for(const auto id:cpuVisible)
+        {
+            data.controls[3]=id;commands->SetInlineConstants(0,sizeof(data),&data);
+            commands->DrawInstanced(3,1,0,0);
+        }
+        commands->EndRendering();
+        const ResourceBarrierDesc end{nullptr,target,ResourceState::RenderTarget,ResourceState::Present,{}};
+        commands->ResourceBarrier(&end,1);
+        check(commands->Close(),"Command recording failed.");
+        check(device.Submit(&commands,1),"Submission failed.");
+        check(device.Present(),"Present failed.");
+        ++frame;reportTime+=elapsed;
         if(reportTime>=1)
         {
-            const auto& statistics=renderer->GetLastRenderStatistics();
-            if(statistics.gpuVisibility)
-                std::fprintf(stderr,"GPU %.1f submitted/s | indirect batches %u | visible objects/triangles N/A\n",reportFrames/reportTime,statistics.indirectBatchCount);
-            else std::fprintf(stderr,"CPU %.1f submitted/s | draws %u | visible objects %u | culled %u\n",reportFrames/reportTime,
-                statistics.mainDrawCount,statistics.mainInstanceCount,statistics.culledEntityCount);
-            reportTime=0;reportFrames=0;
+            if(gpu) std::printf("GPU | inputs %u | visible N/A | indirect submissions 1 | frustum %d\n",objectCount,culling);
+            else std::printf("CPU | inputs %u | visible %zu | direct submissions %zu | frustum %d\n",
+                objectCount,cpuVisible.size(),cpuVisible.size(),culling);
+            reportTime=0;
         }
-        if(completion==previous) Platform::Window::WaitEvents(.001);
     }
+    check(device.WaitIdle(),"WaitIdle failed.");
     return 0;
 }
 catch(const std::exception& error)

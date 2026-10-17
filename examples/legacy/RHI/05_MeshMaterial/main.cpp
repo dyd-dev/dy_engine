@@ -1,4 +1,4 @@
-#include "../../../ResourceScope.h"
+#include "dyf/RHI/ResourceScope.h"
 #include "dyf.h"
 #include "dyf/RHI.h"
 
@@ -54,7 +54,7 @@ int main()
 		return 1;
 	}
 	auto& device = *deviceOwner;
-	example::ResourceScope resources(device);
+	dyf::RHI::ResourceScope resources(device);
 	dyf::RHI::SwapchainDesc swapchain;
 	swapchain.window = window.GetHandle();
 	swapchain.format = dyf::RHI::Format::B8G8R8A8_UNORM;
@@ -130,7 +130,7 @@ int main()
 	dyf::RHI::ResourceState depthState = dyf::RHI::ResourceState::Undefined;
 	const auto mesh = dyf::CreateCubeMesh(1);
 
-	example::ResourceScope uploadScope(device);
+	dyf::RHI::ResourceScope uploadScope(device);
 	auto* upload = uploadScope.Keep(device.AcquireCommandList());
 	if (!upload)
 	{
@@ -307,7 +307,7 @@ int main()
 			for (auto& draw : draws) draw.viewProjectionMatrix = camera.projection * camera.view;
 		}
 
-		example::ResourceScope commandsScope(device);
+		dyf::RHI::ResourceScope commandsScope(device);
 		auto* commands = commandsScope.Keep(device.AcquireCommandList());
 		if (!commands)
 		{

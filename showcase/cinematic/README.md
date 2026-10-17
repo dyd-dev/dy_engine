@@ -2,7 +2,7 @@
 
 카메라 오류를 수정하고 실제 Bistro 모델로 조명과 재질을 확인했다. 종전에는 단위가 다른 FBX Camera의 legacy Position을 노드 좌표로 사용해 모델 밖에서 HDRI 배경 사진만 보고 있었다. Wine의 카메라 좌표는 실제 노드 위치와 100배 차이가 났다. 현재는 모델과 같은 노드 계층으로 카메라를 계산한다.
 
-TAA 입력은 geometry와 하늘을 같은 jitter sample grid에 렌더링한다. 하늘은 translation을 제외한 카메라 회전으로 재투영하며 정지 시 정확한 identity를 사용한다. 윤곽에서 motion을 선택할 때 현재·이전 depth도 같은 표면의 값으로 맞춘다. 종전의 jitter 없는 배경과 jitter 있는 geometry 혼합을 제거한 변경이며 실행 확인은 사용자에게 남아 있다. 실제 모델에서 검게 뭉치던 그늘은 Bistro Specular 텍스처 201개의 R 채널이 모두 0인데 이를 AO로 연결한 것이 원인이었다. 예제에서 해당 채널의 occlusionStrength를 0으로 두고 G/B roughness·metalness와 화면 공간 AO는 유지한다. 외부의 환경광 비율·노출과 실내 광원을 수정한 뒤 Wayland/Vulkan 실행 화면에서 벽·목재·가구와 그늘 바닥이 보이는 것을 직접 확인했다. 캡처는 `/home/suhan/downloads/bistro-quality-review-20261017`에 저장했다. 유리의 작은 흰 하이라이트에는 화면 내 법선 분산에 따른 specular AA를 적용했다. GGX 반사 폭을 픽셀의 법선 변화에 맞춰 필터링하고 peak 부근 분모의 정밀도 손실을 줄인다. 공통 GLSL/HLSL/Metal 셰이더를 수정했고 Vulkan 재빌드·실내 실행·연속 캡처를 수행했다. 모든 카메라·이동 상태에서 깜빡임이 완전히 사라졌다고 확정하지 않는다.
+TAA 입력은 geometry와 하늘을 같은 jitter sample grid에 렌더링한다. 하늘은 translation을 제외한 카메라 회전으로 재투영하며 정지 시 정확한 identity를 사용한다. 윤곽에서 motion을 선택할 때 현재·이전 depth도 같은 표면의 값으로 맞춘다. 종전의 jitter 없는 배경과 jitter 있는 geometry 혼합을 제거한 변경이며 실행 확인은 사용자에게 남아 있다. 실제 모델에서 검게 뭉치던 그늘은 Bistro Specular 텍스처 201개의 R 채널이 모두 0인데 이를 AO로 연결한 것이 원인이었다. 예제에서 해당 채널의 occlusionStrength를 0으로 두고 G/B roughness·metalness와 화면 공간 AO는 유지한다. 외부의 환경광 비율·노출과 실내 광원을 수정한 뒤 Wayland/Vulkan 실행 화면에서 벽·목재·가구와 그늘 바닥이 보이는 것을 직접 확인했다. 캡처는 `/home/suhan/dev/assets/bistro-quality-review-20261017`에 저장했다. 유리의 작은 흰 하이라이트에는 화면 내 법선 분산에 따른 specular AA를 적용했다. GGX 반사 폭을 픽셀의 법선 변화에 맞춰 필터링하고 peak 부근 분모의 정밀도 손실을 줄인다. 공통 GLSL/HLSL/Metal 셰이더를 수정했고 Vulkan 재빌드·실내 실행·연속 캡처를 수행했다. 모든 카메라·이동 상태에서 깜빡임이 완전히 사라졌다고 확정하지 않는다.
 
 `BistroInterior_Wine.fbx`에 없는 점광원 4개는 `LoadModelLights()`로 일반 `BistroInterior.fbx`에서 읽어 같은 좌표계로 연결한다. 이 경로는 geometry·texture·animation을 디코드하지 않는다. 위치와 range는 정규화 scale, inverse-square intensity는 scale²로 변환한다. Wine에는 외부용 태양을 추가하지 않고 야외 HDRI도 사용하지 않는다. 현재 노출은 실내 0.12, 외부 0.04이며 외부 환경광 intensity는 원본 설정 10이다. 공통 렌더러 기본값은 바꾸지 않는다.
 
@@ -10,19 +10,19 @@ TAA 입력은 geometry와 하늘을 같은 jitter sample grid에 렌더링한다
 
 유리 밖에서도 흰 점 깜빡임이 보고되어 Main과 Surface의 GLSL/HLSL/Metal 6개 셰이더에도 같은 specular AA를 적용했다. Surface에 필터링된 roughness를 저장해 IBL·SSR의 반사 폭을 Main과 맞췄으며 Vulkan 컴파일·링크를 완료했다. 이 추가 변경의 실행 결과는 아직 확인하지 않았다. 잔여 흰 점 전체가 해결됐다고 취급하지 않는다. 별도 원인 후보로 SSGI의 4-ray hit가 밝은 발광 램프를 간헐적으로 샘플하는 고분산 경로가 있다. GI 전용 시간 누적·모멘트·공간 노이즈 필터는 아직 구현하지 않았고, 최종 TAA에 의존한다. SSR의 고정 5점 HDR 샘플도 밝은 표면에서 같은 종류의 불안정성이 가능하다. 해당 경로가 실제 잔여 점의 원인인지는 효과별 화면 비교 전이다.
 
-환경 시연은 **Bistro의 빛·재질·유리와 Emerald Square Day의 광역 가시성·LOD**로 구성한다. 기본 장면은 Bistro 외부 거리이며 Wine 실내와 Emerald를 선택한다. 반복 객체 장면은 별도 [30_DenseArena](../30_DenseArena/README.md), Sponza는 개발 회귀·효과 비교용이다. Android/iOS는 별도 브랜치 작업이다.
+환경 시연은 **Bistro의 빛·재질·유리와 Emerald Square Day의 광역 가시성·LOD**로 구성한다. 기본 장면은 Bistro 외부 거리이며 Wine 실내와 Emerald를 선택한다. 반복 객체 장면은 별도 [Dense Arena](../arena/README.md), Sponza는 개발 회귀·효과 비교용이다. Android/iOS는 별도 브랜치 작업이다.
 
-공통 렌더러에는 FBX/glTF 공유 geometry와 화면 오차 기준 indexed LOD를 연결했다. LOD는 실제 index buffer를 바꾸며 색상 표시만 바꾸는 예제가 아니다. Emerald 연결까지 포함한 `AdvancedCinematicShowcase`·`AdvancedDenseArena` 두 target의 Linux Wayland/Vulkan 최종 빌드를 완료했다. 프로그램 실행·구도·화질·성능 측정은 하지 않았다. 광역 에셋은 원본 FBX를 지원하는 Emerald Square로 선택했으며 포맷 변환은 하지 않는다. Jungle 원본은 보관하지만 Blender/USD 로더가 없어 현재 영상 장면에서 제외한다.
+공통 렌더러에는 FBX/glTF 공유 geometry와 화면 오차 기준 indexed LOD를 연결했다. LOD는 실제 index buffer를 바꾸며 색상 표시만 바꾸는 예제가 아니다. Emerald 연결까지 포함한 `ShowcaseCinematic`·`ShowcaseArena` 두 target의 Linux Wayland/Vulkan 최종 빌드를 완료했다. 프로그램 실행·구도·화질·성능 측정은 하지 않았다. 광역 에셋은 원본 FBX를 지원하는 Emerald Square로 선택했으며 포맷 변환은 하지 않는다. Jungle 원본은 보관하지만 Blender/USD 로더가 없어 현재 영상 장면에서 제외한다.
 
 [main.cpp](main.cpp)는 기존 ModelScene·Renderer·Camera·Window를 사용한다. 효과와 투명 렌더링은 공통 Renderer가 공개 RHI로 구성하며 backend는 네이티브 명령으로 번역한다. 현재 개발 환경은 Linux Wayland/Vulkan이며 Windows D3D12·Windows Vulkan·Android Vulkan·iOS Metal을 최종 타깃으로 한다. 셰이더 소스 제공, 플랫폼 빌드, 실제 기기 실행은 각각 구분한다.
 
-`build-showcase-wayland/AdvancedCinematicShowcase`는 Wayland/Vulkan Release 산출물이다. Windows D3D12·Windows Vulkan·Metal 빌드와 기기 실행은 수행하지 않았다. 투명 표면의 coverage는 별도 reactive MRT에 기록하되, coverage만으로 정적 유리의 history를 매 프레임 버리지 않고 현재·이전 HDR의 상대 색 차이를 함께 반응도로 사용한다. 주변에서 선택한 motion으로 재투영할 때 깊이 비교도 같은 motion의 이전 깊이에 맞춘다.
+`build/showcase`는 Wayland/Vulkan Release 산출물이다. Windows D3D12·Windows Vulkan·Metal 빌드와 기기 실행은 수행하지 않았다. 투명 표면의 coverage는 별도 reactive MRT에 기록하되, coverage만으로 정적 유리의 history를 매 프레임 버리지 않고 현재·이전 HDR의 상대 색 차이를 함께 반응도로 사용한다. 주변에서 선택한 motion으로 재투영할 때 깊이 비교도 같은 motion의 이전 깊이에 맞춘다.
 
 밉맵 준비는 최대 4개 임시 CPU 작업으로 제한하고 GPU 업로드는 이미지 한 장씩 처리한다. `textureDecodeThreadCount=4`는 glTF의 지연 외부 이미지 디코딩에 적용되며 FBX 로더 내부의 이미지 디코딩은 현재 순차 처리한다. DDS도 현재 GPU에는 RGBA8로 올리므로 모바일용 압축 텍스처 저장·품질 예산은 별도 브랜치에서 연결할 작업이다.
 
 ## 에셋과 선택
 
-[NVIDIA ORCA Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro) 배포본은 /home/suhan/downloads/Bistro_v5_2에 압축 해제했다. 번들의 LICENSE.txt는 CC BY 4.0이며 Amazon Lumberyard/ORCA 출처와 수정 내역을 영상 크레딧에 남긴다. 외부 약 283만, 와인 내부 약 129만 삼각형은 배포본 README의 전체 삼각형 수다. 실행 중 실제 제출량과 동일한 수치로 취급하지 않는다.
+[NVIDIA ORCA Bistro](https://developer.nvidia.com/orca/amazon-lumberyard-bistro) 배포본은 /home/suhan/dev/assets/Bistro_v5_2에 압축 해제했다. 번들의 LICENSE.txt는 CC BY 4.0이며 Amazon Lumberyard/ORCA 출처와 수정 내역을 영상 크레딧에 남긴다. 외부 약 283만, 와인 내부 약 129만 삼각형은 배포본 README의 전체 삼각형 수다. 실행 중 실제 제출량과 동일한 수치로 취급하지 않는다.
 
 | 실행 인자 | 장면 |
 | --- | --- |
@@ -32,13 +32,13 @@ TAA 입력은 geometry와 하늘을 같은 jitter sample grid에 렌더링한다
 | emerald | CMake의 DY_SHOWCASE_EMERALD_SCENE. EmeraldSquare_Day.fbx 원본 |
 | 파일 경로 하나 | glTF·GLB·FBX·OBJ 입력. Bistro·Sponza 외에는 Y-up 장면용 바깥쪽 궤도 |
 
-[NVIDIA ORCA Emerald Square](https://developer.nvidia.com/orca/nvidia-emerald-square)는 `/home/suhan/downloads/EmeraldSquare_v4_1.zip`(617,345,248B)을 받아 `/home/suhan/downloads/EmeraldSquare_v4_1`에 추출했다. 362개 항목·1,544,054,516B이며 원본 `EmeraldSquare_Day.fbx`·`EmeraldSquare_Day.pyscene`·`symmetrical_garden_4k.hdr`를 그대로 사용한다. CMake `DY_SHOWCASE_EMERALD_SCENE`은 이 FBX, `DY_SHOWCASE_EMERALD_ENVIRONMENT`는 이 HDR를 선택한다. 포맷 변환·에셋 재생성 경로는 없다.
+[NVIDIA ORCA Emerald Square](https://developer.nvidia.com/orca/nvidia-emerald-square)는 `/home/suhan/dev/assets/EmeraldSquare_v4_1.zip`(617,345,248B)을 받아 `/home/suhan/dev/assets/EmeraldSquare_v4_1`에 추출했다. 362개 항목·1,544,054,516B이며 원본 `EmeraldSquare_Day.fbx`·`EmeraldSquare_Day.pyscene`·`symmetrical_garden_4k.hdr`를 그대로 사용한다. CMake `DY_SHOWCASE_EMERALD_SCENE`은 이 FBX, `DY_SHOWCASE_EMERALD_ENVIRONMENT`는 이 HDR를 선택한다. 포맷 변환·에셋 재생성 경로는 없다.
 
 배포 README의 unique triangles 2,695,054·total triangles 10,046,405는 원본 장면 수치이며 실제 프레임 제출량과 다르다. 번들 라이선스는 CC BY-NC-SA 3.0이다. 영상 크레딧에 Nicholas Hull·Kate Anderson·Nir Benty, NVIDIA ORCA, 식생의 SpeedTree 크레딧과 수정 내역을 남긴다.
 
 Emerald는 광역 장면 후보이며 LOD·모바일 대표 장면으로의 적합성은 미확인이다. 전체 삼각형 수만으로 선정하지 않고 현재 동선의 근중원경 분포, 실제 생성·선택 단계와 제출량 감소, 정상 렌더의 실루엣, 목표 기기의 메모리·프레임 비용을 기준으로 판단한다. 와이어프레임이 모두 LOD0였다는 사용자 보고와 FBX LOD 입력 수정 이후의 결과를 구분하며, 수정만으로 장면의 적합성을 확인했다고 취급하지 않는다.
 
-Jungle 원본 약 7.44GB는 `/home/suhan/downloads/JungleRuins_1_0_1b`에 추출해 보관한다. 원본 USD가 참조하는 [Poly Haven Kloppenheim 06 Pure Sky](https://polyhaven.com/a/kloppenheim_06_puresky)의 2K HDR도 `/home/suhan/downloads/JungleRuins_1_0_1b/kloppenheim_06_puresky_2k.hdr`에 내려받았으며 원본 USD의 8K 참조는 수정하지 않았다. 출처는 Greg Zaal·Jarod Guest, 라이선스는 CC0다. 원본 추출·HDR 다운로드는 엔진의 geometry·재질 로딩이나 시연 통합 완료를 의미하지 않는다.
+Jungle 원본 약 7.44GB는 `/home/suhan/dev/assets/JungleRuins_1_0_1b`에 추출해 보관한다. 원본 USD가 참조하는 [Poly Haven Kloppenheim 06 Pure Sky](https://polyhaven.com/a/kloppenheim_06_puresky)의 2K HDR도 `/home/suhan/dev/assets/JungleRuins_1_0_1b/kloppenheim_06_puresky_2k.hdr`에 내려받았으며 원본 USD의 8K 참조는 수정하지 않았다. 출처는 Greg Zaal·Jarod Guest, 라이선스는 CC0다. 원본 추출·HDR 다운로드는 엔진의 geometry·재질 로딩이나 시연 통합 완료를 의미하지 않는다.
 
 장면과 Textures 폴더는 원래 배치를 유지한다. 외부 HDRI는 번들의 san_giuseppe_bridge_4k.hdr이며 .pyscene에 명시된 intensity 10을 사용한다. Wine은 실내 점광원과 원본 스크립트의 발광 보정 1000배를 사용한다. 직접 조명은 복원한 점광원이 담당하고, 실내 표면에서 반사된 빛은 초기 local probe로 근사한다. 발광 geometry가 면광원으로서 방 전체를 직접 비추거나 다중 반사 GI를 계산하는 경로는 아니다. 외부 HDRI 로딩 실패 시 오류를 출력하고 종료한다. 기존 CMake 캐시에 다른 경로가 저장되어 있으면 새 기본값으로 자동 변경하지 않는다.
 
@@ -71,21 +71,21 @@ Sponza 파일은 기존 10개 키 동선을 사용한다. [Sponza.camera.csv](Sp
 Wayland용 별도 CMake는 필요하지 않다. Vulkan·Wayland·xkbcommon 개발 파일과 wayland-scanner가 준비된 환경에서 저장소 루트 기준으로 구성한다.
 
 ```bash
-cmake -S examples/advanced/29_CinematicShowcase -B build-showcase-wayland \
+cmake -S showcase -B build \
   -DUSE_VULKAN=ON -DDY_LINUX_WINDOW_SYSTEM=WAYLAND -DCMAKE_BUILD_TYPE=Release \
-  -DDY_SHOWCASE_SCENE=/home/suhan/downloads/Bistro_v5_2/BistroExterior.fbx \
-  -DDY_SHOWCASE_ENVIRONMENT=/home/suhan/downloads/Bistro_v5_2/san_giuseppe_bridge_4k.hdr
-cmake --build build-showcase-wayland --target AdvancedCinematicShowcase --parallel 4
-./build-showcase-wayland/AdvancedCinematicShowcase
-./build-showcase-wayland/AdvancedCinematicShowcase interior
-./build-showcase-wayland/AdvancedCinematicShowcase emerald
+  -DDY_SHOWCASE_SCENE=/home/suhan/dev/assets/Bistro_v5_2/BistroExterior.fbx \
+  -DDY_SHOWCASE_ENVIRONMENT=/home/suhan/dev/assets/Bistro_v5_2/san_giuseppe_bridge_4k.hdr
+cmake --build build --target ShowcaseCinematic --parallel 4
+./build/showcase
+./build/showcase interior
+./build/showcase emerald
 ```
 
-현재 로컬 빌드 캐시는 build-showcase-wayland/dependencies에 풀어 둔 Debian 개발 패키지를 사용한다. 이 캐시를 재사용할 때에는 빌드용 pkgconf를 위해 아래 환경 변수를 해당 명령에만 전달한다. 시스템·Sway·foot 설정은 변경하지 않는다.
+현재 로컬 빌드 캐시는 build/dependencies에 풀어 둔 Debian 개발 패키지를 사용한다. 이 캐시를 재사용할 때에는 빌드용 pkgconf를 위해 아래 환경 변수를 해당 명령에만 전달한다. 시스템·Sway·foot 설정은 변경하지 않는다.
 
 ```bash
-LD_LIBRARY_PATH=/home/suhan/dev/dy_engine/build-showcase-wayland/dependencies/root/usr/lib/x86_64-linux-gnu \
-  cmake --build build-showcase-wayland --target AdvancedCinematicShowcase --parallel 4
+LD_LIBRARY_PATH=/home/suhan/dev/dy_engine/build/dependencies/root/usr/lib/x86_64-linux-gnu \
+  cmake --build build --target ShowcaseCinematic --parallel 4
 ```
 
 Windows_DX·Windows_VK·Android·iOS 산출물을 이 Linux 실행 파일로 대체하지 않는다. 해당 플랫폼 빌드와 실제 기기 동작은 별도 작업이다.
@@ -133,7 +133,7 @@ F8의 네 번째 항목 `INDEXED LOD`는 현재 로딩한 지원 장면에서 �
 
 창 크기·포커스·카메라·품질 변경은 수집을 취소한다. F6은 선택한 최적화 외의 조건이 다르면 거절한다. 결과는 표본 수로 가중한 평균과 관측 최대 프레임 시간, Main 작업량, GPU 패스 시간을 화면·콘솔로 표시한다. 최대는 p95/1% low가 아니며 파일은 자동 생성하지 않는다. 두 수집 후에도 투어는 정지 상태이고 Space로 재생한다. VSync 상태는 두 수집에서 같아야 하며, 표시 주기 제한으로 FPS가 같더라도 CPU 작업·GPU 패스 시간은 달라질 수 있다. 병렬 기록이나 인스턴싱의 이득을 측정 전에 가정하지 않는다. Bistro의 많은 고유 메시에는 인스턴싱 이득이 작을 수 있다.
 
-밀집 객체 비교용 [30_DenseArena](../30_DenseArena/README.md)는 같은 공통 프로파일러·비교 UI를 사용한다. 현재 CMake 구성에서는 `cmake --build build-showcase-wayland --target AdvancedDenseArena --parallel 4`로 만들며 `./build-showcase-wayland/dense-arena/AdvancedDenseArena`로 실행한다. 에셋 기본 경로는 CMake의 `DY_DENSE_ARENA_ASSETS=/home/suhan/downloads/kenney_tiny-dungeon`이다. F5/F6은 동일한 정지 게임 상태에서 개별 draw와 인스턴싱을 비교하며 게임 시뮬레이션 최적화 결과로 해석하지 않는다.
+밀집 객체 비교용 [Dense Arena](../arena/README.md)는 같은 공통 프로파일러·비교 UI를 사용한다. 현재 CMake 구성에서는 `cmake --build build --target ShowcaseArena --parallel 4`로 만들며 `./build/arena`로 실행한다. 에셋 기본 경로는 CMake의 `DY_DENSE_ARENA_ASSETS=/home/suhan/dev/assets/kenney_tiny-dungeon`이다. F5/F6은 동일한 정지 게임 상태에서 개별 draw와 인스턴싱을 비교하며 게임 시뮬레이션 최적화 결과로 해석하지 않는다.
 
 ## 공통 렌더 경로와 한계
 
@@ -163,6 +163,6 @@ indexed LOD는 원본 vertex buffer를 공유하고 최대 3개의 축약 index 
 
 FBX 로더가 삼각형 corner별로 저장한 정점은 LOD 생성 안에서 동일한 위치·법선·UV·접선·색상끼리 임시로 재인덱싱한다. 연결된 표면이 모두 seam으로 오인돼 축약되지 않던 입력 문제를 수정한 것이다. 축약한 인덱스는 원본 정점의 대표 인덱스로 되돌려 GPU의 원본 VB를 그대로 사용하며 실제 속성 경계는 유지한다. 오차값은 위치와 법선/UV를 함께 평가한 가중 근사값을 물체 크기로 환산한 것으로, 순수 기하 거리의 엄밀한 상한은 아니다. 실제 생성 단계 수·LOD 분포·삼각형 감소는 사용자 실행 확인 대상이다.
 
-RHI indirect와 독립 [17 예제](../17_IndirectDrawing)는 구현되어 있지만 이 환경 경로의 GPU culling·indirect 소비는 미연결이다. 공통 renderer의 indexed LOD와 독립 [23 예제](../23_MeshletCullingLOD)의 미완성 meshlet 경로는 서로 다르다. 대량 적/탄환/소품은 별도 Dense Arena의 CPU 컬링·instancing 경로이며 광역 에셋 로딩·실제 장면 통합과 모바일 앱 연결은 [후속 기획](../29_CinematicShowcase.md)에 남아 있다. 구현된 렌더 경로와 해당 에셋에서의 실행 완료를 구분한다.
+RHI indirect와 독립 [17 예제](../../examples/advanced/17_IndirectDrawing)는 구현되어 있지만 이 환경 경로의 GPU culling·indirect 소비는 미연결이다. 공통 renderer의 indexed LOD와 독립 [23 예제](../../examples/advanced/23_MeshletCullingLOD)의 미완성 meshlet 경로는 서로 다르다. 대량 적/탄환/소품은 별도 Dense Arena의 CPU 컬링·instancing 경로이며 광역 에셋 로딩·실제 장면 통합과 모바일 앱 연결은 [후속 기획](../Presentation.md)에 남아 있다. 구현된 렌더 경로와 해당 에셋에서의 실행 완료를 구분한다.
 
 사용자 확인 항목은 Bistro DDS·재질/유리 표현, 실내 probe 반사·박스 경계·그림자 하이라이트 차폐, 외부 식생과 그림자/motion, Emerald 60초 원본 카메라의 끝 구도·자동 노출·재질/조명, 입력·resize·각 패스, 정지/이동 TAA 흔들림·잔상·잔여 흰 점, 공유 geometry의 노드 배치, LOD 전환·실루엣·alpha·wireframe·단계별 통계, 초기 probe/LOD 준비 시간·메모리·정상 프레임 비용이다. 이번 변경은 실행 테스트하지 않았고 실제 화질·FPS는 미측정이다. Jungle 원본의 엔진 실행도 미완료다. 원본 Falcor·Intel 결과와 동등한 화질 또는 특정 성능을 확인했다고 주장하지 않는다.

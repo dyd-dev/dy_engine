@@ -1,4 +1,4 @@
-#include "../../../ResourceScope.h"
+#include "dyf/RHI/ResourceScope.h"
 #include "dyf/Extends/ImGui/ImGui.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/Platform/ActionMap.h"
@@ -182,7 +182,7 @@ int main(int argc,char** argv)
             if(!window.IsRunning()) return selfTest ? 1 : 0;
             glfwWaitEventsTimeout(0.001);
         }
-        example::ResourceScope resources(*device);
+        dyf::RHI::ResourceScope resources(*device);
         auto* commands=resources.Keep(device->AcquireCommandList());
         auto* target=device->GetBackBuffer();
         if(!commands || !target) return 1;

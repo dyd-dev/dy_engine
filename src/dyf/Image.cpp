@@ -15,11 +15,11 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
 
-// bcdec 0.985, vendored unchanged under MIT; see ThirdParty/bcdec/ORIGIN.txt.
+// CMake로 받은 bcdec 0.985를 사용한다. 원저작권과 MIT 라이선스는 헤더에 있다.
 #define BCDECDEF static inline
 #define BCDEC_BC4BC5_PRECISE
 #define BCDEC_IMPLEMENTATION
-#include "../ThirdParty/bcdec/bcdec.h"
+#include "bcdec.h"
 #undef BCDEC_IMPLEMENTATION
 #undef BCDEC_BC4BC5_PRECISE
 #undef BCDECDEF

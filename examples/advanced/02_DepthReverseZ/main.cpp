@@ -1,4 +1,4 @@
-#include "../../ResourceScope.h"
+#include "dyf/RHI/ResourceScope.h"
 #include "dyf/RHI.h"
 #include "dyf/Platform/Window.h"
 #include "vertex.h"
@@ -107,7 +107,7 @@ int main(int argc, char** argv) try {
         std::cout << "UNSUPPORTED: this backend does not rasterize.\n";
         return 77;
     }
-    example::ResourceScope resources(device);
+    dyf::RHI::ResourceScope resources(device);
 
     // 화면 표시용 스왑체인을 준비하고, 캡처 요청이 있으면 이미지 읽기를 허용한다.
     SwapchainDesc swapchain;
@@ -176,7 +176,7 @@ int main(int argc, char** argv) try {
         }
 
         // 색상·깊이 텍스처를 렌더링에 사용할 상태로 전환하는 명령부터 기록한다.
-        example::ResourceScope frameResources(device);
+        dyf::RHI::ResourceScope frameResources(device);
         auto* commands = frameResources.Keep(device.AcquireCommandList());
         const ResourceBarrierDesc barriers[] = {
             {nullptr, target, ResourceState::Present, ResourceState::RenderTarget, {}},
