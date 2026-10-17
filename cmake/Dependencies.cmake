@@ -118,12 +118,18 @@ if(USE_D3D12 AND WIN32 AND DY_ENABLE_PIX)
     target_link_libraries(${PROJECT_NAME} PRIVATE WinPixEventRuntime::WinPixEventRuntime)
 endif()
 
-FetchContent_Declare(
-	glfw
-	GIT_REPOSITORY "https://github.com/glfw/glfw.git"
-	GIT_TAG "3.4"
-)
-FetchContent_MakeAvailable(glfw)
+# GLFW는 데스크톱 빌드에서만 준비하고 연결한다.
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    FetchContent_Declare(
+        glfw
+        GIT_REPOSITORY "https://github.com/glfw/glfw.git"
+        GIT_TAG "3.4"
+    )
+    FetchContent_MakeAvailable(glfw)
+
+    target_link_libraries(${PROJECT_NAME} PRIVATE glfw)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE GLFW_INCLUDE_NONE)
+endif()
 
 # stb_image 자동 다운로드 설정
 FetchContent_Declare(
@@ -132,8 +138,5 @@ FetchContent_Declare(
     GIT_TAG "31c1ad37456438565541f4919958214b6e762fb4"
 )
 FetchContent_MakeAvailable(stb)
-
-target_link_libraries(${PROJECT_NAME} PRIVATE glfw)
-target_compile_definitions(${PROJECT_NAME} PRIVATE GLFW_INCLUDE_NONE)
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${stb_SOURCE_DIR})

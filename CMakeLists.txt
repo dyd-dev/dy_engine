@@ -32,10 +32,15 @@ add_library(${PROJECT_NAME} STATIC
 	"src/dyf/DrawData.cpp"
 	"src/dyf/TextureCache.cpp"
 	"src/dyf/Scene.cpp"
-	"src/Platform/Window.cpp"
 	"src/Platform/Input.cpp"
 	"src/Platform/ActionMap.cpp"
 )
+
+# 데스크톱에서는 GLFW 기반 창 코드를 사용한다.
+# ios 화면은 앱의 UIKit 코드에서 관리한다.
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    target_sources(${PROJECT_NAME} PRIVATE "src/Platform/Window.cpp")
+endif()
 
 # global options
 include(Engine_Options)

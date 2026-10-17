@@ -1,241 +1,180 @@
+// 데스크톱은 main의 루프, iOS는 CreateShadowMapping으로 만든 객체의 Tick을 사용한다.
+// Draw는 그림자 깊이 패스 → 그림자 맵을 읽는 조명 패스 순서로 명령을 제출한다.
+#include "../common/Example.h"
+#ifndef DY_ADVANCED_IOS
 #include "dyf.h"
-#include "dyf/RHI.h"
-#include "vertex.h"
-#include "shadowDepth.h"
-#include "lighting.h"
-#include <algorithm>
+#endif
 #include <array>
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
-#include <cstdio>
-#include <fstream>
-#include <memory>
-#include <stdexcept>
-#include <string>
 #include <vector>
 
 using namespace dyf::RHI;
+using namespace advanced;
 namespace {
-// 그림자 비교에 필요한 화면 정보와 설정을 셰이더에 전달한다.
-// 네 개의 16바이트 배열은 GLSL·HLSL·Metal 셰이더와 같은 메모리 배치를 유지한다.
-struct alignas(16) Params {
-    float sizeTime[4] = {960, 640, 0, 0};
-    float settings[4] = {1, 0.45f, 0.8f, 0.9f};
-    float jitter[4] = {};
-    float extra[4] = {};
-};
-static_assert(sizeof(Params) == 64 && alignof(Params) == 16);
-static_assert(offsetof(Params, settings) == 16 && offsetof(Params, jitter) == 32 && offsetof(Params, extra) == 48);
+// 같은 앱에 두 예제를 연결해도 셰이더 데이터의 이름이 충돌하지 않는다.
+#include "vertex.h"
+#include "shadowDepth.h"
+#include "lighting.h"
 
-// 숫자 뒤에 다른 문자가 붙었거나 허용 범위를 벗어난 입력은 거부한다.
-double Number(const std::string& value, double minimum, double maximum) {
-    size_t consumed = 0;
-    double result = std::stod(value, &consumed);
-    if (consumed != value.size() || !std::isfinite(result) || result < minimum || result > maximum)
-        throw std::runtime_error("Numeric option out of range: " + value);
-    return result;
-}
-
-// GPU의 렌더링 결과를 읽어 RGB 순서의 PPM 이미지로 저장한다.
-void Capture(IDevice& device, TextureHandle texture, const std::string& path) {
-    TextureReadback image;
-    if (!device.ReadTexture(texture, image)) throw std::runtime_error("ReadTexture failed.");
-    std::ofstream stream(path, std::ios::binary);
-    if (!stream) throw std::runtime_error("Cannot open capture path.");
-    stream << "P6\n" << image.width << " " << image.height << "\n255\n";
-    const bool bgra = image.format == Format::B8G8R8A8_UNORM || image.format == Format::B8G8R8A8_UNORM_SRGB;
-    for (uint32_t y = 0; y < image.height; y++)
-        for (uint32_t x = 0; x < image.width; x++) {
-            const auto* pixel = image.pixels.data() + size_t(y) * image.rowPitch + size_t(x) * 4;
-            const char rgb[3] = {char(pixel[bgra ? 2 : 0]), char(pixel[1]), char(pixel[bgra ? 0 : 2])};
-            stream.write(rgb, 3);
-        }
-    if (!stream) throw std::runtime_error("Capture write failed.");
-    std::printf("Captured %s (%ux%u).\n", path.c_str(), image.width, image.height);
-}
-
-}
-
-int main(int argc, char** argv) try {
-    // 그림자의 바이어스·필터 범위·종류와 분할 거리·광원 높이의 기본값을 준비한다.
-    Params params;
-    params.settings[1] = 0.0015f;
-    params.settings[2] = 1;
-    params.settings[3] = 0;
-    params.extra[0] = 8;
-    params.extra[1] = 4;
-    uint64_t frameLimit = 0;
-    bool framesSpecified = false, validation = false, fixedTime = false;
-    float timeValue = 0;
-    std::string capture;
+Options ParseOptions(int argc, char **argv) {
+    Options options;
+    options.params.settings[1] = 0.0015f;
+    options.params.settings[2] = 1;
+    options.params.settings[3] = 0;
+    options.params.extra[0] = 8;
+    options.params.extra[1] = 4;
 
     // 실행 인자를 읽어 표시 모드와 관찰할 값을 변경한다. 도움말 요청은 여기서 종료한다.
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--help") {
-            std::puts(
-                "ShadowMapping\n--shadow-type directional|cascaded|point, --mode shadow|unshadowed|depth|visibility|regions\n--bias [0,0.1], --pcf [0,2] (integer), --split [4,16], --light-height [2,8], --exposure [0.01,20]\nCascades use two manually fitted camera-distance intervals; point atlas stores radial depth.\n--frames N (0=unlimited), --capture path.ppm, --time SECONDS, --validation\n--capture defaults to 1 frames unless --frames is supplied.");
-            return 0;
+            std::puts("ShadowMapping\n--shadow-type directional|cascaded|point, --mode "
+                      "shadow|unshadowed|depth|visibility|regions\n--bias [0,0.1], --pcf [0,2] (integer), "
+                      "--split [4,16], --light-height [2,8], --exposure [0.01,20]\nCascades use two manually "
+                      "fitted camera-distance intervals; point atlas stores radial depth.\n--frames N "
+                      "(0=unlimited), --capture path.ppm, --time SECONDS, --validation\n--capture defaults "
+                      "to 1 frames unless --frames is supplied.");
+            options.help = true;
+            return options;
         }
         if (arg == "--validation") {
-            validation = true;
+            options.validation = true;
             continue;
         }
-        if (i + 1 >= argc) throw std::runtime_error("Missing value for " + arg);
+        if (i + 1 >= argc)
+            throw std::runtime_error("Missing value for " + arg);
         std::string value = argv[++i];
         if (arg == "--frames") {
             double n = Number(value, 0, 10000000);
-            if (std::floor(n) != n) throw std::runtime_error("Frame count must be an integer.");
-            frameLimit = uint64_t(n);
-            framesSpecified = true;
+            if (std::floor(n) != n)
+                throw std::runtime_error("Frame count must be an integer.");
+            options.frameLimit = uint64_t(n);
+            options.framesSpecified = true;
         } else if (arg == "--capture")
-            capture = value;
+            options.capture = value;
         else if (arg == "--time") {
-            timeValue = float(Number(value, 0, 1000000));
-            fixedTime = true;
+            options.timeValue = float(Number(value, 0, 1000000));
+            options.fixedTime = true;
         } else if (arg == "--mode") {
             if (value == "shadow")
-                params.sizeTime[3] = 0;
+                options.params.sizeTime[3] = 0;
             else if (value == "unshadowed")
-                params.sizeTime[3] = 1;
+                options.params.sizeTime[3] = 1;
             else if (value == "depth")
-                params.sizeTime[3] = 2;
+                options.params.sizeTime[3] = 2;
             else if (value == "visibility")
-                params.sizeTime[3] = 3;
+                options.params.sizeTime[3] = 3;
             else if (value == "regions")
-                params.sizeTime[3] = 4;
+                options.params.sizeTime[3] = 4;
             else
                 throw std::runtime_error("Unknown mode: " + value);
         } else if (arg == "--shadow-type") {
             if (value == "directional")
-                params.settings[3] = 0;
+                options.params.settings[3] = 0;
             else if (value == "cascaded")
-                params.settings[3] = 1;
+                options.params.settings[3] = 1;
             else if (value == "point")
-                params.settings[3] = 2;
+                options.params.settings[3] = 2;
             else
                 throw std::runtime_error("Unknown shadow type.");
         } else if (arg == "--bias") {
             double n = Number(value, 0, 0.1);
-            params.settings[1] = float(n);
+            options.params.settings[1] = float(n);
         } else if (arg == "--pcf") {
             double n = Number(value, 0, 2);
-            if (std::floor(n) != n) throw std::runtime_error("This option requires an integer.");
-            params.settings[2] = float(n);
+            if (std::floor(n) != n)
+                throw std::runtime_error("This option requires an integer.");
+            options.params.settings[2] = float(n);
         } else if (arg == "--split") {
             double n = Number(value, 4, 16);
-            params.extra[0] = float(n);
+            options.params.extra[0] = float(n);
         } else if (arg == "--light-height") {
             double n = Number(value, 2, 8);
-            params.extra[1] = float(n);
+            options.params.extra[1] = float(n);
         } else if (arg == "--exposure") {
             double n = Number(value, 0.01, 20);
-            params.settings[0] = float(n);
+            options.params.settings[0] = float(n);
         } else
             throw std::runtime_error("Unknown option: " + arg);
     }
 
     // 캡처할 마지막 프레임을 결정한다. 캡처 요청에는 유한한 프레임 수가 필요하다.
-    if (!capture.empty() && !framesSpecified) frameLimit = 1;
-    if (!capture.empty() && frameLimit == 0) throw std::runtime_error("Capture requires a finite frame count.");
+    if (!options.capture.empty() && !options.framesSpecified)
+        options.frameLimit = 1;
+    if (!options.capture.empty() && options.frameLimit == 0)
+        throw std::runtime_error("Capture requires a finite frame count.");
 
-    // 창과 그래픽 장치, 화면 표시용 스왑체인을 생성한다.
-    dyf::Platform::Window window(960, 640, "Advanced / ShadowMapping");
-    if (!window.GetHandle()) throw std::runtime_error("Window creation failed.");
-    DeviceDesc deviceDesc;
-    deviceDesc.enableValidation = validation;
-    std::unique_ptr<IDevice> owner(IDevice::Create(deviceDesc));
-    if (!owner) throw std::runtime_error("Device creation failed.");
-    auto& device = *owner;
+    return options;
+}
 
-    ResourceScope resources(device);
-    SwapchainDesc swap;
-    swap.window = window.GetHandle();
-    swap.format = Format::B8G8R8A8_UNORM;
-    swap.minimumImageCount = 2;
-    swap.presentMode = PresentMode::Fifo;
-    swap.allowReadback = !capture.empty();
-    if (!device.CreateSwapchain(swap)) throw std::runtime_error("Swapchain creation failed.");
+class Renderer final : public Example {
+  public:
+    Renderer(const void *window, const Options &options) : Example(window, options) {
+        // 빌드 시 포함된 셰이더와 텍스처를 읽을 샘플러를 준비한다.
+        auto vertexShader = resources.Keep(device.CreateShader(
+            {ShaderStage::Vertex, ShaderData::vertexEntryPoint, ShaderData::vertex, ShaderData::vertexSize}));
+        auto shadowDepthShader =
+            resources.Keep(device.CreateShader({ShaderStage::Fragment, ShaderData::shadowDepthEntryPoint,
+                                                ShaderData::shadowDepth, ShaderData::shadowDepthSize}));
+        auto lightingShader =
+            resources.Keep(device.CreateShader({ShaderStage::Fragment, ShaderData::lightingEntryPoint,
+                                                ShaderData::lighting, ShaderData::lightingSize}));
+        SamplerDesc sampler;
+        sampler.minFilter = SamplerFilter::Nearest;
+        sampler.magFilter = SamplerFilter::Nearest;
+        sampler.mipFilter = SamplerFilter::Nearest;
+        sampler.addressU = sampler.addressV = sampler.addressW = SamplerAddressMode::ClampToEdge;
+        sampler.mipLodBias = sampler.minLod = sampler.maxLod = 0;
 
-    // 빌드 시 포함된 셰이더와 텍스처를 읽을 샘플러를 준비한다.
-    auto vertexShader = resources.Keep(device.CreateShader(
-        {ShaderStage::Vertex, ShaderData::vertexEntryPoint, ShaderData::vertex, ShaderData::vertexSize}));
-    auto shadowDepthShader =
-        resources.Keep(device.CreateShader({ShaderStage::Fragment, ShaderData::shadowDepthEntryPoint,
-                                            ShaderData::shadowDepth, ShaderData::shadowDepthSize}));
-    auto lightingShader = resources.Keep(device.CreateShader(
-        {ShaderStage::Fragment, ShaderData::lightingEntryPoint, ShaderData::lighting, ShaderData::lightingSize}));
-    SamplerDesc sampler;
-    sampler.minFilter = SamplerFilter::Nearest;
-    sampler.magFilter = SamplerFilter::Nearest;
-    sampler.mipFilter = SamplerFilter::Nearest;
-    sampler.addressU = sampler.addressV = sampler.addressW = SamplerAddressMode::ClampToEdge;
-    sampler.mipLodBias = sampler.minLod = sampler.maxLod = 0;
+        // 광원에서 본 깊이를 그림자 텍스처에 기록할 파이프라인.
+        std::vector<ResourceBindingLayout> shadowBindings;
+        std::array<ColorAttachmentDesc, 0> shadowColors{};
+        for (auto &attachment : shadowColors)
+            attachment = {Format::B8G8R8A8_UNORM, {}, ColorWriteMask::All};
+        GraphicsPipelineDesc shadowDesc;
+        shadowDesc.vertexShader = vertexShader;
+        shadowDesc.fragmentShader = shadowDepthShader;
+        shadowDesc.topology = PrimitiveTopology::TriangleList;
+        shadowDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
+        shadowDesc.colorAttachments = shadowColors.data();
+        shadowDesc.colorAttachmentCount = uint32_t(shadowColors.size());
+        shadowDesc.depthStencil.format = Format::D32_FLOAT;
+        shadowDesc.depthStencil.depthWriteEnabled = true;
+        shadowDesc.depthStencil.depthTestEnabled = true;
+        shadowDesc.depthStencil.depthCompareOp = CompareOp::Always;
+        shadowDesc.layout = {shadowBindings.data(), uint32_t(shadowBindings.size()), sizeof(Params),
+                             ShaderStageFlags::Fragment, 15};
+        shadowPipeline = resources.Keep(device.CreateGraphicsPipeline(shadowDesc));
 
-    // 광원에서 본 깊이를 그림자 텍스처에 기록할 파이프라인.
-    std::vector<ResourceBindingLayout> shadowBindings;
-    std::array<ColorAttachmentDesc, 0> shadowColors{};
-    for (auto& attachment : shadowColors)
-        attachment = {Format::B8G8R8A8_UNORM, {}, ColorWriteMask::All};
-    GraphicsPipelineDesc shadowDesc;
-    shadowDesc.vertexShader = vertexShader;
-    shadowDesc.fragmentShader = shadowDepthShader;
-    shadowDesc.topology = PrimitiveTopology::TriangleList;
-    shadowDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
-    shadowDesc.colorAttachments = shadowColors.data();
-    shadowDesc.colorAttachmentCount = uint32_t(shadowColors.size());
-    shadowDesc.depthStencil.format = Format::D32_FLOAT;
-    shadowDesc.depthStencil.depthWriteEnabled = true;
-    shadowDesc.depthStencil.depthTestEnabled = true;
-    shadowDesc.depthStencil.depthCompareOp = CompareOp::Always;
-    shadowDesc.layout = {shadowBindings.data(), uint32_t(shadowBindings.size()), sizeof(Params),
-                         ShaderStageFlags::Fragment, 15};
-    auto shadowPipeline = resources.Keep(device.CreateGraphicsPipeline(shadowDesc));
+        // 앞 단계에서 만든 텍스처를 읽어 최종 조명 결과를 계산할 파이프라인.
+        std::vector<ResourceBindingLayout> lightingBindings;
+        lightingBindings.push_back(
+            {0, ResourceBindingType::SampledTexture, 1, ShaderStageFlags::Fragment, {}});
+        lightingBindings.push_back(
+            {8, ResourceBindingType::StaticSampler, 1, ShaderStageFlags::Fragment, sampler});
+        std::array<ColorAttachmentDesc, 1> lightingColors{};
+        for (auto &attachment : lightingColors)
+            attachment = {Format::B8G8R8A8_UNORM, {}, ColorWriteMask::All};
+        GraphicsPipelineDesc lightingDesc;
+        lightingDesc.vertexShader = vertexShader;
+        lightingDesc.fragmentShader = lightingShader;
+        lightingDesc.topology = PrimitiveTopology::TriangleList;
+        lightingDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
+        lightingDesc.colorAttachments = lightingColors.data();
+        lightingDesc.colorAttachmentCount = uint32_t(lightingColors.size());
+        lightingDesc.layout = {lightingBindings.data(), uint32_t(lightingBindings.size()), sizeof(Params),
+                               ShaderStageFlags::Fragment, 15};
+        lightingPipeline = resources.Keep(device.CreateGraphicsPipeline(lightingDesc));
+    }
 
-    // 앞 단계에서 만든 텍스처를 읽어 최종 조명 결과를 계산할 파이프라인.
-    std::vector<ResourceBindingLayout> lightingBindings;
-    lightingBindings.push_back({0, ResourceBindingType::SampledTexture, 1, ShaderStageFlags::Fragment, {}});
-    lightingBindings.push_back({8, ResourceBindingType::StaticSampler, 1, ShaderStageFlags::Fragment, sampler});
-    std::array<ColorAttachmentDesc, 1> lightingColors{};
-    for (auto& attachment : lightingColors)
-        attachment = {Format::B8G8R8A8_UNORM, {}, ColorWriteMask::All};
-    GraphicsPipelineDesc lightingDesc;
-    lightingDesc.vertexShader = vertexShader;
-    lightingDesc.fragmentShader = lightingShader;
-    lightingDesc.topology = PrimitiveTopology::TriangleList;
-    lightingDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
-    lightingDesc.colorAttachments = lightingColors.data();
-    lightingDesc.colorAttachmentCount = uint32_t(lightingColors.size());
-    lightingDesc.layout = {lightingBindings.data(), uint32_t(lightingBindings.size()), sizeof(Params),
-                           ShaderStageFlags::Fragment, 15};
-    auto lightingPipeline = resources.Keep(device.CreateGraphicsPipeline(lightingDesc));
-
-    // 크기 변경 시 다시 만들 텍스처·리소스 세트와 프레임 사이에 유지할 상태를 보관한다.
-    std::unique_ptr<ResourceScope> imageResources;
-    uint32_t imageWidth = 0, imageHeight = 0;
-    bool initializeImages = true;
-    TextureHandle shadowMap = nullptr;
-    ResourceSetHandle lightingSet = nullptr;
-
-    uint64_t frame = 0;
-
-    // 창 이벤트를 처리하고 렌더링 가능한 프레임에서만 작업을 진행한다.
-    while (!frameLimit || frame < frameLimit) {
-        window.PollEvents();
-        if (!window.IsRunning()) break;
-        if (!device.BeginFrame()) {
-            if (device.IsLost()) throw std::runtime_error("Device lost.");
-            continue;
-        }
-        auto backbuffer = device.GetBackBuffer();
-        if (!backbuffer) throw std::runtime_error("Backbuffer unavailable.");
+  private:
+    void Draw(TextureHandle backbuffer) override {
         const auto dimensions = backbuffer->GetDesc();
 
         // 첫 프레임 또는 화면 크기 변경 시 기존 GPU 작업을 기다리고 그림자 텍스처와 연결을 다시 만든다.
         // 그림자 텍스처 자체는 고정 크기 1536×1024를 사용한다.
         if (dimensions.width != imageWidth || dimensions.height != imageHeight) {
-            if (!device.WaitIdle()) throw std::runtime_error("Resize wait failed.");
+            if (!device.WaitIdle())
+                throw std::runtime_error("Resize wait failed.");
             imageResources = std::make_unique<ResourceScope>(device);
             imageWidth = dimensions.width;
             imageHeight = dimensions.height;
@@ -253,13 +192,8 @@ int main(int argc, char** argv) try {
                 {lightingPipeline, lightingSetBindings.data(), uint32_t(lightingSetBindings.size())}));
         }
 
-        // 현재 화면 크기와 시간을 셰이더 설정에 반영한다. 시간 고정 옵션이 없으면 프레임 수로 계산한다.
-        params.sizeTime[0] = float(imageWidth);
-        params.sizeTime[1] = float(imageHeight);
-        params.sizeTime[2] = fixedTime ? timeValue : float(frame) / 60.0f;
-
         ResourceScope frameResources(device);
-        auto* commands = frameResources.Keep(device.AcquireCommandList());
+        auto *commands = frameResources.Keep(device.AcquireCommandList());
 
         // 새로 만든 텍스처를 초기화하고, 이후 렌더링 단계에서 사용할 읽기 상태로 전환한다.
         if (initializeImages) {
@@ -331,16 +265,42 @@ int main(int argc, char** argv) try {
             throw std::runtime_error("Frame recording/submission failed.");
         // 명령 제출에 성공한 경우에만 CPU의 프레임 상태를 갱신한다. GPU 작업은 같은 큐의 제출 순서를 따른다.
         initializeImages = false;
-
-        // 마지막 프레임의 캡처를 저장한 뒤 결과를 화면에 표시한다.
-        ++frame;
-        if (!capture.empty() && frame == frameLimit) Capture(device, backbuffer, capture);
-        if (!device.Present()) throw std::runtime_error("Present failed.");
     }
 
-    if (!device.WaitIdle()) throw std::runtime_error("Final GPU wait failed.");
+    PipelineHandle lightingPipeline = nullptr;
+    PipelineHandle shadowPipeline = nullptr;
+    bool initializeImages = true;
+    TextureHandle shadowMap = nullptr;
+    ResourceSetHandle lightingSet = nullptr;
+};
+} // namespace
+
+// iOS 앱의 진입점. 예제 전환 시 새 객체를 만들어 파이프라인과 그림자 자원을 다시 준비한다.
+std::unique_ptr<Example> advanced::CreateShadowMapping(const void *view, int argc, char **argv) {
+    const auto options = ParseOptions(argc, argv);
+    if (options.help)
+        return nullptr;
+    return std::make_unique<Renderer>(view, options);
+}
+
+#ifndef DY_ADVANCED_IOS
+int main(int argc, char **argv) try {
+    const auto options = ParseOptions(argc, argv);
+    if (options.help)
+        return 0;
+    dyf::Platform::Window window(960, 640, "Advanced / ShadowMapping");
+    if (!window.GetHandle())
+        throw std::runtime_error("Window creation failed.");
+    Renderer renderer(window.GetHandle(), options);
+    while (window.IsRunning()) {
+        window.PollEvents();
+        if (!window.IsRunning() || !renderer.Tick())
+            break;
+    }
+    renderer.WaitIdle();
     return 0;
-} catch (const std::exception& error) {
+} catch (const std::exception &error) {
     std::fprintf(stderr, "ShadowMapping: %s\n", error.what());
     return 1;
 }
+#endif
