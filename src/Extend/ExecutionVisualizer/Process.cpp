@@ -1,6 +1,11 @@
 #include "Process.h"
+#include <winsock2.h>
 #include <windows.h>
+#include <iphlpapi.h>
+#include <tlhelp32.h>
 #include <filesystem>
+#include <algorithm>
+#include <map>
 #include <limits>
 #include <climits>
 #include <stdexcept>
@@ -66,7 +71,21 @@ static std::string WindowsError(DWORD code)
 }
 
 TargetProcess::~TargetProcess() { if(process) CloseHandle(process); }
+void TargetProcess::Forget() {if(process)CloseHandle(process);process=nullptr;pid=0;}
 bool TargetProcess::Running() const { return process && WaitForSingleObject(process, 0) == WAIT_TIMEOUT; }
+static uint64_t Created(HANDLE handle)
+{
+    FILETIME creation{},exit{},kernel{},user{};
+    if(!GetProcessTimes(handle,&creation,&exit,&kernel,&user)) return 0;
+    return (uint64_t(creation.dwHighDateTime)<<32)|creation.dwLowDateTime;
+}
+uint64_t TargetProcess::CreationTime() const { return process ? Created(process) : 0; }
+bool SameRunningProcess(uint32_t pid,uint64_t creationTime)
+{
+    if(!pid||!creationTime)return false;
+    const auto opened=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,pid);if(!opened)return false;
+    const bool same=Created(opened)==creationTime&&WaitForSingleObject(opened,0)==WAIT_TIMEOUT;CloseHandle(opened);return same;
+}
 std::optional<uint32_t> TargetProcess::ExitCode() const
 {
     if(!process || WaitForSingleObject(process, 0) != WAIT_OBJECT_0) return {};
@@ -76,7 +95,8 @@ std::optional<uint32_t> TargetProcess::ExitCode() const
 }
 
 bool TargetProcess::Launch(const std::string& executable, const std::string& arguments,
-    const std::string& directory, std::string& error)
+    const std::string& directory, std::string& error,
+    const std::vector<std::pair<std::string,std::string>>& environment,bool hidden)
 {
     error.clear();
     if(Running()) { error = "The launched target is still running."; return false; }
@@ -90,9 +110,35 @@ bool TargetProcess::Launch(const std::string& executable, const std::string& arg
         if(command.size() >= 32767) throw std::invalid_argument("Windows command line exceeds 32766 characters.");
         STARTUPINFOW startup{};
         startup.cb = sizeof(startup);
+        std::vector<wchar_t> environmentBlock;
+        if(!environment.empty())
+        {
+            struct IgnoreCase { bool operator()(const std::wstring& a,const std::wstring& b) const {return CompareStringOrdinal(a.c_str(),-1,b.c_str(),-1,TRUE)==CSTR_LESS_THAN;} };
+            std::map<std::wstring,std::wstring,IgnoreCase> variables;
+            auto* inherited=GetEnvironmentStringsW();
+            if(!inherited) {error=WindowsError(GetLastError());return false;}
+            for(auto* entry=inherited;*entry;entry+=wcslen(entry)+1)
+            {
+                std::wstring value(entry);const auto equals=value.find(L'=',value[0]==L'=' ? 1 : 0);
+                if(equals!=value.npos) variables[value.substr(0,equals)]=value.substr(equals+1);
+            }
+            FreeEnvironmentStringsW(inherited);
+            for(const auto& [name,value]:environment)
+            {
+                if(name.empty()||name.find('=')!=name.npos) throw std::invalid_argument("Invalid child environment name.");
+                variables[ToWide(name)]=ToWide(value);
+            }
+            for(const auto& [name,value]:variables)
+            {
+                const auto entry=name+L"="+value;
+                environmentBlock.insert(environmentBlock.end(),entry.begin(),entry.end());environmentBlock.push_back(0);
+            }
+            environmentBlock.push_back(0);
+        }
         PROCESS_INFORMATION created{};
-        if(!CreateProcessW(path.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_UNICODE_ENVIRONMENT,
-            nullptr, folder.c_str(), &startup, &created))
+        if(!CreateProcessW(path.c_str(), command.data(), nullptr, nullptr, FALSE,
+            CREATE_UNICODE_ENVIRONMENT|(hidden ? CREATE_NO_WINDOW : 0),
+            environmentBlock.empty() ? nullptr : environmentBlock.data(), folder.c_str(), &startup, &created))
         { error = WindowsError(GetLastError()); return false; }
         CloseHandle(created.hThread);
         if(process) CloseHandle(process);
@@ -101,5 +147,75 @@ bool TargetProcess::Launch(const std::string& executable, const std::string& arg
         return true;
     }
     catch(const std::exception& exception) { error = exception.what(); return false; }
+}
+
+bool TargetProcess::Observe(uint32_t processId,uint64_t creationTime,const std::string& executable,std::string& error)
+{
+    error.clear();
+    if(Running()) {error="An observed target is still running.";return false;}
+    HANDLE opened=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,processId);
+    if(!opened) {error=WindowsError(GetLastError());return false;}
+    try
+    {
+        wchar_t image[32768]{};DWORD length=32768;
+        if(!creationTime||Created(opened)!=creationTime||WaitForSingleObject(opened,0)!=WAIT_TIMEOUT
+            || !QueryFullProcessImageNameW(opened,0,image,&length)) throw std::runtime_error("Process creation identity does not match a running target.");
+        const auto expected=std::filesystem::weakly_canonical(std::filesystem::path(ToWide(executable)));
+        const auto actual=std::filesystem::weakly_canonical(std::filesystem::path(image));
+        if(CompareStringOrdinal(expected.c_str(),-1,actual.c_str(),-1,TRUE)!=CSTR_EQUAL)
+            throw std::runtime_error("Process executable path does not match the selected target.");
+        if(process)CloseHandle(process);process=opened;pid=processId;return true;
+    }
+    catch(const std::exception& exception) {CloseHandle(opened);error=exception.what();return false;}
+}
+
+bool TargetProcess::ObserveChild(const TargetProcess& parent,const std::string& executable,std::string& error,
+    uint32_t expectedPid,uint64_t expectedCreation)
+{
+    error.clear();if(Running())return !expectedPid||expectedPid==pid;
+    if(!parent.Running()) {error="The launch parent is no longer running.";return false;}
+    const auto snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);
+    if(snapshot==INVALID_HANDLE_VALUE) {error=WindowsError(GetLastError());return false;}
+    PROCESSENTRY32W entry{};entry.dwSize=sizeof(entry);
+    uint32_t match=0;uint64_t time=0;
+    if(Process32FirstW(snapshot,&entry)) do
+    {
+        if(entry.th32ParentProcessID!=parent.Pid() || (expectedPid&&entry.th32ProcessID!=expectedPid)) continue;
+        HANDLE candidate=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,entry.th32ProcessID);
+        const auto created=candidate ? Created(candidate) : 0;if(candidate)CloseHandle(candidate);
+        if(created<parent.CreationTime() || (expectedCreation&&created!=expectedCreation))continue;
+        TargetProcess verified;std::string issue;
+        if(!verified.Observe(entry.th32ProcessID,created,executable,issue))continue;
+        if(match) {error="More than one matching child; automatic ownership is ambiguous.";match=0;break;}
+        match=entry.th32ProcessID;time=created;
+    }while(Process32NextW(snapshot,&entry));
+    CloseHandle(snapshot);
+    return match&&Observe(match,time,executable,error);
+}
+
+uint16_t FreeTcpPort()
+{
+    WSADATA data{};if(WSAStartup(MAKEWORD(2,2),&data))throw std::runtime_error("Winsock initialization failed.");
+    SOCKET socket=::socket(AF_INET,SOCK_STREAM,IPPROTO_TCP);uint16_t port=0;
+    if(socket!=INVALID_SOCKET)
+    {
+        const BOOL exclusive=TRUE;setsockopt(socket,SOL_SOCKET,SO_EXCLUSIVEADDRUSE,reinterpret_cast<const char*>(&exclusive),sizeof(exclusive));
+        sockaddr_in address{};address.sin_family=AF_INET;int length=sizeof(address);
+        if(bind(socket,reinterpret_cast<sockaddr*>(&address),sizeof(address))==0
+            &&getsockname(socket,reinterpret_cast<sockaddr*>(&address),&length)==0)port=ntohs(address.sin_port);
+        closesocket(socket);
+    }
+    WSACleanup();if(!port)throw std::runtime_error("No free local Tracy port could be reserved.");return port;
+}
+bool OwnsTcpListener(uint32_t pid,uint16_t port)
+{
+    if(!pid||!port)return false;
+    DWORD bytes=0;if(GetExtendedTcpTable(nullptr,&bytes,FALSE,AF_INET,TCP_TABLE_OWNER_PID_LISTENER,0)!=ERROR_INSUFFICIENT_BUFFER)return false;
+    std::vector<unsigned char> data(bytes);
+    if(GetExtendedTcpTable(data.data(),&bytes,FALSE,AF_INET,TCP_TABLE_OWNER_PID_LISTENER,0)!=NO_ERROR)return false;
+    const auto* table=reinterpret_cast<const MIB_TCPTABLE_OWNER_PID*>(data.data());
+    for(DWORD i=0;i<table->dwNumEntries;++i)
+        if(table->table[i].dwOwningPid==pid&&ntohs(uint16_t(table->table[i].dwLocalPort))==port)return true;
+    return false;
 }
 }

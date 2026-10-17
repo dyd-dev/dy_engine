@@ -42,6 +42,7 @@ IDevice::LiveState* IDevice::GetLiveState() noexcept
             live->recordingSource=D::RegisterLiveObject(&live->recordingSource,
                 {D::LiveObjectKind::Device,live->device,live->device,0,0,"RHI command recording source"});
             m_live=std::move(live);
+            m_live->tools=std::make_unique<Platform::LiveTools>(m_live->device,m_live->recordingSource);
             PublishLiveResources();
         }
         return m_live.get();
@@ -127,6 +128,7 @@ void IDevice::PrepareLiveControls(D::LiveFrameKey key) noexcept
     {
         std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
         auto* live=GetLiveState();if(!live||live->stopping||live->device!=key.device)return;
+        if(live->tools)live->tools->Poll(key);
         if(!live->uploadPolicyInitialized)
         {
             live->uploadPolicySupported=SetUploadMemoryPolicyNative(live->uploadPageReuse,live->uploadSuballocation);

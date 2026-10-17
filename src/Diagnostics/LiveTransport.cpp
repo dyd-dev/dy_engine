@@ -72,8 +72,10 @@ bool Send(HANDLE pipe,Detail::PacketKind kind,std::vector<std::uint8_t>& payload
 bool Receive(HANDLE pipe,Detail::PacketHeader& h,std::vector<std::uint8_t>& payload,const std::atomic<bool>& stop)
 {if(!Transfer(pipe,false,&h,sizeof(h),stop)||!Detail::ValidateHeader(h))return false;payload.resize(h.size);return Transfer(pipe,false,payload.data(),h.size,stop);}
 bool Available(HANDLE pipe){DWORD size=0;return PeekNamedPipe(pipe,nullptr,0,nullptr,&size,nullptr)&&size>=sizeof(Detail::PacketHeader);}
+const std::string& PipePrefix()
+{static const std::string prefix="dy_engine.live.v"+std::to_string(LiveProtocolVersion)+".";return prefix;}
 std::string PipeName(LiveSessionId session)
-{std::ostringstream s;s<<"\\\\.\\pipe\\dy_engine.live.v3."<<GetCurrentProcessId()<<'.'<<std::hex<<session.high<<'.'<<session.low;return s.str();}
+{std::ostringstream s;s<<"\\\\.\\pipe\\"<<PipePrefix()<<GetCurrentProcessId()<<'.'<<std::hex<<session.high<<'.'<<session.low;return s.str();}
 struct Server;
 std::atomic<Server*> existingServer{nullptr};
 struct Server
@@ -196,7 +198,7 @@ std::vector<LiveTarget> LiveClient::Discover()
 #ifdef _WIN32
     WIN32_FIND_DATAW data{};HANDLE search=FindFirstFileW(L"\\\\.\\pipe\\*",&data);if(search==INVALID_HANDLE_VALUE)return targets;
     do{const auto full=Utf8(data.cFileName);const auto slash=full.find_last_of('\\');const auto name=slash==std::string::npos?full:full.substr(slash+1);unsigned pid=0;unsigned long long high=0,low=0;
-        if(std::sscanf(name.c_str(),"dy_engine.live.v3.%u.%llx.%llx",&pid,&high,&low)!=3||!SameLogin(pid))continue;
+        if(name.rfind(PipePrefix(),0)!=0||std::sscanf(name.c_str()+PipePrefix().size(),"%u.%llx.%llx",&pid,&high,&low)!=3||!SameLogin(pid))continue;
         LiveTarget target;target.session={high,low};target.processId=pid;target.endpoint="\\\\.\\pipe\\"+full;
         Handle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid));wchar_t path[32768]{};DWORD length=32768;
         if(process.value&&QueryFullProcessImageNameW(process.value,0,path,&length))target.executable=Utf8(std::wstring(path,length));targets.push_back(std::move(target));
@@ -210,7 +212,7 @@ bool LiveClient::Connect(const LiveTarget& target)
 #ifdef _WIN32
     if(target.endpoint.rfind("\\\\.\\pipe\\",0)!=0)return false;
     const auto suffix=target.endpoint.substr(9);const auto slash=suffix.find_last_of('\\');const auto leaf=slash==std::string::npos?suffix:suffix.substr(slash+1);
-    if(leaf.rfind("dy_engine.live.v3.",0)!=0||(slash!=std::string::npos&&(suffix.rfind("Sessions\\",0)!=0||suffix.find("\\AppContainerNamedObjects\\S-1-15-2-")==std::string::npos)))return false;
+    if(leaf.rfind(PipePrefix(),0)!=0||(slash!=std::string::npos&&(suffix.rfind("Sessions\\",0)!=0||suffix.find("\\AppContainerNamedObjects\\S-1-15-2-")==std::string::npos)))return false;
     {std::lock_guard<std::mutex> lock(impl->mutex);impl->state=LiveClientState::Connecting;impl->error.clear();}impl->stop=false;impl->worker=std::thread([state=impl.get(),target]{state->Run(target);});return true;
 #else
     (void)target;impl->state=LiveClientState::Unsupported;return false;

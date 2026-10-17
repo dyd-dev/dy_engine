@@ -9,6 +9,10 @@
 #include <map>
 #include <fstream>
 #include <iomanip>
+#include <windows.h>
+#if DY_VIEWER_EMBED_TRACY
+#include "TracyWorker.hpp"
+#endif
 
 namespace viewer
 {
@@ -53,15 +57,79 @@ const char* Viewer::UpdateStatus() const
 
 void Viewer::Launch()
 {
+    if(automatic.Target().Running()||automatic.Busy()) {launchIssue="자동 세션이 실행 중입니다. 게임을 종료하거나 준비를 취소한 뒤 실행하세요.";return;}
     std::string arguments;
     if(!launch.BuildArguments(arguments,launchIssue)) return;
     if(process.Launch(launch.executable, arguments, launch.directory, launchIssue))
     { wantedPid = process.Pid(); nextDiscoveryNs = 0; message = "대상 실행됨. 계측 세션을 찾는 중입니다."; }
 }
+void Viewer::InitializeAutomatic(bool start,std::optional<bool> tracyOverride)
+{
+    std::string error;
+    if(!automatic.Load(error)) {message=error;ShowTracy(tracyOverride.value_or(false),false);return;}
+    const auto& saved=automatic.Profile();automaticEnabled=saved.enabled;
+    ShowTracy(tracyOverride.value_or(saved.tracyVisible),false);
+    if(!saved.executable.empty())
+    {
+        SetLaunchExecutable(saved.executable);launch.useRaw=true;launch.rawArguments=saved.arguments;launch.directory=saved.directory;
+    }
+    if(start&&saved.enabled)
+    {
+        if(saved.executable.empty())openLaunchDialog=true;
+        else automatic.Start(saved);
+    }
+}
+void Viewer::StartAutomatic()
+{
+    if(process.Running()) {launchIssue="직접 실행한 게임이 실행 중입니다. 종료한 후 자동 연결을 시작하세요.";return;}
+    std::string arguments;if(!launch.BuildArguments(arguments,launchIssue))return;
+    SessionProfile profile;profile.enabled=true;profile.executable=launch.executable;profile.arguments=arguments;profile.directory=launch.directory;profile.tracyVisible=tracyVisible;
+    if(automatic.Start(profile)) {automaticEnabled=true;automaticReplayRequest=0;automaticAttachPid=0;launchIssue.clear();}
+    else launchIssue=automatic.Status();
+}
+void Viewer::TickAutomatic(uint64_t now)
+{
+    AutoEvidence evidence;
+    evidence.tracyRequested=tracyCollectRequested;
+    evidence.embeddedConnected=embedded&&embedded->Connected()&&embeddedPid==automatic.Target().Pid()
+        &&embeddedCreation==automatic.Target().CreationTime();
+    evidence.embeddedIssue=evidence.tracyRequested ? tracyIssue : std::string{};
+    if(evidence.tracyRequested&&evidence.embeddedIssue.empty()&&embedded&&!evidence.embeddedConnected)
+        evidence.embeddedIssue=embedded->LastError();
+    evidence.connected=client.GetState()==D::LiveClientState::Connected&&reconnect&&reconnect->processId==automatic.Target().Pid()
+        &&state.snapshot&&now>=state.receivedNs&&now-state.receivedNs<2000000000ull;
+    const D::ControlDesc* connect=nullptr;
+    if(evidence.connected)for(const auto& control:state.snapshot->controls)
+    {
+        if(control.category!=D::ControlCategory::Diagnostic||control.device!=state.device)continue;
+        if(control.key=="tools.tracy") {if(const auto* value=std::get_if<int64_t>(&control.appliedValue))evidence.tracy=*value;}
+        else if(control.key=="tools.renderdoc.capture") {evidence.captureReady=control.writable;evidence.captureIssue=control.unavailableReason;}
+        else if(control.key=="tools.renderdoc.connected") {if(const auto* value=std::get_if<bool>(&control.appliedValue))evidence.renderDocConnected=*value;}
+        else if(control.key=="tools.renderdoc.connect")connect=&control;
+    }
+    for(const auto& request:state.requests)if(automaticReplayRequest&&request.request==automaticReplayRequest
+        &&(request.state==D::ControlState::Rejected||request.state==D::ControlState::Failed||request.state==D::ControlState::Cancelled))evidence.renderDocError=request.message;
+    if(evidence.renderDocConnected&&*evidence.renderDocConnected)automaticReplayRequest=0;
+    automatic.Tick(evidence);
+    if(automatic.WantsRenderDocConnection()&&!automaticReplayRequest&&connect&&connect->writable)
+    {
+        automaticReplayRequest=Send(*connect,true);
+        if(!automaticReplayRequest) {evidence.renderDocError=message;automatic.Tick(evidence);}
+    }
+    const auto phase=automatic.Stage();
+    if((phase==AutoStage::WaitingLive||phase==AutoStage::WaitingTracy||phase==AutoStage::Ready)
+        &&automatic.Target().Running()&&automatic.Target().Pid()!=automaticAttachPid)
+    {automaticAttachPid=wantedPid=automatic.Target().Pid();nextDiscoveryNs=0;}
+    if(renderDocExecutable.empty()&&!automatic.Paths().renderdocUi.empty())renderDocExecutable=ToUtf8(automatic.Paths().renderdocUi.native());
+}
 void Viewer::Connect(const D::LiveTarget& target)
 {
+    const bool sameSession=reconnect&&reconnect->processId==target.processId&&reconnect->session==target.session;
     if(!client.Connect(target)) { message = client.GetLastError(); return; }
-    reconnect = target; state.Clear(); drafts.clear(); indexedSequence = graphSequence = UINT64_MAX;
+    reconnect = target; state.Clear();
+    if(!sameSession) {tracyMetrics.Clear();drawnMetrics.clear();presentedMetrics.clear();}
+    if(tracyCollectRequested)tracyConnectPending=true;
+    drafts.clear(); toolRequest=0;toolIssue.clear();indexedSequence = graphSequence = UINT64_MAX;
     receivedSnapshots=0;
     statistics.Clear(); playback.Clear(); comparisonPlayback.Clear(); presentationLog={}; graphFocus=0; selectedControl=0;
     comparisonGraphGeneration=UINT64_MAX;
@@ -89,15 +157,90 @@ void Viewer::Tick()
     if(auto incoming = client.Poll())
     {
         if(state.snapshot && incoming->session!=state.snapshot->session)
-        { statistics.Clear(); playback.Clear(); comparisonPlayback.Clear(); presentationLog={}; graphFocus=0; drafts.clear(); selectedControl=0; comparisonGraphGeneration=UINT64_MAX; }
+        { statistics.Clear(); tracyMetrics.Clear();drawnMetrics.clear();presentedMetrics.clear();if(tracyCollectRequested)tracyConnectPending=true;
+            playback.Clear(); comparisonPlayback.Clear(); presentationLog={}; graphFocus=0; drafts.clear(); selectedControl=0; toolRequest=0;toolIssue.clear(); comparisonGraphGeneration=UINT64_MAX; }
         if(state.Accept(std::move(incoming), now)) { message.clear(); ++receivedSnapshots; }
     }
+    TickTracy();
+    if(state.snapshot)tracyMetrics.Observe(*state.snapshot);
     if(client.GetState()==D::LiveClientState::Connected)
     {
         statistics.Update(state.snapshot,state.device,state.source,now);
         if(playback.Update(state.snapshot,state.device,state.source,now)) indexedSequence=graphSequence=UINT64_MAX;
         if(comparisonPlayback.Update(state.snapshot,state.device,state.source,state.Comparison() ? state.Comparison()->request : 0,now)) comparisonGraphGeneration=UINT64_MAX;
     }
+    TickAutomatic(now);
+}
+void Viewer::InitializeEmbedded(dyf::Gui& gui,dyf::RHI::IDevice& device)
+{embedded=std::make_unique<EmbeddedTracy>(gui,device);}
+void Viewer::ShowTracy(bool visible,bool persist)
+{
+    if(persist&&!automatic.SetTracyVisible(visible)) {tracyIssue=automatic.Status();return;}
+    tracyVisible=visible;
+    if(visible&&!tracyCollectRequested)
+    {
+#if DY_VIEWER_EMBED_TRACY
+        tracyCollectRequested=true;tracyConnectPending=true;tracyIssue.clear();
+#else
+        tracyIssue="이 분석기는 내장 Tracy를 제외하고 빌드됐습니다 (DY_VIEWER_EMBED_TRACY=OFF).";
+#endif
+    }
+}
+void Viewer::TickTracy()
+{
+    if(!embedded)return;
+    embedded->Tick();
+    if(tracyReplaceWaiting&&!embedded->ClosePending())
+    {
+        tracyReplaceWaiting=false;
+        if(embedded->CloseCancelled()) {tracyConnectPending=false;tracyIssue="대상 변경 취소 · 이전 Tracy 기록을 보존합니다.";}
+    }
+    if(tracyConnectPending&&!tracyReplaceWaiting&&reconnect&&state.snapshot&&client.GetState()==D::LiveClientState::Connected)
+    {
+        const auto pid=reconnect->processId;
+        uint64_t creation=0;
+        const auto handle=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid);
+        if(handle)
+        {
+            FILETIME created{},exited{},kernel{},user{};
+            if(GetProcessTimes(handle,&created,&exited,&kernel,&user))creation=(uint64_t(created.dwHighDateTime)<<32)|created.dwLowDateTime;
+            CloseHandle(handle);
+        }
+        const auto port=pid==automatic.Target().Pid() ? automatic.TracyPort() : manualTracyPort;
+        tracyConnectPending=false;
+        if(!creation)tracyIssue="게임의 PID·시작 시각을 확인하지 못했습니다.";
+        else if(embedded->Connect(pid,creation,port,tracyIssue))
+        {
+            if(embeddedPid!=pid||embeddedCreation!=creation||embeddedSession!=state.snapshot->session)tracyMetrics.Clear();
+            embeddedPid=pid;embeddedCreation=creation;embeddedSession=state.snapshot->session;
+        }
+        else if(embedded->ClosePending()) {tracyReplaceWaiting=true;tracyConnectPending=true;}
+    }
+    if(state.snapshot&&reconnect&&client.GetState()==D::LiveClientState::Connected
+        &&reconnect->processId==embeddedPid&&state.snapshot->session==embeddedSession)
+        embedded->ReadWorker([&](tracy::Worker& worker) {tracyMetrics.Read(worker,*state.snapshot);});
+}
+bool Viewer::RequestClose() {return !embedded||embedded->RequestClose();}
+std::optional<int64_t> Viewer::TracyMemoryLimit() const
+{
+    std::optional<int64_t> limit;
+#if DY_VIEWER_EMBED_TRACY
+    if(embedded)embedded->ReadWorker([&](tracy::Worker& worker) {limit=worker.GetMemoryLimit();});
+#endif
+    return limit;
+}
+bool Viewer::SaveTracy(const std::filesystem::path& path)
+{
+    if(!embedded)return false;
+    embedded->Stop();tracyCollectRequested=false;tracyConnectPending=false;
+    return embedded->SaveCapture(ToUtf8(path.native()),tracyIssue);
+}
+bool Viewer::OpenTracy(const std::filesystem::path& path)
+{
+    if(!embedded||!embedded->OpenCapture(ToUtf8(path.native()),tracyIssue))return false;
+    tracyMetrics.Clear();if(state.snapshot)tracyMetrics.Observe(*state.snapshot);
+    embeddedPid=0;embeddedCreation=0;embeddedSession={};tracyCollectRequested=false;tracyConnectPending=false;tracyVisible=true;
+    return true;
 }
 D::LiveId Viewer::Send(const D::ControlDesc& control, const D::ControlValue& value)
 {
@@ -124,8 +267,19 @@ void Viewer::Dock()
     if(ImGui::SmallButton("연결·실행")) ImGui::OpenPopup("##ConnectionSetup");
     ImGui::SetNextWindowSizeConstraints({280,0},{std::min(560.f,viewport->WorkSize.x-16),viewport->WorkSize.y*.8f});
     if(ImGui::BeginPopup("##ConnectionSetup",ImGuiWindowFlags_AlwaysAutoResize)) { Targets(); ImGui::EndPopup(); }
+    sameLineIfFits("분석 도구",ImGui::GetStyle().FramePadding.x*2);
+    if(ImGui::SmallButton("분석 도구")) ImGui::OpenPopup("##ExternalTools");
+    ImGui::SetNextWindowSizeConstraints({420,0},{std::min(660.f,viewport->WorkSize.x-16),viewport->WorkSize.y*.9f});
+    if(ImGui::BeginPopup("##ExternalTools",ImGuiWindowFlags_AlwaysAutoResize)) { ExternalTools(); ImGui::EndPopup(); }
     sameLineIfFits("배치 초기화",ImGui::GetStyle().FramePadding.x*2);
     if(ImGui::SmallButton("배치 초기화")) resetLayout=true;
+    sameLineIfFits("Tracy",30);
+    bool visible=tracyVisible;
+    if(ImGui::Checkbox("Tracy",&visible))ShowTracy(visible);
+    if(embedded&&embedded->Connected()) {sameLineIfFits("수집 중",0);ImGui::TextDisabled("수집 중");}
+    if(ImGui::IsItemHovered())ImGui::SetTooltip("내부 탭 표시. 탭을 숨겨도 수집과 기록은 유지합니다.");
+    if(automatic.Stage()!=AutoStage::Idle)
+        ImGui::TextWrapped("%s",automatic.Status().c_str());
     ImGui::Separator();
     const auto dock=ImGui::GetID("ExecutionVisualizerReadableFlowDock");
     if(!ImGui::DockBuilderGetNode(dock) || resetLayout)
@@ -144,6 +298,7 @@ void Viewer::Dock()
         ImGui::DockBuilderDockWindow("Controls / 실제 적용",controls);
         ImGui::DockBuilderDockWindow("Overview / 현재 상태",overview);
         ImGui::DockBuilderDockWindow("Flow / 데이터 흐름",rightSide);
+        ImGui::DockBuilderDockWindow("Tracy###Profiler",rightSide);
         ImGui::DockBuilderFinish(dock);
     }
     ImGui::DockSpace(dock,{0,0}); ImGui::End();
@@ -159,11 +314,12 @@ void Viewer::Targets()
     for(const auto& target : targets)
     {
         const auto title = std::to_string(target.processId) + "  " + target.executable + "##" + target.endpoint;
-        if(ImGui::Selectable(title.c_str(), reconnect && target.session == reconnect->session)) Connect(target);
+        if(ImGui::Selectable(title.c_str(), reconnect && target.session == reconnect->session))
+        {if(automatic.Target().Pid()!=target.processId)automatic.Cancel();Connect(target);}
         if(ImGui::IsItemHovered()) ImGui::SetTooltip("%s\nPID %u\n%s", target.executable.c_str(), target.processId, target.endpoint.c_str());
     }
     ImGui::BeginDisabled(client.GetState() == D::LiveClientState::Disconnected);
-    if(ImGui::Button("Disconnect / 연결 해제")) { client.Disconnect(); message = "연결 해제됨. 마지막 측정값은 과거 값으로 보존합니다."; }
+    if(ImGui::Button("Disconnect / 연결 해제")) {automatic.Cancel(); client.Disconnect(); message = "연결 해제됨. 마지막 측정값은 과거 값으로 보존합니다."; }
     ImGui::EndDisabled(); ImGui::SameLine(); ImGui::BeginDisabled(!reconnect.has_value());
     if(ImGui::Button("Reconnect")) Connect(*reconnect);
     ImGui::EndDisabled();
@@ -177,7 +333,7 @@ void Viewer::Targets()
                 std::string label = std::to_string(source.device) + "/" + std::to_string(source.source);
                 for(const auto& object : state.snapshot->objects) if(object.id == source.source) { label += " " + object.desc.label; break; }
                 if(ImGui::Selectable(label.c_str(), state.device == source.device && state.source == source.source))
-                { state.SelectSource(source.device, source.source); statistics.Clear(); playback.Clear(); presentationLog={};
+                { state.SelectSource(source.device, source.source); statistics.Clear();drawnMetrics.clear();presentedMetrics.clear();playback.Clear(); presentationLog={};
                     graphFocus=0; indexedSequence=graphSequence=UINT64_MAX; }
             }
             ImGui::EndCombo();
@@ -359,47 +515,52 @@ void Viewer::History()
     ImGui::SetNextItemWidth(220);
     ImGui::Combo("Metric",&historyMetric,"Frame ms\0CPU render ms\0GPU measured ms\0Upload bytes/frame\0Draw calls/frame\0Semantic live objects\0");
     if(statistics.history.empty()) { ImGui::TextDisabled("완료된 생산자 1초 구간 대기"); return; }
-    const auto point=[&](const D::LiveAggregate& bucket)->std::optional<double> {
-        if(!bucket.frameCount) return {};
-        if(historyMetric==3) return bucket.recordedMean.uploadBytes;
-        if(historyMetric==4) return bucket.recordedMean.draw+bucket.recordedMean.drawIndexed;
-        const auto& metric=historyMetric==5 ? bucket.objects : historyMetric==0 ? bucket.frame : historyMetric==1 ? bucket.cpuRender : bucket.gpuMeasured;
-        if(Ready(metric)) return metric.average;
-        return {};
-    };
+    static constexpr ComparisonMetric metrics[]{ComparisonMetric::Frame,ComparisonMetric::Cpu,ComparisonMetric::Gpu,ComparisonMetric::Upload,ComparisonMetric::Draws};
+    auto points=tracyMetrics.History(statistics.history,historyMetric<5 ? metrics[historyMetric] : ComparisonMetric::Frames);
+    if(historyMetric==5)for(size_t i=0;i<points.size();++i)
+    {
+        auto& point=points[i];const auto& metric=statistics.history[i].objects;
+        point.choice.value=Ready(metric) ? std::optional<double>(metric.average) : std::nullopt;
+        point.choice.origin=MetricOrigin::Engine;point.choice.reason="엔진 의미 객체 수";
+        point.choice.readyFrames=metric.ready;point.choice.evidence.definition="엔진 의미 객체 수의 유효 표본 평균";
+    }
     uint64_t end=0; double maximum=0; bool havePoint=false;
-    for(const auto& bucket:statistics.history)
-    { end=std::max(end,bucket.endNs); if(const auto value=point(bucket)) { maximum=std::max(maximum,*value); havePoint=true; } }
+    for(size_t i=0;i<statistics.history.size();++i)
+    { end=std::max(end,statistics.history[i].endNs); if(const auto value=points[i].choice.value) { maximum=std::max(maximum,*value); havePoint=true; } }
     if(!havePoint) { ImGui::TextDisabled("해당 측정값은 대기 · 미지원 · 미수집입니다."); return; }
     maximum=std::max(1.0,maximum*1.1); const auto begin=end>D::LiveHistoryWindowNs ? end-D::LiveHistoryWindowNs : 0;
     ImGui::TextDisabled("생산자 완료 1초 평균 · 초당 1회 갱신 · 세로축 0..%.3f",maximum);
     const auto origin=ImGui::GetCursorScreenPos();
     const ImVec2 size{std::max(1.f,ImGui::GetContentRegionAvail().x),std::max(50.f,ImGui::GetContentRegionAvail().y-28)};
     ImGui::InvisibleButton("##HistoryPlot",size); auto* draw=ImGui::GetWindowDrawList();
+    const bool historyVisible=ImGui::IsItemVisible();
     draw->AddRectFilled(origin,{origin.x+size.x,origin.y+size.y},IM_COL32(18,25,34,255));
     for(int i=0;i<=4;++i) draw->AddLine({origin.x,origin.y+size.y*i/4.f},{origin.x+size.x,origin.y+size.y*i/4.f},IM_COL32(90,105,130,45));
     std::optional<ImVec2> previous; D::LiveId revision=0; uint64_t previousEnd=0; bool previousMixed=false;
-    for(const auto& bucket:statistics.history)
+    for(size_t i=0;i<statistics.history.size();++i)
     {
+        const auto& bucket=statistics.history[i];const auto& point=points[i];
         if(bucket.endNs<begin) continue;
         const float x=origin.x+float(double(bucket.endNs-begin)/double(D::LiveHistoryWindowNs))*size.x;
         if(previousEnd && (revision!=bucket.appliedRevision || bucket.mixedRevision)) draw->AddLine({x,origin.y},{x,origin.y+size.y},IM_COL32(255,175,76,180));
-        const auto value=point(bucket);
+        const auto value=point.choice.value;
+        const auto color=point.choice.origin==MetricOrigin::Tracy ? IM_COL32(255,175,76,255) : IM_COL32(56,194,191,255);
+        if(historyVisible)RecordMetric("history."+std::to_string(i),point.choice);
         if(value)
         {
             const ImVec2 next{x,origin.y+size.y*(1.f-float(*value/maximum))};
-            if(previous && previousEnd==bucket.beginNs && revision==bucket.appliedRevision && !previousMixed && !bucket.mixedRevision)
-                draw->AddLine(*previous,next,IM_COL32(56,194,191,255),2);
-            draw->AddCircleFilled(next,4,IM_COL32(56,194,191,255)); previous=next;
+            if(previous && point.connectPrevious && previousEnd==bucket.beginNs && revision==bucket.appliedRevision && !previousMixed && !bucket.mixedRevision)
+                draw->AddLine(*previous,next,color,2);
+            draw->AddCircleFilled(next,4,color); previous=next;
         }
         else previous.reset();
         revision=bucket.appliedRevision; previousEnd=bucket.endNs; previousMixed=bucket.mixedRevision;
         if(ImGui::IsItemHovered() && std::abs(ImGui::GetIO().MousePos.x-x)<8)
-            ImGui::SetTooltip("완료 %.1f초 구간%s · 처리 %s개 · %s\nCPU 측정 %llu 대기 %llu / GPU 측정 %llu 대기 %llu",
-                (bucket.endNs-bucket.beginNs)/1e9,bucket.mixedRevision ? " (설정 전환 포함)" : "",DisplayAmount(double(bucket.frameCount),0).c_str(),value ? std::to_string(*value).c_str() : "미수집",
+            ImGui::SetTooltip("%s · 완료 %.1f초 구간%s · 처리 %s개 · %s\n%s\nCPU 측정 %llu 대기 %llu / GPU 측정 %llu 대기 %llu",
+                OriginName(point.choice.origin),(bucket.endNs-bucket.beginNs)/1e9,bucket.mixedRevision ? " (설정 전환 포함)" : "",DisplayAmount(double(bucket.frameCount),0).c_str(),value ? std::to_string(*value).c_str() : "미수집",point.choice.reason.c_str(),
                 bucket.cpuRender.ready,bucket.cpuRender.pending,bucket.gpuMeasured.ready,bucket.gpuMeasured.pending);
     }
-    ImGui::TextDisabled("-10초                          생산자 원본 시간 / 누락·미측정 구간은 연결하지 않음");
+    ImGui::TextDisabled("-10초 · 자체 청록 / Tracy 주황 · 출처 전환·누락은 잇지 않음");
 }
 
 void Viewer::Requests()
@@ -414,12 +575,22 @@ void Viewer::Requests()
 }
 void Viewer::Draw()
 {
-    statisticsDrawn=flowDrawn=false; comparisonDrawn.reset(); observationStatisticsDrawn.reset(); observationFlowDrawn.reset(); Dock();
+    statisticsDrawn=flowDrawn=false;drawnMetrics.clear();comparisonDrawn.reset(); observationStatisticsDrawn.reset(); observationFlowDrawn.reset(); Dock();
     Controls(); Overview(); Flow();
+    if(embedded)
+    {
+        const bool visible=tracyVisible;embedded->Draw(tracyVisible);
+        if(visible!=tracyVisible&&!automatic.SetTracyVisible(tracyVisible))tracyIssue=automatic.Status();
+    }
     LaunchDialog();
 }
 void Viewer::Presented(uint64_t nowNs)
 {
+    for(auto& metric:drawnMetrics)
+    {
+        IM_ASSERT(!state.snapshot||metric.second.choice.evidence.session==state.snapshot->session);
+        metric.second.presentedNs=nowNs;presentedMetrics[metric.first]=metric.second;
+    }
     presentationLog.Presented(statistics,playback,statisticsDrawn,flowDrawn,nowNs);
     presentationLog.PresentedComparison(comparisonDrawn ? &*comparisonDrawn : nullptr,nowNs);
     presentationLog.PresentedObservations(observationStatisticsDrawn ? &*observationStatisticsDrawn : nullptr,
@@ -429,10 +600,44 @@ bool Viewer::WriteReport(const std::filesystem::path& path,uint64_t frames) cons
 {
     std::ofstream output(path); if(!output) return false;
     output<<"native_presented_frames="<<frames<<"\nsnapshots_received="<<receivedSnapshots<<"\nclient_state="<<int(client.GetState())<<'\n';
+    output<<"auto_session_phase="<<int(automatic.Stage())<<"\nauto_target_pid="<<automatic.Target().Pid()
+        <<"\nauto_target_creation="<<automatic.Target().CreationTime()<<"\nauto_tracy_port="<<automatic.TracyPort()
+        <<"\nauto_status="<<automatic.Status()<<'\n';
+    output<<"embedded_tracy_visible="<<tracyVisible<<"\nembedded_tracy_collect_requested="<<tracyCollectRequested
+        <<"\nembedded_tracy_connected="<<(embedded&&embedded->Connected())<<"\nembedded_tracy_has_capture="<<(embedded&&embedded->HasCapture())
+        <<"\nembedded_target_pid="<<embeddedPid<<"\nembedded_target_creation="<<embeddedCreation
+        <<"\nembedded_tracy_issue="<<std::quoted(tracyIssue)<<'\n';
+    if(state.snapshot)for(const auto& control:state.snapshot->controls)if(control.device==state.device)
+    {
+        if(control.key=="tools.tracy") {if(const auto* value=std::get_if<int64_t>(&control.appliedValue))output<<"target_tracy_state="<<*value<<'\n';}
+        else if(control.key=="tools.renderdoc.connected") {if(const auto* value=std::get_if<bool>(&control.appliedValue))output<<"target_renderdoc_connected="<<*value<<'\n';}
+        else if(control.key=="tools.renderdoc.capture")output<<"target_renderdoc_capture_ready="<<control.writable<<'\n';
+    }
     if(const auto* source=state.Source())
         output<<"received_device="<<state.device<<"\nreceived_source="<<state.source<<"\nreceived_frame_id="<<source->latest.key.frame
             <<"\nreceived_revision="<<source->latest.appliedRevision<<"\nreceived_draw="<<source->latest.recorded.draw<<"\nreceived_draw_indexed="<<source->latest.recorded.drawIndexed
             <<"\nreceived_upload_bytes="<<source->latest.recorded.uploadBytes<<"\nqpc_clock_matches="<<state.ExactClock(D::GetLiveClockInfo())<<'\n';
+    output<<"legacy_numbers_origin=engine\nselected_metric_policy=compatible_tracy_original_first\n";
+    output<<std::setprecision(17);
+    if(statistics.state.snapshot)for(const auto& bucket:statistics.history)
+        output<<"engine_window="<<statistics.state.snapshot->session.high<<','<<statistics.state.snapshot->session.low<<','
+            <<bucket.device<<','<<bucket.source<<','<<bucket.appliedRevision<<','<<bucket.beginNs<<','<<bucket.endNs<<','<<bucket.frameCount
+            <<','<<int(bucket.frame.state)<<','<<bucket.frame.ready<<','<<bucket.frame.pending<<','<<bucket.frame.average
+            <<','<<int(bucket.cpuRender.state)<<','<<bucket.cpuRender.ready<<','<<bucket.cpuRender.pending<<','<<bucket.cpuRender.average<<'\n';
+    for(const auto& entry:presentedMetrics)
+    {
+        const auto& choice=entry.second.choice;const auto& evidence=choice.evidence;
+        output<<"selected_metric="<<entry.first<<','<<(choice.origin==MetricOrigin::Tracy ? "tracy" : "engine")<<',';
+        if(choice.value)output<<*choice.value;else output<<"--";
+        output<<','<<choice.readyFrames<<','<<evidence.session.high<<','<<evidence.session.low<<','<<evidence.device<<','<<evidence.source
+            <<','<<evidence.revision<<','<<evidence.beginNs<<','<<evidence.endNs<<','<<evidence.frames<<','<<evidence.frameDigest
+            <<','<<std::quoted(evidence.definition)<<','<<std::quoted(choice.reason)<<','<<entry.second.request<<','<<entry.second.presentedNs
+            <<','<<evidence.tracyConnection<<','<<evidence.tracyFirstNs<<','<<evidence.tracyLastNs<<'\n';
+        const auto& range=entry.second.range;
+        if(range.windows)output<<"selected_metric_range="<<entry.first<<','<<(choice.origin==MetricOrigin::Tracy ? "tracy" : "engine")
+            <<','<<int(range.state)<<','<<range.low<<','<<range.high<<','<<range.windows<<'\n';
+        for(const auto& frame:evidence.originalFrames)output<<"selected_metric_frame="<<entry.first<<','<<frame.device<<','<<frame.source<<','<<frame.frame<<'\n';
+    }
     presentationLog.Write(output);
     return output.good();
 }

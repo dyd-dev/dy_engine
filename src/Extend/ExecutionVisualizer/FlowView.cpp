@@ -23,14 +23,15 @@ static std::string MetricText(double value,int decimals)
 {
     return DisplayAmount(value,decimals);
 }
-static bool MetricCard(const char* name,double mean,D::LiveValueState state,const D::LiveMetricRange& range,int decimals,const char* footer=nullptr)
+static bool MetricCard(const char* name,std::optional<double> mean,D::LiveValueState state,const D::LiveMetricRange& range,int decimals,const char* footer=nullptr)
 {
     const auto origin=ImGui::GetCursorScreenPos(); const ImVec2 size{std::max(1.f,ImGui::GetContentRegionAvail().x),82};
     ImGui::InvisibleButton(name,size); const bool visible=ImGui::IsItemVisible(); auto* draw=ImGui::GetWindowDrawList();
     draw->AddRectFilled(origin,{origin.x+size.x,origin.y+size.y},IM_COL32(23,35,48,255),5);
     TextAt(draw,{origin.x+6,origin.y+3},22,muted,name);
     char text[160];
-    if(state==D::LiveValueState::Ready && std::isfinite(mean)) std::snprintf(text,sizeof(text),"%s",MetricText(mean,decimals).c_str());
+    IM_ASSERT(mean || state!=D::LiveValueState::Ready);
+    if(mean && state==D::LiveValueState::Ready && std::isfinite(*mean)) std::snprintf(text,sizeof(text),"%s",MetricText(*mean,decimals).c_str());
     else std::snprintf(text,sizeof(text),"-- (%s)",ValueState(state));
     TextAt(draw,{origin.x+6,origin.y+26},30,ink,text);
     if(footer) std::snprintf(text,sizeof(text),"%s",footer);
@@ -38,7 +39,7 @@ static bool MetricCard(const char* name,double mean,D::LiveValueState state,cons
         std::snprintf(text,sizeof(text),"Low %s   High %s",MetricText(range.low,decimals).c_str(),MetricText(range.high,decimals).c_str());
     else std::snprintf(text,sizeof(text),"Low --   High --");
     TextAt(draw,{origin.x+6,origin.y+59},20,muted,text);
-    if(ImGui::IsItemHovered()) ImGui::SetTooltip("완료된 원본 구간의 값입니다. Low / High는 해당 지표의 완료 1초 평균 최저·최고이며 개별 프레임 극값이 아닙니다.");
+    if(ImGui::IsItemHovered()) ImGui::SetTooltip("완료된 원본 구간의 값입니다. Low / High는 같은 출처의 완료 1초 평균 최저·최고입니다.");
     return visible;
 }
 void Viewer::Overview()
@@ -70,13 +71,28 @@ void Viewer::Overview()
         if(ImGui::BeginTable("##Metrics",columns,ImGuiTableFlags_SizingStretchSame,{width,0}))
         {
             const auto card=[&](const char* title,double value,D::LiveValueState availability,const auto& range,int decimals) {
-                ImGui::TableNextColumn(); if(MetricCard(title,value,availability,range,decimals) && source) statisticsDrawn=true;
+                const std::string footer=range.state==D::LiveValueState::Ready&&range.windows
+                    ? "자체 · Low "+MetricText(range.low,decimals)+" / "+MetricText(range.high,decimals) : "자체 · Low -- / High --";
+                ImGui::TableNextColumn(); if(MetricCard(title,value,availability,range,decimals,footer.c_str()) && source) statisticsDrawn=true;
             };
             ImGui::TableNextColumn();
-            if(MetricCard("초당 처리 구간",rate.value_or(0),rate ? D::LiveValueState::Ready : D::LiveValueState::Unavailable,{},1,"완료 구간 수 / 구간 길이") && source) statisticsDrawn=true;
-            card("평균 구간 (ms)",a.frame.average,metricState(a.frame),ranges.frame,3);
-            card("평균 CPU (ms)",a.cpuRender.average,metricState(a.cpuRender),ranges.cpuRender,3);
-            card("평균 GPU (ms)",a.gpuMeasured.average,metricState(a.gpuMeasured),ranges.gpuMeasured,3);
+            if(MetricCard("초당 처리 구간",rate.value_or(0),rate ? D::LiveValueState::Ready : D::LiveValueState::Unavailable,{},1,"자체 · 완료 구간 수 / 길이") && source) statisticsDrawn=true;
+            const auto selectedCard=[&](const char* title,ComparisonMetric metric,const auto& ownMetric,const auto& ownRange,const char* slot) {
+                const auto choice=tracyMetrics.Select(a,metric);
+                const auto originRanges=tracyMetrics.RunLowHigh(a.device,a.source,metric);
+                const auto& range=choice.origin==MetricOrigin::Tracy ? originRanges.tracy : ownRange;
+                const auto missingState=ownMetric.state!=D::LiveValueState::Ready ? ownMetric.state : ownMetric.pending ? D::LiveValueState::Pending
+                    : ownMetric.unsupported ? D::LiveValueState::Unsupported : D::LiveValueState::Unavailable;
+                const std::string footer=std::string(OriginName(choice.origin))+(range.state==D::LiveValueState::Ready&&range.windows
+                    ? " · Low "+MetricText(range.low,3)+" / "+MetricText(range.high,3) : " · Low -- / High --");
+                ImGui::TableNextColumn();
+                if(MetricCard(title,choice.value,choice.value ? D::LiveValueState::Ready : missingState,range,3,footer.c_str())&&source)
+                {statisticsDrawn=true;RecordMetric(slot,choice,0,range);}
+                if(ImGui::IsItemHovered())ImGui::SetTooltip("%s · %s\n원본 %llu 프레임 · 동일 측정 구간만 대체\nLow/High는 같은 출처의 실행 중 완료 구간 범위",OriginName(choice.origin),choice.reason.c_str(),choice.readyFrames);
+            };
+            selectedCard("평균 구간 (ms)",ComparisonMetric::Frame,a.frame,ranges.frame,"overview.frame");
+            selectedCard("평균 CPU (ms)",ComparisonMetric::Cpu,a.cpuRender,ranges.cpuRender,"overview.cpu");
+            selectedCard("평균 GPU (ms)",ComparisonMetric::Gpu,a.gpuMeasured,ranges.gpuMeasured,"overview.gpu");
             card("기록 Draw / 구간",a.recordedMean.draw+a.recordedMean.drawIndexed,counter,ranges.drawCalls,1);
             card("인스턴스 / 구간",a.recordedMean.instances,counter,ranges.instances,1);
             card("기록 배치 / 구간",a.recordedMean.batches,counter,ranges.batches,1);
@@ -129,15 +145,17 @@ void Viewer::ObservationStatistics()
                 ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextWrapped("%s",StageName(D::LiveStage(stage)));
                 for(size_t metric=0;metric<size_t(StageMetric::Count);++metric)
                 {
-                    ImGui::TableNextColumn(); const auto value=StageNumber(a,D::LiveStage(stage),StageMetric(metric));
+                    ImGui::TableNextColumn();const auto choice=tracyMetrics.SelectStage(a,D::LiveStage(stage),StageMetric(metric));const auto value=choice.value;
                     if(value) ImGui::TextUnformatted(MetricText(*value,metric<2 ? 3 : 1).c_str()); else ImGui::TextDisabled("--");
                     shown.stageVisibility[stage][metric]=ImGui::IsItemVisible();
+                    if(shown.stageVisibility[stage][metric])RecordMetric("stage."+std::to_string(stage)+"."+std::to_string(metric),choice);
                     if(metric<2)
                     {
                         const auto& timing=metric==0 ? a.stages[stage].cpu : a.stages[stage].gpu;
-                        ImGui::TextWrapped("%s · 측정 %llu/%llu",ValueState(timing.state),timing.ready,a.frameCount);
-                        if(ImGui::IsItemHovered()) ImGui::SetTooltip("대기 %llu / 타이밍 미지원 %llu / 미수집 %llu",timing.pending,timing.unsupported,timing.unavailable);
+                        ImGui::TextWrapped("%s · 측정 %llu/%llu",OriginName(choice.origin),choice.readyFrames,a.frameCount);
+                        if(ImGui::IsItemHovered()) ImGui::SetTooltip("%s\n자체 상태 %s · 대기 %llu / 타이밍 미지원 %llu / 미수집 %llu",choice.reason.c_str(),ValueState(timing.state),timing.pending,timing.unsupported,timing.unavailable);
                     }
+                    else ImGui::TextDisabled("자체");
                 }
             }
             ImGui::EndTable();

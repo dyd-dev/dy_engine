@@ -1,4 +1,9 @@
 #include "LiveInternal.h"
+#include "LiveTracy.h"
+#ifdef DY_TRACY_ENABLED
+#include "tracy/TracyC.h"
+#include "client/TracyProfiler.hpp"
+#endif
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -53,8 +58,16 @@ void AggregationAllocationPoint()
 }
 bool ReserveDetail(std::size_t bytes,std::uint64_t budget=DetailBudget){auto current=detailBytes.load();while(current<=budget&&bytes<=budget-current){if(detailBytes.compare_exchange_weak(current,current+bytes))return true;}return false;}
 struct SourceRun;
+struct FrameTrace
+{
+#if defined(DY_TRACY_ENABLED) || defined(DY_LIVE_TRACE_TEST)
+    std::uint64_t attempts=0,sequence=0,previousFrame=0,unsupportedStages=0;
+    std::array<std::uint64_t,LiveStageCount> stageCount{},stageDigest{};
+    const char* frameName=nullptr;
+#endif
+};
 struct EvidenceRecord {std::mutex mutex;LiveFrameEvidence value;std::size_t retainedBytes=0;~EvidenceRecord(){detailBytes-=retainedBytes;}};
-struct FrameRecord { std::mutex mutex; LiveFrameSummary summary; LiveFlowSnapshot flow; std::shared_ptr<const LiveFlowSnapshot> publishedFlow; std::shared_ptr<SourceRun> run; std::weak_ptr<EvidenceRecord> evidence; bool ended=false,retry=false,acquireSkipped=false,settingsNotified=false,coverage=false,coverageLost=false; std::uint64_t attemptBeginNs=0,cpuNs=0,omittedGpuSpans=0;std::size_t retainedBytes=0;std::set<std::tuple<LiveId,LiveId,std::uint64_t,LiveOutcome>> counted;std::map<std::tuple<LiveId,LiveId,std::uint64_t>,LiveCounters<std::uint64_t>> submittedCounts;~FrameRecord(){detailBytes-=retainedBytes;} };
+struct FrameRecord { std::mutex mutex; LiveFrameSummary summary; LiveFlowSnapshot flow; std::shared_ptr<const LiveFlowSnapshot> publishedFlow; std::shared_ptr<SourceRun> run; std::weak_ptr<EvidenceRecord> evidence; FrameTrace trace; bool ended=false,retry=false,acquireSkipped=false,settingsNotified=false,coverage=false,coverageLost=false; std::uint64_t attemptBeginNs=0,cpuNs=0,omittedGpuSpans=0;std::size_t retainedBytes=0;std::set<std::tuple<LiveId,LiveId,std::uint64_t,LiveOutcome>> counted;std::map<std::tuple<LiveId,LiveId,std::uint64_t>,LiveCounters<std::uint64_t>> submittedCounts;~FrameRecord(){detailBytes-=retainedBytes;} };
 void RepairEvidence(FrameRecord& frame)
 {
     if(auto record=frame.evidence.lock()){std::lock_guard<std::mutex> lock(record->mutex);auto& value=record->value;if(value.summary.key!=frame.summary.key)return;value.summary=frame.summary;value.flow.gpuSpans.assign(frame.flow.gpuSpans.begin(),frame.flow.gpuSpans.end());value.loss.gpuSpans=frame.omittedGpuSpans;if(value.available&&(value.windowRevision!=frame.summary.appliedRevision||std::any_of(value.flow.gpuSpans.begin(),value.flow.gpuSpans.end(),[&](const auto& span){return span.frame!=value.summary.key||span.appliedRevision!=value.summary.appliedRevision;}))){value.available=false;++value.loss.frames;}++value.flow.revision;}
@@ -128,6 +141,10 @@ struct State
     std::unordered_map<LiveId,std::shared_ptr<const LiveObjectInfo>> objects;
     std::map<LiveId,LiveDeviceSnapshot> devices;
     std::map<LiveId,SourceRecord> sources;
+#ifdef DY_TRACY_ENABLED
+    // Tracy's shutdown can outlive State; FrameMarkNamed addresses must remain valid until process exit.
+    std::map<LiveId,std::string>& tracyFrameNames=*new std::map<LiveId,std::string>;
+#endif
     std::map<std::pair<LiveId,std::uint64_t>,BatchRecord> batches;
     std::uint64_t nextBatchSweepNs=0;
     std::map<LiveId,std::shared_ptr<ControlSlot>> controls;
@@ -139,6 +156,71 @@ struct State
     std::size_t frameCount=0;
 };
 State& S() { static State value;return value; }
+struct TraceClock { std::int64_t time=0;std::uint64_t connection=0; };
+TraceClock TraceNow() noexcept
+{
+#ifdef DY_LIVE_TRACE_TEST
+    return {std::int64_t(LiveNowNs()),1};
+#elif defined(DY_TRACY_ENABLED)
+    auto& profiler=tracy::GetProfiler();if(!profiler.IsConnected())return {};
+#ifdef TRACY_ON_DEMAND
+    const auto connection=profiler.ConnectionId()+1;
+#else
+    constexpr std::uint64_t connection=1;
+#endif
+    return {tracy::Profiler::GetTime(),connection};
+#else
+    return {};
+#endif
+}
+void TraceEmit(Detail::LiveTraceEvent event,TraceClock stamp) noexcept
+{
+    if(!stamp.connection)return;
+    event.session=S().session;event.connection=stamp.connection;
+#ifdef DY_LIVE_TRACE_TEST
+    Detail::CaptureLiveTraceForTest(event,std::uint64_t(stamp.time));
+#elif defined(DY_TRACY_ENABLED)
+    try{
+        if(TraceNow().connection!=stamp.connection)return;
+        const auto text=Detail::EncodeLiveTrace(event);
+        auto* copy=static_cast<char*>(tracy::tracy_malloc(text.size()));if(!copy)return;
+        std::memcpy(copy,text.data(),text.size());
+        // v0.13.1 Message payload, with Tracy's own timestamp captured at the boundary before formatting.
+        TracyQueuePrepare(tracy::QueueType::Message);
+        tracy::MemWrite(&item->messageFat.time,stamp.time);tracy::MemWrite(&item->messageFat.text,std::uint64_t(copy));
+        tracy::MemWrite(&item->messageFat.size,std::uint16_t(text.size()));
+        TracyQueueCommit(messageFatThread);
+    }catch(...) {}
+#endif
+}
+void TraceAttempt(FrameRecord& frame,bool begin,TraceClock stamp) noexcept
+{
+#if defined(DY_TRACY_ENABLED) || defined(DY_LIVE_TRACE_TEST)
+    if(begin)++frame.trace.attempts;
+    Detail::LiveTraceEvent e;e.kind=begin?Detail::LiveTraceKind::AttemptBegin:Detail::LiveTraceKind::AttemptEnd;
+    e.frame=frame.summary.key;e.revision=frame.summary.appliedRevision;e.id=frame.trace.attempts;TraceEmit(e,stamp);
+#else
+    (void)frame;(void)begin;(void)stamp;
+#endif
+}
+void TraceStageContribution(FrameRecord& frame,const LiveEvent& event) noexcept
+{
+#if defined(DY_TRACY_ENABLED) || defined(DY_LIVE_TRACE_TEST)
+    if(event.endNs>=event.beginNs&&event.endNs){const auto i=std::size_t(event.stage);++frame.trace.stageCount[i];frame.trace.stageDigest[i]^=Detail::LiveTraceDigest(event.id);}
+#else
+    (void)frame;(void)event;
+#endif
+}
+void TraceDeferredContribution(FrameRecord& frame,const LiveEventSummary& summary) noexcept
+{
+#if defined(DY_TRACY_ENABLED) || defined(DY_LIVE_TRACE_TEST)
+    for(std::size_t i=0;i<LiveStageCount;++i)if(summary.stages[i].cpu.state==LiveValueState::Ready)frame.trace.unsupportedStages|=1ull<<i;
+#else
+    (void)frame;(void)summary;
+#endif
+}
+// Definition follows SourceRun; the final marker is also the authoritative stage contributor seal.
+void TraceFrameEnd(FrameRecord&,bool,TraceClock) noexcept;
 bool Matches(const EvidenceCandidate& candidate,const LiveAggregate& aggregate)
 {return aggregate.frameCount&&!aggregate.mixedRevision&&candidate.key.frame&&candidate.beginNs==aggregate.beginNs&&candidate.endNs==aggregate.endNs&&candidate.revision==aggregate.appliedRevision;}
 EvidenceCandidate SelectEvidence(const SourceRecord& source,const LiveAggregate& aggregate)
@@ -251,6 +333,22 @@ struct SourceRun
     LiveRunRanges frozen;
     LiveFrameSummary latest;
 };
+void TraceFrameEnd(FrameRecord& frame,bool boundary,TraceClock stamp) noexcept
+{
+#if defined(DY_TRACY_ENABLED) || defined(DY_LIVE_TRACE_TEST)
+    Detail::LiveTraceEvent e;e.kind=boundary?Detail::LiveTraceKind::FrameEnd:Detail::LiveTraceKind::FrameSeal;
+    e.frame=frame.summary.key;e.revision=frame.summary.appliedRevision;e.id=frame.trace.attempts;e.aux=unsigned(frame.summary.outcome);
+    e.originNs=frame.run?frame.run->originNs:0;e.endNs=frame.summary.endNs;e.previousFrame=frame.trace.previousFrame;
+    e.sequence=++frame.trace.sequence;e.stageCount=frame.trace.stageCount;e.stageDigest=frame.trace.stageDigest;
+    e.unsupportedStages=frame.trace.unsupportedStages|(frame.summary.incomplete?(1ull<<63):0);
+    TraceEmit(e,stamp);
+#ifdef DY_TRACY_ENABLED
+    if(boundary&&frame.trace.frameName)TracyCFrameMarkNamed(frame.trace.frameName);
+#endif
+#else
+    (void)frame;(void)boundary;(void)stamp;
+#endif
+}
 bool Invalid(const SourceRun& run,std::uint64_t index) {return run.invalidSeconds[index%run.invalidSeconds.size()]==index+1;}
 void Range(LiveMetricRange& range,double value)
 {
@@ -394,7 +492,7 @@ void UpdateControlComparisons(State& state,LiveId id,SourceRecord& source,std::u
     if(!source.run)return;
     std::lock_guard<std::mutex> lock(source.run->mutex);auto& run=*source.run;
     const auto latest=CompletedSecond(run,source.revision,now);
-    for(auto& request:state.requests)if(request.source==id&&request.state==ControlState::Applied){
+    for(auto& request:state.requests)if(request.source==id&&request.state==ControlState::Applied&&request.appliedRevision){
         RefreshComparison(run,request.baseline);
         if(request.appliedRevision==source.revision)request.after=latest.beginNs>=request.appliedNs?latest:UnavailableSecond(latest);
         else RefreshComparison(run,request.after);
@@ -556,11 +654,15 @@ LiveFrameToken BeginLiveFrame(LiveId device,LiveId source) noexcept
     LiveFrameToken token;token.previous=context;if(!IsLiveCollectorEnabled()||!device||!source)return token;
     if(context.frame.frame&&context.frame.device==device){auto frame=Frame(context.frame);if(frame){std::lock_guard<std::mutex> lock(frame->mutex);if(!frame->ended){token.key=context.frame;return token;}}token.previous={};}
     try{auto& s=S();std::lock_guard<std::mutex> lock(s.mutex);auto& record=s.sources[source];record.device=device;
-        if(!record.frames.empty()){auto frame=record.frames.back();std::lock_guard<std::mutex> frameLock(frame->mutex);if(!frame->ended&&frame->retry){frame->retry=false;frame->acquireSkipped=false;frame->attemptBeginNs=LiveNowNs();token.key=frame->summary.key;token.ownsFrame=true;currentFrame=frame;context={token.key,record.revision,source,0,0};return token;}}
+        if(!record.frames.empty()){auto frame=record.frames.back();std::lock_guard<std::mutex> frameLock(frame->mutex);if(!frame->ended&&frame->retry){frame->retry=false;frame->acquireSkipped=false;const auto stamp=TraceNow();frame->attemptBeginNs=LiveNowNs();TraceAttempt(*frame,true,stamp);token.key=frame->summary.key;token.ownsFrame=true;currentFrame=frame;context={token.key,record.revision,source,0,0};return token;}}
         while(s.frameCount>=8192){bool removed=false;for(auto it=s.sources.begin();it!=s.sources.end();){if(it->first!=source&&it->second.frames.empty()&&it->second.retiredNs){it=s.sources.erase(it);continue;}auto ended=std::find_if(it->second.frames.begin(),it->second.frames.end(),[](const auto& f){return f->ended;});if(ended!=it->second.frames.end()){EvictFrame(*ended);it->second.frames.erase(ended);--s.frameCount;++s.omittedFrames;removed=true;break;}++it;}if(!removed){if(record.frames.empty()&&!record.run)s.sources.erase(source);++s.omittedFrames;return token;}}
         token.key={device,source,AllocateLiveId()};token.ownsFrame=true;
-        auto frame=std::make_shared<FrameRecord>();frame->summary.key=token.key;frame->summary.beginNs=LiveNowNs();frame->attemptBeginNs=frame->summary.beginNs;frame->summary.appliedRevision=record.revision;frame->flow.key=token.key;
+        auto frame=std::make_shared<FrameRecord>();frame->summary.key=token.key;const auto stamp=TraceNow();frame->summary.beginNs=LiveNowNs();frame->attemptBeginNs=frame->summary.beginNs;frame->summary.appliedRevision=record.revision;frame->flow.key=token.key;
         if(!record.run){record.run=std::make_shared<SourceRun>();record.run->device=device;record.run->source=source;record.run->originNs=frame->summary.beginNs;}frame->run=record.run;
+#ifdef DY_TRACY_ENABLED
+        auto& name=s.tracyFrameNames[source];if(name.empty())name="dyf Live device "+std::to_string(device)+" source "+std::to_string(source);frame->trace.frameName=name.c_str();
+#endif
+        TraceAttempt(*frame,true,stamp);
         record.frames.push_back(frame);++s.frameCount;currentFrame=frame;context={token.key,record.revision,source,0,0};
         while(s.frameCount>8192){bool removed=false;for(auto it=s.sources.begin();it!=s.sources.end();){if(it->second.frames.empty()&&it->second.retiredNs){it=s.sources.erase(it);continue;}if(!it->second.frames.empty()&&it->second.frames.front()->ended){EvictFrame(it->second.frames.front());it->second.frames.pop_front();--s.frameCount;++s.omittedFrames;removed=true;break;}++it;}if(!removed)break;}
     }catch(...){context={token.key,0,source,0,0};++S().omittedFrames;}
@@ -577,12 +679,16 @@ void EndLiveFrame(LiveFrameToken token,LiveOutcome outcome) noexcept
         const auto& work=f->summary.recorded;
         const bool skipped=outcome==LiveOutcome::Skipped||(outcome==LiveOutcome::Completed&&f->acquireSkipped);
         const bool retry=skipped&&!f->settingsNotified&&!work.draw&&!work.drawIndexed&&!work.dispatch&&!work.dispatchMesh&&!work.uploadCalls&&!f->summary.submitted.submissions;
-        if(token.ownsFrame&&f->attemptBeginNs){f->cpuNs+=LiveNowNs()-f->attemptBeginNs;f->attemptBeginNs=0;}
+        if(token.ownsFrame&&f->attemptBeginNs){const auto stamp=TraceNow();f->cpuNs+=LiveNowNs()-f->attemptBeginNs;f->attemptBeginNs=0;TraceAttempt(*f,false,stamp);}
         if(token.ownsFrame&&retry)f->retry=true;
         if(token.ownsFrame&&!retry){
         if(skipped)outcome=LiveOutcome::Skipped;
-        f->summary.endNs=LiveNowNs();f->summary.cpuRender={LiveValueState::Ready,double(f->cpuNs)/1e6};f->summary.outcome=outcome;f->ended=true;
+        const auto endStamp=TraceNow();f->summary.endNs=LiveNowNs();f->summary.cpuRender={LiveValueState::Ready,double(f->cpuNs)/1e6};f->summary.outcome=outcome;f->ended=true;
         auto& source=s.sources[token.key.source];auto& frames=source.frames;
+#if defined(DY_TRACY_ENABLED) || defined(DY_LIVE_TRACE_TEST)
+        f->trace.previousFrame=source.lastEndedKey.frame;
+#endif
+        TraceFrameEnd(*f,true,endStamp);
         if(source.lastEndedNs&&f->summary.endNs>=source.lastEndedNs)f->summary.frame={LiveValueState::Ready,double(f->summary.endNs-source.lastEndedNs)/1e6};
         if(auto previous=source.lastEnded.lock();previous&&previous.get()!=f){std::lock_guard<std::mutex> previousLock(previous->mutex);if(previous->publishedFlow){const auto bytes=previous->publishedFlow->events.capacity()*sizeof(LiveEvent)+previous->publishedFlow->links.capacity()*sizeof(LiveFlowLink);previous->retainedBytes-=bytes;detailBytes-=bytes;}previous->publishedFlow.reset();}
         if(currentFrame&&currentFrame.get()==f)source.lastEnded=currentFrame;else for(auto frame=frames.rbegin();frame!=frames.rend();++frame)if(frame->get()==f){source.lastEnded=*frame;break;}source.lastEndedKey=f->summary.key;source.lastEndedNs=f->summary.endNs;
@@ -616,10 +722,11 @@ void ReleaseLiveDetailBytes(std::size_t bytes) noexcept{detailBytes-=bytes;}
 void RecordLiveEventSummary(LiveCommandRef command,const LiveEventSummary& summary) noexcept
 {
     if(!IsLiveCollectorEnabled())return;
-    try{auto& s=S();auto f=Frame(context.frame);if(!f){s.omittedEvents+=summary.omittedEvents;s.omittedLinks+=summary.omittedLinks;return;}std::lock_guard<std::mutex> lock(f->mutex);LateSecondUpdate update(*f);Add(f->summary.recorded,summary.recorded);
+    try{auto& s=S();auto f=Frame(context.frame);if(!f){s.omittedEvents+=summary.omittedEvents;s.omittedLinks+=summary.omittedLinks;return;}std::lock_guard<std::mutex> lock(f->mutex);LateSecondUpdate update(*f);Add(f->summary.recorded,summary.recorded);TraceDeferredContribution(*f,summary);
         for(std::size_t i=0;i<LiveStageCount;++i){auto& to=f->summary.stages[i];const auto& from=summary.stages[i];to.elements+=from.elements;to.bytes+=from.bytes;to.operations+=from.operations;if(from.cpu.state==LiveValueState::Ready){to.cpu.state=LiveValueState::Ready;to.cpu.milliseconds+=from.cpu.milliseconds;}}
         f->flow.omittedEvents+=summary.omittedEvents;f->flow.omittedLinks+=summary.omittedLinks;s.omittedEvents+=summary.omittedEvents;s.omittedLinks+=summary.omittedLinks;f->summary.incomplete|=summary.omittedEvents||summary.omittedLinks;
         if(command.commandList){auto logical=summary.recorded;ClearNativeUploadCounts(logical);std::lock_guard<std::mutex> commands(s.commandMutex);const auto key=std::make_pair(command.commandList,command.generation);for(auto it=s.commandCounts.lower_bound({command.commandList,0});it!=s.commandCounts.end()&&it->first.first==command.commandList;)if(it->first!=key)it=s.commandCounts.erase(it);else++it;if(s.commandCounts.size()<4096||s.commandCounts.count(key))Add(s.commandCounts[key],logical);else f->summary.incomplete=true;}
+        if(f->ended)TraceFrameEnd(*f,false,TraceNow());
     }catch(...){++S().omittedEvents;}
 }
 void RecordLiveEvent(const LiveEvent& input,bool includeSummary) noexcept
@@ -633,7 +740,7 @@ void RecordLiveEvent(const LiveEvent& input,bool includeSummary) noexcept
         std::optional<LiveFrameSummary> before;if(f->ended&&f->run)before=summary;
         if(static_cast<std::size_t>(e.stage)>=LiveStageCount){++s.omittedEvents;summary.incomplete=true;return;}
         if(includeSummary&&e.kind==LiveEventKind::Submission&&(e.outcome==LiveOutcome::Submitted||e.outcome==LiveOutcome::Completed)&&f->counted.count(std::make_tuple(e.submission,e.command.commandList,e.command.generation,e.outcome)))return;
-        if(includeSummary){LiveEventSummary eventSummary;AccumulateLiveEventSummary(eventSummary,e);auto counts=eventSummary.recorded;
+        if(includeSummary){LiveEventSummary eventSummary;AccumulateLiveEventSummary(eventSummary,e);auto counts=eventSummary.recorded;TraceStageContribution(*f,e);
         auto& stage=summary.stages[static_cast<std::size_t>(e.stage)];const auto& extra=eventSummary.stages[static_cast<std::size_t>(e.stage)];stage.elements+=extra.elements;stage.bytes+=extra.bytes;stage.operations+=extra.operations;if(extra.cpu.state==LiveValueState::Ready){stage.cpu.state=LiveValueState::Ready;stage.cpu.milliseconds+=extra.cpu.milliseconds;}
         if(e.kind==LiveEventKind::Submission){
             if(e.outcome==LiveOutcome::Submitted||e.outcome==LiveOutcome::Completed){
@@ -653,7 +760,7 @@ void RecordLiveEvent(const LiveEvent& input,bool includeSummary) noexcept
         }
         if(e.kind==LiveEventKind::Output&&e.commandKind==LiveCommandKind::Present&&e.outcome==LiveOutcome::Completed&&!f->ended)f->acquireSkipped=false;
         if(e.kind==LiveEventKind::Wait&&e.outcome==LiveOutcome::Skipped&&e.id==e.context.frame.frame){f->acquireSkipped=true;auto existing=std::find_if(f->flow.events.begin(),f->flow.events.end(),[&](const auto& v){return v.id==e.id&&v.kind==LiveEventKind::Wait&&v.outcome==LiveOutcome::Skipped;});if(existing!=f->flow.events.end()){existing->endNs=e.endNs;existing->operations+=e.operations;return;}}
-        if(f->ended){if(before)UpdateSecond(*f,&*before);RepairEvidence(*f);AppendEvidenceDetail(*f,&e,nullptr);lock.unlock();if(!AppendLateDetail(f,&e,nullptr))++s.omittedEvents;}
+        if(f->ended){if(includeSummary&&e.endNs>=e.beginNs&&e.endNs)TraceFrameEnd(*f,false,TraceNow());if(before)UpdateSecond(*f,&*before);RepairEvidence(*f);AppendEvidenceDetail(*f,&e,nullptr);lock.unlock();if(!AppendLateDetail(f,&e,nullptr))++s.omittedEvents;}
         else if(!PushDetail(*f,f->flow.events,e,8192)){++f->flow.omittedEvents;++s.omittedEvents;summary.incomplete=true;}
     }catch(...){++s.omittedEvents;try{if(auto f=Frame(input.context.frame.frame?input.context.frame:context.frame)){std::lock_guard<std::mutex> lock(f->mutex);f->summary.incomplete=true;}}catch(...) {}}
 }
@@ -772,7 +879,10 @@ static std::uint32_t PollControlsImpl(LiveId owner,LiveFrameKey key,bool checkOw
             ControlApplyResult result;try{result=slot.handler(item.first,key);}catch(const std::exception& e){result.message=e.what();}catch(...){result.message="Control callback failed";}
             ++count;
             if(result.normalizedExpected){auto& s=S();std::lock_guard<std::mutex> lock(s.mutex);auto* r=FindRequest(s,item.first.request);if(!Validate(slot.desc,*result.normalizedExpected,false)){result.state=ControlState::Failed;result.message="Invalid normalized control value";}else if(r&&!Terminal(r->state))s.expectedRequests[item.first.request]=*result.normalizedExpected;}
-            if(result.state==ControlState::Applied)CompleteControl(item.first.request,key,result.actual);
+            if(result.state==ControlState::Applied){
+                CompleteControl(item.first.request,key,result.actual);
+                if(!result.message.empty()){auto& s=S();std::lock_guard<std::mutex> lock(s.mutex);if(auto* r=FindRequest(s,item.first.request);r&&r->state==ControlState::Applied)r->message=result.message;}
+            }
             else{auto& s=S();std::lock_guard<std::mutex> lock(s.mutex);auto* r=FindRequest(s,item.first.request);if(r&&!Terminal(r->state)){r->state=result.state==ControlState::PendingApply?ControlState::PendingApply:ControlState::Failed;r->message=result.message;slot.pending=r->state==ControlState::PendingApply;for(const auto& newer:s.requests)if(newer.control==r->control&&newer.state==ControlState::Requested&&newer.request!=r->request){r->state=ControlState::Cancelled;r->message="Superseded";break;}if(Terminal(r->state))s.expectedRequests.erase(r->request);}}
             {auto& s=S();std::lock_guard<std::mutex> lock(s.mutex);slot.executing=0;}
         }
@@ -793,6 +903,11 @@ void CompleteControl(LiveId request,LiveFrameKey key,const ControlValue& value) 
     try{auto& s=S();std::lock_guard<std::mutex> lock(s.mutex);auto* r=FindRequest(s,request);if(!r||Terminal(r->state))return;const auto source=r->source;auto slot=s.controls.find(r->control);if(slot==s.controls.end())return;
         const auto normalized=s.expectedRequests.find(request);const auto& expected=normalized==s.expectedRequests.end()?r->requested:normalized->second;
         if(value!=expected){r->state=ControlState::Cancelled;r->actual=value;r->message="Superseded by application settings";slot->second->pending=false;s.expectedRequests.erase(request);return;}
+        // Diagnostic actions must not change settings revisions or replace optimization evidence.
+        if(slot->second->desc.category==ControlCategory::Diagnostic){
+            r->previousActual=slot->second->desc.appliedValue;r->actual=value;r->appliedFrame=key;r->appliedNs=LiveNowNs();
+            r->state=ControlState::Applied;s.expectedRequests.erase(request);slot->second->desc.appliedValue=value;slot->second->pending=false;return;
+        }
         r->previousActual=slot->second->desc.appliedValue;const bool changed=r->previousActual!=value;const auto revision=ApplyRevision(s,source,key,changed);
         r->actual=value;r->appliedFrame=key;r->appliedRevision=revision;r->appliedNs=LiveNowNs();r->baseline=changed?s.sources[source].baseline:CompletedSecond(s.sources[source],revision,r->appliedNs);
         r->state=ControlState::Applied;s.expectedRequests.erase(request);
@@ -803,8 +918,25 @@ void CompleteControl(LiveId request,LiveFrameKey key,const ControlValue& value) 
 void FailControl(LiveId request,std::string_view message) noexcept
 {try{auto& s=S();std::lock_guard<std::mutex> lock(s.mutex);if(auto* r=FindRequest(s,request)){if(!Terminal(r->state)){r->state=ControlState::Failed;r->message.assign(message.substr(0,1024));s.expectedRequests.erase(request);}}}catch(...) {}}
 LiveCpuScope::LiveCpuScope(LiveStage stage,const char* label) noexcept
-{if(!IsLiveCollectorEnabled())return;event.context=GetLiveContext();event.stage=stage;event.beginNs=LiveNowNs();if(label){std::strncpy(event.label,label,sizeof(event.label)-1);}}
-LiveCpuScope::~LiveCpuScope(){if(event.beginNs){event.endNs=LiveNowNs();RecordLiveEvent(event);}}
+{
+    if(!IsLiveCollectorEnabled())return;event.context=GetLiveContext();event.stage=stage;event.id=AllocateLiveId();
+#ifdef DY_TRACY_ENABLED
+    static const ___tracy_source_location_data location={"dyf Live CPU",__func__,__FILE__,__LINE__,0};
+    if(event.context.frame.frame){const auto zone=___tracy_emit_zone_begin(&location,1);tracyZone=zone.id;tracyZoneActive=zone.active;if(label&&zone.active)___tracy_emit_zone_name(zone,label,std::strlen(label));}
+#endif
+    const auto stamp=TraceNow();tracyConnection=stamp.connection;event.beginNs=LiveNowNs();
+    if(label)std::copy_n(label,(std::min)(std::strlen(label),sizeof(event.label)-1),event.label);
+    if(event.context.frame.frame&&std::size_t(stage)<LiveStageCount){Detail::LiveTraceEvent e;e.kind=Detail::LiveTraceKind::StageBegin;e.frame=event.context.frame;e.revision=event.context.appliedRevision;e.id=event.id;e.aux=std::size_t(stage);TraceEmit(e,stamp);}
+}
+LiveCpuScope::~LiveCpuScope()
+{
+    if(!event.beginNs)return;const auto stamp=TraceNow();event.endNs=LiveNowNs();
+    if(event.context.frame.frame&&std::size_t(event.stage)<LiveStageCount){Detail::LiveTraceEvent e;e.kind=Detail::LiveTraceKind::StageEnd;e.frame=event.context.frame;e.revision=event.context.appliedRevision;e.id=event.id;e.aux=std::size_t(event.stage);TraceEmit(e,stamp);}
+#ifdef DY_TRACY_ENABLED
+    if(tracyZoneActive&&stamp.connection==tracyConnection)___tracy_emit_zone_end({tracyZone,tracyZoneActive});
+#endif
+    RecordLiveEvent(event);
+}
 }
 
 namespace dyf::Diagnostics

@@ -14,7 +14,7 @@
 namespace dyf::Diagnostics
 {
 using LiveId = std::uint64_t;
-constexpr std::uint32_t LiveProtocolVersion = 3;
+constexpr std::uint32_t LiveProtocolVersion = 4;
 constexpr std::size_t LiveTransferLimit = 64u * 1024u * 1024u;
 constexpr std::uint64_t LivePublishIntervalNs = 100000000;
 constexpr std::uint64_t LiveAverageWindowNs = 1000000000;
@@ -211,7 +211,7 @@ using ControlValue=std::variant<bool,std::int64_t,double>;
 enum class ControlKind : std::uint8_t { Boolean,Integer,Real,Enumeration };
 enum class ControlApplication : std::uint8_t { Immediate,ResourceRebuild,RestartRequired,RebuildRequired };
 enum class ControlState : std::uint8_t { Requested,Validated,PendingApply,Applied,Rejected,Failed,Cancelled };
-enum class ControlCategory : std::uint8_t { Unspecified,Optimization,OutputQuality,BuildOrStructural };
+enum class ControlCategory : std::uint8_t { Unspecified,Optimization,OutputQuality,BuildOrStructural,Diagnostic };
 struct ControlChoice { std::int64_t value=0; std::string label; };
 struct ControlDesc
 {
@@ -231,6 +231,8 @@ struct ControlDesc
 struct ControlRequest { LiveId request=0,control=0; ControlValue value=false; };
 struct ControlStatus
 {
+    // device/source identify the registration; appliedFrame identifies the execution boundary.
+    // Device-wide diagnostic actions may run in another source and keep appliedRevision=0.
     LiveId request=0,control=0,device=0,source=0;
     ControlState state=ControlState::Requested;
     ControlValue requested=false,actual=false;
@@ -391,6 +393,10 @@ public:
     ~LiveCpuScope();
     LiveCpuScope(const LiveCpuScope&)=delete;
     LiveCpuScope& operator=(const LiveCpuScope&)=delete;
-private: LiveEvent event;
+private:
+    LiveEvent event;
+    std::uint32_t tracyZone=0;
+    std::int32_t tracyZoneActive=0;
+    std::uint64_t tracyConnection=0;
 };
 }

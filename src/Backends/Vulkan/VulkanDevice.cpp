@@ -15,6 +15,7 @@
 #include "VulkanPipeline.h"
 #include "VulkanResources.h"
 #include "VulkanSwapchain.h"
+#include "VulkanTracy.h"
 
 #include <GLFW/glfw3.h>
 
@@ -244,6 +245,10 @@ namespace dyf::Backends
 		void DestroyDeviceResources();
 
 		VulkanContext m_context;
+#if defined(DY_TRACY_ENABLED)
+        std::unique_ptr<VulkanTracy> m_tracy;
+        uint64_t m_tracyConnection = 0;
+#endif
 		std::shared_ptr<VulkanUploadPool> m_uploadPool;
 		VulkanSwapchain m_swapchain;
 		void* m_windowHandle = nullptr;
@@ -259,6 +264,9 @@ namespace dyf::Backends
 		{
             uint64_t serial=0;
 			VkFence fence = VK_NULL_HANDLE;
+#if defined(DY_TRACY_ENABLED)
+            std::unique_ptr<VulkanTracyBatch> tracyBatch;
+#endif
 			std::vector<std::unique_ptr<VulkanCommandList, VulkanObjectDeleter>> commandLists;
 			uint32_t frameSlot = std::numeric_limits<uint32_t>::max();
 			uint32_t imageIndex = std::numeric_limits<uint32_t>::max();
@@ -980,7 +988,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         // 중간 제출의 최종 상태는 제한하지 않는다. Present에서 공통 RHI가 검사한다.
 
 		std::vector<VkCommandBuffer> nativeCommandBuffers;
-		nativeCommandBuffers.reserve(count);
+		nativeCommandBuffers.reserve(size_t(count) + 2);
 		for (VulkanCommandList* commandList : selected)
 		{
 			nativeCommandBuffers.push_back(commandList->GetCommandBuffer());
@@ -989,14 +997,48 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		SubmissionRecord submission{};
 		submission.commandLists = std::move(consumed);
 		m_submissions.reserve(m_submissions.size() + 1);
+#if defined(DY_TRACY_ENABLED)
+        if(TracyIsConnected && m_owner.GetTimestampValidBits())
+        {
+            const auto connection = tracy::GetProfiler().ConnectionId();
+            if(connection != m_tracyConnection)
+            {
+                // Old marker buffers must retire before replacing their query pool.
+                if(!WaitIdle()) return false;
+                m_tracy.reset();
+                m_tracyConnection = connection;
+                // Tracy reserves one byte for context IDs, including other devices.
+                if(tracy::GetGpuCtxCounter().load(std::memory_order_relaxed) < 254)
+                {
+                    auto profiler = std::make_unique<VulkanTracy>();
+                    if(profiler->Initialize(m_context)) m_tracy = std::move(profiler);
+                }
+            }
+        }
+#endif
 		VkFenceCreateInfo fenceInfo{};
 		fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
 		if (vkCreateFence(m_context.device, &fenceInfo, nullptr, &submission.fence) != VK_SUCCESS) return false;
+#if defined(DY_TRACY_ENABLED)
+        if(TracyIsConnected && tracy::GetProfiler().ConnectionId() == m_tracyConnection)
+        {
+            // Bound query-ring occupancy even if the GPU stops completing work.
+            if(m_tracy && m_submissions.size() < 8192)
+            {
+                submission.tracyBatch = m_tracy->Record(m_context);
+                if(submission.tracyBatch)
+                {
+                    nativeCommandBuffers.insert(nativeCommandBuffers.begin(), submission.tracyBatch->commands[0]);
+                    nativeCommandBuffers.push_back(submission.tracyBatch->commands[1]);
+                }
+            }
+        }
+#endif
 
 		const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 		VkSubmitInfo submitInfo{};
 		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-		submitInfo.commandBufferCount = count;
+		submitInfo.commandBufferCount = static_cast<uint32_t>(nativeCommandBuffers.size());
 		submitInfo.pCommandBuffers = nativeCommandBuffers.data();
 		const bool waitsForAcquire = frameSubmission && !m_presentPending;
 		if (waitsForAcquire)
@@ -1007,7 +1049,13 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
             // 표시 신호는 Present의 마지막 제출에서만 보낸다.
 		}
 
+#if defined(DY_TRACY_ENABLED)
+        const auto tracySubmitBegin = tracy::Profiler::GetTime();
+#endif
 		const VkResult result = vkQueueSubmit(m_context.graphicsQueue, 1, &submitInfo, submission.fence);
+#if defined(DY_TRACY_ENABLED)
+        const auto tracySubmitEnd = tracy::Profiler::GetTime();
+#endif
 		if (result != VK_SUCCESS)
 		{
             m_submissionFaulted = true;
@@ -1016,6 +1064,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			LogVulkanFailure("vkQueueSubmit", result);
 			return false;
 		}
+#if defined(DY_TRACY_ENABLED)
+        if(submission.tracyBatch && TracyIsConnected && tracy::GetProfiler().ConnectionId() == m_tracyConnection)
+            m_tracy->Publish(*submission.tracyBatch, tracySubmitBegin, tracySubmitEnd);
+#endif
 		for (VulkanCommandList* commandList : selected) commandList->CommitResourceStates();
 
 		if (frameSubmission)
@@ -1917,6 +1969,11 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 				if (submission.fence != VK_NULL_HANDLE) vkDestroyFence(m_context.device, submission.fence, nullptr);
 			}
 			m_submissions.clear();
+#if defined(DY_TRACY_ENABLED)
+            if(m_tracy && !m_submissionFaulted && TracyIsConnected && tracy::GetProfiler().ConnectionId() == m_tracyConnection)
+                m_tracy->Flush();
+            m_tracy.reset();
+#endif
 		}
 		m_acquiredCommandLists.clear();
 		// Commands have retired under their fences (or shutdown established idle/loss).

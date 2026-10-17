@@ -55,7 +55,7 @@ LIMIT(LiveObjectKind,Batch) LIMIT(LiveCpuClock,SteadyClock) LIMIT(LiveCommandKin
 LIMIT(LiveEventKind,UploadMemory) LIMIT(LiveSplitReason,EndOfInput) LIMIT(LiveGpuScope,LegacyRendererMainWindow)
 LIMIT(LiveGpuAggregation,LegacyDetail) LIMIT(ControlKind,Enumeration)
 LIMIT(ControlApplication,RebuildRequired) LIMIT(ControlState,Cancelled)
-LIMIT(ControlCategory,BuildOrStructural)
+LIMIT(ControlCategory,Diagnostic)
 #undef LIMIT
 struct Writer
 {

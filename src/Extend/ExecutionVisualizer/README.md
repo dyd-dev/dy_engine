@@ -2,6 +2,35 @@
 
 별도 Windows 창에서 재빌드된 계측 제작물의 실시간 데이터 흐름을 관찰합니다. 대상 제작물은 자신의 원래 창에서 실행합니다.
 
+## 분석기만 열어 자동 연결
+
+`dy_execution_visualizer.exe`를 열면 같은 폴더의 `execution-visualizer.session`에 기억한 게임·인자·작업 폴더로 자동 시작합니다. 처음에는 **연결·실행 → 실행 설정**에서 게임을 선택하고 **자동 연결로 실행·기억**을 한 번 누릅니다. 이 작업 공간의 `build/tool-integration-viewer/Release`에는 현재 `PerformancePlayground.exe`를 지정한 로컬 설정과 도구 캐시를 준비합니다. 이후에는 해당 분석기 EXE만 열면 됩니다.
+
+RenderDoc 첫 실행에 사용 통계 선택창이 나타나면 사용자가 허용·거부를 선택하고 **OK**를 누른 뒤 연결이 진행되며, 분석기는 이 개인정보 설정을 대신 변경하지 않습니다.
+
+Tracy v0.13.1의 원래 View와 수신부는 분석기 실행 파일에 포함됩니다. `tracy-profiler.exe` 다운로드나 실행은 하지 않으며, 기존 캐시와 외부 Tracy 프로세스는 보존합니다. 공식 [RenderDoc v1.37 64-bit portable ZIP](https://renderdoc.org/builds)은 필요한 경우 작업 스레드에서 내려받아 EXE 옆 `profiler-tools`에 준비합니다. 고정 SHA256·파일 manifest·라이선스를 검증하고 정상 캐시를 재사용합니다. Windows 기본 `curl.exe`와 `tar.exe`를 사용합니다.
+
+RenderDoc 1.37이 PySide2에 생성한 두 Python 바이트코드 캐시는 보존용 격리 폴더로 이동한 뒤 배포 파일 전체를 다시 해시 검증하며, 다른 추가 파일은 허용하지 않습니다.
+
+RenderDoc의 공식 `capture --wait-for-exit --opt-hook-children`로 분석기의 헤드리스 실행 모드를 시작합니다. 이 모드는 GUI·계측 collector를 만들기 전에 분기하고, 기존 `CreateProcessW` 실행기를 사용해 인자와 작업 폴더를 그대로 게임에 전달합니다. 게임의 PID·시작 시각·실행 경로·부모 관계를 확인한 뒤 Live 세션에 연결합니다. 게임에만 전용 `TRACY_PORT`·`TRACY_ONLY_IPV4=1`·`TRACY_ONLY_LOCALHOST=1` 환경을 전달하고, 해당 PID가 포트를 소유한 것을 확인해 Tracy를 직접 연결합니다. RenderDoc UI 연결은 주입된 게임의 `tools.renderdoc.connect`를 통해 요청합니다. 자동 캡처는 하지 않습니다.
+
+상단 상태가 **자동 연결 완료**가 되려면 실제 Live 스냅샷과 RenderDoc 캡처·UI 연결을 확인해야 합니다. 기본 OFF인 Tracy 보기는 준비 완료를 막지 않습니다. Tracy를 켠 경우 이 분석기의 내장 Worker가 같은 PID·시작 시각에 연결됐는지 추가 확인하며 대상의 연결 플래그만으로 완료를 표시하지 않습니다. **분석 도구 → 자동 연결 / 재시도**로 이어갈 수 있습니다. **다음 분석기 실행 시 자동 연결** 또는 CLI `--auto-session 0`으로 자동 시작을 생략합니다. `--attach-pid`와 `--target/--arguments/--working-directory`는 수동 동작을 유지합니다.
+
+## 내부 Tracy 탭과 측정 출처
+
+상단 `Tracy`를 켜면 Flow와 같은 도킹 영역에 원래 `Profiler` 탭이 열립니다. 탭 닫기·체크 해제는 표시만 숨기며 수집은 유지합니다. **분석 도구 → 수집 종료**로 수신을 끝내고, 받은 기록은 저장·폐기 전까지 유지합니다. 다른 대상·기록으로 교체하거나 종료할 때 저장·폐기·취소를 처리하며 저장 실패 시 기존 기록을 보존합니다. 수동 대상은 **분석 도구**에서 그 PID가 소유한 로컬 Tracy 포트를 입력합니다. 다른 수신기가 연결돼 있으면 해당 수신기를 자동 종료하지 않습니다.
+
+Overview·단계·History·전후 비교는 같은 Live 세션, device/source/frame/revision 및 완료 1초 구간의 호환 원본이 모두 있을 때만 `Tracy`를 선택합니다. 없으면 `자체` 또는 기존 결측 상태를 유지합니다. 엔진 평균 Plot과 Draw·인스턴스·업로드 카운터는 자체 값이며, GPU 미수집을 0으로 채우지 않습니다. 비교 양쪽 출처를 맞추고 History는 출처 전환·누락을 선으로 잇지 않습니다. Low/High도 같은 출처끼리 계산합니다.
+
+`--report`의 기존 원본 집계에는 `legacy_numbers_origin=engine`을 명시합니다. 실제 화면에서 선택해 Present한 값은 `selected_metric`에 슬롯·출처·값(결측 `--`)·표본 수·session/device/source/revision·원본 구간·digest·정의·선택 이유·요청 ID·표시 시각·Tracy 연결과 원본 시계 범위로 기록하며, `selected_metric_frame`은 원래 프레임 집합입니다. `selected_metric_range`는 카드의 같은 출처 Low/High이고, `engine_window`는 생산자가 완료한 1초 원본 집계입니다. 스크롤로 숨겨진 행은 마지막 실제 표시값을 유지합니다.
+
+빌드 옵션 `DY_VIEWER_EMBED_TRACY`는 기본 ON이며 게임의 `DY_ENABLE_TRACY`와 독립입니다. OFF 빌드도 기존 분석기를 사용할 수 있습니다. 기존 한글 22px와 공용 ImGui를 유지합니다. 글꼴 크기는 고정이며 실행 중 UI 배율 변경은 지원하지 않습니다. 타임라인 구간 확대·축소는 사용할 수 있습니다. 수집 메모리 초기 제한은 물리 메모리의 10%입니다. GPU·메모리·락·이미지는 대상이 원래 Tracy 이벤트를 제공할 때 사용할 수 있습니다.
+
+재현용 CLI는 `--tracy 0|1`, 수동 포트 `--tracy-port 8086`, `--width 1280 --height 800`, `--tracy-open <file.tracy>`, `--frames <count> --tracy-save <file.tracy>`를 지원합니다. CLI 표시 지정은 저장한 게임 설정을 덮어쓰지 않습니다. 저장 실패 또는 종료 취소 시 화면과 수집 기록을 유지합니다.
+고정 부하 검증의 `--tracy-hide-after N`은 N번째 Present 뒤 탭만 숨기고 수집을 유지합니다. 보고서는 숨긴 원본 시각과 종료 직전 읽을 수 있었던 실제 Worker 메모리 한도도 남기며, 읽지 못한 한도는 `--`입니다.
+
+분석기를 다시 열면 `*.runtime` 소유 기록과 실제 프로세스 신원을 검사해 살아 있는 게임을 재사용합니다. 같은 세션은 한 분석기만 자동 실행하며 게임·실행기가 남아 있는 동안 다른 인자나 작업 폴더로 덮어쓰지 않습니다. 취소·분석기 종료 시 게임과 도구 창을 강제 종료하지 않습니다. 종료한 게임을 재시작할 때 이전 Tracy 창도 보존합니다. 설정은 원자적으로 저장하며 `*.request`와 `*.request.receipt`는 게임 실행 요청과 검증 결과입니다.
+
 ## 빠른 시작: 14번 인스턴싱 비교
 
 첫 예제는 저장소의 [`14_InstancingBatching`](../../../examples/advanced/14_InstancingBatching)입니다. 같은 위치·색의 256개 인스턴스를 인스턴싱 ON에서 Draw 1회, OFF에서 Draw 256회로 묶어 그립니다. 인스턴싱을 분명하게 비교하는 RHI 예제이며, Renderer·Canvas·Model의 다른 기능은 해당 경로를 사용하는 제작물에서 확인합니다.
@@ -14,7 +43,7 @@ Windows 준비물은 Visual Studio 2022의 **C++를 사용한 데스크톱 개�
 cmake -S src/Extend/ExecutionVisualizer -B build/demo-viewer-d3d12 `
   -G "Visual Studio 17 2022" -A x64 -DUSE_D3D12=ON -DUSE_VULKAN=OFF `
   -DDY_ENABLE_LIVE_PROFILING=OFF -DDY_ENABLE_TRACY=OFF -DDY_ENABLE_PIX=OFF `
-  -DDY_ENABLE_RENDERDOC=OFF -DDY_VIEWER_BUILD_TESTS=ON
+  -DDY_ENABLE_RENDERDOC=OFF -DDY_VIEWER_BUILD_TESTS=OFF
 cmake --build build/demo-viewer-d3d12 --config Release --target dy_execution_visualizer `
   --parallel 1 -- /nodeReuse:false
 
@@ -41,16 +70,26 @@ cmake --build build/demo14-vulkan --config Release --target AdvancedInstancingBa
 
 ## 개발용 빌드·계약 검증
 
+아래 회귀 검증은 별도로 보관한 최신 로컬 `tests` 파일과 `DY_VIEWER_BUILD_TESTS=ON` 구성을 사용합니다. 일반 사용에는 위 분석기 빌드만 필요합니다.
+
 저장소 root에서 `DY_BUILD_EXECUTION_VISUALIZER=ON`을 선택하거나 이 디렉터리를 독립 CMake 프로젝트로 빌드합니다. GUI 렌더용 D3D12/Vulkan backend는 분석 대상의 backend와 독립적입니다. 새로운 UI/차트 라이브러리를 추가하지 않고 기존 `dyf::Gui`, Dear ImGui docking, GLFW를 사용합니다.
 
 ```powershell
 cmake --build build/demo-viewer-d3d12 --config Release --target `
-  ViewerProcessTests ViewerLaunchOptionsTests ViewerStateTests ViewerFlowPlaybackTests ViewerGlfwWindowOwnershipTests ViewerNativeIpcTests `
+  ViewerProcessTests ViewerLaunchOptionsTests ViewerAutoSessionTests ViewerToolBootstrapTests ViewerStateTests ViewerFlowPlaybackTests ViewerGlfwWindowOwnershipTests ViewerNativeIpcTests `
   --parallel 1 -- /nodeReuse:false
 ctest --test-dir build/demo-viewer-d3d12 -C Release --output-on-failure
 ```
 
-공개 통신 형식은 v3입니다. GUI와 분석 대상 양쪽을 같은 최신 계약으로 재빌드해야 합니다. 분석 대상은 `DY_ENABLE_LIVE_PROFILING=ON`으로 재빌드해야 합니다. GUI 자체는 계측 OFF에서도 공통 Client를 사용하며, 장치 생성 전에 `SetLiveCollectorEnabled(false)`를 호출합니다. GUI의 자원·Draw가 대상 목록과 통계에 섞이지 않습니다.
+공개 통신 형식은 v4입니다. GUI와 분석 대상 양쪽을 같은 최신 계약으로 재빌드해야 합니다. 분석 대상은 `DY_ENABLE_LIVE_PROFILING=ON`으로 재빌드해야 합니다. GUI 자체는 계측 OFF에서도 공통 Client를 사용하며, 장치 생성 전에 `SetLiveCollectorEnabled(false)`를 호출합니다. GUI의 자원·Draw가 대상 목록과 통계에 섞이지 않습니다.
+
+## Tracy · RenderDoc 연결
+
+- 대상 프로그램은 `DY_ENABLE_LIVE_PROFILING=ON`과 사용할 도구의 옵션(`DY_ENABLE_TRACY=ON`, `DY_ENABLE_RENDERDOC=ON`)을 켜서 빌드합니다. RenderDoc 헤더를 못 찾으면 `DY_RENDERDOC_ROOT`에 설치 폴더를 지정합니다. 분석기 자체의 도구 옵션은 OFF여도 됩니다.
+- 자동 세션은 위 과정으로 도구와 정확한 게임 PID를 연결합니다. 수동 세션은 **연결·실행**에서 대상을 고른 뒤 **분석 도구**에 그 PID가 소유한 로컬 Tracy 포트를 입력하고 **내장 연결 / 재시도**를 누릅니다. 내장 Worker의 연결 상태를 표시하며, **Tracy 표식 남기기**는 원본 device/source/frame과 요청 ID를 Tracy 메시지 및 분석기 이벤트에 함께 남깁니다.
+- 수동 RenderDoc 실행은 `qrenderdoc.exe`의 **Launch Application**에서 게임을 시작하고 분석기의 **연결·실행**에서 해당 PID를 선택합니다. 이미 일반 실행한 게임에는 주입하지 않습니다. **이 게임에 RenderDoc 연결**은 주입된 대상에서 캡처 0개일 때도 연결을 요청하며, 실제 UI 연결 값과 실행 요청 결과를 구분합니다.
+- **다음 프레임 캡처**는 게임의 기존 `TriggerNextFrame()`을 호출합니다. **요청 처리 완료**는 캡처 파일 생성 완료와 다르며, 대상 API가 보고한 **완료된 캡처** 건수 증가와 RenderDoc에서 결과를 확인합니다. **캡처 목록 열기**는 이미 대상에 연결된 RenderDoc UI가 있으면 그 창을 사용하고, 없으면 대상 연결용 UI 실행을 요청합니다. 실행 요청만으로 UI 연결이나 캡처 파일 열기 완료를 보장하지 않으며, RenderDoc 창의 **Capture List**에서 캡처를 직접 선택합니다. 이때 표시되는 frame은 요청 처리 지점이고 RenderDoc의 캡처 프레임 번호와 동일하다는 뜻이 아닙니다.
+- 도구 요청 자체는 새 최적화 revision이나 전후 비교 요청을 만들지 않습니다. 캡처 비용이 포함된 프레임도 일반 집계에 포함되며 자동으로 식별하거나 제외하지 않습니다. 캡처 후 안정된 완료 1초 구간이 모인 다음 최적화 요청을 보내 전후를 비교하고, 캡처 시점은 따로 기록합니다. 도구 옵션이 꺼졌거나 RenderDoc이 주입되지 않은 경우 이유를 표시하며 사용할 수 없는 버튼은 비활성입니다.
 
 ## Windows GLFW 창 소유권 보호
 

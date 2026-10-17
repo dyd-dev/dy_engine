@@ -225,7 +225,7 @@ const D::ControlStatus* ViewerState::Comparison() const
     const D::ControlStatus* found = nullptr;
     const auto* current = Source();
     for(const auto& status : requests)
-        if(current && status.device == device && status.source == source && status.state == D::ControlState::Applied
+        if(current && status.device == device && status.source == source && status.state == D::ControlState::Applied && status.appliedRevision
             && (!found || status.appliedNs > found->appliedNs || (status.appliedNs == found->appliedNs && status.request > found->request))) found = &status;
     return found;
 }

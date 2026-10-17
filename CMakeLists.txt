@@ -29,6 +29,7 @@ add_library(${PROJECT_NAME} STATIC
     "src/dyf/Profiler.cpp"
     "src/dyf/ProfilerSampler.cpp"
     "src/Platform/RenderDocCapture.cpp"
+    "src/Platform/LiveTools.cpp"
     "src/Platform/Log.cpp"
     "src/Platform/LogSession.cpp"
 	"src/dyf/DrawData.cpp"
@@ -60,6 +61,7 @@ target_link_libraries(${PROJECT_NAME} PUBLIC dy_live_profiling)
 
 option(DY_EXTEND_MODEL "Build the optional Model extension." OFF)
 option(DY_EXTEND_IMGUI "Build the optional Dear ImGui extension." OFF)
+option(DY_VIEWER_EMBED_TRACY "Embed the pinned Tracy profiler UI in the execution visualizer." ON)
 
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     include(.github/ci/CiChecks.cmake)

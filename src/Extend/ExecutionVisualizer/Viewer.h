@@ -4,6 +4,9 @@
 #include "FlowGraph.h"
 #include "LaunchOptions.h"
 #include "FlowPlayback.h"
+#include "AutoSession.h"
+#include "EmbeddedTracy.h"
+#include "TracyMetrics.h"
 #include <array>
 #include <future>
 #include <map>
@@ -25,6 +28,16 @@ public:
     std::string message;
     ViewerState state;
     void Launch();
+    void InitializeAutomatic(bool start=true,std::optional<bool> tracyOverride={});
+    void InitializeEmbedded(dyf::Gui&,dyf::RHI::IDevice&);
+    void ShowTracy(bool visible,bool persist=true);
+    void SetTracyPort(uint16_t port) {manualTracyPort=port;}
+    bool RequestClose();
+    bool CloseCancelled() const {return embedded&&embedded->CloseCancelled();}
+    bool SaveTracy(const std::filesystem::path&);
+    bool OpenTracy(const std::filesystem::path&);
+    std::optional<int64_t> TracyMemoryLimit() const;
+    void StartAutomatic();
     void Tick();
     void Draw();
     void Presented(uint64_t nowNs);
@@ -53,6 +66,27 @@ private:
     void ObservationStatistics();
     void ObservationFlow();
     void Targets();
+    void ExternalTools();
+    TargetProcess renderDocProcess;
+    std::string renderDocExecutable,toolIssue;
+    std::unique_ptr<EmbeddedTracy> embedded;
+    TracyMetrics tracyMetrics;
+    bool tracyVisible=false,tracyCollectRequested=false,tracyConnectPending=false,tracyReplaceWaiting=false;
+    uint16_t manualTracyPort=8086;
+    uint32_t embeddedPid=0;
+    uint64_t embeddedCreation=0;
+    D::LiveSessionId embeddedSession;
+    std::string tracyIssue;
+    void TickTracy();
+    struct DisplayedMetric {MetricChoice choice;D::LiveId request=0;uint64_t presentedNs=0;D::LiveMetricRange range;};
+    std::map<std::string,DisplayedMetric> drawnMetrics,presentedMetrics;
+    void RecordMetric(const std::string& slot,const MetricChoice& value,D::LiveId request=0,D::LiveMetricRange range={}) {drawnMetrics[slot]={value,request,0,range};}
+    D::LiveId toolRequest=0;
+    AutoSession automatic{CurrentExecutable().parent_path()/L"execution-visualizer.session",CurrentExecutable()};
+    bool automaticEnabled=true;
+    uint32_t automaticAttachPid=0;
+    D::LiveId automaticReplayRequest=0;
+    void TickAutomatic(uint64_t now);
     void LaunchDialog();
     void StartExecutableScan();
     void PollExecutableScan();

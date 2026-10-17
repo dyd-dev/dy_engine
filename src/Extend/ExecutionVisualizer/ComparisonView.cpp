@@ -106,9 +106,16 @@ void Viewer::ControlComparison()
                     if(ImGui::IsItemHovered()) ImGui::SetTooltip("이전: pending %llu / unsupported %llu / unavailable %llu\n이후: pending %llu / unsupported %llu / unavailable %llu",
                         a.pending,a.unsupported,a.unavailable,b.pending,b.unsupported,b.unavailable);
                 }
-                shown.stageVisibility[i][size_t(metric)]=NumberCells(CompareNumbers(
-                    shown.beforeReady ? StageNumber(shown.status.baseline,D::LiveStage(i),metric) : std::nullopt,
-                    shown.afterReady ? StageNumber(shown.status.after,D::LiveStage(i),metric) : std::nullopt),stageComparisonMetric<2 ? 3 : 1);
+                const auto pair=tracyMetrics.CompareStage(shown.beforeReady ? shown.status.baseline : D::LiveAggregate{},
+                    shown.afterReady ? shown.status.after : D::LiveAggregate{},D::LiveStage(i),metric);
+                ImGui::TextDisabled("%s",OriginName(pair.before.origin));
+                if(ImGui::IsItemHovered())ImGui::SetTooltip("이전: %s\n이후: %s",pair.before.reason.c_str(),pair.after.reason.c_str());
+                shown.stageVisibility[i][size_t(metric)]=NumberCells(pair.change,stageComparisonMetric<2 ? 3 : 1);
+                if(shown.stageVisibility[i][size_t(metric)])
+                {
+                    const auto slot="comparison.stage."+std::to_string(i)+"."+std::to_string(size_t(metric));
+                    RecordMetric(slot+".before",pair.before,shown.status.request);RecordMetric(slot+".after",pair.after,shown.status.request);
+                }
             }
             ImGui::EndTable();
         }
@@ -119,7 +126,7 @@ void Viewer::ControlComparison()
         ImGui::SetNextItemWidth(std::min(260.f,width*.55f)); ImGui::Combo("집계 범위",&counterComparisonPhase,phases,3);
         if(ImGui::BeginTable("##Counters",5,ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerV|ImGuiTableFlags_SizingStretchProp|ImGuiTableFlags_ScrollY,{width,TableHeight(ComparisonCounterCount)}))
         {
-            ComparisonColumns("작업 / frame");
+            ComparisonColumns("작업 / frame · 자체");
             for(size_t i=0;i<ComparisonCounters().size();++i)
             {
                 const auto& field=ComparisonCounters()[i]; ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextWrapped("%s",field.label);
@@ -141,9 +148,16 @@ void Viewer::ControlComparison()
             for(size_t i=0;i<9;++i)
             {
                 ImGui::TableNextRow(); ImGui::TableNextColumn(); ImGui::TextUnformatted(names[i]);
-                shown.metricVisibility[i]=NumberCells(CompareNumbers(
-                    shown.beforeReady ? ComparisonNumber(shown.status.baseline,ComparisonMetric(i)) : std::nullopt,
-                    shown.afterReady ? ComparisonNumber(shown.status.after,ComparisonMetric(i)) : std::nullopt),i==0 ? 0 : i>=size_t(ComparisonMetric::Draws) ? 1 : 3);
+                const auto pair=tracyMetrics.Compare(shown.beforeReady ? shown.status.baseline : D::LiveAggregate{},
+                    shown.afterReady ? shown.status.after : D::LiveAggregate{},ComparisonMetric(i));
+                ImGui::TextDisabled("%s",OriginName(pair.before.origin));
+                if(ImGui::IsItemHovered())ImGui::SetTooltip("이전: %s\n이후: %s",pair.before.reason.c_str(),pair.after.reason.c_str());
+                shown.metricVisibility[i]=NumberCells(pair.change,i==0 ? 0 : i>=size_t(ComparisonMetric::Draws) ? 1 : 3);
+                if(shown.metricVisibility[i])
+                {
+                    const auto slot="comparison.metric."+std::to_string(i);
+                    RecordMetric(slot+".before",pair.before,shown.status.request);RecordMetric(slot+".after",pair.after,shown.status.request);
+                }
             }
             ImGui::EndTable();
         }

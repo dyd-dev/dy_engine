@@ -9,7 +9,7 @@
 
 namespace viewer
 {
-Viewer::~Viewer() { if(cancelExecutableScan) cancelExecutableScan->store(true); }
+Viewer::~Viewer() {automatic.Cancel(); if(cancelExecutableScan) cancelExecutableScan->store(true); }
 void Viewer::SetLaunchExecutable(const std::string& value)
 {
     launch.SelectExecutable(value); manualExecutable=launch.executable; launchIssue.clear();
@@ -66,7 +66,7 @@ void Viewer::LaunchDialog()
     ImGui::SetNextWindowPos({viewport->WorkPos.x+viewport->WorkSize.x*.5f,viewport->WorkPos.y+viewport->WorkSize.y*.5f},ImGuiCond_Appearing,{.5f,.5f});
     bool open=true;
     if(!ImGui::BeginPopupModal("Launch setup / 실행 설정",&open)) return;
-    const auto footerHeight=ImGui::GetFrameHeightWithSpacing()+ImGui::GetStyle().ItemSpacing.y;
+    const auto footerHeight=ImGui::GetFrameHeightWithSpacing()*3+ImGui::GetStyle().ItemSpacing.y;
     ImGui::BeginChild("##LaunchSetupBody",{0,-footerHeight});
     const auto folderChanged=[&] {
         if(cancelExecutableScan) cancelExecutableScan->store(true);
@@ -178,7 +178,12 @@ void Viewer::LaunchDialog()
     ImGui::TextUnformatted("전체 명령 미리보기");
     ImGui::BeginChild("##CommandPreview",{0,48},ImGuiChildFlags_Borders,ImGuiWindowFlags_HorizontalScrollbar); ImGui::TextUnformatted(preview.c_str()); ImGui::EndChild();
     ImGui::EndChild();
-    ImGui::BeginDisabled(process.Running() || launch.executable.empty() || !valid || !error.empty());
+    if(ImGui::Checkbox("분석기 실행 시 이 게임·인자·도구 자동 연결 기억",&automaticEnabled))
+        if(!automatic.SetEnabled(automaticEnabled)) {automaticEnabled=automatic.Profile().enabled;launchIssue=automatic.Status();}
+    ImGui::BeginDisabled(process.Running() || automatic.Busy() || launch.executable.empty() || !valid || !error.empty());
+    if(ImGui::Button("자동 연결로 실행·기억"))StartAutomatic();
+    ImGui::EndDisabled();ImGui::SameLine();
+    ImGui::BeginDisabled(process.Running() || automatic.Target().Running() || automatic.Busy() || launch.executable.empty() || !valid || !error.empty());
     if(ImGui::Button("Launch / 선택 exe 실행")) Launch();
     ImGui::EndDisabled(); ImGui::SameLine();
     if(ImGui::Button("Close / 닫기")) ImGui::CloseCurrentPopup();

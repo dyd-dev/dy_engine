@@ -62,20 +62,33 @@ message(STATUS "Download and Configure glfw...")
 
 include(FetchContent)
 
-if(DY_ENABLE_TRACY)
+if(DY_ENABLE_TRACY OR DY_VIEWER_NEEDS_TRACY_SOURCE OR (DY_BUILD_EXECUTION_VISUALIZER AND DY_VIEWER_EMBED_TRACY))
     message(STATUS "Download and Configure Tracy...")
-    set(TRACY_ENABLE ON CACHE BOOL "" FORCE)
-    set(TRACY_ON_DEMAND ON CACHE BOOL "" FORCE)
-    set(TRACY_NO_FRAME_IMAGE ON CACHE BOOL "" FORCE)
+    if(DY_ENABLE_TRACY)
+        set(TRACY_ENABLE ON CACHE BOOL "" FORCE)
+        set(TRACY_ON_DEMAND ON CACHE BOOL "" FORCE)
+        set(TRACY_NO_FRAME_IMAGE ON CACHE BOOL "" FORCE)
+        set(dy_tracy_source_subdir "")
+    else()
+        # Source-only population: the analyzer does not instrument itself.
+        set(dy_tracy_source_subdir "dy-viewer-source-only")
+    endif()
     FetchContent_Declare(
         tracy
         GIT_REPOSITORY "https://github.com/wolfpld/tracy.git"
         GIT_TAG "v0.13.1"
         GIT_SHALLOW TRUE
+        SOURCE_SUBDIR "${dy_tracy_source_subdir}"
     )
     FetchContent_MakeAvailable(tracy)
+endif()
+if(DY_ENABLE_TRACY)
     target_link_libraries(Engine_Options INTERFACE Tracy::TracyClient)
     target_compile_definitions(Engine_Options INTERFACE DY_TRACY_ENABLED=1)
+    if(MSVC)
+        target_compile_options(Engine_Options INTERFACE /Zi)
+        target_link_options(Engine_Options INTERFACE /DEBUG:FULL)
+    endif()
     if(DY_TRACY_RAW_PLOTS)
         target_compile_definitions(Engine_Options INTERFACE DY_TRACY_RAW_PLOTS_ENABLED=1)
     endif()

@@ -79,6 +79,7 @@ void Viewer::Controls()
     std::vector<const D::ControlDesc*> controls;
     if(state.snapshot) for(const auto& control : state.snapshot->controls)
     {
+        if(control.category==D::ControlCategory::Diagnostic) continue;
         if(control.device && control.device != state.device) continue;
         if(control.source && control.source != state.source) continue;
         controls.push_back(&control);

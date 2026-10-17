@@ -1,6 +1,7 @@
 #pragma once
 #include "dyf/RHI/IDevice.h"
 #include "dyf/RHI/ICommandList.h"
+#include "dyf/Platform/LiveTools.h"
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -18,6 +19,7 @@ struct IDevice::LiveState
     static constexpr size_t PendingLimit=1024,SubmissionIdLimit=4096;
     static constexpr uint64_t PendingBytesLimit=Diagnostics::LiveTransferLimit;
     Diagnostics::LiveId device=0,gpuClock=0,recordingSource=0;
+    std::unique_ptr<Platform::LiveTools> tools;
     Diagnostics::LiveId backBufferSubmission=0;
     Diagnostics::LiveFrameToken frame;
     bool hasFrame=false;

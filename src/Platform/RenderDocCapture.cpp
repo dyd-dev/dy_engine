@@ -65,15 +65,62 @@ bool RenderDocCapture::IsAvailable()
 	return Initialize();
 }
 
+bool RenderDocCapture::IsEnabled()
+{
+#if defined(DY_RENDERDOC_ENABLED)
+	return true;
+#else
+	return false;
+#endif
+}
+
+bool RenderDocCapture::IsReplayUIConnected()
+{
+#if defined(DY_RENDERDOC_ENABLED)
+	return Initialize() && g_renderDocApi->IsTargetControlConnected && g_renderDocApi->IsTargetControlConnected();
+#else
+	return false;
+#endif
+}
+
 bool RenderDocCapture::TriggerNextFrame()
 {
 	if(!Initialize()) return false;
 #if defined(DY_RENDERDOC_ENABLED)
+	if(!g_renderDocApi->TriggerCapture) return false;
 	g_renderDocApi->TriggerCapture();
 	std::cout << "[dy_engine] RenderDoc capture requested for the next frame.\n";
 	return true;
 #else
 	return false;
 #endif
+}
+
+std::uint32_t RenderDocCapture::GetCaptureCount()
+{
+#if defined(DY_RENDERDOC_ENABLED)
+	if(Initialize() && g_renderDocApi->GetNumCaptures) return g_renderDocApi->GetNumCaptures();
+#endif
+	return 0;
+}
+
+RenderDocCapture::ReplayUIResult RenderDocCapture::ConnectReplayUI()
+{
+#if defined(DY_RENDERDOC_ENABLED)
+	if(!Initialize()) return ReplayUIResult::Unavailable;
+	if(IsReplayUIConnected()) return ReplayUIResult::AlreadyConnected;
+	if(g_renderDocApi->LaunchReplayUI && g_renderDocApi->LaunchReplayUI(1, nullptr))
+		return ReplayUIResult::Launched;
+	return ReplayUIResult::LaunchFailed;
+#else
+	return ReplayUIResult::Unavailable;
+#endif
+}
+
+RenderDocCapture::ReplayUIResult RenderDocCapture::OpenReplayUI()
+{
+	if(!Initialize()) return ReplayUIResult::Unavailable;
+	if(!GetCaptureCount()) return ReplayUIResult::NoCaptures;
+	return ConnectReplayUI();
 }
 }
