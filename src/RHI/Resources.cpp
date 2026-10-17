@@ -4,12 +4,43 @@
 #include "Validation.h"
 #include "dyf/RHI/Readback.h"
 #include "dyf/Core/ThreadPool.h"
+#include "LiveRhi.h"
 #include <chrono>
 #include <thread>
+#include <cstdio>
 
 namespace dyf::RHI
 {
-IDevice::~IDevice() = default;
+namespace
+{
+const char* LiveShaderStage(ShaderStage stage) noexcept
+{
+    switch(stage)
+    {case ShaderStage::Vertex:return "Vertex";case ShaderStage::Fragment:return "Fragment";
+     case ShaderStage::Compute:return "Compute";case ShaderStage::Hull:return "Hull";
+     case ShaderStage::Domain:return "Domain";case ShaderStage::Mesh:return "Mesh";default:return "Unknown";}
+}
+const char* LiveTopology(PrimitiveTopology topology) noexcept
+{
+    switch(topology)
+    {case PrimitiveTopology::PointList:return "PointList";case PrimitiveTopology::LineList:return "LineList";
+     case PrimitiveTopology::TriangleList:return "TriangleList";case PrimitiveTopology::TriangleStrip:return "TriangleStrip";
+     case PrimitiveTopology::PatchList:return "PatchList";default:return "Undefined";}
+}
+}
+IDevice::IDevice() = default;
+IDevice::~IDevice()
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+    if(m_live)
+    {
+        m_live->stopping=true;m_live->wake.notify_all();
+        if(m_live->worker.joinable())m_live->worker.join();
+        Diagnostics::RetireLiveObject(m_live->recordingSource);
+        Diagnostics::RetireLiveObject(m_live->device);
+    }
+#endif
+}
 
 void IDevice::ReportDiagnostic(DiagnosticSeverity severity, const char* message) const
 {
@@ -73,19 +104,46 @@ TimestampQueryHandle IDevice::CreateTimestampQuery(const TimestampQueryDesc& des
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
     if(!desc.count || !Supports(Feature::TimestampQuery)) return nullptr;
     auto* query=CreateTimestampQueryNative(desc);
-    Track(query,[](IDevice& device,void* object){device.DestroyTimestampQueryNative(static_cast<TimestampQueryHandle>(object));});
+    Track(query,[](IDevice& device,void* object){device.DestroyTimestampQueryNative(static_cast<TimestampQueryHandle>(object));},
+        {},Diagnostics::LiveObjectKind::Query,desc.count,uint64_t(desc.count)*sizeof(uint64_t));
     return query;
 }
 void IDevice::DestroyTimestampQuery(TimestampQueryHandle query)
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+    RecordLiveRelease(query);
     m_resources.erase(query);
 }
 bool IDevice::ReadTimestamps(TimestampQueryHandle query,uint32_t first,uint32_t count,uint64_t* ticks)
+{return ReadTimestampsInternal(query,first,count,ticks,true);}
+
+bool IDevice::ReadTimestampsInternal(TimestampQueryHandle query,uint32_t first,uint32_t count,uint64_t* ticks,bool observe)
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
-    if(!Reference(query) || !ticks || !count || first>=query->GetCount() || count>query->GetCount()-first) return false;
-    return ReadTimestampsNative(query,first,count,ticks);
+    auto* live=observe?GetLiveState():nullptr;
+    Diagnostics::LiveFrameScope frame(live?live->device:0,live?live->device:0);
+    frame.SetOutcome(Diagnostics::LiveOutcome::Failed);
+    Diagnostics::LiveEventScope scope(Diagnostics::LiveEventKind::CpuWork,Diagnostics::LiveStage::Output,"Read timestamps",observe);
+    scope.event.resource=Diagnostics::FindLiveObject(query);scope.event.arguments={first,count};scope.event.operations=1;
+    scope.event.outcome=Diagnostics::LiveOutcome::Failed;
+    if(!Reference(query) || !ticks || !count || first>=query->GetCount() || count>query->GetCount()-first)
+    {frame.SetOutcome(Diagnostics::LiveOutcome::Failed);return false;}
+    const bool ready=ReadTimestampsNative(query,first,count,ticks);
+    scope.event.outcome=ready?Diagnostics::LiveOutcome::Completed:Diagnostics::LiveOutcome::Unknown;
+    if(ready)scope.event.bytes=uint64_t(count)*sizeof(uint64_t);
+    frame.SetOutcome(scope.event.outcome);return ready;
+}
+bool IDevice::GetTimestampCalibration(TimestampCalibration& calibration) const
+{
+    std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+    calibration = {};
+    TimestampCalibration sample;
+    if(!Supports(Feature::TimestampCalibration) || !GetTimestampCalibrationNative(sample) ||
+        sample.cpuDomain == CpuTimestampDomain::Unsupported || !sample.cpuFrequency ||
+        !sample.gpuValidBits || sample.gpuValidBits > 64 ||
+        !std::isfinite(sample.gpuPeriodNanoseconds) || sample.gpuPeriodNanoseconds <= 0) return false;
+    calibration = sample;
+    return true;
 }
 
 void IDevice::InvalidateBackBuffers()
@@ -108,7 +166,14 @@ bool IDevice::IsLost() const
 bool IDevice::WaitIdle()
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
-    return WaitIdleNative();
+    auto* live=GetLiveState();
+    Diagnostics::LiveFrameScope frame(live?live->device:0,live?live->device:0);
+    Diagnostics::LiveEventScope scope(Diagnostics::LiveEventKind::Wait,Diagnostics::LiveStage::Submit,"WaitIdle");
+    frame.SetOutcome(Diagnostics::LiveOutcome::Failed);scope.event.outcome=Diagnostics::LiveOutcome::Failed;scope.event.operations=1;
+    const bool complete=WaitIdleNative();
+    scope.event.operations=1;scope.event.outcome=complete?Diagnostics::LiveOutcome::Completed:Diagnostics::LiveOutcome::Failed;
+    frame.SetOutcome(scope.event.outcome);
+    return complete;
 }
 
 bool IDevice::CreateSwapchain(const SwapchainDesc& desc)
@@ -145,8 +210,23 @@ bool IDevice::BeginFrame()
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
     if(m_frameActive) return true;
+    auto* live=GetLiveState();
+    if(live)
+    {live->frame=Diagnostics::BeginLiveFrame(live->device,live->device);live->hasFrame=live->frame.key.frame!=0;PrepareLiveControls(live->frame.key);}
+    Diagnostics::LiveEventScope scope(Diagnostics::LiveEventKind::Output,Diagnostics::LiveStage::Output,"BeginFrame / acquire");
+    scope.event.operations=1;
     InvalidateBackBuffers();
     m_frameActive = BeginFrameNative();
+    if(live)
+    {
+        scope.event.outcome=m_frameActive?Diagnostics::LiveOutcome::Observed:
+            (m_hasSwapchain&&!IsLostNative()?Diagnostics::LiveOutcome::Skipped:Diagnostics::LiveOutcome::Failed);
+        if(scope.event.outcome==Diagnostics::LiveOutcome::Skipped)
+        {scope.event.kind=Diagnostics::LiveEventKind::Wait;scope.event.id=scope.event.context.frame.frame;}
+        scope.Finish();
+        if(!m_frameActive&&live->hasFrame)
+        {Diagnostics::EndLiveFrame(live->frame,scope.event.outcome);live->hasFrame=false;}
+    }
     return m_frameActive;
 }
 
@@ -158,8 +238,16 @@ bool IDevice::Present()
     const auto state = m_resourceStates.find({reinterpret_cast<uintptr_t>(backBuffer),0,0});
     if(!backBuffer || state == m_resourceStates.end() || state->second != ResourceState::Present)
     {dyf::Platform::Log::Writef(dyf::Platform::LogLevel::Error, "RHI", __FILE__, __LINE__, "dyf::RHI: Submit the backbuffer transition to Present before presenting.");return false;}
+    Diagnostics::LiveEventScope scope(Diagnostics::LiveEventKind::Output,Diagnostics::LiveStage::Output,"Present");
+    scope.event.commandKind=Diagnostics::LiveCommandKind::Present;
+    scope.event.resource=Diagnostics::FindLiveObject(backBuffer);scope.event.operations=1;
+    if(m_live)scope.event.submission=m_live->backBufferSubmission;
     const bool presented = PresentNative();
     m_frameActive = false;
+    scope.event.outcome=presented&&!IsLostNative()?Diagnostics::LiveOutcome::Completed:Diagnostics::LiveOutcome::Failed;
+    scope.Finish();
+    if(m_live&&m_live->hasFrame)
+    {Diagnostics::EndLiveFrame(m_live->frame,scope.event.outcome);m_live->hasFrame=false;}
     if(!presented || IsLostNative()) {dyf::Platform::Log::Writef(dyf::Platform::LogLevel::Error, "RHI", __FILE__, __LINE__, "dyf::RHI: Presentation failed.");return false;}
     return true;
 }
@@ -173,19 +261,30 @@ std::shared_ptr<void> IDevice::Reference(const void* handle) const
 }
 
 void IDevice::Track(void* handle, void (*destroy)(IDevice&, void*),
-    std::vector<std::shared_ptr<void>> dependencies)
+    std::vector<std::shared_ptr<void>> dependencies,Diagnostics::LiveObjectKind kind,uint64_t elements,uint64_t bytes,const char* label)
 {
     if(!handle) return;
+    Diagnostics::LiveId liveId=0;
+    if(auto* live=GetLiveState())liveId=Diagnostics::RegisterLiveObject(handle,
+        {kind,live->device,Diagnostics::GetLiveContext().owner,elements,bytes,label});
     auto reference = std::shared_ptr<void>(handle,
-        [this, destroy, dependencies = std::move(dependencies)](void* object)
+        [this, destroy, liveId, dependencies = std::move(dependencies)](void* object)
         {
             std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
             const uintptr_t key=reinterpret_cast<uintptr_t>(object);
             for(auto it=m_resourceStates.begin();it!=m_resourceStates.end();)
                 if(std::get<0>(it->first)==key)it=m_resourceStates.erase(it);else ++it;
-            if(m_nativeResourcesAlive) destroy(*this, object);
+            if(m_nativeResourcesAlive) {destroy(*this, object);Diagnostics::RetireLiveObject(liveId);}
+            else
+            {
+                Diagnostics::LiveEvent event;event.context=Diagnostics::GetLiveContext();event.resource=liveId;
+                event.kind=Diagnostics::LiveEventKind::CpuWork;event.stage=Diagnostics::LiveStage::Data;
+                event.outcome=Diagnostics::LiveOutcome::Unknown;Diagnostics::RecordLiveEvent(event);
+            }
+            PublishLiveResources();
         });
     m_resources.emplace(handle, std::move(reference));
+    PublishLiveResources();
 }
 
 ResourceAllocationCounters IDevice::GetResourceAllocationCounters() const
@@ -202,6 +301,7 @@ void IDevice::AbandonResources()
 
 void IDevice::ReleaseResources()
 {
+    StopLiveProfiling();
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
     std::vector<std::shared_ptr<void>> references;
     for(auto* commands : m_recordedCommands)
@@ -228,8 +328,14 @@ ICommandList* IDevice::AcquireCommandList()
     std::unique_ptr<ICommandList, decltype(rollback)> owner(ICommandList::CreateRecorded(), rollback);
     auto* commands = owner.get();
     commands->m_owner = this;
+    if(auto* live=GetLiveState())
+    {
+        commands->m_livePosition={Diagnostics::RegisterLiveObject(commands,
+            {Diagnostics::LiveObjectKind::CommandList,live->device,Diagnostics::GetLiveContext().owner,0,0,"Command list"}),1,0};
+    }
     m_userCommands.insert(commands);
     m_recordedCommands.insert(commands);
+    BeginLiveRecording(*commands);
     return owner.release();
 }
 
@@ -241,6 +347,8 @@ TextureHandle IDevice::GetBackBuffer()
     {
         m_borrowedTextures.insert(texture);
         m_resources.emplace(texture, std::shared_ptr<void>(texture, [](void*) {}));
+        if(auto* live=GetLiveState())Diagnostics::RegisterLiveObject(texture,
+            {Diagnostics::LiveObjectKind::Texture,live->device,live->device,0,0,"Swapchain image (borrowed)"});
         m_resourceStates[{reinterpret_cast<uintptr_t>(texture),0,0}]=ResourceState::Present;
     }
     return texture;
@@ -270,11 +378,17 @@ bool IDevice::IsComplete(FenceHandle completion)
 }
 bool IDevice::Wait(FenceHandle completion,uint64_t timeoutNanoseconds)
 {
+    auto* live=GetLiveState();
+    Diagnostics::LiveFrameScope frame(live?live->device:0,live?live->device:0);
+    Diagnostics::LiveEventScope scope(Diagnostics::LiveEventKind::Wait,Diagnostics::LiveStage::Submit,"Wait fence");
+    frame.SetOutcome(Diagnostics::LiveOutcome::Failed);
+    scope.event.operations=1;scope.event.submission=GetLiveSubmissionId(completion);
+    scope.event.outcome=Diagnostics::LiveOutcome::Failed;
     if(completion.m_device!=this || !completion.m_value) return false;
     const auto start=std::chrono::steady_clock::now();
     do
     {
-        if(IsComplete(completion)) return true;
+        if(IsComplete(completion)) {scope.event.outcome=Diagnostics::LiveOutcome::Completed;frame.SetOutcome(scope.event.outcome);return true;}
         if(IsLost()) return false;
         if(timeoutNanoseconds==0) return false;
         std::this_thread::sleep_for(std::chrono::microseconds(100));
@@ -288,11 +402,13 @@ bool IDevice::ResetCommandList(ICommandList* commands)
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
     if(!commands || !m_userCommands.count(commands) ||
         (commands->m_completion && commands->m_completion>GetCompletedSubmissionNative())) return false;
+    commands->FinishLiveRecording(commands->m_recordingFailed?Diagnostics::LiveOutcome::Failed:Diagnostics::LiveOutcome::Discarded,true);
     if(commands->m_preparedNative)
     {
         DiscardCommandListNative(commands->m_preparedNative);
         commands->m_preparedNative = nullptr;
     }
+    DiscardLivePrepared(commands,Diagnostics::LiveOutcome::Discarded);
     commands->m_commands.clear();
     commands->m_stateOperations.clear();
     commands->m_references.clear();
@@ -306,6 +422,12 @@ bool IDevice::ResetCommandList(ICommandList* commands)
     commands->m_colorFormats.clear();
     commands->m_depthStencilFormat=Format::Unknown;
     commands->m_completion=commands->m_imageGeneration=0;
+    if(commands->m_livePosition.commandList)++commands->m_livePosition.generation;
+    commands->m_livePosition.index=0;
+    commands->m_liveContext={};commands->m_liveExecutionContext={};commands->m_liveRecordFrame={};
+    commands->m_liveInExecution=commands->m_liveSubmitted=commands->m_liveTerminal=false;
+    commands->m_liveCommandBeginNs=0;commands->m_livePreviousEvent=0;commands->DiscardLiveDeferred();
+    BeginLiveRecording(*commands);
     return true;
 }
 void IDevice::DestroyCommandList(ICommandList* commands)
@@ -322,7 +444,8 @@ bool IDevice::PrepareCommandLists(ICommandList* const* commands, uint32_t count,
     work.reserve(count);
     const auto discard = [&] {
         std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
-        for(const auto& item : work) DiscardCommandListNative(item.native);
+        for(const auto& item : work)
+        {DiscardCommandListNative(item.native);DiscardLivePrepared(item.source,Diagnostics::LiveOutcome::Failed);}
     };
     try
     {
@@ -343,17 +466,41 @@ bool IDevice::PrepareCommandLists(ICommandList* const* commands, uint32_t count,
             for(uint32_t i = 0; i < count; ++i)
             {
                 if(commands[i]->m_preparedNative) continue;
-                auto* native = AcquireCommandListNative();
+                auto* native = AcquireCommandListNative(commands[i]->m_uploadPageReuse,commands[i]->m_uploadSuballocation);
                 if(!native) { discard(); return false; }
                 work.push_back({commands[i], native});
                 native->m_owner = this;
                 m_recordedCommands.insert(native);
                 native->m_references = commands[i]->m_references;
+                const auto slot=ReserveLiveQuery(commands[i]);
+                if(slot!=UINT32_MAX&&m_live)
+                {
+                    try
+                    {
+                        native->m_references.push_back(Reference(m_live->query));
+                        native->m_liveReplayQuery=m_live->query;native->m_liveFirstQuery=slot*2;
+                    }
+                    catch(...){DiscardLivePrepared(commands[i],Diagnostics::LiveOutcome::Skipped);}
+                }
             }
         }
+        if(work.empty())return true;
+        LiveExecutionScope execution(*this,commands,count);
         std::vector<uint8_t> recorded(work.size(), 0);
+        const auto callerContext=Diagnostics::GetLiveContext();
         const auto record = [&](size_t i) {
+            Diagnostics::LiveContextScope context(work[i].source->m_liveExecutionContext.frame.frame?
+                work[i].source->m_liveExecutionContext:callerContext);
+            Diagnostics::LiveEventScope scope(Diagnostics::LiveEventKind::NativeTranslation,Diagnostics::LiveStage::NativeTranslate,"Native replay");
+            scope.event.command=work[i].source->m_livePosition;scope.event.operations=1;
+            scope.event.outcome=Diagnostics::LiveOutcome::Failed;
             recorded[i] = work[i].native->ReplayNative(work[i].source->m_commands);
+            scope.event.outcome=recorded[i]?Diagnostics::LiveOutcome::Observed:Diagnostics::LiveOutcome::Failed;
+            Diagnostics::LiveEvent policy;policy.context=Diagnostics::GetLiveContext();policy.command=work[i].source->m_livePosition;
+            policy.kind=Diagnostics::LiveEventKind::CpuWork;policy.stage=Diagnostics::LiveStage::NativeTranslate;
+            policy.arguments={work[i].source->m_uploadPageReuse,work[i].source->m_uploadSuballocation};
+            const char label[]="Captured upload policy: reuse, suballocation";std::copy(std::begin(label),std::end(label),policy.label);
+            if(policy.context.frame.frame)Diagnostics::RecordLiveEvent(policy);
         };
         if(pool && pool->GetThreadCount() > 1 && !pool->IsWorkerThread() && work.size() > 1)
         {
@@ -380,6 +527,7 @@ bool IDevice::PrepareCommandLists(ICommandList* const* commands, uint32_t count,
                 return false;
             }
         for(const auto& item : work) item.source->m_preparedNative = item.native;
+        execution.outcome=Diagnostics::LiveOutcome::Observed;
         return true;
     }
     catch(...) { discard(); throw; }
@@ -388,7 +536,16 @@ bool IDevice::PrepareCommandLists(ICommandList* const* commands, uint32_t count,
 bool IDevice::Submit(ICommandList** commands, uint32_t count)
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+    LiveExecutionScope execution(*this,commands,count);
+    Diagnostics::LiveContextScope context(commands&&count&&commands[0]&&m_userCommands.count(commands[0])?
+        commands[0]->m_liveExecutionContext:Diagnostics::GetLiveContext());
+    Diagnostics::LiveEventScope scope(Diagnostics::LiveEventKind::CpuWork,Diagnostics::LiveStage::Submit,"Validate + native submit");
+    scope.event.outcome=Diagnostics::LiveOutcome::Failed;
     if(!commands || !count) return false;
+    for(uint32_t i=0;i<count;++i)if(commands[i]&&m_userCommands.count(commands[i]))
+    {
+        commands[i]->FlushLiveDeferred(commands[i]->m_liveContext);
+    }
     const uint64_t completed=GetCompletedSubmissionNative();
     for(uint32_t i=0;i<count;++i)
     {
@@ -420,6 +577,7 @@ bool IDevice::Submit(ICommandList** commands, uint32_t count)
     if(!submitted)
     {
         discard();
+        SubmitLiveWork(commands,count,false,0);
         ReportDiagnostic(DiagnosticSeverity::Error,"Submit: native submission failed.");
         return false;
     }
@@ -429,6 +587,8 @@ bool IDevice::Submit(ICommandList** commands, uint32_t count)
     }
     const uint64_t completion=GetLastSubmissionNative();
     for(uint32_t i=0;i<count;++i) commands[i]->m_completion=completion;
+    SubmitLiveWork(commands,count,true,completion);
+    scope.event.outcome=execution.outcome=Diagnostics::LiveOutcome::Submitted;
     return true;
 }
 
@@ -442,7 +602,7 @@ BufferHandle IDevice::CreateBuffer(const BufferDesc& desc)
     Track(buffer, [](IDevice& device, void* handle) {
         device.DestroyBufferNative(static_cast<BufferHandle>(handle));
         --device.m_allocationCounters.buffers.live; ++device.m_allocationCounters.buffers.destroyed;
-    });
+    },{},Diagnostics::LiveObjectKind::Buffer,0,desc.size);
     try { if(buffer)m_resourceStates[{reinterpret_cast<uintptr_t>(buffer),0,0}]=desc.initialState; }
     catch(...) { m_resources.erase(buffer); throw; }
     return buffer;
@@ -461,7 +621,7 @@ TextureHandle IDevice::CreateTexture(const TextureDesc& desc)
     Track(texture, [](IDevice& device, void* handle) {
         device.DestroyTextureNative(static_cast<TextureHandle>(handle));
         --device.m_allocationCounters.textures.live; ++device.m_allocationCounters.textures.destroyed;
-    });
+    },{},Diagnostics::LiveObjectKind::Texture);
     try
     {
         if(texture)for(uint32_t layer=0;layer<desc.depthOrArraySize;++layer)for(uint32_t mip=0;mip<desc.mipLevels;++mip)
@@ -482,7 +642,8 @@ ShaderHandle IDevice::CreateShader(const ShaderDesc& desc)
         !desc.binary || !desc.binarySize || !desc.entryPoint || !*desc.entryPoint) return nullptr;
     auto* shader = CreateShaderNative(desc);
     if(!shader) ReportDiagnostic(DiagnosticSeverity::Error,"CreateShader: native shader creation failed; no substitute shader was selected.");
-    Track(shader, [](IDevice& device, void* handle) { device.DestroyShaderNative(static_cast<ShaderHandle>(handle)); });
+    Track(shader, [](IDevice& device, void* handle) { device.DestroyShaderNative(static_cast<ShaderHandle>(handle)); },
+        {},Diagnostics::LiveObjectKind::Shader,0,desc.binarySize,LiveShaderStage(desc.stage));
     return shader;
 }
 
@@ -505,7 +666,7 @@ PipelineHandle IDevice::CreateComputePipeline(const ComputePipelineDesc& desc)
     Track(pipeline,[](IDevice& device,void* handle){
         device.DestroyPipelineNative(static_cast<PipelineHandle>(handle));
         --device.m_allocationCounters.pipelines.live; ++device.m_allocationCounters.pipelines.destroyed;
-    },std::move(dependencies));
+    },std::move(dependencies),Diagnostics::LiveObjectKind::Pipeline,0,0,"Compute pipeline; stages=Compute");
     return pipeline;
 }
 
@@ -538,10 +699,12 @@ PipelineHandle IDevice::CreateGraphicsPipeline(const GraphicsPipelineDesc& desc)
         pipeline->m_depthStencilFormat=desc.depthStencil.format;
     }
     if(pipeline) { ++m_allocationCounters.pipelines.live; ++m_allocationCounters.pipelines.created; }
+    char description[192];std::snprintf(description,sizeof(description),"Graphics pipeline; topology=%s; stages=Vertex%s%s%s; patchControlPoints=%u",
+        LiveTopology(desc.topology),desc.hullShader?",Hull":"",desc.domainShader?",Domain":"",desc.fragmentShader?",Fragment":"",desc.patchControlPoints);
     Track(pipeline, [](IDevice& device, void* handle) {
         device.DestroyPipelineNative(static_cast<PipelineHandle>(handle));
         --device.m_allocationCounters.pipelines.live; ++device.m_allocationCounters.pipelines.destroyed;
-    }, std::move(dependencies));
+    }, std::move(dependencies),Diagnostics::LiveObjectKind::Pipeline,0,0,description);
     return pipeline;
 }
 
@@ -566,7 +729,7 @@ PipelineHandle IDevice::CreateMeshPipeline(const MeshPipelineDesc& desc)
     Track(pipeline, [](IDevice& device, void* handle) {
         device.DestroyPipelineNative(static_cast<PipelineHandle>(handle));
         --device.m_allocationCounters.pipelines.live; ++device.m_allocationCounters.pipelines.destroyed;
-    }, std::move(dependencies));
+    }, std::move(dependencies),Diagnostics::LiveObjectKind::Pipeline,0,0,desc.fragmentShader?"Mesh pipeline; stages=Mesh,Fragment":"Mesh pipeline; stages=Mesh");
     return pipeline;
 }
 
@@ -605,19 +768,20 @@ ResourceSetHandle IDevice::CreateResourceSet(const ResourceSetDesc& desc)
     }
     auto* resources = CreateResourceSetNative(desc);
     if(!resources) ReportDiagnostic(DiagnosticSeverity::Error,"CreateResourceSet: native binding constraints or allocation prevented creation; no substitute resource was bound.");
-    Track(resources, [](IDevice& device, void* handle) { device.DestroyResourceSetNative(static_cast<ResourceSetHandle>(handle)); }, std::move(dependencies));
+    Track(resources, [](IDevice& device, void* handle) { device.DestroyResourceSetNative(static_cast<ResourceSetHandle>(handle)); },
+        std::move(dependencies),Diagnostics::LiveObjectKind::ResourceSet,desc.bindingCount);
     return resources;
 }
 
-void IDevice::DestroyBuffer(BufferHandle handle) { std::lock_guard<std::recursive_mutex> lock(m_resourceMutex); m_resources.erase(handle); }
+void IDevice::DestroyBuffer(BufferHandle handle) { std::lock_guard<std::recursive_mutex> lock(m_resourceMutex); RecordLiveRelease(handle);m_resources.erase(handle); }
 void IDevice::DestroyTexture(TextureHandle handle)
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
-    if(!m_borrowedTextures.count(handle)) m_resources.erase(handle);
+    if(!m_borrowedTextures.count(handle)) {RecordLiveRelease(handle);m_resources.erase(handle);}
 }
-void IDevice::DestroyShader(ShaderHandle handle) { std::lock_guard<std::recursive_mutex> lock(m_resourceMutex); m_resources.erase(handle); }
-void IDevice::DestroyPipeline(PipelineHandle handle) { std::lock_guard<std::recursive_mutex> lock(m_resourceMutex); m_resources.erase(handle); }
-void IDevice::DestroyResourceSet(ResourceSetHandle handle) { std::lock_guard<std::recursive_mutex> lock(m_resourceMutex); m_resources.erase(handle); }
+void IDevice::DestroyShader(ShaderHandle handle) { std::lock_guard<std::recursive_mutex> lock(m_resourceMutex); RecordLiveRelease(handle);m_resources.erase(handle); }
+void IDevice::DestroyPipeline(PipelineHandle handle) { std::lock_guard<std::recursive_mutex> lock(m_resourceMutex); RecordLiveRelease(handle);m_resources.erase(handle); }
+void IDevice::DestroyResourceSet(ResourceSetHandle handle) { std::lock_guard<std::recursive_mutex> lock(m_resourceMutex); RecordLiveRelease(handle);m_resources.erase(handle); }
 
 bool IDevice::UpdateBuffer(ICommandList& commands, BufferHandle buffer, uint32_t offset, const void* data, uint32_t size)
 try
@@ -635,6 +799,8 @@ try
             offset,bytes.size(),buffer->GetDesc().size);
         return false;
     });
+    commands.RecordLiveCommand(Diagnostics::LiveCommandKind::Upload,{offset,size},buffer,0,size,1,
+        Diagnostics::LiveEventKind::Upload,offset==0&&size==buffer->GetDesc().size);
     return true;
 }
 catch(...) { commands.m_recordingFailed=true; throw; }
@@ -663,6 +829,8 @@ try
             mip,layer,bytes.size(),rowPitch,slicePitch);
         return false;
     });
+    commands.RecordLiveCommand(Diagnostics::LiveCommandKind::Upload,{mip,layer,size,rowPitch,slicePitch},texture,0,size,1,
+        Diagnostics::LiveEventKind::Upload,texture->GetDesc().mipLevels==1&&texture->GetDesc().depthOrArraySize==1);
     return true;
 }
 catch(...) { commands.m_recordingFailed=true; throw; }
@@ -670,6 +838,16 @@ catch(...) { commands.m_recordingFailed=true; throw; }
 bool IDevice::ReadTexture(TextureHandle texture, TextureReadback& result)
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
-    return Reference(texture) && ReadTextureNative(texture, result);
+    auto* live=GetLiveState();
+    Diagnostics::LiveFrameScope frame(live?live->device:0,live?live->device:0);
+    Diagnostics::LiveEventScope scope(Diagnostics::LiveEventKind::CpuWork,Diagnostics::LiveStage::Output,"Read texture");
+    frame.SetOutcome(Diagnostics::LiveOutcome::Failed);
+    scope.event.resource=Diagnostics::FindLiveObject(texture);scope.event.operations=1;
+    scope.event.outcome=Diagnostics::LiveOutcome::Failed;
+    if(!Reference(texture)){frame.SetOutcome(scope.event.outcome);return false;}
+    const bool ready=ReadTextureNative(texture,result);
+    scope.event.outcome=ready?Diagnostics::LiveOutcome::Completed:Diagnostics::LiveOutcome::Unknown;
+    if(ready)scope.event.bytes=result.pixels.size();
+    frame.SetOutcome(scope.event.outcome);return ready;
 }
 }

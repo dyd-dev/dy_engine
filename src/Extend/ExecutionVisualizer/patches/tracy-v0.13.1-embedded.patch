@@ -1,0 +1,854 @@
+--- a/profiler/src/profiler/TracyImGui.cpp
++++ b/profiler/src/profiler/TracyImGui.cpp
+@@ -24,8 +24,14 @@
+ 
+ void DrawZigZag( ImDrawList* draw, const ImVec2& wpos, double start, double end, double h, uint32_t color )
+ {
+-    const auto v = ( end - start ) / ( h * 2 );
+-    draw->AddImage( zigzagTex, wpos + ImVec2( start, -h ), wpos + ImVec2( end, h ), ImVec2( 0, 0 ), ImVec2( v, 1 ), color );
++    // The host sampler clamps. Tile the original image explicitly instead of requiring GL repeat.
++    if( h <= 0 || end <= start ) return;
++    const double period = h * 2;
++    for( double x = start; x < end; x += period )
++    {
++        const double next = std::min( end, x + period );
++        draw->AddImage( zigzagTex, wpos + ImVec2( x, -h ), wpos + ImVec2( next, h ), ImVec2( 0, 0 ), ImVec2( (next-x)/period, 1 ), color );
++    }
+ }
+ 
+ void DrawStripedRect( ImDrawList* draw, const ImVec2& wpos, double x0, double y0, double x1, double y1, double sw, uint32_t color, bool fix_stripes_in_screen_space, bool inverted )
+--- a/profiler/src/profiler/TracyImGui.hpp
++++ b/profiler/src/profiler/TracyImGui.hpp
+@@ -23,6 +23,19 @@
+ 
+ namespace tracy
+ {
++inline void EmbeddedSetNextWindowSize( const ImVec2& size )
++{
++    const auto* viewport = ImGui::GetMainViewport();
++    const auto padding = ImGui::GetStyle().DisplayWindowPadding;
++    const ImVec2 available( ImMax( 1.f, viewport->WorkSize.x - 2 * padding.x ), ImMax( 1.f, viewport->WorkSize.y - 2 * padding.y ) );
++    ImGui::SetNextWindowSize( ImVec2( ImMin( size.x, available.x ), ImMin( size.y, available.y ) ), ImGuiCond_FirstUseEver );
++    ImGui::SetNextWindowPos( viewport->GetWorkCenter(), ImGuiCond_FirstUseEver, ImVec2( 0.5f, 0.5f ) );
++}
++
++bool EmbeddedInputAllowed();
++inline bool EmbeddedIsKeyPressed( ImGuiKey key, bool repeat = true ) { return EmbeddedInputAllowed() && ImGui::IsKeyPressed( key, repeat ); }
++inline bool EmbeddedIsKeyDown( ImGuiKey key ) { return EmbeddedInputAllowed() && ImGui::IsKeyDown( key ); }
++
+ 
+ extern bool s_wasActive;
+ bool WasActive();
+--- a/profiler/src/profiler/TracyMouse.cpp
++++ b/profiler/src/profiler/TracyMouse.cpp
+@@ -22,8 +22,9 @@
+ 
+ static Mouse s_mouse = {};
+ 
+-void MouseFrame()
++void MouseFrame( bool enabled )
+ {
++    if( !enabled ) { s_mouse = {}; return; }
+     for( int i=0; i<MouseButtons; i++ )
+     {
+         s_mouse.mouseDown[i] = ImGui::IsMouseDown( i );
+--- a/profiler/src/profiler/TracyMouse.hpp
++++ b/profiler/src/profiler/TracyMouse.hpp
+@@ -6,7 +6,7 @@
+ namespace tracy
+ {
+ 
+-void MouseFrame();
++void MouseFrame( bool enabled = true );
+ 
+ bool IsMouseDown( ImGuiMouseButton button );
+ bool IsMouseClicked( ImGuiMouseButton button );
+--- a/profiler/src/profiler/TracyStorage.cpp
++++ b/profiler/src/profiler/TracyStorage.cpp
+@@ -136,8 +136,7 @@
+     size_t sz;
+     GetConfigDirectory( buf, sz );
+ 
+-    memcpy( buf+sz, "/tracy/", 8 );
+-    sz += 7;
++    sz += sprintf( buf+sz, "/dy_engine/ExecutionVisualizer/Tracy/" );
+ 
+     auto status = CreateDirStruct( buf );
+     assert( status );
+@@ -220,7 +219,7 @@
+     }
+ 
+     // 604800 = 7 days
+-    sz += sprintf( buf+sz, "/tracy/user/%c/%s/%" PRIu64 "/%" PRIu64 "/", tmp[0], tmp, uint64_t( time / 604800 ), time );
++    sz += sprintf( buf+sz, "/dy_engine/ExecutionVisualizer/Tracy/user/%c/%s/%" PRIu64 "/%" PRIu64 "/", tmp[0], tmp, uint64_t( time / 604800 ), time );
+ 
+     if( create )
+     {
+@@ -256,8 +255,7 @@
+     size_t sz;
+     GetCacheDirectory( buf, sz );
+ 
+-    memcpy( buf+sz, "/tracy/", 8 );
+-    sz += 7;
++    sz += sprintf( buf+sz, "/dy_engine/ExecutionVisualizer/Tracy/" );
+ 
+     auto status = CreateDirStruct( buf );
+     assert( status );
+--- a/profiler/src/profiler/TracyTexture.hpp
++++ b/profiler/src/profiler/TracyTexture.hpp
+@@ -10,9 +10,9 @@
+ void InitTexture();
+ ImTextureID MakeTexture( bool zigzag = false );
+ void FreeTexture( ImTextureID tex, void(*runOnMainThread)(const std::function<void()>&, bool) );
+-void UpdateTexture( ImTextureID tex, const char* data, int w, int h );
+-void UpdateTextureRGBA( ImTextureID tex, void* data, int w, int h );
+-void UpdateTextureRGBAMips( ImTextureID tex, void** data, int* w, int* h, size_t mips );
++void UpdateTexture( ImTextureID& tex, const char* data, int w, int h );
++void UpdateTextureRGBA( ImTextureID& tex, void* data, int w, int h );
++void UpdateTextureRGBAMips( ImTextureID& tex, void** data, int* w, int* h, size_t mips );
+ 
+ }
+ 
+--- a/profiler/src/profiler/TracyView.cpp
++++ b/profiler/src/profiler/TracyView.cpp
+@@ -63,7 +63,9 @@
+     , m_td( 2, "ViewMt" )
+ #else
+     , m_td( std::thread::hardware_concurrency(), "ViewMt" )
++#ifndef TRACY_NO_LLM
+     , m_llm( m_worker, *m_manualData )
++#endif
+ #endif
+ {
+     InitTextEditor();
+@@ -93,9 +95,12 @@
+     , m_td( 2, "ViewMt" )
+ #else
+     , m_td( std::thread::hardware_concurrency(), "ViewMt" )
++#ifndef TRACY_NO_LLM
+     , m_llm( m_worker, *m_manualData )
+ #endif
+-{
++#endif
++{
++    EmbeddedMarkSaved( m_worker.GetLastTime() );
+     m_notificationTime = 4;
+     m_notificationText = std::string( "Trace loaded in " ) + TimeToString( m_worker.GetLoadTime() );
+ 
+@@ -128,6 +133,7 @@
+ 
+     if( m_frameTexture ) FreeTexture( m_frameTexture, m_cbMainThread );
+     if( m_playback.texture ) FreeTexture( m_playback.texture, m_cbMainThread );
++    if( m_frameTextureConn ) FreeTexture( m_frameTextureConn, m_cbMainThread );
+ }
+ 
+ void View::InitTextEditor()
+@@ -665,10 +671,10 @@
+     }
+ 
+     if( !m_staticView &&
+-        ( ImGui::IsKeyDown( ImGuiKey_LeftCtrl ) || ImGui::IsKeyDown( ImGuiKey_RightCtrl ) ) &&
+-        ( ImGui::IsKeyDown( ImGuiKey_LeftShift ) || ImGui::IsKeyDown( ImGuiKey_RightShift ) ) &&
+-        ( ImGui::IsKeyDown( ImGuiKey_LeftAlt ) || ImGui::IsKeyDown( ImGuiKey_RightAlt ) ) &&
+-        ImGui::IsKeyPressed( ImGuiKey_R ) )
++        ( EmbeddedIsKeyDown( ImGuiKey_LeftCtrl ) || EmbeddedIsKeyDown( ImGuiKey_RightCtrl ) ) &&
++        ( EmbeddedIsKeyDown( ImGuiKey_LeftShift ) || EmbeddedIsKeyDown( ImGuiKey_RightShift ) ) &&
++        ( EmbeddedIsKeyDown( ImGuiKey_LeftAlt ) || EmbeddedIsKeyDown( ImGuiKey_RightAlt ) ) &&
++        EmbeddedIsKeyPressed( ImGuiKey_R ) )
+     {
+         m_reconnectRequested = true;
+         return false;
+@@ -676,6 +682,17 @@
+ 
+     s_time += ImGui::GetIO().DeltaTime;
+     return DrawImpl();
++}
++
++void EmbeddedToolbarNext( float width )
++{
++    const auto right = ImGui::GetCursorScreenPos().x + ImGui::GetContentRegionAvail().x;
++    if( ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x + width <= right ) ImGui::SameLine();
++}
++
++static void EmbeddedToolbarNext( const char* label )
++{
++    EmbeddedToolbarNext( ImGui::CalcTextSize( label ).x + ImGui::GetStyle().FramePadding.x * 2 );
+ }
+ 
+ static const char* MainWindowButtons[] = {
+@@ -686,13 +703,43 @@
+ 
+ enum { MainWindowButtonsCount = sizeof( MainWindowButtons ) / sizeof( *MainWindowButtons ) };
+ 
++// Called on the host GUI thread, including while the tab is hidden.
++void View::EmbeddedProcessSave()
++{
++    if( m_saveThreadState.load( std::memory_order_acquire ) == SaveThreadState::NeedsJoin )
++    {
++        m_saveThread.join();
++        m_saveThreadState.store( SaveThreadState::Inert, std::memory_order_release );
++        const auto src = m_srcFileBytes.load( std::memory_order_relaxed );
++        const auto dst = m_dstFileBytes.load( std::memory_order_relaxed );
++        m_notificationTime = 4;
++        char buf[1024];
++        sprintf( buf, "Trace size %s (%.2f%% ratio)", MemSizeToString( dst ), 100.f * dst / src );
++        m_notificationText = EmbeddedSaveFailed() ? "Trace save failed" : buf;
++        m_acb();
++    }
++}
++
++void View::EmbeddedStoreUserData( bool preserve )
++{
++    if( !m_userData.Valid() )
++    {
++        if( !m_worker.HasData() ) return;
++        m_userData.Init( m_worker.GetCaptureProgram().c_str(), m_worker.GetCaptureTime() );
++    }
++    if( preserve ) m_userData.StateShouldBePreserved();
++    m_userData.SaveState( m_vd );
++    m_userData.SaveAnnotations( m_annotations );
++    m_userData.SaveSourceSubstitutions( m_sourceSubstitutions );
++}
++
+ bool View::DrawImpl()
+ {
+     if( !m_worker.HasData() )
+     {
+         bool keepOpen = true;
+         char tmp[2048];
+-        sprintf( tmp, "%s###Connection", m_worker.GetAddr().c_str() );
++        sprintf( tmp, "%s###Profiler", m_worker.GetAddr().c_str() );
+         ImGui::Begin( tmp, &keepOpen, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse );
+         ImGui::PushFont( g_fonts.normal, FontNormal * 2.f );
+         ImGui::Spacing();
+@@ -722,18 +769,7 @@
+         m_sourceView->SetCpuId( m_worker.GetCpuId() );
+     }
+     if( !m_userData.Valid() ) m_userData.Init( m_worker.GetCaptureProgram().c_str(), m_worker.GetCaptureTime() );
+-    if( m_saveThreadState.load( std::memory_order_acquire ) == SaveThreadState::NeedsJoin )
+-    {
+-        m_saveThread.join();
+-        m_saveThreadState.store( SaveThreadState::Inert, std::memory_order_release );
+-        const auto src = m_srcFileBytes.load( std::memory_order_relaxed );
+-        const auto dst = m_dstFileBytes.load( std::memory_order_relaxed );
+-        m_notificationTime = 4;
+-        char buf[1024];
+-        sprintf( buf, "Trace size %s (%.2f%% ratio)", MemSizeToString( dst ), 100.f * dst / src );
+-        m_notificationText = buf;
+-        m_acb();
+-    }
++    EmbeddedProcessSave();
+ 
+     auto& threadHints = m_worker.GetPendingThreadHints();
+     if( !threadHints.empty() )
+@@ -757,9 +793,9 @@
+     m_wasActive = false;
+ 
+     assert( m_shortcut == ShortcutAction::None );
+-    if( io.KeyCtrl )
+-    {
+-        if( ImGui::IsKeyPressed( ImGuiKey_F ) )
++    if( io.KeyCtrl && EmbeddedInputAllowed() )
++    {
++        if( EmbeddedIsKeyPressed( ImGuiKey_F ) )
+         {
+             m_findZone.show = true;
+             m_shortcut = ShortcutAction::OpenFind;
+@@ -777,7 +813,7 @@
+     bw += th;
+ 
+     bool keepOpen = true;
+-    bool* keepOpenPtr = nullptr;
++    bool* keepOpenPtr = &keepOpen;
+     (void)keepOpenPtr;
+     if( m_staticView )
+     {
+@@ -815,7 +851,7 @@
+ #else
+     char tmp[2048];
+     sprintf( tmp, "%s###Profiler", m_worker.GetCaptureName().c_str() );
+-    ImGui::SetNextWindowSize( ImVec2( 1550, 800 ), ImGuiCond_FirstUseEver );
++    EmbeddedSetNextWindowSize( ImVec2( 1550, 800 ) );
+     ImGui::Begin( tmp, keepOpenPtr, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoBringToFrontOnFocus );
+     ImGuiViewport* viewport = ImGui::GetMainViewport();
+ #endif
+@@ -905,23 +941,23 @@
+         if( ImGui::Button( ICON_FA_POWER_OFF ) ) keepOpen = false;
+         ImGui::PopStyleColor( 3 );
+     }
+-    ImGui::SameLine();
++    EmbeddedToolbarNext( ICON_FA_GEAR );
+     ToggleButton( ICON_FA_GEAR, m_showOptions );
+-    ImGui::SameLine();
++    EmbeddedToolbarNext( ICON_FA_TAGS " Messages" );
+     ToggleButton( ICON_FA_TAGS " Messages", m_showMessages );
+-    ImGui::SameLine();
++    EmbeddedToolbarNext( ICON_FA_MAGNIFYING_GLASS " Find" );
+     ToggleButton( ICON_FA_MAGNIFYING_GLASS " Find", m_findZone.show );
+-    ImGui::SameLine();
++    EmbeddedToolbarNext( ICON_FA_ARROW_UP_WIDE_SHORT " Statistics" );
+     ToggleButton( ICON_FA_ARROW_UP_WIDE_SHORT " Statistics", m_showStatistics );
+-    ImGui::SameLine();
++    EmbeddedToolbarNext( ICON_FA_FIRE_FLAME_CURVED " Flame" );
+     ToggleButton( ICON_FA_FIRE_FLAME_CURVED " Flame", m_showFlameGraph );
+-    ImGui::SameLine();
++    EmbeddedToolbarNext( ICON_FA_MEMORY " Memory" );
+     ToggleButton( ICON_FA_MEMORY " Memory", m_memInfo.show );
+-    ImGui::SameLine();
++    EmbeddedToolbarNext( ICON_FA_SCALE_BALANCED " Compare" );
+     ToggleButton( ICON_FA_SCALE_BALANCED " Compare", m_compare.show );
+-    ImGui::SameLine();
++    EmbeddedToolbarNext( ICON_FA_FINGERPRINT " Info" );
+     ToggleButton( ICON_FA_FINGERPRINT " Info", m_showInfo );
+-    ImGui::SameLine();
++    EmbeddedToolbarNext( ICON_FA_SCREWDRIVER_WRENCH );
+     if( ImGui::Button( ICON_FA_SCREWDRIVER_WRENCH ) ) ImGui::OpenPopup( "ToolsPopup" );
+     if( ImGui::BeginPopup( "ToolsPopup" ) )
+     {
+@@ -944,11 +980,11 @@
+         }
+         ImGui::EndPopup();
+     }
+-    ImGui::SameLine();
++    EmbeddedToolbarNext( ICON_FA_BOOK );
+     ToggleButton( ICON_FA_BOOK, m_showManual );
+     if( m_sscb )
+     {
+-        ImGui::SameLine();
++        EmbeddedToolbarNext( ICON_FA_MAGNIFYING_GLASS_PLUS );
+         if( ImGui::Button( ICON_FA_MAGNIFYING_GLASS_PLUS ) ) ImGui::OpenPopup( "ZoomPopup" );
+         if( ImGui::BeginPopup( "ZoomPopup" ) )
+         {
+@@ -968,7 +1004,7 @@
+             ImGui::EndPopup();
+         }
+     }
+-#ifndef __EMSCRIPTEN__
++#if !defined(__EMSCRIPTEN__) && !defined(TRACY_NO_LLM)
+     if( s_config.llm )
+     {
+         ImGui::SameLine();
+@@ -977,7 +1013,11 @@
+ #endif
+     if( m_worker.AreFramesUsed() )
+     {
+-        ImGui::SameLine();
++        const auto frameText = ImGui::CalcTextSize( GetFrameSetName( *m_frames ) ).x + ImGui::CalcTextSize( ": " ).x +
++            ImGui::CalcTextSize( RealToString( m_worker.GetFrameCount( *m_frames ) ) ).x;
++        const auto arrowWidth = ImGui::CalcTextSize( " " ICON_FA_CARET_LEFT " " ).x + 2 * ImGui::GetStyle().FramePadding.x;
++        EmbeddedToolbarNext( frameText + 2 * arrowWidth + ImGui::GetFrameHeight() + 3 * ImGui::GetStyle().ItemSpacing.x );
++        ImGui::BeginGroup();
+         if( ImGui::SmallButton( " " ICON_FA_CARET_LEFT " " ) ) ZoomToPrevFrame();
+         ImGui::SameLine();
+         {
+@@ -1027,89 +1067,55 @@
+             if( clicked ) ZoomToRange( m_worker.GetFrameBegin( *m_frames, frameNum - frameOffset ), m_worker.GetFrameEnd( *m_frames, frameNum - frameOffset ) );
+             ImGui::EndPopup();
+         }
+-    }
+-
++        ImGui::EndGroup();
++    }
++
++    EmbeddedToolbarNext( ImGui::CalcTextSize( ICON_FA_EYE " 12345.67 ms" ).x );
++    ImGui::BeginGroup();
++    ImGui::Text( ICON_FA_EYE " %s", TimeToString( m_vd.zvEnd - m_vd.zvStart ) );
++    TooltipIfHovered( "View span" );
++    ImGui::EndGroup();
++
++    EmbeddedToolbarNext( ImGui::CalcTextSize( ICON_FA_DATABASE " 12345.67 ms" ).x );
++    ImGui::BeginGroup();
++    const auto firstTime = m_worker.GetFirstTime();
++    const auto lastTime = m_worker.GetLastTime();
++    ImGui::Text( ICON_FA_DATABASE " %s", TimeToString( lastTime - firstTime ) );
++    if( ImGui::IsItemHovered() )
++    {
++        ImGui::BeginTooltip();
++        if( firstTime == 0 ) ImGui::TextUnformatted( "Time span" );
++        else TextFocused( "Total time span:", TimeToString( lastTime ) );
++        ImGui::EndTooltip();
++        if( ImGui::IsItemClicked( 2 ) ) ZoomToRange( firstTime, lastTime );
++    }
++    ImGui::EndGroup();
++
++    EmbeddedToolbarNext( ImGui::CalcTextSize( ICON_FA_MEMORY " 1234.56 MB (123.45%)" ).x + ImGui::GetFrameHeight() );
++    ImGui::BeginGroup();
++    const auto mem = memUsage.load( std::memory_order_relaxed );
++    ImGui::Text( ICON_FA_MEMORY " %s", MemSizeToString( mem ) );
++    TooltipIfHovered( "Profiler memory usage" );
++    if( m_totalMemory != 0 )
+     {
+         ImGui::SameLine();
+-        ImGui::Spacing();
++        const auto memUse = float( mem ) / m_totalMemory * 100;
++        if( memUse < 80 ) ImGui::TextDisabled( "(%.2f%%)", memUse );
++        else ImGui::TextColored( ImVec4( 1.f, 0.25f, 0.25f, 1.f ), "(%.2f%%)", memUse );
++    }
++    const auto memoryLimit = m_worker.GetMemoryLimit();
++    if( memoryLimit > 0 )
++    {
+         ImGui::SameLine();
+-
+-        auto targetLabelSize = ImGui::CalcTextSize( ICON_FA_EYE " 12345.67 ms" ).x;
+-        auto cx = ImGui::GetCursorPosX();
+-        ImGui::Text( ICON_FA_EYE " %s", TimeToString( m_vd.zvEnd - m_vd.zvStart ) );
+-        TooltipIfHovered( "View span" );
+-        ImGui::SameLine();
+-        auto dx = ImGui::GetCursorPosX() - cx;
+-        if( dx < targetLabelSize ) ImGui::SameLine( cx + targetLabelSize );
+-
+-        const auto firstTime = m_worker.GetFirstTime();
+-        const auto lastTime = m_worker.GetLastTime();
+-        cx = ImGui::GetCursorPosX();
+-        ImGui::Text( ICON_FA_DATABASE " %s", TimeToString( lastTime - firstTime ) );
++        TextColoredUnformatted( memUsage.load( std::memory_order_relaxed ) > memoryLimit ? 0xFF2222FF : 0xFF00FFFF, ICON_FA_TRIANGLE_EXCLAMATION );
+         if( ImGui::IsItemHovered() )
+         {
+             ImGui::BeginTooltip();
+-            if( firstTime == 0 )
+-            {
+-                ImGui::Text( "Time span" );
+-            }
+-            else
+-            {
+-                TextFocused( "Total time span:", TimeToString( lastTime ) );
+-            }
++            ImGui::Text( "Memory limit: %s", MemSizeToString( memoryLimit ) );
+             ImGui::EndTooltip();
+-            if( ImGui::IsItemClicked( 2 ) )
+-            {
+-                ZoomToRange( firstTime, lastTime );
+-            }
+-        }
+-        ImGui::SameLine();
+-        dx = ImGui::GetCursorPosX() - cx;
+-        if( dx < targetLabelSize ) ImGui::SameLine( cx + targetLabelSize );
+-
+-        targetLabelSize = ImGui::CalcTextSize( ICON_FA_MEMORY " 1234.56 MB (123.45 %%)" ).x;
+-        cx = ImGui::GetCursorPosX();
+-        const auto mem = memUsage.load( std::memory_order_relaxed );
+-        ImGui::Text( ICON_FA_MEMORY " %s", MemSizeToString( mem ) );
+-        TooltipIfHovered( "Profiler memory usage" );
+-        if( m_totalMemory != 0 )
+-        {
+-            ImGui::SameLine();
+-            const auto memUse = float( mem ) / m_totalMemory * 100;
+-            if( memUse < 80 )
+-            {
+-                ImGui::TextDisabled( "(%.2f%%)", memUse );
+-            }
+-            else
+-            {
+-                ImGui::TextColored( ImVec4( 1.f, 0.25f, 0.25f, 1.f ), "(%.2f%%)", memUse );
+-            }
+-        }
+-        ImGui::SameLine();
+-        dx = ImGui::GetCursorPosX() - cx;
+-        if( dx < targetLabelSize ) ImGui::SameLine( cx + targetLabelSize );
+-        ImGui::Spacing();
+-
+-        const auto memoryLimit = m_worker.GetMemoryLimit();
+-        if( memoryLimit > 0 )
+-        {
+-            ImGui::SameLine();
+-            if( memUsage.load( std::memory_order_relaxed ) > memoryLimit )
+-            {
+-                TextColoredUnformatted( 0xFF2222FF, ICON_FA_TRIANGLE_EXCLAMATION );
+-            }
+-            else
+-            {
+-                TextColoredUnformatted( 0xFF00FFFF, ICON_FA_TRIANGLE_EXCLAMATION );
+-            }
+-            if( ImGui::IsItemHovered() )
+-            {
+-                ImGui::BeginTooltip();
+-                ImGui::Text( "Memory limit: %s", MemSizeToString( memoryLimit ) );
+-                ImGui::EndTooltip();
+-            }
+-        }
+-    }
++        }
++    }
++    ImGui::EndGroup();
+     DrawNotificationArea();
+ 
+     m_frameHover = -1;
+@@ -1170,7 +1176,7 @@
+     if( m_showRanges ) DrawRanges();
+     if( m_showWaitStacks ) DrawWaitStacks();
+     if( m_showManual ) DrawManual();
+-#ifndef __EMSCRIPTEN__
++#if !defined(__EMSCRIPTEN__) && !defined(TRACY_NO_LLM)
+     if( m_llm.m_show ) m_llm.Draw();
+ #endif
+ 
+@@ -1362,7 +1368,7 @@
+ void View::DrawTextEditor()
+ {
+     const auto scale = GetScale();
+-    ImGui::SetNextWindowSize( ImVec2( 1800 * scale, 800 * scale ), ImGuiCond_FirstUseEver );
++    EmbeddedSetNextWindowSize( ImVec2( 1800 * scale, 800 * scale ) );
+     bool show = true;
+     ImGui::Begin( "Source view", &show, ImGuiWindowFlags_NoScrollbar );
+     if( !ImGui::GetCurrentWindowRead()->SkipItems ) m_sourceView->Render( m_worker, *this );
+@@ -1442,14 +1448,18 @@
+ bool View::Save( const char* fn, FileCompression comp, int zlevel, bool buildDict, int streams )
+ {
+     std::unique_ptr<FileWrite> f( FileWrite::Open( fn, comp, zlevel, streams ) );
+-    if( !f ) return false;
++    if( !f ) { EmbeddedMarkSaveFailed(); return false; }
+ 
+     m_userData.StateShouldBePreserved();
++    m_embeddedSaveFailed.store( false, std::memory_order_release );
+     m_saveThreadState.store( SaveThreadState::Saving, std::memory_order_relaxed );
+     m_saveThread = std::thread( [this, f{std::move( f )}, buildDict] {
+         Worker::MainThreadDataLockGuard lock = m_worker.ObtainLockForMainThread();
+         m_worker.Write( *f, buildDict );
+         f->Finish();
++        const bool failed = f->HasWriteError();
++        m_embeddedSaveFailed.store( failed, std::memory_order_release );
++        if( !failed ) EmbeddedMarkSaved( m_worker.GetLastTime() );
+         const auto stats = f->GetCompressionStatistics();
+         m_srcFileBytes.store( stats.first, std::memory_order_relaxed );
+         m_dstFileBytes.store( stats.second, std::memory_order_relaxed );
+@@ -1482,7 +1492,7 @@
+ 
+ void View::AddLlmAttachment( const nlohmann::json& json )
+ {
+-#ifndef __EMSCRIPTEN__
++#if !defined(__EMSCRIPTEN__) && !defined(TRACY_NO_LLM)
+     m_llm.AddAttachment( json.dump( 2 ), "user" );
+     m_llm.m_show = true;
+ #endif
+@@ -1490,7 +1500,7 @@
+ 
+ void View::AddLlmQuery( const char* query )
+ {
+-#ifndef __EMSCRIPTEN__
++#if !defined(__EMSCRIPTEN__) && !defined(TRACY_NO_LLM)
+     std::string str( query );
+     m_llm.AddMessage( std::move( str ), "user" );
+     m_llm.m_show = true;
+--- a/profiler/src/profiler/TracyView.hpp
++++ b/profiler/src/profiler/TracyView.hpp
+@@ -31,7 +31,7 @@
+ #include "../server/tracy_robin_hood.h"
+ #include "../server/TracyVector.hpp"
+ 
+-#ifndef __EMSCRIPTEN__
++#if !defined(__EMSCRIPTEN__) && !defined(TRACY_NO_LLM)
+ #  include "TracyLlm.hpp"
+ #endif
+ 
+@@ -122,6 +122,18 @@
+     View( void(*cbMainThread)(const std::function<void()>&, bool), FileRead& f, SetTitleCallback stcb, SetScaleCallback sscb, AttentionCallback acb, AchievementsMgr* amgr );
+     ~View();
+ 
++    // v0.13.1 embedded adapter: the host owns synchronization and capture lifetime.
++    Worker& GetEmbeddedWorker() { return m_worker; }
++    bool EmbeddedDiscardRequested() const { return m_embeddedDiscard; }
++    bool EmbeddedStatic() const { return m_staticView; }
++    void EmbeddedStop() { m_worker.Disconnect(); m_disconnectIssued = true; }
++    int64_t EmbeddedSavedTime() const { return m_embeddedSavedTime.load( std::memory_order_acquire ); }
++    void EmbeddedMarkSaved( int64_t t ) { m_embeddedSaveFailed.store( false, std::memory_order_release ); m_embeddedSavedTime.store( t, std::memory_order_release ); }
++    void EmbeddedMarkSaveFailed() { m_embeddedSaveFailed.store( true, std::memory_order_release ); }
++    bool EmbeddedSaveFailed() const { return m_embeddedSaveFailed.load( std::memory_order_acquire ); }
++    bool EmbeddedSavePending() const { return m_saveThreadState.load( std::memory_order_acquire ) != SaveThreadState::Inert; }
++    void EmbeddedProcessSave();
++    void EmbeddedStoreUserData( bool preserve = false );
+     bool Draw();
+     bool WasActive() const;
+ 
+@@ -462,6 +474,9 @@
+     static const char* DecodeContextSwitchReason( uint8_t reason );
+     static const char* DecodeContextSwitchReasonCode( uint8_t reason );
+ 
++    bool m_embeddedDiscard = false;
++    std::atomic<int64_t> m_embeddedSavedTime { -1 };
++    std::atomic<bool> m_embeddedSaveFailed { false };
+     Worker m_worker;
+     std::string m_filename, m_filenameStaging;
+     bool m_staticView;
+@@ -952,7 +967,7 @@
+         }
+     } m_flameGraphInvariant;
+ 
+-#ifndef __EMSCRIPTEN__
++#if !defined(__EMSCRIPTEN__) && !defined(TRACY_NO_LLM)
+     TracyLlm m_llm;
+ #endif
+ };
+--- a/profiler/src/profiler/TracyView_Annotations.cpp
++++ b/profiler/src/profiler/TracyView_Annotations.cpp
+@@ -72,7 +72,7 @@
+ void View::DrawAnnotationList()
+ {
+     const auto scale = GetScale();
+-    ImGui::SetNextWindowSize( ImVec2( 600 * scale, 300 * scale ), ImGuiCond_FirstUseEver );
++    EmbeddedSetNextWindowSize( ImVec2( 600 * scale, 300 * scale ) );
+     ImGui::Begin( "Annotation list", &m_showAnnotationList );
+     if( ImGui::GetCurrentWindowRead()->SkipItems ) { ImGui::End(); return; }
+ 
+--- a/profiler/src/profiler/TracyView_Callstack.cpp
++++ b/profiler/src/profiler/TracyView_Callstack.cpp
+@@ -18,7 +18,7 @@
+ {
+     bool show = true;
+     const auto scale = GetScale();
+-    ImGui::SetNextWindowSize( ImVec2( 1400 * scale, 500 * scale ), ImGuiCond_FirstUseEver );
++    EmbeddedSetNextWindowSize( ImVec2( 1400 * scale, 500 * scale ) );
+     ImGui::Begin( "Call stack", &show, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse );
+     if( !ImGui::GetCurrentWindowRead()->SkipItems )
+     {
+--- a/profiler/src/profiler/TracyView_Compare.cpp
++++ b/profiler/src/profiler/TracyView_Compare.cpp
+@@ -200,7 +200,7 @@
+ void View::DrawCompare()
+ {
+     const auto scale = GetScale();
+-    ImGui::SetNextWindowSize( ImVec2( 590 * scale, 800 * scale ), ImGuiCond_FirstUseEver );
++    EmbeddedSetNextWindowSize( ImVec2( 590 * scale, 800 * scale ) );
+     ImGui::Begin( "Compare traces", &m_compare.show, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse );
+     if( ImGui::GetCurrentWindowRead()->SkipItems ) { ImGui::End(); return; }
+ #ifdef TRACY_NO_STATISTICS
+--- a/profiler/src/profiler/TracyView_ConnectionState.cpp
++++ b/profiler/src/profiler/TracyView_ConnectionState.cpp
+@@ -176,6 +176,7 @@
+         {
+             ImGui::CloseCurrentPopup();
+             ImGui::EndPopup();
++            m_embeddedDiscard = true;
+             return false;
+         }
+         ImGui::SameLine();
+@@ -184,6 +185,7 @@
+             ImGui::CloseCurrentPopup();
+             ImGui::EndPopup();
+             m_reconnectRequested = true;
++            m_embeddedDiscard = true;
+             return false;
+         }
+         ImGui::SameLine( 0, ty * 2 );
+--- a/profiler/src/profiler/TracyView_ContextSwitch.cpp
++++ b/profiler/src/profiler/TracyView_ContextSwitch.cpp
+@@ -387,7 +387,7 @@
+ void View::DrawWaitStacks()
+ {
+     const auto scale = GetScale();
+-    ImGui::SetNextWindowSize( ImVec2( 1400 * scale, 500 * scale ), ImGuiCond_FirstUseEver );
++    EmbeddedSetNextWindowSize( ImVec2( 1400 * scale, 500 * scale ) );
+     ImGui::Begin( "Wait stacks", &m_showWaitStacks );
+     if( ImGui::GetCurrentWindowRead()->SkipItems ) { ImGui::End(); return; }
+ #ifdef TRACY_NO_STATISTICS
+--- a/profiler/src/profiler/TracyView_CpuData.cpp
++++ b/profiler/src/profiler/TracyView_CpuData.cpp
+@@ -571,7 +571,7 @@
+ void View::DrawCpuDataWindow()
+ {
+     const auto scale = GetScale();
+-    ImGui::SetNextWindowSize( ImVec2( 700 * scale, 800 * scale ), ImGuiCond_FirstUseEver );
++    EmbeddedSetNextWindowSize( ImVec2( 700 * scale, 800 * scale ) );
+     ImGui::Begin( "CPU data", &m_showCpuDataWindow );
+     if( ImGui::GetCurrentWindowRead()->SkipItems ) { ImGui::End(); return; }
+ 
+--- a/profiler/src/profiler/TracyView_FindZone.cpp
++++ b/profiler/src/profiler/TracyView_FindZone.cpp
+@@ -258,7 +258,7 @@
+     if( m_shortcut == ShortcutAction::OpenFind ) ImGui::SetNextWindowFocus();
+ 
+     const auto scale = GetScale();
+-    ImGui::SetNextWindowSize( ImVec2( 520 * scale, 800 * scale ), ImGuiCond_FirstUseEver );
++    EmbeddedSetNextWindowSize( ImVec2( 520 * scale, 800 * scale ) );
+     ImGui::Begin( "Find zone", &m_findZone.show, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse );
+     if( ImGui::GetCurrentWindowRead()->SkipItems ) { ImGui::End(); return; }
+ #ifdef TRACY_NO_STATISTICS
+--- a/profiler/src/profiler/TracyView_FlameGraph.cpp
++++ b/profiler/src/profiler/TracyView_FlameGraph.cpp
+@@ -731,7 +731,7 @@
+ void View::DrawFlameGraph()
+ {
+     const auto scale = GetScale();
+-    ImGui::SetNextWindowSize( ImVec2( 1400 * scale, 800 * scale ), ImGuiCond_FirstUseEver );
++    EmbeddedSetNextWindowSize( ImVec2( 1400 * scale, 800 * scale ) );
+     ImGui::Begin( "Flame graph", &m_showFlameGraph, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse );
+     if( ImGui::GetCurrentWindowRead()->SkipItems ) { ImGui::End(); return; }
+ 
+--- a/profiler/src/profiler/TracyView_Memory.cpp
++++ b/profiler/src/profiler/TracyView_Memory.cpp
+@@ -173,7 +173,7 @@
+ void View::DrawMemory()
+ {
+     const auto scale = GetScale();
+-    ImGui::SetNextWindowSize( ImVec2( 1100 * scale, 500 * scale ), ImGuiCond_FirstUseEver );
++    EmbeddedSetNextWindowSize( ImVec2( 1100 * scale, 500 * scale ) );
+     ImGui::Begin( "Memory", &m_memInfo.show, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse );
+     if( ImGui::GetCurrentWindowRead()->SkipItems ) { ImGui::End(); return; }
+ 
+@@ -910,7 +910,7 @@
+ void View::DrawAllocList()
+ {
+     const auto scale = GetScale();
+-    ImGui::SetNextWindowSize( ImVec2( 1100 * scale, 500 * scale ), ImGuiCond_FirstUseEver );
++    EmbeddedSetNextWindowSize( ImVec2( 1100 * scale, 500 * scale ) );
+     ImGui::Begin( "Allocations list", &m_memInfo.showAllocList );
+     if( ImGui::GetCurrentWindowRead()->SkipItems ) { ImGui::End(); return; }
+ 
+--- a/profiler/src/profiler/TracyView_Messages.cpp
++++ b/profiler/src/profiler/TracyView_Messages.cpp
+@@ -12,7 +12,7 @@
+     const auto& msgs = m_worker.GetMessages();
+ 
+     const auto scale = GetScale();
+-    ImGui::SetNextWindowSize( ImVec2( 1200 * scale, 600 * scale ), ImGuiCond_FirstUseEver );
++    EmbeddedSetNextWindowSize( ImVec2( 1200 * scale, 600 * scale ) );
+     ImGui::Begin( "Messages", &m_showMessages );
+     if( ImGui::GetCurrentWindowRead()->SkipItems ) { ImGui::End(); return; }
+ 
+--- a/profiler/src/profiler/TracyView_Samples.cpp
++++ b/profiler/src/profiler/TracyView_Samples.cpp
+@@ -804,7 +804,7 @@
+ {
+     bool show = true;
+     const auto scale = GetScale();
+-    ImGui::SetNextWindowSize( ImVec2( 1400 * scale, 500 * scale ), ImGuiCond_FirstUseEver );
++    EmbeddedSetNextWindowSize( ImVec2( 1400 * scale, 500 * scale ) );
+     ImGui::Begin( "Sample entry stacks", &show, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse );
+     if( !ImGui::GetCurrentWindowRead()->SkipItems )
+     {
+--- a/profiler/src/profiler/TracyView_Statistics.cpp
++++ b/profiler/src/profiler/TracyView_Statistics.cpp
+@@ -38,7 +38,7 @@
+ void View::DrawStatistics()
+ {
+     const auto scale = GetScale();
+-    ImGui::SetNextWindowSize( ImVec2( 1400 * scale, 600 * scale ), ImGuiCond_FirstUseEver );
++    EmbeddedSetNextWindowSize( ImVec2( 1400 * scale, 600 * scale ) );
+     ImGui::Begin( "Statistics", &m_showStatistics, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse );
+     if( ImGui::GetCurrentWindowRead()->SkipItems ) { ImGui::End(); return; }
+ #ifdef TRACY_NO_STATISTICS
+--- a/profiler/src/profiler/TracyView_Timeline.cpp
++++ b/profiler/src/profiler/TracyView_Timeline.cpp
+@@ -188,7 +188,7 @@
+     {
+         auto& inertia = m_kbNavCtrl.m_scrollInertia[direction];
+ 
+-        if( ImGui::IsKeyDown( KeyboardNavigation::DirectionToKeyMap[direction] ) )
++        if( EmbeddedIsKeyDown( KeyboardNavigation::DirectionToKeyMap[direction] ) )
+         {
+             const auto timeStartDelta = movement * KeyboardNavigation::StartRangeMod[direction];
+             const auto timeEndDelta = movement * KeyboardNavigation::EndRangeMod[direction];
+--- a/profiler/src/profiler/TracyView_TraceInfo.cpp
++++ b/profiler/src/profiler/TracyView_TraceInfo.cpp
+@@ -14,7 +14,7 @@
+ void View::DrawInfo()
+ {
+     const auto scale = GetScale();
+-    ImGui::SetNextWindowSize( ImVec2( 400 * scale, 650 * scale ), ImGuiCond_FirstUseEver );
++    EmbeddedSetNextWindowSize( ImVec2( 400 * scale, 650 * scale ) );
+     ImGui::Begin( "Trace information", &m_showInfo, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse );
+     if( ImGui::GetCurrentWindowRead()->SkipItems ) { ImGui::End(); return; }
+     ImGui::PushFont( g_fonts.normal, FontBig );
+--- a/profiler/src/profiler/TracyView_ZoneInfo.cpp
++++ b/profiler/src/profiler/TracyView_ZoneInfo.cpp
+@@ -296,7 +296,7 @@
+     const auto& srcloc = m_worker.GetSourceLocation( ev.SrcLoc() );
+ 
+     const auto scale = GetScale();
+-    ImGui::SetNextWindowSize( ImVec2( 500 * scale, 600 * scale ), ImGuiCond_FirstUseEver );
++    EmbeddedSetNextWindowSize( ImVec2( 500 * scale, 600 * scale ) );
+     bool show = true;
+     ImGui::Begin( "Zone info", &show, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse );
+     if( !ImGui::GetCurrentWindowRead()->SkipItems )
+@@ -1443,7 +1443,7 @@
+     const auto& srcloc = m_worker.GetSourceLocation( ev.SrcLoc() );
+ 
+     const auto scale = GetScale();
+-    ImGui::SetNextWindowSize( ImVec2( 500 * scale, 600 * scale), ImGuiCond_FirstUseEver );
++    EmbeddedSetNextWindowSize( ImVec2( 500 * scale, 600 * scale) );
+     bool show = true;
+     ImGui::Begin( "Zone info", &show, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse );
+     if( !ImGui::GetCurrentWindowRead()->SkipItems )
+--- a/server/TracyEmbeddedFile.hpp
++++ b/server/TracyEmbeddedFile.hpp
+@@ -0,0 +1,21 @@
++#pragma once
++#include <stdio.h>
++#ifdef _WIN32
++#include <windows.h>
++#include <string>
++#endif
++namespace tracy {
++inline FILE* EmbeddedFileOpen( const char* name, const char* mode ) {
++#ifdef _WIN32
++    const int count = MultiByteToWideChar( CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, nullptr, 0 );
++    if( count <= 0 ) return nullptr;
++    std::wstring path( count, L'\0' );
++    if( !MultiByteToWideChar( CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, path.data(), count ) ) return nullptr;
++    std::wstring wideMode;
++    for( const char* p = mode; *p; ++p ) wideMode += wchar_t( *p );
++    return _wfopen( path.c_str(), wideMode.c_str() );
++#else
++    return fopen( name, mode );
++#endif
++}
++}
+--- a/server/TracyFileRead.hpp
++++ b/server/TracyFileRead.hpp
+@@ -22,6 +22,7 @@
+ #  define stat64 stat
+ #endif
+ 
++#include "TracyEmbeddedFile.hpp"
+ #include "TracyFileHeader.hpp"
+ #include "TracyFileMeta.hpp"
+ #include "TracyMmap.hpp"
+@@ -119,7 +120,7 @@
+ public:
+     static FileRead* Open( const char* fn )
+     {
+-        auto f = fopen( fn, "rb" );
++        auto f = EmbeddedFileOpen( fn, "rb" );
+         return f ? new FileRead( f, fn ) : nullptr;
+     }
+ 
+@@ -459,7 +460,12 @@
+         }
+ 
+         struct stat64 buf;
++#ifdef _MSC_VER
++        // Query the already-open handle; the UTF-8 filename is not a CRT ANSI path.
++        if( _fstat64( _fileno( f ), &buf ) == 0 )
++#else
+         if( stat64( fn, &buf ) == 0 )
++#endif
+         {
+             m_dataSize = buf.st_size;
+         }
+--- a/server/TracyFileWrite.hpp
++++ b/server/TracyFileWrite.hpp
+@@ -16,6 +16,7 @@
+ #include <vector>
+ #include <zstd.h>
+ 
++#include "TracyEmbeddedFile.hpp"
+ #include "TracyFileHeader.hpp"
+ #include "TracyFileMeta.hpp"
+ #include "../public/common/tracy_lz4.hpp"
+@@ -137,7 +138,7 @@
+ public:
+     static FileWrite* Open( const char* fn, FileCompression comp = FileCompression::Fast, int level = 1, int streams = -1 )
+     {
+-        auto f = fopen( fn, "wb" );
++        auto f = EmbeddedFileOpen( fn, "wb" );
+         if( !f ) return nullptr;
+         if( streams <= 0 ) streams = std::max<int>( 1, std::thread::hardware_concurrency() );
+         if( streams > 255 ) streams = 255;
+@@ -149,6 +150,8 @@
+         Finish();
+         fclose( m_file );
+     }
++
++    bool HasWriteError() { return fflush( m_file ) != 0 || ferror( m_file ) != 0; }
+ 
+     void Finish()
+     {

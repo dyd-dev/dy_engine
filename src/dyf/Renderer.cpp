@@ -175,7 +175,8 @@ bool Renderer::ApplySettings()
     const bool nextShadows = nextConfig.lighting.enabled && nextConfig.lighting.shadows;
     const bool rebuild = shadersPending || shadows != nextShadows ||
         config.enableHdrRendering != nextConfig.enableHdrRendering ||
-        config.enableInstancing != nextConfig.enableInstancing;
+        config.enableInstancing != nextConfig.enableInstancing ||
+        config.enableBindlessMaterials != nextConfig.enableBindlessMaterials;
     const bool outputChanged = config.vsync != nextConfig.vsync ||
         config.allowReadback != nextConfig.allowReadback;
     RHI::SwapchainDesc output;
@@ -278,7 +279,15 @@ Renderer::Renderer(RHI::IDevice& borrowedDevice,const void* window,const Rendere
     : device(&borrowedDevice),windowHandle(window),config(desc)
 {
 }
-Renderer::~Renderer() { Shutdown(); }
+Renderer::~Renderer() {
+    if(liveId)device->ReleaseLiveControls(liveId);
+    for(auto& control:liveCatalog)control=Diagnostics::ControlRegistration{};
+    for(auto& control:liveControls)control=Diagnostics::ControlRegistration{};
+    for(const auto& sample:liveGpuSamples)device->DestroyTimestampQuery(sample.query);
+    for(const auto query:liveFreeQueries)device->DestroyTimestampQuery(query);
+    Diagnostics::RetireLiveObject(liveId);
+    Shutdown();
+}
 
 std::unique_ptr<Renderer> Renderer::Create(const void* window)
 {
@@ -311,6 +320,7 @@ std::unique_ptr<Renderer> Renderer::Create(RHI::IDevice& device, const void* win
     if(!ValidateRendererConfig(desc))return nullptr;
     auto renderer = std::unique_ptr<Renderer>(new Renderer(device, window, desc));
     if(!renderer->Initialize()){RendererFailure("Renderer initialization failed.");return nullptr;}
+    renderer->InitializeLiveProfiling();
     return renderer;
 
     }
@@ -334,11 +344,15 @@ bool Renderer::Render(const Scene& scene, const Camera& camera, const Canvas& ov
 }
 bool Renderer::Render(const Canvas& canvas, Image* readback)
 {
+    InitializeLiveProfiling();
+    PublishLiveGeometryAvailability(false);
+    Diagnostics::LiveFrameScope liveFrame(Diagnostics::FindLiveObject(device),liveId);
+    device->PrepareLiveControls(liveFrame.GetKey());
     try
     {
-        if(!ApplySettings()) return false;
+        if(!PrepareLiveFrame(liveFrame.GetKey()))return false;
         if(readback && !config.allowReadback) return RendererFailure("Readback was not enabled.");
-        return RenderCanvas(canvas,readback);
+        const bool rendered=RenderCanvas(canvas,readback);liveFrame.SetOutcome(rendered?Diagnostics::LiveOutcome::Completed:Diagnostics::LiveOutcome::Failed);return rendered;
     }
     catch(const std::exception& error)
     {
@@ -443,6 +457,8 @@ bool Renderer::UsesStockGeometry() const
 }
 bool Renderer::UsesInstanceStream() const { return config.enableInstancing && UsesStockGeometry(); }
 bool Renderer::UsesBindlessMaterials() const
+{return config.enableBindlessMaterials&&SupportsBindlessMaterials();}
+bool Renderer::SupportsBindlessMaterials() const
 {
     // 사용자 Fragment는 기본 레이아웃 계약을 유지한다. 기본 셰이더의 최적화 가능 여부는 RHI에 묻는다.
     if(!shaderSources.bytes[MeshFragment].empty()) return false;
@@ -515,11 +531,17 @@ bool Renderer::RenderToTexture(const Scene& scene,const Camera& camera,RHI::Text
 bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, const Canvas* overlay, Image* readback,
     const std::vector<RendererDrawDesc>* draws,RHI::TextureHandle selectedOutput,RHI::ResourceState before)
 {
+    InitializeLiveProfiling();
+    PublishLiveGeometryAvailability(draws!=nullptr);
+    Diagnostics::LiveFrameScope liveFrame(Diagnostics::FindLiveObject(device),liveId);
+    device->PrepareLiveControls(liveFrame.GetKey());
+    Diagnostics::SetLiveObjectGauge(liveFrame.GetKey(),{Diagnostics::LiveValueState::Ready,scene.GetEntityCount()});
+    struct LivePending {Renderer& r;Diagnostics::LiveFrameKey key;~LivePending(){r.SubmitLiveGpuSamples({},key);}} livePending{*this,liveFrame.GetKey()};
     try
     {
         lastStatistics={};
         DY_PROFILE_CPU_ZONE_NAMED("Renderer::RenderScene");
-        if(!ApplySettings())return false;
+        if(!PrepareLiveFrame(liveFrame.GetKey()))return false;
         if(!selectedOutput && Platform::Window::ConsumeKeyPress(Platform::Key::F11,windowHandle))
             config.profilerStartsExpanded = !config.profilerStartsExpanded;
         if(draws && draws->size() != scene.GetEntityCount()) return RendererFailure("Draw input count must match the scene.");
@@ -529,7 +551,10 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
         const auto cpuStart=std::chrono::steady_clock::now();
         if(readback && !config.allowReadback) return RendererFailure("Renderer readback was not enabled.");
         RHI::IDevice* nativeDevice = device;
-        if(!selectedOutput && !nativeDevice->BeginFrame()){if(nativeDevice->IsLost())return RendererFailure("RHI device was lost.");if(readback)*readback={};return true;}
+        if(!selectedOutput && !nativeDevice->BeginFrame()){
+            if(nativeDevice->IsLost())return RendererFailure("RHI device was lost.");
+            livePreparedFrame=0;liveFrame.SetOutcome(Diagnostics::LiveOutcome::Skipped);if(readback)*readback={};return true;
+        }
         if(!selectedOutput) framePending=true;
         FrameEnd frameEnd{*nativeDevice,framePending};
         auto* output=selectedOutput ? selectedOutput : nativeDevice->GetBackBuffer();
@@ -697,6 +722,7 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
         drawn = drawn && nativeDevice->Submit({frame.lists.data(),
             static_cast<uint32_t>(frame.lists.size()), nullptr, 0}, completion);
         if(drawn) {
+            SubmitLiveGpuSamples(completion,liveFrame.GetKey());
             canvasFrame.Commit();
             samples.completion=completion;
             lastRenderCompletion=completion;
@@ -717,6 +743,7 @@ bool Renderer::RenderScene(const Scene& scene, const Camera* selectedCamera, con
             if(!presented) return RendererFailure("Scene presentation failed.");
             DY_PROFILE_FRAME_MARK();
         }
+        liveFrame.SetOutcome(Diagnostics::LiveOutcome::Completed);
         return true;
     }
     catch(const std::exception& error)

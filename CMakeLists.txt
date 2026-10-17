@@ -14,7 +14,9 @@ add_library(${PROJECT_NAME} STATIC
 	"src/RHI/IDevice.cpp"
 	"src/RHI/ICommandList.cpp"
 	"src/RHI/Resources.cpp"
+    "src/RHI/LiveRhi.cpp"
 	"src/dyf/Renderer.cpp"
+    "src/dyf/RendererLive.cpp"
 	"src/dyf/Image.cpp"
 	"src/dyf/Canvas.cpp"
 	"src/dyf/Font.cpp"
@@ -27,6 +29,7 @@ add_library(${PROJECT_NAME} STATIC
     "src/dyf/Profiler.cpp"
     "src/dyf/ProfilerSampler.cpp"
     "src/Platform/RenderDocCapture.cpp"
+    "src/Platform/LiveTools.cpp"
     "src/Platform/Log.cpp"
     "src/Platform/LogSession.cpp"
 	"src/dyf/DrawData.cpp"
@@ -45,8 +48,20 @@ find_package(Threads REQUIRED)
 target_link_libraries(${PROJECT_NAME} PUBLIC Threads::Threads)
 target_include_directories(${PROJECT_NAME} BEFORE PUBLIC "${PROJECT_SOURCE_DIR}/src/Public")
 
+# Client/protocol remain functional when only the producer hooks are disabled.
+add_library(dy_live_profiling STATIC src/Diagnostics/LiveProfiling.cpp
+    src/Diagnostics/LiveProtocol.cpp src/Diagnostics/LiveTransport.cpp)
+add_library(dyf::LiveProfiling ALIAS dy_live_profiling)
+add_library(dyf::LiveClient ALIAS dy_live_profiling)
+target_link_libraries(dy_live_profiling PUBLIC Engine_Options Threads::Threads)
+if(WIN32)
+    target_link_libraries(dy_live_profiling PRIVATE advapi32)
+endif()
+target_link_libraries(${PROJECT_NAME} PUBLIC dy_live_profiling)
+
 option(DY_EXTEND_MODEL "Build the optional Model extension." OFF)
 option(DY_EXTEND_IMGUI "Build the optional Dear ImGui extension." OFF)
+option(DY_VIEWER_EMBED_TRACY "Embed the pinned Tracy profiler UI in the execution visualizer." ON)
 
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     include(.github/ci/CiChecks.cmake)
@@ -61,8 +76,11 @@ include(ShaderAssets)
 if(DY_EXTEND_MODEL)
 	add_subdirectory(src/Extend/Model)
 endif()
-if(DY_EXTEND_IMGUI)
+if(DY_EXTEND_IMGUI OR DY_BUILD_EXECUTION_VISUALIZER)
 	add_subdirectory(src/Extend/ImGui)
+endif()
+if(DY_BUILD_EXECUTION_VISUALIZER)
+    add_subdirectory(src/Extend/ExecutionVisualizer)
 endif()
 
 # Only add the executable if this is the main project being built (not when included as a subdirectory in another project)

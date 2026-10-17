@@ -8,6 +8,7 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include "dyf/Platform/Profiler.h"
 
 namespace dyf::Core
 {
@@ -33,8 +34,13 @@ private:
     void WorkerLoop();
     std::vector<std::thread> m_workers;
     std::deque<std::packaged_task<void()>> m_tasks;
+#if defined(DY_TRACY_ENABLED)
+    TracyLockableN(std::mutex, m_mutex, "ThreadPool task queue");
+    std::condition_variable_any m_ready, m_idle;
+#else
     std::mutex m_mutex;
     std::condition_variable m_ready, m_idle;
+#endif
     size_t m_active = 0;
     bool m_stopping = false;
 };

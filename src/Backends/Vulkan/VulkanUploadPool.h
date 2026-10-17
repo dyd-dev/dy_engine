@@ -1,5 +1,8 @@
 #pragma once
 #include "dyf/RHI/UploadMemory.h"
+#ifdef DY_LIVE_PROFILING_ENABLED
+#include "dyf/Diagnostics/LiveProfiling.h"
+#endif
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +15,10 @@
 
 namespace dyf::Backends::VulkanDetail
 {
+struct UploadPolicy
+{
+    bool reusePages=true,suballocate=true;
+};
 // Page supplies capacity, mapped bytes and API-specific destruction. A lease
 // belongs to a native command list until its existing retirement/discard path.
 template<class Page>
@@ -47,19 +54,27 @@ public:
     explicit UploadPagePool(Factory factory,uint64_t pageSize=256*1024,uint64_t cacheBudget=8*1024*1024)
         :m_factory(std::move(factory)),m_pageSize(std::max(uint64_t{1},pageSize)),m_cacheBudget(cacheBudget) {}
 
+    void SetPolicy(UploadPolicy policy)
+    { std::lock_guard<std::mutex> lock(m_mutex);m_policy=policy; }
+    [[nodiscard]] UploadPolicy GetPolicy() const
+    { std::lock_guard<std::mutex> lock(m_mutex);return m_policy; }
     [[nodiscard]] Lease Acquire(uint64_t minimumCapacity)
+    { return Acquire(minimumCapacity,GetPolicy().reusePages); }
+    [[nodiscard]] Lease Acquire(uint64_t minimumCapacity,bool reusePages)
     {
         if(!minimumCapacity || minimumCapacity>std::numeric_limits<size_t>::max() || !m_factory)return {};
         auto owner=this->shared_from_this();
         std::unique_ptr<Page> page;
+        [[maybe_unused]] bool reused=false;
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             auto best=m_free.end();
-            for(auto it=m_free.begin();it!=m_free.end();++it)
+            for(auto it=m_free.begin();reusePages&&it!=m_free.end();++it)
                 if((*it)->capacity>=minimumCapacity && (best==m_free.end() || (*it)->capacity<(*best)->capacity))best=it;
             if(best!=m_free.end())
             {
                 page=std::move(*best);m_free.erase(best);
+                reused=true;
                 m_statistics.cachedBytes-=page->capacity;
                 Accumulate(m_statistics.reuseCount,1);
                 m_statistics.inUseBytes+=page->capacity;
@@ -79,6 +94,16 @@ public:
             m_statistics.inUseBytes+=page->capacity;
             m_statistics.peakInUseBytes=std::max(m_statistics.peakInUseBytes,m_statistics.inUseBytes);
         }
+#ifdef DY_LIVE_PROFILING_ENABLED
+        const auto context=Diagnostics::GetLiveContext();
+        if(context.frame.frame&&Diagnostics::IsLiveCollectorEnabled())
+        {
+            Diagnostics::LiveEvent event;event.id=Diagnostics::AllocateLiveId();event.context=context;
+            event.kind=Diagnostics::LiveEventKind::UploadMemory;event.stage=Diagnostics::LiveStage::NativeTranslate;
+            event.arguments[0]=reused?1:0;event.bytes=page->capacity;event.operations=1;
+            Diagnostics::RecordLiveEvent(event);
+        }
+#endif
         return Lease(std::move(owner),std::move(page));
     }
     void RecordRequest(uint64_t bytes)
@@ -95,7 +120,7 @@ private:
         {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_statistics.inUseBytes-=page->capacity;
-            if(page->capacity<=m_cacheBudget-m_statistics.cachedBytes)
+            if(m_policy.reusePages && page->capacity<=m_cacheBudget-m_statistics.cachedBytes)
             {
                 const auto capacity=page->capacity;
                 m_free.push_back(std::move(page));
@@ -110,6 +135,7 @@ private:
     mutable std::mutex m_mutex;
     std::vector<std::unique_ptr<Page>> m_free;
     RHI::UploadMemoryStatistics m_statistics;
+    UploadPolicy m_policy;
 };
 
 template<class Page>
@@ -123,14 +149,17 @@ public:
         uint8_t* data=nullptr;
         explicit operator bool() const noexcept { return page!=nullptr; }
     };
-    explicit UploadArena(std::shared_ptr<UploadPagePool<Page>> pool):m_pool(std::move(pool)) {}
+    explicit UploadArena(std::shared_ptr<UploadPagePool<Page>> pool)
+        :m_pool(std::move(pool)),m_policy(m_pool?m_pool->GetPolicy():UploadPolicy{}) {}
+    UploadArena(std::shared_ptr<UploadPagePool<Page>> pool,UploadPolicy policy)
+        :m_pool(std::move(pool)),m_policy(policy) {}
     UploadArena(const UploadArena&)=delete;
     UploadArena& operator=(const UploadArena&)=delete;
     [[nodiscard]] Allocation Allocate(uint64_t bytes,uint64_t alignment=16)
     {
         if(!m_pool || !bytes || bytes>std::numeric_limits<size_t>::max() || !alignment || (alignment&(alignment-1)))return {};
         uint64_t offset=0;
-        Page* page=m_pages.empty()?nullptr:m_pages.back().Get();
+        Page* page=!m_policy.suballocate||m_pages.empty()?nullptr:m_pages.back().Get();
         if(page && m_offset<=UINT64_MAX-(alignment-1))
         {
             offset=(m_offset+alignment-1)&~(alignment-1);
@@ -139,7 +168,7 @@ public:
         else page=nullptr;
         if(!page)
         {
-            auto lease=m_pool->Acquire(bytes);
+            auto lease=m_pool->Acquire(bytes,m_policy.reusePages);
             if(!lease)return {};
             m_pages.push_back(std::move(lease));
             page=m_pages.back().Get();offset=0;
@@ -150,6 +179,8 @@ public:
     }
 private:
     std::shared_ptr<UploadPagePool<Page>> m_pool;
+    // Freeze recording policy; returning a retired page uses the pool's current cache policy.
+    const UploadPolicy m_policy;
     std::vector<typename UploadPagePool<Page>::Lease> m_pages;
     uint64_t m_offset=0;
 };

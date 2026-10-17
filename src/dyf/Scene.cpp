@@ -44,6 +44,9 @@ EntityID Scene::CreateEntity(MeshID mesh, MaterialID material,
         throw;
     }
     ++m_transformRevision;
+    if(Diagnostics::IsLiveCollectorEnabled()){
+        try{m_liveEntities.resize(count+1,0);m_liveEntities[count]=Diagnostics::RegisterLiveObject(nullptr,{Diagnostics::LiveObjectKind::Entity,0,m_liveId,1,sizeof(Transform),"Scene entity"});}catch(...){}
+    }
     return static_cast<EntityID>(count);
 }
 
@@ -87,8 +90,8 @@ namespace
 
 }
 // Scene 자신이 수명 표식을 보유한다. Handle의 weak_ptr은 Scene의 생존 기간을 늘리지 않는다.
-Scene::Scene() : m_lifetime(this, [](Scene*) {}) {}
-Scene::~Scene() = default;
+Scene::Scene() : m_lifetime(this, [](Scene*) {}) {m_liveId=Diagnostics::RegisterLiveObject(this,{Diagnostics::LiveObjectKind::Scene,0,0,0,0,"Scene"});}
+Scene::~Scene() {for(const auto id:m_liveEntities)Diagnostics::RetireLiveObject(id);Diagnostics::RetireLiveObject(m_liveId);}
 EntityHandle Scene::Add(const MeshData& mesh,const MaterialDesc& material,const Math::float4x4& transform)
 {
     const auto meshCount=m_meshes.size(), materialCount=m_materials.size();
