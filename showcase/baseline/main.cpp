@@ -1,7 +1,7 @@
 #include "dyf.h"
 #include "dyf/RHI.h"
 #include <dyf/Extends/Model.h>
-#include "../../CameraPath.h"
+#include "../CameraPath.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -49,7 +49,7 @@ double Number(const std::string& text)
 
 void Help()
 {
-    std::puts("AdvancedCinematicBaseline: stock renderer at commit 89ac61c\n"
+    std::puts("baseline: stock renderer at commit 89ac61c\n"
         "  --scene FILE   FBX, glTF, GLB or OBJ environment; default original Sponza glTF/PNG\n"
         "  --path FILE    Shared seconds,eyeXYZ,targetXYZ,fovDegrees,upXYZ camera CSV\n"
         "  --start N --paused --width N --height N\n"
@@ -182,7 +182,7 @@ private:
 
 int main(int argc,char** argv)try
 {
-    std::string scenePath="/home/suhan/downloads/main_sponza/NewSponza_Main_glTF_003.gltf";
+    std::string scenePath=DY_BASELINE_SCENE;
     std::string cameraPath=DY_BASELINE_CAMERA_PATH;
     uint32_t width=renderWidth,height=renderHeight;
     uint64_t budget=8192ull*1024*1024,maxAnimationKeys=std::numeric_limits<uint64_t>::max();
@@ -241,7 +241,7 @@ int main(int argc,char** argv)try
     std::fprintf(stderr,"Loaded %zu meshes, %zu materials, %u entities. Camera CSV: %s (%.3f s).\n",
         scene.Meshes().size(),scene.Materials().size(),scene.GetEntityCount(),cameraPath.c_str(),path.Duration());
 
-    dyf::Platform::Window window(width,height,"Cinematic baseline / stock 89ac61c");
+    dyf::Platform::Window window(width,height,"baseline / stock 89ac61c");
     Check(window.GetHandle()!=nullptr,"Window creation failed.");
     dyf::RendererConfig config;
     config.enableHdrRendering=true;config.exposure=exposure;config.enableProfilerHud=false;
@@ -298,6 +298,6 @@ int main(int argc,char** argv)try
 }
 catch(const std::exception& error)
 {
-    std::fprintf(stderr,"CinematicBaseline: %s\n",error.what());
+    std::fprintf(stderr,"baseline: %s\n",error.what());
     return 1;
 }
