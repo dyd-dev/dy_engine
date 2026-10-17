@@ -1,3 +1,4 @@
+#include "dyf/Platform/GlfwWindow.h"
 #include "dyf/Extends/ImGui/ImGui.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI/Buffer.h"
@@ -152,7 +153,7 @@ Gui::Gui(RHI::IDevice& device) : impl(new Impl(device)) {}
 std::unique_ptr<Gui> Gui::Create(Platform::Window& window, RHI::IDevice& device)
 {
     if(activeContext || ImGui::GetCurrentContext()) { Fail("Only one Gui/ImGui context is supported."); return nullptr; }
-    if(!window.GetGlfwHandle()) { Fail("A valid Window is required."); return nullptr; }
+    if(!dyf::Platform::GetGlfwWindow(window)) { Fail("A valid Window is required."); return nullptr; }
     IMGUI_CHECKVERSION();
     std::unique_ptr<Gui> gui(new Gui(device));
     gui->impl->context = ImGui::CreateContext();
@@ -162,7 +163,7 @@ std::unique_ptr<Gui> Gui::Create(Platform::Window& window, RHI::IDevice& device)
     io.BackendRendererName = "dyf_rhi";
     io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    gui->impl->platformReady = ImGui_ImplGlfw_InitForOther(window.GetGlfwHandle(), true);
+    gui->impl->platformReady = ImGui_ImplGlfw_InitForOther(dyf::Platform::GetGlfwWindow(window), true);
     if(!gui->impl->platformReady) { Fail("GLFW backend initialization failed."); return nullptr; }
     return gui;
 }

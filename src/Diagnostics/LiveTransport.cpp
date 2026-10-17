@@ -1,4 +1,5 @@
 #include "LiveInternal.h"
+#include "dyf/Diagnostics/LiveConnection.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -104,14 +105,14 @@ struct Server
             Handle handle(CreateNamedPipeW(name.c_str(),PIPE_ACCESS_DUPLEX|FILE_FLAG_OVERLAPPED|FILE_FLAG_FIRST_PIPE_INSTANCE,
                 PIPE_TYPE_BYTE|PIPE_READMODE_BYTE|PIPE_WAIT|PIPE_REJECT_REMOTE_CLIENTS,1,65536,65536,0,&security));LocalFree(descriptor);
             if(handle.value==INVALID_HANDLE_VALUE){std::fprintf(stderr,"dyf live: named pipe creation failed (%lu)\n",GetLastError());return;}pipe=handle.value;
-            while(!stop){
+            while(!stop&&IsLiveCollectorEnabled()){
                 Handle event(CreateEventW(nullptr,TRUE,FALSE,nullptr));if(!event.value)break;OVERLAPPED overlapped{};overlapped.hEvent=event.value;
                 BOOL connected=ConnectNamedPipe(handle.value,&overlapped);DWORD error=connected?ERROR_SUCCESS:GetLastError();
-                if(error==ERROR_IO_PENDING){while(!stop&&WaitForSingleObject(event.value,20)==WAIT_TIMEOUT){}if(stop){CancelIoEx(handle.value,&overlapped);WaitForSingleObject(event.value,INFINITE);break;}DWORD bytes;connected=GetOverlappedResult(handle.value,&overlapped,&bytes,FALSE);}
+                if(error==ERROR_IO_PENDING){while(!stop&&IsLiveCollectorEnabled()&&WaitForSingleObject(event.value,20)==WAIT_TIMEOUT){}if(stop||!IsLiveCollectorEnabled()){CancelIoEx(handle.value,&overlapped);WaitForSingleObject(event.value,INFINITE);break;}DWORD bytes;connected=GetOverlappedResult(handle.value,&overlapped,&bytes,FALSE);}
                 else connected=connected||error==ERROR_PIPE_CONNECTED;
                 if(!connected||!Peer(handle.value,true)){DisconnectNamedPipe(handle.value);continue;}
                 auto last=std::uint64_t(0);
-                while(!stop){
+                while(!stop&&IsLiveCollectorEnabled()){
                     if(Available(handle.value)){Detail::PacketHeader header;std::vector<std::uint8_t> payload;ControlRequest request;std::string reason;
                         if(!Receive(handle.value,header,payload,stop)||header.kind!=std::uint32_t(Detail::PacketKind::Control)||!Detail::DecodeControl(payload,request,reason))break;
                         const auto accepted=Detail::EnqueueControl(request)!=0;auto ack=Detail::EncodeAck({request.request,accepted,accepted?"":"Duplicate request or control queue full"});if(!Send(handle.value,Detail::PacketKind::ControlAck,ack,stop))break;
@@ -132,18 +133,15 @@ Server& GetServer(){static Server server;return server;}
 }
 #endif
 
-namespace Detail
-{
-void StartServer(){
+void StartLiveConnection(){
 #ifdef _WIN32
-    if(IsLiveCollectorEnabled())GetServer().Start();
+    if(IsLiveCollectorEnabled()&&ReadLiveSnapshot())GetServer().Start();
 #endif
 }
-void StopServer() noexcept {
+void StopLiveConnection() noexcept {
 #ifdef _WIN32
     if(auto* server=existingServer.load())server->Stop();
 #endif
-}
 }
 struct LiveClient::Impl
 {

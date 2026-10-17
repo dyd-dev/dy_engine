@@ -1,6 +1,8 @@
 # Execution Visualizer shared contracts v3
 
-Public contract: `src/Public/dyf/Diagnostics/LiveProfiling.h` (C++17; standard-library types only).
+Public collection/data contract: `src/Public/dyf/Diagnostics/LiveProfiling.h`.
+Optional connection/client contract: `src/Public/dyf/Diagnostics/LiveConnection.h`.
+Both use C++17 standard-library types only.
 
 ## Optimization analysis v3 contract and implementation plan
 
@@ -89,9 +91,11 @@ The public SetSkinningExecutionMode retains its lazy pipeline contract. Programm
 
 ## Client/transport
 
-LiveClient owns worker/handles and returns immutable owning snapshots. Protocol and Windows pipe namespace are v2; producer, GUI and external consumers must all rebuild together. Connect/RequestControl success means locally queued, not remotely applied. Poll returns only new snapshots; held snapshots survive disconnect/reconnect. Target discovery is local; same logon SID/user/session only; reject remote pipe clients; explicit peer PID/token verification. Byte framing validates magic/version/kind/length/counts before allocating. Pending transport memory <=64MiB. Summary/control state and runRanges have priority; bounded details and optional recentSeconds/history report omission. Reconnect receives current surviving object/resource inventory. GUI calls SetLiveCollectorEnabled(false) before creating its own engine device.
+LiveClient owns worker/handles and returns immutable owning snapshots. Protocol and Windows pipe namespace are v3; producer, GUI and external consumers must all rebuild together. Connect/RequestControl success means locally queued, not remotely applied. Poll returns only new snapshots; held snapshots survive disconnect/reconnect. Target discovery is local; same logon SID/user/session only; reject remote pipe clients; explicit peer PID/token verification. Byte framing validates magic/version/kind/length/counts before allocating. Pending transport memory <=64MiB. Summary/control state and runRanges have priority; bounded details and optional recentSeconds/history report omission. Reconnect receives current surviving object/resource inventory. GUI calls SetLiveCollectorEnabled(false) before creating its own engine device.
 
-Options: DY_ENABLE_LIVE_PROFILING=OFF and DY_BUILD_EXECUTION_VISUALIZER=OFF independently. Engine producer has no ImGui/GUI dependency. Feature-off paths remain linkable no-ops. CMake connections are owned by A, other owners submit their target/source requirements.
+`dyf::LiveProfiling` contains the collector and controls. `dyf::LiveClient` separately contains serialization and Windows transport. Object registration and collector enable/disable have no direct transport dependency. A process owner explicitly starts/stops `LiveConnectionScope` or calls `StartLiveConnection`/`StopLiveConnection`; re-enabling collection requires another start. Disabling collection causes the server to stop serving. No independent service process is created.
+
+Options: DY_ENABLE_LIVE_PROFILING=OFF, DY_ENABLE_LIVE_CONNECTION=OFF and DY_BUILD_EXECUTION_VISUALIZER=OFF independently. Enabling the connection option requires collection ON and adds the client target for application-owned sessions; the viewer links the client directly with collection OFF. Engine producer has no ImGui/GUI dependency. Feature-off paths remain linkable no-ops.
 
 ## Implementation and verification plan
 

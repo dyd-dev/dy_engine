@@ -74,10 +74,10 @@ if(DY_ENABLE_TRACY)
         GIT_SHALLOW TRUE
     )
     FetchContent_MakeAvailable(tracy)
-    target_link_libraries(Engine_Options INTERFACE Tracy::TracyClient)
-    target_compile_definitions(Engine_Options INTERFACE DY_TRACY_ENABLED=1)
+    target_link_libraries(dy_profiler_external PRIVATE Tracy::TracyClient)
+    target_compile_definitions(dy_profiler_external PRIVATE DY_TRACY_ENABLED=1)
     if(DY_TRACY_RAW_PLOTS)
-        target_compile_definitions(Engine_Options INTERFACE DY_TRACY_RAW_PLOTS_ENABLED=1)
+        target_compile_definitions(dy_profiler_external PRIVATE DY_TRACY_RAW_PLOTS_ENABLED=1)
     endif()
 endif()
 
@@ -89,10 +89,10 @@ if(DY_ENABLE_RENDERDOC)
     find_path(DY_RENDERDOC_INCLUDE_DIR NAMES renderdoc_app.h
         HINTS "${DY_RENDERDOC_ROOT}" "$ENV{RENDERDOC_ROOT}" "$ENV{ProgramFiles}/RenderDoc"
         PATH_SUFFIXES "" include include/renderdoc renderdoc/api/app REQUIRED)
-    target_include_directories(${PROJECT_NAME} PRIVATE "${DY_RENDERDOC_INCLUDE_DIR}")
-    target_compile_definitions(${PROJECT_NAME} PRIVATE DY_RENDERDOC_ENABLED=1)
+    target_include_directories(dy_profiler_external PRIVATE "${DY_RENDERDOC_INCLUDE_DIR}")
+    target_compile_definitions(dy_profiler_external PRIVATE DY_RENDERDOC_ENABLED=1)
     if(UNIX AND NOT APPLE)
-        target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS})
+        target_link_libraries(dy_profiler_external PRIVATE ${CMAKE_DL_LIBS})
     endif()
 endif()
 
@@ -115,7 +115,6 @@ if(USE_D3D12 AND WIN32 AND DY_ENABLE_PIX)
         IMPORTED_IMPLIB "${winpixeventruntime_SOURCE_DIR}/bin/${DY_WINPIX_ARCH}/WinPixEventRuntime.lib"
         INTERFACE_INCLUDE_DIRECTORIES "${winpixeventruntime_SOURCE_DIR}/Include/WinPixEventRuntime")
     add_library(WinPixEventRuntime::WinPixEventRuntime ALIAS WinPixEventRuntime)
-    target_link_libraries(${PROJECT_NAME} PRIVATE WinPixEventRuntime::WinPixEventRuntime)
 endif()
 
 if(NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")

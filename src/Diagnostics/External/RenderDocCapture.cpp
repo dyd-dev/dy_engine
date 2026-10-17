@@ -46,8 +46,8 @@ namespace
 			g_available = g_renderDocApi != nullptr;
 		}
 		std::cout << (g_available
-			? "[dy_engine] RenderDoc capture ready (F12 captures the next frame).\n"
-			: "[dy_engine] RenderDoc API not injected; F12 capture is inactive.\n");
+			? "[dy_engine] RenderDoc capture ready.\n"
+			: "[dy_engine] RenderDoc API not injected; capture is inactive.\n");
 	}
 #else
 	void InitializeRenderDocApi() {}

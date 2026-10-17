@@ -1,3 +1,4 @@
+#include "dyf/Diagnostics/LiveConnection.h"
 #include "dyf/Diagnostics/LiveProfiling.h"
 #include <chrono>
 #include <cstdlib>

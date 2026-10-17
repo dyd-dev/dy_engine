@@ -1,12 +1,14 @@
 #include <android_native_app_glue.h>
 #include "dyf/Platform/Window.h"
+#include "dyf/Platform/AndroidWindow.h"
 #include "Example.h"
 #include <exception>
+#include <stdexcept>
 #include <cstdio>
 
 void android_main(struct android_app* state)
 {
-    dyf::Platform::Window::SetAndroidApp(state);
+    dyf::Platform::SetAndroidApp(state);
     try
     {
         dyf::Platform::Window window(960,640,"Advanced Android");
@@ -17,7 +19,7 @@ void android_main(struct android_app* state)
 #else
         auto example=advanced::CreatePBRLighting(window.GetHandle(),1,arguments);
 #endif
-        if(!example) return;
+        if(!example) throw std::runtime_error("Example initialization failed.");
         while(window.IsRunning())
         {
             window.PollEvents();
@@ -29,5 +31,5 @@ void android_main(struct android_app* state)
     {
         std::fprintf(stderr,"Advanced Android: %s\n",error.what());
     }
-    dyf::Platform::Window::SetAndroidApp(nullptr);
+    dyf::Platform::SetAndroidApp(nullptr);
 }

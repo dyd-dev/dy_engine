@@ -1,3 +1,4 @@
+#include "dyf/Diagnostics/LiveConnection.h"
 #include "dyf/Diagnostics/LiveProfiling.h"
 #include <chrono>
 #include <cmath>
@@ -67,7 +68,7 @@ int main(int argc,char** argv)
     if(argc==2&&std::string(argv[1])=="--cold-lifecycle"){
         CHECK(SetLiveCollectorEnabled(false)&&!ReadLiveSnapshot()&&SetLiveCollectorEnabled(true));int identity=0;const auto id=RegisterLiveObject(&identity,{LiveObjectKind::Device,0,0,0,0,"cold lifecycle"});CHECK(id);{LiveFrameScope frame(id,id);frame.SetOutcome(LiveOutcome::Completed);}
 #ifdef _WIN32
-        const auto session=ReadLiveSnapshot()->session;LiveClient client;const auto deadline=LiveNowNs()+3000000000ull;bool connected=false;
+        LiveConnectionScope connection;const auto session=ReadLiveSnapshot()->session;LiveClient client;const auto deadline=LiveNowNs()+3000000000ull;bool connected=false;
         while(LiveNowNs()<deadline&&!connected){if(client.GetState()==LiveClientState::Disconnected)for(const auto& target:LiveClient::Discover())if(target.session==session){CHECK(client.Connect(target));break;}if(client.Poll())connected=true;if(client.GetState()==LiveClientState::Failed){std::cerr<<client.GetLastError()<<"\n";return 1;}std::this_thread::sleep_for(std::chrono::milliseconds(5));}CHECK(connected);
 #endif
         std::cout<<"Cold disable-enable-register and connected worker shutdown passed\n";return 0;

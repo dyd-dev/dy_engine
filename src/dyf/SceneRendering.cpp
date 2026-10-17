@@ -10,7 +10,6 @@
 #include "dyf/Camera.h"
 #include "dyf/Scene.h"
 #include "dyf/Platform/Profiler.h"
-#include "dyf/Platform/Window.h"
 #include "dyf/RHI/Readback.h"
 #include "dyf/RHI/ResourceScope.h"
 #include <algorithm>
@@ -60,8 +59,6 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         lastStatistics={};
         DY_PROFILE_CPU_ZONE_NAMED("Renderer::Impl::RenderScene");
         if(!PrepareLiveFrame(liveFrame.GetKey()))return false;
-        if(!selectedOutput && Platform::Window::ConsumeKeyPress(Platform::Key::F11,windowHandle))
-            config.profilerStartsExpanded = !config.profilerStartsExpanded;
         if(draws && draws->size() != scene.GetEntityCount()) return RendererFailure("Draw input count must match the scene.");
         const bool stockDraws=!draws || std::all_of(draws->begin(),draws->end(),[](const RendererDrawDesc& draw) {
             return draw.stockGeometry && draw.vertexResources.empty() && draw.inlineConstants.empty();

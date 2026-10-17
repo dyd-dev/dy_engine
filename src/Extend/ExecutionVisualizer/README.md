@@ -13,14 +13,14 @@ Windows 준비물은 Visual Studio 2022의 **C++를 사용한 데스크톱 개�
 ```powershell
 cmake -S src/Extend/ExecutionVisualizer -B build/demo-viewer-d3d12 `
   -G "Visual Studio 17 2022" -A x64 -DUSE_D3D12=ON -DUSE_VULKAN=OFF `
-  -DDY_ENABLE_LIVE_PROFILING=OFF -DDY_ENABLE_TRACY=OFF -DDY_ENABLE_PIX=OFF `
+  -DDY_ENABLE_LIVE_PROFILING=OFF -DDY_ENABLE_LIVE_CONNECTION=OFF -DDY_ENABLE_TRACY=OFF -DDY_ENABLE_PIX=OFF `
   -DDY_ENABLE_RENDERDOC=OFF -DDY_VIEWER_BUILD_TESTS=ON
 cmake --build build/demo-viewer-d3d12 --config Release --target dy_execution_visualizer `
   --parallel 1 -- /nodeReuse:false
 
 cmake -S examples/advanced/14_InstancingBatching -B build/demo14-vulkan `
   -G "Visual Studio 17 2022" -A x64 -DUSE_VULKAN=ON -DUSE_D3D12=OFF `
-  -DDY_ENABLE_LIVE_PROFILING=ON -DDY_ENABLE_TRACY=OFF -DDY_ENABLE_PIX=OFF `
+  -DDY_ENABLE_LIVE_PROFILING=ON -DDY_ENABLE_LIVE_CONNECTION=ON -DDY_ENABLE_TRACY=OFF -DDY_ENABLE_PIX=OFF `
   -DDY_ENABLE_RENDERDOC=OFF
 cmake --build build/demo14-vulkan --config Release --target AdvancedInstancingBatching `
   --parallel 1 -- /nodeReuse:false
@@ -50,7 +50,7 @@ cmake --build build/demo-viewer-d3d12 --config Release --target `
 ctest --test-dir build/demo-viewer-d3d12 -C Release --output-on-failure
 ```
 
-공개 통신 형식은 v3입니다. GUI와 분석 대상 양쪽을 같은 최신 계약으로 재빌드해야 합니다. 분석 대상은 `DY_ENABLE_LIVE_PROFILING=ON`으로 재빌드해야 합니다. GUI 자체는 계측 OFF에서도 공통 Client를 사용하며, 장치 생성 전에 `SetLiveCollectorEnabled(false)`를 호출합니다. GUI의 자원·Draw가 대상 목록과 통계에 섞이지 않습니다.
+공개 통신 형식은 v3입니다. GUI와 분석 대상 양쪽을 같은 최신 계약으로 재빌드해야 합니다. 분석 대상은 `DY_ENABLE_LIVE_PROFILING=ON`으로 수집하고 별도 `dyf::LiveClient` 연결을 명시적으로 시작해야 합니다. 위 14번 예제는 `DY_ENABLE_LIVE_CONNECTION=ON`일 때 main의 `LiveConnectionScope`가 시작·종료를 맡습니다. 수집만 ON으로 설정하면 앱 내부 스냅샷만 제공하며 서버를 자동 시작하지 않습니다. GUI 자체는 계측 OFF에서도 공통 Client를 사용하며, 장치 생성 전에 `SetLiveCollectorEnabled(false)`를 호출합니다. GUI의 자원·Draw가 대상 목록과 통계에 섞이지 않습니다.
 
 ## Windows GLFW 창 소유권 보호
 

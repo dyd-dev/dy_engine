@@ -4,8 +4,10 @@ project(dy_engine CXX)
 # add module path
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-if(USE_METAL AND APPLE)
+if(APPLE)
 	enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 17)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 endif()
 
 # main target
@@ -45,7 +47,7 @@ add_library(${PROJECT_NAME} STATIC
     "src/dyf/Lighting.cpp"
     "src/dyf/Profiler.cpp"
     "src/dyf/ProfilerSampler.cpp"
-    "src/Platform/RenderDocCapture.cpp"
+    "src/Diagnostics/ProfilerControls.cpp"
     "src/Platform/Log.cpp"
     "src/Platform/LogSession.cpp"
 	"src/dyf/DrawData.cpp"
@@ -57,13 +59,25 @@ add_library(${PROJECT_NAME} STATIC
 	"src/dyf/Scene.cpp"
 	"src/Platform/Input.cpp"
 	"src/Platform/ActionMap.cpp"
+    "src/Platform/Window.cpp"
 )
 
-# 데스크톱에서는 GLFW 기반 창 코드를 사용한다.
-# ios 화면은 앱의 UIKit 코드에서 관리한다.
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
-    target_sources(${PROJECT_NAME} PRIVATE "src/Platform/Window.cpp")
+# 공통 Window는 선택된 플랫폼 팩터리만 사용한다.
+if(ANDROID)
+    set(DY_WINDOW_BACKEND_SOURCES src/Platform/Android/AndroidWindow.cpp)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(DY_WINDOW_BACKEND_SOURCES src/Platform/iOS/IOSWindow.mm)
+    target_link_libraries(${PROJECT_NAME} PRIVATE "-framework UIKit")
+elseif(WIN32)
+    set(DY_WINDOW_BACKEND_SOURCES src/Platform/Glfw/GlfwWindow.cpp src/Platform/Windows/WindowsWindow.cpp)
+elseif(APPLE)
+    set(DY_WINDOW_BACKEND_SOURCES src/Platform/Glfw/GlfwWindow.cpp src/Platform/macOS/MacOSWindow.mm)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(DY_WINDOW_BACKEND_SOURCES src/Platform/Glfw/GlfwWindow.cpp src/Platform/Linux/LinuxWindow.cpp)
+else()
+    message(FATAL_ERROR "No Window backend for ${CMAKE_SYSTEM_NAME}.")
 endif()
+target_sources(${PROJECT_NAME} PRIVATE ${DY_WINDOW_BACKEND_SOURCES})
 
 # global options
 include(Engine_Options)
@@ -74,16 +88,32 @@ target_link_libraries(${PROJECT_NAME} PUBLIC Threads::Threads)
 target_include_directories(${PROJECT_NAME} BEFORE PUBLIC "${PROJECT_SOURCE_DIR}/src/Public")
 target_include_directories(${PROJECT_NAME} PRIVATE "${PROJECT_SOURCE_DIR}/src")
 
-add_library(dy_live_profiling STATIC src/Diagnostics/LiveProfiling.cpp
-    src/Diagnostics/LiveProtocol.cpp src/Diagnostics/LiveTransport.cpp)
+add_library(dy_profiler_external STATIC
+    src/Diagnostics/External/Profiler.cpp
+    src/Diagnostics/External/RenderDocCapture.cpp)
+add_library(dyf::ExternalProfilers ALIAS dy_profiler_external)
+target_link_libraries(dy_profiler_external PUBLIC Engine_Options PRIVATE Threads::Threads)
+target_link_libraries(${PROJECT_NAME} PRIVATE dy_profiler_external)
+
+add_library(dy_live_profiling STATIC src/Diagnostics/LiveProfiling.cpp)
 add_library(dyf::LiveProfiling ALIAS dy_live_profiling)
-add_library(dyf::LiveClient ALIAS dy_live_profiling)
 target_link_libraries(dy_live_profiling PUBLIC Engine_Options Threads::Threads)
 target_include_directories(dy_live_profiling PRIVATE "${PROJECT_SOURCE_DIR}/src")
+
+add_library(dy_live_connection STATIC EXCLUDE_FROM_ALL
+    src/Diagnostics/LiveProtocol.cpp src/Diagnostics/LiveTransport.cpp)
+add_library(dyf::LiveClient ALIAS dy_live_connection)
+target_link_libraries(dy_live_connection PUBLIC dyf::LiveProfiling)
 if(WIN32)
-    target_link_libraries(dy_live_profiling PRIVATE advapi32)
+    target_link_libraries(dy_live_connection PRIVATE advapi32)
 endif()
 target_link_libraries(${PROJECT_NAME} PUBLIC dy_live_profiling)
+if(DY_ENABLE_LIVE_CONNECTION)
+    if(NOT DY_ENABLE_LIVE_PROFILING)
+        message(FATAL_ERROR "DY_ENABLE_LIVE_CONNECTION requires DY_ENABLE_LIVE_PROFILING=ON.")
+    endif()
+    target_link_libraries(${PROJECT_NAME} PUBLIC dyf::LiveClient)
+endif()
 
 option(DY_EXTEND_MODEL "Build the optional Model extension." OFF)
 option(DY_EXTEND_IMGUI "Build the optional Dear ImGui extension." OFF)

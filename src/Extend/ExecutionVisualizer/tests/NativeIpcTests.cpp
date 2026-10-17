@@ -1,3 +1,4 @@
+#include "dyf/Diagnostics/LiveConnection.h"
 #include "../Process.h"
 #include "NativeMetrics.h"
 #include "dyf/Diagnostics/LiveProfiling.h"

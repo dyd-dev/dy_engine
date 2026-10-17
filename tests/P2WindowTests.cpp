@@ -1,10 +1,10 @@
+#include "dyf/Platform/GlfwWindow.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <new>
 #include <stdexcept>
 #include <dyf/Platform/Window.h>
-#include <dyf/Platform/RenderDocCapture.h>
 #include <dyf/Platform/Log.h>
 #ifndef GLFW_INCLUDE_NONE
 #define GLFW_INCLUDE_NONE
@@ -43,12 +43,10 @@ struct GLFWwindow
 };
 static GLFWwindow nativeWindows[4];
 static int created = 0, destroyed = 0, terminated = 0;
-static bool failCaptureInit = false, failCaptureTrigger = false;
-struct CaptureFailure {};
+static bool failNativeSetup = false;
+struct NativeSetupFailure {};
 namespace dyf::Platform
 {
-bool RenderDocCapture::Initialize() { if(failCaptureInit) throw CaptureFailure{}; return true; }
-bool RenderDocCapture::TriggerNextFrame() { if(failCaptureTrigger) throw CaptureFailure{}; return true; }
 namespace Log
 {
 void Initialize() noexcept {}
@@ -56,7 +54,7 @@ void Writef(LogLevel, std::string_view, const char*, int, const char*, ...) noex
 }
 }
 
-// Replace the native dispatcher/capture service, while compiling the real Window
+// Replace the native dispatcher, while compiling the real Window
 // and Input implementations. No OS windows or GPU work are started by this test.
 extern "C"
 {
@@ -68,7 +66,11 @@ GLFWwindow* glfwCreateWindow(int, int, const char*, GLFWmonitor*, GLFWwindow*)
     auto* result = &nativeWindows[created++]; *result = {}; result->alive = true; return result;
 }
 void glfwDestroyWindow(GLFWwindow* window) { if(window->alive) { window->alive = false; ++destroyed; } }
-void glfwSetWindowUserPointer(GLFWwindow* w, void* p) { w->user = p; }
+void glfwSetWindowUserPointer(GLFWwindow* w, void* p)
+{
+    if(p && failNativeSetup) { failNativeSetup=false; throw NativeSetupFailure{}; }
+    w->user = p;
+}
 void* glfwGetWindowUserPointer(GLFWwindow* w) { return w->user; }
 #define P2_GLFW_CALLBACK(name, field, type) type name(GLFWwindow* w, type f) { auto old = w->field; w->field = f; return old; }
 P2_GLFW_CALLBACK(glfwSetKeyCallback, key, GLFWkeyfun)
@@ -94,7 +96,7 @@ int glfwRawMouseMotionSupported() { return GLFW_FALSE; }
 #if defined(_WIN32)
 HWND glfwGetWin32Window(GLFWwindow* w) { return reinterpret_cast<HWND>(w); }
 #elif defined(__APPLE__)
-id glfwGetCocoaWindow(GLFWwindow*) { return nullptr; }
+id glfwGetCocoaWindow(GLFWwindow* w) { return reinterpret_cast<id>(w); }
 #endif
 }
 
@@ -108,9 +110,9 @@ void ConstructorRollback(bool keepAnotherWindow)
 {
     std::unique_ptr<Window> first;
     if(keepAnotherWindow) first = std::make_unique<Window>(64, 64);
-    failCaptureInit = true;
+    failNativeSetup = true;
     bool propagated = false;
-    try { Window rejected(64, 64); } catch(const CaptureFailure&) { propagated = true; }
+    try { Window rejected(64, 64); } catch(const NativeSetupFailure&) { propagated = true; }
     Check(propagated, "constructor must preserve original exception");
     Check(destroyed == 1, "failed constructor must destroy its native window");
     Check(terminated == (keepAnotherWindow ? 0 : 1), "rollback must terminate GLFW only after the last window");
@@ -120,7 +122,7 @@ void ConstructorRollback(bool keepAnotherWindow)
 void ReleaseOrFocus(bool focusLoss)
 {
     Window window(64, 64);
-    auto* native = window.GetGlfwHandle();
+    auto* native = dyf::Platform::GetGlfwWindow(window);
     native->key(native, GLFW_KEY_A, 0, GLFW_PRESS, 0);
     Window::PollEvents();
     Check(window.GetInput().IsDown(Key::A), "initial press not published");
@@ -142,19 +144,16 @@ void ReleaseOrFocus(bool focusLoss)
     try { Window::PollEvents(); } catch(...) { repeated = true; }
     Check(!repeated, "already reported callback exception must not repeat");
 }
-void CaptureCallbackFailure()
+void CaptureKeyInput()
 {
     Window window(64, 64);
-    auto* native = window.GetGlfwHandle();
-    failCaptureTrigger = true;
-    bool escapedCallback = false, reported = false;
-    try { native->key(native, GLFW_KEY_F12, 0, GLFW_PRESS, 0); }
-    catch(...) { escapedCallback = true; }
-    try { Window::WaitEvents(.001); } catch(const CaptureFailure&) { reported = true; }
-    Check(!escapedCallback && reported, "capture failure must move from native callback to WaitEvents");
+    auto* native = dyf::Platform::GetGlfwWindow(window);
+    native->key(native, GLFW_KEY_F12, 0, GLFW_PRESS, 0);
+    Window::WaitEvents(.001);
     Window::PollEvents();
-    Check(window.GetInput().WasPressed(Key::F12), "capture failure must preserve normal input event");
+    Check(window.GetInput().WasPressed(Key::F12), "F12 must remain an ordinary input event");
 }
+
 int main(int argc, char** argv)
 {
     if(argc != 2) return 2;
@@ -162,7 +161,7 @@ int main(int argc, char** argv)
     else if(std::strcmp(argv[1], "constructor-shared") == 0) ConstructorRollback(true);
     else if(std::strcmp(argv[1], "release") == 0) ReleaseOrFocus(false);
     else if(std::strcmp(argv[1], "focus") == 0) ReleaseOrFocus(true);
-    else if(std::strcmp(argv[1], "capture") == 0) CaptureCallbackFailure();
+    else if(std::strcmp(argv[1], "capture") == 0) CaptureKeyInput();
     else return 2;
     std::printf("P2 window %s: %d failures\n", argv[1], failures);
     return failures ? 1 : 0;

@@ -90,6 +90,14 @@ Cross-Cutting
 
 그래픽스 API 구현은 [CMake 옵션](#cmake-옵션)으로 선택합니다.
 
+### Window와 진단 연결
+
+공개 `Platform::Window`는 공통 입력과 이벤트 펌프를 제공하는 진입점입니다. 내부 `WindowBackend`를 Android·iOS 구현과 GLFW 공통 구현이 상속하고, GLFW 구현을 Windows·macOS·Linux가 공유합니다. CMake는 해당 플랫폼 구현 하나를 선택합니다.
+
+데스크톱 창은 엔진이 생성하고 파괴합니다. Android의 `ANativeWindow`와 iOS의 `UIView`는 플랫폼이 소유하며, 이를 사용하는 Window와 RHI 장치보다 오래 살아 있어야 합니다. `GetNativeHandle()`은 주소와 종류를 함께 반환합니다. GLFW 연동은 별도 `dyf/Platform/GlfwWindow.h`의 `GetGlfwWindow(window)`, Android 앱 연결은 `dyf/Platform/AndroidWindow.h`에서 제공합니다. iOS 이벤트 루프와 화면 갱신은 UIKit·CADisplayLink가 담당하며 `WaitEvents()`는 지원하지 않습니다.
+
+내부 CPU/GPU 측정·스냅샷·HUD는 외부 도구 연결과 독립적입니다. Tracy·RenderDoc·PIX SDK는 어댑터 안에 두고, Live 수집기(`dyf::LiveProfiling`)와 선택적 통신(`dyf::LiveClient`)도 별도 타깃으로 연결합니다. 단축키와 통신 시작은 앱이 명시적으로 선택합니다. 사용법은 [프로파일링과 캡처](docs/profiling.md)를 참고하세요.
+
 ## 요구 사항
 
 먼저 빌드할 그래픽스 백엔드를 하나 고릅니다. 공통으로는 CMake와 C++17 컴파일러가 필요하고, 선택한 백엔드에 따라 플랫폼 SDK나 개발 패키지가 추가로 필요합니다.
@@ -132,9 +140,14 @@ sudo apt-get install -y libwayland-dev wayland-protocols libxkbcommon-dev
 | --- | --- | --- |
 | `USE_VULKAN` | `OFF` | Vulkan 사용 |
 | `USE_D3D12` | `OFF` | Direct3D 12 사용. Windows 전용 |
-| `USE_METAL` | `OFF` | Metal 사용. macOS 전용 |
+| `USE_METAL` | `OFF` | Metal 사용. macOS·iOS |
 | `DY_ENABLE_SIMD` | `ON` | 지원 CPU에서 SIMD 수학 경로 사용 |
 | `DY_LINUX_WINDOW_SYSTEM` | `AUTO` | Linux GLFW window system 선택. `AUTO`, `X11`, `WAYLAND` |
+| `DY_ENABLE_TRACY` | `ON` | 선택적 Tracy CPU 구간·프레임·수치 연결 |
+| `DY_ENABLE_LIVE_PROFILING` | `OFF` | 내부 Live 실행 진단 수집 |
+| `DY_ENABLE_LIVE_CONNECTION` | `OFF` | Live 통신 연결을 링크. 수집 ON이 필요하며 앱이 수명을 관리 |
+| `DY_ENABLE_RENDERDOC` | `OFF` | 이미 주입된 RenderDoc API로 캡처 요청 |
+| `DY_ENABLE_PIX` | MSVC에서 `ON` | D3D12 PIX 이벤트 어댑터 |
 
 그래픽스 백엔드 옵션은 한 번에 하나만 켜는 것을 기준으로 합니다. 백엔드를 바꿔 실험할 때는 빌드 폴더를 분리하면 CMake cache 충돌을 피할 수 있습니다.
 

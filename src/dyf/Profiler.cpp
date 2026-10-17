@@ -1,7 +1,7 @@
 #include "RendererInternal.h"
 #include "dyf/Canvas.h"
 #include "dyf/RHI/IDevice.h"
-#include "dyf/Platform/Profiler.h"
+#include "dyf/Diagnostics/Profiler.h"
 #include <algorithm>
 #include <cstdio>
 #include <cmath>
@@ -126,8 +126,7 @@ void Renderer::Impl::RecordProfilerFrame(Platform::ProfilerTimingSample sample,u
     const auto now=std::chrono::steady_clock::now();
     sample.frameMilliseconds=m_previous.time_since_epoch().count()==0?0:std::chrono::duration<double,std::milli>(now-m_previous).count();
     m_previous=now;
-    DY_PROFILE_RAW_VALUE("Frame.Raw.ms",sample.frameMilliseconds);
-    DY_PROFILE_RAW_VALUE("CPU.Render.Raw.ms",sample.cpuRenderMilliseconds);
+    Diagnostics::PublishProfilerRawFrame(sample);
     m_profilerStatistics=lastStatistics;
     if(!m_profilerSampler.AddSample(sample,m_profilerSnapshot)) return;
     m_profilerSnapshot.gpuTimingSupported=device->Supports(RHI::Feature::TimestampQuery) &&
@@ -143,17 +142,8 @@ void Renderer::Impl::RecordProfilerFrame(Platform::ProfilerTimingSample sample,u
         scale=std::max(scale,std::max({m_history[i],m_cpuHistory[i],m_gpuHistoryValid[i]?m_gpuHistory[i]:0.f})*1.15f);
     m_graphScaleMilliseconds=std::max(scale,m_graphScaleMilliseconds*0.97f);
     m_entities=entities;
-    DY_PROFILE_GPU_MILLISECONDS("Frame.Average.ms",m_profilerSnapshot.frameAverageMilliseconds);
-    DY_PROFILE_GPU_MILLISECONDS("Frame.Maximum.ms",m_profilerSnapshot.frameMaximumMilliseconds);
-    DY_PROFILE_GPU_MILLISECONDS("CPU.Render.Average.ms",m_profilerSnapshot.cpuRenderAverageMilliseconds);
-    if(m_profilerSnapshot.hasGpuFrame) DY_PROFILE_GPU_MILLISECONDS("GPU.Frame.Average.ms",m_profilerSnapshot.gpuFrameAverageMilliseconds);
-    if(m_profilerSnapshot.hasGpuMain) DY_PROFILE_GPU_MILLISECONDS("GPU.MainForward.Average.ms",m_profilerSnapshot.gpuMainAverageMilliseconds);
-    if(m_profilerSnapshot.hasGpuShadow) DY_PROFILE_GPU_MILLISECONDS("GPU.Shadow.Average.ms",m_profilerSnapshot.gpuShadowAverageMilliseconds);
     m_profilerResourceSnapshot=device->GetResourceAllocationCounters();
-    const auto& counters=m_profilerResourceSnapshot;
-    DY_PROFILE_RESOURCE_COUNT("GPU.Resources.Buffers.Live",counters.buffers.live);
-    DY_PROFILE_RESOURCE_COUNT("GPU.Resources.Textures.Live",counters.textures.live);
-    DY_PROFILE_RESOURCE_COUNT("GPU.Resources.Pipelines.Live",counters.pipelines.live);
+    Diagnostics::PublishProfilerSnapshot(m_profilerSnapshot,m_profilerResourceSnapshot);
 }
 Canvas Renderer::Impl::BuildProfilerOverlay(uint32_t width,uint32_t height,bool expanded) const
 {

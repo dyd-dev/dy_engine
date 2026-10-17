@@ -1,3 +1,4 @@
+#include "dyf/Platform/GlfwWindow.h"
 #include "dyf/RHI/ResourceScope.h"
 #include "dyf/Extends/ImGui/ImGui.h"
 #include "dyf/Platform/Window.h"
@@ -93,7 +94,7 @@ int main(int argc,char** argv)
         const auto frameStart=Clock::now();
         if(selfTest)
         {
-            auto* h=window.GetGlfwHandle();
+            auto* h=dyf::Platform::GetGlfwWindow(window);
             // Deterministic callback injection, separate from physical-device testing.
             ImGui_ImplGlfw_CursorEnterCallback(h,true);
             ImVec2 point=frame<18 ? buttonPoint : frame<38 ? textPoint : frame<48 ? sliderPoint : ImVec2(900,620);
@@ -220,7 +221,7 @@ int main(int argc,char** argv)
     if(selfTest)
     {
         gui.reset();
-        auto* h=window.GetGlfwHandle();
+        auto* h=dyf::Platform::GetGlfwWindow(window);
         const auto callback=glfwSetKeyCallback(h,nullptr);
         glfwSetKeyCallback(h,callback);
         if(!callback) return 1;

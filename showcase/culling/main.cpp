@@ -1,3 +1,5 @@
+#include "dyf/Diagnostics/LiveConnection.h"
+#include "dyf/Diagnostics/ProfilerControls.h"
 #include "dyf/Camera.h"
 #include "dyf/Extends/AdvancedRendering.h"
 #include "dyf/Platform/Time.h"
@@ -69,6 +71,9 @@ int main(int argc,char** argv) try
         else throw std::runtime_error("Unknown or incomplete option; use --help.");
     }
     Platform::Window window(1280,720,"GPU Culling / 4 frustum | U GPU/CPU | L LOD | O HiZ | Space pause | F11 profiler");
+#if defined(DY_LIVE_CONNECTION_ENABLED)
+    dyf::Diagnostics::LiveConnectionScope liveConnection;
+#endif
     if(!window.GetHandle()) throw std::runtime_error("Window creation failed.");
     RHI::DeviceDesc deviceDesc;deviceDesc.enableValidation=validation;
     std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(deviceDesc));
@@ -117,7 +122,8 @@ int main(int argc,char** argv) try
     bool paused=false,ready=false;
     while(window.IsRunning() && (!frameLimit || submitted<frameLimit))
     {
-        window.PollEvents();const auto& input=window.GetInput();
+        window.PollEvents();
+        if(!dyf::Diagnostics::UpdateProfilerControls(window.GetInput(),renderer.get())) return 1;const auto& input=window.GetInput();
         if(input.WasPressed(Platform::Key::Escape)) window.RequestClose();
         if(!window.IsRunning()) break;
         const auto extent=window.GetFramebufferSize();

@@ -6,6 +6,7 @@
 #include "D3D12Texture.h"
 #include "D3D12Query.h"
 #include "D3D12Validation.h"
+#include "../../Diagnostics/External/PixEvents.h"
 #include "d3dx12.h"
 
 #include <algorithm>
@@ -14,9 +15,6 @@
 #include <d3d12.h>
 #include <limits>
 #include <wrl.h>
-#if defined(USE_PIX)
-#include <pix3.h>
-#endif
 
 using Microsoft::WRL::ComPtr;
 
@@ -368,29 +366,17 @@ namespace dyf::Backends
     void D3D12CommandList::BeginDebugEventNative(const char* name, const RHI::DebugLabelColor& color)
     {
         if(!CanRecord(m_internal)) { RejectRecording(m_internal); return; }
-#if defined(USE_PIX)
-        const auto channel = [](float value) { return UINT8(std::clamp(value, 0.0f, 1.0f) * 255); };
-        PIXBeginEvent(m_internal->commandList.Get(), PIX_COLOR(channel(color.r), channel(color.g), channel(color.b)), "%s", name);
-#else
-        (void)name; (void)color;
-#endif
+        Diagnostics::BeginPixEvent(m_internal->commandList.Get(),name,color);
     }
     void D3D12CommandList::EndDebugEventNative()
     {
         if(!CanRecord(m_internal)) { RejectRecording(m_internal); return; }
-#if defined(USE_PIX)
-        PIXEndEvent(m_internal->commandList.Get());
-#endif
+        Diagnostics::EndPixEvent(m_internal->commandList.Get());
     }
     void D3D12CommandList::InsertDebugMarkerNative(const char* name, const RHI::DebugLabelColor& color)
     {
         if(!CanRecord(m_internal)) { RejectRecording(m_internal); return; }
-#if defined(USE_PIX)
-        const auto channel = [](float value) { return UINT8(std::clamp(value, 0.0f, 1.0f) * 255); };
-        PIXSetMarker(m_internal->commandList.Get(), PIX_COLOR(channel(color.r), channel(color.g), channel(color.b)), "%s", name);
-#else
-        (void)name; (void)color;
-#endif
+        Diagnostics::InsertPixMarker(m_internal->commandList.Get(),name,color);
     }
     void D3D12CommandList::GlobalBarrierNative()
     {

@@ -1,3 +1,6 @@
+#include "dyf/Diagnostics/LiveConnection.h"
+#include "dyf/Diagnostics/ProfilerControls.h"
+#include "dyf/Platform/GlfwWindow.h"
 #include "dyf/RHI/ResourceScope.h"
 #include "EditorScene.h"
 #include "dyf/Camera.h"
@@ -449,6 +452,9 @@ int main(int argc,char** argv)
         project=fs::absolute(project);Editor app(project);
         if(selfTest){std::string error;if(!editor::SelfTest(project/"SelfTest",error)){std::fprintf(stderr,"FAIL model: %s\n",error.c_str());return 1;}std::puts("PASS model edit, duplicate, delete, undo/redo, scene roundtrip, malformed preservation, failed save preservation, preview restoration, picking.");}
         Platform::Window window(1440,900,"dy_engine - 3D Scene Editor");if(!window.GetHandle())return 1;
+#if defined(DY_LIVE_CONNECTION_ENABLED)
+        dyf::Diagnostics::LiveConnectionScope liveConnection;
+#endif
         RendererConfig config;config.clearColor={.025f,.027f,.032f,1};config.enableProfilerHud=false;config.vsync=!selfTest;
         config.allowReadback=selfTest||!capture.empty();config.lighting.shadows=true;config.lighting.ambientIntensity=.12f;
         auto renderer=Renderer::Create(window.GetHandle(),config);if(!renderer)return 1;
@@ -468,20 +474,21 @@ int main(int argc,char** argv)
         for(int frame=0;!app.quit&&(!maxFrames||frame<maxFrames);++frame)
         {
             window.PollEvents();
+            if(!dyf::Diagnostics::UpdateProfilerControls(window.GetInput(),renderer.get())) return 1;
             if(!window.IsRunning())
             {
-                glfwSetWindowShouldClose(window.GetGlfwHandle(),GLFW_FALSE);app.Request(Action::Quit);if(app.quit)break;
-                if(glfwGetWindowAttrib(window.GetGlfwHandle(),GLFW_ICONIFIED))glfwRestoreWindow(window.GetGlfwHandle());
+                glfwSetWindowShouldClose(dyf::Platform::GetGlfwWindow(window),GLFW_FALSE);app.Request(Action::Quit);if(app.quit)break;
+                if(glfwGetWindowAttrib(dyf::Platform::GetGlfwWindow(window),GLFW_ICONIFIED))glfwRestoreWindow(dyf::Platform::GetGlfwWindow(window));
             }
             int framebufferWidth=0,framebufferHeight=0;
-            glfwGetFramebufferSize(window.GetGlfwHandle(),&framebufferWidth,&framebufferHeight);
-            if(!framebufferWidth || !framebufferHeight || glfwGetWindowAttrib(window.GetGlfwHandle(),GLFW_ICONIFIED))
+            glfwGetFramebufferSize(dyf::Platform::GetGlfwWindow(window),&framebufferWidth,&framebufferHeight);
+            if(!framebufferWidth || !framebufferHeight || glfwGetWindowAttrib(dyf::Platform::GetGlfwWindow(window),GLFW_ICONIFIED))
             {glfwWaitEventsTimeout(.05);continue;}
             if(selfTest)
             {
                 if(frame==6){auto before=app.document.objects;for(auto& o:app.document.objects)if(o.primitive!=editor::Primitive::Floor)o.color={.05f,.12f,.95f,1};app.document.Commit(before);}
                 if(frame==10)app.document.Undo();
-                if(frame==14){glfwSetWindowSize(window.GetGlfwHandle(),1280,800);resized=true;}
+                if(frame==14){glfwSetWindowSize(dyf::Platform::GetGlfwWindow(window),1280,800);resized=true;}
                 if(frame==18)app.document.Play();
                 if(frame==24)app.document.Stop();
             }
@@ -506,7 +513,7 @@ int main(int argc,char** argv)
             {
                 if(device.IsLost() || (maxFrames && Clock::now()-acquireStart>std::chrono::seconds(10)))return 1;
                 glfwWaitEventsTimeout(.001);
-                if(!maxFrames || !window.IsRunning() || glfwGetWindowAttrib(window.GetGlfwHandle(),GLFW_ICONIFIED))break;
+                if(!maxFrames || !window.IsRunning() || glfwGetWindowAttrib(dyf::Platform::GetGlfwWindow(window),GLFW_ICONIFIED))break;
             }
             if(!acquired)continue; // Retry through the event/UI loop so close always reaches the dirty-scene dialog.
             dyf::RHI::ResourceScope resources(device);auto* commands=resources.Keep(device.AcquireCommandList());auto* target=device.GetBackBuffer();if(!commands||!target)return 1;
@@ -523,7 +530,7 @@ int main(int argc,char** argv)
             if(!capture.empty()&&frame==maxFrames-1&&!Capture(device,target,capture))return 1;
             if(!device.Present())return 1;++completed;
             const auto title=std::string("dy_engine - ")+(app.document.path.empty()?"Untitled":app.document.path.filename().u8string())+(app.document.Dirty()?" *":"")+" - 3D Scene Editor";
-            glfwSetWindowTitle(window.GetGlfwHandle(),title.c_str());
+            glfwSetWindowTitle(dyf::Platform::GetGlfwWindow(window),title.c_str());
         }
         if(!device.WaitIdle())return 1;
         if(selfTest)

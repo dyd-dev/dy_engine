@@ -22,7 +22,7 @@ add_executable(dy_execution_visualizer main.cpp Process.cpp Viewer.cpp ViewerSta
 FetchContent_GetProperties(imgui SOURCE_DIR viewer_imgui_source)
 target_sources(dy_execution_visualizer PRIVATE "${viewer_imgui_source}/misc/cpp/imgui_stdlib.cpp")
 target_link_libraries(dy_execution_visualizer PRIVATE ole32 shell32)
-target_link_libraries(dy_execution_visualizer PRIVATE dyf::LiveProfiling)
+target_link_libraries(dy_execution_visualizer PRIVATE dyf::LiveClient)
 target_link_libraries(dy_execution_visualizer PRIVATE dy_imgui glfw)
 target_compile_definitions(dy_execution_visualizer PRIVATE GLFW_INCLUDE_NONE NOMINMAX WIN32_LEAN_AND_MEAN)
 if(MSVC)

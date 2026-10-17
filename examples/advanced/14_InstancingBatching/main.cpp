@@ -1,3 +1,5 @@
+#include "dyf/Diagnostics/LiveConnection.h"
+#include "dyf/Diagnostics/ProfilerControls.h"
 #include "dyf/RHI/ResourceScope.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI.h"
@@ -93,6 +95,9 @@ int main(int argc, char** argv) {
 
         // 창과 그래픽 장치, 캡처 옵션을 반영한 스왑체인을 준비한다.
         dyf::Platform::Window window(800, 600, "Advanced / Instancing and batching");
+#if defined(DY_LIVE_CONNECTION_ENABLED)
+        dyf::Diagnostics::LiveConnectionScope liveConnection;
+#endif
         Check(window.GetHandle() != nullptr, "Window creation failed");
         RHI::DeviceDesc deviceDesc;
         deviceDesc.enableValidation = options.validation;
@@ -187,6 +192,7 @@ int main(int argc, char** argv) {
         // 렌더링 가능한 프레임에서 명령을 기록하고, 지정한 프레임 수 또는 창 종료까지 반복한다.
         while (window.IsRunning() && (options.frames == 0 || frame < options.frames)) {
             window.PollEvents();
+            if(!dyf::Diagnostics::UpdateProfilerControls(window.GetInput())) return 1;
             if (!window.IsRunning()) break;
             if (!device.BeginFrame()) {
                 Check(!device.IsLost(), "Device lost during BeginFrame");

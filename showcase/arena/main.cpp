@@ -1,3 +1,5 @@
+#include "dyf/Diagnostics/LiveConnection.h"
+#include "dyf/Diagnostics/ProfilerControls.h"
 #include "dyf/Camera.h"
 #include "dyf/Platform/Time.h"
 #include "dyf/Platform/Window.h"
@@ -226,6 +228,9 @@ int main(int argc, char** argv)
         if(!hero) return 1;
 
         Platform::Window window(1280, 720, "dy_engine / Dense Arena - Space pause | 4 culling | 5 instancing | F11 profiler");
+#if defined(DY_LIVE_CONNECTION_ENABLED)
+        dyf::Diagnostics::LiveConnectionScope liveConnection;
+#endif
         if(!window.GetHandle()) return 1;
         RendererConfig config;
         config.clearColor = {.12f, .065f, .09f, 1};
@@ -264,6 +269,7 @@ int main(int argc, char** argv)
         while(window.IsRunning())
         {
             window.PollEvents();
+            if(!dyf::Diagnostics::UpdateProfilerControls(window.GetInput(),renderer.get())) return 1;
             const auto& input = window.GetInput();
             if(input.WasPressed(Key::Escape)) window.RequestClose();
             if(!window.IsRunning()) break;

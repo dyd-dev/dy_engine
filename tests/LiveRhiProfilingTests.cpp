@@ -1,3 +1,4 @@
+#include "dyf/Diagnostics/LiveConnection.h"
 #include "dyf/RHI.h"
 #include "RHI/ThreadPool.h"
 #include <cmath>
@@ -179,7 +180,7 @@ int NativePresentContinuity(R::IDevice& device)
     CHECK(Eventually([&]{return Source(sourceId).latest.completed.submissions==1;}));
     std::cout<<"Native continuous Present: asynchronous GPU samples progress while rendering continues; readiness retries="<<retries<<".\n";
 #if defined(_WIN32)
-    D::LiveClient client;bool connected=false;
+    D::LiveConnectionScope connection;D::LiveClient client;bool connected=false;
     CHECK(Eventually([&]{for(const auto& target:D::LiveClient::Discover())
         if(target.processId==GetCurrentProcessId()){connected=client.Connect(target);return connected;}return false;}));
     uint64_t received=0,ready=0;bool truncated=false;

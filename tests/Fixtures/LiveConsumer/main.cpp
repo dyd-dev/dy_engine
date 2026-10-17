@@ -6,6 +6,7 @@
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI.h"
 #include "dyf/Diagnostics/LiveProfiling.h"
+#include "dyf/Diagnostics/LiveConnection.h"
 #include <chrono>
 #include <charconv>
 #include <iostream>
@@ -64,6 +65,7 @@ D::LiveId Control(const D::LiveSnapshot& s,D::LiveId source,const char* key){for
 const D::LiveSourceSnapshot* Source(const D::LiveSnapshot& s,D::LiveId id){for(const auto& source:s.sources)if(source.source==id)return &source;return nullptr;}
 int main(int argc,char** argv)
 {
+    D::LiveConnectionScope liveConnection;
     Options options;if(!ParseOptions(argc,argv,options)){
         std::cerr<<"Usage: LiveExternalConsumer [--raw|--renderer|--canvas|--features] [--verify] [--frames N]\n--features selects Renderer and cannot be combined with --raw/--canvas.\n";return 2;
     }

@@ -1,3 +1,5 @@
+#include "dyf/Diagnostics/LiveConnection.h"
+#include "dyf/Diagnostics/ProfilerControls.h"
 #include "dyf/Camera.h"
 #include "dyf/Extends/AdvancedRendering.h"
 #include "dyf/Extends/Model/Model.h"
@@ -535,6 +537,9 @@ int main(int argc, char** argv)
 
         constexpr uint32_t renderWidth=1920,renderHeight=1080;
         Platform::Window window(renderWidth, renderHeight, "dy_engine / Cinematic Showcase - Space pause | R restart | Tab free camera");
+#if defined(DY_LIVE_CONNECTION_ENABLED)
+        dyf::Diagnostics::LiveConnectionScope liveConnection;
+#endif
         if(!window.GetHandle()) return 1;
         RendererConfig config;
         config.renderWidth = renderWidth;
@@ -697,6 +702,7 @@ int main(int argc, char** argv)
         while(window.IsRunning())
         {
             window.PollEvents();
+            if(!dyf::Diagnostics::UpdateProfilerControls(window.GetInput(),renderer.get())) return 1;
             const auto& input = window.GetInput();
             if(input.WasPressed(Key::Escape)) window.RequestClose();
             if(!window.IsRunning()) break;

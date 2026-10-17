@@ -3,6 +3,7 @@
 #import "ViewController.h"
 #import <QuartzCore/CAMetalLayer.h>
 #include "Example.h"
+#include "dyf/Platform/Window.h"
 #include <vector>
 
 // iOS 스왑체인은 UIView의 기존 CAMetalLayer를 사용하므로 기본 레이어 클래스를 교체한다.
@@ -13,6 +14,7 @@
 @end
 
 @interface ViewController () {
+    std::unique_ptr<dyf::Platform::Window> _engineWindow;
     std::unique_ptr<advanced::Example> _example;
     CADisplayLink* _displayLink;
     BOOL _started;
@@ -130,11 +132,13 @@
     _errorLabel = nil;
     std::vector<char*> argv;
     for(auto& argument : arguments) argv.push_back(argument.data());
+    if(!_engineWindow)_engineWindow=std::make_unique<dyf::Platform::Window>(
+        dyf::Platform::NativeWindowHandle{dyf::Platform::NativeWindowKind::UIKit,(__bridge void*)self.view});
     // UIView의 소유권은 UIKit에 둔다. 생성 함수는 화면 주소와 실행 옵션을 동기적으로 받는다.
     if(_exampleSelector.selectedSegmentIndex == 0)
-        _example = advanced::CreatePBRLighting((__bridge const void*)self.view, int(argv.size()), argv.data());
+        _example = advanced::CreatePBRLighting(_engineWindow->GetHandle(), int(argv.size()), argv.data());
     else
-        _example = advanced::CreateShadowMapping((__bridge const void*)self.view, int(argv.size()), argv.data());
+        _example = advanced::CreateShadowMapping(_engineWindow->GetHandle(), int(argv.size()), argv.data());
     if(!_example) return;
     NSLog(@"advanced %02ld: Metal renderer initialized", (long)_exampleSelector.selectedSegmentIndex + 7);
     _displayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(drawFrame:)];
@@ -147,6 +151,7 @@
 - (void)drawFrame:(CADisplayLink*)sender {
     (void)sender;
     try {
+        dyf::Platform::Window::PollEvents();
         if(!_example->Tick()) {
             [_displayLink invalidate];
             _displayLink = nil;

@@ -511,7 +511,19 @@ bool SetLiveCollectorEnabled(bool value) noexcept
 #ifndef DY_LIVE_PROFILING_ENABLED
     if(value)return false;
 #endif
-    const bool wasEnabled=enabled.exchange(value);if(!value){Detail::StopServer();if(wasEnabled)try{std::vector<LiveFrameToken> retries;{auto& s=S();std::lock_guard<std::mutex> lock(s.mutex);for(const auto& source:s.sources)for(const auto& frame:source.second.frames){std::lock_guard<std::mutex> guard(frame->mutex);if(frame->retry&&!frame->ended)retries.push_back({frame->summary.key,true,context});}}for(const auto& token:retries)EndLiveFrame(token,LiveOutcome::Discarded);}catch(...) {}}return true;
+    const bool wasEnabled=enabled.exchange(value);
+    if(!value&&wasEnabled)try {
+        std::vector<LiveFrameToken> retries;
+        {
+            auto& s=S();std::lock_guard<std::mutex> lock(s.mutex);
+            for(const auto& source:s.sources)for(const auto& frame:source.second.frames) {
+                std::lock_guard<std::mutex> guard(frame->mutex);
+                if(frame->retry&&!frame->ended)retries.push_back({frame->summary.key,true,context});
+            }
+        }
+        for(const auto& token:retries)EndLiveFrame(token,LiveOutcome::Discarded);
+    } catch(...) {}
+    return true;
 }
 LiveId AllocateLiveId() noexcept {return IsLiveCollectorEnabled()?nextId.fetch_add(1,std::memory_order_relaxed):0;}
 LiveId RegisterLiveObject(const void* identity,const LiveObjectDesc& desc) noexcept
@@ -524,7 +536,7 @@ LiveId RegisterLiveObject(const void* identity,const LiveObjectDesc& desc) noexc
             s.objects.emplace(id,std::make_shared<LiveObjectInfo>(LiveObjectInfo{id,std::move(copy)}));if(identity)s.identities[identity]=id;
             if(auto* frame=FindFrame(s,context.frame)){std::lock_guard<std::mutex> guard(frame->mutex);LateSecondUpdate update(*frame);++frame->summary.recorded.objectsCreated;}
         }
-        Detail::StartServer();return id;
+        return id;
     }catch(...){return 0;}
 }
 LiveId FindLiveObject(const void* identity) noexcept

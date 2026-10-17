@@ -1,4 +1,5 @@
 #pragma once
+#include "dyf/Diagnostics/LiveConnection.h"
 #include "Process.h"
 #include "ViewerState.h"
 #include "FlowGraph.h"

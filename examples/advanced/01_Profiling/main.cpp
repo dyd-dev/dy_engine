@@ -1,3 +1,5 @@
+#include "dyf/Diagnostics/LiveConnection.h"
+#include "dyf/Diagnostics/ProfilerControls.h"
 #include "dyf/RHI/ResourceScope.h"
 #include "dyf/RHI.h"
 #include "dyf/Platform/Window.h"
@@ -112,6 +114,9 @@ int main(int argc, char** argv) try {
 
     // 1. 윈도우 생성 (해상도: 800x600)
     dyf::Platform::Window window(800, 600, "Advanced / 01_Profiling");
+#if defined(DY_LIVE_CONNECTION_ENABLED)
+    dyf::Diagnostics::LiveConnectionScope liveConnection;
+#endif
     Check(window.GetHandle() != nullptr, "Window creation failed");
 
     // 2. RHI 렌더 디바이스 생성
@@ -208,6 +213,7 @@ int main(int argc, char** argv) try {
     while (!options.frames || frame < options.frames) {
         // 윈도우 OS 이벤트 처리
         window.PollEvents();
+        if(!dyf::Diagnostics::UpdateProfilerControls(window.GetInput())) return 1;
         if (!window.IsRunning()) {
             break;
         }

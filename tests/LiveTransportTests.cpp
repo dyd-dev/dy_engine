@@ -1,3 +1,4 @@
+#include "dyf/Diagnostics/LiveConnection.h"
 #include "dyf/Diagnostics/LiveProfiling.h"
 #include <chrono>
 #include <iostream>
@@ -8,7 +9,7 @@
 using namespace dyf::Diagnostics;
 int main(int argc,char** argv)
 {
-    if(argc!=2)return 1;int identity=0;const auto device=RegisterLiveObject(&identity,{LiveObjectKind::Device,0,0,0,0,"transport fixture"});const auto source=AllocateLiveId();bool actual=false;
+    if(argc!=2)return 1;int identity=0;const auto device=RegisterLiveObject(&identity,{LiveObjectKind::Device,0,0,0,0,"transport fixture"});const auto source=AllocateLiveId();bool actual=false;LiveConnectionScope connection;
     ControlDesc desc;desc.device=device;desc.source=source;desc.owner=source;desc.key="transport.toggle";desc.label=desc.key;
     auto control=RegisterControl(desc,[&](const ControlRequest& request,LiveFrameKey){actual=std::get<bool>(request.value);return ControlApplyResult{ControlState::Applied,actual,{}};});
     {
