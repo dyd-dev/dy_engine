@@ -1,91 +1,117 @@
-# 5분 발표 계획
+# 렌더링 기술 범위·구현 현황·발표 대상
 
-## 발표 구성
+전체 100%는 아래의 렌더링 기술 영역 전체를 뜻한다.
+분류는 [Real-Time Rendering의 목차](https://www.realtimerendering.com/)를 참고해
+실행 구조·영상 재구성까지 묶었다. RT와 특수 렌더링도 전체 지도에 포함한다.
+기술마다 규모와 대체 관계가 달라 전체 완성률을 단일 %로 합산하지 않는다.
+**● 구현 경로 있음 / △ 제한 구현·독립 예제만 / — 미구현**으로 표시한다.
+구현 표시는 소스 기준이며 화질·성능·플랫폼 검증 완료와 구분한다.
 
-현대 그래픽스 API의 공통 렌더러로 빛·규모·반복을 다룬다.
-완성 화면 → 이론과 기술 → Profiling → 최적화의 증거를 연결한다.
-Ray Tracing은 제외하고, 데스크톱과 모바일의 공통 실행 경로를 중심에 둔다.
+## 전체 기술 영역에서 현재 구현한 것
 
-1. **0:00–0:20 · 도입**
-   Sponza의 초기·현재 컷을 짧게 비교하고 세 장면의 완성 화면으로 넘어간다.
-   빛과 재질, 큰 장면의 디테일, 많은 물체의 제출이라는 질문을 제시한다.
-   목표는 60 FPS이며 실제 달성 여부는 마지막 측정 결과로 답한다.
+1. **장면·기하·애니메이션**
+   ● glTF/FBX, 메시·변환·카메라, 골격·모프, 공유 geometry.
+   △ Tessellation은 RHI 경로. — 전용 지형·세분 곡면·변위 시스템,
+   GPU 파티클·모발·천 등 특수 기하 렌더링.
 
-2. **0:20–1:35 · Bistro: 빛·재질·유리**
-   외부의 60초 카메라 동선을 기본으로 실내 유리·금속·전등의 근접 컷을 넣는다.
-   식생의 흔들림과 캐릭터 애니메이션으로 정적인 건축 장면에 움직임을 더한다.
-   PBR·Fresnel의 표면 반응과 프로브가 공급하는 간접광·반사를 연결한다.
-   법선·거칠기·깊이는 필요한 순간만 표시하고 바로 완성 화면으로 돌아온다.
-   실내 고정 조명의 shadow cache OFF/ON으로 같은 그림자를
-   재사용할 때 Shadow 패스와 CPU 작업이 어떻게 달라지는지 보여준다.
+2. **가시성·디테일·GPU 구동**
+   ● CPU/GPU frustum, Hi-Z 가림, indexed LOD, instancing,
+   가시 목록 압축 → indirect draw. △ 정적 메시 중심 LOD.
+   — 변형 메시 LOD, meshlet 컬링·LOD, 가상 기하·대규모 공간 스트리밍.
 
-3. **1:35–2:35 · Emerald: 규모·LOD·가시성**
-   근경에서 중·원경으로 이동하며 화면 오차에 따른 디테일 선택을 설명한다.
-   같은 시각·구도에서 LOD OFF/ON의 단계 분포·제출 삼각형·패스 시간을 비교한다.
-   단계색·wireframe은 기하 변화를 설명하는 짧은 컷으로만 사용한다.
-   전용 culling 예제로 GPU frustum 판정 → 가시 ID 압축 →
-   indirect draw의 흐름을 보강한다. 원거리 디테일 근사와 비가시 물체 제거를 구분한다.
+3. **표면 재질·텍스처**
+   ● Metallic/Roughness PBR·GGX·Fresnel, normal/AO/발광,
+   mip·이방성 필터, Mask/Blend·양면·unlit.
+   — Clearcoat·재질 이방성·Sheen·SSS·복합 층 재질.
 
-4. **2:35–3:45 · Dense Arena: 반복·배치**
-   Enter the Gungeon처럼 적·탄환·파편·소품이 많은 연출 장면을 보여준다.
-   여러 방의 전체 컷과 중앙 방의 근접 컷으로 물체 수와 움직임을 전달한다.
-   동일 게임 시각·카메라에서 instancing OFF/ON을 비교하고,
-   물체·삼각형 수를 유지하면서 CPU draw 수와 기록·제출 비용이 바뀌는지 확인한다.
-   반복 geometry를 묶는 효과와 GPU 셰이딩 비용은 각각 측정한다.
+4. **직접광·그림자**
+   ● 방향·점·스폿, 사각·원형 LTC 면적광, Clustered Lighting,
+   CSM·atlas·PCF·가변 반그림자 필터·정적 그림자 캐시.
+   — 면적광 그림자, 투과·유색 그림자.
 
-5. **3:45–4:35 · 멀티플랫폼**
-   Windows DX(D3D12)·Windows VK(Vulkan), Android Vulkan·iOS Metal의
-   동일 장면·동선·게임 상태를 이어 보여준다. 기기·GPU·해상도·품질을 표시한다.
-   공통 렌더링 의도가 API별 명령으로 실행되는 점을 설명한다.
-   Android/iOS는 별도 브랜치이며 실기 촬영·성능은 아직 확보해야 한다.
+5. **환경광·간접광·GI**
+   ● HDRI·SH·GGX IBL, 다중 정적 프로브·box projection·가림,
+   SSAO·SSGI와 시간·공간 필터. △ 정적·화면 공간 기반 GI.
+   — Lightmap 베이커, DDGI·동적 radiance cache·일반 다중 반사 GI.
 
-6. **4:35–5:00 · 마무리**
-   HUD를 걷고 가장 좋은 완성 컷으로 돌아온다.
-   장면별로 실제 줄인 작업과 남은 비용을 한 줄씩 정리한다.
-   에셋 출처·라이선스·수정 내역을 크레딧으로 남긴다.
+6. **반사·투명·굴절**
+   ● SSR·IBL 보완, 알파 합성. △ Fresnel·IOR·굴절·흡수의
+   1/2층 래스터 유리. — 평면 반사 전용 경로, 임의의 중첩 매질,
+   다층 재귀 굴절·분산·caustics.
 
-## 기술 연결과 측정·촬영 계획
+7. **매질·하늘·자연 현상**
+   ● 높이 밀도·광원·그림자를 사용하는 단일 산란 볼륨 안개.
+   — 다중 산란 대기·구름, 전용 물·해양·유체 렌더링.
+   식생 움직임은 노드 변환이며 전용 잎 변형·산란 모델은 미구현.
 
-**화면과 렌더 구조**
-Bistro는 미세면 BRDF·Fresnel·굴절·흡수와 직접광·프로브 반사를 연결한다.
-Emerald는 화면 오차 기반 LOD와 가시성 판정, Arena는 배치·자원 공유를 설명한다.
-기하·재질 준비 → 가시성·LOD → 그림자·표면 입력 → 불투명 조명 →
-간접광·반사·투명 → 후처리·출력의 흐름을 실제 패스와 연결한다.
+8. **샘플링·AA·영상 재구성**
+   ● TAA·motion·history 제어, HDR supersampling, 효과별 노이즈 필터.
+   — MSAA·FXAA·SMAA의 공통 렌더 경로,
+   DLSS/FSR/XeSS 등 업스케일러·프레임 생성·동적 해상도 제어.
 
-기본 dyf는 장면·기하·프레임 진행을 맡고, Extends의 Environment·Clustered·
-Surface·Fog·Transparency·PostProcess 모듈은 자원·이력·패스를 소유한다.
-RenderGraph는 입출력 의존성과 배리어를 구성하고 RHI는 공통 자원·명령 계약을 제공한다.
-Backend는 이를 D3D12·Vulkan·Metal 명령으로 실행한다.
+9. **색·카메라·후처리·출력**
+   ● 선형/sRGB, HDR 내부 렌더, 노출·자동 노출·bloom·톤 매핑,
+   색보정·선명화·고정 해상도·비율 유지.
+   — 3D LUT, DOF·motion blur·렌즈 효과, HDR 디스플레이 출력.
 
-**A/B 수집 순서**
-먼저 F11로 CPU 단계와 실제 GPU 패스의 병목을 확인한다.
-Cinematic의 F8로 정적 그림자 캐시·병렬 기록·인스턴싱·LOD 중 비교 항목을 고른다.
-F5로 해당 최적화만 OFF인 기준을 수집하고, 예열·수집이 끝나면
-F6로 저장한 동일 시각·카메라에서 ON을 수집한다. 조건을 바꾸면 기준부터 다시 수집한다.
-Dense Arena의 F5/F6은 같은 게임 상태의 인스턴싱 비교이며,
-이때 GPU 컬링을 고정해 CPU 배치 효과를 분리한다. F7은 비교 취소·초기화다.
+10. **렌더 구조·자원·최적화**
+    ● Forward·Clustered, 모듈별 패스, RenderGraph·배리어·fence,
+    병렬 기록·재사용·timestamp·A/B. △ Deferred·Mesh Shader는 독립 예제,
+    Bindless는 고정 배열. — Async Compute, 완전 Bindless,
+    Virtual Texture·sparse residency·수요 기반 스트리밍·VRS.
 
-**지표와 최적화의 증거**
-FRAME은 프레임 간격, CPU WORK는 렌더러의 준비·기록·제출 경과 시간이다.
-GPU는 패스별 ms와 GPU SPAN을 구분한다. SPAN에는 제출 사이 공백도 포함되며,
-CPU·GPU 시간을 단순히 더해 프레임 시간으로 해석하지 않는다.
-draw·instance·triangle과 관련 패스 시간을 함께 제시해 줄어든 작업을 설명한다.
-GPU 가시 개수는 readback이 없어 N/A이며 완료하지 않은 timestamp를 0ms로 쓰지 않는다.
+11. **광선 기반 렌더링**
+    — BLAS/TLAS·Ray Query·RT Pipeline, RT 그림자·반사·GI,
+    Path Tracing·다중 경로 적분·광자 기반 기법.
+    RT는 이번 개발·발표 범위에서 제외했으나 전체 기술 영역에는 포함한다.
 
-정적 그림자 캐시는 동일 atlas의 재계산 제거, 병렬 기록은 CPU RECORD 변화,
-인스턴싱은 동일 물체 수에서 draw 감소가 핵심 증거다.
-LOD는 삼각형 감소와 디테일 손실을 함께 보여주며 프레임 개선은 별도로 측정한다.
-Indirect는 CPU readback 없이 GPU가 만든 인자를 소비하는 경로로 설명한다.
-삼각형이나 draw가 줄어도 다른 병목이 남으면 전체 프레임은 그대로일 수 있다.
+12. **특수 표현·시점**
+    — NPR·전용 윤곽선/스타일화, SDF·복셀·점/스플랫 표현,
+    XR stereo·multiview·foveated rendering, 스펙트럼·편광 렌더링.
 
-**촬영 조건과 현재 상태**
-기준 영상은 1920×1080·16:9, TAA 기본 OFF다.
-A/B는 카메라·게임 시각·조명·노출·해상도·품질·VSync·worker 조건을 유지한다.
-정상 화질·성능 비교에서는 단계색·wireframe을 끄고 HUD 조건도 맞춘다.
-초기 로딩·프로브 캡처·LOD 생성은 정상 프레임 비용과 분리한다.
-준비·측정 대기는 편집하되 전후 조건과 결과를 보존한다.
+## 이번 브랜치에서 개발한 범위
 
-공통 렌더 경로와 시연 프로그램의 Linux/Vulkan 빌드는 완료했다.
-이번 변경의 화질·안정성과 Windows·모바일의 실제 실행·실측은 별도로 확인해야 한다.
-60 FPS의 예산은 16.67ms이며 목표와 실측을 분리해 기록한다.
-모바일 품질은 실제 기기의 메모리·프레임 예산에 맞추고 설정 차이를 함께 제시한다.
+비교 기준은 `main:89ac61c` → `modular-rendering-showcase`다.
+기존에 PBR·normal/AO·직접광·그림자·골격/모프·CPU 컬링·인스턴싱,
+HDR·노출·톤 매핑·RenderGraph·병렬 기록이 있었다.
+
+- **신규 공통 기능:** HDRI/SH/GGX·프로브·가림, SSAO/SSGI/SSR·필터,
+  래스터 유리·흡수, LTC, indexed LOD, GPU frustum/Hi-Z·indirect,
+  자동 노출·색보정·선명화.
+- **독립 예제 → 공통 렌더러 통합:** Clustered·TAA·볼륨 안개,
+  표면 정보 출력·bloom·후처리. 공통 렌더러는 Forward이며
+  Deferred와 Mesh Shader는 독립 예제 범위다.
+- **기존 기능 개선:** geometry 공유·원본 재질 해석,
+  광원 크기 기반 그림자 설정·캐시·caster/PSO·자원 재사용,
+  1080p 출력·상세 계측·A/B.
+- **구조·API:** RenderExtension과 선택 모듈 6개
+  (Environment·Clustered·Surface·Fog·Transparency·PostProcess),
+  RHI DrawIndirect·DrawIndexedIndirect·DispatchIndirect 3종과 backend 연결.
+- **예제·시연:** 독립 17·18 구현, Bistro·Emerald·Arena,
+  구형 Sponza 비교 실행 파일과 공통 카메라, `showcase/` 분리.
+
+advanced 01–23은 실행 경로 **20개(약 87%)**, 제한 구현 **1개(16)**,
+미구현 **2개(20 AsyncCompute·23 MeshletCullingLOD)**다.
+이 수치는 예제 목록의 비율이며 전체 렌더링 기술의 완성률은 아니다.
+이번 브랜치는 기존 래스터 기반에 고급 효과·GPU 구동·진단 구조를 확장했다.
+
+## 발표에 넣을 기술
+
+- **빛·재질 — Bistro:** PBR·normal·Fresnel, 직접광·LTC·그림자,
+  HDRI·다중 프로브·SSAO/SSGI·SSR, 유리·굴절·흡수,
+  안개·노출·톤 매핑·선명화. 표면 정보와 활성 패스로 결과를 연결한다.
+  식생·Knight 애니메이션을 포함하고 Sponza는 초기/현재 비교에 사용한다.
+- **규모 — Emerald·Culling:** frustum·Hi-Z, 화면 오차 기반 LOD,
+  가시 목록 압축·indirect. 단계색·wireframe·제출 삼각형과 GPU 패스 시간.
+- **반복 — Dense Arena:** 많은 적·탄환·소품, geometry·자원 공유,
+  instancing·컬링·병렬 기록. 동일 상태에서 draw 수·CPU RECORD/SUBMIT 비교.
+- **구조·멀티플랫폼:** 기본 dyf + 선택 모듈 + RenderGraph + RHI,
+  D3D12/Vulkan/Metal의 공통 계약, 장치 기능·한도와 품질 예산.
+  Windows DX/VK와 별도 브랜치의 Android/iOS는 실기 결과를 확보해 제시한다.
+- **Profiling·최적화:** CPU WORK·대기, GPU SPAN·패스별 ms,
+  draw·instance·triangle. 그림자 캐시·병렬 기록·LOD·instancing을
+  동일 카메라·시각·해상도에서 한 항목씩 A/B로 비교한다.
+
+Linux/Vulkan 빌드 완료. 이번 변경의 화질·안정성·60 FPS와
+Windows·모바일 실기 성능은 미확인. GPU 가시 개수 readback은 미구현이다.
+촬영 기준은 1920×1080·16:9·TAA 기본 OFF이며 기기별 차이를 명시한다.
