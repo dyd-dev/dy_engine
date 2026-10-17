@@ -118,7 +118,7 @@ if(USE_D3D12 AND WIN32 AND DY_ENABLE_PIX)
     target_link_libraries(${PROJECT_NAME} PRIVATE WinPixEventRuntime::WinPixEventRuntime)
 endif()
 
-if(NOT ANDROID)
+if(NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
 FetchContent_Declare(
 	glfw
 	GIT_REPOSITORY "https://github.com/glfw/glfw.git"
@@ -148,7 +148,7 @@ FetchContent_MakeAvailable(bcdec)
 if(ANDROID)
     target_link_libraries(${PROJECT_NAME} PRIVATE android log)
     target_include_directories(${PROJECT_NAME} PRIVATE "${ANDROID_NDK}/sources/android/native_app_glue")
-else()
+elseif(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     target_link_libraries(${PROJECT_NAME} PRIVATE glfw)
     target_compile_definitions(${PROJECT_NAME} PRIVATE GLFW_INCLUDE_NONE)
 endif()

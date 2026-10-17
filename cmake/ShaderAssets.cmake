@@ -164,7 +164,7 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
     add_custom_command(
         OUTPUT "${air}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal -c "${source}" -o "${air}"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal ${DY_METAL_COMPILE_ARGS} -c "${source}" -o "${air}"
         DEPENDS "${source}"
         VERBATIM)
     list(APPEND metal_air_files "${air}")
@@ -202,7 +202,7 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
         add_custom_command(
             OUTPUT "${air}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-            COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal
+            COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal ${DY_METAL_COMPILE_ARGS}
                 "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}"
                 "-DRENDERER_VERTEX_ENTRY=${vertex_entry}"
                 -fpreserve-invariance -c "${source}" -o "${air}"
@@ -241,7 +241,7 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
         add_custom_command(
             OUTPUT "${air}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-            COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal
+            COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal ${DY_METAL_COMPILE_ARGS}
                 "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}"
                 "-DRENDERER_FRAGMENT_ENTRY=${fragment_entry}"
                 -c "${source}" -o "${air}"
@@ -288,7 +288,7 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
     set(canvas_header "${DY_STOCK_SHADER_GENERATED_DIR}/CanvasLibrary.h")
     add_custom_command(OUTPUT "${canvas_header}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal -c "${DY_STOCK_SHADER_SOURCE_DIR}/canvas.metal" -o "${canvas_air}"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal ${DY_METAL_COMPILE_ARGS} -c "${DY_STOCK_SHADER_SOURCE_DIR}/canvas.metal" -o "${canvas_air}"
         COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metallib "${canvas_air}" -o "${canvas_library}"
         COMMAND "${CMAKE_COMMAND}" "-DINPUT=${canvas_library}" "-DOUTPUT=${canvas_header}" -DSYMBOL=kCanvasLibrary -P "${DY_STOCK_SHADER_EMBED_SCRIPT}"
         DEPENDS "${DY_STOCK_SHADER_SOURCE_DIR}/canvas.metal" "${DY_STOCK_SHADER_EMBED_SCRIPT}" VERBATIM)
@@ -304,7 +304,7 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
     set(tone_map_header "${DY_STOCK_SHADER_GENERATED_DIR}/ToneMapLibrary.h")
     add_custom_command(OUTPUT "${tone_map_header}"
         COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal -c "${DY_STOCK_SHADER_SOURCE_DIR}/tone_map.metal" -o "${tone_map_air}"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal ${DY_METAL_COMPILE_ARGS} -c "${DY_STOCK_SHADER_SOURCE_DIR}/tone_map.metal" -o "${tone_map_air}"
         COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metallib "${tone_map_air}" -o "${tone_map_library}"
         COMMAND "${CMAKE_COMMAND}" "-DINPUT=${tone_map_library}" "-DOUTPUT=${tone_map_header}" -DSYMBOL=kToneMapLibrary -P "${DY_STOCK_SHADER_EMBED_SCRIPT}"
         DEPENDS "${DY_STOCK_SHADER_SOURCE_DIR}/tone_map.metal" "${DY_STOCK_SHADER_EMBED_SCRIPT}" VERBATIM)
@@ -329,7 +329,7 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
         set(air "${DY_STOCK_SHADER_GENERATED_DIR}/Bindless${enable_shadows}.air")
         add_custom_command(OUTPUT "${air}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-            COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal
+            COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal ${DY_METAL_COMPILE_ARGS}
                 -DRENDERER_BINDLESS=1 "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}"
                 "-DRENDERER_FRAGMENT_ENTRY=bindlessFragment${enable_shadows}" -c "${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.metal" -o "${air}"
             DEPENDS "${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.metal" "${DY_STOCK_SHADER_SHARED_DIR}/shadow_filter.metal" VERBATIM)

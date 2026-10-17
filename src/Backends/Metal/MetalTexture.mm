@@ -8,6 +8,7 @@
 #include "MetalTexture.h"
 #include "MetalValidation.h"
 #import <Metal/Metal.h>
+#import <TargetConditionals.h>
 
 namespace dyf::Backends
 {
@@ -32,7 +33,10 @@ namespace dyf::Backends
             case RHI::Format::R32_FLOAT:             return MTLPixelFormatR32Float;
             case RHI::Format::R32G32B32A32_FLOAT:    return MTLPixelFormatRGBA32Float;
             case RHI::Format::D32_FLOAT:             return MTLPixelFormatDepth32Float;
+#if !TARGET_OS_IOS
+            // iOS SDK에는 D24S8 네이티브 포맷이 없다. 다른 포맷으로 암묵 변환하지 않는다.
             case RHI::Format::D24_UNORM_S8_UINT:     return MTLPixelFormatDepth24Unorm_Stencil8;
+#endif
             case RHI::Format::D32_FLOAT_S8_UINT:     return MTLPixelFormatDepth32Float_Stencil8;
 			case RHI::Format::R32_UINT:              return MTLPixelFormatR32Uint;
 			case RHI::Format::R16_UINT:              return MTLPixelFormatR16Uint;

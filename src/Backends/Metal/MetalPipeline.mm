@@ -6,6 +6,7 @@
 #include <set>
 
 #import <Metal/Metal.h>
+#import <TargetConditionals.h>
 
 namespace dyf::Backends
 {
@@ -24,7 +25,10 @@ namespace dyf::Backends
             case RHI::Format::R32_FLOAT: return MTLPixelFormatR32Float;
 			case RHI::Format::R32G32B32A32_FLOAT: return MTLPixelFormatRGBA32Float;
 			case RHI::Format::D32_FLOAT: return MTLPixelFormatDepth32Float;
+#if !TARGET_OS_IOS
+			// 텍스처 매핑과 동일하게 iOS에서 지원하지 않는 D24S8 경로를 제외한다.
 			case RHI::Format::D24_UNORM_S8_UINT: return MTLPixelFormatDepth24Unorm_Stencil8;
+#endif
 			case RHI::Format::D32_FLOAT_S8_UINT: return MTLPixelFormatDepth32Float_Stencil8;
 			case RHI::Format::R32_UINT: return MTLPixelFormatR32Uint;
 			case RHI::Format::R16_UINT: return MTLPixelFormatR16Uint;
@@ -393,8 +397,10 @@ namespace dyf::Backends
         }
         if(desc.depthStencil.format != RHI::Format::Unknown &&
             ToPixelFormat(desc.depthStencil.format) == MTLPixelFormatInvalid) return false;
+#if !TARGET_OS_IOS
         if(desc.depthStencil.format == RHI::Format::D24_UNORM_S8_UINT &&
             !metalDevice.depth24Stencil8PixelFormatSupported) return false;
+#endif
         return true;
     }
 
@@ -591,9 +597,9 @@ namespace dyf::Backends
 		const MTLPixelFormat depthStencilFormat = ToPixelFormat(desc.depthStencil.format);
 		if(desc.depthStencil.format != RHI::Format::Unknown)
 		{
-			if(depthStencilFormat != MTLPixelFormatDepth32Float &&
-				depthStencilFormat != MTLPixelFormatDepth24Unorm_Stencil8 &&
-				depthStencilFormat != MTLPixelFormatDepth32Float_Stencil8)
+			if(depthStencilFormat == MTLPixelFormatInvalid ||
+                (desc.depthStencil.format != RHI::Format::D32_FLOAT &&
+                 !RHI::HasStencil(desc.depthStencil.format)))
 			{
 				descriptorValid = false;
 			}
@@ -924,7 +930,9 @@ namespace dyf::Backends
 			if(desc.depthStencil.format != RHI::Format::Unknown)
 			{
 				if(depthStencilFormat != MTLPixelFormatDepth32Float &&
+#if !TARGET_OS_IOS
 					depthStencilFormat != MTLPixelFormatDepth24Unorm_Stencil8 &&
+#endif
 					depthStencilFormat != MTLPixelFormatDepth32Float_Stencil8)
 				{
 					descriptorValid = false;

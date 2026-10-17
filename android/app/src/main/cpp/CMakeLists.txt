@@ -73,6 +73,7 @@ endif()
 target_include_directories(dy_engine_app PRIVATE
     "${NATIVE_APP_GLUE_DIR}"
     "${DY_ENGINE_ROOT}/src/Public"
+    "${DY_ENGINE_ROOT}/examples/advanced/common"
 )
 
 if(TARGET Vulkan::Vulkan)
