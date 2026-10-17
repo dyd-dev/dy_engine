@@ -21,10 +21,22 @@ static FlowObservations ObserveEvents(const FlowGraph& graph,const D::LiveFlowSn
                 || (event.kind==D::LiveEventKind::Output && kind==D::LiveCommandKind::Present);
             const bool wait=event.kind==D::LiveEventKind::Wait && event.outcome!=D::LiveOutcome::Skipped;
             if(wait) kind=D::LiveCommandKind::Wait;
-            if((command || wait) && kind!=D::LiveCommandKind::None && size_t(kind)<result.commandKinds.size()) ++result.commandKinds[size_t(kind)];
+            if((command || wait) && size_t(kind)<result.commandKinds.size()) ++result.commandKinds[size_t(kind)];
+            if(event.kind==D::LiveEventKind::Command && (kind==D::LiveCommandKind::Draw || kind==D::LiveCommandKind::DrawIndexed)
+                && event.arguments[1]>1) ++result.multiInstanceDraws;
+            if(event.kind==D::LiveEventKind::Output && kind==D::LiveCommandKind::Present && size_t(event.outcome)<result.presentOutcomes.size())
+                ++result.presentOutcomes[size_t(event.outcome)];
         }
     }
     return result;
+}
+const D::LiveEvent* FlowEvent(const FlowGraph& graph,const D::LiveFlowSnapshot& flow,D::LiveId id)
+{
+    const auto node=std::find_if(graph.nodes.begin(),graph.nodes.end(),[&](const auto& value){return value.id==id;});
+    if(node==graph.nodes.end() || node->index>=flow.events.size()) return nullptr;
+    const auto& event=flow.events[node->index];
+    if(event.context.frame!=flow.key || (node->kind==FlowNodeKind::Event && event.id!=id)) return nullptr;
+    return node->kind==FlowNodeKind::Event || node->kind==FlowNodeKind::BatchReference || node->kind==FlowNodeKind::SubmissionReference ? &flow.events[node->index] : nullptr;
 }
 std::vector<FlowBundle> GroupFlowLinks(const FlowGraph& graph)
 {

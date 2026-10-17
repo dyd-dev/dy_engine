@@ -4,6 +4,7 @@
 #include "dyf/RHI/IDevice.h"
 #include "dyf/Core/ThreadPool.h"
 #include "Validation.h"
+#include "LiveRhi.h"
 
 #include <atomic>
 
@@ -298,6 +299,7 @@ namespace dyf::RHI
             Diagnostics::LiveEvent event;event.id=eventId;event.kind=Diagnostics::LiveEventKind::CpuWork;
             event.stage=Diagnostics::LiveStage::CpuPrepare;event.arguments={pass,
                 static_cast<int64_t>(m_passes[pass]->GetReads().size()),static_cast<int64_t>(m_passes[pass]->GetWrites().size())};
+            event.arguments[4]=LiveRhiThreadToken();
             const auto& name=m_passes[pass]->GetName();
             for(size_t i=0;i<name.size()&&i+1<sizeof(event.label);++i)event.label[i]=name[i];
             event.beginNs=Diagnostics::LiveNowNs();
@@ -348,6 +350,29 @@ namespace dyf::RHI
     {
         if(!device || !commandLists.empty() || !IsCompiled())
             return Fail("parallel recording requires a device, an empty output and an unchanged compiled graph.");
+        auto* liveState=device->GetLiveState();
+        const auto caller=Diagnostics::GetLiveContext();
+        if(liveState&&caller.frame.device==liveState->device&&caller.frame.frame)
+        {device->PrepareLiveControls(caller.frame);device->CaptureLiveGraphParallel(caller.frame);}
+        // Boundary, passes and an empty final list belong to this actual recording operation.
+        Diagnostics::LiveFrameScope liveFrame(liveState?liveState->device:0,liveState?liveState->recordingSource:0);
+        liveFrame.SetOutcome(Diagnostics::LiveOutcome::Failed);
+        if(liveState)device->PrepareLiveControls(liveFrame.GetKey());
+        const auto policyBegin=liveState?Diagnostics::LiveNowNs():0;
+        const bool requestedParallel=device->CaptureLiveGraphParallel(liveFrame.GetKey());
+        const auto workers=pool?pool->GetThreadCount():0;
+        const int64_t fallback=!requestedParallel?1:!pool?2:workers<=1?3:pool->IsWorkerThread()?4:0;
+        auto* effectivePool=fallback?nullptr:pool;
+        if(liveState)
+        {
+            Diagnostics::LiveEvent policy;policy.context=Diagnostics::GetLiveContext();
+            policy.kind=Diagnostics::LiveEventKind::CpuWork;policy.stage=Diagnostics::LiveStage::CpuPrepare;
+            policy.beginNs=policyBegin;policy.endNs=Diagnostics::LiveNowNs();
+            policy.arguments={requestedParallel,effectivePool!=nullptr,workers,fallback,
+                LiveRhiThreadToken()};
+            const char label[]="RenderGraph recording policy";std::copy(std::begin(label),std::end(label),policy.label);
+            Diagnostics::RecordLiveEvent(policy);
+        }
         struct Recording
         {
             IDevice& device;
@@ -390,7 +415,7 @@ namespace dyf::RHI
             }
             else recorded[pass]=RecordPass(passes[pass],pass)&&passes[pass]->Close();
         };
-        const bool parallel = pool && pool->GetThreadCount() > 1 && !pool->IsWorkerThread();
+        const bool parallel = effectivePool!=nullptr;
         for(const auto& stage : m_executionStages)
         {
             if(!parallel || stage.passIndices.size() == 1)
@@ -405,7 +430,7 @@ namespace dyf::RHI
                 try
                 {
                     for(uint32_t pass : stage.passIndices)
-                        pending.push_back(pool->Enqueue([&, pass] { record(pass); }));
+                        pending.push_back(effectivePool->Enqueue([&, pass] { record(pass); }));
                 }
                 catch(...) { failure = std::current_exception(); }
                 // Even queue/allocation failures must join previously accepted jobs.
@@ -421,8 +446,9 @@ namespace dyf::RHI
             passes[dependency.after]->RecordLiveResourceLink(passEvents[dependency.before],passEvents[dependency.after]);
         if(!final->Close()) return false;
         if(!device->PrepareCommandLists(recording.lists.data(),
-            static_cast<uint32_t>(recording.lists.size()), pool)) return false;
+            static_cast<uint32_t>(recording.lists.size()), effectivePool)) return false;
         commandLists.swap(recording.lists);
+        liveFrame.SetOutcome(Diagnostics::LiveOutcome::Observed);
         return true;
     }
 

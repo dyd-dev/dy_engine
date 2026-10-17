@@ -1,6 +1,7 @@
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/IDevice.h"
 #include "Validation.h"
+#include "LiveRhi.h"
 #include <algorithm>
 #include <string>
 
@@ -53,7 +54,7 @@ void ICommandList::FlushLiveDeferred(D::LiveContext context) noexcept
 {
 #ifdef DY_LIVE_PROFILING_ENABLED
     if(m_liveDeferred.empty()&&m_liveDeferredLinks.empty()&&!m_liveDeferredSummary.omittedEvents&&!m_liveDeferredSummary.omittedLinks)return;
-    D::LiveContextScope restore(context);m_liveContext=context;
+    D::LiveContextScope restore(context);
     // Fixed counters never depend on retained detail or space remaining for publication.
     D::RecordLiveEventSummary(m_livePosition,m_liveDeferredSummary);
     for(auto event:m_liveDeferred){event.context=context;D::RecordLiveEvent(event,false);}
@@ -69,11 +70,8 @@ void ICommandList::RecordLiveInfo(D::LiveEvent event) noexcept
     if(!m_livePosition.commandList||!D::IsLiveCollectorEnabled())return;
     try
     {
-        auto context=D::GetLiveContext();
-        if(context.frame.frame&&context.frame.device==m_liveContext.frame.device&&
-            (!m_liveContext.frame.frame||context.frame==m_liveContext.frame))
-        {if(!m_liveContext.frame.frame){FlushLiveDeferred(context);m_liveContext=context;}}
-        else context=m_liveContext;
+        auto context=event.context.frame.frame?event.context:D::GetLiveContext();
+        if(!context.frame.frame||context.frame.device!=m_liveContext.frame.device)context=m_liveContext;
         event.context=context;
         if(context.frame.frame)D::RecordLiveEvent(event);else DeferLiveEvent(event);
     }
@@ -104,10 +102,7 @@ void ICommandList::RecordLiveCommand(D::LiveCommandKind commandKind,std::array<i
     try
     {
         auto context=D::GetLiveContext();
-        if(context.frame.frame&&context.frame.device==m_liveContext.frame.device&&
-            (!m_liveContext.frame.frame||context.frame==m_liveContext.frame))
-        {if(!m_liveContext.frame.frame)FlushLiveDeferred(context);if(!m_livePosition.index||!m_liveContext.frame.frame)m_liveContext=context;}
-        else context=m_liveContext;
+        if(!context.frame.frame||context.frame!=m_liveContext.frame)context=m_liveContext;
         D::LiveEvent event;event.id=D::AllocateLiveId();event.context=context;
         event.command=m_livePosition;event.command.index=++m_livePosition.index;
         event.resource=D::FindLiveObject(resource);event.kind=kind;event.commandKind=commandKind;
@@ -118,6 +113,7 @@ void ICommandList::RecordLiveCommand(D::LiveCommandKind commandKind,std::array<i
         if(!event.beginNs)event.beginNs=event.endNs;
         if(context.frame.frame)D::RecordLiveEvent(event);else DeferLiveEvent(event);
         RecordLiveResourceLink(event.resource,event.id);
+        RecordLiveBindings(event.id,commandKind);
         RecordLiveResourceLink(context.batch,event.id);
         RecordLiveResourceLink(m_livePreviousEvent,event.id);
         m_livePreviousEvent=event.id;m_liveCommandBeginNs=0;
@@ -125,6 +121,48 @@ void ICommandList::RecordLiveCommand(D::LiveCommandKind commandKind,std::array<i
     catch(...) {m_liveCommandBeginNs=0;}
 #else
     (void)commandKind;(void)arguments;(void)resource;(void)elements;(void)bytes;(void)operations;(void)kind;(void)fullUpload;(void)label;
+#endif
+}
+void ICommandList::RecordLiveBindings(D::LiveId event,D::LiveCommandKind kind) noexcept
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+    const bool draw=kind==D::LiveCommandKind::Draw||kind==D::LiveCommandKind::DrawIndexed;
+    if(!draw&&kind!=D::LiveCommandKind::Dispatch&&kind!=D::LiveCommandKind::DispatchMesh)return;
+    RecordLiveResourceLink(D::FindLiveObject(m_pipeline),event);
+    if(draw&&m_pipeline)for(const auto binding:m_pipeline->m_requiredVertexBindings)
+    {const auto found=m_vertexBuffers.find(binding);if(found!=m_vertexBuffers.end())RecordLiveResourceLink(D::FindLiveObject(found->second),event);}
+    if(kind==D::LiveCommandKind::DrawIndexed)RecordLiveResourceLink(D::FindLiveObject(m_indexBuffer),event);
+    if(m_resourceSet&&m_resourceSet->GetPipeline()==m_pipeline)
+    {
+        RecordLiveResourceLink(D::FindLiveObject(m_resourceSet),event);
+        for(uint32_t i=0;i<m_resourceSet->GetBindingCount();++i)
+        {const auto& binding=m_resourceSet->GetBindings()[i];
+            RecordLiveResourceLink(D::FindLiveObject(binding.buffer),event);RecordLiveResourceLink(D::FindLiveObject(binding.texture),event);}
+    }
+#else
+    (void)event;(void)kind;
+#endif
+}
+void ICommandList::FinishLiveRecording(D::LiveOutcome outcome,bool terminal) noexcept
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+    if(!m_livePosition.commandList)return;
+    try
+    {
+        D::LiveContextScope context(m_liveContext);FlushLiveDeferred(m_liveContext);
+        if(terminal&&!m_liveTerminal&&!m_liveSubmitted&&m_livePosition.index)
+        {
+            D::LiveEvent event;event.context=m_liveContext;event.command=m_livePosition;event.kind=D::LiveEventKind::CpuWork;
+            event.stage=D::LiveStage::Record;event.outcome=outcome;event.beginNs=event.endNs=D::LiveNowNs();
+            const char label[]="Recording ended without submission";std::copy(std::begin(label),std::end(label),event.label);
+            D::RecordLiveEvent(event);m_liveTerminal=true;
+        }
+        if(m_liveRecordFrame.ownsFrame)
+        {auto token=m_liveRecordFrame;m_liveRecordFrame={};EndLiveRhiFrame(token,outcome);}
+    }
+    catch(...){}
+#else
+    (void)outcome;(void)terminal;
 #endif
 }
 void ICommandList::BeginDebugEvent(const char* name, const DebugLabelColor& color)
@@ -176,6 +214,7 @@ ICommandList::~ICommandList()
     if(m_owner)
     {
         std::lock_guard<std::recursive_mutex> lock(m_owner->m_resourceMutex);
+        FinishLiveRecording(m_recordingFailed?D::LiveOutcome::Failed:D::LiveOutcome::Discarded,true);
         m_owner->DiscardLivePrepared(this,D::LiveOutcome::Discarded);
         if(m_preparedNative) m_owner->DiscardCommandListNative(m_preparedNative);
         m_owner->m_recordedCommands.erase(this);
@@ -553,9 +592,10 @@ try
     m_recordingClosed = true;
     m_recordingFailed = m_recordingFailed || !nativeClosed;
     if(m_recordingFailed && m_owner)m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,"Close: command recording failed. Invalid commands will not be submitted.");
+    FinishLiveRecording(m_recordingFailed?D::LiveOutcome::Failed:D::LiveOutcome::Observed,m_recordingFailed);
     return !m_recordingFailed;
 }
-catch(...) { m_recordingFailed=true; throw; }
+catch(...) { m_recordingFailed=true;FinishLiveRecording(D::LiveOutcome::Failed,true); throw; }
 }
 
 

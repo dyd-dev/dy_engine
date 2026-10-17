@@ -117,6 +117,9 @@ namespace dyf::RHI
 	private:
         Diagnostics::LiveCommandRef m_livePosition;
         Diagnostics::LiveContext m_liveContext;
+        Diagnostics::LiveContext m_liveExecutionContext;
+        Diagnostics::LiveFrameToken m_liveRecordFrame;
+        bool m_liveInExecution=false,m_liveSubmitted=false,m_liveTerminal=false;
         uint64_t m_liveCommandBeginNs=0;
         Diagnostics::LiveId m_livePreviousEvent=0;
         std::vector<Diagnostics::LiveEvent> m_liveDeferred;
@@ -135,6 +138,8 @@ namespace dyf::RHI
             const char* label=nullptr) noexcept;
         void RecordLiveResourceLink(Diagnostics::LiveId,Diagnostics::LiveId) noexcept;
         void RecordLiveInfo(Diagnostics::LiveEvent) noexcept;
+        void FinishLiveRecording(Diagnostics::LiveOutcome,bool terminal=false) noexcept;
+        void RecordLiveBindings(Diagnostics::LiveId,Diagnostics::LiveCommandKind) noexcept;
 		friend class IDevice;
         friend class RenderGraph;
         friend class RenderGraphPass;

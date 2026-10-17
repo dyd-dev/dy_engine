@@ -45,6 +45,10 @@ bool CompleteComparisonWindow(const D::LiveAggregate&,D::LiveId device,D::LiveId
 bool ComparisonAfterReady(const ViewerState&,const D::ControlStatus&,uint64_t producerNs);
 enum class ComparisonMetric { Frames,Fps,Frame,Cpu,Gpu,Draws,Instances,Dispatch,Upload };
 std::optional<double> ComparisonNumber(const D::LiveAggregate&,ComparisonMetric);
+std::optional<double> WindowRate(const D::LiveAggregate&);
+std::string DisplayAmount(double value,int decimals=1);
+struct EventText { std::string name,label,explanation,arguments,value="--",unit="미수집"; };
+EventText DescribeEvent(const D::LiveEvent&);
 enum class StageMetric { Cpu,Gpu,Operations,Elements,Bytes,Count };
 std::optional<double> StageNumber(const D::LiveAggregate&,D::LiveStage,StageMetric);
 enum class CounterPhase { Recorded,Submitted,Completed };

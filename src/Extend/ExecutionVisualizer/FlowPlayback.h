@@ -37,7 +37,7 @@ private:
 struct FlowPoint { float x=0,y=0; };
 struct FlowRouteLayout
 {
-    static constexpr float Radius=70,Spacing=240,CenterY=150;
+    static constexpr float Radius=32,Spacing=114,CenterY=78;
     std::vector<FlowPoint> nodes;
     std::vector<D::LiveId> ids;
     std::vector<std::vector<FlowPoint>> paths;
@@ -72,6 +72,26 @@ struct FlowPresentation
     D::LiveId revision=0;
     uint64_t sequence=0,cycleStartedNs=0,presentedNs=0;
 };
+struct StatisticsObservation
+{
+    StatisticsPresentation values;
+    std::array<std::array<unsigned char,ComparisonCounterCount>,3> counterVisibility{};
+    std::array<std::array<unsigned char,size_t(StageMetric::Count)>,D::LiveStageCount> stageVisibility{};
+};
+std::optional<StatisticsObservation> ObserveStatistics(const StatisticsView&);
+struct ObservedEventPresentation { D::LiveEvent event; unsigned char visibility=0; };
+struct FlowObservationPresentation
+{
+    FlowPresentation values;
+    FlowObservations observed;
+    D::LiveLoss loss;
+    uint64_t omittedEvents=0,omittedLinks=0;
+    bool incomplete=false,headerVisible=false,multiInstanceVisible=false;
+    std::array<unsigned char,size_t(D::LiveOutcome::Unknown)+1> presentOutcomeVisibility{};
+    std::array<unsigned char,size_t(D::LiveCommandKind::Present)+1> commandVisibility{};
+    std::vector<ObservedEventPresentation> events;
+};
+std::optional<FlowObservationPresentation> ObserveReplay(const FlowPlayback&);
 struct ComparisonFramePresentation
 {
     D::LiveFrameKey frame;
@@ -114,12 +134,16 @@ struct PresentationLog
     std::optional<ComparisonPresentation> comparison;
     std::optional<ComparisonPresentation> stageComparison,counterComparison;
     std::optional<ComparisonFlowPresentation> comparisonFlow;
+    std::optional<StatisticsObservation> observationCounters,observationStages;
+    std::optional<FlowObservationPresentation> observationFlow;
     bool statisticsVisible=false,flowVisible=false;
     bool comparisonVisible=false;
     bool comparisonStagesVisible=false,comparisonCountersVisible=false,comparisonFlowVisible=false;
+    bool observationCountersVisible=false,observationStagesVisible=false,observationFlowVisible=false;
     uint64_t statisticsUpdates=0,flowCycles=0;
     void Presented(const StatisticsView&,const FlowPlayback&,bool statisticsDrawn,bool flowDrawn,uint64_t nowNs);
     void PresentedComparison(const ComparisonPresentation*,uint64_t nowNs);
+    void PresentedObservations(const StatisticsObservation*,const FlowObservationPresentation*,uint64_t nowNs);
     void Write(std::ostream&) const;
 };
 std::vector<int> ActiveFlowColumns(const FlowGraph&);

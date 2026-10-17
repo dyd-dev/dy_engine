@@ -32,12 +32,15 @@ IDevice::LiveState* IDevice::GetLiveState() noexcept
     if(!D::IsLiveCollectorEnabled())return nullptr;
     try
     {
+        std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
         if(!m_live)
         {
             auto live=std::make_unique<LiveState>();
             live->device=D::FindLiveObject(this);
             if(!live->device)live->device=D::RegisterLiveObject(this,{D::LiveObjectKind::Device,0,0,0,0,BackendName()});
             live->gpuClock=live->device;
+            live->recordingSource=D::RegisterLiveObject(&live->recordingSource,
+                {D::LiveObjectKind::Device,live->device,live->device,0,0,"RHI command recording source"});
             m_live=std::move(live);
             PublishLiveResources();
         }
@@ -46,6 +49,73 @@ IDevice::LiveState* IDevice::GetLiveState() noexcept
     catch(...){return nullptr;}
 #else
     return nullptr;
+#endif
+}
+
+void IDevice::BeginLiveRecording(ICommandList& commands) noexcept
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+    try
+    {
+        auto* live=GetLiveState();if(!live||live->stopping)return;
+        D::LiveContextScope restore(D::GetLiveContext());
+        if(D::GetLiveContext().frame.device!=live->device)D::SetLiveContext({});
+        const auto caller=D::GetLiveContext();
+        auto token=D::BeginLiveFrame(live->device,caller.frame.source?caller.frame.source:live->recordingSource);
+        commands.m_liveRecordFrame=token;PrepareLiveControls(token.key);
+        commands.m_liveContext=D::GetLiveContext();CaptureLiveUploadPolicy(commands);
+    }
+    catch(...){}
+#else
+    (void)commands;
+#endif
+}
+
+void IDevice::BeginLiveExecution(ICommandList* const* commands,uint32_t count,LiveExecutionScope& scope) noexcept
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+    try
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+        auto* live=GetLiveState();if(!live||live->stopping||!commands)return;
+        scope.frames.reserve(count);scope.activated.reserve(count);
+        const auto caller=D::GetLiveContext();D::LiveContextScope restore(caller);
+        for(uint32_t i=0;i<count;++i)
+        {
+            auto* list=commands[i];if(!list||!m_userCommands.count(list)||list->m_liveInExecution||!list->m_livePosition.commandList)continue;
+            if(!caller.frame.frame&&list->m_liveContext.frame.source!=live->recordingSource&&!list->m_liveSubmitted)
+            {
+                scope.activated.push_back(list);list->m_liveExecutionContext=list->m_liveContext;list->m_liveInExecution=true;continue;
+            }
+            D::SetLiveContext(caller.frame.device==live->device?caller:D::LiveContext{});
+            auto source=list->m_liveContext.frame.source;
+            // Separate stable streams keep the latest original recording visible after Submit.
+            if(!source||source==live->recordingSource)source=live->device;
+            const auto existing=std::find_if(scope.activated.begin(),scope.activated.end(),[&](const auto* item){
+                return item->m_liveExecutionContext.frame.source==source;});
+            if(existing!=scope.activated.end())D::SetLiveContext((*existing)->m_liveExecutionContext);
+            auto token=D::BeginLiveFrame(live->device,source);
+            if(token.ownsFrame)scope.frames.push_back(token);
+            auto context=D::GetLiveContext();
+            if(token.ownsFrame||existing!=scope.activated.end())
+            {context.owner=list->m_liveContext.owner;context.object=list->m_liveContext.object;context.batch=list->m_liveContext.batch;}
+            scope.activated.push_back(list);list->m_liveExecutionContext=context;list->m_liveInExecution=true;
+        }
+    }
+    catch(...){}
+#else
+    (void)commands;(void)count;(void)scope;
+#endif
+}
+
+void IDevice::EndLiveExecution(LiveExecutionScope& scope) noexcept
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+    std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+    for(auto* list:scope.activated)list->m_liveInExecution=false;
+    for(auto it=scope.frames.rbegin();it!=scope.frames.rend();++it)EndLiveRhiFrame(*it,scope.outcome);
+#else
+    (void)scope;
 #endif
 }
 
@@ -107,7 +177,7 @@ void IDevice::PrepareLiveControls(D::LiveFrameKey key) noexcept
         D::NotifyLiveSettingsApplied(key.source,key,changed);
         D::PublishControlValue(source.controls[0].GetId(),source.reusePages);
         D::PublishControlValue(source.controls[1].GetId(),source.suballocate);
-        source.applying=true;D::PollControls(source.owner,key);source.applying=false;
+        source.applying=true;D::Detail::PollControlsSerialized(source.owner,key);source.applying=false;
         D::PublishControlValue(source.controls[0].GetId(),source.reusePages);
         D::PublishControlValue(source.controls[1].GetId(),source.suballocate);
     }
@@ -117,10 +187,61 @@ void IDevice::PrepareLiveControls(D::LiveFrameKey key) noexcept
 #endif
 }
 
+bool IDevice::CaptureLiveGraphParallel(D::LiveFrameKey key) noexcept
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+    try
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+        if(!m_live||m_live->stopping)return true;
+        auto& live=*m_live;
+        const auto context=D::GetLiveContext();
+        const auto sourceId=key.source?key.source:
+            (context.frame.device==live.device&&context.frame.source?context.frame.source:live.recordingSource);
+        auto found=live.graphControls.find(sourceId);
+        if(!D::IsLiveCollectorEnabled()||!key.frame||key.device!=live.device||context.frame!=key)
+            return found==live.graphControls.end()?true:found->second.parallel;
+        if(found==live.graphControls.end())
+        {
+            LiveState::GraphControls source;source.owner=D::AllocateLiveId();
+            D::ControlDesc desc;desc.device=key.device;desc.source=sourceId;desc.owner=source.owner;
+            desc.key="rhi.parallelRecording";desc.label=u8"RenderGraph \ubcd1\ub82c \uae30\ub85d";
+            desc.appliedValue=true;desc.category=D::ControlCategory::Optimization;
+            desc.description="Request worker-pool recording for common RenderGraph ExecuteParallel; the policy event reports the effective path separately";
+            desc.onPath="Use the caller-supplied pool for independent pass callbacks and native command-list replay";
+            desc.offPath="Record every pass callback and native command list on the calling thread";
+            desc.conditions="Applied at the first graph preparation boundary of each source frame; pool absent, one worker or a call from that pool's worker uses the caller path. Serial-width stages also run on the caller. Requests during a graph or the same outer frame wait for the next recording frame";
+            desc.tradeoffs="Worker scheduling has CPU overhead; GPU order, barriers, list count and payload are unchanged. ON is a request, not proof of parallel use or a speedup. Event args[4] is a process-local thread hash/token, not an OS TID, and may collide";
+            source.control=D::RegisterControl(std::move(desc),[this,sourceId](const D::ControlRequest& request,D::LiveFrameKey frame){
+                if(!m_live||frame.device!=m_live->device||frame.source!=sourceId)
+                    return D::ControlApplyResult{D::ControlState::Failed,true,"Graph source frame mismatch"};
+                const auto item=m_live->graphControls.find(sourceId);
+                if(item==m_live->graphControls.end()||!item->second.applying||item->second.frame!=frame)
+                    return D::ControlApplyResult{D::ControlState::Failed,true,"Graph policy applies only at the graph preparation boundary"};
+                item->second.parallel=std::get<bool>(request.value);
+                return D::ControlApplyResult{D::ControlState::Applied,item->second.parallel,{}};
+            });
+            if(!source.control.GetId())return true;
+            found=live.graphControls.emplace(sourceId,std::move(source)).first;
+        }
+        auto& source=found->second;
+        D::NotifyLiveSettingsApplied(sourceId,key,false);
+        if(source.frame==key)return source.parallel;
+        source.frame=key;source.applying=true;D::Detail::PollControlsSerialized(source.owner,key);source.applying=false;
+        D::PublishControlValue(source.control.GetId(),source.parallel);
+        return source.parallel;
+    }
+    catch(...){}
+#else
+    (void)key;
+#endif
+    return true;
+}
+
 void IDevice::ReleaseLiveControls(D::LiveId source) noexcept
 {
 #ifdef DY_LIVE_PROFILING_ENABLED
-    try{std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);if(m_live)m_live->uploadControls.erase(source);}catch(...){}
+    try{std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);if(m_live){m_live->uploadControls.erase(source);m_live->graphControls.erase(source);}}catch(...){}
 #else
     (void)source;
 #endif
@@ -129,7 +250,7 @@ void IDevice::ReleaseLiveControls(D::LiveId source) noexcept
 void IDevice::CaptureLiveUploadPolicy(ICommandList& commands) noexcept
 {
 #ifdef DY_LIVE_PROFILING_ENABLED
-    if(!m_live)return;
+    if(!m_live||m_live->stopping)return;
     const auto source=m_live->uploadControls.find(commands.m_liveContext.frame.source);
     if(source!=m_live->uploadControls.end()&&source->second.frame==commands.m_liveContext.frame)
     {commands.m_uploadPageReuse=source->second.reusePages;commands.m_uploadSuballocation=source->second.suballocate;}
@@ -210,10 +331,11 @@ void IDevice::DiscardLivePrepared(ICommandList* source,D::LiveOutcome outcome) n
 #ifdef DY_LIVE_PROFILING_ENABLED
     if(!m_live)return;
     const auto found=m_live->prepared.find(source);
-    if(found!=m_live->prepared.end()){m_live->reserved[found->second.slot]=false;m_live->prepared.erase(found);}
+    if(found==m_live->prepared.end())return;
+    m_live->reserved[found->second.slot]=false;m_live->prepared.erase(found);
     if(source&&source->m_livePosition.commandList)
     {
-        D::LiveEvent event;event.context=source->m_liveContext;event.command=source->m_livePosition;
+        D::LiveEvent event;event.context=source->m_liveExecutionContext;event.command=source->m_livePosition;
         event.kind=D::LiveEventKind::NativeTranslation;event.stage=D::LiveStage::NativeTranslate;event.outcome=outcome;
         D::RecordLiveEvent(event);
     }
@@ -255,14 +377,15 @@ void IDevice::SubmitLiveWork(ICommandList* const* commands,uint32_t count,bool s
         for(uint32_t i=0;i<count;++i)
         {
             auto* list=commands[i];if(!list->m_livePosition.commandList)continue;
-            const auto context=list->m_liveContext.frame.frame?list->m_liveContext:submissionContext;
+            const auto context=list->m_liveExecutionContext.frame.frame?list->m_liveExecutionContext:submissionContext;
             D::LiveContextScope contextScope(context);
-            if(std::find(frames.begin(),frames.end(),context.frame)==frames.end())
+            const bool firstInFrame=std::find(frames.begin(),frames.end(),context.frame)==frames.end();
+            if(firstInFrame)
             {frames.push_back(context.frame);D::SetLiveGpuCoverage(context.frame,false);}
-            list->FlushLiveDeferred(context);
+            list->m_liveSubmitted=true;
             D::LiveEvent event;event.id=D::AllocateLiveId();event.context=context;event.command=list->m_livePosition;
             event.submission=submission;event.kind=D::LiveEventKind::Submission;event.stage=D::LiveStage::Submit;
-            event.outcome=D::LiveOutcome::Submitted;event.operations=i==0?1:0;
+            event.outcome=D::LiveOutcome::Submitted;event.operations=firstInFrame?1:0;
             pending.lists.push_back(event);D::RecordLiveEvent(event);
             if(list->m_livePreviousEvent)D::RecordLiveLink({list->m_livePreviousEvent,event.id});
             if(list->m_imageGeneration)live->backBufferSubmission=submission;
@@ -363,7 +486,7 @@ void IDevice::PumpLiveWork() noexcept
                     if(sample.slot!=UINT32_MAX)
                     {
                         uint64_t ticks[2]{};const auto bits=GetTimestampValidBits();const auto period=GetTimestampPeriodNanoseconds();
-                        if(!lost&&bits&&bits<=64&&period>0&&ReadTimestamps(live.query,sample.slot*2,2,ticks))
+                        if(!lost&&bits&&bits<=64&&period>0&&ReadTimestampsInternal(live.query,sample.slot*2,2,ticks,false))
                         {
                             const uint64_t mask=bits==64?UINT64_MAX:(uint64_t{1}<<bits)-1;
                             const auto begin=ticks[0]&mask;const auto delta=(ticks[1]-ticks[0])&mask;
@@ -413,13 +536,19 @@ void IDevice::PumpLiveWork() noexcept
 void IDevice::StopLiveProfiling() noexcept
 {
 #ifdef DY_LIVE_PROFILING_ENABLED
-    if(!m_live)return;
+    if(!m_live||m_live->stopping)return;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+        for(auto* list:m_userCommands)list->FinishLiveRecording(D::LiveOutcome::Discarded,true);
+    }
     PumpLiveWork();m_live->stopping=true;m_live->wake.notify_all();
     if(m_live->worker.joinable())m_live->worker.join();
     try
     {
         std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
         m_live->uploadControls.clear();
+        m_live->graphControls.clear();
+        D::RetireLiveObject(m_live->recordingSource);
         for(const auto& pending:m_live->pending)for(auto sample:pending.samples)
         {sample.span.outcome=D::LiveOutcome::Unknown;sample.span.duration.state=D::LiveValueState::Unavailable;D::RecordLiveGpuSpan(sample.span);}
         m_live->pending.clear();m_live->prepared.clear();

@@ -339,11 +339,30 @@ std::shared_ptr<const LiveSnapshot> ReadLiveSnapshot();
 LiveId NotifyLiveSettingsApplied(LiveId source,LiveFrameKey,bool changed) noexcept;
 ControlRegistration RegisterControl(ControlDesc,ControlHandler);
 std::uint32_t PollControls(LiveId owner,LiveFrameKey) noexcept;
+namespace Detail
+{
+// Caller serializes the owner's state and lifetime outside the collector.
+std::uint32_t PollControlsSerialized(LiveId owner,LiveFrameKey key) noexcept;
+}
 void PublishControlValue(LiveId,const ControlValue&) noexcept;
 void PublishControlAvailability(LiveId,bool,std::string_view reason={}) noexcept;
 void CompleteControl(LiveId request,LiveFrameKey,const ControlValue&) noexcept;
 void FailControl(LiveId request,std::string_view) noexcept;
 LiveId RequestLiveControl(LiveId,const ControlValue&);
+
+// Mutable event metadata for native operations shared by backend producers.
+class LiveEventScope
+{
+public:
+    LiveEvent event;
+    explicit LiveEventScope(LiveEventKind kind,LiveStage stage,const char* label,bool enabled=true) noexcept;
+    ~LiveEventScope();
+    void Finish() noexcept;
+    LiveEventScope(const LiveEventScope&)=delete;
+    LiveEventScope& operator=(const LiveEventScope&)=delete;
+};
+// Call only after native completion is proven; no GPU duration is inferred.
+void RecordLiveReadbackCompletion(LiveId submission,LiveId resource) noexcept;
 
 class LiveContextScope
 {

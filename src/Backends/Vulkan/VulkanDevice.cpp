@@ -1,4 +1,5 @@
 #include "VulkanDevice.h"
+#include "dyf/Diagnostics/LiveProfiling.h"
 #include "VulkanQuery.h"
 #include "dyf/Platform/Log.h"
 
@@ -1190,8 +1191,11 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		VkBufferImageCopy copy{};
 		copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
 		copy.imageExtent = {desc.width, desc.height, 1};
-		vkCmdCopyImageToBuffer(command, image->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-			resources.buffer, 1, &copy);
+		{
+			dyf::Diagnostics::LiveEventScope observed(dyf::Diagnostics::LiveEventKind::CpuWork,dyf::Diagnostics::LiveStage::NativeTranslate,"Readback: record texture copy");
+			observed.event.resource=dyf::Diagnostics::FindLiveObject(texture);observed.event.bytes=bytes;observed.event.operations=1;
+			vkCmdCopyImageToBuffer(command, image->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,resources.buffer,1,&copy);
+		}
 		VkBufferMemoryBarrier hostRead{};
 		hostRead.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
 		hostRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1213,7 +1217,14 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 		submit.commandBufferCount = 1;
 		submit.pCommandBuffers = &command;
-		const VkResult submitted = vkQueueSubmit(m_context.graphicsQueue, 1, &submit, VK_NULL_HANDLE);
+		const auto liveSubmission=dyf::Diagnostics::IsLiveCollectorEnabled()?dyf::Diagnostics::AllocateLiveId():0;
+		VkResult submitted;
+		{
+			dyf::Diagnostics::LiveEventScope observed(dyf::Diagnostics::LiveEventKind::CpuWork,dyf::Diagnostics::LiveStage::Submit,"Readback: native submission");
+			observed.event.resource=dyf::Diagnostics::FindLiveObject(texture);observed.event.submission=liveSubmission;observed.event.operations=1;
+			submitted=vkQueueSubmit(m_context.graphicsQueue,1,&submit,VK_NULL_HANDLE);
+			observed.event.outcome=submitted==VK_SUCCESS?dyf::Diagnostics::LiveOutcome::Submitted:dyf::Diagnostics::LiveOutcome::Failed;
+		}
 		if(submitted != VK_SUCCESS)
 		{
 			// OOM submit failures leave the commands unsubmitted. Other failures
@@ -1226,7 +1237,12 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			LogVulkanFailure("vkQueueSubmit(readback)", submitted);
 			return false;
 		}
+		if(liveSubmission)dyf::Diagnostics::SetLiveGpuCoverage(dyf::Diagnostics::GetLiveContext().frame,false);
+		dyf::Diagnostics::LiveEventScope observedWait(dyf::Diagnostics::LiveEventKind::Wait,dyf::Diagnostics::LiveStage::Submit,"Readback: queue wait");
+		observedWait.event.resource=dyf::Diagnostics::FindLiveObject(texture);observedWait.event.submission=liveSubmission;observedWait.event.operations=1;
 		const VkResult waited = vkQueueWaitIdle(m_context.graphicsQueue);
+		observedWait.event.outcome=waited==VK_SUCCESS?dyf::Diagnostics::LiveOutcome::Completed:dyf::Diagnostics::LiveOutcome::Failed;
+		observedWait.Finish();
 		if(waited != VK_SUCCESS)
 		{
 			m_submissionFaulted = true;
@@ -1236,6 +1252,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			return false;
 		}
 		dyf::RHI::TextureReadback output;
+		dyf::Diagnostics::RecordLiveReadbackCompletion(liveSubmission,dyf::Diagnostics::FindLiveObject(texture));
 		output.width = desc.width; output.height = desc.height;
 		output.rowPitch = desc.width * 4u; output.format = desc.format;
 		output.pixels.resize(static_cast<size_t>(bytes));

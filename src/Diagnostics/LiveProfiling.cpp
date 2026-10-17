@@ -632,6 +632,7 @@ void RecordLiveEvent(const LiveEvent& input,bool includeSummary) noexcept
         std::unique_lock<std::mutex> lock(f->mutex);auto& summary=f->summary;
         std::optional<LiveFrameSummary> before;if(f->ended&&f->run)before=summary;
         if(static_cast<std::size_t>(e.stage)>=LiveStageCount){++s.omittedEvents;summary.incomplete=true;return;}
+        if(includeSummary&&e.kind==LiveEventKind::Submission&&(e.outcome==LiveOutcome::Submitted||e.outcome==LiveOutcome::Completed)&&f->counted.count(std::make_tuple(e.submission,e.command.commandList,e.command.generation,e.outcome)))return;
         if(includeSummary){LiveEventSummary eventSummary;AccumulateLiveEventSummary(eventSummary,e);auto counts=eventSummary.recorded;
         auto& stage=summary.stages[static_cast<std::size_t>(e.stage)];const auto& extra=eventSummary.stages[static_cast<std::size_t>(e.stage)];stage.elements+=extra.elements;stage.bytes+=extra.bytes;stage.operations+=extra.operations;if(extra.cpu.state==LiveValueState::Ready){stage.cpu.state=LiveValueState::Ready;stage.cpu.milliseconds+=extra.cpu.milliseconds;}
         if(e.kind==LiveEventKind::Submission){
@@ -675,7 +676,8 @@ void SetLiveObjectGauge(LiveFrameKey key,LiveObjectGauge gauge) noexcept
 std::shared_ptr<const LiveSnapshot> ReadLiveSnapshot()
 {
     if(!IsLiveCollectorEnabled())return {};
-    auto result=std::make_shared<LiveSnapshot>();std::map<LiveId,SourceRecord> sources;std::vector<std::shared_ptr<const LiveObjectInfo>> inventory;
+    struct SnapshotSource {SourceRecord record;std::shared_ptr<const LiveFlowSnapshot> detail;};
+    auto result=std::make_shared<LiveSnapshot>();std::map<LiveId,SnapshotSource> sources;std::vector<std::shared_ptr<const LiveObjectInfo>> inventory;
     auto& s=S();
     {std::lock_guard<std::mutex> lock(s.mutex);result->session=s.session;result->sequence=++s.sequence;result->producerTimeNs=LiveNowNs();result->clock=GetLiveClockInfo();result->loss=s.loss;
         const auto cutoff=result->producerTimeNs>LiveHistoryWindowNs?result->producerTimeNs-LiveHistoryWindowNs:0;
@@ -686,17 +688,18 @@ std::shared_ptr<const LiveSnapshot> ReadLiveSnapshot()
         for(const auto& pair:s.controls)result->controls.push_back(pair.second->desc);
         for(auto& pair:s.sources)UpdateControlComparisons(s,pair.first,pair.second,result->producerTimeNs);
         result->controlStatus.assign(s.requests.begin(),s.requests.end());
-        // Only shared frame ownership is copied here; no large flow copy under this lock.
-        for(const auto& pair:s.sources){auto& copy=sources[pair.first];copy.device=pair.second.device;copy.revision=pair.second.revision;copy.frames=pair.second.frames;copy.run=pair.second.run;copy.lastEndedKey=pair.second.lastEndedKey;copy.evidenceRequest=pair.second.evidenceRequest;copy.beforeEvidence=pair.second.beforeEvidence;copy.afterEvidence=pair.second.afterEvidence;}
+        // Pin the latest flow before EndLiveFrame can release it; large copies stay outside this lock.
+        for(const auto& pair:s.sources){auto& snapshot=sources[pair.first];auto& copy=snapshot.record;copy.device=pair.second.device;copy.revision=pair.second.revision;copy.frames=pair.second.frames;copy.run=pair.second.run;copy.lastEndedKey=pair.second.lastEndedKey;copy.evidenceRequest=pair.second.evidenceRequest;copy.beforeEvidence=pair.second.beforeEvidence;copy.afterEvidence=pair.second.afterEvidence;
+            if(auto latest=pair.second.lastEnded.lock()){std::lock_guard<std::mutex> frameLock(latest->mutex);snapshot.detail=latest->publishedFlow;}}
     }
     result->objects.reserve(inventory.size());for(const auto& object:inventory)result->objects.push_back(*object);
     const auto now=result->producerTimeNs;
-    for(auto& pair:sources){auto& source=pair.second;if(!source.run||!source.lastEndedKey.frame)continue;
+    for(auto& pair:sources){auto& source=pair.second.record;if(!source.run||!source.lastEndedKey.frame)continue;
         LiveSourceSnapshot out;out.device=source.device;out.source=pair.first;ReadRun(*source.run,now,out);
         const auto compared=std::find_if(result->controlStatus.begin(),result->controlStatus.end(),[&](const auto& status){return status.request==source.evidenceRequest&&status.state==ControlState::Applied;});
         if(compared!=result->controlStatus.end()){out.comparisonEvidence.request=compared->request;out.comparisonEvidence.before=CopyEvidence(source.beforeEvidence,compared->baseline,now);out.comparisonEvidence.after=CopyEvidence(source.afterEvidence,compared->after,now);}
-        std::shared_ptr<const LiveFlowSnapshot> detail;std::vector<LiveGpuSpan> recent;
-        for(auto& ptr:source.frames){auto copy=std::make_shared<FrameRecord>();{std::lock_guard<std::mutex> lock(ptr->mutex);copy->summary=ptr->summary;copy->ended=ptr->ended;copy->flow.gpuSpans=ptr->flow.gpuSpans;copy->flow.omittedEvents=ptr->flow.omittedEvents;copy->flow.omittedLinks=ptr->flow.omittedLinks;if(ptr->ended&&ptr->publishedFlow)detail=ptr->publishedFlow;}ptr=std::move(copy);}
+        auto detail=std::move(pair.second.detail);std::vector<LiveGpuSpan> recent;
+        for(auto& ptr:source.frames){auto copy=std::make_shared<FrameRecord>();{std::lock_guard<std::mutex> lock(ptr->mutex);copy->summary=ptr->summary;copy->ended=ptr->ended;copy->flow.gpuSpans=ptr->flow.gpuSpans;copy->flow.omittedEvents=ptr->flow.omittedEvents;copy->flow.omittedLinks=ptr->flow.omittedLinks;}ptr=std::move(copy);}
         auto latest=std::find_if(source.frames.rbegin(),source.frames.rend(),[&](const auto& f){return f->ended&&f->summary.key==source.lastEndedKey;});
         if(latest!=source.frames.rend()){out.latest=(*latest)->summary;if(detail)out.flow=*detail;out.flow.gpuSpans=(*latest)->flow.gpuSpans;out.flow.omittedEvents=(*latest)->flow.omittedEvents;out.flow.omittedLinks=(*latest)->flow.omittedLinks;}
         out.latest.sampleAgeNs=now>=out.latest.endNs?now-out.latest.endNs:0;
@@ -752,7 +755,7 @@ LiveId EnqueueControl(ControlRequest request)
 }
 }
 LiveId RequestLiveControl(LiveId id,const ControlValue& value){return Detail::EnqueueControl({0,id,value});}
-std::uint32_t PollControls(LiveId owner,LiveFrameKey key) noexcept
+static std::uint32_t PollControlsImpl(LiveId owner,LiveFrameKey key,bool checkOwnerThread) noexcept
 {
     if(!IsLiveCollectorEnabled())return 0;
     std::uint32_t count=0;
@@ -760,7 +763,7 @@ std::uint32_t PollControls(LiveId owner,LiveFrameKey key) noexcept
         std::vector<std::pair<ControlRequest,std::shared_ptr<ControlSlot>>> work;
         {auto& s=S();std::lock_guard<std::mutex> lock(s.mutex);for(auto& r:s.requests){if(r.state!=ControlState::Requested)continue;auto it=s.controls.find(r.control);if(it==s.controls.end()||it->second->desc.owner!=owner)continue;auto slot=it->second;
             if(ControlInvocation::Contains(slot.get()))continue;
-            if(slot->ownerThread!=std::this_thread::get_id()||!slot->handler||!Validate(slot->desc,r.requested)){r.state=ControlState::Rejected;r.message="Invalid type/range, unsupported control or owner thread";continue;}
+            if((checkOwnerThread&&slot->ownerThread!=std::this_thread::get_id())||!slot->handler||!Validate(slot->desc,r.requested)){r.state=ControlState::Rejected;r.message="Invalid type/range, unsupported control or owner thread";continue;}
             r.state=ControlState::Validated;work.push_back({{r.request,r.control,r.requested},slot});if(work.size()==32)break;
         }}
         for(auto& item:work){auto& slot=*item.second;std::lock_guard<std::mutex> invoke(slot.invocation);if(!slot.active)continue;ControlInvocation invocation(slot);
@@ -776,6 +779,10 @@ std::uint32_t PollControls(LiveId owner,LiveFrameKey key) noexcept
     }catch(...){}
     return count;
 }
+std::uint32_t PollControls(LiveId owner,LiveFrameKey key) noexcept
+{return PollControlsImpl(owner,key,true);}
+std::uint32_t Detail::PollControlsSerialized(LiveId owner,LiveFrameKey key) noexcept
+{return PollControlsImpl(owner,key,false);}
 void PublishControlValue(LiveId id,const ControlValue& value) noexcept
 {if(!id)return;try{auto& s=S();std::lock_guard<std::mutex> lock(s.mutex);auto it=s.controls.find(id);if(it!=s.controls.end())it->second->desc.appliedValue=value;}catch(...) {}}
 void PublishControlAvailability(LiveId id,bool available,std::string_view reason) noexcept
@@ -798,4 +805,42 @@ void FailControl(LiveId request,std::string_view message) noexcept
 LiveCpuScope::LiveCpuScope(LiveStage stage,const char* label) noexcept
 {if(!IsLiveCollectorEnabled())return;event.context=GetLiveContext();event.stage=stage;event.beginNs=LiveNowNs();if(label){std::strncpy(event.label,label,sizeof(event.label)-1);}}
 LiveCpuScope::~LiveCpuScope(){if(event.beginNs){event.endNs=LiveNowNs();RecordLiveEvent(event);}}
+}
+
+namespace dyf::Diagnostics
+{
+void RecordLiveReadbackCompletion(LiveId submission,LiveId resource) noexcept
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+    const auto context=GetLiveContext();if(!submission||!context.frame.frame)return;
+    // The native fence proves completion; this work has no GPU timestamp measurement.
+    LiveGpuSpan span;span.id=AllocateLiveId();span.frame=context.frame;
+    span.appliedRevision=context.appliedRevision;span.owner=context.owner;span.aggregation=LiveGpuAggregation::FrameCoverage;
+    span.begin.submission=span.end.submission=submission;span.outcome=LiveOutcome::Completed;
+    RecordLiveGpuSpan(span);RecordLiveLink({resource,span.id});
+#else
+    (void)submission;(void)resource;
+#endif
+}
+
+LiveEventScope::LiveEventScope(LiveEventKind kind,LiveStage stage,const char* label,bool enabled) noexcept
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+        if(!enabled||!IsLiveCollectorEnabled())return;
+        event.id=AllocateLiveId();event.context=GetLiveContext();event.kind=kind;event.stage=stage;
+        if(kind==LiveEventKind::NativeTranslation)
+            event.arguments[4]=static_cast<int64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id())&INT64_MAX);
+        event.beginNs=LiveNowNs();
+        for(size_t i=0;label&&label[i]&&i+1<sizeof(event.label);++i)event.label[i]=label[i];
+#else
+        (void)kind;(void)stage;(void)label;(void)enabled;
+#endif
+}
+void LiveEventScope::Finish() noexcept
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+        if(event.beginNs){event.endNs=LiveNowNs();RecordLiveEvent(event);event.beginNs=0;}
+#endif
+}
+LiveEventScope::~LiveEventScope(){Finish();}
 }
