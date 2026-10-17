@@ -1,4 +1,5 @@
-#include <dyf/Core/ThreadPool.h>
+#include "../src/RHI/ThreadPool.h"
+#include "../src/RHI/ResourceScope.h"
 #include <dyf/RHI.h>
 #include <atomic>
 #include <chrono>
@@ -11,7 +12,7 @@
 #include <string>
 
 namespace RHI = dyf::RHI;
-using dyf::Core::ThreadPool;
+using dyf::RHI::ThreadPool;
 
 namespace
 {
@@ -82,7 +83,7 @@ void TestPool()
     Check(finished == 32, "ThreadPool destruction lost queued tasks");
 }
 
-void TestGlobalStages(RHI::IDevice& device, ThreadPool& pool)
+void TestGlobalStages(RHI::IDevice& device, uint32_t threadCount)
 {
     RHI::RenderGraph graph;
     Rendezvous first;
@@ -110,14 +111,14 @@ void TestGlobalStages(RHI::IDevice& device, ThreadPool& pool)
     Check(stages.size() == 3 && stages[0].passIndices.size() == 2 &&
         stages[1].passIndices.size() == 1 && stages[2].passIndices.size() == 2, "Incorrect global dependency stages");
     Lists lists(device);
-    Check(graph.ExecuteParallel(&device, &pool, lists.values), "Global parallel recording failed");
+    Check(graph.ExecuteParallel(&device, lists.values, threadCount), "Global parallel recording failed");
     Check(after == 2 && threads.size() == 2 && !threads.count(std::this_thread::get_id()), "No actual worker recording");
     Check(std::set<RHI::ICommandList*>(lists.values.begin(), lists.values.end()).size() == lists.values.size(),
         "Different passes reused a command list");
     lists.Submit();
 }
 
-void TestPreparedLifetime(RHI::IDevice& device, ThreadPool& pool)
+void TestPreparedLifetime(RHI::IDevice& device, uint32_t threadCount)
 {
     const auto live = device.GetResourceAllocationCounters().buffers.live;
     auto* buffer = Buffer(device);
@@ -129,21 +130,21 @@ void TestPreparedLifetime(RHI::IDevice& device, ThreadPool& pool)
     list->GlobalBarrier();
     Check(list->Close(), "Prepared list close failed");
     RHI::ICommandList* duplicates[] = {list, list};
-    Check(!device.PrepareCommandLists(duplicates, 2, &pool), "Duplicate preparation accepted");
-    Check(device.PrepareCommandLists(&list, 1, &pool), "Native preparation failed");
-    Check(device.PrepareCommandLists(&list, 1, &pool), "Repeated preparation failed");
+    Check(!device.PrepareCommandLists(duplicates, 2, threadCount), "Duplicate preparation accepted");
+    Check(device.PrepareCommandLists(&list, 1, threadCount), "Native preparation failed");
+    Check(device.PrepareCommandLists(&list, 1, threadCount), "Repeated preparation failed");
     device.DestroyBuffer(buffer);
     Check(device.GetResourceAllocationCounters().buffers.live == live + 1, "Prepared resources not retained");
     Check(device.ResetCommandList(list), "Unsubmitted prepared list cannot reset");
     Check(device.GetResourceAllocationCounters().buffers.live == live, "Reset leaked native retained resources");
     list->GlobalBarrier();
-    Check(list->Close() && device.PrepareCommandLists(&list, 1, &pool), "Preparation after reset failed");
+    Check(list->Close() && device.PrepareCommandLists(&list, 1, threadCount), "Preparation after reset failed");
     RHI::FenceHandle completion;
     Check(device.Submit({&list, 1, nullptr, 0}, completion) && device.Wait(completion, 5000000000ull),
         "Prepared list submission failed");
 }
 
-void TestGlobalWithoutImports(RHI::IDevice& device, ThreadPool& pool)
+void TestGlobalWithoutImports(RHI::IDevice& device, uint32_t threadCount)
 {
     RHI::ResourceScope resources(device);
     RHI::TextureDesc desc;
@@ -168,7 +169,7 @@ void TestGlobalWithoutImports(RHI::IDevice& device, ThreadPool& pool)
     });
     Check(graph.Compile(), "External-resource global graph compile failed");
     Lists lists(device);
-    Check(graph.ExecuteParallel(&device, &pool, lists.values), "External-resource recording failed");
+    Check(graph.ExecuteParallel(&device, lists.values, threadCount), "External-resource recording failed");
     lists.Submit();
     if(device.Supports(RHI::Feature::Rasterization))
     {
@@ -180,7 +181,7 @@ void TestGlobalWithoutImports(RHI::IDevice& device, ThreadPool& pool)
     }
 }
 
-void TestCopies(RHI::IDevice& device, ThreadPool* pool, unsigned count)
+void TestCopies(RHI::IDevice& device, uint32_t threadCount, unsigned count)
 {
     RHI::ResourceScope resources(device);
     RHI::RenderGraph graph;
@@ -203,7 +204,7 @@ void TestCopies(RHI::IDevice& device, ThreadPool* pool, unsigned count)
     graph.AddPass("memory-boundary").GlobalBarrier().SetExecute([](RHI::ICommandList*) {});
     Check(graph.Compile(), "Copy graph compile failed");
     Lists lists(device);
-    Check(graph.ExecuteParallel(&device, pool, lists.values), "Copy graph recording failed");
+    Check(graph.ExecuteParallel(&device, lists.values, threadCount), "Copy graph recording failed");
     Check(callbacks == count && lists.values.size() == count + 3, "Passes were skipped or slots were reused");
     lists.Submit();
     RHI::RenderGraph verify;
@@ -216,11 +217,11 @@ void TestCopies(RHI::IDevice& device, ThreadPool* pool, unsigned count)
     }
     Check(verify.Compile(), "Final-state graph compile failed");
     Lists checked(device);
-    Check(verify.ExecuteParallel(&device, pool, checked.values), "Final-state recording failed");
+    Check(verify.ExecuteParallel(&device, checked.values, threadCount), "Final-state recording failed");
     checked.Submit();
 }
 
-void TestSubmissionOrder(RHI::IDevice& device, ThreadPool& pool)
+void TestSubmissionOrder(RHI::IDevice& device, uint32_t threadCount)
 {
     RHI::ResourceScope resources(device);
     auto* x = resources.Keep(Buffer(device));
@@ -235,11 +236,11 @@ void TestSubmissionOrder(RHI::IDevice& device, ThreadPool& pool)
     Check(graph.Compile(), "Submission-order compile failed");
     Check(graph.GetExecutionStages()[0].passIndices == std::vector<uint32_t>({0, 2}), "Expected independent record stage");
     Lists lists(device);
-    Check(graph.ExecuteParallel(&device, &pool, lists.values), "Submission-order recording failed");
+    Check(graph.ExecuteParallel(&device, lists.values, threadCount), "Submission-order recording failed");
     lists.Submit(); // Stage order {0,2,1} would fail: pass 1 owns y's state transition.
 }
 
-void TestFailureRecovery(RHI::IDevice& device, ThreadPool& pool)
+void TestFailureRecovery(RHI::IDevice& device, uint32_t threadCount)
 {
     RHI::ResourceScope resources(device);
     auto* buffer = resources.Keep(Buffer(device));
@@ -262,7 +263,7 @@ void TestFailureRecovery(RHI::IDevice& device, ThreadPool& pool)
     Check(graph.Compile(), "Failure graph compile failed");
     Lists lists(device);
     bool caught = false;
-    try { (void)graph.ExecuteParallel(&device, &pool, lists.values); }
+    try { (void)graph.ExecuteParallel(&device, lists.values, threadCount); }
     catch(const std::runtime_error&) { caught = true; }
     Check(caught && finished && lists.values.empty(), "Failure did not join/clean all workers");
 
@@ -272,15 +273,15 @@ void TestFailureRecovery(RHI::IDevice& device, ThreadPool& pool)
     auto& pass = graph.AddPass("recovery").Write(recovered, RHI::ResourceState::CopyDestination);
     pass.SetExecute([](RHI::ICommandList* list) { list->BeginRendering({}); });
     Check(graph.Compile(), "Invalid callback compile failed");
-    Check(!graph.ExecuteParallel(&device, &pool, lists.values) && lists.values.empty(), "Invalid recording escaped");
+    Check(!graph.ExecuteParallel(&device, lists.values, threadCount) && lists.values.empty(), "Invalid recording escaped");
     pass.SetExecute([](RHI::ICommandList*) {});
-    Check(!graph.ExecuteParallel(&device, &pool, lists.values), "Stale compile was accepted");
-    Check(graph.Compile() && graph.ExecuteParallel(&device, &pool, lists.values), "Recovery failed");
-    Check(!graph.ExecuteParallel(&device, &pool, lists.values), "Nonempty output accepted");
+    Check(!graph.ExecuteParallel(&device, lists.values, threadCount), "Stale compile was accepted");
+    Check(graph.Compile() && graph.ExecuteParallel(&device, lists.values, threadCount), "Recovery failed");
+    Check(!graph.ExecuteParallel(&device, lists.values, threadCount), "Nonempty output accepted");
     lists.Submit(); // Earlier failures must not have submitted any state transition.
 }
 
-void TestLifetimeAndBoundaries(RHI::IDevice& device, ThreadPool& pool)
+void TestLifetimeAndBoundaries(RHI::IDevice& device, uint32_t threadCount)
 {
     auto* buffer = Buffer(device);
     RHI::RenderGraph graph;
@@ -294,7 +295,7 @@ void TestLifetimeAndBoundaries(RHI::IDevice& device, ThreadPool& pool)
         });
     Check(graph.Compile(), "Retained graph compile failed");
     Lists retained(device);
-    Check(graph.ExecuteParallel(&device, &pool, retained.values), "Retained graph recording failed");
+    Check(graph.ExecuteParallel(&device, retained.values, threadCount), "Retained graph recording failed");
     retained.Submit();
 
     RHI::ResourceScope resources(device);
@@ -303,7 +304,7 @@ void TestLifetimeAndBoundaries(RHI::IDevice& device, ThreadPool& pool)
     (void)wrong.ImportBuffer("wrong-initial", live, RHI::ResourceState::VertexBuffer, RHI::ResourceState::VertexBuffer);
     Check(wrong.Compile(), "Empty graph compile failed");
     Lists invalid(device);
-    Check(wrong.ExecuteParallel(&device, &pool, invalid.values), "Deferred boundary recording failed");
+    Check(wrong.ExecuteParallel(&device, invalid.values, threadCount), "Deferred boundary recording failed");
     RHI::FenceHandle fence;
     Check(!device.Submit({invalid.values.data(), uint32_t(invalid.values.size()), nullptr, 0}, fence) && !fence,
         "Wrong initial state escaped deferred submission validation");
@@ -316,11 +317,11 @@ void TestLifetimeAndBoundaries(RHI::IDevice& device, ThreadPool& pool)
     Check(stale.Compile(), "Destroyed graph compile failed");
     device.DestroyBuffer(dead);
     Lists empty(device);
-    Check(!stale.ExecuteParallel(&device, &pool, empty.values) && !called && empty.values.empty(),
+    Check(!stale.ExecuteParallel(&device, empty.values, threadCount) && !called && empty.values.empty(),
         "Imports were not validated before callbacks");
 }
 
-void TestTextures(RHI::IDevice& device, ThreadPool& pool)
+void TestTextures(RHI::IDevice& device, uint32_t threadCount)
 {
     RHI::ResourceScope resources(device);
     RHI::RenderGraph graph;
@@ -344,7 +345,7 @@ void TestTextures(RHI::IDevice& device, ThreadPool& pool)
     graph.AddPass("texture-memory-boundary").GlobalBarrier().SetExecute([](RHI::ICommandList*) {});
     Check(graph.Compile(), "Texture graph compile failed");
     Lists lists(device);
-    Check(graph.ExecuteParallel(&device, &pool, lists.values), "Texture graph recording failed");
+    Check(graph.ExecuteParallel(&device, lists.values, threadCount), "Texture graph recording failed");
     lists.Submit();
     if(device.Supports(RHI::Feature::Rasterization))
     {
@@ -367,19 +368,19 @@ int main()
         TestPool();
         std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create({}));
         Check(bool(device), "Device creation failed");
-        ThreadPool pool(2), one(1);
-        TestGlobalStages(*device, pool);
-        TestPreparedLifetime(*device, pool);
-        TestGlobalWithoutImports(*device, pool);
-        TestCopies(*device, nullptr, 3);
-        TestCopies(*device, &one, 3);
-        TestCopies(*device, &pool, 70);
-        TestSubmissionOrder(*device, pool);
-        TestFailureRecovery(*device, pool);
-        TestLifetimeAndBoundaries(*device, pool);
-        TestTextures(*device, pool);
-        // Nested use of the same pool falls back instead of waiting on itself.
-        auto nested = pool.Enqueue([&] { TestCopies(*device, &pool, 2); });
+        ThreadPool pool(2);
+        TestGlobalStages(*device, 2);
+        TestPreparedLifetime(*device, 2);
+        TestGlobalWithoutImports(*device, 2);
+        TestCopies(*device, 1, 3);
+        TestCopies(*device, 0, 3);
+        TestCopies(*device, 2, 70);
+        TestSubmissionOrder(*device, 2);
+        TestFailureRecovery(*device, 2);
+        TestLifetimeAndBoundaries(*device, 2);
+        TestTextures(*device, 2);
+        // An external worker can use the device-owned recording workers.
+        auto nested = pool.Enqueue([&] { TestCopies(*device, 2, 2); });
         nested.get();
         Check(device->WaitIdle(), "Final WaitIdle failed");
         std::puts("RenderGraph contracts passed: real worker overlap, ordering, >64 lists, barriers, lifetime, failures and fences.");

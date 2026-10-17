@@ -1,9 +1,10 @@
-#include "dyf/Renderer.h"
+#include "RendererInternal.h"
 #include "dyf/Canvas.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/Platform/Profiler.h"
 #include <algorithm>
 #include <cstdio>
+#include <cmath>
 namespace dyf
 {
 namespace
@@ -58,68 +59,83 @@ namespace
 		}
 	}
 
-    void Text(Canvas& canvas,const char* text,float x,float y,Math::float4 color={1,1,1,1})
+    void Text(Canvas& canvas,const char* text,float x,float y,Math::float4 color={1,1,1,1},float scale=2)
     {
-        for(const char* at=text;*at;++at,x+=12)
+        for(const char* at=text;*at;++at,x+=6*scale)
         {
             const auto columns=Glyph(*at);
             for(uint32_t column=0;column<5;++column)for(uint32_t row=0;row<7;++row)
-                if(columns[column]&(1u<<row))canvas.FillRect({x+column*2.f,y+row*2.f,2,2},color);
+                if(columns[column]&(1u<<row))canvas.FillRect({x+column*scale,y+row*scale,scale,scale},color);
         }
     }
 }
 // 측정은 RHI timestamp query를 사용하고, 표시는 아래 Canvas 명령으로 작성한다.
-RHI::TimestampQueryHandle Renderer::BeginGpuSample(uint32_t slot)
+RHI::TimestampQueryHandle Renderer::Impl::AcquireProfilerQuery(uint32_t count)
+{
+    const auto bits=device->GetTimestampValidBits();
+    const auto period=device->GetTimestampPeriodNanoseconds();
+    if(!device->Supports(RHI::Feature::TimestampQuery) || !bits || bits>64 || !std::isfinite(period) || period<=0 ||
+        m_pending.size()>device->GetDesc().maxFramesInFlight+1) return nullptr;
+    for(auto it=m_availableQueries.begin();it!=m_availableQueries.end();++it) if(it->second==count)
+    {
+        auto* query=it->first;
+        m_availableQueries.erase(it);
+        return query;
+    }
+    return device->CreateTimestampQuery({count});
+}
+void Renderer::Impl::PollGpuSamples()
 {
     while(!m_pending.empty() && m_pending.front().completion && device->IsComplete(m_pending.front().completion))
     {
-        const auto sample=m_pending.front();
-        uint64_t ticks[2];
-        if(device->ReadTimestamps(sample.query,0,2,ticks))
-        {
-            const auto bits=device->GetTimestampValidBits();
-            const auto mask=bits==64 ? UINT64_MAX : (uint64_t{1}<<bits)-1;
-            m_gpuMilliseconds[sample.slot]=((ticks[1]-ticks[0])&mask)*device->GetTimestampPeriodNanoseconds()/1e6;
-        }
-        device->DestroyTimestampQuery(sample.query);
+        struct Completed {
+            RHI::IDevice& device;
+            GpuSample sample;
+            ~Completed() {device.DestroyTimestampQuery(sample.query);device.DestroyTimestampQuery(sample.start);}
+        } completed{*device,std::move(m_pending.front())};
         m_pending.pop_front();
+        auto& sample=completed.sample;
+        const auto count=2+2*static_cast<uint32_t>(sample.passes.size());
+        std::vector<uint64_t> ticks(count);
+        uint64_t start=0;
+        const bool valid=device->ReadTimestamps(sample.query,0,count,ticks.data());
+        const bool hasStart=sample.start && device->ReadTimestamps(sample.start,0,1,&start);
+        const auto bits=device->GetTimestampValidBits();
+        const auto mask=bits==64 ? UINT64_MAX : bits>0 && bits<64 ? (uint64_t{1}<<bits)-1 : 0;
+        const auto period=device->GetTimestampPeriodNanoseconds();
+        if(valid && mask && std::isfinite(period) && period>0)
+        {
+            const auto milliseconds=[&](uint64_t begin,uint64_t end){return ((end-begin)&mask)*period/1e6;};
+            std::vector<Platform::ProfilerPassTiming> passes;
+            passes.reserve(sample.passes.size());
+            for(size_t i=0;i<sample.passes.size();++i)
+                passes.push_back({sample.passes[i],milliseconds(ticks[2+2*i],ticks[3+2*i]),1});
+            m_profilerSampler.AddGpuSample(hasStart ? milliseconds(start,ticks[1]) : -1.0,passes);
+        }
+        const auto recycle=[&](RHI::TimestampQueryHandle& query,uint32_t slots) {
+            if(!query) return;
+            if(m_availableQueries.size()<16) m_availableQueries.push_back({query,slots});
+            else device->DestroyTimestampQuery(query);
+            query=nullptr;
+        };
+        recycle(sample.query,count);recycle(sample.start,1);
     }
-    auto* query=device->CreateTimestampQuery({2});
-    if(query)
-    {
-        try { m_pending.push_back({query,{},slot}); }
-        catch(...) { device->DestroyTimestampQuery(query); throw; }
-    }
-    return query;
 }
-void Renderer::SubmittedGpuSample(RHI::TimestampQueryHandle query,RHI::FenceHandle completion)
-{
-    for(auto it=m_pending.begin();it!=m_pending.end();++it)if(it->query==query)
-    {
-        if(completion)it->completion=completion;
-        else {device->DestroyTimestampQuery(query);m_pending.erase(it);}
-        return;
-    }
-}
-void Renderer::RecordProfilerFrame(double cpu,uint32_t entities)
+void Renderer::Impl::RecordProfilerFrame(Platform::ProfilerTimingSample sample,uint32_t entities)
 {
     const auto now=std::chrono::steady_clock::now();
-    const double frame=m_previous.time_since_epoch().count()==0?0:std::chrono::duration<double,std::milli>(now-m_previous).count();
+    sample.frameMilliseconds=m_previous.time_since_epoch().count()==0?0:std::chrono::duration<double,std::milli>(now-m_previous).count();
     m_previous=now;
-    // BeginGpuSample drains completions for both slots. Consume each published
-    // GPU result once; frames without a fresh completion must not repeat it.
-    const auto gpuMilliseconds=m_gpuMilliseconds;
-    m_gpuMilliseconds={-1,-1};
-    DY_PROFILE_RAW_VALUE("Frame.Raw.ms",frame);
-    DY_PROFILE_RAW_VALUE("CPU.Render.Raw.ms",cpu);
-    if(gpuMilliseconds[1]>=0) DY_PROFILE_RAW_VALUE("GPU.MainForward.Raw.ms",gpuMilliseconds[1]);
-    if(gpuMilliseconds[0]>=0) DY_PROFILE_RAW_VALUE("GPU.Shadow.Raw.ms",gpuMilliseconds[0]);
-    if(!m_profilerSampler.AddSample({frame,cpu,gpuMilliseconds[1],gpuMilliseconds[0],
-        gpuMilliseconds[1]>=0,gpuMilliseconds[0]>=0},m_profilerSnapshot)) return;
+    DY_PROFILE_RAW_VALUE("Frame.Raw.ms",sample.frameMilliseconds);
+    DY_PROFILE_RAW_VALUE("CPU.Render.Raw.ms",sample.cpuRenderMilliseconds);
+    m_profilerStatistics=lastStatistics;
+    if(!m_profilerSampler.AddSample(sample,m_profilerSnapshot)) return;
+    m_profilerSnapshot.gpuTimingSupported=device->Supports(RHI::Feature::TimestampQuery) &&
+        device->GetTimestampValidBits()>0 && device->GetTimestampPeriodNanoseconds()>0;
     m_history[m_cursor]=static_cast<float>(m_profilerSnapshot.frameAverageMilliseconds);
     m_cpuHistory[m_cursor]=static_cast<float>(m_profilerSnapshot.cpuRenderAverageMilliseconds);
-    m_gpuHistory[m_cursor]=static_cast<float>(m_profilerSnapshot.gpuMainAverageMilliseconds);
-    m_gpuHistoryValid[m_cursor]=m_profilerSnapshot.hasGpuMain ? 1 : 0;
+    m_gpuHistory[m_cursor]=static_cast<float>(m_profilerSnapshot.gpuFrameAverageMilliseconds);
+    m_gpuHistoryValid[m_cursor]=m_profilerSnapshot.hasGpuFrame ? 1 : 0;
     m_cursor=(m_cursor+1)%m_history.size();
     m_count=std::min<uint32_t>(m_count+1,m_history.size());
     float scale=33.33f;
@@ -130,6 +146,7 @@ void Renderer::RecordProfilerFrame(double cpu,uint32_t entities)
     DY_PROFILE_GPU_MILLISECONDS("Frame.Average.ms",m_profilerSnapshot.frameAverageMilliseconds);
     DY_PROFILE_GPU_MILLISECONDS("Frame.Maximum.ms",m_profilerSnapshot.frameMaximumMilliseconds);
     DY_PROFILE_GPU_MILLISECONDS("CPU.Render.Average.ms",m_profilerSnapshot.cpuRenderAverageMilliseconds);
+    if(m_profilerSnapshot.hasGpuFrame) DY_PROFILE_GPU_MILLISECONDS("GPU.Frame.Average.ms",m_profilerSnapshot.gpuFrameAverageMilliseconds);
     if(m_profilerSnapshot.hasGpuMain) DY_PROFILE_GPU_MILLISECONDS("GPU.MainForward.Average.ms",m_profilerSnapshot.gpuMainAverageMilliseconds);
     if(m_profilerSnapshot.hasGpuShadow) DY_PROFILE_GPU_MILLISECONDS("GPU.Shadow.Average.ms",m_profilerSnapshot.gpuShadowAverageMilliseconds);
     m_profilerResourceSnapshot=device->GetResourceAllocationCounters();
@@ -138,61 +155,109 @@ void Renderer::RecordProfilerFrame(double cpu,uint32_t entities)
     DY_PROFILE_RESOURCE_COUNT("GPU.Resources.Textures.Live",counters.textures.live);
     DY_PROFILE_RESOURCE_COUNT("GPU.Resources.Pipelines.Live",counters.pipelines.live);
 }
-Canvas Renderer::BuildProfilerOverlay(uint32_t width,uint32_t height,bool expanded) const
+Canvas Renderer::Impl::BuildProfilerOverlay(uint32_t width,uint32_t height,bool expanded) const
 {
     Canvas canvas(width,height);
-    canvas.FillRect({10,10,560,expanded?314.f:96.f},{.015f,.02f,.03f,.84f});
+    if(width<160 || height<100) return canvas;
+    const float panelWidth=std::max(200.f,std::min(920.f,float(width)-20));
+    const uint32_t columns=panelWidth>=780 ? 2 : 1;
+    const uint32_t rows=(static_cast<uint32_t>(m_profilerSnapshot.gpuPasses.size())+columns-1)/columns;
+    const float graphTop=296.f+rows*18;
+    const float panelHeight=expanded ? std::min(float(height)-20,graphTop+134) : 156.f;
+    canvas.FillRect({10,10,expanded?panelWidth:std::min(panelWidth,650.f),panelHeight},{.015f,.02f,.03f,.84f});
     char line[128];
-    std::snprintf(line,sizeof(line),"FPS AVG %.1f  FRAME AVG %.2f MS",m_profilerSnapshot.fps,m_profilerSnapshot.frameAverageMilliseconds);
+    std::snprintf(line,sizeof(line),"FPS %.1f  FRAME %.2f MS  MAX %.2f",m_profilerSnapshot.fps,
+        m_profilerSnapshot.frameAverageMilliseconds,m_profilerSnapshot.frameMaximumMilliseconds);
     Text(canvas,line,18,18);
-    std::snprintf(line,sizeof(line),"CPU AVG %.2f MS  ENTITIES %u  F11",m_profilerSnapshot.cpuRenderAverageMilliseconds,m_entities);
+    if(m_profilerSnapshot.hasGpuFrame)
+        std::snprintf(line,sizeof(line),"CPU WORK %.2f MS  GPU SPAN %.2f MS",m_profilerSnapshot.cpuRenderAverageMilliseconds,m_profilerSnapshot.gpuFrameAverageMilliseconds);
+    else std::snprintf(line,sizeof(line),"CPU WORK %.2f MS  GPU %s",m_profilerSnapshot.cpuRenderAverageMilliseconds,
+        device->Supports(RHI::Feature::TimestampQuery) ? "PENDING" : "UNSUPPORTED");
     Text(canvas,line,18,38);
-    if(m_profilerSnapshot.hasGpuMain)
-    {
-        if(m_profilerSnapshot.hasGpuShadow)
-            std::snprintf(line,sizeof(line),"GPU MAIN %.2f SHADOW %.2f MS",m_profilerSnapshot.gpuMainAverageMilliseconds,m_profilerSnapshot.gpuShadowAverageMilliseconds);
-        else std::snprintf(line,sizeof(line),"GPU MAIN %.2f MS  SHADOW PENDING",m_profilerSnapshot.gpuMainAverageMilliseconds);
-        Text(canvas,line,18,58);
-    }
-    else Text(canvas,device->Supports(RHI::Feature::TimestampQuery) ? "GPU TIMING PENDING" : "GPU TIMING UNSUPPORTED",18,58);
-    const auto& counters=m_profilerResourceSnapshot;
-    if(!expanded)
-    {
-        std::snprintf(line,sizeof(line),"LIVE BUF %llu TEX %llu PSO %llu",
-            static_cast<unsigned long long>(counters.buffers.live),static_cast<unsigned long long>(counters.textures.live),
-            static_cast<unsigned long long>(counters.pipelines.live));
-        Text(canvas,line,18,78);
-        return canvas;
-    }
-    std::snprintf(line,sizeof(line),"FRAME MAX %.2f MS  WINDOW 200 MS",m_profilerSnapshot.frameMaximumMilliseconds);
+    std::snprintf(line,sizeof(line),"MAIN DRAWS %u  INST %u  TRI %llu",m_profilerStatistics.mainDrawCount,
+        m_profilerStatistics.mainInstanceCount,static_cast<unsigned long long>(m_profilerStatistics.mainTriangleCount));
+    if(m_profilerStatistics.gpuVisibility)
+        std::snprintf(line,sizeof(line),"GPU INDIRECT BATCHES %u  VISIBLE INST/TRI N/A",m_profilerStatistics.indirectBatchCount);
+    Text(canvas,line,18,58);
+    std::snprintf(line,sizeof(line),"CPU CULLED %u  SHADOW L0 %u DRAWS %s",m_profilerStatistics.culledEntityCount,
+        m_profilerStatistics.shadowDrawCount,m_profilerStatistics.reusedShadowAtlas ? "CACHED" : "");
     Text(canvas,line,18,78);
-    const auto counterLine=[&](const char* name,const RHI::ResourceCounter& counter,float y) {
-        std::snprintf(line,sizeof(line),"%s %llu LIVE %llu NEW %llu FREED",name,
-            static_cast<unsigned long long>(counter.live),static_cast<unsigned long long>(counter.created),
-            static_cast<unsigned long long>(counter.destroyed));
-        Text(canvas,line,18,y);
-    };
-    counterLine("BUF",counters.buffers,98);
-    counterLine("TEX",counters.textures,118);
-    counterLine("PSO",counters.pipelines,138);
-    std::snprintf(line,sizeof(line),"HISTORY 24 SEC  SCALE %.1f MS",m_graphScaleMilliseconds);
-    Text(canvas,line,18,158);
+    const auto& lod=m_profilerStatistics.lodInstanceCounts;
+    std::snprintf(line,sizeof(line),"LOD %.2fPX  L0 %u  L1 %u  L2 %u  L3 %u",config.lodPixelError,lod[0],lod[1],lod[2],lod[3]);
+    if(m_profilerStatistics.gpuVisibility)
+        std::snprintf(line,sizeof(line),"GPU LOD %.2fPX  COUNTS N/A  COLOR VIEW AVAILABLE",config.lodPixelError);
+    Text(canvas,line,18,98,{1,1,1,1},1.6f);
+    std::snprintf(line,sizeof(line),"MAIN TRI ORIGINAL %llu > SELECTED %llu",
+        static_cast<unsigned long long>(m_profilerStatistics.mainOriginalTriangleCount),
+        static_cast<unsigned long long>(m_profilerStatistics.mainTriangleCount));
+    if(m_profilerStatistics.gpuVisibility)
+        std::snprintf(line,sizeof(line),"GPU COUNTS REMAIN ON DEVICE; COMPARE PASS TIMES");
+    Text(canvas,line,18,118,{1,1,1,1},1.6f);
+    std::snprintf(line,sizeof(line),"RENDER %u X %u / OUTPUT %u X %u",m_profilerStatistics.renderWidth,
+        m_profilerStatistics.renderHeight,m_profilerStatistics.outputWidth,m_profilerStatistics.outputHeight);
+    // 전체 구간에는 명령 준비 대기가 섞일 수 있으므로 측정된 패스 합계도 함께 표시한다.
+    if(!m_profilerSnapshot.gpuPasses.empty())
+    {
+        double passMilliseconds=0;
+        for(const auto& pass:m_profilerSnapshot.gpuPasses)passMilliseconds+=pass.averageMilliseconds;
+        std::snprintf(line,sizeof(line),"RENDER %u X %u / OUTPUT %u X %u / GPU PASS %.2f MS",
+            m_profilerStatistics.renderWidth,m_profilerStatistics.renderHeight,
+            m_profilerStatistics.outputWidth,m_profilerStatistics.outputHeight,passMilliseconds);
+    }
+    Text(canvas,line,18,138,{1,1,1,1},1.6f);
+    const auto& counters=m_profilerResourceSnapshot;
+    if(!expanded) return canvas;
+    std::snprintf(line,sizeof(line),"CPU ACQUIRE %.2f  PREPARE %.2f  RECORD %.2f MS",m_profilerSnapshot.cpuAcquireAverageMilliseconds,
+        m_profilerSnapshot.cpuPrepareAverageMilliseconds,m_profilerSnapshot.cpuRecordAverageMilliseconds);
+    Text(canvas,line,18,160,{1,1,1,1},1.6f);
+    std::snprintf(line,sizeof(line),"CPU SUBMIT %.2f  PRESENT %.2f  READBACK %.2f MS",m_profilerSnapshot.cpuSubmitAverageMilliseconds,
+        m_profilerSnapshot.cpuPresentAverageMilliseconds,m_profilerSnapshot.cpuReadbackAverageMilliseconds);
+    Text(canvas,line,18,180,{1,1,1,1},1.6f);
+    std::snprintf(line,sizeof(line),"ENTITIES %u  SHADOW INST %u  TRI %llu",m_entities,m_profilerStatistics.shadowInstanceCount,
+        static_cast<unsigned long long>(m_profilerStatistics.shadowTriangleCount));
+    Text(canvas,line,18,200,{1,1,1,1},1.6f);
+    std::snprintf(line,sizeof(line),"LIVE BUF %llu TEX %llu PSO %llu  GPU SAMPLES %u",
+        static_cast<unsigned long long>(counters.buffers.live),static_cast<unsigned long long>(counters.textures.live),
+        static_cast<unsigned long long>(counters.pipelines.live),m_profilerSnapshot.gpuFrameSampleCount);
+    Text(canvas,line,18,220,{1,1,1,1},1.6f);
+    std::snprintf(line,sizeof(line),"GPU CULL %s  HIZ %s  CLUSTER %s  SURFACE %s",
+        m_profilerStatistics.gpuVisibility ? "ON" : "OFF",m_profilerStatistics.gpuOcclusion ? "ON" : "OFF",
+        m_profilerStatistics.clusteredLighting ? "ON" : "OFF",m_profilerStatistics.surfacePrepass ? "ON" : "OFF");
+    Text(canvas,line,18,240,{1,1,1,1},1.6f);
+    std::snprintf(line,sizeof(line),"SHADOW VIEWS %u  TILE %u PX  DISTANCE %.1f",
+        m_profilerStatistics.shadowViewCount,m_profilerStatistics.shadowViewResolution,m_profilerStatistics.directionalShadowDistance);
+    Text(canvas,line,18,260,{1,1,1,1},1.6f);
     const Math::float4 cyan{.1f,.8f,1,1},green{.3f,1,.4f,1},orange{1,.65f,.15f,1},red{1,.3f,.3f,1};
-    const auto y=[&](float milliseconds){return 284.f-100.f*std::clamp(milliseconds/m_graphScaleMilliseconds,0.f,1.f);};
-    canvas.Line({18,y(16.67f)},{518,y(16.67f)},red,1.2f);
+    const float columnWidth=(panelWidth-16)/columns;
+    for(uint32_t i=0;i<m_profilerSnapshot.gpuPasses.size();++i)
+    {
+        const auto& pass=m_profilerSnapshot.gpuPasses[i];
+        const float x=18+(i/rows)*columnWidth,y=284+(i%rows)*18;
+        if(y+14>height-28) break;
+        const auto fraction=std::clamp(pass.averageMilliseconds/std::max(m_profilerSnapshot.gpuFrameAverageMilliseconds,1.0),0.0,1.0);
+        canvas.FillRect({x,y,columnWidth*static_cast<float>(fraction),14},{.15f,.28f,.4f,.7f});
+        std::snprintf(line,sizeof(line),"%.28s",pass.name.c_str());
+        Text(canvas,line,x,y,{1,1,1,1},1.5f);
+        std::snprintf(line,sizeof(line),"%.2f MS",pass.averageMilliseconds);
+        Text(canvas,line,x+columnWidth-84,y,orange,1.5f);
+    }
+    if(graphTop+124>height-20) return canvas;
+    const auto y=[&](float milliseconds){return graphTop+100-100.f*std::clamp(milliseconds/m_graphScaleMilliseconds,0.f,1.f);};
+    const float graphWidth=std::min(500.f,panelWidth-24);
+    canvas.Line({18,y(16.67f)},{18+graphWidth,y(16.67f)},red,1.2f);
     for(uint32_t i=1;i<m_count;++i)
     {
         const uint32_t a=(m_cursor+m_history.size()-m_count+i-1)%m_history.size();
         const uint32_t b=(a+1)%m_history.size();
-        const float xa=18+(i-1)*500.f/119,xb=18+i*500.f/119;
+        const float xa=18+(i-1)*graphWidth/119,xb=18+i*graphWidth/119;
         // Canvas::Line emits triangles, including on D3D12; no unsupported line topology is used.
         canvas.Line({xa,y(m_history[a])},{xb,y(m_history[b])},cyan,1.5f);
         canvas.Line({xa,y(m_cpuHistory[a])},{xb,y(m_cpuHistory[b])},green,1.5f);
         if(m_gpuHistoryValid[a] && m_gpuHistoryValid[b])
             canvas.Line({xa,y(m_gpuHistory[a])},{xb,y(m_gpuHistory[b])},orange,1.5f);
     }
-    Text(canvas,"FRAME",18,298,cyan);Text(canvas,"CPU",108,298,green);
-    Text(canvas,"GPU",174,298,orange);Text(canvas,"16.67 MS",240,298,red);
+    Text(canvas,"FRAME",18,graphTop+110,cyan);Text(canvas,"CPU",108,graphTop+110,green);
+    Text(canvas,"GPU SPAN",174,graphTop+110,orange);Text(canvas,"16.67 MS",300,graphTop+110,red);
     return canvas;
 }
 }

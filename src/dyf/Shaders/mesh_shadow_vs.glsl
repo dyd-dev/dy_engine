@@ -9,6 +9,8 @@
 #define RENDERER_BINDING_SHADOW_MATRIX 3
 
 layout(location = 0) in vec3 inPosition;
+layout(location = 2) in vec2 inUv;
+layout(location = 0) out vec2 shadowUv;
 #if RENDERER_INSTANCING
 layout(location = 4) in mat4 instanceModel;
 #endif
@@ -36,10 +38,13 @@ layout(set = RENDERER_DESCRIPTOR_SET, binding = RENDERER_BINDING_SHADOW_MATRIX) 
     vec4 directionalSplits[RENDERER_MAX_DIRECTIONAL_LIGHTS];
     mat4 cameraView;
     vec4 filterParams;
+    vec4 viewProjectionParams[128];
+    vec4 softShadowParams;
 } shadowMatrix;
 
 void main()
 {
+    shadowUv=inUv;
 #if RENDERER_INSTANCING
     gl_Position = shadowMatrix.lightViewProjectionMatrix[drawConstants.padding2] * instanceModel * vec4(inPosition, 1.0);
 #else

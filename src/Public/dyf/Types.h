@@ -22,8 +22,4 @@ namespace dyf
 	template <typename T>
 	[[nodiscard]] constexpr bool IsValid(T id) { return ToIndex(id) != 0xFFFFFFFFu; }
 
-	struct alignas(16) Transform
-	{
-		Math::float4x4 worldMatrix = Math::float4x4::Identity();
-	};
 }

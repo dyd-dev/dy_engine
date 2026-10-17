@@ -10,13 +10,70 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 namespace dyf::Backends
 {
+    struct VulkanCommandStorage
+    {
+        VkDevice device=VK_NULL_HANDLE;
+        VkCommandPool pool=VK_NULL_HANDLE;
+        VkCommandBuffer buffer=VK_NULL_HANDLE;
+        ~VulkanCommandStorage() {if(pool)vkDestroyCommandPool(device,pool,nullptr);}
+    };
+
+    VulkanCommandPoolCache::VulkanCommandPoolCache(const VulkanContext& context)
+        :m_device(context.device),m_queueFamily(context.queueIndices.graphicsFamily) {}
+    VulkanCommandPoolCache::~VulkanCommandPoolCache()=default;
+
+    void VulkanCommandPoolCache::RequireSuccess(VkResult result,const char* operation)
+    {
+        if(result==VK_SUCCESS)return;
+        if(result==VK_ERROR_DEVICE_LOST)MarkDeviceLost();
+        throw std::runtime_error(std::string(operation)+" failed (VkResult "+std::to_string(result)+")");
+    }
+
+    std::unique_ptr<VulkanCommandStorage> VulkanCommandPoolCache::Acquire()
+    {
+        if(!m_reuseEnabled || m_device==VK_NULL_HANDLE)throw std::runtime_error("Vulkan command pool cache is unavailable");
+        std::unique_ptr<VulkanCommandStorage> storage;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            if(!m_available.empty()) {storage=std::move(m_available.back());m_available.pop_back();}
+        }
+        if(storage)
+            RequireSuccess(vkResetCommandPool(m_device,storage->pool,0),"vkResetCommandPool");
+        else
+        {
+            storage=std::make_unique<VulkanCommandStorage>();storage->device=m_device;
+            VkCommandPoolCreateInfo pool{};pool.sType=VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+            pool.flags=VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;pool.queueFamilyIndex=m_queueFamily;
+            RequireSuccess(vkCreateCommandPool(m_device,&pool,nullptr,&storage->pool),"vkCreateCommandPool");
+            VkCommandBufferAllocateInfo allocate{};allocate.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            allocate.commandPool=storage->pool;allocate.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;allocate.commandBufferCount=1;
+            RequireSuccess(vkAllocateCommandBuffers(m_device,&allocate,&storage->buffer),"vkAllocateCommandBuffers");
+        }
+        VkCommandBufferBeginInfo begin{};begin.sType=VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        RequireSuccess(vkBeginCommandBuffer(storage->buffer,&begin),"vkBeginCommandBuffer");
+        return storage;
+    }
+
+    void VulkanCommandPoolCache::Return(std::unique_ptr<VulkanCommandStorage> storage) noexcept
+    {
+        if(!storage || !m_reuseEnabled)return;
+        try
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_available.push_back(std::move(storage));
+        }
+        catch(...) {}
+    }
+
     void VulkanCommandList::BeginDebugEventNative(const char* name,const RHI::DebugLabelColor& color)
     {
         if(!m_context.debugUtilsEnabled) return;
-        auto function=reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(vkGetDeviceProcAddr(m_context.device,"vkCmdBeginDebugUtilsLabelEXT"));
+        auto function=m_context.beginDebugLabel;
         if(function)
         {
             VkDebugUtilsLabelEXT label{};label.sType=VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
@@ -27,13 +84,13 @@ namespace dyf::Backends
     void VulkanCommandList::EndDebugEventNative()
     {
         if(!m_context.debugUtilsEnabled) return;
-        auto function=reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(vkGetDeviceProcAddr(m_context.device,"vkCmdEndDebugUtilsLabelEXT"));
+        auto function=m_context.endDebugLabel;
         if(function) function(m_commandBuffer);
     }
     void VulkanCommandList::InsertDebugMarkerNative(const char* name,const RHI::DebugLabelColor& color)
     {
         if(!m_context.debugUtilsEnabled) return;
-        auto function=reinterpret_cast<PFN_vkCmdInsertDebugUtilsLabelEXT>(vkGetDeviceProcAddr(m_context.device,"vkCmdInsertDebugUtilsLabelEXT"));
+        auto function=m_context.insertDebugLabel;
         if(function)
         {
             VkDebugUtilsLabelEXT label{};label.sType=VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
@@ -78,6 +135,8 @@ namespace dyf::Backends
 				return { VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT, VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT };
 			case dyf::RHI::ResourceState::IndexBuffer:
 				return { VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT, VK_ACCESS_2_INDEX_READ_BIT };
+			case dyf::RHI::ResourceState::IndirectArgument:
+				return { VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT };
 			case dyf::RHI::ResourceState::ConstantBuffer:
 				return { shaderStages, VK_ACCESS_2_UNIFORM_READ_BIT };
 			case dyf::RHI::ResourceState::ShaderResource:
@@ -128,6 +187,7 @@ namespace dyf::Backends
 			case dyf::RHI::Format::R8G8B8A8_UNORM_SRGB:
 			case dyf::RHI::Format::B8G8R8A8_UNORM_SRGB:
 			case dyf::RHI::Format::R32_UINT:
+			case dyf::RHI::Format::R32_FLOAT:
 				return 4;
 			case dyf::RHI::Format::R16G16B16A16_FLOAT:
 			case dyf::RHI::Format::R32G32_FLOAT:
@@ -234,61 +294,28 @@ namespace dyf::Backends
 		});
 	}
 
-	VulkanCommandList::VulkanCommandList(const VulkanContext& context, std::shared_ptr<VulkanUploadPool> uploadPool)
+	VulkanCommandList::VulkanCommandList(const VulkanContext& context, std::shared_ptr<VulkanUploadPool> uploadPool,
+        std::shared_ptr<VulkanCommandPoolCache> commandPools)
 		: m_context(context)
+        , m_commandPools(commandPools ? std::move(commandPools) : std::make_shared<VulkanCommandPoolCache>(context))
 		, m_uploadArena(uploadPool ? std::move(uploadPool) : CreateVulkanUploadPool(context))
 	{
-        VkPhysicalDeviceProperties properties{};
-        vkGetPhysicalDeviceProperties(context.physicalDevice, &properties);
+        if(!context.physicalInfo)throw std::runtime_error("Vulkan physical device information is unavailable");
+        const auto& properties=context.physicalInfo->properties;
         std::copy_n(properties.limits.maxComputeWorkGroupCount, 3, m_maxComputeGroups);
         m_maxColorAttachments=properties.limits.maxColorAttachments;
         std::copy_n(properties.limits.maxViewportDimensions,2,m_maxViewportDimensions);
         std::copy_n(properties.limits.viewportBoundsRange,2,m_viewportBounds);
-		uint32_t familyCount = 0;
-		vkGetPhysicalDeviceQueueFamilyProperties(context.physicalDevice, &familyCount, nullptr);
-		std::vector<VkQueueFamilyProperties> families(familyCount);
-		vkGetPhysicalDeviceQueueFamilyProperties(context.physicalDevice, &familyCount, families.data());
-		if (context.queueIndices.graphicsFamily >= familyCount)
-			throw std::runtime_error("Vulkan command queue family is unavailable");
-		m_supportsCompute = (families[context.queueIndices.graphicsFamily].queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
-		VkCommandPoolCreateInfo poolInfo{};
-		poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-		poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-		poolInfo.queueFamilyIndex = context.queueIndices.graphicsFamily;
-		if (vkCreateCommandPool(context.device, &poolInfo, nullptr, &m_commandPool) != VK_SUCCESS)
-		{
-			throw std::runtime_error("Failed to create Vulkan command pool");
-		}
-
-		VkCommandBufferAllocateInfo allocation{};
-		allocation.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-		allocation.commandPool = m_commandPool;
-		allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-		allocation.commandBufferCount = 1;
-		if (vkAllocateCommandBuffers(context.device, &allocation, &m_commandBuffer) != VK_SUCCESS)
-		{
-			vkDestroyCommandPool(context.device, m_commandPool, nullptr);
-			m_commandPool = VK_NULL_HANDLE;
-			throw std::runtime_error("Failed to allocate Vulkan command buffer");
-		}
-
-		VkCommandBufferBeginInfo beginInfo{};
-		beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-		beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-		if (vkBeginCommandBuffer(m_commandBuffer, &beginInfo) != VK_SUCCESS)
-		{
-			vkDestroyCommandPool(context.device, m_commandPool, nullptr);
-			m_commandPool = VK_NULL_HANDLE;
-			m_commandBuffer = VK_NULL_HANDLE;
-			throw std::runtime_error("Failed to begin Vulkan command buffer");
-		}
+        m_supportsCompute=(context.physicalInfo->graphicsQueue.queueFlags&VK_QUEUE_COMPUTE_BIT)!=0;
+        m_commandStorage=m_commandPools->Acquire();m_commandBuffer=m_commandStorage->buffer;
 	}
 
 	VulkanCommandList::~VulkanCommandList()
 	{
-		// Destruction follows completed-submission retirement, or an unsubmitted discard.
-		// The arena returns mapped pages only after this native command pool is released.
-		if (m_commandPool != VK_NULL_HANDLE) vkDestroyCommandPool(m_context.device, m_commandPool, nullptr);
+        // 완료 fence나 미제출 폐기로 안전성이 확인된 pool만 재사용한다.
+        // wrapper와 업로드 arena의 소멸은 기존 참조·페이지 반환 순서를 유지한다.
+        if(m_poolReusable && IsValid())m_commandPools->Return(std::move(m_commandStorage));
+        else m_commandStorage.reset();
 	}
 
     void VulkanCommandList::GlobalBarrierNative()
@@ -666,6 +693,20 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
     vkCmdDispatch(m_commandBuffer,x,y,z);
 }
 
+void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint32_t offset)
+{
+    auto* buffer = dynamic_cast<VulkanBuffer*>(arguments);
+    if (m_closed || m_failed || m_rendering || !m_boundPipeline || !m_boundPipeline->IsCompute() ||
+        (RequiresResourceSet(m_boundPipeline->GetLayout()) && !m_boundResourceSet) ||
+        std::any_of(m_inlineConstantCoverage.begin(), m_inlineConstantCoverage.end(), [](uint8_t byte) { return !byte; }) ||
+        !RequireBufferState(buffer, RHI::ResourceState::IndirectArgument))
+    {
+        Fail();
+        return;
+    }
+    vkCmdDispatchIndirect(m_commandBuffer, buffer->GetHandle(), offset);
+}
+
 	void VulkanCommandList::BindGraphicsPipelineNative(dyf::RHI::PipelineHandle pipelineState)
 	{
 		VulkanPipeline* pipeline = dynamic_cast<VulkanPipeline*>(pipelineState);
@@ -925,6 +966,30 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 		vkCmdDrawIndexed(m_commandBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 	}
 
+	void VulkanCommandList::DrawIndirectNative(RHI::BufferHandle arguments, uint32_t offset)
+	{
+		auto* buffer = dynamic_cast<VulkanBuffer*>(arguments);
+		if (!ValidateDraw(false, 0, 0, 0, 0) ||
+			!RequireBufferState(buffer, RHI::ResourceState::IndirectArgument))
+		{
+			Fail();
+			return;
+		}
+		vkCmdDrawIndirect(m_commandBuffer, buffer->GetHandle(), offset, 1, sizeof(VkDrawIndirectCommand));
+	}
+
+	void VulkanCommandList::DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset)
+	{
+		auto* buffer = dynamic_cast<VulkanBuffer*>(arguments);
+		if (!ValidateDraw(true, 0, 0, 0, 0) ||
+			!RequireBufferState(buffer, RHI::ResourceState::IndirectArgument))
+		{
+			Fail();
+			return;
+		}
+		vkCmdDrawIndexedIndirect(m_commandBuffer, buffer->GetHandle(), offset, 1, sizeof(VkDrawIndexedIndirectCommand));
+	}
+
 	void VulkanCommandList::DispatchMeshNative(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)
 	{
 		if (m_closed || !m_rendering || !m_context.vkCmdDrawMeshTasksEXT ||
@@ -946,7 +1011,12 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 			vkCmdEndRendering(m_commandBuffer);
 			m_rendering = false;
 		}
-		if (vkEndCommandBuffer(m_commandBuffer) != VK_SUCCESS) Fail();
+        const auto result=vkEndCommandBuffer(m_commandBuffer);
+        if(result!=VK_SUCCESS)
+        {
+            if(result==VK_ERROR_DEVICE_LOST)m_commandPools->MarkDeviceLost();
+            Fail();
+        }
 		m_closed = true;
 
         return !m_failed;
@@ -1050,12 +1120,13 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 	{
 		if (buffer == nullptr || !buffer->IsStateAllowed(state)) return false;
 		const auto found = m_bufferStates.find(buffer);
-		if (found != m_bufferStates.end() && found->second != state) return false;
+		if (found != m_bufferStates.end()) return found->second == state;
 		Operation operation{};
 		operation.kind = OperationKind::BufferRequirement;
 		operation.buffer = buffer;
 		operation.before = state;
 		m_operations.push_back(operation);
+		m_bufferStates.emplace(buffer, state);
 		return true;
 	}
 
@@ -1072,7 +1143,7 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 		}
 		const auto key = TextureKey(texture, mipLevel, arrayLayer);
 		const auto found = m_textureStates.find(key);
-		if (found != m_textureStates.end() && found->second != state) return false;
+		if (found != m_textureStates.end()) return found->second == state;
 		Operation operation{};
 		operation.kind = OperationKind::TextureRequirement;
 		operation.texture = texture;
@@ -1080,6 +1151,7 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 		operation.arrayLayer = arrayLayer;
 		operation.before = state;
 		m_operations.push_back(operation);
+		m_textureStates.emplace(key, state);
 		return true;
 	}
 

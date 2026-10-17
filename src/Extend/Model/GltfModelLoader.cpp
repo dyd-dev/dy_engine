@@ -504,13 +504,35 @@ namespace dyf
 				}
 			}
 
-			for(const fastgltf::Node& node : gltf.nodes)
+			const bool deformingModel = !gltf.skins.empty() || !gltf.animations.empty() ||
+				std::any_of(gltf.meshes.begin(), gltf.meshes.end(), [](const fastgltf::Mesh& mesh) {
+					return std::any_of(mesh.primitives.begin(), mesh.primitives.end(), [](const fastgltf::Primitive& primitive) {
+						return !primitive.targets.empty();
+					});
+				});
+			std::vector<size_t> parents(gltf.nodes.size(), gltf.nodes.size());
+			for(size_t nodeIndex = 0; nodeIndex < gltf.nodes.size(); ++nodeIndex)
+				for(size_t child : gltf.nodes[nodeIndex].children) parents[child] = nodeIndex;
+			std::map<std::pair<size_t, size_t>, bool> countedGeometry;
+			for(size_t nodeIndex = 0; nodeIndex < gltf.nodes.size(); ++nodeIndex)
 			{
+				const auto& node = gltf.nodes[nodeIndex];
 				if(!node.meshIndex.has_value()) continue;
 				if(node.meshIndex.value() >= gltf.meshes.size()) return false;
-				const fastgltf::Mesh& sourceMesh = gltf.meshes[node.meshIndex.value()];
-				for(const fastgltf::Primitive& primitive : sourceMesh.primitives)
+				bool mirrored = false;
+				if(!deformingModel)
 				{
+					for(size_t ancestor = nodeIndex; ancestor < gltf.nodes.size(); ancestor = parents[ancestor])
+					{
+						const auto* trs = std::get_if<fastgltf::TRS>(&gltf.nodes[ancestor].transform);
+						if(!trs) return ReportModelError(filepath, "glTF node matrix could not be decomposed");
+						mirrored ^= (trs->scale.x() < 0) ^ (trs->scale.y() < 0) ^ (trs->scale.z() < 0);
+					}
+				}
+				const fastgltf::Mesh& sourceMesh = gltf.meshes[node.meshIndex.value()];
+				for(size_t primitiveIndex = 0; primitiveIndex < sourceMesh.primitives.size(); ++primitiveIndex)
+				{
+					const auto& primitive = sourceMesh.primitives[primitiveIndex];
 					if(primitive.targets.size() > options.maxMorphTargetsPerMesh)
 					{
 						return ReportModelError(
@@ -519,6 +541,10 @@ namespace dyf
 					}
 					const auto* position = primitive.findAttribute("POSITION");
 					if(position == primitive.attributes.end()) continue;
+					if(!budget.AddBytes(1, sizeof(ModelMesh) + sizeof(ModelAssetMesh), "mesh instances")) return false;
+					const bool shared = !node.skinIndex.has_value() && primitive.targets.empty() && !mirrored;
+					if(shared && !countedGeometry.emplace(std::make_pair(*node.meshIndex, primitiveIndex), true).second)
+						continue;
 					if(position->accessorIndex >= gltf.accessors.size()) return false;
 					const uint64_t vertexCount = gltf.accessors[position->accessorIndex].count;
 					if(!budget.AddBytes(vertexCount, sizeof(Vertex), "vertices")) return false;
@@ -673,8 +699,13 @@ namespace dyf
 			}
 
 			const std::filesystem::path basePath = sourcePath.parent_path();
+			const auto materialExtensions = fastgltf::Extensions::KHR_materials_ior
+				| fastgltf::Extensions::KHR_materials_transmission
+				| fastgltf::Extensions::KHR_materials_volume
+				| fastgltf::Extensions::KHR_materials_emissive_strength
+				| fastgltf::Extensions::KHR_materials_unlit;
 			{
-				fastgltf::Parser metadataParser;
+				fastgltf::Parser metadataParser(materialExtensions);
 				auto metadataAsset = metadataParser.loadGltf(
 					data.get(),
 					basePath,
@@ -691,7 +722,7 @@ namespace dyf
 			}
 			data.get().reset();
 
-			fastgltf::Parser parser;
+			fastgltf::Parser parser(materialExtensions);
 			auto asset = parser.loadGltf(
 				data.get(),
 				basePath,
@@ -750,10 +781,38 @@ namespace dyf
 					source.pbrData.baseColorFactor[3]);
 				material.material.metallicFactor = source.pbrData.metallicFactor;
 				material.material.roughnessFactor = source.pbrData.roughnessFactor;
+				material.material.alphaMode = source.alphaMode == fastgltf::AlphaMode::Mask
+					? MaterialAlphaMode::Mask : source.alphaMode == fastgltf::AlphaMode::Blend
+					? MaterialAlphaMode::Blend : MaterialAlphaMode::Opaque;
+				material.material.alphaCutoff = source.alphaCutoff;
+				material.material.doubleSided = source.doubleSided;
+				material.material.unlit = source.unlit;
 				material.material.emissiveColor = Math::float3(
-					source.emissiveFactor[0],
-					source.emissiveFactor[1],
-					source.emissiveFactor[2]);
+					source.emissiveFactor[0] * source.emissiveStrength,
+					source.emissiveFactor[1] * source.emissiveStrength,
+					source.emissiveFactor[2] * source.emissiveStrength);
+				material.material.indexOfRefraction = static_cast<float>(source.ior);
+				if(source.transmission != nullptr)
+				{
+					material.material.transmissionFactor = static_cast<float>(source.transmission->transmissionFactor);
+					if(source.transmission->transmissionTexture.has_value())
+						ReportModelWarning(filepath, "glTF transmission texture is unsupported; using transmissionFactor");
+				}
+				if(source.volume != nullptr)
+				{
+					material.material.thickness = static_cast<float>(source.volume->thicknessFactor);
+					material.material.attenuationColor = Math::float3(source.volume->attenuationColor[0],
+						source.volume->attenuationColor[1], source.volume->attenuationColor[2]);
+					material.material.attenuationDistance = std::isfinite(source.volume->attenuationDistance)
+						? static_cast<float>(source.volume->attenuationDistance) : 0.0f;
+					if(source.volume->thicknessTexture.has_value())
+						ReportModelWarning(filepath, "glTF thickness texture is unsupported; using thicknessFactor");
+				}
+				if(!material.material.unlit && material.material.transmissionFactor > 0.0f)
+				{
+					material.material.alphaMode = MaterialAlphaMode::Blend;
+					material.material.doubleSided = true;
+				}
 				if(source.pbrData.baseColorTexture.has_value()) ApplyGltfMaterialTexture(
 					basePath, gltf, source.pbrData.baseColorTexture.value(), material,
 					MaterialTextureKind::BaseColor, filepath);
@@ -1111,12 +1170,22 @@ namespace dyf
 				fastgltf::math::fmat4x4 parentMatrix;
 			};
 			std::vector<PendingNode> pendingNodes;
+			std::map<std::pair<size_t, size_t>, uint32_t> sharedGeometry;
 			auto processNode =
 				[&](size_t nodeIndex, fastgltf::math::mat<float, 4, 4> parentMatrix)
 			{
 				if(nodeIndex >= gltf.nodes.size()) return false;
 				const fastgltf::Node& node = gltf.nodes[nodeIndex];
 				const fastgltf::math::mat<float, 4, 4> globalMatrix = parentMatrix * fastgltf::getTransformMatrix(node);
+				// The stock renderer has no mirrored-winding pipeline variant. Keep
+				// the old baked-transform path for static reflected nodes only.
+				const bool localGeometry = animatedModel || Math::Determinant3x3(ToFloat4x4(globalMatrix)) >= 0.0f;
+				if(!animatedModel && node.meshIndex.has_value())
+				{
+					Math::float4x4 normalMatrix;
+					if(!Math::InverseTranspose(ToFloat4x4(globalMatrix), normalMatrix))
+						return ReportModelError(filepath, "glTF mesh transform is singular; normals cannot be transformed");
+				}
 
 				if(node.meshIndex.has_value())
 				{
@@ -1137,6 +1206,8 @@ namespace dyf
 
 						if(posAttr->accessorIndex >= gltf.accessors.size()) return false;
 						const fastgltf::Accessor& posAccessor = gltf.accessors[posAttr->accessorIndex];
+						if(outModel.meshes.size() >= UINT32_MAX)
+							return ReportModelError(filepath, "glTF mesh instance count exceeds the supported index range");
 						ModelMesh mesh = {};
 						mesh.name = sourceMesh.name.c_str();
 						if(primitive.materialIndex.has_value()
@@ -1145,7 +1216,7 @@ namespace dyf
 							? static_cast<uint32_t>(primitive.materialIndex.value())
 							: defaultMaterialIndex;
 						if(mesh.materialIndex >= outModel.materials.size()) return false;
-						if(animatedModel)
+						if(localGeometry)
 						{
 							mesh.nodeIndex = static_cast<uint32_t>(nodeIndex);
 							if(node.skinIndex.has_value())
@@ -1161,8 +1232,17 @@ namespace dyf
 								filepath,
 								"glTF morph default weight count does not match primitive target count");
 						}
+						const bool shareGeometry = localGeometry && !node.skinIndex.has_value() && primitive.targets.empty();
+						const auto geometryKey = std::make_pair(sourceMeshIndex, primitiveIndex);
+						const auto existingGeometry = sharedGeometry.find(geometryKey);
+						if(shareGeometry && existingGeometry != sharedGeometry.end())
+						{
+							mesh.geometryIndex = existingGeometry->second;
+							outModel.meshes.push_back(std::move(mesh));
+							continue;
+						}
 						mesh.mesh.vertices.resize(posAccessor.count);
-						const fastgltf::math::fmat4x4 vertexMatrix = animatedModel
+						const fastgltf::math::fmat4x4 vertexMatrix = localGeometry
 							? fastgltf::math::fmat4x4(1.0f)
 							: globalMatrix;
 
@@ -1481,6 +1561,7 @@ namespace dyf
 						if(tangentAttr == primitive.attributes.end()
 							&& !CalculateTangents(mesh.mesh, !hasNormalAttribute))
 							return ReportModelError(filepath, "glTF generated normal or tangent is non-finite");
+						if(shareGeometry) sharedGeometry.emplace(geometryKey, static_cast<uint32_t>(outModel.meshes.size()));
 						outModel.meshes.push_back(std::move(mesh));
 					}
 				}

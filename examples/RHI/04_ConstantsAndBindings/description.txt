@@ -1,0 +1,1 @@
+PipelineLayout 선언, 인라인 상수, 상수 버퍼, 오프셋 정렬, ResourceSet의 생성과 바인딩을 다룬다.

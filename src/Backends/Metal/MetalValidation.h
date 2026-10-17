@@ -41,6 +41,7 @@ namespace dyf::Backends::MetalValidation
         case RHI::Format::D32_FLOAT:
         case RHI::Format::D24_UNORM_S8_UINT:
         case RHI::Format::R32_UINT:
+        case RHI::Format::R32_FLOAT:
             return 4;
         case RHI::Format::R16G16B16A16_FLOAT:
         case RHI::Format::R32G32_FLOAT:
@@ -89,6 +90,8 @@ namespace dyf::Backends::MetalValidation
             return MetalValidation::HasUsage(desc.usage, RHI::BufferUsage::Vertex);
         case RHI::ResourceState::IndexBuffer:
             return MetalValidation::HasUsage(desc.usage, RHI::BufferUsage::Index);
+        case RHI::ResourceState::IndirectArgument:
+            return MetalValidation::HasUsage(desc.usage, RHI::BufferUsage::Indirect);
         case RHI::ResourceState::ConstantBuffer:
             return MetalValidation::HasUsage(desc.usage, RHI::BufferUsage::Constant);
         case RHI::ResourceState::ShaderResource:

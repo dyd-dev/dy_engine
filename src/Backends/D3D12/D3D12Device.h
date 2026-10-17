@@ -28,7 +28,6 @@ namespace dyf::Backends
         bool SupportsMeshPipelineNative(const RHI::MeshPipelineDesc& desc) const override;
         uint64_t GetCompletedSubmissionNative() override;
         uint64_t GetLastSubmissionNative() const override;
-        RHI::UploadMemoryStatistics GetUploadMemoryStatisticsNative() const override;
 
         bool CreateSwapchainNative(const RHI::SwapchainDesc& desc) override;
         bool BeginFrameNative() override;

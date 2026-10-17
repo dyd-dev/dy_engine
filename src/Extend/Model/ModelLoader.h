@@ -52,5 +52,6 @@ namespace dyf
 	[[nodiscard]] bool LoadUfbxModel(
 		const std::string& filepath,
 		ModelData& outModel,
-		const ModelLoadOptions& options, uint64_t* decodedBytes = nullptr);
+		const ModelLoadOptions& options, uint64_t* decodedBytes = nullptr,
+		const Math::Bounds3* lightOnlyBounds = nullptr);
 }

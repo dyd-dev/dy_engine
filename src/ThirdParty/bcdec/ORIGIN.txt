@@ -1,0 +1,7 @@
+bcdec 0.985 — Sergii "iOrange" Kudlai
+Upstream: https://github.com/iOrange/bcdec
+Commit: 80859ed3b7afb1c527a2a99d70c61457bea72d0c
+Source: https://raw.githubusercontent.com/iOrange/bcdec/80859ed3b7afb1c527a2a99d70c61457bea72d0c/bcdec.h
+License: MIT (alternative A of the upstream dual license).
+The original copyright and both license texts remain in bcdec.h.
+Vendored unchanged. Used privately by Image.cpp for CPU DDS decompression.

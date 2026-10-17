@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "../src/RHI/Query.h"
 #include <array>
 #include <chrono>
 #include <cmath>

@@ -10,19 +10,36 @@ endif()
 
 # main target
 add_library(${PROJECT_NAME} STATIC
-	"src/Core/ThreadPool.cpp"
+	"src/RHI/ThreadPool.cpp"
 	"src/RHI/IDevice.cpp"
 	"src/RHI/ICommandList.cpp"
 	"src/RHI/Resources.cpp"
 	"src/dyf/Renderer.cpp"
+    "src/dyf/RendererFacade.cpp"
+    "src/dyf/SceneRendering.cpp"
+    "src/dyf/RendererPipelines.cpp"
+    "src/dyf/LightingData.cpp"
+    "src/dyf/RenderResources.cpp"
+    "src/dyf/OutputPresentation.cpp"
 	"src/dyf/Image.cpp"
 	"src/dyf/Canvas.cpp"
 	"src/dyf/Font.cpp"
 	"src/dyf/MeshPrimitives.cpp"
+    "src/dyf/Lod.cpp"
+    "src/dyf/GpuVisibility.cpp"
+    "src/dyf/GpuScene.cpp"
+    "src/dyf/BasicLightingResources.cpp"
+    "src/dyf/BasicEnvironmentResources.cpp"
+    "src/dyf/LocalLightData.cpp"
+    "src/dyf/AreaLightingLtc.cpp"
 	"src/dyf/Shaders.cpp"
 	"src/RHI/RenderGraph.cpp"
 	"src/dyf/CanvasRenderer.cpp"
     "src/dyf/PostProcess.cpp"
+    "src/dyf/OutputColor.cpp"
+    "src/dyf/EnvironmentCapture.cpp"
+    "src/dyf/EnvironmentDepthCapture.cpp"
+    "src/dyf/FrameResources.cpp"
     "src/dyf/Lighting.cpp"
     "src/dyf/Profiler.cpp"
     "src/dyf/ProfilerSampler.cpp"
@@ -30,6 +47,10 @@ add_library(${PROJECT_NAME} STATIC
     "src/Platform/Log.cpp"
     "src/Platform/LogSession.cpp"
 	"src/dyf/DrawData.cpp"
+    "src/dyf/GeometryUpload.cpp"
+    "src/dyf/MaterialBindings.cpp"
+    "src/dyf/ShadowPass.cpp"
+    "src/dyf/ForwardPass.cpp"
 	"src/dyf/TextureCache.cpp"
 	"src/dyf/Scene.cpp"
 	"src/Platform/Window.cpp"
@@ -47,6 +68,7 @@ target_include_directories(${PROJECT_NAME} BEFORE PUBLIC "${PROJECT_SOURCE_DIR}/
 
 option(DY_EXTEND_MODEL "Build the optional Model extension." OFF)
 option(DY_EXTEND_IMGUI "Build the optional Dear ImGui extension." OFF)
+option(DY_EXTEND_ADVANCED_RENDERING "Build the optional AdvancedRendering extension." OFF)
 
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     include(.github/ci/CiChecks.cmake)
@@ -57,6 +79,10 @@ include(LogCapture)
 
 # 기본 구현과 내장 셰이더는 같은 엔진 타깃에서 공개 RHI를 사용한다.
 include(ShaderAssets)
+
+if(DY_EXTEND_ADVANCED_RENDERING)
+    add_subdirectory(src/Extend/AdvancedRendering)
+endif()
 
 if(DY_EXTEND_MODEL)
 	add_subdirectory(src/Extend/Model)

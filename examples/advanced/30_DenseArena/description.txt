@@ -1,0 +1,1 @@
+Dense Arena: a deterministic sprite dungeon for comparing stock Scene instancing, CPU frustum culling and frame timings with the same frozen game state. Kenney Tiny Dungeon CC0 assets remain external. This example does not implement GPU culling, indirect sprite generation or a complete game.

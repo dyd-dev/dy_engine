@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <tuple>
 #include "ResourceState.h"
@@ -14,10 +15,6 @@
 #include "Swapchain.h"
 #include "Submission.h"
 #include "Feature.h"
-#include "Query.h"
-#include "UploadMemory.h"
-
-namespace dyf::Core { class ThreadPool; }
 
 namespace dyf::RHI
 {
@@ -33,12 +30,24 @@ namespace dyf::RHI
 	struct TextureDesc;
 	struct TextureReadback;
 
+    // 장치가 실제로 제공하는 한도다. 바이트 단위와 정렬 조건은 값 이름에 따른다.
+    enum class Limit : uint8_t
+    {
+        InlineConstantBytes, Texture2DDimension,
+        UniformBufferOffsetAlignment, StorageBufferOffsetAlignment,
+        UniformBufferBytes, StorageBufferBytes, SamplerAnisotropy, TessellationPatchControlPoints,
+        TextureArrayLayers
+    };
+
 	struct DeviceDesc
 	{
 		uint32_t maxFramesInFlight = 2;
         uint32_t adapterIndex = 0;
         bool enableValidation = false;
 	};
+
+    // 결과는 ReadTimestamps로 읽는다. 쿼리 객체는 핸들로만 사용한다.
+    struct TimestampQueryDesc { uint32_t count = 0; };
 
     struct ResourceCounter { uint64_t live = 0, created = 0, destroyed = 0; };
     struct ResourceAllocationCounters { ResourceCounter buffers, textures, pipelines; };
@@ -55,9 +64,6 @@ namespace dyf::RHI
         // Counts device-created resources, including resources retained by pending GPU work.
         // Swapchain-owned images are excluded.
         [[nodiscard]] ResourceAllocationCounters GetResourceAllocationCounters() const;
-        // Thread-safe native staging snapshot; backends without staging report zero.
-        [[nodiscard]] UploadMemoryStatistics GetUploadMemoryStatistics() const
-        { std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);return GetUploadMemoryStatisticsNative(); }
         // 설정의 공통 규칙과 장치 한도를 검사한다. 셰이더는 이 장치에서 생성한 핸들을 사용한다.
         // 조회는 자원을 생성하지 않으며, 이후 생성 시 메모리·셰이더 오류까지 보장하지는 않는다.
         [[nodiscard]] bool Supports(const PipelineLayoutDesc&) const;
@@ -86,8 +92,10 @@ namespace dyf::RHI
         // Only native recording runs on workers; allocation, validation and submission
         // remain owned by the common RHI. Join before changing lists/device lifetime.
         // Resources and frame/swapchain state must remain unchanged during this call.
+        // Workers are owned by the device. threadCount=0 selects hardware concurrency;
+        // 1 records on the calling thread. All recording finishes before returning.
         [[nodiscard]] bool PrepareCommandLists(ICommandList* const* commandLists, uint32_t count,
-            Core::ThreadPool* pool = nullptr);
+            uint32_t threadCount = 1);
         [[nodiscard]] bool ResetCommandList(ICommandList*);
         void DestroyCommandList(ICommandList*);
 
@@ -147,12 +155,17 @@ namespace dyf::RHI
 			uint32_t slicePitch);
 
 	protected:
-        virtual UploadMemoryStatistics GetUploadMemoryStatisticsNative() const { return {}; }
         enum class DiagnosticSeverity : uint8_t { Info, Warning, Error };
         void ReportDiagnostic(DiagnosticSeverity severity, const char* message) const;
 		// Release common references while the native device is still alive.
 		void ReleaseResources();
 		void AbandonResources();
+        // Reserve before retiring native swapchain resources. Only one replacement
+        // may await reclamation; false defers another replacement without losing
+        // the device. Complete only after native completion has been confirmed
+        // and the retired resources have been released.
+        [[nodiscard]] bool TryBeginSwapchainRetirement();
+        void CompleteSwapchainRetirement();
 		virtual bool CreateSwapchainNative(const SwapchainDesc&) = 0;
 		virtual void DestroySwapchainNative() = 0;
 		virtual bool WaitIdleNative() = 0;
@@ -208,6 +221,10 @@ namespace dyf::RHI
 
 	private:
 		friend class ICommandList;
+        friend class RenderGraph;
+        struct RecordingState;
+        void RecordParallel(uint32_t count, uint32_t threadCount,
+            const std::function<void(uint32_t)>& record);
 		mutable std::recursive_mutex m_resourceMutex;
         ResourceAllocationCounters m_allocationCounters;
 		bool m_nativeResourcesAlive = true;
@@ -223,7 +240,9 @@ namespace dyf::RHI
 		DeviceDesc m_desc = {};
 		SwapchainDesc m_swapchainDesc = {};
 		bool m_hasSwapchain = false;
+        bool m_swapchainRetirementPending = false;
 		bool m_frameActive = false;
+        std::shared_ptr<RecordingState> m_recording;
 		void InvalidateBackBuffers();
 	};
 }

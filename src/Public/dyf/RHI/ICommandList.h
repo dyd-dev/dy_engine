@@ -5,13 +5,14 @@
 #include <map>
 #include <tuple>
 #include <memory>
+#include <unordered_set>
 #include <vector>
 
 #include "Barrier.h"
 #include "Format.h"
+#include "Indirect.h"
 #include "Rendering.h"
 #include "ResourceHandles.h"
-#include "Query.h"
 
 namespace dyf::RHI
 {
@@ -41,6 +42,9 @@ namespace dyf::RHI
 		void BindGraphicsPipeline(PipelineHandle pipeline);
         void BindComputePipeline(PipelineHandle pipeline);
         void Dispatch(uint32_t x,uint32_t y,uint32_t z);
+        // Requires Feature::IndirectDispatch and ResourceState::IndirectArgument.
+        // The argument buffer supplies one DispatchIndirectArguments structure.
+        void DispatchIndirect(BufferHandle arguments, uint32_t offset = 0);
 		// ResourceSet은 현재 pipeline용이어야 한다. pipeline 교체 후에는 다시 바인딩한다.
 		// graphics의 VB/IB/ResourceSet은 rendering 구간 안에서 설정하고 EndRendering에서 해제된다.
 		// compute의 ResourceSet은 BindComputePipeline 뒤, rendering 구간 밖에서 설정한다.
@@ -68,6 +72,13 @@ namespace dyf::RHI
 			int32_t vertexOffset,
 			uint32_t firstInstance);
 
+        // Requires Feature::IndirectDraw and ResourceState::IndirectArgument.
+        // Each call consumes one argument structure; count/instanceCount zero is a no-op.
+        // firstInstance must be zero unless Feature::IndirectFirstInstance is supported.
+        // PatchList pipelines additionally require Feature::IndirectTessellation.
+        void DrawIndirect(BufferHandle arguments, uint32_t offset = 0);
+        void DrawIndexedIndirect(BufferHandle arguments, uint32_t offset = 0);
+
 		void DispatchMesh(
 			uint32_t threadGroupCountX,
 			uint32_t threadGroupCountY,
@@ -91,6 +102,7 @@ namespace dyf::RHI
 		virtual void BindGraphicsPipelineNative(PipelineHandle pipeline) = 0;
         virtual void BindComputePipelineNative(PipelineHandle) {m_recordingFailed=true;}
         virtual void DispatchNative(uint32_t,uint32_t,uint32_t) {m_recordingFailed=true;}
+        virtual void DispatchIndirectNative(BufferHandle,uint32_t) {m_recordingFailed=true;}
 		virtual void BindResourceSetNative(ResourceSetHandle resourceSet) = 0;
 		virtual void BindVertexBufferNative(uint32_t binding, BufferHandle buffer, uint32_t offset) = 0;
 		virtual void BindIndexBufferNative(BufferHandle buffer, Format format, uint32_t offset) = 0;
@@ -109,6 +121,8 @@ namespace dyf::RHI
 			uint32_t firstIndex,
 			int32_t vertexOffset,
 			uint32_t firstInstance) = 0;
+        virtual void DrawIndirectNative(BufferHandle,uint32_t) {m_recordingFailed=true;}
+        virtual void DrawIndexedIndirectNative(BufferHandle,uint32_t) {m_recordingFailed=true;}
 		virtual void DispatchMeshNative(uint32_t x, uint32_t y, uint32_t z) { (void)x; (void)y; (void)z; m_recordingFailed = true; }
 		virtual bool CloseNative() = 0;
 
@@ -119,7 +133,16 @@ namespace dyf::RHI
         friend class RecordedCommandList;
         static ICommandList* CreateRecorded();
         using StateMap=std::map<std::tuple<uintptr_t,uint32_t,uint32_t>,ResourceState>;
-        std::vector<std::function<bool(StateMap&)>> m_stateOperations;
+        struct StateOperation
+        {
+            uintptr_t resource;
+            uint32_t mip,layer;
+            ResourceState before,after;
+            bool barrier;
+        };
+        std::vector<StateOperation> m_stateOperations;
+        StateMap m_recordedStates;
+        std::unordered_set<ResourceSetHandle> m_requiredResourceSets;
         void RequireState(const void*,uint32_t mip,uint32_t layer,ResourceState);
         std::vector<std::function<bool(ICommandList&)>> m_commands;
         ICommandList* m_preparedNative = nullptr;
@@ -135,6 +158,7 @@ namespace dyf::RHI
         Format m_depthStencilFormat=Format::Unknown;
         bool ValidateBindings(bool indexed, bool compute);
         bool ValidateMeshBindings();
+        bool ValidateIndirectArguments(BufferHandle, uint32_t offset, uint32_t size);
         bool RequireResourceSetStates(ResourceSetHandle);
 		bool Track(const void* handle);
 		bool CanRecordCommands();
@@ -142,5 +166,13 @@ namespace dyf::RHI
 		bool m_recordingClosed = false;
 		bool m_recordingFailed = false;
 		std::vector<std::shared_ptr<void>> m_references;
+        std::unordered_set<const void*> m_referenceHandles;
+        // 그래프 전체 참조는 한 번만 보유하고 각 목록은 추가 참조만 따로 기록한다.
+        struct ReferenceSnapshot
+        {
+            std::vector<std::shared_ptr<void>> resources;
+            std::unordered_set<const void*> handles;
+        };
+        std::shared_ptr<const ReferenceSnapshot> m_sharedReferences;
 	};
 }

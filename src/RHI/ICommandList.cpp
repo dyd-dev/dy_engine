@@ -1,4 +1,5 @@
 #include "dyf/RHI/ICommandList.h"
+#include "Query.h"
 #include "dyf/RHI/IDevice.h"
 #include "Validation.h"
 #include <string>
@@ -57,6 +58,8 @@ ICommandList::~ICommandList()
         if(m_preparedNative) m_owner->DiscardCommandListNative(m_preparedNative);
         m_owner->m_recordedCommands.erase(this);
         m_references.clear();
+        m_referenceHandles.clear();
+        m_sharedReferences.reset();
     }
 }
 
@@ -86,16 +89,17 @@ bool ICommandList::Track(const void* handle)
 try
 {
     if(!CanRecordCommands()) return false;
-    // References recorded before Destroy* retain the object until this list ends.
-    for(const auto& existing : m_references)
-        if(existing.get() == handle) return true;
-    // Resource ownership and swapchain generation are one synchronized snapshot.
-    // The command list itself remains exclusively owned by its recording thread.
+    // Destroy* 전에 보유한 참조는 목록이 끝날 때까지 유지한다.
+    if(m_referenceHandles.count(handle) || (m_sharedReferences && m_sharedReferences->handles.count(handle))) return true;
+    // 자원 소유권과 스왑체인 세대는 같은 잠금 안에서 가져온다.
+    // 명령 목록 자체는 기록 중인 스레드 하나만 변경한다.
     std::lock_guard<std::recursive_mutex> lock(m_owner->m_resourceMutex);
     auto reference = m_owner->Reference(handle);
     if(!reference) { m_recordingFailed = true; return false; }
     if(m_owner->m_borrowedTextures.count(handle)) m_imageGeneration=m_owner->m_imageGeneration;
     m_references.push_back(std::move(reference));
+    try { m_referenceHandles.insert(handle); }
+    catch(...) { m_references.pop_back(); throw; }
     return true;
 }
 catch(...) { m_recordingFailed=true; throw; }
@@ -105,6 +109,7 @@ try
 {
     if(!CanRecordCommands()) return;
     if(count && !barriers) { m_recordingFailed = true; return; }
+    if(count) m_requiredResourceSets.clear();
     for(uint32_t i = 0; i < count; ++i)
     {
         const auto& barrier = barriers[i];
@@ -125,11 +130,8 @@ try
         for(uint32_t l=layer;l<layer+layers;++l)for(uint32_t m=mip;m<mip+mips;++m)
         {
             const auto key=std::make_tuple(object,m,l);
-            m_stateOperations.push_back([key,before=barrier.before,after=barrier.after](StateMap& states) {
-                const auto found=states.find(key);
-                if(found==states.end() || found->second!=before)return false;
-                found->second=after;return true;
-            });
+            m_stateOperations.push_back({object,m,l,barrier.before,barrier.after,true});
+            m_recordedStates[key]=barrier.after;
         }
 
     }
@@ -142,10 +144,11 @@ void ICommandList::RequireState(const void* resource,uint32_t mip,uint32_t layer
 try
 {
     const auto key=std::make_tuple(reinterpret_cast<uintptr_t>(resource),mip,layer);
-    m_stateOperations.push_back([key,state](StateMap& states){
-        const auto found=states.find(key);
-        return found!=states.end() && found->second==state;
-    });
+    // 이 목록의 앞선 검사나 배리어가 같은 상태를 이미 보장하면 중복 검사만 합친다.
+    const auto recorded=m_recordedStates.find(key);
+    if(recorded!=m_recordedStates.end() && recorded->second==state) return;
+    m_stateOperations.push_back({reinterpret_cast<uintptr_t>(resource),mip,layer,state,state,false});
+    m_recordedStates[key]=state;
 }
 catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::BeginRendering(const RenderingDesc& desc)
@@ -175,7 +178,7 @@ try
         if(color.loadOp==LoadOp::Clear)
         {
             const auto format=color.texture->GetDesc().format;
-            const uint32_t channels=(format==Format::R16_UINT || format==Format::R32_UINT) ? 1u :
+            const uint32_t channels=(format==Format::R16_UINT || format==Format::R32_UINT || format==Format::R32_FLOAT) ? 1u :
                 format==Format::R32G32_FLOAT ? 2u : format==Format::R32G32B32_FLOAT ? 3u : 4u;
             for(uint32_t channel=0;channel<channels;++channel)
                 if(!std::isfinite(color.clearColor[channel])){m_recordingFailed=true;return;}
@@ -245,6 +248,21 @@ catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::Dispatch(uint32_t x,uint32_t y,uint32_t z) try
 {if(!CanRecordCommands())return;if(m_rendering||!m_pipeline||!m_pipeline->IsCompute()||!x||!y||!z){m_recordingFailed=true;return;}if(ValidateBindings(false,true))DispatchNative(x,y,z);}
 catch(...) { m_recordingFailed=true; throw; }
+void ICommandList::DispatchIndirect(BufferHandle arguments, uint32_t offset)
+try
+{
+    if(!CanRecordCommands()) return;
+    if(m_rendering || !m_owner->Supports(Feature::IndirectDispatch))
+    {
+        m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,
+            "DispatchIndirect: requires indirect dispatch support and must be recorded outside rendering.");
+        m_recordingFailed=true;return;
+    }
+    if(ValidateBindings(false,true) &&
+        ValidateIndirectArguments(arguments,offset,sizeof(DispatchIndirectArguments)))
+        DispatchIndirectNative(arguments,offset);
+}
+catch(...) { m_recordingFailed=true; throw; }
 
 void ICommandList::BindResourceSet(ResourceSetHandle resources)
 try
@@ -260,6 +278,8 @@ catch(...) { m_recordingFailed=true; throw; }
 
 bool ICommandList::RequireResourceSetStates(ResourceSetHandle resources)
 {
+    // 세트는 불변이므로 배리어 사이에서는 바인딩과 전체 서브리소스를 다시 순회하지 않는다.
+    if(m_requiredResourceSets.count(resources)) return true;
     for(uint32_t i=0;i<resources->GetBindingCount();++i)
     {
         const auto& binding=resources->GetBindings()[i];
@@ -281,6 +301,7 @@ bool ICommandList::RequireResourceSetStates(ResourceSetHandle resources)
                     ResourceState::UnorderedAccess:ResourceState::ShaderResource);
         }
     }
+    m_requiredResourceSets.insert(resources);
     return true;
 }
 void ICommandList::BindVertexBuffer(uint32_t binding,BufferHandle buffer,uint32_t offset)
@@ -376,6 +397,27 @@ bool ICommandList::ValidateBindings(bool indexed, bool compute)
         return fail("Draw/Dispatch: bind a complete ResourceSet for the current pipeline after selecting that pipeline.");
     return !m_resourceSet || RequireResourceSetStates(m_resourceSet);
 }
+bool ICommandList::ValidateIndirectArguments(BufferHandle arguments, uint32_t offset, uint32_t size)
+{
+    if(m_pipeline && m_pipeline->m_topology==PrimitiveTopology::PatchList &&
+        !m_owner->Supports(Feature::IndirectTessellation))
+    {
+        m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,
+            "Indirect drawing with a PatchList pipeline requires Feature::IndirectTessellation.");
+        m_recordingFailed=true;return false;
+    }
+    if(!Track(arguments)) return false;
+    const auto& desc=arguments->GetDesc();
+    if(!HasUsage(desc.usage,BufferUsage::Indirect) || offset%4 ||
+        offset>desc.size || size>desc.size-offset)
+    {
+        m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,
+            "Indirect command: requires BufferUsage::Indirect, a 4-byte aligned offset and a complete argument structure within the buffer.");
+        m_recordingFailed=true;return false;
+    }
+    RequireState(arguments,0,0,ResourceState::IndirectArgument);
+    return true;
+}
 bool ICommandList::ValidateMeshBindings()
 {
     const auto fail=[&](const char* message) {
@@ -402,6 +444,36 @@ catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::DrawIndexedInstanced(uint32_t indices, uint32_t instances, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance)
 try
 { if(CanRecordCommands() && ValidateBindings(true,false)) DrawIndexedInstancedNative(indices, instances, firstIndex, vertexOffset, firstInstance); }
+catch(...) { m_recordingFailed=true; throw; }
+void ICommandList::DrawIndirect(BufferHandle arguments, uint32_t offset)
+try
+{
+    if(!CanRecordCommands()) return;
+    if(!m_owner->Supports(Feature::IndirectDraw))
+    {
+        m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,
+            "DrawIndirect: indirect drawing is not supported by this device.");
+        m_recordingFailed=true;return;
+    }
+    if(ValidateBindings(false,false) &&
+        ValidateIndirectArguments(arguments,offset,sizeof(DrawIndirectArguments)))
+        DrawIndirectNative(arguments,offset);
+}
+catch(...) { m_recordingFailed=true; throw; }
+void ICommandList::DrawIndexedIndirect(BufferHandle arguments, uint32_t offset)
+try
+{
+    if(!CanRecordCommands()) return;
+    if(!m_owner->Supports(Feature::IndirectDraw))
+    {
+        m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,
+            "DrawIndexedIndirect: indirect drawing is not supported by this device.");
+        m_recordingFailed=true;return;
+    }
+    if(ValidateBindings(true,false) &&
+        ValidateIndirectArguments(arguments,offset,sizeof(DrawIndexedIndirectArguments)))
+        DrawIndexedIndirectNative(arguments,offset);
+}
 catch(...) { m_recordingFailed=true; throw; }
 
 void ICommandList::DispatchMesh(uint32_t x, uint32_t y, uint32_t z)
@@ -484,6 +556,8 @@ class RecordedCommandList final : public ICommandList
     {m_commands.push_back([=](ICommandList& n){n.WriteTimestampNative(query,index);return true;});}
     void DispatchNative(uint32_t x,uint32_t y,uint32_t z) override
     {m_commands.push_back([=](ICommandList& n){n.DispatchNative(x,y,z);return true;});}
+    void DispatchIndirectNative(BufferHandle arguments,uint32_t offset) override
+    {m_commands.push_back([=](ICommandList& n){n.DispatchIndirectNative(arguments,offset);return true;});}
     void BindGraphicsPipelineNative(PipelineHandle pipeline) override
     {
         m_pipeline=pipeline;
@@ -520,6 +594,16 @@ class RecordedCommandList final : public ICommandList
     {
         if(!m_rendering || !m_pipeline || !m_indexBuffer || !m_viewport || !m_scissor) {m_recordingFailed=true;return;}
         m_commands.push_back([=](ICommandList& n){n.DrawIndexedInstancedNative(indices,instances,firstIndex,vertexOffset,firstInstance);return true;});
+    }
+    void DrawIndirectNative(BufferHandle arguments,uint32_t offset) override
+    {
+        if(!m_rendering || !m_pipeline || !m_viewport || !m_scissor) {m_recordingFailed=true;return;}
+        m_commands.push_back([=](ICommandList& n){n.DrawIndirectNative(arguments,offset);return true;});
+    }
+    void DrawIndexedIndirectNative(BufferHandle arguments,uint32_t offset) override
+    {
+        if(!m_rendering || !m_pipeline || !m_indexBuffer || !m_viewport || !m_scissor) {m_recordingFailed=true;return;}
+        m_commands.push_back([=](ICommandList& n){n.DrawIndexedIndirectNative(arguments,offset);return true;});
     }
     void DispatchMeshNative(uint32_t x,uint32_t y,uint32_t z) override
     {

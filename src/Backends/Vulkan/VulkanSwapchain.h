@@ -57,6 +57,11 @@ public:
     const std::vector<VkImageView>& GetImageViews() const { return m_swapchainImageViews; }
     size_t GetImageCount() const { return m_swapchainImages.size(); }
 
+    bool IsSurfaceConfigurationChanged(
+        const VulkanContext& context,
+        void* windowHandle,
+        bool& changed,
+        InitializationStatus& status) const;
     static SwapchainSupportDetails QuerySwapchainSupport(VkPhysicalDevice device, VkSurfaceKHR surface, InitializationStatus& status);
 
 private:
@@ -76,6 +81,7 @@ private:
     VkSwapchainKHR m_swapchain = VK_NULL_HANDLE;
     VkFormat m_swapchainImageFormat = VK_FORMAT_UNDEFINED;
     VkExtent2D m_swapchainExtent = {};
+    VkSurfaceTransformFlagBitsKHR m_preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     std::vector<VkImage> m_swapchainImages;
     std::vector<VkImageView> m_swapchainImageViews;
 };

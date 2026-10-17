@@ -35,6 +35,8 @@ cbuffer ShadowMatrix : register(
     float4 directionalSplits[RENDERER_MAX_DIRECTIONAL_LIGHTS];
     float4x4 cameraView;
     float4 filterParams;
+    float4 viewProjectionParams[128];
+    float4 softShadowParams;
 };
 #endif
 
@@ -54,7 +56,7 @@ struct VSInput
 
 struct VSOutput
 {
-    float4 position : SV_POSITION;
+    precise float4 position : SV_POSITION;
     float2 uv : TEXCOORD0;
     float3 worldPosition : TEXCOORD1;
     float3 worldNormal : TEXCOORD2;
@@ -102,11 +104,12 @@ VSOutput main(VSInput input)
 #else
     const float4x4 world = modelMatrix;
 #endif
-    const float4 worldPosition = mul(world, float4(input.position, 1.0));
+    precise float4 worldPosition = mul(world, float4(input.position, 1.0));
+    precise float4 clipPosition = mul(viewProjectionMatrix, worldPosition);
     const float3x3 normalMatrix = MeshNormalMatrix(world);
 
     VSOutput output;
-    output.position = mul(viewProjectionMatrix, worldPosition);
+    output.position = clipPosition;
     output.uv = input.uv;
     output.worldPosition = worldPosition.xyz;
     output.worldNormal = MeshNormalizeOr(mul(normalMatrix, input.normal), float3(0,0,1));

@@ -17,7 +17,8 @@ namespace dyf::RHI
 		RenderTarget,
 		DepthRead,
 		DepthWrite,
-		Present
+		Present,
+		IndirectArgument
 	};
 
 }

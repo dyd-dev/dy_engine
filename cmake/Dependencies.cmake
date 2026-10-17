@@ -137,3 +137,12 @@ target_link_libraries(${PROJECT_NAME} PRIVATE glfw)
 target_compile_definitions(${PROJECT_NAME} PRIVATE GLFW_INCLUDE_NONE)
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${stb_SOURCE_DIR})
+
+# Portable offline/initial-upload mesh simplification; no graphics API dependency.
+FetchContent_Declare(meshoptimizer
+    GIT_REPOSITORY "https://github.com/zeux/meshoptimizer.git"
+    GIT_TAG "v0.25"
+    GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(meshoptimizer)
+target_link_libraries(${PROJECT_NAME} PRIVATE meshoptimizer)

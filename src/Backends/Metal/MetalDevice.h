@@ -61,7 +61,6 @@ namespace dyf::Backends
 
     protected:
         int Initialize(const void* windowHandle, const RHI::DeviceDesc& desc) override;
-        RHI::UploadMemoryStatistics GetUploadMemoryStatisticsNative() const override;
 
     private:
         struct Impl;

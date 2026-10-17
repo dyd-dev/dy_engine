@@ -29,6 +29,7 @@ namespace dyf::Backends
 			case RHI::Format::B8G8R8A8_UNORM_SRGB:   return MTLPixelFormatBGRA8Unorm_sRGB;
             case RHI::Format::R16G16B16A16_FLOAT:    return MTLPixelFormatRGBA16Float;
 			case RHI::Format::R32G32_FLOAT:          return MTLPixelFormatRG32Float;
+            case RHI::Format::R32_FLOAT:             return MTLPixelFormatR32Float;
             case RHI::Format::R32G32B32A32_FLOAT:    return MTLPixelFormatRGBA32Float;
             case RHI::Format::D32_FLOAT:             return MTLPixelFormatDepth32Float;
             case RHI::Format::D24_UNORM_S8_UINT:     return MTLPixelFormatDepth24Unorm_Stencil8;

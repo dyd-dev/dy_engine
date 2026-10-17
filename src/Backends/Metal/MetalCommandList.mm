@@ -21,6 +21,10 @@
 
 namespace dyf::Backends
 {
+	static_assert(sizeof(RHI::DrawIndirectArguments) == sizeof(MTLDrawPrimitivesIndirectArguments));
+	static_assert(sizeof(RHI::DrawIndexedIndirectArguments) == sizeof(MTLDrawIndexedPrimitivesIndirectArguments));
+	static_assert(sizeof(RHI::DispatchIndirectArguments) == sizeof(MTLDispatchThreadgroupsIndirectArguments));
+
 	namespace
 	{
 		[[nodiscard]] bool HasStage(
@@ -750,9 +754,29 @@ namespace dyf::Backends
 
 	void MetalCommandList::DispatchNative(uint32_t x, uint32_t y, uint32_t z)
 	{
+		DispatchCompute(x, y, z, nullptr, 0);
+	}
+
+	void MetalCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint32_t offset)
+	{
+		auto* buffer = dynamic_cast<MetalBuffer*>(arguments);
+		if(m_impl->closed || buffer == nullptr || NativeBuffer(buffer) == nil ||
+			!RequireBufferState(m_impl, buffer, RHI::ResourceState::IndirectArgument))
+		{
+			Invalidate(m_impl);
+			return;
+		}
+		RetainResource(m_impl, NativeBuffer(buffer));
+		DispatchCompute(0, 0, 0, buffer, offset);
+	}
+
+	void MetalCommandList::DispatchCompute(uint32_t x, uint32_t y, uint32_t z,
+		MetalBuffer* arguments, uint32_t offset)
+	{
 		auto* pipeline = m_impl->pipeline;
 		if(m_impl->closed || m_impl->rendering || !pipeline || !pipeline->IsCompute() ||
-			!x || !y || !z || (pipeline->GetLayout().bindingCount && !m_impl->resourceSet) ||
+			(!arguments && (!x || !y || !z)) ||
+			(pipeline->GetLayout().bindingCount && !m_impl->resourceSet) ||
 			std::any_of(m_impl->inlineConstantCoverage.begin(), m_impl->inlineConstantCoverage.end(),
 				[](uint8_t byte) { return !byte; }))
 		{
@@ -793,7 +817,14 @@ namespace dyf::Backends
 		}
 		const auto* size = pipeline->GetThreadGroupSize();
 		if(m_impl->valid)
-			[encoder dispatchThreadgroups:MTLSizeMake(x, y, z) threadsPerThreadgroup:MTLSizeMake(size[0], size[1], size[2])];
+		{
+			if(arguments != nullptr)
+				[encoder dispatchThreadgroupsWithIndirectBuffer:NativeBuffer(arguments)
+					indirectBufferOffset:offset threadsPerThreadgroup:MTLSizeMake(size[0], size[1], size[2])];
+			else
+				[encoder dispatchThreadgroups:MTLSizeMake(x, y, z)
+					threadsPerThreadgroup:MTLSizeMake(size[0], size[1], size[2])];
+		}
 		// Tracked buffer hazards synchronize this pass with subsequent compute/render/blit passes.
 		[encoder endEncoding];
 	}
@@ -1379,6 +1410,45 @@ namespace dyf::Backends
 			instanceCount:instanceCount
 			baseVertex:vertexOffset
 			baseInstance:firstInstance];
+	}
+
+	void MetalCommandList::DrawIndirectNative(RHI::BufferHandle arguments, uint32_t offset)
+	{
+		auto* buffer = dynamic_cast<MetalBuffer*>(arguments);
+		if(m_impl->closed || !ValidateDrawState(m_impl) ||
+			m_impl->pipeline->IsMesh() || m_impl->pipeline->IsTessellated() ||
+			buffer == nullptr || NativeBuffer(buffer) == nil ||
+			!RequireBufferState(m_impl, buffer, RHI::ResourceState::IndirectArgument))
+		{
+			Invalidate(m_impl);
+			return;
+		}
+		RetainResource(m_impl, NativeBuffer(buffer));
+		[m_impl->renderEncoder
+			drawPrimitives:static_cast<MTLPrimitiveType>(m_impl->pipeline->GetNativePrimitiveType())
+			indirectBuffer:NativeBuffer(buffer) indirectBufferOffset:offset];
+	}
+
+	void MetalCommandList::DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset)
+	{
+		auto* buffer = dynamic_cast<MetalBuffer*>(arguments);
+		if(m_impl->closed || !ValidateDrawState(m_impl) ||
+			m_impl->pipeline->IsMesh() || m_impl->pipeline->IsTessellated() ||
+			m_impl->indexBuffer == nullptr || NativeBuffer(m_impl->indexBuffer) == nil ||
+			buffer == nullptr || NativeBuffer(buffer) == nil ||
+			!RequireBufferState(m_impl, buffer, RHI::ResourceState::IndirectArgument))
+		{
+			Invalidate(m_impl);
+			return;
+		}
+		RetainResource(m_impl, NativeBuffer(buffer));
+		const MTLIndexType indexType = m_impl->indexFormat == RHI::Format::R16_UINT
+			? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
+		[m_impl->renderEncoder
+			drawIndexedPrimitives:static_cast<MTLPrimitiveType>(m_impl->pipeline->GetNativePrimitiveType())
+			indexType:indexType indexBuffer:NativeBuffer(m_impl->indexBuffer)
+			indexBufferOffset:m_impl->indexOffset
+			indirectBuffer:NativeBuffer(buffer) indirectBufferOffset:offset];
 	}
 
 	void MetalCommandList::DispatchMeshNative(

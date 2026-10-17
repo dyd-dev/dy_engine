@@ -54,6 +54,9 @@ namespace dyf::Backends
     struct D3D12InternalState
     {
         ComPtr<ID3D12Device> device;
+        ComPtr<ID3D12CommandSignature> drawSignature;
+        ComPtr<ID3D12CommandSignature> drawIndexedSignature;
+        ComPtr<ID3D12CommandSignature> dispatchSignature;
         std::shared_ptr<D3D12UploadPool> uploadPool;
         D3D12_RESOURCE_BINDING_TIER resourceBindingTier = D3D12_RESOURCE_BINDING_TIER_1;
         D3D_FEATURE_LEVEL resourceBindingFeatureLevel = D3D_FEATURE_LEVEL_11_0;
@@ -95,6 +98,37 @@ namespace dyf::Backends
         bool frameReady = false;
         bool frameSubmitted = false;
         bool submissionFaulted = false;
+
+        bool InitializeIndirectSignatures()
+        {
+            if (drawSignature && drawIndexedSignature && dispatchSignature) return true;
+            if (!device) return false;
+
+            static_assert(sizeof(RHI::DrawIndirectArguments) == sizeof(D3D12_DRAW_ARGUMENTS));
+            static_assert(sizeof(RHI::DrawIndexedIndirectArguments) == sizeof(D3D12_DRAW_INDEXED_ARGUMENTS));
+            static_assert(sizeof(RHI::DispatchIndirectArguments) == sizeof(D3D12_DISPATCH_ARGUMENTS));
+            D3D12_INDIRECT_ARGUMENT_DESC argument = {};
+            D3D12_COMMAND_SIGNATURE_DESC desc = {};
+            desc.NumArgumentDescs = 1;
+            desc.pArgumentDescs = &argument;
+            ComPtr<ID3D12CommandSignature> draw, indexed, dispatch;
+            argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
+            desc.ByteStride = sizeof(RHI::DrawIndirectArguments);
+            if (FAILED(device->CreateCommandSignature(&desc, nullptr, IID_PPV_ARGS(&draw))))
+                return false;
+            argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED;
+            desc.ByteStride = sizeof(RHI::DrawIndexedIndirectArguments);
+            if (FAILED(device->CreateCommandSignature(&desc, nullptr, IID_PPV_ARGS(&indexed))))
+                return false;
+            argument.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH;
+            desc.ByteStride = sizeof(RHI::DispatchIndirectArguments);
+            if (FAILED(device->CreateCommandSignature(&desc, nullptr, IID_PPV_ARGS(&dispatch))))
+                return false;
+            drawSignature = std::move(draw);
+            drawIndexedSignature = std::move(indexed);
+            dispatchSignature = std::move(dispatch);
+            return true;
+        }
 
         auto FindActiveCommandList(const RHI::ICommandList* command)
         {
@@ -371,6 +405,7 @@ namespace dyf::Backends
             return -1;
         }
         m_internal->uploadPool = MakeD3D12UploadPool(m_internal->device.Get());
+        if (!m_internal->InitializeIndirectSignatures()) return -1;
 
         D3D12_FEATURE_DATA_D3D12_OPTIONS options = {};
         const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
@@ -422,11 +457,6 @@ namespace dyf::Backends
 
 
 uint64_t D3D12Device::GetLastSubmissionNative() const {return m_internal->lastSubmittedValue;}
-RHI::UploadMemoryStatistics D3D12Device::GetUploadMemoryStatisticsNative() const
-{
-    return m_internal && m_internal->uploadPool
-        ? m_internal->uploadPool->GetStatistics() : RHI::UploadMemoryStatistics{};
-}
 uint64_t D3D12Device::GetCompletedSubmissionNative() {uint64_t value=0; return m_internal->CollectCompletedWork(value)?value:0;}
 void D3D12Device::DiscardCommandListNative(RHI::ICommandList* list) {auto& active=m_internal->activeCommandLists; active.erase(std::remove_if(active.begin(),active.end(),[list](const auto& value){return value.get()==list;}),active.end());}
 
@@ -475,6 +505,12 @@ bool D3D12Device::SupportsNative(RHI::Feature feature) const
     if(feature == RHI::Feature::TimestampQuery) return m_internal->timestampFrequency != 0;
     switch(feature)
     {
+    case RHI::Feature::IndirectDraw:
+    case RHI::Feature::IndirectFirstInstance:
+    case RHI::Feature::IndirectTessellation:
+        return m_internal && m_internal->drawSignature && m_internal->drawIndexedSignature;
+    case RHI::Feature::IndirectDispatch:
+        return m_internal && m_internal->dispatchSignature;
     case RHI::Feature::Compute:
     case RHI::Feature::Rasterization:
     case RHI::Feature::Tessellation:
@@ -509,6 +545,8 @@ uint64_t D3D12Device::GetLimitNative(RHI::Limit limit) const
         return D3D12_MAX_ROOT_COST * sizeof(uint32_t);
     case RHI::Limit::Texture2DDimension:
         return D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;
+    case RHI::Limit::TextureArrayLayers:
+        return D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION;
     case RHI::Limit::UniformBufferOffsetAlignment:
         return D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
     case RHI::Limit::StorageBufferOffsetAlignment:
@@ -926,9 +964,12 @@ void D3D12Device::DestroySwapchainNative()
         // Also supports native fixtures that supply a device without Initialize.
         if (!m_internal->uploadPool)
             m_internal->uploadPool = MakeD3D12UploadPool(m_internal->device.Get());
+        if (!m_internal->InitializeIndirectSignatures()) return nullptr;
 
         auto commandList = std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>(
-            new D3D12CommandList(m_internal->device.Get(), m_internal->uploadPool));
+            new D3D12CommandList(m_internal->device.Get(), m_internal->uploadPool,
+                m_internal->drawSignature.Get(), m_internal->drawIndexedSignature.Get(),
+                m_internal->dispatchSignature.Get()));
         if (commandList->GetNativeList() == nullptr) return nullptr;
         return m_internal->activeCommandLists.emplace_back(std::move(commandList)).get();
     }
@@ -1134,6 +1175,7 @@ void D3D12Device::DestroySwapchainNative()
             case RHI::Format::R8G8B8A8_UNORM: return DXGI_FORMAT_R8G8B8A8_UNORM;
             case RHI::Format::R16G16B16A16_FLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
             case RHI::Format::R32G32_FLOAT: return DXGI_FORMAT_R32G32_FLOAT;
+            case RHI::Format::R32_FLOAT: return DXGI_FORMAT_R32_FLOAT;
             case RHI::Format::R32G32B32_FLOAT: return DXGI_FORMAT_R32G32B32_FLOAT;
             case RHI::Format::R32G32B32A32_FLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;
             case RHI::Format::R32_UINT: return DXGI_FORMAT_R32_UINT;

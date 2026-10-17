@@ -1,5 +1,5 @@
 #include "dyf/Image.h"
-#include "dyf/Renderer.h"
+#include "RendererInternal.h"
 #include "dyf/Platform/Profiler.h"
 #include "dyf/Canvas.h"
 
@@ -10,7 +10,7 @@
 #include "dyf/RHI/ResourceSet.h"
 #include "dyf/RHI/Shader.h"
 #include "dyf/RHI/Texture.h"
-#include "dyf/RHI/ResourceScope.h"
+#include "../RHI/ResourceScope.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -19,13 +19,13 @@
 
 namespace dyf
 {
-Renderer::CanvasFrame::CanvasFrame(Renderer& renderer):owner(renderer),imageCount(renderer.canvasImages.size())
+Renderer::Impl::CanvasFrame::CanvasFrame(Impl& renderer):owner(renderer),imageCount(renderer.canvasImages.size())
 {
     owner.canvasPendingVertices=owner.canvasVertices;
     owner.canvasVertexCursor=0;
     for(auto& image:owner.canvasImages)image.used=false;
 }
-Renderer::CanvasFrame::~CanvasFrame()
+Renderer::Impl::CanvasFrame::~CanvasFrame()
 {
     if(committed)return;
     for(size_t i=0;i<owner.canvasPendingVertices.size();++i)
@@ -38,7 +38,7 @@ Renderer::CanvasFrame::~CanvasFrame()
         owner.canvasImages.pop_back();
     }
 }
-void Renderer::CanvasFrame::Commit()
+void Renderer::Impl::CanvasFrame::Commit()
 {
     for(size_t i=0;i<owner.canvasVertices.size();++i)
         if(owner.canvasVertices[i].buffer!=owner.canvasPendingVertices[i].buffer)
@@ -58,7 +58,7 @@ void Renderer::CanvasFrame::Commit()
 }
 
 // Canvas의 CPU 정점과 이미지를 그리는 기본 파이프라인을 공개 RHI로 작성한다.
-bool Renderer::InitializeCanvas(RHI::Format format)
+bool Renderer::Impl::InitializeCanvas(RHI::Format format)
 {
     using namespace RHI;
     if(canvasPipeline) return true;
@@ -86,7 +86,7 @@ bool Renderer::InitializeCanvas(RHI::Format format)
     canvasPipeline=device->CreateGraphicsPipeline(desc);
     return canvasPipeline!=nullptr;
 }
-bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList, RHI::TextureHandle target, bool overlay, bool graphManagedTarget)
+bool Renderer::Impl::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList, RHI::TextureHandle target, bool overlay, bool graphManagedTarget)
 {
     using namespace RHI;
     if(!canvas.IsValid()) {std::fprintf(stderr,"dyf: Invalid canvas dimensions.\n");return false;}
@@ -207,7 +207,7 @@ bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList
     return true;
 }
 
-bool Renderer::RenderCanvas(const Canvas& canvas, Image* readback)
+bool Renderer::Impl::RenderCanvas(const Canvas& canvas, Image* readback)
 {
     if(!canvas.IsValid()) {std::fprintf(stderr,"dyf: Invalid canvas dimensions.\n");return false;}
     if(!device->BeginFrame())

@@ -1,0 +1,1 @@
+2개 프레임 슬롯에 CommandList와 완료 Fence를 보관한다. Submit·Present·완료 확인을 구분하고, GPU 완료 후 같은 슬롯을 Reset해 재사용한다.

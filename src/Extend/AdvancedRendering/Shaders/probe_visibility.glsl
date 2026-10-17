@@ -1,0 +1,25 @@
+#ifndef DY_PROBE_VISIBILITY_INCLUDED
+#define DY_PROBE_VISIBILITY_INCLUDED
+float SpatialProbeVisibility(vec3 position,vec3 probePosition,float valid,float scale,uint layer,
+    texture2DArray image,sampler imageSampler)
+{
+    if(valid<=.5 || scale<=0) return 1;
+    vec3 delta=position-probePosition;float distance=length(delta);
+    if(distance<=1e-6) return 1;
+    vec3 direction=delta/distance;
+    vec2 coordinate=vec2(atan(direction.y,direction.x)*.15915494309189535+.5,
+        acos(clamp(direction.z,-1,1))*.3183098861837907);
+    ivec2 dimensions=textureSize(sampler2DArray(image,imageSampler),0).xy;
+    vec2 pixel=coordinate*vec2(dimensions)-.5,w=fract(pixel);ivec2 a=ivec2(floor(pixel)),b=a+1;
+    a.x=(a.x%dimensions.x+dimensions.x)%dimensions.x;b.x=(b.x%dimensions.x+dimensions.x)%dimensions.x;
+    a.y=clamp(a.y,0,dimensions.y-1);b.y=clamp(b.y,0,dimensions.y-1);
+    vec2 moments=mix(mix(texelFetch(sampler2DArray(image,imageSampler),ivec3(a,int(layer)),0),
+        texelFetch(sampler2DArray(image,imageSampler),ivec3(b.x,a.y,int(layer)),0),w.x),
+        mix(texelFetch(sampler2DArray(image,imageSampler),ivec3(a.x,b.y,int(layer)),0),
+        texelFetch(sampler2DArray(image,imageSampler),ivec3(b,int(layer)),0),w.x),w.y).rg;
+    float footprint=moments.x*(3.141592653589793/max(float(dimensions.y),1));
+    float excess=max(distance/scale-moments.x-footprint,0);
+    float variance=max(moments.y-moments.x*moments.x,footprint*footprint);
+    return excess<=0?1:(variance>0?variance/(variance+excess*excess):0);
+}
+#endif

@@ -16,13 +16,15 @@ namespace dyf
 	{
 		MaterialDesc material;
 		std::string name;
-		std::array<std::string, kMaterialTextureCount> texturePaths = {};
-		std::array<bool, kMaterialTextureCount> hasTexture = {};
-		std::array<uint32_t, kMaterialTextureCount> textureIndices = [] {
-			std::array<uint32_t, kMaterialTextureCount> indices = {};
+		std::array<std::string, ToIndex(MaterialTextureKind::Count)> texturePaths = {};
+		std::array<bool, ToIndex(MaterialTextureKind::Count)> hasTexture = {};
+		std::array<uint32_t, ToIndex(MaterialTextureKind::Count)> textureIndices = [] {
+			std::array<uint32_t, ToIndex(MaterialTextureKind::Count)> indices = {};
 			indices.fill(UINT32_MAX);
 			return indices;
 		}();
+		// 독립 거칠기 원본의 R 채널을 재질 준비 시 공통 ORM의 G 채널에 결합한다.
+		std::string roughnessTexturePath;
 	};
 
 	struct MorphTarget
@@ -43,6 +45,10 @@ namespace dyf
 		uint32_t nodeIndex = UINT32_MAX;
 		uint32_t skinIndex = UINT32_MAX;
 		std::string name;
+		// Immutable geometry may reference an earlier, owning ModelData::meshes
+		// entry. The reference has empty mesh/skin/morph storage but keeps its own
+		// material and node transform. UINT32_MAX owns the geometry in mesh.
+		uint32_t geometryIndex = UINT32_MAX;
 	};
 
 	struct ModelData
@@ -53,7 +59,30 @@ namespace dyf
 		std::vector<ModelNode> nodes;
 		std::vector<ModelSkin> skins;
 		std::vector<AnimationClip> animations;
+		// Source lights in asset coordinates, independently instanced with the model.
+		std::vector<DirectionalLight> directionalLights;
+		std::vector<PointLight> pointLights;
+		std::vector<SpotLight> spotLights;
 		Math::float4x4 assetTransform = Math::float4x4::Identity();
+	};
+
+	// 모델과 함께 명시한 재질 설정이다. 재질 이름은 정확히 일치해야 한다.
+	struct ModelMaterialOverride
+	{
+		std::string name;
+		float transmissionFactor = 0.0f;
+		float indexOfRefraction = 1.5f;
+		float thickness = 0.0f;
+		Math::float3 attenuationColor = Math::float3(1.0f, 1.0f, 1.0f);
+		float attenuationDistance = 0.0f;
+		// Negative values preserve the imported scalar factors.
+		float roughnessFactor = -1.0f;
+		float metallicFactor = -1.0f;
+		// 네 성분 모두 -1이면 보존한다. 덮어쓸 때는 네 성분 모두 0..1이어야 한다.
+		Math::float4 baseColor = Math::float4(-1.0f, -1.0f, -1.0f, -1.0f);
+		// 빈 문자열은 보존한다. 경로는 모델 파일 기준 상대 경로나 절대 경로다.
+		std::array<std::string, ToIndex(MaterialTextureKind::Count)> texturePaths = {};
+		std::string roughnessTexturePath;
 	};
 
 	struct ModelLoadOptions
@@ -73,6 +102,16 @@ namespace dyf
 		uint64_t maxAnimationKeys = 10000000ull;
 		float fbxBakeRate = 30.0f;
 		float fbxConstantTrackTolerance = 1.0e-5f;
+		// Source conventions are explicit: ordinary FBX specular RGB is not an ORM map.
+		bool fbxSpecularTextureIsOrm = false;
+		bool fbxBaseColorTextureHasOpacity = false;
+		// +1 for OpenGL/glTF tangent-space normals; -1 for DirectX sources.
+		float normalMapYSign = 1.0f;
+		std::vector<ModelMaterialOverride> materialOverrides;
+		bool importLights = false;
+		// Maximum concurrent deferred external-image decodes in LoadModelAsset; >=1.
+		// Workers end when loading completes. This does not change asset identity.
+		uint32_t textureDecodeThreadCount = 1;
 	};
 
 	// Scene에 모델 파일을 추가할 때 사용하는 설정이다. 모델 객체나 생성된 인스턴스가 아니다.
@@ -105,6 +144,9 @@ namespace dyf
 		std::vector<ModelNode> nodes;
 		std::vector<ModelSkin> skins;
 		std::vector<AnimationClip> animations;
+		std::vector<DirectionalLight> directionalLights;
+		std::vector<PointLight> pointLights;
+		std::vector<SpotLight> spotLights;
 		Math::float4x4 assetTransform = Math::float4x4::Identity();
 		Math::float3 boundsCenter = Math::float3(0.0f, 0.0f, 0.0f);
 		float boundsLargestAxis = 0.0f;
@@ -112,6 +154,13 @@ namespace dyf
 	};
 
 	[[nodiscard]] bool LoadModel(const std::string& path, ModelData& outModel, const ModelLoadOptions& options = {});
+	// FBX lights only, in source world coordinates. Geometry, textures and animations
+	// are not decoded. sourceBounds defines the finite range for lights without a cutoff.
+	[[nodiscard]] bool LoadModelLights(
+		const std::string& path,
+		ModelData& outModel,
+		const Math::Bounds3& sourceBounds,
+		const ModelLoadOptions& options = {});
 	[[nodiscard]] bool LoadMesh(const std::string& path, MeshData& outMesh, ModelMaterialInfo* outMaterial = nullptr, const ModelLoadOptions& options = {});
 	[[nodiscard]] bool LoadMesh(const std::string& path, MeshData& outMesh, std::string* outBaseColorTexturePath, const ModelLoadOptions& options = {});
 	[[nodiscard]] bool LoadModelAsset(

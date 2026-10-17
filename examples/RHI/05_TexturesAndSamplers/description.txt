@@ -1,0 +1,1 @@
+화소 업로드와 rowPitch, 텍스처 상태 전환, 정적 샘플러와 ResourceSet을 구성한다. 왼쪽 Nearest와 오른쪽 Linear를 비교한다.

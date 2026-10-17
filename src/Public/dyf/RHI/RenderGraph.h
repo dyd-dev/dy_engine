@@ -8,12 +8,14 @@
 #include <vector>
 #include "Barrier.h"
 
-namespace dyf::Core { class ThreadPool; }
-
 namespace dyf::RHI
 {
     class ICommandList;
     class IDevice;
+
+    // Independent는 다른 패스 callback과 변경 가능한 CPU 상태를 공유하지 않는다.
+    // 기록 모드는 GPU 실행 순서나 배리어를 바꾸지 않는다.
+    enum class RGRecordingMode : uint8_t { Ordered, Independent };
 
     struct RGExecutionStage
     {
@@ -37,8 +39,9 @@ namespace dyf::RHI
     class RenderGraphPass
     {
     public:
-        explicit RenderGraphPass(std::string name, uint32_t index)
-            : m_name(std::move(name)), m_index(index) {}
+        explicit RenderGraphPass(std::string name, uint32_t index,
+            RGRecordingMode mode = RGRecordingMode::Ordered)
+            : m_name(std::move(name)), m_index(index), m_recordingMode(mode) {}
         RenderGraphPass(const RenderGraphPass&) = delete;
         RenderGraphPass& operator=(const RenderGraphPass&) = delete;
         RenderGraphPass(RenderGraphPass&&) = delete;
@@ -59,6 +62,7 @@ namespace dyf::RHI
 
         [[nodiscard]] const std::string& GetName() const { return m_name; }
         [[nodiscard]] uint32_t GetIndex() const { return m_index; }
+        [[nodiscard]] RGRecordingMode GetRecordingMode() const { return m_recordingMode; }
         [[nodiscard]] uint64_t GetRevision() const { return m_revision; }
         [[nodiscard]] PipelineHandle GetPipeline() const { return m_pipeline; }
         [[nodiscard]] const std::vector<RGResourceBinding>& GetReads() const { return m_reads; }
@@ -70,6 +74,7 @@ namespace dyf::RHI
     private:
         std::string m_name;
         uint32_t m_index = 0;
+        RGRecordingMode m_recordingMode = RGRecordingMode::Ordered;
         uint64_t m_revision = 0;
         PipelineHandle m_pipeline = nullptr;
         std::vector<RGResourceBinding> m_reads;
@@ -95,7 +100,7 @@ namespace dyf::RHI
             ResourceState initialState, ResourceState finalState);
         [[nodiscard]] RGResourceHandle ImportBuffer(const std::string& name, BufferHandle buffer,
             ResourceState initialState, ResourceState finalState);
-        RenderGraphPass& AddPass(const std::string& name);
+        RenderGraphPass& AddPass(const std::string& name, RGRecordingMode mode = RGRecordingMode::Ordered);
 
         // 등록 순서의 RAW/WAR/WAW 의존성과 패스별/종료 배리어를 계산한다.
         [[nodiscard]] bool Compile();
@@ -104,18 +109,26 @@ namespace dyf::RHI
         // Execute는 그래프 상태를 갱신하지 않는다. 재실행 시 initialState를 다시 만족해야 한다.
         // 구성/Compile/Reset과 실행을 동시에 호출하지 않는다.
         [[nodiscard]] bool Execute(ICommandList* commandList) const;
-        // 의존성이 없는 패스의 RHI 명령과 각 목록의 네이티브 명령을 병렬 기록한다.
+        // Independent 패스는 GPU 의존성과 무관하게 한 묶음으로 병렬 기록한다.
+        // Ordered 패스는 기존 의존 단계 순서대로 기록하며 같은 단계 안에서는 병렬 기록한다.
+        // 각 목록의 네이티브 기록도 병렬화하며 GPU 제출 순서는 그대로 유지한다.
         // 성공 시 비어 있던 commandLists에 닫힌 목록을 제출 순서대로 반환한다.
         // 호출자는 목록을 순서대로 한 번에 Submit하고 DestroyCommandList로 해제한다.
         // GPU 완료까지의 자원 보유와 완료 펜스는 기존 IDevice::Submit 계약을 따른다.
         // 실패 시 출력은 비어 있으며 모든 작업 합류/목록 폐기 후 callback 예외를 전파한다.
-        // pool=nullptr/1 worker 또는 같은 pool의 worker에서 호출하면 현재 스레드에서 기록한다.
+        // 작업자는 장치가 관리한다. threadCount=0은 하드웨어 작업자 수를 선택하고,
+        // 1이면 현재 스레드에서 기록한다. 같은 작업자에서 재진입해도 직렬 기록한다.
         // callback의 공유 데이터는 호출자가 동기화한다. callback에서 Submit/Present,
         // 목록 Close/Reset/Destroy 또는 그래프를 변경하지 않는다. 첫 callback 전에
         // 모든 import/pipeline을 보유하며 소유 핸들 해제 후에도 기록된 참조는 유지한다.
         // 반환 전에 네이티브 기록까지 완료한다. GPU 제출은 호출자가 수행한다.
-        [[nodiscard]] bool ExecuteParallel(IDevice* device, Core::ThreadPool* pool,
-            std::vector<ICommandList*>& commandLists) const;
+        [[nodiscard]] bool ExecuteParallel(IDevice* device,
+            std::vector<ICommandList*>& commandLists, uint32_t threadCount = 0) const;
+        // Optional caller-owned query with at least 2 + 2 * pass-count slots.
+        // Slots 0/1 span the graph; slots 2+2*pass / 3+2*pass surround that pass,
+        // including its barriers. Reset is recorded once before all pass lists.
+        // The caller retains the query through Submit and reads after its completion fence.
+        void SetTimestampQuery(TimestampQueryHandle query) { m_timestampQuery=query; }
         void Reset();
 
         [[nodiscard]] bool IsCompiled() const;
@@ -141,6 +154,8 @@ namespace dyf::RHI
         std::vector<Resource> m_resources;
         std::unordered_map<std::string, RGResourceHandle> m_resourceNameToHandle;
         std::unordered_map<uint64_t, uint32_t> m_resourceIndices;
+        std::unordered_map<BufferHandle, RGResourceHandle> m_bufferHandles;
+        std::unordered_map<TextureHandle, RGResourceHandle> m_textureHandles;
         std::vector<std::unique_ptr<RenderGraphPass>> m_passes;
         std::vector<uint32_t> m_executionOrder;
         std::vector<RGExecutionStage> m_executionStages;
@@ -148,5 +163,6 @@ namespace dyf::RHI
         std::vector<ResourceBarrierDesc> m_finalBarriers;
         std::vector<uint64_t> m_compiledRevisions;
         bool m_compiled = false;
+        TimestampQueryHandle m_timestampQuery = nullptr;
     };
 }

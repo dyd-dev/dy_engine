@@ -1,3 +1,4 @@
+#include "../../ResourceScope.h"
 #include "dyf.h"
 #include "dyf/RHI.h"
 #include "vertex.h"
@@ -142,7 +143,7 @@ int main(int argc, char** argv) try {
     }
     auto& device = *owner;
 
-    ResourceScope resources(device);
+    example::ResourceScope resources(device);
 
     // 3. 스왑체인 생성
     SwapchainDesc swap;
@@ -211,7 +212,7 @@ int main(int argc, char** argv) try {
     fogDesc.layout = {fogBindings.data(), uint32_t(fogBindings.size()), sizeof(Params), ShaderStageFlags::Fragment, 15};
     auto fogPipeline = resources.Keep(device.CreateGraphicsPipeline(fogDesc));
 
-    std::unique_ptr<ResourceScope> imageResources;
+    std::unique_ptr<example::ResourceScope> imageResources;
     uint32_t imageWidth = 0;
     uint32_t imageHeight = 0;
     bool initializeImages = true;
@@ -249,7 +250,7 @@ int main(int argc, char** argv) try {
             if (!device.WaitIdle()) {
                 throw std::runtime_error("Resize wait failed.");
             }
-            imageResources = std::make_unique<ResourceScope>(device);
+            imageResources = std::make_unique<example::ResourceScope>(device);
             imageWidth = dimensions.width;
             imageHeight = dimensions.height;
             initializeImages = true;
@@ -270,7 +271,7 @@ int main(int argc, char** argv) try {
         params.sizeTime[1] = float(imageHeight);
         params.sizeTime[2] = fixedTime ? timeValue : float(frame) / 60.0f;
 
-        ResourceScope frameResources(device);
+        example::ResourceScope frameResources(device);
         auto* commands = frameResources.Keep(device.AcquireCommandList());
 
         // 초기 텍스처 상태 클리어

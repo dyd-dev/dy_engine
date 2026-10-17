@@ -1,5 +1,7 @@
 #version 450
 
+invariant gl_Position;
+
 // 이 셰이더가 사용하는 바인딩과 입력 크기다.
 #define RENDERER_DESCRIPTOR_SET 0
 #define RENDERER_MAX_DIRECTIONAL_LIGHTS 4
@@ -52,6 +54,8 @@ layout(set = RENDERER_DESCRIPTOR_SET, binding = RENDERER_BINDING_SHADOW_MATRIX) 
     vec4 directionalSplits[RENDERER_MAX_DIRECTIONAL_LIGHTS];
     mat4 cameraView;
     vec4 filterParams;
+    vec4 viewProjectionParams[128];
+    vec4 softShadowParams;
 } shadowMatrix;
 #endif
 
@@ -94,8 +98,9 @@ void main()
     mat4 world = drawConstants.modelMatrix;
 #endif
     mat3 normalMatrix = MeshNormalMatrix(world);
-    vec4 worldPosition = world * vec4(inPosition, 1.0);
-    gl_Position = drawConstants.viewProjectionMatrix * worldPosition;
+    precise vec4 worldPosition = world * vec4(inPosition, 1.0);
+    precise vec4 clipPosition = drawConstants.viewProjectionMatrix * worldPosition;
+    gl_Position = clipPosition;
     fragUv = inUv;
     fragWorldPosition = worldPosition.xyz;
     fragNormal = MeshNormalizeOr(mat3(normalMatrix) * inNormal, vec3(0,0,1));

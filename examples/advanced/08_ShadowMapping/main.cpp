@@ -1,3 +1,4 @@
+#include "../../ResourceScope.h"
 #include "dyf.h"
 #include "dyf/RHI.h"
 #include "vertex.h"
@@ -149,7 +150,7 @@ int main(int argc, char** argv) try {
     if (!owner) throw std::runtime_error("Device creation failed.");
     auto& device = *owner;
 
-    ResourceScope resources(device);
+    example::ResourceScope resources(device);
     SwapchainDesc swap;
     swap.window = window.GetHandle();
     swap.format = Format::B8G8R8A8_UNORM;
@@ -212,7 +213,7 @@ int main(int argc, char** argv) try {
     auto lightingPipeline = resources.Keep(device.CreateGraphicsPipeline(lightingDesc));
 
     // 크기 변경 시 다시 만들 텍스처·리소스 세트와 프레임 사이에 유지할 상태를 보관한다.
-    std::unique_ptr<ResourceScope> imageResources;
+    std::unique_ptr<example::ResourceScope> imageResources;
     uint32_t imageWidth = 0, imageHeight = 0;
     bool initializeImages = true;
     TextureHandle shadowMap = nullptr;
@@ -236,7 +237,7 @@ int main(int argc, char** argv) try {
         // 그림자 텍스처 자체는 고정 크기 1536×1024를 사용한다.
         if (dimensions.width != imageWidth || dimensions.height != imageHeight) {
             if (!device.WaitIdle()) throw std::runtime_error("Resize wait failed.");
-            imageResources = std::make_unique<ResourceScope>(device);
+            imageResources = std::make_unique<example::ResourceScope>(device);
             imageWidth = dimensions.width;
             imageHeight = dimensions.height;
             initializeImages = true;
@@ -258,7 +259,7 @@ int main(int argc, char** argv) try {
         params.sizeTime[1] = float(imageHeight);
         params.sizeTime[2] = fixedTime ? timeValue : float(frame) / 60.0f;
 
-        ResourceScope frameResources(device);
+        example::ResourceScope frameResources(device);
         auto* commands = frameResources.Keep(device.AcquireCommandList());
 
         // 새로 만든 텍스처를 초기화하고, 이후 렌더링 단계에서 사용할 읽기 상태로 전환한다.

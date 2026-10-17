@@ -3,13 +3,57 @@
 #include "dyf/RHI/ICommandList.h"
 #include "Validation.h"
 #include "dyf/RHI/Readback.h"
-#include "dyf/Core/ThreadPool.h"
+#include "ThreadPool.h"
+#include "Query.h"
 #include <chrono>
 #include <thread>
 
 namespace dyf::RHI
 {
+struct IDevice::RecordingState
+{
+    explicit RecordingState(uint32_t count) : threadCount(count), pool(count) {}
+    uint32_t threadCount;
+    ThreadPool pool;
+};
+
 IDevice::~IDevice() = default;
+
+void IDevice::RecordParallel(uint32_t count, uint32_t threadCount,
+    const std::function<void(uint32_t)>& record)
+{
+    if(count <= 1 || threadCount == 1)
+    {
+        for(uint32_t i = 0; i < count; ++i) record(i);
+        return;
+    }
+    std::shared_ptr<RecordingState> recording;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+        if(!m_recording || m_recording->threadCount != threadCount)
+            m_recording = std::make_shared<RecordingState>(threadCount);
+        recording = m_recording;
+    }
+    auto& pool = recording->pool;
+    if(pool.GetThreadCount() <= 1 || pool.IsWorkerThread())
+    {
+        for(uint32_t i = 0; i < count; ++i) record(i);
+        return;
+    }
+    std::vector<std::future<void>> pending;
+    pending.reserve(count);
+    std::exception_ptr failure;
+    try
+    {
+        for(uint32_t i = 0; i < count; ++i)
+            pending.push_back(pool.Enqueue([&, i] { record(i); }));
+    }
+    catch(...) { failure = std::current_exception(); }
+    for(auto& job : pending)
+        try { job.get(); }
+        catch(...) { if(!failure) failure = std::current_exception(); }
+    if(failure) std::rethrow_exception(failure);
+}
 
 void IDevice::ReportDiagnostic(DiagnosticSeverity severity, const char* message) const
 {
@@ -111,6 +155,20 @@ bool IDevice::WaitIdle()
     return WaitIdleNative();
 }
 
+bool IDevice::TryBeginSwapchainRetirement()
+{
+    std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+    if(m_swapchainRetirementPending) return false;
+    m_swapchainRetirementPending = true;
+    return true;
+}
+
+void IDevice::CompleteSwapchainRetirement()
+{
+    std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+    m_swapchainRetirementPending = false;
+}
+
 bool IDevice::CreateSwapchain(const SwapchainDesc& desc)
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
@@ -204,10 +262,13 @@ void IDevice::ReleaseResources()
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
     std::vector<std::shared_ptr<void>> references;
+    std::vector<std::shared_ptr<const ICommandList::ReferenceSnapshot>> snapshots;
     for(auto* commands : m_recordedCommands)
     {
         for(auto& reference : commands->m_references) references.push_back(std::move(reference));
         commands->m_references.clear();
+        commands->m_referenceHandles.clear();
+        if(commands->m_sharedReferences)snapshots.push_back(std::move(commands->m_sharedReferences));
         commands->m_owner = nullptr;
     }
     m_recordedCommands.clear();
@@ -295,7 +356,11 @@ bool IDevice::ResetCommandList(ICommandList* commands)
     }
     commands->m_commands.clear();
     commands->m_stateOperations.clear();
+    commands->m_recordedStates.clear();
+    commands->m_requiredResourceSets.clear();
     commands->m_references.clear();
+    commands->m_referenceHandles.clear();
+    commands->m_sharedReferences.reset();
     commands->m_recordingClosed=commands->m_recordingFailed=false;
     commands->m_debugEventDepth=0;
     commands->m_rendering=commands->m_viewport=commands->m_scissor=false;
@@ -314,7 +379,7 @@ void IDevice::DestroyCommandList(ICommandList* commands)
     if(commands && m_userCommands.erase(commands)) delete commands;
 }
 
-bool IDevice::PrepareCommandLists(ICommandList* const* commands, uint32_t count, Core::ThreadPool* pool)
+bool IDevice::PrepareCommandLists(ICommandList* const* commands, uint32_t count, uint32_t threadCount)
 {
     if(!commands || !count) return false;
     struct Work { ICommandList* source; ICommandList* native; };
@@ -349,29 +414,15 @@ bool IDevice::PrepareCommandLists(ICommandList* const* commands, uint32_t count,
                 native->m_owner = this;
                 m_recordedCommands.insert(native);
                 native->m_references = commands[i]->m_references;
+                native->m_referenceHandles = commands[i]->m_referenceHandles;
+                native->m_sharedReferences = commands[i]->m_sharedReferences;
             }
         }
         std::vector<uint8_t> recorded(work.size(), 0);
-        const auto record = [&](size_t i) {
+        const auto record = [&](uint32_t i) {
             recorded[i] = work[i].native->ReplayNative(work[i].source->m_commands);
         };
-        if(pool && pool->GetThreadCount() > 1 && !pool->IsWorkerThread() && work.size() > 1)
-        {
-            std::vector<std::future<void>> pending;
-            pending.reserve(work.size());
-            std::exception_ptr failure;
-            try
-            {
-                for(size_t i = 0; i < work.size(); ++i)
-                    pending.push_back(pool->Enqueue([&, i] { record(i); }));
-            }
-            catch(...) { failure = std::current_exception(); }
-            for(auto& job : pending)
-                try { job.get(); }
-                catch(...) { if(!failure) failure = std::current_exception(); }
-            if(failure) std::rethrow_exception(failure);
-        }
-        else for(size_t i = 0; i < work.size(); ++i) record(i);
+        RecordParallel(static_cast<uint32_t>(work.size()), threadCount, record);
         for(auto success : recorded)
             if(!success)
             {
@@ -398,13 +449,30 @@ bool IDevice::Submit(ICommandList** commands, uint32_t count)
             (commands[i]->m_imageGeneration && commands[i]->m_imageGeneration!=m_imageGeneration)) return false;
         for(uint32_t j=0;j<i;++j) if(commands[i]==commands[j]) return false;
     }
-    auto states=m_resourceStates;
-    for(uint32_t i=0;i<count;++i)for(const auto& validate:commands[i]->m_stateOperations)
-        if(!validate(states))
+    // 제출이 성공할 때까지 전역 상태를 유지하고 배리어로 바뀐 상태만 따로 보관한다.
+    ICommandList::StateMap states;
+    for(uint32_t i=0;i<count;++i)for(const auto& operation:commands[i]->m_stateOperations)
+    {
+        const auto key=std::make_tuple(operation.resource,operation.mip,operation.layer);
+        const auto changed=states.find(key);
+        const ResourceState* current=nullptr;
+        if(changed!=states.end()) current=&changed->second;
+        else
+        {
+            const auto original=m_resourceStates.find(key);
+            if(original!=m_resourceStates.end()) current=&original->second;
+        }
+        if(!current || *current!=operation.before)
         {
             ReportDiagnostic(DiagnosticSeverity::Error, "Submit: resource state mismatch. Barrier.before must match the current state (Undefined is not a wildcard); bound resources must still have the required state at draw/dispatch.");
             return false;
         }
+        if(operation.barrier)
+        {
+            if(changed!=states.end()) changed->second=operation.after;
+            else states.emplace(key,operation.after);
+        }
+    }
     std::vector<ICommandList*> native(count);
     if(!PrepareCommandLists(commands, count)) return false;
     for(uint32_t i=0;i<count;++i)
@@ -453,6 +521,7 @@ TextureHandle IDevice::CreateTexture(const TextureDesc& desc)
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
     if(!desc.width || !desc.height || !desc.depthOrArraySize || !desc.mipLevels
         || desc.width > GetLimit(Limit::Texture2DDimension) || desc.height > GetLimit(Limit::Texture2DDimension)
+        || desc.depthOrArraySize > GetLimit(Limit::TextureArrayLayers)
         || desc.mipLevels > MaximumMipCount(desc.width, desc.height)
         || !FormatSize(desc.format) || desc.usage == TextureUsage::None) return nullptr;
     auto* texture = CreateTextureNative(desc);
@@ -536,6 +605,7 @@ PipelineHandle IDevice::CreateGraphicsPipeline(const GraphicsPipelineDesc& desc)
         pipeline->m_requiredVertexBindings = std::move(requiredVertexBindings);
         pipeline->m_colorFormats = std::move(colorFormats);
         pipeline->m_depthStencilFormat=desc.depthStencil.format;
+        pipeline->m_topology=desc.topology;
     }
     if(pipeline) { ++m_allocationCounters.pipelines.live; ++m_allocationCounters.pipelines.created; }
     Track(pipeline, [](IDevice& device, void* handle) {
@@ -580,6 +650,12 @@ ResourceSetHandle IDevice::CreateResourceSet(const ResourceSetDesc& desc)
     for(uint32_t i = 0; i < desc.bindingCount; ++i)
     {
         const auto& binding = desc.bindings[i];
+        if(binding.buffer && binding.size==0)
+        {
+            ReportDiagnostic(DiagnosticSeverity::Error,
+                "CreateResourceSet: buffer bindings require an explicit nonzero byte range; size=0 does not select the whole buffer.");
+            return nullptr;
+        }
         const void* handles[] = {binding.buffer, binding.texture};
         for(const void* handle : handles)
             if(handle)

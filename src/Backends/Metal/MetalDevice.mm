@@ -23,6 +23,7 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <dispatch/dispatch.h>
+#import <TargetConditionals.h>
 
 namespace dyf::Backends
 {
@@ -254,12 +255,6 @@ namespace dyf::Backends
     {
     }
 
-    RHI::UploadMemoryStatistics MetalDevice::GetUploadMemoryStatisticsNative() const
-    {
-        return m_impl != nullptr && m_impl->uploadPool ?
-            m_impl->uploadPool->GetStatistics() : RHI::UploadMemoryStatistics{};
-    }
-
     MetalDevice::~MetalDevice()
     {
         if(m_impl == nullptr) return;
@@ -355,6 +350,25 @@ bool MetalDevice::SupportsNative(RHI::Feature feature) const
     if(!m_impl || m_impl->device == nil) return false;
     switch(feature)
     {
+    case RHI::Feature::IndirectDraw:
+    case RHI::Feature::IndirectDispatch:
+    case RHI::Feature::IndirectFirstInstance:
+        // Native indirect arguments and base vertex/instance require Apple3
+        // on iOS; every Mac Metal GPU supports these commands.
+        // https://developer.apple.com/metal/capabilities/
+#if TARGET_OS_OSX || TARGET_OS_MACCATALYST
+        return true;
+#else
+        if(@available(iOS 13.0, tvOS 13.0, *))
+            return [m_impl->device supportsFamily:MTLGPUFamilyApple3];
+#if TARGET_OS_TV
+        if(@available(tvOS 11.0, *))
+            return [m_impl->device supportsFeatureSet:MTLFeatureSet_tvOS_GPUFamily2_v1];
+        return false;
+#else
+        return [m_impl->device supportsFeatureSet:MTLFeatureSet_iOS_GPUFamily3_v1];
+#endif
+#endif
     case RHI::Feature::Compute:
     case RHI::Feature::Rasterization:
     case RHI::Feature::Tessellation:
@@ -400,6 +414,10 @@ uint64_t MetalDevice::GetLimitNative(RHI::Limit limit) const
             if([device supportsFamily:MTLGPUFamilyApple10]) return 32768;
 #endif
         return 16384;
+    case RHI::Limit::TextureArrayLayers:
+        // Apple의 arrayLength 명세와 모든 지원 GPU family 표의 실제 한도다.
+        // https://developer.apple.com/documentation/metal/mtltexture/arraylength
+        return 2048;
     case RHI::Limit::UniformBufferOffsetAlignment:
         // Apple GPU의 constant 정렬은 4B, Mac2의 정렬은 32B다. 장치 family를 확인한다.
         if(@available(macOS 11.0, *))

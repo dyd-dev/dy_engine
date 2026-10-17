@@ -42,6 +42,11 @@ namespace dyf
         return mesh.vertices.empty() ? nullptr : &mesh;
     }
 
+    bool ModelScene::HasEntityMorphTargets(EntityID entity) const
+    {
+        return ValidEntity(entity, m_entityHasMorphTargets.size()) && m_entityHasMorphTargets[ToIndex(entity)];
+    }
+
 	ModelInstanceID ModelScene::CreateModelInstance(ModelInstance instance)
 	{
 		const ModelAsset* asset = TryGetModelAsset(instance.assetId);
@@ -88,6 +93,9 @@ namespace dyf
 		binding.skinIndex = skinIndex;
 		binding.assetMeshIndex = assetMeshIndex;
 		instance.bindings.push_back(binding);
+        m_entityHasMorphTargets.resize(GetEntityCount(), false);
+        m_entityHasMorphTargets[ToIndex(entity)] = asset != nullptr && assetMeshIndex != UINT32_MAX &&
+            !asset->meshes[assetMeshIndex].morphTargets.empty();
 		return true;
 	}
 

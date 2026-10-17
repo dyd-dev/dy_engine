@@ -2,11 +2,14 @@
 #include "ModelLoader.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <limits>
 
 #include <dyf/Extends/Model/ModelScene.h>
@@ -21,6 +24,14 @@ namespace dyf
 			Math::float3 max;
 			bool valid = false;
 		};
+
+		[[nodiscard]] const ModelMesh* ResolveGeometry(const ModelData& model, const ModelMesh& mesh)
+		{
+			if(mesh.geometryIndex == UINT32_MAX) return &mesh;
+			if(mesh.geometryIndex >= model.meshes.size()) return nullptr;
+			const auto& source = model.meshes[mesh.geometryIndex];
+			return source.geometryIndex == UINT32_MAX ? &source : nullptr;
+		}
 
 		void IncludePoint(ModelBounds& bounds, const Math::float3& point)
 		{
@@ -49,10 +60,12 @@ namespace dyf
 			const bool hasBindGlobals = BuildGlobalNodeMatrices(model.nodes, bindPose, bindGlobals);
 			for(const ModelMesh& mesh : model.meshes)
 			{
+				const auto* geometry = ResolveGeometry(model, mesh);
+				if(!geometry) return {};
 				Math::float4x4 vertexTransform = model.assetTransform;
 				if(hasBindGlobals && mesh.nodeIndex < bindGlobals.size())
 					vertexTransform = vertexTransform * bindGlobals[mesh.nodeIndex];
-				for(const Vertex& vertex : mesh.mesh.vertices)
+				for(const Vertex& vertex : geometry->mesh.vertices)
 				{
 					IncludePoint(bounds, Math::TransformPoint(vertexTransform, vertex.position));
 				}
@@ -134,6 +147,42 @@ namespace dyf
 			const Image* textures[]={&material.baseColorTexture,&material.metallicRoughnessTexture,&material.normalTexture,&material.occlusionTexture,&material.emissiveTexture};
             for(uint32_t slot=0;slot<5;++slot)
                 if((source.textureIndices[slot]<importedTextures.size() || (source.hasTexture[slot] && !source.texturePaths[slot].empty())) && !textures[slot]->IsValid())return false;
+            if(!source.roughnessTexturePath.empty())
+            {
+                Image roughness;
+                if(!LoadExternalImage(source.roughnessTexturePath,roughness,options,budget))return false;
+                const auto& orm=material.metallicRoughnessTexture;
+                const bool hasOrm=orm.IsValid();
+                const auto& roughnessPixels=roughness.GetPixels();
+                const auto& ormPixels=orm.GetPixels();
+                const uint32_t width=std::max(roughness.GetWidth(),hasOrm?orm.GetWidth():1u);
+                const uint32_t height=std::max(roughness.GetHeight(),hasOrm?orm.GetHeight():1u);
+                const uint64_t pixelCount=uint64_t(width)*height;
+                if(pixelCount>std::numeric_limits<size_t>::max()/4u)
+                    return ReportModelError(source.roughnessTexturePath,"combined roughness texture exceeds addressable memory");
+                if(!budget.AddBytes(pixelCount,4,"combined roughness texture pixels"))return false;
+                std::vector<uint8_t> pixels(static_cast<size_t>(pixelCount*4u),255u);
+                // 크기가 다르면 정규화된 같은 UV의 원본 텍셀을 사용하며 색 공간 변환은 하지 않는다.
+                const auto offset=[width,height](const Image& image,uint32_t x,uint32_t y) {
+                    const auto sx=static_cast<uint32_t>(uint64_t(x)*image.GetWidth()/width);
+                    const auto sy=static_cast<uint32_t>(uint64_t(y)*image.GetHeight()/height);
+                    return (size_t(sy)*image.GetWidth()+sx)*4u;
+                };
+                for(uint32_t y=0;y<height;++y)
+                    for(uint32_t x=0;x<width;++x)
+                    {
+                        const size_t target=(size_t(y)*width+x)*4u;
+                        if(hasOrm)
+                        {
+                            const auto original=offset(orm,x,y);
+                            pixels[target]=ormPixels[original];
+                            pixels[target+2u]=ormPixels[original+2u];
+                            pixels[target+3u]=ormPixels[original+3u];
+                        }
+                        pixels[target+1u]=roughnessPixels[offset(roughness,x,y)];
+                    }
+                material.metallicRoughnessTexture=Image(width,height,std::move(pixels),ColorSpace::Linear);
+            }
             return true;
 		}
 
@@ -174,6 +223,29 @@ namespace dyf
 			};
 			key += "|fbxBakeRate=" + floatIdentity(options.fbxBakeRate);
 			key += "|fbxConstantTrackTolerance=" + floatIdentity(options.fbxConstantTrackTolerance);
+			key += "|fbxSpecularTextureIsOrm=" + std::to_string(options.fbxSpecularTextureIsOrm);
+			key += "|fbxBaseColorTextureHasOpacity=" + std::to_string(options.fbxBaseColorTextureHasOpacity);
+			key += "|normalMapYSign=" + floatIdentity(options.normalMapYSign);
+			key += "|importLights=" + std::to_string(options.importLights);
+			key += "|materialOverrides=" + std::to_string(options.materialOverrides.size());
+			for(const ModelMaterialOverride& value : options.materialOverrides)
+			{
+				key += "|name=" + std::to_string(value.name.size()) + ":" + value.name;
+				key += "|transmission=" + floatIdentity(value.transmissionFactor);
+				key += "|ior=" + floatIdentity(value.indexOfRefraction);
+				key += "|thickness=" + floatIdentity(value.thickness);
+				key += "|attenuation=" + floatIdentity(value.attenuationColor.x) + ","
+					+ floatIdentity(value.attenuationColor.y) + "," + floatIdentity(value.attenuationColor.z);
+				key += "|distance=" + floatIdentity(value.attenuationDistance);
+				key += "|roughness=" + floatIdentity(value.roughnessFactor);
+				key += "|metallic=" + floatIdentity(value.metallicFactor);
+				key += "|baseColor=" + floatIdentity(value.baseColor.x) + "," + floatIdentity(value.baseColor.y)
+					+ "," + floatIdentity(value.baseColor.z) + "," + floatIdentity(value.baseColor.w);
+				for(size_t slot = 0; slot < value.texturePaths.size(); ++slot)
+					key += "|texture" + std::to_string(slot) + "=" + std::to_string(value.texturePaths[slot].size())
+						+ ":" + value.texturePaths[slot];
+				key += "|roughnessTexture=" + std::to_string(value.roughnessTexturePath.size()) + ":" + value.roughnessTexturePath;
+			}
 			return key;
 		}
 	}
@@ -365,6 +437,8 @@ namespace dyf
 		ModelAssetID* outAsset)
 	{
 		if(outAsset != nullptr) *outAsset = ModelAssetID::Invalid;
+		if(options.textureDecodeThreadCount == 0)
+			return ReportModelError(path, "textureDecodeThreadCount must be at least one");
 		const std::string cacheKey = BuildModelAssetCacheKey(path, options);
 		const ModelAssetID cachedAsset = scene.FindModelAsset(cacheKey);
 		if(IsValid(cachedAsset))
@@ -378,17 +452,21 @@ namespace dyf
 		if(!LoadModel(path, model, options, decodedBytes)) return false;
         ModelLoadBudget budget(path,options);
         if(!budget.AddBytes(decodedBytes,1,"decoded model data")) return false;
-		const bool animatedModel = !model.skins.empty() || !model.animations.empty()
-			|| std::any_of(model.meshes.begin(), model.meshes.end(), [](const ModelMesh& mesh) {
-				return mesh.nodeIndex != UINT32_MAX || !mesh.morphTargets.empty();
-			});
-		for(const ModelMesh& modelMesh : model.meshes)
+		for(size_t meshIndex = 0; meshIndex < model.meshes.size(); ++meshIndex)
 		{
-			if(modelMesh.mesh.vertices.empty() || modelMesh.mesh.indices.empty()) continue;
-			if(animatedModel && modelMesh.nodeIndex >= model.nodes.size()) return false;
-			if(animatedModel
-				&& modelMesh.skinIndex != UINT32_MAX
-				&& modelMesh.skinIndex >= model.skins.size()) return false;
+			const auto& modelMesh = model.meshes[meshIndex];
+			const auto* geometry = ResolveGeometry(model, modelMesh);
+			if(!geometry || (modelMesh.geometryIndex != UINT32_MAX &&
+				(modelMesh.geometryIndex >= meshIndex || !modelMesh.mesh.vertices.empty() ||
+				 !modelMesh.mesh.indices.empty() || !modelMesh.skinInfluences.empty() ||
+				 !modelMesh.morphTargets.empty() || modelMesh.skinIndex != UINT32_MAX ||
+				 !geometry->skinInfluences.empty() || !geometry->morphTargets.empty() ||
+				 geometry->skinIndex != UINT32_MAX)))
+				return ReportModelError(path, "invalid shared geometry reference");
+			if(geometry->mesh.vertices.empty() || geometry->mesh.indices.empty()) continue;
+			if(modelMesh.nodeIndex != UINT32_MAX && modelMesh.nodeIndex >= model.nodes.size()) return false;
+			if(modelMesh.skinIndex != UINT32_MAX && (modelMesh.skinIndex >= model.skins.size() ||
+				modelMesh.nodeIndex == UINT32_MAX)) return false;
 		}
 
 		const ModelBounds bounds = ComputeModelBounds(model);
@@ -397,17 +475,101 @@ namespace dyf
 			return static_cast<char>(std::tolower(value));
 		});
 		const bool ufbxTexturesDecoded = extension == ".fbx" || extension == ".obj";
-		for(Image& texture : model.textures)
+		struct ImageJob
 		{
+			size_t index;
+			std::string path;
+			ColorSpace colorSpace;
+			uint64_t decodedBytes;
+		};
+		std::vector<ImageJob> imageJobs;
+		imageJobs.reserve(model.textures.size());
+		for(size_t index = 0; index < model.textures.size(); ++index)
+		{
+			const Image& texture = model.textures[index];
 			if(!texture.IsValid())
 			{
 				// The ufbx loader already attempted bounded decoding. Do not retry without its budget.
 				if(ufbxTexturesDecoded) return false;
-				const ColorSpace colorSpace = texture.GetColorSpace();
-				const std::string path = texture.GetSourcePath();
-				if(path.empty() || !LoadExternalImage(path, texture, options, budget)) return false;
-				texture.SetColorSpace(colorSpace);
+				const std::string& imagePath = texture.GetSourcePath();
+				uint32_t width = 0, height = 0;
+				if(imagePath.empty() || !GetImageDimensions(imagePath, width, height))
+					return ReportModelError(path, "failed to read external image dimensions: " + imagePath);
+				// Reserve every image before launching any decoder. Only this thread
+				// mutates the model budget; workers each receive a separate byte limit.
+				if(!budget.AddBytes(width, uint64_t(height) * 4, "external image pixels")) return false;
+				imageJobs.push_back({index, imagePath, texture.GetColorSpace(), uint64_t(width) * height * 4});
 			}
+		}
+		if(!imageJobs.empty())
+		{
+			std::atomic<size_t> nextImage{0};
+			std::atomic<bool> failed{false};
+			const auto decode = [&]() -> bool {
+				try
+				{
+					while(!failed.load(std::memory_order_relaxed))
+					{
+						const size_t jobIndex = nextImage.fetch_add(1, std::memory_order_relaxed);
+						if(jobIndex >= imageJobs.size()) break;
+						const auto& job = imageJobs[jobIndex];
+						ModelLoadOptions localOptions = options;
+						localOptions.maxDecodedBytes = job.decodedBytes;
+						ModelLoadBudget localBudget(job.path, localOptions);
+						Image decoded;
+						// LoadExternalImage reads immutable encoded bytes, checks their
+						// dimensions again before decoding, and enforces this reservation.
+						if(!LoadExternalImage(job.path, decoded, localOptions, localBudget))
+						{
+							failed.store(true, std::memory_order_relaxed);
+							return false;
+						}
+						decoded.SetColorSpace(job.colorSpace);
+						// The vector's shape is fixed and each slot has exactly one job.
+						model.textures[job.index] = std::move(decoded);
+					}
+					return !failed.load(std::memory_order_relaxed);
+				}
+				catch(...)
+				{
+					failed.store(true, std::memory_order_relaxed);
+					throw;
+				}
+			};
+			const size_t workerCount = std::min<size_t>(options.textureDecodeThreadCount, imageJobs.size());
+			std::vector<std::future<bool>> workers;
+			workers.reserve(workerCount);
+			std::exception_ptr exception;
+			try
+			{
+				for(size_t worker = 0; worker < workerCount; ++worker)
+					workers.emplace_back(std::async(std::launch::async, decode));
+			}
+			catch(...)
+			{
+				failed.store(true, std::memory_order_relaxed);
+				exception = std::current_exception();
+			}
+			bool imagesLoaded = !exception;
+			for(auto& worker : workers)
+			{
+				try { if(!worker.get()) imagesLoaded = false; }
+				catch(...)
+				{
+					imagesLoaded = false;
+					if(!exception) exception = std::current_exception();
+				}
+			}
+			if(exception)
+			{
+				try { std::rethrow_exception(exception); }
+				catch(const std::exception& error)
+				{
+					return ReportModelError(path, std::string("external image decoding failed: ") + error.what());
+				}
+				catch(...) { return ReportModelError(path, "external image decoding failed"); }
+			}
+			if(!imagesLoaded) return false;
 		}
 		std::vector<MaterialID> materials;
 		materials.reserve(model.materials.size());
@@ -424,6 +586,9 @@ namespace dyf
 		asset.nodes = std::move(model.nodes);
 		asset.skins = std::move(model.skins);
 		asset.animations = std::move(model.animations);
+		asset.directionalLights = std::move(model.directionalLights);
+		asset.pointLights = std::move(model.pointLights);
+		asset.spotLights = std::move(model.spotLights);
 		asset.assetTransform = model.assetTransform;
 		asset.hasBounds = bounds.valid;
 		if(bounds.valid)
@@ -434,16 +599,24 @@ namespace dyf
 				bounds.max.z - bounds.min.z);
 		}
 		asset.meshes.reserve(model.meshes.size());
-		for(ModelMesh& modelMesh : model.meshes)
+		std::vector<MeshID> geometryIds(model.meshes.size(), MeshID::Invalid);
+		for(size_t meshIndex = 0; meshIndex < model.meshes.size(); ++meshIndex)
 		{
-			if(modelMesh.mesh.vertices.empty() || modelMesh.mesh.indices.empty()) continue;
+			auto& modelMesh = model.meshes[meshIndex];
+			const size_t geometryIndex = modelMesh.geometryIndex == UINT32_MAX ? meshIndex : modelMesh.geometryIndex;
+			auto& geometry = model.meshes[geometryIndex];
+			if(geometry.mesh.vertices.empty() || geometry.mesh.indices.empty()) continue;
 			const MaterialID material = modelMesh.materialIndex < materials.size()
 				? materials[modelMesh.materialIndex]
 				: materials.front();
 			ModelAssetMesh assetMesh;
-			assetMesh.mesh = scene.CreateMesh(modelMesh.mesh);
-            scene.m_meshSkinInfluences.resize(scene.Meshes().size());
-            scene.m_meshSkinInfluences[ToIndex(assetMesh.mesh)] = std::move(modelMesh.skinInfluences);
+			if(!IsValid(geometryIds[geometryIndex]))
+			{
+				geometryIds[geometryIndex] = scene.CreateMesh(geometry.mesh);
+				scene.m_meshSkinInfluences.resize(scene.Meshes().size());
+				scene.m_meshSkinInfluences[ToIndex(geometryIds[geometryIndex])] = std::move(geometry.skinInfluences);
+			}
+			assetMesh.mesh = geometryIds[geometryIndex];
 			assetMesh.material = material;
 			assetMesh.nodeIndex = modelMesh.nodeIndex;
 			assetMesh.skinIndex = modelMesh.skinIndex;
@@ -488,7 +661,7 @@ namespace dyf
 			const ModelAssetMesh& assetMesh = asset->meshes[assetMeshIndex];
 			if(!IsValid(assetMesh.mesh) || !IsValid(assetMesh.material)) continue;
 			Math::float4x4 entityTransform = transform;
-			if(animatedModel)
+			if(assetMesh.nodeIndex != UINT32_MAX)
 			{
 				const ModelInstance& instance = scene.GetModelInstance(instanceId);
 				if(assetMesh.nodeIndex >= instance.globalPose.size()) return false;
@@ -499,7 +672,7 @@ namespace dyf
 				assetMesh.material,
 				entityTransform,
 				desc.lighting);
-			if(animatedModel && !scene.BindEntityToModel(
+			if(assetMesh.nodeIndex != UINT32_MAX && !scene.BindEntityToModel(
 				instanceId,
 				entity,
 				assetMesh.nodeIndex,
@@ -511,6 +684,50 @@ namespace dyf
 		{
 			if(!scene.UpdateAnimations(0.0f,instanceId)) return false;
 			if(outInstance != nullptr) *outInstance = instanceId;
+		}
+		if(createdAny && (!asset->directionalLights.empty() || !asset->pointLights.empty() || !asset->spotLights.empty()))
+		{
+			// Uniform model normalization scales distances by s and inverse-square
+			// intensities by s^2, preserving incident lighting on the scaled model.
+			const float xScale = Math::Length(Math::TransformVector(transform, Math::float3(1, 0, 0)));
+			const float yScale = Math::Length(Math::TransformVector(transform, Math::float3(0, 1, 0)));
+			const float zScale = Math::Length(Math::TransformVector(transform, Math::float3(0, 0, 1)));
+			const float scale = std::max({xScale, yScale, zScale});
+			if(!std::isfinite(scale) || scale <= 0.0f)
+				return ReportModelError(desc.path, "model light transform must have a finite nonzero scale");
+			if(scale - std::min({xScale, yScale, zScale}) > scale * 1.0e-4f)
+				ReportModelWarning(desc.path, "nonuniform model scaling approximates source light ranges and intensities using the largest axis scale");
+			for(const DirectionalLight& source : asset->directionalLights)
+			{
+				DirectionalLight light = source;
+				light.direction = Math::NormalizeOr(Math::TransformVector(transform, source.direction), Math::float3(0, 0, 1));
+				if(!scene.Add(light)) return false;
+			}
+			for(const PointLight& source : asset->pointLights)
+			{
+				PointLight light = source;
+				light.position = Math::TransformPoint(transform, source.position);
+				light.range *= scale;
+				light.sourceRadius *= scale;
+				light.intensity = static_cast<float>(double(source.intensity) * scale * scale);
+				if(!std::isfinite(light.position.x) || !std::isfinite(light.position.y) || !std::isfinite(light.position.z)
+					|| !std::isfinite(light.range) || !std::isfinite(light.sourceRadius) || !std::isfinite(light.intensity))
+					return ReportModelError(desc.path, "transformed point light exceeds finite float range");
+				if(!scene.Add(light)) return false;
+			}
+			for(const SpotLight& source : asset->spotLights)
+			{
+				SpotLight light = source;
+				light.position = Math::TransformPoint(transform, source.position);
+				light.direction = Math::NormalizeOr(Math::TransformVector(transform, source.direction), Math::float3(0, 0, -1));
+				light.range *= scale;
+				light.sourceRadius *= scale;
+				light.intensity = static_cast<float>(double(source.intensity) * scale * scale);
+				if(!std::isfinite(light.position.x) || !std::isfinite(light.position.y) || !std::isfinite(light.position.z)
+					|| !std::isfinite(light.range) || !std::isfinite(light.sourceRadius) || !std::isfinite(light.intensity))
+					return ReportModelError(desc.path, "transformed spot light exceeds finite float range");
+				if(!scene.Add(light)) return false;
+			}
 		}
 		return createdAny;
 	}
@@ -547,8 +764,10 @@ namespace dyf
 
 		for(const ModelMesh& sourceMesh : model.meshes)
 		{
+			const auto* geometry = ResolveGeometry(model, sourceMesh);
+			if(!geometry) return {};
 			MeshData defaultMorphedMesh;
-			const MeshData* sourceGeometry = &sourceMesh.mesh;
+			const MeshData* sourceGeometry = &geometry->mesh;
 			if(!sourceMesh.morphTargets.empty())
 			{
 				if(!EvaluateMorphTargets(

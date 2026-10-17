@@ -1,3 +1,4 @@
+#include "../../ResourceScope.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI.h"
 #include "vertex.h"
@@ -93,7 +94,7 @@ int main(int argc, char** argv) {
         Check(bool(deviceOwner), "Device creation failed");
         auto& device = *deviceOwner;
 
-        RHI::ResourceScope resources(device);
+        example::ResourceScope resources(device);
 
         // 3. 스왑체인 생성
         RHI::SwapchainDesc swapchain;
@@ -149,7 +150,7 @@ int main(int argc, char** argv) {
         instanceDesc.usage = RHI::BufferUsage::Vertex;
         instanceDesc.initialState = RHI::ResourceState::CopyDestination;
 
-        // create 모드는 프레임 ResourceScope에서 생성/해제하고 reuse 모드는 이 버퍼 하나를 유지한다.
+        // create 모드는 프레임 example::ResourceScope에서 생성/해제하고 reuse 모드는 이 버퍼 하나를 유지한다.
         RHI::BufferHandle reusableBuffer = nullptr;
         uint64_t bufferCreations = 0;
         double allocationMilliseconds = 0.0;
@@ -221,7 +222,7 @@ int main(int argc, char** argv) {
             }
 
             // 제출된 명령이 참조 자원을 GPU 완료까지 유지하므로 이 scope는 프레임 끝에 해제할 수 있다.
-            RHI::ResourceScope frameResources(device);
+            example::ResourceScope frameResources(device);
             auto* commands = frameResources.Keep(device.AcquireCommandList());
             auto* instanceBuffer = reusableBuffer;
 

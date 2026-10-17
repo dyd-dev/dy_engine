@@ -1,3 +1,4 @@
+#include "../../ResourceScope.h"
 #include "dyf/RHI.h"
 #include "dyf/Platform/Window.h"
 #include "vertex.h"
@@ -109,7 +110,7 @@ int main(int argc, char** argv) try {
         std::cout << "UNSUPPORTED: this backend does not rasterize.\n";
         return 77;
     }
-    ResourceScope resources(device);
+    example::ResourceScope resources(device);
 
     // 화면 표시용 스왑체인을 준비하고, 캡처 요청이 있으면 이미지 읽기를 허용한다.
     SwapchainDesc swapchain;

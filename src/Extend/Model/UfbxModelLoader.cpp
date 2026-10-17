@@ -168,6 +168,32 @@ namespace dyf
 			}
 			return true;
 		}
+		[[nodiscard]] bool UsesLocalFbxGeometry(const ufbx_scene& scene, const ufbx_node& node)
+		{
+			return scene.skin_deformers.count > 0 || scene.anim_stacks.count > 0 ||
+				scene.blend_deformers.count > 0 || ufbx_matrix_determinant(&node.node_to_world) >= 0.0;
+		}
+		[[nodiscard]] bool CanShareFbxGeometry(const ufbx_scene& scene, const ufbx_node& node)
+		{
+			return node.mesh != nullptr && node.mesh->skin_deformers.count == 0 &&
+				node.mesh->blend_deformers.count == 0 && UsesLocalFbxGeometry(scene, node);
+		}
+		[[nodiscard]] std::string FbxGeometryKey(const ufbx_node& node)
+		{
+			// Geometric pivots/offsets are baked into node-local vertices. Compare
+			// their exact source bits, as well as per-instance material overrides.
+			const auto& mesh = *node.mesh;
+			std::string key(reinterpret_cast<const char*>(&mesh.typed_id), sizeof(mesh.typed_id));
+			key.append(reinterpret_cast<const char*>(node.geometry_to_node.v), sizeof(node.geometry_to_node.v));
+			const size_t slots = std::max(node.materials.count, mesh.materials.count);
+			for(size_t slot = 0; slot < slots; ++slot)
+			{
+				const auto* material = slot < node.materials.count ? node.materials.data[slot] : mesh.materials.data[slot];
+				const uint32_t identity = material != nullptr ? material->typed_id : UINT32_MAX;
+				key.append(reinterpret_cast<const char*>(&identity), sizeof(identity));
+			}
+			return key;
+		}
 		[[nodiscard]] bool ValidateFbxLoadLimits(
 			const std::string& filepath,
 			const ufbx_scene& scene,
@@ -181,6 +207,18 @@ namespace dyf
 			if(!budget.CheckNodes(scene.nodes.count)
 				|| !budget.AddBytes(scene.nodes.count, sizeof(ModelNode), "nodes")
 				|| !budget.AddBytes(scene.materials.count, sizeof(ModelMaterialInfo), "materials")) return false;
+			if(options.importLights)
+			{
+				for(size_t i = 0; i < scene.nodes.count; ++i)
+				{
+					const ufbx_light* light = scene.nodes.data[i]->light;
+					if(light == nullptr) continue;
+					const size_t stride = light->type == UFBX_LIGHT_DIRECTIONAL ? sizeof(DirectionalLight)
+						: light->type == UFBX_LIGHT_POINT ? sizeof(PointLight)
+						: light->type == UFBX_LIGHT_SPOT ? sizeof(SpotLight) : 0u;
+					if(stride != 0u && !budget.AddBytes(1u, stride, "FBX source lights")) return false;
+				}
+			}
 
 			for(size_t skinIndex = 0; skinIndex < scene.skin_deformers.count; ++skinIndex)
 			{
@@ -190,23 +228,7 @@ namespace dyf
 					return false;
 			}
 
-			uint64_t morphTracksPerSample = 0u;
-			for(size_t nodeIndex = 0; nodeIndex < scene.nodes.count; ++nodeIndex)
-			{
-				const ufbx_mesh* mesh = scene.nodes.data[nodeIndex]->mesh;
-				if(mesh == nullptr) continue;
-				for(size_t deformerIndex = 0; deformerIndex < mesh->blend_deformers.count; ++deformerIndex)
-				{
-					const ufbx_blend_deformer* deformer = mesh->blend_deformers.data[deformerIndex];
-					for(size_t channelIndex = 0; channelIndex < deformer->channels.count; ++channelIndex)
-					{
-						const uint64_t keyframeCount = deformer->channels.data[channelIndex]->keyframes.count;
-						if(keyframeCount > std::numeric_limits<uint64_t>::max() - morphTracksPerSample) return false;
-						morphTracksPerSample += keyframeCount;
-					}
-				}
-			}
-
+			if(!budget.AddBytes(scene.anim_stacks.count, sizeof(AnimationClip), "FBX animation clips")) return false;
 			for(size_t stackIndex = 0; stackIndex < scene.anim_stacks.count; ++stackIndex)
 			{
 				const ufbx_anim_stack* stack = scene.anim_stacks.data[stackIndex];
@@ -221,27 +243,19 @@ namespace dyf
 					return ReportModelError(filepath, "FBX animation exceeds the per-track bake sample limit");
 				const size_t sampleCount = static_cast<size_t>(intervals) + 1u;
 				sampleCounts[stackIndex] = sampleCount;
-				if(scene.nodes.count != 0u
-					&& sampleCount > std::numeric_limits<uint64_t>::max() / scene.nodes.count)
-					return false;
-				const uint64_t nodeSamples = sampleCount * scene.nodes.count;
-				if(nodeSamples > std::numeric_limits<uint64_t>::max() / 3u) return false;
-				const uint64_t keyCount = nodeSamples * 3u;
-				if(!budget.AddAnimationKeys(keyCount)
-					|| !budget.AddBytes(keyCount, sizeof(QuatKey), "FBX baked animation keys")) return false;
-				if(morphTracksPerSample != 0u)
-				{
-					if(sampleCount > std::numeric_limits<uint64_t>::max() / morphTracksPerSample) return false;
-					const uint64_t morphKeyCount = sampleCount * morphTracksPerSample;
-					if(!budget.AddAnimationKeys(morphKeyCount)
-						|| !budget.AddBytes(morphKeyCount, sizeof(FloatKey), "FBX baked morph keys")) return false;
-				}
+				// Key storage is accounted after baking the source's animated channels
+				// and removing constant tracks, rather than for every scene node.
 			}
 
+			std::set<std::string> countedGeometry;
 			for(size_t nodeIndex = 0; nodeIndex < scene.nodes.count; ++nodeIndex)
 			{
-				const ufbx_mesh* mesh = scene.nodes.data[nodeIndex]->mesh;
+				const auto& node = *scene.nodes.data[nodeIndex];
+				const ufbx_mesh* mesh = node.mesh;
 				if(mesh == nullptr) continue;
+				if(!budget.AddBytes(std::max<size_t>(1, mesh->material_parts.count),
+					sizeof(ModelMesh) + sizeof(ModelAssetMesh), "FBX mesh instances")) return false;
+				if(CanShareFbxGeometry(scene, node) && !countedGeometry.insert(FbxGeometryKey(node)).second) continue;
 				uint64_t triangleVertexCount = 0u;
 				for(size_t faceIndex = 0; faceIndex < mesh->faces.count; ++faceIndex)
 				{
@@ -294,15 +308,6 @@ namespace dyf
 		[[nodiscard]] bool NearlyEqualRotation(const Math::quat& lhs, const Math::quat& rhs, float tolerance)
 		{
 			return 1.0f - std::fabs(Math::Dot(Math::Normalize(lhs), Math::Normalize(rhs))) <= tolerance;
-		}
-
-		template<typename Key, typename Equal>
-		void CollapseConstantTrack(std::vector<Key>& keys, Equal equal)
-		{
-			if(keys.size() <= 1u) return;
-			const auto& reference = keys.front().value;
-			if(std::all_of(keys.begin() + 1, keys.end(), [&](const Key& key) { return equal(reference, key.value); }))
-				keys.resize(1u);
 		}
 
 		struct UfbxMorphSource
@@ -445,6 +450,102 @@ namespace dyf
 			return value.data != nullptr ? std::string(value.data, value.length) : std::string{};
 		}
 
+		[[nodiscard]] bool ImportUfbxLights(
+			const std::string& filepath,
+			const ufbx_scene& scene,
+			const Math::Bounds3& sourceBounds,
+			ModelData& outModel,
+			ModelLoadBudget* budget = nullptr)
+		{
+			bool warnedUnsupported = false, warnedDecay = false, warnedRange = false;
+			const Math::float3 center = sourceBounds.valid ? sourceBounds.Center() : Math::float3(0, 0, 0);
+			const float radius = sourceBounds.valid ? Math::Length(sourceBounds.max - center) : 0.0f;
+			for(size_t i = 0; i < scene.nodes.count; ++i)
+			{
+				const ufbx_node* node = scene.nodes.data[i];
+				const ufbx_light* source = node->light;
+				if(source == nullptr) continue;
+				const size_t stride = source->type == UFBX_LIGHT_DIRECTIONAL ? sizeof(DirectionalLight)
+					: source->type == UFBX_LIGHT_POINT ? sizeof(PointLight)
+					: source->type == UFBX_LIGHT_SPOT ? sizeof(SpotLight) : 0u;
+				if(stride == 0u)
+				{
+					if(!warnedUnsupported) ReportModelWarning(filepath, "FBX area/volume lights are unsupported and were not imported");
+					warnedUnsupported = true;
+					continue;
+				}
+				if(budget != nullptr && !budget->AddBytes(1u, stride, "FBX source lights")) return false;
+				const Math::float4x4 nodeToWorld = ToFloat4x4(node->node_to_world);
+				const Math::float3 position = Math::TransformPoint(nodeToWorld, Math::float3(0, 0, 0));
+				const Math::float3 localDirection(static_cast<float>(source->local_direction.x),
+					static_cast<float>(source->local_direction.y), static_cast<float>(source->local_direction.z));
+				const Math::float3 direction = Math::NormalizeOr(Math::TransformVector(nodeToWorld, localDirection), Math::float3(0, -1, 0));
+				const Math::float3 color(static_cast<float>(source->color.x), static_cast<float>(source->color.y), static_cast<float>(source->color.z));
+				const float intensity = static_cast<float>(source->intensity);
+				if(!IsFinite(nodeToWorld) || !IsFinite(position) || !IsFinite(localDirection) || !IsFinite(direction)
+					|| !IsFinite(color) || color.x < 0.0f || color.y < 0.0f || color.z < 0.0f
+					|| !std::isfinite(intensity) || intensity < 0.0f)
+					return ReportModelError(filepath, "FBX light contains invalid positions, color or intensity");
+				const bool enabled = source->cast_light && node->visible;
+				if(source->type == UFBX_LIGHT_DIRECTIONAL)
+				{
+					DirectionalLight light;
+					light.enabled = enabled;
+					// dyf stores the surface-to-light vector; FBX stores the emitted ray direction.
+					light.direction = direction * -1.0f;
+					light.color = color;
+					light.intensity = intensity;
+					light.castShadow = source->cast_shadows;
+					light.shadowStrength = 1.0f;
+					outModel.directionalLights.push_back(light);
+					continue;
+				}
+				if(source->decay != UFBX_LIGHT_DECAY_QUADRATIC)
+				{
+					if(!warnedDecay) ReportModelWarning(filepath, "FBX non-quadratic light decay is approximated by the renderer's inverse-square attenuation");
+					warnedDecay = true;
+				}
+				const double authoredRange = ufbx_find_bool(&source->props, "EnableFarAttenuation", false)
+					? ufbx_find_real(&source->props, "FarAttenuationEnd", 0.0) : 0.0;
+				if(!std::isfinite(authoredRange) || authoredRange < 0.0 || authoredRange > std::numeric_limits<float>::max())
+					return ReportModelError(filepath, "FBX light contains an invalid far attenuation distance");
+				// Without a source cutoff, cover the reference bounds and keep their geometry
+				// inside the inner half of the renderer's finite attenuation window.
+				const float range = authoredRange > 0.0 ? static_cast<float>(authoredRange)
+					: 2.0f * std::max(Math::Length(position - center) + radius, 1.0f);
+				if(!std::isfinite(range) || range <= 0.0f)
+					return ReportModelError(filepath, "FBX light range cannot be represented");
+				if(authoredRange == 0.0)
+				{
+					if(!warnedRange) ReportModelWarning(filepath, "FBX lights without a far cutoff use finite ranges derived from source bounds");
+					warnedRange = true;
+				}
+				if(source->type == UFBX_LIGHT_POINT)
+				{
+					PointLight light;
+					light.enabled = enabled; light.position = position; light.range = range;
+					light.color = color; light.intensity = intensity;
+					light.castShadow = source->cast_shadows; light.shadowStrength = 1.0f;
+					outModel.pointLights.push_back(light);
+				}
+				else
+				{
+					constexpr double toRadians = 3.14159265358979323846 / 180.0;
+					const float inner = static_cast<float>(source->inner_angle * toRadians);
+					const float outer = static_cast<float>(source->outer_angle * toRadians);
+					if(!std::isfinite(inner) || !std::isfinite(outer) || inner < 0.0f || outer < 0.0f)
+						return ReportModelError(filepath, "FBX spot light contains invalid cone angles");
+					SpotLight light;
+					light.enabled = enabled; light.position = position; light.range = range;
+					light.direction = direction; light.color = color; light.intensity = intensity;
+					light.innerConeRadians = inner; light.outerConeRadians = outer;
+					light.castShadow = source->cast_shadows; light.shadowStrength = 1.0f;
+					outModel.spotLights.push_back(light);
+				}
+			}
+			return true;
+		}
+
 		[[nodiscard]] bool LoadUfbxTextureAssets(
 			const std::string& filepath,
 			const ufbx_scene& scene,
@@ -504,21 +605,24 @@ namespace dyf
 				else
 				{
 					std::vector<std::filesystem::path> candidates;
-					const std::string relativeFilename = ToString(source->relative_filename);
-					if(!relativeFilename.empty())
-					{
-						const std::filesystem::path relativePath(relativeFilename);
+					auto appendCandidates = [&](std::string filename) {
+						// FBX commonly stores Windows paths even when loaded on another platform.
+						std::replace(filename.begin(), filename.end(), '\\', '/');
+						if(filename.empty()) return;
+						const std::filesystem::path relativePath(filename);
 						candidates.push_back(externalFileContext.modelDirectory / relativePath);
 						const std::filesystem::path basename = relativePath.filename();
-						if(!basename.empty())
-						{
-							candidates.push_back(externalFileContext.modelDirectory / basename);
-							candidates.push_back(externalFileContext.modelDirectory / "textures" / basename);
-						}
+						if(basename.empty()) return;
+						candidates.push_back(externalFileContext.modelDirectory / basename);
+						candidates.push_back(externalFileContext.modelDirectory / "textures" / basename);
+						candidates.push_back(externalFileContext.modelDirectory / "Textures" / basename);
+					};
+					appendCandidates(ToString(source->relative_filename));
+					appendCandidates(ToString(source->filename));
+					if(candidates.empty())
+					{
+						return ReportModelError(filepath, "ufbx external texture has no source path");
 					}
-
-					const std::string filename = ToString(source->filename);
-					if(!filename.empty()) candidates.emplace_back(filename);
 
 					std::error_code pathError;
 					for(const std::filesystem::path& candidate : candidates)
@@ -588,8 +692,10 @@ namespace dyf
 
 	}
 
-		[[nodiscard]] bool LoadUfbxModel(const std::string& filepath, ModelData& outModel, const ModelLoadOptions& options, uint64_t* decodedBytes)
+		[[nodiscard]] bool LoadUfbxModel(const std::string& filepath, ModelData& outModel, const ModelLoadOptions& options,
+			uint64_t* decodedBytes, const Math::Bounds3* lightOnlyBounds)
 		{
+			const bool lightsOnly = lightOnlyBounds != nullptr;
 			if(decodedBytes) *decodedBytes=0;
 			if(options.maxNodeDepth == 0u)
 				return ReportModelError(
@@ -623,6 +729,9 @@ namespace dyf
 					filepath,
 					"failed to query ufbx model source size");
 			}
+			if(mainSourceSize > options.maxSourceBytes)
+				return ReportModelError(filepath, "model source size " + std::to_string(mainSourceSize)
+					+ " exceeds limit " + std::to_string(options.maxSourceBytes));
 			UfbxExternalFileContext externalFileContext{};
 			externalFileContext.modelDirectory = sourcePath.parent_path();
 			externalFileContext.sourceByteLimit = options.maxSourceBytes;
@@ -632,11 +741,12 @@ namespace dyf
 			opts.temp_allocator.memory_limit = parserByteLimit;
 			opts.result_allocator.allocator = sharedAllocator;
 			opts.result_allocator.memory_limit = parserByteLimit;
-			opts.load_external_files = true;
+			opts.ignore_all_content = lightsOnly;
+			opts.load_external_files = !lightsOnly;
 			opts.open_main_file_with_default = true;
 			opts.open_file_cb.fn = OpenRestrictedUfbxExternalFile;
 			opts.open_file_cb.user = &externalFileContext;
-			opts.generate_missing_normals = true;
+			opts.generate_missing_normals = !lightsOnly;
 			opts.node_depth_limit = options.maxNodeDepth;
 			opts.inherit_mode_handling = UFBX_INHERIT_MODE_HANDLING_HELPER_NODES;
 			opts.scale_helper_name.data = "(scale helper)";
@@ -674,6 +784,15 @@ namespace dyf
 					std::string("failed to load model through ufbx: ") + error.info);
 			}
 			std::unique_ptr<ufbx_scene, void(*)(ufbx_scene*)> sceneOwner(scene, ufbx_free_scene);
+			if(lightsOnly)
+			{
+				ModelLoadBudget budget(filepath, options);
+				if(!budget.CheckNodes(scene->nodes.count)) return false;
+				outModel = {};
+				if(!ImportUfbxLights(filepath, *scene, *lightOnlyBounds, outModel, &budget)) return false;
+				if(decodedBytes != nullptr) *decodedBytes = budget.DecodedBytes();
+				return true;
+			}
 			const double fbxBakeRate = static_cast<double>(options.fbxBakeRate);
 			std::vector<size_t> sampleCounts;
 			uint64_t geometryBytes = 0u;
@@ -692,9 +811,6 @@ namespace dyf
 				textureIndices,
 				decodedTextureBytes)) return false;
 
-			const bool animatedModel = scene->skin_deformers.count > 0
-				|| scene->anim_stacks.count > 0
-				|| scene->blend_deformers.count > 0;
 			std::map<const ufbx_node*, uint32_t> nodeIndices;
 			outModel.nodes.resize(scene->nodes.count);
 			for(size_t nodeIndex = 0; nodeIndex < scene->nodes.count; ++nodeIndex)
@@ -806,6 +922,9 @@ namespace dyf
 				outModel.skins.push_back(std::move(skin));
 			}
 
+			ModelLoadBudget animationBudget(filepath, options);
+			if(!animationBudget.AddBytes(geometryBytes, 1u, "FBX geometry and metadata")
+				|| !animationBudget.AddBytes(decodedTextureBytes, 1u, "FBX decoded textures")) return false;
 			outModel.animations.reserve(scene->anim_stacks.count);
 			for(size_t stackIndex = 0; stackIndex < scene->anim_stacks.count; ++stackIndex)
 			{
@@ -814,73 +933,117 @@ namespace dyf
 				const double beginTime = stack->time_begin;
 				const double duration = std::max(0.0, stack->time_end - beginTime);
 				const size_t sampleCount = sampleCounts[stackIndex];
+				ufbx_bake_opts bakeOptions = {};
+				// Share the bounded parser allocator while the source scene is alive.
+				bakeOptions.temp_allocator = opts.temp_allocator;
+				bakeOptions.result_allocator = opts.result_allocator;
+				bakeOptions.resample_rate = fbxBakeRate;
+				bakeOptions.key_reduction_enabled = options.fbxConstantTrackTolerance > 0.0f;
+				bakeOptions.key_reduction_rotation = true;
+				bakeOptions.key_reduction_threshold = options.fbxConstantTrackTolerance;
+				ufbx_error bakeError = {};
+				std::unique_ptr<ufbx_baked_anim, void(*)(ufbx_baked_anim*)> baked(
+					ufbx_bake_anim(scene, stack->anim, &bakeOptions, &bakeError), ufbx_free_baked_anim);
+				if(!baked)
+					return ReportModelError(filepath, allocatorBudget.limitExceeded
+						? "ufbx animation bake exceeds maxParserBytes"
+						: std::string("failed to bake FBX animation: ") + bakeError.info);
 
 				AnimationClip clip;
 				clip.name = stack->name.length > 0 ? stack->name.data : ("Animation_" + std::to_string(stackIndex));
 				clip.duration = static_cast<float>(duration);
-				clip.tracks.reserve(scene->nodes.count);
-				for(size_t nodeIndex = 0; nodeIndex < scene->nodes.count; ++nodeIndex)
-				{
-					NodeAnimationTrack track;
-					track.nodeIndex = static_cast<uint32_t>(nodeIndex);
-					track.translations.reserve(sampleCount);
-					track.rotations.reserve(sampleCount);
-					track.scales.reserve(sampleCount);
-					Math::quat previousRotation = Math::quat::Identity();
-					for(size_t sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
+				if(!animationBudget.AddBytes(baked->nodes.count, sizeof(NodeAnimationTrack), "FBX node animation tracks")) return false;
+				clip.tracks.reserve(baked->nodes.count);
+				const float tolerance = options.fbxConstantTrackTolerance;
+				auto importVec3Keys = [&](const ufbx_baked_vec3_list& source, const Math::float3& bind,
+					std::vector<Vec3Key>& destination) -> bool {
+					if(source.count == 0u) return true;
+					const auto convert = [](const ufbx_vec3& value) {
+						return Math::float3(static_cast<float>(value.x), static_cast<float>(value.y), static_cast<float>(value.z));
+					};
+					const Math::float3 first = convert(source.data[0].value);
+					bool constant = true;
+					for(size_t i = 0; i < source.count; ++i)
 					{
-						const double relativeTime = std::min(duration, static_cast<double>(sampleIndex) / fbxBakeRate);
-						const ufbx_transform transform = ufbx_evaluate_transform(
-							stack->anim,
-							scene->nodes.data[nodeIndex],
-							beginTime + relativeTime);
-						NodeTransform sampled = ToNodeTransform(transform);
-						if(!IsFinite(sampled))
-						{
-							return ReportModelError(
-								filepath,
-								"ufbx animation sample contains non-finite transform values");
-						}
-						if(sampleIndex > 0 && Math::Dot(previousRotation, sampled.rotation) < 0.0f)
-							sampled.rotation = Math::quat(-sampled.rotation.x, -sampled.rotation.y, -sampled.rotation.z, -sampled.rotation.w);
-						previousRotation = sampled.rotation;
-
-						const float keyTime = static_cast<float>(relativeTime);
-						Vec3Key translationKey;
-						translationKey.time = keyTime;
-						translationKey.value = sampled.translation;
-						track.translations.push_back(translationKey);
-						QuatKey rotationKey;
-						rotationKey.time = keyTime;
-						rotationKey.value = sampled.rotation;
-						track.rotations.push_back(rotationKey);
-						Vec3Key scaleKey;
-						scaleKey.time = keyTime;
-						scaleKey.value = sampled.scale;
-						track.scales.push_back(scaleKey);
+						const Math::float3 value = convert(source.data[i].value);
+						const float time = static_cast<float>(source.data[i].time - beginTime);
+						if(!IsFinite(value) || !std::isfinite(time))
+							return ReportModelError(filepath, "FBX baked vector key contains non-finite values");
+						if(!NearlyEqual(first, value, tolerance)) constant = false;
 					}
-					const float tolerance = options.fbxConstantTrackTolerance;
-					CollapseConstantTrack(track.translations, [tolerance](const Math::float3& lhs, const Math::float3& rhs) {
-						return NearlyEqual(lhs, rhs, tolerance);
-					});
-					CollapseConstantTrack(track.rotations, [tolerance](const Math::quat& lhs, const Math::quat& rhs) {
-						return NearlyEqualRotation(lhs, rhs, tolerance);
-					});
-					CollapseConstantTrack(track.scales, [tolerance](const Math::float3& lhs, const Math::float3& rhs) {
-						return NearlyEqual(lhs, rhs, tolerance);
-					});
-					clip.tracks.push_back(std::move(track));
+					if(constant && NearlyEqual(first, bind, tolerance)) return true;
+					const size_t count = constant ? 1u : source.count;
+					if(!animationBudget.AddAnimationKeys(count)
+						|| !animationBudget.AddBytes(count, sizeof(Vec3Key), "FBX baked vector keys")) return false;
+					destination.reserve(count);
+					for(size_t i = 0; i < count; ++i)
+					{
+						Vec3Key key;
+						key.time = static_cast<float>(source.data[i].time - beginTime);
+						key.value = convert(source.data[i].value);
+						destination.push_back(key);
+					}
+					return true;
+				};
+				auto importRotationKeys = [&](const ufbx_baked_quat_list& source, const Math::quat& bind,
+					std::vector<QuatKey>& destination) -> bool {
+					if(source.count == 0u) return true;
+					const auto convert = [](const ufbx_quat& value) {
+						return Math::quat(static_cast<float>(value.x), static_cast<float>(value.y),
+							static_cast<float>(value.z), static_cast<float>(value.w));
+					};
+					const Math::quat first = convert(source.data[0].value);
+					bool constant = true;
+					for(size_t i = 0; i < source.count; ++i)
+					{
+						const Math::quat value = convert(source.data[i].value);
+						const float time = static_cast<float>(source.data[i].time - beginTime);
+						if(!IsFinite(value) || !std::isfinite(time))
+							return ReportModelError(filepath, "FBX baked rotation key contains non-finite values");
+						if(!NearlyEqualRotation(first, value, tolerance)) constant = false;
+					}
+					if(constant && NearlyEqualRotation(first, bind, tolerance)) return true;
+					const size_t count = constant ? 1u : source.count;
+					if(!animationBudget.AddAnimationKeys(count)
+						|| !animationBudget.AddBytes(count, sizeof(QuatKey), "FBX baked rotation keys")) return false;
+					destination.reserve(count);
+					for(size_t i = 0; i < count; ++i)
+					{
+						QuatKey key;
+						key.time = static_cast<float>(source.data[i].time - beginTime);
+						key.value = convert(source.data[i].value);
+						destination.push_back(key);
+					}
+					return true;
+				};
+				for(size_t nodeIndex = 0; nodeIndex < baked->nodes.count; ++nodeIndex)
+				{
+					const ufbx_baked_node& source = baked->nodes.data[nodeIndex];
+					if(source.typed_id >= outModel.nodes.size())
+						return ReportModelError(filepath, "FBX baked animation refers to an invalid node");
+					NodeAnimationTrack track;
+					track.nodeIndex = source.typed_id;
+					const NodeTransform& bind = outModel.nodes[source.typed_id].bindTransform;
+					if(!importVec3Keys(source.translation_keys, bind.translation, track.translations)
+						|| !importRotationKeys(source.rotation_keys, bind.rotation, track.rotations)
+						|| !importVec3Keys(source.scale_keys, bind.scale, track.scales)) return false;
+					if(!track.translations.empty() || !track.rotations.empty() || !track.scales.empty())
+						clip.tracks.push_back(std::move(track));
 				}
 				for(const UfbxBlendChannelBinding& binding : blendChannelBindings)
 				{
+					const ufbx_baked_element* bakedChannel = ufbx_find_baked_element_by_element_id(baked.get(), binding.channel->element_id);
+					bool animatedWeight = false;
+					if(bakedChannel != nullptr)
+						for(size_t i = 0; i < bakedChannel->props.count; ++i)
+							if(ToString(bakedChannel->props.data[i].name) == "DeformPercent"
+								&& bakedChannel->props.data[i].keys.count != 0u) animatedWeight = true;
+					if(!animatedWeight) continue;
+					if(!animationBudget.AddBytes(binding.targetCount, sizeof(MorphWeightTrack), "FBX morph animation tracks")) return false;
 					std::vector<MorphWeightTrack> tracks(binding.targetCount);
-					for(uint32_t targetOffset = 0u; targetOffset < binding.targetCount; ++targetOffset)
-					{
-						MorphWeightTrack& track = tracks[targetOffset];
-						track.nodeIndex = binding.nodeIndex;
-						track.targetIndex = binding.firstTargetIndex + targetOffset;
-						track.weights.reserve(sampleCount);
-					}
+					std::vector<uint8_t> constant(binding.targetCount, 1u);
+					std::vector<float> firstWeights;
+					// Detect constants without allocating sampleCount*targetCount keys.
 					for(size_t sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
 					{
 						const double relativeTime = std::min(duration, static_cast<double>(sampleIndex) / fbxBakeRate);
@@ -898,58 +1061,192 @@ namespace dyf
 						if(!EvaluateUfbxBlendKeyframeWeights(*binding.channel, channelWeight, effectiveWeights))
 							return ReportModelError(filepath, "FBX animated blend coefficients are non-finite or exceed float range");
 						if(effectiveWeights.size() != binding.targetCount) return false;
-						for(uint32_t targetOffset = 0u; targetOffset < binding.targetCount; ++targetOffset)
+						if(sampleIndex == 0u) firstWeights = std::move(effectiveWeights);
+						else for(uint32_t targetOffset = 0u; targetOffset < binding.targetCount; ++targetOffset)
+							if(std::fabs(effectiveWeights[targetOffset] - firstWeights[targetOffset]) > tolerance)
+								constant[targetOffset] = 0u;
+					}
+					bool needsSamples = false;
+					for(uint32_t targetOffset = 0u; targetOffset < binding.targetCount; ++targetOffset)
+					{
+						MorphWeightTrack& track = tracks[targetOffset];
+						track.nodeIndex = binding.nodeIndex;
+						track.targetIndex = binding.firstTargetIndex + targetOffset;
+						const auto& bindWeights = outModel.nodes[binding.nodeIndex].morphWeights;
+						if(track.targetIndex >= bindWeights.size()) return false;
+						if(constant[targetOffset] && std::fabs(firstWeights[targetOffset] - bindWeights[track.targetIndex]) <= tolerance) continue;
+						const size_t count = constant[targetOffset] ? 1u : sampleCount;
+						if(!animationBudget.AddAnimationKeys(count)
+							|| !animationBudget.AddBytes(count, sizeof(FloatKey), "FBX baked morph keys")) return false;
+						track.weights.reserve(count);
+						if(constant[targetOffset])
 						{
 							FloatKey key;
-							key.time = static_cast<float>(relativeTime);
-							key.value = effectiveWeights[targetOffset];
-							tracks[targetOffset].weights.push_back(key);
+							key.value = firstWeights[targetOffset];
+							track.weights.push_back(key);
 						}
+						else needsSamples = true;
 					}
-					const float tolerance = options.fbxConstantTrackTolerance;
+					if(needsSamples)
+						for(size_t sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex)
+						{
+							const double relativeTime = std::min(duration, static_cast<double>(sampleIndex) / fbxBakeRate);
+							const double channelWeight = ufbx_evaluate_blend_weight(stack->anim, binding.channel, beginTime + relativeTime);
+							std::vector<float> effectiveWeights;
+							if(!std::isfinite(channelWeight)
+								|| !EvaluateUfbxBlendKeyframeWeights(*binding.channel, channelWeight, effectiveWeights)
+								|| effectiveWeights.size() != binding.targetCount)
+								return ReportModelError(filepath, "FBX animated blend coefficients are invalid");
+							for(uint32_t targetOffset = 0u; targetOffset < binding.targetCount; ++targetOffset)
+							{
+								if(constant[targetOffset]) continue;
+								FloatKey key;
+								key.time = static_cast<float>(relativeTime);
+								key.value = effectiveWeights[targetOffset];
+								tracks[targetOffset].weights.push_back(key);
+							}
+						}
 					for(MorphWeightTrack& track : tracks)
 					{
-						CollapseConstantTrack(track.weights, [tolerance](float lhs, float rhs) {
-							return std::fabs(lhs - rhs) <= tolerance;
-						});
-						clip.morphTracks.push_back(std::move(track));
+						if(!track.weights.empty()) clip.morphTracks.push_back(std::move(track));
 					}
 				}
 				outModel.animations.push_back(std::move(clip));
 			}
+			geometryBytes = animationBudget.DecodedBytes() - decodedTextureBytes;
+			textureOptions.maxDecodedBytes = options.maxDecodedBytes - geometryBytes;
 
 			outModel.materials.reserve(scene->materials.count);
 			std::map<const ufbx_material*, uint32_t> materialIndices;
-			auto applyTexture = [&](ModelMaterialInfo& material, MaterialTextureKind kind, const ufbx_material_map& map) {
+			auto textureIndex = [&](const ufbx_material_map& map) -> uint32_t {
 				const ufbx_texture* source = map.texture;
-				if(source == nullptr || !map.texture_enabled) return;
+				if(source == nullptr || !map.texture_enabled) return UINT32_MAX;
 				const auto texture = textureIndices.find(source);
-				if(texture == textureIndices.end() || texture->second >= outModel.textures.size()) return;
-				const Image& asset = outModel.textures[texture->second];
+				return texture != textureIndices.end() ? texture->second : UINT32_MAX;
+			};
+			auto applyTextureIndex = [&](ModelMaterialInfo& material, MaterialTextureKind kind, uint32_t index) {
+				if(index >= outModel.textures.size()) return;
+				const Image& asset = outModel.textures[index];
 				if(asset.GetSourcePath().empty() && asset.GetPixels().empty()) return;
-
 				const uint32_t slot = static_cast<uint32_t>(kind);
-				material.textureIndices[slot] = texture->second;
+				material.textureIndices[slot] = index;
 				material.texturePaths[slot] = asset.GetSourcePath();
 				material.hasTexture[slot] = true;
+			};
+			auto applyTexture = [&](ModelMaterialInfo& material, MaterialTextureKind kind, const ufbx_material_map& map) {
+				applyTextureIndex(material, kind, textureIndex(map));
+			};
+			// Scalar FBX maps are independent images. Pack their red channels into the
+			// renderer's G=roughness/B=metallic layout instead of discarding either map.
+			std::map<std::array<uint32_t, 4>, uint32_t> packedScalarTextures;
+			auto packScalarTextures = [&](uint32_t roughnessIndex, uint32_t metallicIndex,
+				bool glossiness, float glossinessFactor, uint32_t& result) -> bool {
+				uint32_t factorBits = 0;
+				std::memcpy(&factorBits, &glossinessFactor, sizeof(factorBits));
+				const std::array<uint32_t, 4> key = {roughnessIndex, metallicIndex, glossiness ? 1u : 0u, factorBits};
+				const auto cached = packedScalarTextures.find(key);
+				if(cached != packedScalarTextures.end()) { result = cached->second; return true; }
+				const Image* roughness = roughnessIndex < outModel.textures.size() ? &outModel.textures[roughnessIndex] : nullptr;
+				const Image* metallic = metallicIndex < outModel.textures.size() ? &outModel.textures[metallicIndex] : nullptr;
+				if((roughness != nullptr && !roughness->IsValid()) || (metallic != nullptr && !metallic->IsValid()))
+					return ReportModelError(filepath, "cannot pack an undecoded FBX scalar texture");
+				const uint32_t width = std::max(roughness != nullptr ? roughness->GetWidth() : 1u,
+					metallic != nullptr ? metallic->GetWidth() : 1u);
+				const uint32_t height = std::max(roughness != nullptr ? roughness->GetHeight() : 1u,
+					metallic != nullptr ? metallic->GetHeight() : 1u);
+				const uint64_t pixelCount = uint64_t(width) * height;
+				if(pixelCount > UINT64_MAX / 4u || pixelCount * 4u > SIZE_MAX
+					|| decodedTextureBytes > textureOptions.maxDecodedBytes
+					|| pixelCount * 4u > textureOptions.maxDecodedBytes - decodedTextureBytes)
+					return ReportModelError(filepath, "packed FBX texture exceeds maxDecodedBytes");
+				if(outModel.textures.size() >= options.maxTextures || outModel.textures.size() >= UINT32_MAX)
+					return ReportModelError(filepath, "packed FBX texture exceeds maxTextures");
+				const auto sampleScalar = [width, height](const Image* image, uint32_t x, uint32_t y) {
+					if(image == nullptr) return uint8_t(255);
+					const uint32_t sx = static_cast<uint32_t>(uint64_t(x) * image->GetWidth() / width);
+					const uint32_t sy = static_cast<uint32_t>(uint64_t(y) * image->GetHeight() / height);
+					return image->GetPixels()[(size_t(sy) * image->GetWidth() + sx) * 4u];
+				};
+				std::vector<uint8_t> pixels(static_cast<size_t>(pixelCount * 4u), 255u);
+				for(uint32_t y = 0; y < height; ++y)
+					for(uint32_t x = 0; x < width; ++x)
+					{
+						const size_t offset = (size_t(y) * width + x) * 4u;
+						const uint8_t scalar = sampleScalar(roughness, x, y);
+						pixels[offset + 1u] = glossiness
+							? static_cast<uint8_t>(std::lround(255.0f * (1.0f - std::clamp(float(scalar) / 255.0f * glossinessFactor, 0.0f, 1.0f))))
+							: scalar;
+						pixels[offset + 2u] = sampleScalar(metallic, x, y);
+					}
+				decodedTextureBytes += pixelCount * 4u;
+				result = static_cast<uint32_t>(outModel.textures.size());
+				outModel.textures.emplace_back(width, height, std::move(pixels), ColorSpace::Linear);
+				packedScalarTextures.emplace(key, result);
+				return true;
 			};
 			for(size_t i = 0; i < scene->materials.count; ++i)
 			{
 				ufbx_material* mat = scene->materials.data[i];
 				ModelMaterialInfo material = {};
-				material.name = mat->name.data != nullptr ? mat->name.data : "";
+				material.name = ToString(mat->name);
+				const float baseFactor = static_cast<float>(mat->pbr.base_factor.value_real);
+				const bool legacyTransparency = mat->shader_type == UFBX_SHADER_FBX_LAMBERT
+					|| mat->shader_type == UFBX_SHADER_FBX_PHONG;
+				float legacyTransmission = 0.0f;
+				if(legacyTransparency)
+				{
+					const ufbx_vec3& color = mat->fbx.transparency_color.value_vec3;
+					const double amount = mat->fbx.transparency_color.has_value
+						? std::max({color.x, color.y, color.z}) : 1.0;
+					legacyTransmission = static_cast<float>(mat->fbx.transparency_factor.value_real * amount);
+				}
+				float opacity = mat->pbr.opacity.has_value ? static_cast<float>(mat->pbr.opacity.value_real) : 1.0f;
+				if(mat->pbr.base_color.value_components == 4)
+					opacity *= static_cast<float>(mat->pbr.base_color.value_vec4.w);
+				if(!mat->pbr.opacity.has_value && legacyTransparency)
+					opacity *= 1.0f - legacyTransmission;
 				material.material.baseColor = Math::float4(
-					static_cast<float>(mat->pbr.base_color.value_vec3.x),
-					static_cast<float>(mat->pbr.base_color.value_vec3.y),
-					static_cast<float>(mat->pbr.base_color.value_vec3.z),
-					1.0f);
-				material.material.metallicFactor = static_cast<float>(mat->pbr.metalness.value_real);
-				material.material.roughnessFactor = static_cast<float>(mat->pbr.roughness.value_real);
+					static_cast<float>(mat->pbr.base_color.value_vec3.x) * baseFactor,
+					static_cast<float>(mat->pbr.base_color.value_vec3.y) * baseFactor,
+					static_cast<float>(mat->pbr.base_color.value_vec3.z) * baseFactor,
+					opacity);
+				const bool glossiness = mat->features.roughness_as_glossiness.enabled;
+				const ufbx_material_map& roughnessMap = glossiness ? mat->pbr.glossiness : mat->pbr.roughness;
+				const uint32_t roughnessIndex = textureIndex(roughnessMap);
+				const uint32_t metallicIndex = textureIndex(mat->pbr.metalness);
+				material.material.metallicFactor = mat->pbr.metalness.has_value
+					? static_cast<float>(mat->pbr.metalness.value_real) : metallicIndex != UINT32_MAX ? 1.0f : 0.0f;
+				material.material.roughnessFactor = roughnessMap.has_value
+					? static_cast<float>(mat->pbr.roughness.value_real) : roughnessIndex != UINT32_MAX ? 1.0f : 0.5f;
+				const float emissiveFactor = static_cast<float>(mat->pbr.emission_factor.value_real);
+				material.material.emissiveColor = Math::float3(
+					static_cast<float>(mat->pbr.emission_color.value_vec3.x) * emissiveFactor,
+					static_cast<float>(mat->pbr.emission_color.value_vec3.y) * emissiveFactor,
+					static_cast<float>(mat->pbr.emission_color.value_vec3.z) * emissiveFactor);
+				material.material.doubleSided = mat->features.double_sided.enabled;
+				material.material.transmissionFactor = legacyTransparency ? legacyTransmission
+					: static_cast<float>(mat->pbr.transmission_factor.value_real);
+				if(mat->pbr.specular_ior.has_value)
+					material.material.indexOfRefraction = static_cast<float>(mat->pbr.specular_ior.value_real);
+				if(mat->pbr.transmission_depth.has_value && mat->pbr.transmission_depth.value_real > 0.0)
+				{
+					material.material.attenuationDistance = static_cast<float>(mat->pbr.transmission_depth.value_real);
+					material.material.attenuationColor = Math::float3(
+						static_cast<float>(mat->pbr.transmission_color.value_vec3.x),
+						static_cast<float>(mat->pbr.transmission_color.value_vec3.y),
+						static_cast<float>(mat->pbr.transmission_color.value_vec3.z));
+				}
 				if(!std::isfinite(material.material.baseColor.x)
 					|| !std::isfinite(material.material.baseColor.y)
 					|| !std::isfinite(material.material.baseColor.z)
+					|| !std::isfinite(opacity)
 					|| !std::isfinite(material.material.metallicFactor)
-					|| !std::isfinite(material.material.roughnessFactor))
+					|| !std::isfinite(material.material.roughnessFactor)
+					|| !IsFinite(material.material.emissiveColor)
+					|| !std::isfinite(material.material.transmissionFactor)
+					|| !std::isfinite(material.material.indexOfRefraction)
+					|| !std::isfinite(material.material.attenuationDistance)
+					|| !IsFinite(material.material.attenuationColor))
 				{
 					return ReportModelError(
 						filepath,
@@ -960,9 +1257,31 @@ namespace dyf
 					? mat->pbr.base_color
 					: mat->fbx.diffuse_color;
 				applyTexture(material, MaterialTextureKind::BaseColor, baseColorTexture);
-				if(mat->pbr.metalness.texture == mat->pbr.roughness.texture && mat->pbr.roughness.texture_enabled)
+				material.material.baseColor.w = std::clamp(opacity, 0.0f, 1.0f);
+				material.material.metallicFactor = std::clamp(material.material.metallicFactor, 0.0f, 1.0f);
+				material.material.roughnessFactor = std::clamp(material.material.roughnessFactor, 0.0f, 1.0f);
+				material.material.transmissionFactor = std::clamp(material.material.transmissionFactor, 0.0f, 1.0f);
+				if(material.material.indexOfRefraction <= 0.0f)
+					return ReportModelError(filepath, "ufbx material index of refraction must be positive");
+				const ufbx_material_map& specularTexture = textureIndex(mat->fbx.specular_color) != UINT32_MAX
+					? mat->fbx.specular_color : mat->pbr.specular_color;
+				if(options.fbxSpecularTextureIsOrm && textureIndex(specularTexture) != UINT32_MAX)
 				{
-					applyTexture(material, MaterialTextureKind::MetallicRoughness, mat->pbr.metalness);
+					applyTexture(material, MaterialTextureKind::MetallicRoughness, specularTexture);
+					applyTexture(material, MaterialTextureKind::Occlusion, specularTexture);
+					material.material.metallicFactor = 1.0f;
+					material.material.roughnessFactor = 1.0f;
+				}
+				else if(roughnessIndex != UINT32_MAX || metallicIndex != UINT32_MAX)
+				{
+					const float glossinessFactor = glossiness && roughnessMap.has_value
+						? static_cast<float>(roughnessMap.value_real) : 1.0f;
+					if(!std::isfinite(glossinessFactor))
+						return ReportModelError(filepath, "ufbx glossiness factor is non-finite");
+					uint32_t packedIndex = UINT32_MAX;
+					if(!packScalarTextures(roughnessIndex, metallicIndex, glossiness, glossinessFactor, packedIndex)) return false;
+					applyTextureIndex(material, MaterialTextureKind::MetallicRoughness, packedIndex);
+					if(glossiness) material.material.roughnessFactor = 1.0f;
 				}
 				const ufbx_material_map& normalTexture = mat->pbr.normal_map.texture != nullptr
 					? mat->pbr.normal_map
@@ -975,6 +1294,24 @@ namespace dyf
 					? mat->pbr.emission_color
 					: mat->fbx.emission_color;
 				applyTexture(material, MaterialTextureKind::Emissive, emissiveTexture);
+				if(options.fbxBaseColorTextureHasOpacity)
+				{
+					const uint32_t baseIndex = material.textureIndices[ToIndex(MaterialTextureKind::BaseColor)];
+					if(baseIndex < outModel.textures.size())
+					{
+						const std::vector<uint8_t>& pixels = outModel.textures[baseIndex].GetPixels();
+						for(size_t pixel = 3; pixel < pixels.size(); pixel += 4)
+						{
+							if(pixels[pixel] == 255u) continue;
+							material.material.alphaMode = pixels[pixel] == 0u
+								? MaterialAlphaMode::Mask : MaterialAlphaMode::Blend;
+							if(material.material.alphaMode == MaterialAlphaMode::Blend) break;
+						}
+					}
+				}
+				if(material.material.baseColor.w < 1.0f || material.material.transmissionFactor > 0.0f)
+					material.material.alphaMode = MaterialAlphaMode::Blend;
+				if(material.material.transmissionFactor > 0.0f) material.material.doubleSided = true;
 				materialIndices[mat] = static_cast<uint32_t>(outModel.materials.size());
 				outModel.materials.push_back(std::move(material));
 			}
@@ -994,6 +1331,10 @@ namespace dyf
 				return it != materialIndices.end() ? it->second : defaultMaterialIndex;
 			};
 
+			Math::float3 lightBoundsMin = Math::float3(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
+			Math::float3 lightBoundsMax = Math::float3(-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max(), -std::numeric_limits<float>::max());
+			bool hasLightBounds = false;
+			std::map<std::string, std::vector<std::pair<uint32_t, uint32_t>>> sharedGeometry;
 			for(size_t ni = 0; ni < scene->nodes.count; ++ni)
 			{
 				ufbx_node* node = scene->nodes.data[ni];
@@ -1002,6 +1343,8 @@ namespace dyf
 				ufbx_mesh* sourceMesh = node->mesh;
 				const auto modelNode = nodeIndices.find(node);
 				if(modelNode == nodeIndices.end()) return false;
+				const bool localGeometry = UsesLocalFbxGeometry(*scene, *node);
+				const bool shareGeometry = CanShareFbxGeometry(*scene, *node);
 				const ufbx_skin_deformer* skinDeformer = sourceMesh->skin_deformers.count > 0
 					? sourceMesh->skin_deformers.data[0]
 					: nullptr;
@@ -1036,7 +1379,7 @@ namespace dyf
 							? nodeName + "_" + std::to_string(materialIndex)
 							: nodeName + "_" + materialName;
 						mesh.materialIndex = materialIndex;
-						if(animatedModel) mesh.nodeIndex = modelNode->second;
+						if(localGeometry) mesh.nodeIndex = modelNode->second;
 						mesh.skinIndex = modelSkinIndex;
 						mesh.defaultMorphWeights = outModel.nodes[ni].morphWeights;
 						mesh.morphTargets.reserve(morphSourcesByNode[ni].size());
@@ -1049,10 +1392,40 @@ namespace dyf
 					}
 					return mesh;
 				};
-				const ufbx_matrix& vertexMatrix = animatedModel
+				const ufbx_matrix& vertexMatrix = localGeometry
 					? node->geometry_to_node : node->geometry_to_world;
 				const ufbx_matrix normalMatrix = ufbx_matrix_for_normals(&vertexMatrix);
+				const Math::float4x4 nodeToWorld = ToFloat4x4(node->node_to_world);
 				const bool hasAuthoredTangents = sourceMesh->vertex_tangent.exists;
+				const auto geometryKey = shareGeometry ? FbxGeometryKey(*node) : std::string{};
+				const auto existingGeometry = shareGeometry ? sharedGeometry.find(geometryKey) : sharedGeometry.end();
+				if(existingGeometry != sharedGeometry.end())
+				{
+					for(const auto& part : existingGeometry->second)
+					{
+						if(outModel.meshes.size() >= UINT32_MAX)
+							return ReportModelError(filepath, "FBX mesh instance count exceeds the supported index range");
+						if(options.importLights && scene->lights.count != 0u)
+						{
+							for(const auto& vertex : outModel.meshes[part.second].mesh.vertices)
+							{
+								const auto world = Math::TransformPoint(nodeToWorld, vertex.position);
+								if(!IsFinite(world)) return ReportModelError(filepath, "FBX light bounds contain non-finite positions");
+								lightBoundsMin.x = std::min(lightBoundsMin.x, world.x);
+								lightBoundsMin.y = std::min(lightBoundsMin.y, world.y);
+								lightBoundsMin.z = std::min(lightBoundsMin.z, world.z);
+								lightBoundsMax.x = std::max(lightBoundsMax.x, world.x);
+								lightBoundsMax.y = std::max(lightBoundsMax.y, world.y);
+								lightBoundsMax.z = std::max(lightBoundsMax.z, world.z);
+								hasLightBounds = true;
+							}
+						}
+						auto& reference = getMesh(part.first);
+						reference.geometryIndex = part.second;
+						outModel.meshes.push_back(std::move(reference));
+					}
+					continue;
+				}
 
 				for(size_t fi = 0; fi < sourceMesh->faces.count; ++fi)
 				{
@@ -1084,6 +1457,19 @@ namespace dyf
 							return ReportModelError(
 								filepath,
 								"ufbx vertex position contains non-finite values");
+						}
+						if(options.importLights && scene->lights.count != 0u)
+						{
+							const Math::float3 world = localGeometry
+								? Math::TransformPoint(nodeToWorld, vertex.position) : vertex.position;
+							if(!IsFinite(world)) return ReportModelError(filepath, "FBX light bounds contain non-finite positions");
+							lightBoundsMin.x = std::min(lightBoundsMin.x, world.x);
+							lightBoundsMin.y = std::min(lightBoundsMin.y, world.y);
+							lightBoundsMin.z = std::min(lightBoundsMin.z, world.z);
+							lightBoundsMax.x = std::max(lightBoundsMax.x, world.x);
+							lightBoundsMax.y = std::max(lightBoundsMax.y, world.y);
+							lightBoundsMax.z = std::max(lightBoundsMax.z, world.z);
+							hasLightBounds = true;
 						}
 
 						double normalDeltaScale = 1.0;
@@ -1288,19 +1674,31 @@ namespace dyf
 					}
 				}
 
+				std::vector<std::pair<uint32_t, uint32_t>> geometryParts;
 				for(auto& [materialIndex, mesh] : meshesByMaterial)
 				{
-					(void)materialIndex;
 					if(mesh.mesh.indices.empty()) continue;
 					if(ufbx_matrix_determinant(&vertexMatrix) < 0.0)
 						for(size_t index = 0; index < mesh.mesh.indices.size(); index += 3)
 							std::swap(mesh.mesh.indices[index + 1], mesh.mesh.indices[index + 2]);
 					if(!hasAuthoredTangents && !CalculateTangents(mesh.mesh))
 						return ReportModelError(filepath, "ufbx generated normal or tangent is non-finite");
+					if(outModel.meshes.size() >= UINT32_MAX)
+						return ReportModelError(filepath, "FBX mesh instance count exceeds the supported index range");
+					if(shareGeometry) geometryParts.emplace_back(materialIndex, static_cast<uint32_t>(outModel.meshes.size()));
 					outModel.meshes.push_back(std::move(mesh));
 				}
+				if(shareGeometry) sharedGeometry.emplace(geometryKey, std::move(geometryParts));
 			}
 
+			if(options.importLights)
+			{
+				Math::Bounds3 sourceBounds;
+				sourceBounds.min = lightBoundsMin;
+				sourceBounds.max = lightBoundsMax;
+				sourceBounds.valid = hasLightBounds;
+				if(!ImportUfbxLights(filepath, *scene, sourceBounds, outModel)) return false;
+			}
 			if(decodedBytes) *decodedBytes=geometryBytes+decodedTextureBytes;
 			return !outModel.meshes.empty();
 		}
