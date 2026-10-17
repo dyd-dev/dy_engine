@@ -423,6 +423,7 @@ bool TransparentRendering::AddPasses(RenderGraph& graph,TextureHandle opaque,RGR
         nearest.Write(nearestHandle,ResourceState::DepthWrite);geometryReads(nearest);
         nearest.SetExecute([this,drawGeometry,sets=std::move(sets)](ICommandList* commands) {
             DepthStencilAttachment depth;depth.texture=m_nearestDepth;
+            depth.state=ResourceState::DepthWrite;
             depth.depthLoadOp=LoadOp::Clear;depth.depthStoreOp=StoreOp::Store;depth.clearDepth=1;
             commands->BeginRendering({nullptr,0,&depth});
             commands->SetViewport({0,0,float(m_nearestDepth->GetDesc().width),float(m_nearestDepth->GetDesc().height),0,1});

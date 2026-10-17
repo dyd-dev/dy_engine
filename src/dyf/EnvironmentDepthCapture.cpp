@@ -47,6 +47,7 @@ bool EnvironmentDepthCapture::Prepare(RHI::TextureHandle depth)
         SamplerDesc sampler;
         sampler.minFilter=sampler.magFilter=sampler.mipFilter=SamplerFilter::Nearest;
         sampler.addressU=sampler.addressV=sampler.addressW=SamplerAddressMode::ClampToEdge;
+        sampler.mipLodBias=0;
         sampler.minLod=sampler.maxLod=0;
         const ResourceBindingLayout bindings[]={
             {0,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Fragment,{}},
