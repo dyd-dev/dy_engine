@@ -12,7 +12,7 @@
   "authored_api_count": 67,
   "authored_files": {
     "api_owners.json": "57d827a5c171252e444a0425d230c9de410eddd77961438880fe9db7e9d5e92b",
-    "api_groups.json": "d1e44daa55b383b864dd092f2a39ed30c13d29b5980d27e29760f1c82c2a8a56",
+    "api_groups.json": "93ca12b2e902b0a939d1b9cc2d02780dbba77a2774d463d6e24cc54fb0138918",
     "frontend_reference.json": "eaa0925573e1123c9ce777acbd83320c01bdc1a6ce8a68f663f1268f101bf41c",
     "rhi_reference.json": "ecef7a3d0527f9f00c3befad7bfbefe812f9185b042d9b01980156b4bfa3aa0c",
     "guides.json": "aba630c9c299fe2685b080b91f99345082831dd418c6054aad2d1a0c05b1f78a"
@@ -67,8 +67,8 @@
     "dyf/Utf8.h": "fbca5fe3052862a586ca2991d4aabb0bcc03d30a36e451225d72d240c70e088b",
     "dyf.h": "7e27d8cc32d6245161bd43658069c8a9417addf05ac3f3c3125e14d4843b833d"
   },
-  "symbols": 236,
-  "search_entries": 1143,
+  "symbols": 234,
+  "search_entries": 1140,
   "pages": [
     "component/api-dy-profile-cpu-zone-named.html",
     "component/api-dy-profile-cpu-zone.html",
@@ -96,7 +96,6 @@
     "component/api-dyf-fontglyph.html",
     "component/api-dyf-image.html",
     "component/api-dyf-isvalid.html",
-    "component/api-dyf-kmaterialtexturecount.html",
     "component/api-dyf-lighthandle.html",
     "component/api-dyf-lightingconfig.html",
     "component/api-dyf-materialdesc.html",
@@ -240,7 +239,6 @@
     "component/api-dyf-spotlightid.html",
     "component/api-dyf-textureid.html",
     "component/api-dyf-toindex.html",
-    "component/api-dyf-transform.html",
     "component/api-dyf-vec3key.html",
     "component/api-dyf-vertex.html",
     "component/api-index.html",

@@ -10,7 +10,6 @@
       "dyf::Scene",
       "dyf::Camera",
       "dyf::EntityHandle",
-      "dyf::Transform",
       "dyf::EntityID",
       "dyf::ToIndex",
       "dyf::IsValid"
@@ -20,7 +19,6 @@
       "dyf::Vertex",
       "dyf::MaterialDesc",
       "dyf::MaterialTextureKind",
-      "dyf::kMaterialTextureCount",
       "dyf::MeshID",
       "dyf::MaterialID"
     ],
