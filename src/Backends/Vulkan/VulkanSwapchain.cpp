@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <limits>
 #include <utility>
-#include "dyf/Platform/Log.h"
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -80,36 +79,12 @@ bool VulkanSwapchain::Initialize(
     if (status.result != VK_SUCCESS) return false;
     if (swapchainSupport.formats.empty() || swapchainSupport.presentModes.empty()) return false;
 
-    Platform::Log::Writef(Platform::LogLevel::Info, "VulkanSwapchain", __FILE__, __LINE__,
-        "requested: format=%d, colorSpace=%d, compositeAlpha=%d, presentMode=%d",
-        requestedFormat, requestedColorSpace, requestedCompositeAlpha, requestedPresentMode);
-    for (size_t i = 0; i < swapchainSupport.formats.size(); ++i) {
-        Platform::Log::Writef(Platform::LogLevel::Info, "VulkanSwapchain", __FILE__, __LINE__,
-            "  Surface format[%zu]: format=%d, colorSpace=%d",
-            i, swapchainSupport.formats[i].format, swapchainSupport.formats[i].colorSpace);
-    }
-    Platform::Log::Writef(Platform::LogLevel::Info, "VulkanSwapchain", __FILE__, __LINE__,
-        "Surface caps: minImages=%u, maxImages=%u, currentExtent=(%u,%u), supportedAlpha=0x%x",
-        swapchainSupport.capabilities.minImageCount, swapchainSupport.capabilities.maxImageCount,
-        swapchainSupport.capabilities.currentExtent.width, swapchainSupport.capabilities.currentExtent.height,
-        swapchainSupport.capabilities.supportedCompositeAlpha);
-
     VkExtent2D extent{};
-    if (!SupportsSurfaceFormat(swapchainSupport.formats, requestedFormat, requestedColorSpace)) {
-        Platform::Log::Writef(Platform::LogLevel::Error, "VulkanSwapchain", __FILE__, __LINE__, "SupportsSurfaceFormat failed");
+    if (!SupportsSurfaceFormat(swapchainSupport.formats, requestedFormat, requestedColorSpace) ||
+        !SupportsPresentMode(swapchainSupport.presentModes, requestedPresentMode) ||
+        !ChooseSwapExtent(swapchainSupport.capabilities, windowHandle, extent, status)) {
         return false;
     }
-    if (!SupportsPresentMode(swapchainSupport.presentModes, requestedPresentMode)) {
-        Platform::Log::Writef(Platform::LogLevel::Error, "VulkanSwapchain", __FILE__, __LINE__, "SupportsPresentMode failed");
-        return false;
-    }
-    if (!ChooseSwapExtent(swapchainSupport.capabilities, windowHandle, extent, status)) {
-        Platform::Log::Writef(Platform::LogLevel::Error, "VulkanSwapchain", __FILE__, __LINE__, "ChooseSwapExtent failed");
-        return false;
-    }
-
-    Platform::Log::Writef(Platform::LogLevel::Info, "VulkanSwapchain", __FILE__, __LINE__,
-        "Selected extent=(%u,%u)", extent.width, extent.height);
 
     uint32_t imageCount = std::max(requestedMinimumImageCount, swapchainSupport.capabilities.minImageCount);
 #if defined(__ANDROID__)
@@ -141,8 +116,6 @@ bool VulkanSwapchain::Initialize(
                 }
             }
         }
-        Platform::Log::Writef(Platform::LogLevel::Info, "VulkanSwapchain", __FILE__, __LINE__,
-            "Fallback compositeAlpha to 0x%x (surface supports 0x%x)", compositeAlpha, swapchainSupport.capabilities.supportedCompositeAlpha);
     }
     VkSwapchainCreateInfoKHR createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -154,10 +127,8 @@ bool VulkanSwapchain::Initialize(
     createInfo.imageArrayLayers = 1;
     createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if(allowReadback) createInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    if((swapchainSupport.capabilities.supportedUsageFlags & createInfo.imageUsage) != createInfo.imageUsage) {
-        Platform::Log::Writef(Platform::LogLevel::Error, "VulkanSwapchain", __FILE__, __LINE__, "imageUsage not supported");
+    if((swapchainSupport.capabilities.supportedUsageFlags & createInfo.imageUsage) != createInfo.imageUsage)
         return false;
-    }
 
     uint32_t queueFamilyIndices[] = { context.queueIndices.graphicsFamily, context.queueIndices.presentFamily };
 
@@ -169,13 +140,9 @@ bool VulkanSwapchain::Initialize(
         createInfo.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     }
 
-    VkSurfaceTransformFlagBitsKHR preTransform = (swapchainSupport.capabilities.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+    createInfo.preTransform = (swapchainSupport.capabilities.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
         ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
         : swapchainSupport.capabilities.currentTransform;
-    Platform::Log::Writef(Platform::LogLevel::Info, "VulkanSwapchain", __FILE__, __LINE__,
-        "preTransform: selected=0x%x, currentTransform=0x%x, supported=0x%x",
-        preTransform, swapchainSupport.capabilities.currentTransform, swapchainSupport.capabilities.supportedTransforms);
-    createInfo.preTransform = preTransform;
     createInfo.compositeAlpha = compositeAlpha;
     createInfo.presentMode = requestedPresentMode;
     createInfo.clipped = allowReadback ? VK_FALSE : VK_TRUE;
@@ -183,13 +150,7 @@ bool VulkanSwapchain::Initialize(
 
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
     oldSwapchainRetired = oldSwapchain != VK_NULL_HANDLE;
-    Platform::Log::Writef(Platform::LogLevel::Info, "VulkanSwapchain", __FILE__, __LINE__,
-        "Calling vkCreateSwapchainKHR: imageFormat=%d, extent=(%u,%u), compositeAlpha=0x%x, minImageCount=%u",
-        createInfo.imageFormat, createInfo.imageExtent.width, createInfo.imageExtent.height, createInfo.compositeAlpha, createInfo.minImageCount);
-    VkResult vkRes = vkCreateSwapchainKHR(context.device, &createInfo, nullptr, &swapchain);
-    Platform::Log::Writef(Platform::LogLevel::Info, "VulkanSwapchain", __FILE__, __LINE__,
-        "vkCreateSwapchainKHR result=%d", vkRes);
-    if (!status.Check(vkRes, "vkCreateSwapchainKHR")) return false;
+    if (!status.Check(vkCreateSwapchainKHR(context.device, &createInfo, nullptr, &swapchain), "vkCreateSwapchainKHR")) return false;
     std::vector<VkImageView> imageViews;
     struct PendingSwapchain {
         VkDevice device;
