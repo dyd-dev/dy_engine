@@ -13,6 +13,7 @@
 namespace viewer
 {
 void Style();
+float TableHeight(size_t rows,size_t visibleRows=6);
 class Viewer
 {
 public:
@@ -37,10 +38,8 @@ private:
     uint64_t nextDiscoveryNs = 0;
     uint32_t wantedPid = 0;
     int selectedStage = 3, historyMetric = 0;
-    enum class Layout { Default,Columns,Tabs };
-    Layout requestedLayout=Layout::Default;
-    float optionalWindowY=0;
     bool resetLayout = false, onlyRelated = false;
+    bool revealDetails=false,revealEvents=false,revealInventory=false;
     struct Draft { D::ControlValue value; bool dirty = false; D::LiveId pending = 0; };
     std::map<D::LiveId, Draft> drafts;
     std::vector<size_t> visibleEvents;
@@ -51,6 +50,8 @@ private:
     D::LiveId Send(const D::ControlDesc&, const D::ControlValue&);
     void Dock();
     void Overview();
+    void ObservationStatistics();
+    void ObservationFlow();
     void Targets();
     void LaunchDialog();
     void StartExecutableScan();
@@ -68,6 +69,7 @@ private:
     D::LiveId selectedControl=0;
     int stageComparisonMetric=int(StageMetric::Operations),counterComparisonPhase=0;
     void Details();
+    void EventSummary(const D::LiveEvent&,const char* caption);
     void History();
     void Graph();
     void Requests();
@@ -97,12 +99,13 @@ private:
     std::array<ComparisonSide,2> comparisonSides;
     uint64_t comparisonGraphGeneration=UINT64_MAX;
     bool comparisonReferences=false;
-    enum Panel { OverviewPanel,FlowPanel,TargetsPanel,ControlsPanel,EventsPanel,ObjectsPanel,GpuPanel,HistoryPanel,RequestsPanel,DetailsPanel,PanelCount };
-    std::array<bool,PanelCount> panels{true,true,false,false,false,false,false,false,false,false};
     FlowPlayback playback;
     StatisticsView statistics;
     PresentationLog presentationLog;
     std::optional<ComparisonPresentation> comparisonDrawn;
+    std::optional<StatisticsObservation> observationStatisticsDrawn;
+    std::optional<FlowObservationPresentation> observationFlowDrawn,observedFrame;
+    uint64_t observedFrameGeneration=UINT64_MAX;
     bool statisticsDrawn=false,flowDrawn=false;
     uint64_t receivedSnapshots=0;
 };

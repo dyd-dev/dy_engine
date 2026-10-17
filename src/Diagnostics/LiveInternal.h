@@ -19,6 +19,8 @@ std::vector<std::uint8_t> EncodeAck(const ControlAck&);
 bool DecodeAck(const std::vector<std::uint8_t>&,ControlAck&,std::string&);
 bool ValidateHeader(const PacketHeader&) noexcept;
 LiveId EnqueueControl(ControlRequest);
+// Caller serializes the owner's state and lifetime outside the collector.
+std::uint32_t PollControlsSerialized(LiveId owner,LiveFrameKey key) noexcept;
 void StartServer();
 void StopServer() noexcept;
 }

@@ -223,11 +223,18 @@ namespace dyf::RHI
 
 	private:
 		friend class ICommandList;
+        friend class RenderGraph;
         struct LiveState;
         std::unique_ptr<LiveState> m_live;
         LiveState* GetLiveState() noexcept;
         void PublishLiveResources() noexcept;
         void CaptureLiveUploadPolicy(ICommandList&) noexcept;
+        void BeginLiveRecording(ICommandList&) noexcept;
+        bool CaptureLiveGraphParallel(Diagnostics::LiveFrameKey) noexcept;
+        struct LiveExecutionScope;
+        void BeginLiveExecution(ICommandList* const*,uint32_t,LiveExecutionScope&) noexcept;
+        void EndLiveExecution(LiveExecutionScope&) noexcept;
+        bool ReadTimestampsInternal(TimestampQueryHandle,uint32_t,uint32_t,uint64_t*,bool observe);
         void PumpLiveWork() noexcept;
         uint32_t ReserveLiveQuery(ICommandList*) noexcept;
         void DiscardLivePrepared(ICommandList*,Diagnostics::LiveOutcome) noexcept;
@@ -242,7 +249,8 @@ namespace dyf::RHI
 		std::unordered_set<const void*> m_borrowedTextures;
 		std::shared_ptr<void> Reference(const void* handle) const;
 		void Track(void* handle, void (*destroy)(IDevice&, void*), std::vector<std::shared_ptr<void>> dependencies = {},
-            Diagnostics::LiveObjectKind kind=Diagnostics::LiveObjectKind::Entity,uint64_t elements=0,uint64_t bytes=0);
+            Diagnostics::LiveObjectKind kind=Diagnostics::LiveObjectKind::Entity,uint64_t elements=0,uint64_t bytes=0,
+            const char* label="RHI resource");
 		std::unordered_map<const void*, std::shared_ptr<void>> m_resources;
 
 		DeviceDesc m_desc = {};

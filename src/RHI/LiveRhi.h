@@ -8,12 +8,16 @@
 
 namespace dyf::RHI
 {
+// Process-local 63-bit hash/token; not an OS TID and not guaranteed collision-free.
+inline int64_t LiveRhiThreadToken() noexcept
+{return static_cast<int64_t>(std::hash<std::thread::id>{}(std::this_thread::get_id())&INT64_MAX);}
+
 struct IDevice::LiveState
 {
     static constexpr uint32_t QuerySlots=512;
     static constexpr size_t PendingLimit=1024,SubmissionIdLimit=4096;
     static constexpr uint64_t PendingBytesLimit=Diagnostics::LiveTransferLimit;
-    Diagnostics::LiveId device=0,gpuClock=0;
+    Diagnostics::LiveId device=0,gpuClock=0,recordingSource=0;
     Diagnostics::LiveId backBufferSubmission=0;
     Diagnostics::LiveFrameToken frame;
     bool hasFrame=false;
@@ -25,6 +29,14 @@ struct IDevice::LiveState
         bool reusePages=true,suballocate=true,applying=false;
     };
     std::unordered_map<Diagnostics::LiveId,UploadControls> uploadControls;
+    struct GraphControls
+    {
+        Diagnostics::LiveId owner=0;
+        Diagnostics::ControlRegistration control;
+        Diagnostics::LiveFrameKey frame;
+        bool parallel=true,applying=false;
+    };
+    std::unordered_map<Diagnostics::LiveId,GraphControls> graphControls;
     bool uploadPolicyInitialized=false,uploadPolicySupported=false;
     bool uploadPageReuse=true,uploadSuballocation=true;
     TimestampQueryHandle query=nullptr;
@@ -52,18 +64,51 @@ struct IDevice::LiveState
     std::thread worker;
 };
 
+struct IDevice::LiveExecutionScope
+{
+    IDevice& device;
+    std::vector<Diagnostics::LiveFrameToken> frames;
+    std::vector<ICommandList*> activated;
+    Diagnostics::LiveOutcome outcome=Diagnostics::LiveOutcome::Failed;
+    LiveExecutionScope(IDevice& device,ICommandList* const* lists,uint32_t count) noexcept:device(device)
+    {device.BeginLiveExecution(lists,count,*this);}
+    ~LiveExecutionScope(){device.EndLiveExecution(*this);}
+};
+
+// A profiling token may end on a different recording worker; never restore its creator's TLS.
+inline void EndLiveRhiFrame(Diagnostics::LiveFrameToken token,Diagnostics::LiveOutcome outcome) noexcept
+{
+    token.previous=Diagnostics::GetLiveContext();Diagnostics::EndLiveFrame(token,outcome);
+}
+
+inline void RecordLiveReadbackCompletion(Diagnostics::LiveId submission,Diagnostics::LiveId resource) noexcept
+{
+#ifdef DY_LIVE_PROFILING_ENABLED
+    const auto context=Diagnostics::GetLiveContext();if(!submission||!context.frame.frame)return;
+    // The native fence proves completion; this work has no GPU timestamp measurement.
+    Diagnostics::LiveGpuSpan span;span.id=Diagnostics::AllocateLiveId();span.frame=context.frame;
+    span.appliedRevision=context.appliedRevision;span.owner=context.owner;span.aggregation=Diagnostics::LiveGpuAggregation::FrameCoverage;
+    span.begin.submission=span.end.submission=submission;span.outcome=Diagnostics::LiveOutcome::Completed;
+    Diagnostics::RecordLiveGpuSpan(span);Diagnostics::RecordLiveLink({resource,span.id});
+#else
+    (void)submission;(void)resource;
+#endif
+}
+
 struct LiveRhiScope
 {
     Diagnostics::LiveEvent event;
-    explicit LiveRhiScope(Diagnostics::LiveEventKind kind,Diagnostics::LiveStage stage,const char* label) noexcept
+    explicit LiveRhiScope(Diagnostics::LiveEventKind kind,Diagnostics::LiveStage stage,const char* label,bool enabled=true) noexcept
     {
 #ifdef DY_LIVE_PROFILING_ENABLED
-        if(!Diagnostics::IsLiveCollectorEnabled())return;
+        if(!enabled||!Diagnostics::IsLiveCollectorEnabled())return;
         event.id=Diagnostics::AllocateLiveId();event.context=Diagnostics::GetLiveContext();event.kind=kind;event.stage=stage;
+        if(kind==Diagnostics::LiveEventKind::NativeTranslation)
+            event.arguments[4]=LiveRhiThreadToken();
         event.beginNs=Diagnostics::LiveNowNs();
         for(size_t i=0;label&&label[i]&&i+1<sizeof(event.label);++i)event.label[i]=label[i];
 #else
-        (void)kind;(void)stage;(void)label;
+        (void)kind;(void)stage;(void)label;(void)enabled;
 #endif
     }
     void Finish() noexcept

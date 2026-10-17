@@ -16,6 +16,7 @@ static const FeatureInfo* Feature(const std::string& key)
         {"example14.instancing","인스턴싱","256개 인스턴스의 개별 Draw와 묶음 Draw를 전환합니다."},
         {"example15.reuse","버퍼 재사용","인스턴스 버퍼를 매 프레임 새로 만들거나 기존 버퍼를 재사용합니다."},
         {"parallelRecording","명령 병렬 기록","등록된 작업 스레드로 렌더 명령을 병렬 기록합니다."},
+        {"rhi.parallelRecording","RenderGraph 병렬 기록","RenderGraph의 CPU pass 기록과 네이티브 명령 변환을 직렬 또는 병렬로 수행합니다."},
         {"lighting","조명","실제 Renderer 조명 설정을 전환합니다."},
         {"shadows","그림자","그림자 렌더링을 전환합니다."},
         {"shadowQuality","그림자 품질","등록된 그림자 품질 단계를 선택합니다."},
@@ -73,9 +74,7 @@ static const char* Category(const D::ControlDesc& control)
 }
 void Viewer::Controls()
 {
-    if(!ImGui::Begin("Controls / 실제 적용",&panels[ControlsPanel])) { ImGui::End(); return; }
-    ImGui::PushFont(nullptr,26); ImGui::TextUnformatted("최적화 분석"); ImGui::PopFont();
-    ImGui::TextWrapped("기능 선택 → 실제 적용 → 단계별 1초 변화와 전후 원본 흐름 확인");
+    if(!ImGui::Begin("Controls / 실제 적용")) { ImGui::End(); return; }
     const bool connected = client.GetState() == D::LiveClientState::Connected;
     std::vector<const D::ControlDesc*> controls;
     if(state.snapshot) for(const auto& control : state.snapshot->controls)
@@ -84,7 +83,12 @@ void Viewer::Controls()
         if(control.source && control.source != state.source) continue;
         controls.push_back(&control);
     }
-    if(controls.empty()) { ImGui::TextWrapped("연결된 source에 실제 등록된 기능이 없습니다."); ImGui::End(); return; }
+    if(controls.empty())
+    {
+        ImGui::TextWrapped("선택 source에 조절 항목이 없습니다. 작업은 Overview·Flow에서 확인하세요.");
+        if(ImGui::CollapsingHeader("적용 요청 내역")) Requests();
+        ImGui::End(); return;
+    }
     auto selected=std::find_if(controls.begin(),controls.end(),[&](const auto* value){return value->id==selectedControl;});
     if(selected==controls.end())
     {
@@ -92,23 +96,32 @@ void Viewer::Controls()
         if(selected==controls.end()) selected=controls.begin();
         selectedControl=(*selected)->id;
     }
-    const float listWidth=std::min(300.f,std::max(200.f,ImGui::GetContentRegionAvail().x*.24f));
-    if(ImGui::BeginChild("##FeatureSelection",{listWidth,0},true,ImGuiWindowFlags_HorizontalScrollbar))
-    {
-        ImGui::TextWrapped("실제 등록된 기능 %zu개",controls.size());
+    const bool compact=ImGui::GetContentRegionAvail().x<1000;
+    const auto entries=[&] {
         for(const auto* control:controls)
         {
             ImGui::PushID(reinterpret_cast<void*>(static_cast<uintptr_t>(control->id)));
-            ImGui::Separator(); ImGui::TextDisabled("%s",Category(*control));
             if(ImGui::Selectable(FeatureTitle(*control),selectedControl==control->id)) selectedControl=control->id;
-            if(!control->writable || control->application==D::ControlApplication::RebuildRequired || control->application==D::ControlApplication::RestartRequired)
-                ImGui::TextDisabled("읽기 전용");
-            if(ImGui::IsItemHovered()) ImGui::SetTooltip("%s\n%s",control->key.c_str(),Application(control->application));
+            if(ImGui::IsItemHovered()) ImGui::SetTooltip("%s · %s%s\n%s",Category(*control),Application(control->application),control->writable ? "" : " · 읽기 전용",control->key.c_str());
             ImGui::PopID();
         }
+    };
+    if(compact)
+    {
+        ImGui::Text("조절 항목 %zu개",controls.size()); ImGui::SameLine(); ImGui::SetNextItemWidth(-1);
+        const auto* current=*std::find_if(controls.begin(),controls.end(),[&](const auto* control){return control->id==selectedControl;});
+        if(ImGui::BeginCombo("##FeatureSelectionCombo",FeatureTitle(*current))) { entries(); ImGui::EndCombo(); }
     }
-    ImGui::EndChild(); ImGui::SameLine();
-    if(ImGui::BeginChild("##FeatureAnalysis",{0,0},false,ImGuiWindowFlags_HorizontalScrollbar))
+    else
+    {
+        const float listWidth=std::min(240.f,ImGui::GetContentRegionAvail().x*.23f);
+        if(ImGui::BeginChild("##FeatureSelection",{listWidth,0},true))
+        {
+            ImGui::Text("조절 항목 %zu개",controls.size()); entries();
+        }
+        ImGui::EndChild(); ImGui::SameLine();
+    }
+    if(ImGui::BeginChild("##FeatureAnalysis",{0,0}))
     {
         const auto& control=**std::find_if(controls.begin(),controls.end(),[&](const auto* value){return value->id==selectedControl;});
         ImGui::PushID(reinterpret_cast<void*>(static_cast<uintptr_t>(control.id)));
@@ -119,10 +132,8 @@ void Viewer::Controls()
         if(!draft.dirty && !draft.pending && !ImGui::IsAnyItemActive()) draft.value = control.appliedValue;
         ImGui::PushFont(nullptr,26); ImGui::TextWrapped("%s",FeatureTitle(control)); ImGui::PopFont();
         ImGui::TextDisabled("%s · %s",Category(control),Application(control.application));
-        if(!control.description.empty()) ImGui::TextWrapped("%s",control.description.c_str());
-        else if(const auto* info=Feature(control.key); info && *info->description) ImGui::TextWrapped("%s",info->description);
         const bool runtime = control.application == D::ControlApplication::Immediate || control.application == D::ControlApplication::ResourceRebuild;
-        if(control.writable && runtime) ImGui::TextColored(accent,"실제 적용: %s",FeatureValue(control,control.appliedValue).c_str());
+        if(control.writable && runtime) ImGui::TextColored(accent,"현재: %s",FeatureValue(control,control.appliedValue).c_str());
         else ImGui::TextDisabled("등록된 설정값: %s",FeatureValue(control,control.appliedValue).c_str());
         if(!control.writable || !runtime)
         {
@@ -136,7 +147,7 @@ void Viewer::Controls()
         bool changed = false;
         if(control.kind == D::ControlKind::Boolean)
         {
-            if(auto* value = std::get_if<bool>(&draft.value)) changed = ImGui::Checkbox("요청값 (체크 = 켜기)", value);
+            if(auto* value = std::get_if<bool>(&draft.value)) changed = ImGui::Checkbox("요청: 켜기", value);
         }
         else if(control.kind == D::ControlKind::Integer)
         {
@@ -167,11 +178,11 @@ void Viewer::Controls()
         for(auto it = state.requests.rbegin(); it != state.requests.rend(); ++it) if(it->control == control.id)
         {
             ImGui::TextColored(it->state==D::ControlState::Applied ? accent : warning,"%s",ControlState(it->state));
-            if(ImGui::IsItemHovered()) ImGui::SetTooltip("Request %llu / control %llu",it->request,it->control);
+            if(ImGui::IsItemHovered()) ImGui::SetTooltip("이 조절 항목의 실제 적용 요청 상태입니다.");
             if(it->state == D::ControlState::Applied)
             {
                 ImGui::Text("실제 결과: %s",FeatureValue(control,it->actual).c_str());
-                if(ImGui::IsItemHovered()) ImGui::SetTooltip("원본 적용 frame %llu / revision %llu",it->appliedFrame.frame,it->appliedRevision);
+                if(ImGui::IsItemHovered()) ImGui::SetTooltip("프로그램의 실제 준비 경계에서 적용된 결과입니다.");
             }
             else if((it->state == D::ControlState::Requested || it->state == D::ControlState::Validated || it->state == D::ControlState::PendingApply)
                 && D::LiveNowNs() > it->requestedNs + 2000000000) ImGui::TextColored(warning, "상태 갱신 지연 / 결과 미확인");
@@ -180,6 +191,8 @@ void Viewer::Controls()
         }
         if(ImGui::CollapsingHeader("역할·처리 경로·적용 조건"))
         {
+            if(!control.description.empty()) ImGui::TextWrapped("%s",control.description.c_str());
+            else if(const auto* info=Feature(control.key); info && *info->description) ImGui::TextWrapped("%s",info->description);
             const auto text=[](const char* label,const std::string& value) {
                 ImGui::TextColored(accent,"%s",label); ImGui::TextWrapped("%s",value.empty() ? "제작물이 설명을 등록하지 않았습니다." : value.c_str());
             };
@@ -187,6 +200,7 @@ void Viewer::Controls()
             text("적용 조건",control.conditions); text("추가 비용·교환 조건",control.tradeoffs);
         }
         ControlComparison();
+        if(ImGui::CollapsingHeader("적용 요청 내역")) Requests();
         ImGui::PopID();
     }
     ImGui::EndChild();

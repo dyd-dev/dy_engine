@@ -56,6 +56,37 @@ bool StatisticsView::Update(std::shared_ptr<const D::LiveSnapshot> incoming,D::L
     }
     return false;
 }
+std::optional<StatisticsObservation> ObserveStatistics(const StatisticsView& values)
+{
+    const auto* source=values.state.Source();
+    if(!source || !values.state.snapshot) return {};
+    StatisticsObservation shown;
+    shown.values={values.state.snapshot->session,values.state.snapshot->sequence,0,source->recent,source->runRanges};
+    return shown;
+}
+std::optional<FlowObservationPresentation> ObserveReplay(const FlowPlayback& replay)
+{
+    const auto* source=replay.Source();
+    if(!source || !replay.snapshot || source->flow.key!=replay.frame) return {};
+    FlowObservationPresentation shown;
+    shown.values={replay.snapshot->session,replay.frame,replay.revision,replay.snapshot->sequence,replay.startedNs,0};
+    shown.observed=ObserveFlow(BuildFlowGraph(*replay.snapshot,*source),*source);
+    shown.loss=replay.snapshot->loss; shown.incomplete=source->latest.incomplete;
+    shown.omittedEvents=source->flow.omittedEvents; shown.omittedLinks=source->flow.omittedLinks;
+    return shown;
+}
+void PresentationLog::PresentedObservations(const StatisticsObservation* shownStatistics,const FlowObservationPresentation* shownFlow,uint64_t nowNs)
+{
+    const auto any=[](const auto& rows) { for(const auto& row:rows) if(std::any_of(row.begin(),row.end(),[](auto value){return value!=0;})) return true; return false; };
+    observationCountersVisible=shownStatistics && any(shownStatistics->counterVisibility);
+    observationStagesVisible=shownStatistics && any(shownStatistics->stageVisibility);
+    observationFlowVisible=shownFlow && (shownFlow->headerVisible || shownFlow->multiInstanceVisible || !shownFlow->events.empty()
+        || std::any_of(shownFlow->presentOutcomeVisibility.begin(),shownFlow->presentOutcomeVisibility.end(),[](auto value){return value!=0;})
+        || std::any_of(shownFlow->commandVisibility.begin(),shownFlow->commandVisibility.end(),[](auto value){return value!=0;}));
+    if(observationCountersVisible) { observationCounters=*shownStatistics; observationCounters->values.presentedNs=nowNs; }
+    if(observationStagesVisible) { observationStages=*shownStatistics; observationStages->values.presentedNs=nowNs; }
+    if(observationFlowVisible) { observationFlow=*shownFlow; observationFlow->values.presentedNs=nowNs; }
+}
 void PresentationLog::Presented(const StatisticsView& values,const FlowPlayback& replay,bool statisticsDrawn,bool flowDrawn,uint64_t nowNs)
 {
     const auto* source=values.state.Source();
@@ -77,9 +108,62 @@ void PresentationLog::Write(std::ostream& out) const
     out<<"display_policy=producer_completed_1s_average_and_3s_recorded_relationship_replay\nlegacy_250ms_gate=retired_by_user\n"
         <<"statistics_visible_at_last_present="<<statisticsVisible<<"\nflow_visible_at_last_present="<<flowVisible
         <<"\nstatistics_presented_updates="<<statisticsUpdates<<"\nflow_presented_cycles="<<flowCycles<<'\n';
+    out<<"observation_measurement_scope=instrumented_frame_or_work_interval_not_display_fps\nobservation_counters_visible_at_last_present="<<observationCountersVisible
+        <<"\nobservation_stages_visible_at_last_present="<<observationStagesVisible<<"\nobservation_flow_visible_at_last_present="<<observationFlowVisible<<'\n';
+    const auto observationWindow=[&](const char* name,const StatisticsObservation& shown) {
+        const auto& v=shown.values; const auto& a=v.average;
+        out<<"observation_"<<name<<"_last_presented="<<v.session.high<<','<<v.session.low<<','<<v.sequence<<','<<a.device<<','<<a.source<<','
+            <<a.beginNs<<','<<a.endNs<<','<<a.appliedRevision<<','<<a.mixedRevision<<','<<a.frameCount<<','<<v.presentedNs<<'\n';
+    };
+    const auto number=[&](std::optional<double> value) { out<<','<<bool(value)<<','; if(value) out<<std::setprecision(12)<<*value; else out<<"--"; out<<'\n'; };
+    if(observationCounters)
+    {
+        const auto& shown=*observationCounters; observationWindow("counter",shown);
+        for(size_t phase=0;phase<3;++phase) for(size_t i=0;i<ComparisonCounters().size();++i) if(shown.counterVisibility[phase][i])
+        { const auto& field=ComparisonCounters()[i]; out<<"observation_counter="<<phase<<','<<field.key; number(CounterNumber(shown.values.average,CounterPhase(phase),field)); }
+    }
+    if(observationStages)
+    {
+        const auto& shown=*observationStages; observationWindow("stage",shown);
+        for(size_t stage=0;stage<D::LiveStageCount;++stage) for(size_t metric=0;metric<size_t(StageMetric::Count);++metric) if(shown.stageVisibility[stage][metric])
+        {
+            out<<"observation_stage="<<stage<<','<<metric; number(StageNumber(shown.values.average,D::LiveStage(stage),StageMetric(metric)));
+            if(metric<2)
+            {
+                const auto& timing=metric==0 ? shown.values.average.stages[stage].cpu : shown.values.average.stages[stage].gpu;
+                out<<"observation_stage_coverage="<<stage<<','<<metric<<','<<int(timing.state)<<','<<timing.ready<<','<<shown.values.average.frameCount<<','
+                    <<timing.pending<<','<<timing.unsupported<<','<<timing.unavailable<<'\n';
+            }
+        }
+    }
+    if(observationFlow)
+    {
+        const auto& shown=*observationFlow; const auto& v=shown.values;
+        out<<"observation_flow_last_presented="<<v.session.high<<','<<v.session.low<<','<<v.sequence<<','<<v.frame.device<<','<<v.frame.source<<','<<v.frame.frame<<','
+            <<v.revision<<','<<v.cycleStartedNs<<','<<v.presentedNs<<'\n';
+        out<<"observation_flow_loss="<<shown.incomplete<<','<<shown.omittedEvents<<','<<shown.omittedLinks<<','<<shown.loss.events<<','<<shown.loss.links<<','
+            <<shown.loss.frames<<','<<shown.loss.inventory<<','<<shown.loss.gpuSpans<<','<<shown.loss.transferTruncated<<'\n';
+        for(size_t i=0;i<shown.commandVisibility.size();++i) if(shown.commandVisibility[i]) out<<"observation_command="<<i<<','<<shown.observed.commandKinds[i]<<'\n';
+        if(shown.multiInstanceVisible) out<<"observation_multi_instance_draws="<<shown.observed.multiInstanceDraws<<'\n';
+        for(size_t i=0;i<shown.observed.presentOutcomes.size();++i) if(shown.presentOutcomeVisibility[i])
+            out<<"observation_present_outcome="<<i<<','<<shown.observed.presentOutcomes[i]<<'\n';
+        for(const auto& item:shown.events)
+        {
+            const auto& event=item.event; const auto mask=item.visibility;
+            out<<"observation_event="<<event.id<<','<<unsigned(mask)<<',';
+            if(mask&1) out<<int(event.kind)<<','<<int(event.commandKind); else out<<"--,--";
+            out<<','; if(mask&4) out<<int(event.outcome); else out<<"--";
+            for(const auto argument:event.arguments) { out<<','; if(mask&8) out<<argument; else out<<"--"; }
+            out<<','; if(mask&2) out<<std::quoted(std::string(event.label,std::find(std::begin(event.label),std::end(event.label),'\0'))); else out<<"--";
+            out<<'\n';
+        }
+    }
     if(statistics)
     {
         const auto& value=*statistics; const auto& a=value.average;
+        const auto rate=WindowRate(a);
+        out<<"statistics_window_rate="<<a.frameCount<<','<<(a.endNs>=a.beginNs ? a.endNs-a.beginNs : 0)<<','<<bool(rate)<<',';
+        if(rate) out<<std::setprecision(12)<<*rate; else out<<"--"; out<<'\n';
         out<<"statistics_session="<<value.session.high<<','<<value.session.low<<'\n';
         out<<"statistics_last_presented="<<value.sequence<<','<<a.device<<','<<a.source<<','<<a.beginNs<<','<<a.endNs<<','<<a.appliedRevision<<','<<a.mixedRevision<<','<<value.presentedNs<<'\n';
         const auto metric=[&](const char* name,double mean,D::LiveValueState state,const D::LiveMetricRange& range) {
@@ -127,6 +211,13 @@ void PresentationLog::Write(std::ostream& out) const
             out<<"comparison_"<<name<<"="<<a.beginNs<<','<<a.endNs<<','<<a.appliedRevision<<','<<a.frameCount<<','<<ready<<','<<a.mixedRevision<<'\n';
         };
         window("before",status.baseline,value.beforeReady); window("after",status.after,value.afterReady);
+        for(int side=0;side<2;++side)
+        {
+            const auto& a=side ? status.after : status.baseline;
+            const auto rate=(side ? value.afterReady : value.beforeReady) ? WindowRate(a) : std::nullopt;
+            out<<"comparison_window_rate="<<side<<','<<a.frameCount<<','<<(a.endNs>=a.beginNs ? a.endNs-a.beginNs : 0)<<','<<bool(rate)<<',';
+            if(rate) out<<*rate; else out<<"--"; out<<'\n';
+        }
         const char* names[]{"frames","fps","frame_ms","cpu_ms","gpu_ms","draws","instances","dispatch","upload_bytes"};
         for(size_t i=0;i<9;++i)
         {
@@ -279,21 +370,21 @@ FlowRouteLayout LayoutFlowRoute(const FlowRoute& route)
         offset+=size_t(step.links); result.ids.push_back(route.links[offset-1].to);
     }
     if(offset!=route.links.size()) return {};
-    for(size_t i=0;i<result.ids.size();++i) result.nodes.push_back({result.Radius+60+float(i)*result.Spacing,result.CenterY});
-    result.height=result.CenterY+result.Radius+100;
+    for(size_t i=0;i<result.ids.size();++i) result.nodes.push_back({result.Spacing*.5f+4+float(i)*result.Spacing,result.CenterY});
+    result.height=result.CenterY+result.Radius+36;
     for(size_t i=0;i<route.steps.size();++i)
     {
         auto from=result.nodes[i],to=result.nodes[i+1]; const auto& step=route.steps[i];
         // Keep the moving marker below the value/unit text, including inside a node.
-        from.y+=result.Radius*.8f; to.y=from.y;
+        from.y+=result.Radius*.9f; to.y=from.y;
         if(route.recording && step.from<step.to) result.paths.push_back({from,to});
         else
         {
-            const float port=result.Radius*.5f,bottom=result.CenterY+result.Radius+60;
+            const float port=result.Radius*.5f,bottom=result.CenterY+result.Radius+16;
             result.paths.push_back({from,{from.x+port,from.y},{from.x+port,bottom},{to.x-port,bottom},{to.x-port,to.y},to});
         }
     }
-    result.width=result.nodes.back().x+result.Radius+60;
+    result.width=result.nodes.back().x+result.Spacing*.5f+4;
     return result;
 }
 std::vector<int> ActiveFlowColumns(const FlowGraph& graph)

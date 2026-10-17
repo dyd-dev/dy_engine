@@ -7,6 +7,7 @@
 #include "D3D12Texture.h"
 #include "D3D12Query.h"
 #include "../../RHI/Validation.h"
+#include "../../RHI/LiveRhi.h"
 #include "dyf/RHI/ResourceSet.h"
 #include "dyf/RHI/Shader.h"
 #include "dyf/RHI/Pipeline.h"
@@ -196,7 +197,11 @@ namespace dyf::Backends
         commands->ResourceBarrier(1, &barrier);
         const CD3DX12_TEXTURE_COPY_LOCATION source(resource, 0u);
         const CD3DX12_TEXTURE_COPY_LOCATION destination(buffer.Get(), footprint);
-        commands->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        {
+            RHI::LiveRhiScope copy(Diagnostics::LiveEventKind::CpuWork,Diagnostics::LiveStage::NativeTranslate,"Readback: record texture copy");
+            copy.event.resource=Diagnostics::FindLiveObject(texture);copy.event.bytes=bytes;copy.event.operations=1;
+            commands->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        }
         std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
         commands->ResourceBarrier(1, &barrier);
         if(FAILED(commands->Close())) return false;
@@ -208,7 +213,16 @@ namespace dyf::Backends
         m_internal->readbackResources.emplace_back(commands.Get());
         m_internal->readbackResources.emplace_back(fence.Get());
         ID3D12CommandList* native = commands.Get();
-        m_internal->commandQueue->ExecuteCommandLists(1, &native);
+        const auto liveSubmission=Diagnostics::IsLiveCollectorEnabled()?Diagnostics::AllocateLiveId():0;
+        {
+            RHI::LiveRhiScope submit(Diagnostics::LiveEventKind::CpuWork,Diagnostics::LiveStage::Submit,"Readback: native submission");
+            submit.event.resource=Diagnostics::FindLiveObject(texture);submit.event.submission=liveSubmission;submit.event.operations=1;
+            m_internal->commandQueue->ExecuteCommandLists(1, &native);submit.event.outcome=Diagnostics::LiveOutcome::Submitted;
+        }
+        if(liveSubmission)Diagnostics::SetLiveGpuCoverage(Diagnostics::GetLiveContext().frame,false);
+        RHI::LiveRhiScope wait(Diagnostics::LiveEventKind::Wait,Diagnostics::LiveStage::Submit,"Readback: fence wait");
+        wait.event.resource=Diagnostics::FindLiveObject(texture);wait.event.submission=liveSubmission;wait.event.operations=1;
+        wait.event.outcome=Diagnostics::LiveOutcome::Failed;
         if(FAILED(m_internal->commandQueue->Signal(fence.Get(), 1)) ||
             FAILED(fence->SetEventOnCompletion(1, event.handle)) ||
             WaitForSingleObject(event.handle, INFINITE) != WAIT_OBJECT_0 ||
@@ -217,6 +231,8 @@ namespace dyf::Backends
             m_internal->submissionFaulted = true;
             return false;
         }
+        wait.event.outcome=Diagnostics::LiveOutcome::Completed;wait.Finish();
+        RHI::RecordLiveReadbackCompletion(liveSubmission,Diagnostics::FindLiveObject(texture));
         m_internal->readbackResources.resize(retirementBase);
         void* mapped = nullptr;
         const D3D12_RANGE range{0, static_cast<SIZE_T>(storageBytes)};

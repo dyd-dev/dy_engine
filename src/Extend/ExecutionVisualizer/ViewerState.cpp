@@ -18,6 +18,72 @@ bool ComparisonAfterReady(const ViewerState& state,const D::ControlStatus& statu
         && status.appliedFrame.source==state.source && status.appliedFrame.frame
         && CompleteComparisonWindow(status.after,state.device,state.source,producerNs,status.appliedRevision) && status.after.beginNs>=status.appliedNs;
 }
+std::optional<double> WindowRate(const D::LiveAggregate& a)
+{
+    if(!a.frameCount || a.endNs<=a.beginNs) return {};
+    return double(a.frameCount)*1e9/double(a.endNs-a.beginNs);
+}
+std::string DisplayAmount(double value,int decimals)
+{
+    if(!std::isfinite(value)) return "--";
+    const char* suffix="";
+    for(const auto* next:{"k","M","G"}) { if(std::abs(value)<1000) break; value/=1000; suffix=next; }
+    char text[64];
+    if(*suffix) std::snprintf(text,sizeof(text),"%.3g%s",value,suffix);
+    else std::snprintf(text,sizeof(text),"%.*f",decimals,value);
+    return text;
+}
+EventText DescribeEvent(const D::LiveEvent& e)
+{
+    EventText text; text.label.assign(e.label,std::find(std::begin(e.label),std::end(e.label),'\0'));
+    text.name=e.commandKind!=D::LiveCommandKind::None ? CommandKind(e.commandKind) : text.label.empty() ? EventKind(e.kind) : text.label;
+    text.explanation="프로그램이 기록한 작업 또는 상태입니다.";
+    text.arguments="주요 인자 의미 미수집";
+    const auto amount=[](int64_t value) { return DisplayAmount(double(value),0); };
+    const auto& a=e.arguments;
+    if(e.kind==D::LiveEventKind::NativeTranslation) { text.name="Native translate"; text.explanation="기록된 논리 명령을 백엔드 명령으로 변환합니다."; }
+    else if(e.kind==D::LiveEventKind::Submission) { text.name="Submit"; text.explanation="기록된 명령 목록의 제출·완료 관측입니다."; }
+    else if(e.kind==D::LiveEventKind::Wait) { text.name="Wait"; text.explanation="동기화 조건을 기다린 관측입니다."; }
+    else if(e.kind==D::LiveEventKind::Output && e.commandKind==D::LiveCommandKind::Present)
+    { text.name="Present"; text.explanation="화면 출력 API의 요청·결과 관측입니다."; }
+    else if(e.kind==D::LiveEventKind::Upload)
+    {
+        text.name="Upload"; text.explanation="CPU 데이터를 GPU 자원으로 업로드합니다.";
+        text.arguments="bytes="+DisplayAmount(double(e.bytes),0)+" B · "+(e.fullUpload ? "전체 업로드" : "부분 업로드");
+        text.value=DisplayAmount(double(e.bytes),0); text.unit="B";
+    }
+    else if(e.kind==D::LiveEventKind::Command)
+    {
+        switch(e.commandKind)
+        {
+        case D::LiveCommandKind::Draw:
+            text.explanation="정점과 인스턴스로 그리기를 기록합니다.";
+            text.arguments="vertices="+amount(a[0])+" · instances="+amount(a[1])+" · firstVertex="+amount(a[2])+" · firstInstance="+amount(a[3]);
+            text.value=amount(a[1]); text.unit="inst"; break;
+        case D::LiveCommandKind::DrawIndexed:
+            text.explanation="인덱스로 정점을 선택해 그리기를 기록합니다.";
+            text.arguments="indices="+amount(a[0])+" · instances="+amount(a[1])+" · firstIndex="+amount(a[2])+" · vertexOffset="+amount(a[3])+" · firstInstance="+amount(a[4]);
+            text.value=amount(a[1]); text.unit="inst"; break;
+        case D::LiveCommandKind::Dispatch: case D::LiveCommandKind::DispatchMesh:
+            text.explanation=e.commandKind==D::LiveCommandKind::Dispatch ? "컴퓨트 작업 그룹을 기록합니다." : "메시 셰이더 작업 그룹을 기록합니다.";
+            text.arguments="groups xyz="+amount(a[0])+", "+amount(a[1])+", "+amount(a[2]); text.value=amount(a[0]); text.unit="x grp"; break;
+        case D::LiveCommandKind::Barrier:
+            text.explanation="자원 사용 상태·접근 동기화를 기록합니다."; break;
+        case D::LiveCommandKind::Bind:
+            text.explanation="파이프라인·버퍼·자원을 명령 목록에 연결합니다.";
+            if(text.label=="Vertex buffer") text.arguments="binding="+amount(a[0])+" · offset="+amount(a[1])+" B";
+            else if(text.label=="Index buffer") text.arguments="format code="+amount(a[0])+" · offset="+amount(a[1])+" B";
+            else if(text.label=="Inline constants") text.arguments="offset="+amount(a[0])+" B · bytes="+amount(a[1])+" B";
+            break;
+        default: break;
+        }
+    }
+    if(text.arguments=="주요 인자 의미 미수집" && (e.operations || e.elements || e.bytes))
+        text.arguments="관측 작업="+DisplayAmount(double(e.operations),0)+" · 요소="+DisplayAmount(double(e.elements),0)+" · bytes="+DisplayAmount(double(e.bytes),0)+" B";
+    if(text.value=="--" && e.beginNs && e.endNs>=e.beginNs)
+    { text.value=DisplayAmount(double(e.endNs-e.beginNs)/1e6,3); text.unit="CPU ms"; }
+    return text;
+}
 std::optional<double> ComparisonNumber(const D::LiveAggregate& a,ComparisonMetric metric)
 {
     if(!a.frameCount) return {};

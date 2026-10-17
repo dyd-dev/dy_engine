@@ -15,6 +15,7 @@ struct FlowGraph
 };
 FlowGraph BuildFlowGraph(const D::LiveSnapshot&, const D::LiveSourceSnapshot&, D::LiveId focus=0);
 FlowGraph BuildFlowGraph(const D::LiveFrameEvidence&);
+const D::LiveEvent* FlowEvent(const FlowGraph&,const D::LiveFlowSnapshot&,D::LiveId);
 std::vector<const D::LiveGpuSpan*> GpuSamples(const D::LiveSourceSnapshot&);
 struct FlowBundle { int from=0,to=0; uint64_t links=0; };
 std::vector<FlowBundle> GroupFlowLinks(const FlowGraph&);
@@ -22,6 +23,8 @@ struct FlowObservations
 {
     std::array<uint64_t,D::LiveStageCount> stageEvents{};
     std::array<uint64_t,size_t(D::LiveCommandKind::Present)+1> commandKinds{};
+    uint64_t multiInstanceDraws=0;
+    std::array<uint64_t,size_t(D::LiveOutcome::Unknown)+1> presentOutcomes{};
     std::vector<FlowBundle> links;
 };
 FlowObservations ObserveFlow(const FlowGraph&,const D::LiveSourceSnapshot&);
