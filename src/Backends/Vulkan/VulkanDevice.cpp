@@ -1,5 +1,5 @@
 #include "VulkanDevice.h"
-#include "RHI/LiveRhi.h"
+#include "../../RHI/LiveRhi.h"
 #include "VulkanQuery.h"
 #include "dyf/Platform/Log.h"
 
@@ -105,31 +105,7 @@ namespace dyf::Backends
             if(!m_uploadPool)m_uploadPool=CreateVulkanUploadPool(m_context);
             m_uploadPool->SetPolicy({reusePages,suballocate});return true;
         }
-        bool GetTimestampCalibration(RHI::TimestampCalibration& calibration)
-        {
-#if defined(_WIN32)
-            if(m_submissionFaulted || !m_context.getCalibratedTimestamps || !m_context.cpuTimestampFrequency) return false;
-            const VkCalibratedTimestampInfoEXT clocks[2] = {
-                {VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, nullptr, VK_TIME_DOMAIN_DEVICE_EXT},
-                {VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, nullptr, VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT}};
-            uint64_t ticks[2]{}, deviation = 0;
-            const VkResult result = m_context.getCalibratedTimestamps(m_context.device, 2, clocks, ticks, &deviation);
-            if(result == VK_ERROR_DEVICE_LOST) m_submissionFaulted = true;
-            if(result != VK_SUCCESS || !deviation) return false;
-            calibration = {};
-            calibration.cpuDomain = RHI::CpuTimestampDomain::QueryPerformanceCounter;
-            calibration.cpuTicks = ticks[1];
-            calibration.cpuFrequency = m_context.cpuTimestampFrequency;
-            calibration.gpuTicks = ticks[0];
-            calibration.gpuPeriodNanoseconds = m_owner.GetTimestampPeriodNanoseconds();
-            calibration.gpuValidBits = m_owner.GetTimestampValidBits();
-            calibration.maximumDeviationNanoseconds = deviation;
-            return true;
-#else
-            (void)calibration;
-            return false;
-#endif
-        }
+
 
 		bool IsLost() const {return m_submissionFaulted || (m_commandPools && m_commandPools->IsDeviceLost());}
         bool Supports(RHI::Feature feature) const

@@ -52,7 +52,7 @@ def module_name(header):
     if parts[0] == "dyf":
         if len(parts) > 2 and parts[1] == "Extends":
             return "확장: " + parts[2]
-        if len(parts) > 1 and parts[1] in {"RHI", "Math", "Platform"}:
+        if len(parts) > 1 and parts[1] in {"RHI", "Math", "Platform", "Diagnostics"}:
             return parts[1]
         return "dyf"
     return path.parent.as_posix() if path.parent != Path(".") else "기본"
@@ -95,7 +95,7 @@ def relative_links(document, filename):
 class Reference:
     def __init__(self, headers=None):
         self.headers = Path(headers if headers is not None else ROOT / "src" / "Public").resolve()
-        self.project_name = ROOT.name
+        self.project_name = "dy_engine" if self.headers == (ROOT / "src" / "Public").resolve() else ROOT.name
         try:
             self.source_label = self.headers.relative_to(ROOT).as_posix()
         except ValueError:
@@ -161,7 +161,7 @@ class Reference:
         for key, declaration in self.symbols.items():
             self.by_header[declaration.header].append((key, declaration))
         modules = {module_name(header) for header in self.sources}
-        preferred = {name: index for index, name in enumerate(("dyf", "RHI", "Math", "Platform", "확장: Model"))}
+        preferred = {name: index for index, name in enumerate(("dyf", "RHI", "Math", "Platform", "Diagnostics", "확장: Model", "확장: AdvancedRendering"))}
         self.by_module = {name: [] for name in sorted(modules, key=lambda name: (preferred.get(name, len(preferred)), name))}
         self.module_headers = {name: [] for name in self.by_module}
         for header, values in self.by_header.items():

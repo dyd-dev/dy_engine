@@ -798,6 +798,7 @@ class RecordedCommandList final : public ICommandList
     {
         if(!m_rendering || !m_pipeline || !m_indexBuffer || !m_viewport || !m_scissor) {m_recordingFailed=true;return;}
         m_commands.push_back([=](ICommandList& n){n.DrawIndexedInstancedNative(indices,instances,firstIndex,vertexOffset,firstInstance);return true;});
+        RecordLiveCommand(D::LiveCommandKind::DrawIndexed,{indices,instances,firstIndex,vertexOffset,firstInstance},nullptr,uint64_t(indices)*instances);
     }
     void DrawIndirectNative(BufferHandle arguments,uint32_t offset) override
     {
