@@ -9,11 +9,14 @@
 #include "../PerformanceComparison.h"
 #include "AnimatedActor.h"
 #include "KnightMaterials.h"
+#include "../../CameraPath.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <exception>
+#include <fstream>
+#include <iomanip>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -37,6 +40,12 @@
 #ifndef DY_SHOWCASE_KNIGHT_ACTOR
 #define DY_SHOWCASE_KNIGHT_ACTOR ""
 #endif
+#ifndef DY_SHOWCASE_COMPARISON_SCENE
+#define DY_SHOWCASE_COMPARISON_SCENE ""
+#endif
+#ifndef DY_SHOWCASE_COMPARISON_CAMERA
+#define DY_SHOWCASE_COMPARISON_CAMERA ""
+#endif
 
 int main(int argc, char** argv)
 {
@@ -47,8 +56,12 @@ int main(int argc, char** argv)
         using Platform::Key;
         using Platform::MouseButton;
         constexpr float pi = 3.14159265358979323846f;
-        constexpr double tourSeconds = 60.0;
-        struct Shot { double seconds; float3 eye, target; float fov; float3 up = {0, 0, 1}; };
+        double tourSeconds = 60.0;
+        using Shot=showcase::CameraKeyframe;
+        showcase::CameraPath comparisonPath;
+        std::string cameraPath,exportCameraPath;
+        double initialTourTime=0;
+        bool initiallyPaused=false;
         const char* const surfaceViews[] = {"off", "base color", "normal", "roughness", "metallic", "depth", "motion"};
         // Intel New Sponza, centered and normalized to 80 units in Z-up world.
         std::vector<Shot> shots{
@@ -70,17 +83,21 @@ int main(int argc, char** argv)
         actorDescription.transform = Math::RotationX(pi * .5f);
         actorDescription.loadOptions.textureDecodeThreadCount = 4;
         uint32_t actorClip = 0;
-        bool actorPositioned = false, sceneSpecified = false, bakeSpatialProbes = true;
+        bool actorPositioned = false, sceneSpecified = false, bakeSpatialProbes = true, legacyComparison = false;
         ShadowQuality shadowQuality = ShadowQuality::High;
         float shadowDistance = 0, shadowSplit = .65f, lightRadius = 0;
         uint32_t directionalShadowLights = 4, pointShadowLights = 16, spotShadowLights = 16;
         uint32_t glassLayers = 2;
         const auto usage = [] {
-            std::fputs("Usage: AdvancedCinematicShowcase [exterior|interior|emerald|scene.gltf|scene.glb|scene.fbx|scene.obj] [options]\n"
+            std::fputs("Usage: AdvancedCinematicShowcase [exterior|interior|emerald|comparison|scene.gltf|scene.glb|scene.fbx|scene.obj] [options]\n"
+                "  comparison               Same Sponza asset and 60 s CSV as the legacy-renderer branch\n"
                 "  --actor FILE|knight      Original animated glTF/GLB/FBX, Y-up; knight uses Intel's original FBX\n"
                 "  --actor-position X Y Z   Actor feet in normalized Z-up world; default: opening view\n"
                 "  --actor-size N           Actor largest dimension (default 2.4)\n"
                 "  --actor-clip N           Zero-based animation clip (default 0)\n"
+                "  --path FILE              Shared comparison CSV, seconds/eye/target/FOV/up (11 columns)\n"
+                "  --export-camera FILE     Write a 60 Hz camera CSV without creating a window or GPU device\n"
+                "  --start N --paused       Hold an identical comparison timestamp in both renderers\n"
                 "  --no-probes              Skip 3 spatial probe bakes; interior keeps its single room fallback\n"
                 "  --shadow-quality MODE    low, medium, high (default high)\n"
                 "  --shadow-distance N      Directional shadow view distance in world units; 0 keeps scene/camera fit\n"
@@ -98,6 +115,10 @@ int main(int argc, char** argv)
             const std::string argument = argv[i];
             if(argument == "--help") { usage(); return 0; }
             if(argument == "--no-probes") bakeSpatialProbes = false;
+            else if(argument == "--paused") initiallyPaused=true;
+            else if(argument == "--start" && i + 1 < argc) initialTourTime=std::stod(argv[++i]);
+            else if(argument == "--path" && i + 1 < argc) cameraPath=argv[++i];
+            else if(argument == "--export-camera" && i + 1 < argc) exportCameraPath=argv[++i];
             else if(argument == "--glass-layers" && i + 1 < argc)
             {
                 const auto layers = std::stoul(argv[++i]);
@@ -149,6 +170,14 @@ int main(int argc, char** argv)
             model.path = (std::filesystem::path(DY_SHOWCASE_DEFAULT_SCENE).parent_path() /
                 (model.path == "exterior" ? "BistroExterior.fbx" : "BistroInterior_Wine.fbx")).string();
         if(model.path == "emerald") model.path = DY_SHOWCASE_EMERALD_SCENE;
+        if(model.path=="comparison")
+        {
+            legacyComparison=true;
+            model.path=DY_SHOWCASE_COMPARISON_SCENE;
+            if(cameraPath.empty()) cameraPath=DY_SHOWCASE_COMPARISON_CAMERA;
+            if(model.path.empty() || cameraPath.empty())
+                throw std::runtime_error("Sponza comparison asset or camera path is not configured");
+        }
         if(actorDescription.path=="knight")
         {
             actorDescription.path=DY_SHOWCASE_KNIGHT_ACTOR;
@@ -172,7 +201,7 @@ int main(int argc, char** argv)
         }
         if(!std::isfinite(shadowDistance) || shadowDistance < 0 ||
             !std::isfinite(shadowSplit) || shadowSplit < 0 || shadowSplit > 1 ||
-            !std::isfinite(lightRadius) || lightRadius < 0)
+            !std::isfinite(lightRadius) || lightRadius < 0 || !std::isfinite(initialTourTime) || initialTourTime<0)
         { usage(); return 1; }
         const auto filename = std::filesystem::path(model.path).filename().string();
         const bool bistro = filename.rfind("Bistro", 0) == 0;
@@ -427,6 +456,51 @@ int main(int argc, char** argv)
         }
         const double timelineScale = tourSeconds / shots.back().seconds;
         for(auto& shot : shots) shot.seconds *= timelineScale;
+        const auto sampleTour=[&](double seconds) {
+            if(!cameraPath.empty()) return comparisonPath.Sample(seconds);
+            Shot shot;
+            if(bistro || emerald)
+            {
+                if(!sampleAuthoredCamera(seconds,shot)) throw std::runtime_error("Camera sampling failed");
+                return shot;
+            }
+            size_t segment=0;
+            while(segment+2<shots.size() && seconds>shots[segment+1].seconds) ++segment;
+            const auto& a=shots[segment];const auto& b=shots[segment+1];
+            float t=float((seconds-a.seconds)/(b.seconds-a.seconds));
+            if(shots.size()==10) t=t*t*(3-2*t);
+            return Shot{seconds,a.eye+(b.eye-a.eye)*t,a.target+(b.target-a.target)*t,a.fov+(b.fov-a.fov)*t,
+                Math::NormalizeOr(a.up+(b.up-a.up)*t,{0,0,1})};
+        };
+        if(!cameraPath.empty())
+        {
+            comparisonPath.Load(cameraPath);
+            tourSeconds=comparisonPath.Duration();
+            shots.front()=comparisonPath.Sample(0);
+        }
+        if(!exportCameraPath.empty())
+        {
+            if(std::filesystem::exists(exportCameraPath))
+                throw std::runtime_error("Camera export already exists: "+exportCameraPath);
+            std::ofstream output(exportCameraPath);
+            if(!output) throw std::runtime_error("Cannot write camera export: "+exportCameraPath);
+            output<<"# source="<<model.path<<"\n# centered, largest axis 80, Z-up, 1920x1080, near .03, far "
+                <<cameraFarPlane<<"\n# seconds,eyeX,eyeY,eyeZ,targetX,targetY,targetZ,fovDegrees,upX,upY,upZ\n";
+            output<<std::setprecision(17);
+            const uint64_t intervals=static_cast<uint64_t>(std::ceil(tourSeconds*60));
+            for(uint64_t i=0;i<=intervals;++i)
+            {
+                const double seconds=std::min(double(i)/60,tourSeconds);
+                const auto shot=sampleTour(seconds);
+                output<<seconds<<','<<shot.eye.x<<','<<shot.eye.y<<','<<shot.eye.z<<','
+                    <<shot.target.x<<','<<shot.target.y<<','<<shot.target.z<<','<<shot.fov<<','
+                    <<shot.up.x<<','<<shot.up.y<<','<<shot.up.z<<'\n';
+            }
+            output.close();
+            if(!output) throw std::runtime_error("Camera export write failed");
+            std::fprintf(stderr,"Camera export written: %s; no window or GPU device created.\n",exportCameraPath.c_str());
+            return 0;
+        }
         DirectionalLight sun;
         sun.direction = {-.38f, -.55f, .74f};
         sun.color = {1, .91f, .78f};
@@ -494,6 +568,11 @@ int main(int argc, char** argv)
         config.advanced.enabled = true;
         config.advanced.temporalAA = false;
         config.advanced.transparencyLayers = glassLayers;
+        if(legacyComparison)
+        {
+            config.enableLod=false;
+            std::fputs("Legacy comparison: shared Sponza/60 s path, 1920x1080, TAA off, original LOD0 geometry.\n",stderr);
+        }
         // Preserve the authored sun/sky radiance; meter exposure in the HDR graph.
         config.advanced.autoExposure = emerald;
         // The room probe supplies reflected diffuse illumination without noisy
@@ -536,7 +615,7 @@ int main(int argc, char** argv)
             for(uint32_t i = 0; i < captureCount; ++i)
             {
                 Shot shot;
-                if(!sampleAuthoredCamera(captureTimes[i], shot)) return 1;
+                shot=sampleTour(captureTimes[i]);
                 EnvironmentProbeDesc probe;
                 const auto margin = span * .001f;
                 probe.position = {
@@ -588,10 +667,10 @@ int main(int argc, char** argv)
         Camera camera;
         Platform::Time clock;
         Shot pose = shots.front();
-        double tourTime = 0, sceneTime = 0, metricsTime = 0;
+        double tourTime=std::clamp(initialTourTime,0.0,tourSeconds),sceneTime=tourTime,metricsTime=0;
         float yaw = 0, pitch = 0;
         uint32_t frames = 0;
-        bool paused = false, freeCamera = false, metrics = false, ready = false;
+        bool paused=initiallyPaused,freeCamera=false,metrics=false,ready=false;
         bool windEnabled = !windObjects.empty();
         showcase::PerformanceComparison comparison;
         Shot baselinePose = pose;
@@ -761,23 +840,9 @@ int main(int argc, char** argv)
                 pose.target = pose.eye + forward;
                 pose.up = {0, 0, 1};
             }
-            else if(bistro || emerald)
-            {
-                if(!sampleAuthoredCamera(tourTime, pose)) return 1;
-            }
             else
             {
-                size_t segment = 0;
-                while(segment + 2 < shots.size() && tourTime > shots[segment + 1].seconds) ++segment;
-                const auto& a = shots[segment];
-                const auto& b = shots[segment + 1];
-                float t = float((tourTime - a.seconds) / (b.seconds - a.seconds));
-                // Sponza retains its original eased shots.
-                if(shots.size() == 10) t = t * t * (3 - 2 * t);
-                pose.eye = a.eye + (b.eye - a.eye) * t;
-                pose.target = a.target + (b.target - a.target) * t;
-                pose.fov = a.fov + (b.fov - a.fov) * t;
-                pose.up = Math::NormalizeOr(a.up + (b.up - a.up) * t, {0, 0, 1});
+                pose=sampleTour(tourTime);
             }
             // 큰 시점 단절은 이전 색·조명 이력과 이전 변형 위치를 함께 폐기한다.
             if(ready && !freeCamera &&
@@ -906,7 +971,7 @@ int main(int argc, char** argv)
                 const auto& current = config;
                 std::ostringstream text;
                 text.precision(17);
-                text << model.path << " " << size.width << 'x' << size.height << " mode=" << comparisonMode
+                text << model.path << " cameraPath=" << cameraPath << " " << size.width << 'x' << size.height << " mode=" << comparisonMode
                     << " render=" << current.renderWidth << 'x' << current.renderHeight
                     << " sceneTime=" << sceneTime << " wind=" << windEnabled
                     << " actor=" << actorDescription.path << " actorClip=" << actorClip
