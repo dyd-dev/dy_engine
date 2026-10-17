@@ -1,4 +1,5 @@
 #pragma once
+#include "dyf/Diagnostics/LiveProfiling.h"
 
 #include <cstdint>
 #include <functional>
@@ -21,6 +22,7 @@ namespace dyf::RHI
 	class ICommandList
 	{
 	public:
+        [[nodiscard]] Diagnostics::LiveCommandRef GetLiveCommandPosition() const noexcept {return m_livePosition;}
         ICommandList(const ICommandList&) = delete;
         ICommandList& operator=(const ICommandList&) = delete;
         // A recording exception invalidates this list until IDevice::ResetCommandList.
@@ -127,6 +129,31 @@ namespace dyf::RHI
 		virtual bool CloseNative() = 0;
 
 	private:
+        Diagnostics::LiveCommandRef m_livePosition;
+        Diagnostics::LiveContext m_liveContext;
+        Diagnostics::LiveContext m_liveExecutionContext;
+        Diagnostics::LiveFrameToken m_liveRecordFrame;
+        bool m_liveInExecution=false,m_liveSubmitted=false,m_liveTerminal=false;
+        uint64_t m_liveCommandBeginNs=0;
+        Diagnostics::LiveId m_livePreviousEvent=0;
+        std::vector<Diagnostics::LiveEvent> m_liveDeferred;
+        std::vector<Diagnostics::LiveFlowLink> m_liveDeferredLinks;
+#ifdef DY_LIVE_PROFILING_ENABLED
+        Diagnostics::LiveEventSummary m_liveDeferredSummary;
+#endif
+        void DeferLiveEvent(const Diagnostics::LiveEvent&) noexcept;
+        void FlushLiveDeferred(Diagnostics::LiveContext) noexcept;
+        void DiscardLiveDeferred() noexcept;
+        TimestampQueryHandle m_liveReplayQuery=nullptr;
+        uint32_t m_liveFirstQuery=0;
+        void RecordLiveCommand(Diagnostics::LiveCommandKind,std::array<int64_t,5> arguments={},
+            const void* resource=nullptr,uint64_t elements=0,uint64_t bytes=0,uint64_t operations=1,
+            Diagnostics::LiveEventKind kind=Diagnostics::LiveEventKind::Command,bool fullUpload=false,
+            const char* label=nullptr) noexcept;
+        void RecordLiveResourceLink(Diagnostics::LiveId,Diagnostics::LiveId) noexcept;
+        void RecordLiveInfo(Diagnostics::LiveEvent) noexcept;
+        void FinishLiveRecording(Diagnostics::LiveOutcome,bool terminal=false) noexcept;
+        void RecordLiveBindings(Diagnostics::LiveId,Diagnostics::LiveCommandKind) noexcept;
 		friend class IDevice;
         friend class RenderGraph;
         friend class RenderGraphPass;
@@ -146,6 +173,7 @@ namespace dyf::RHI
         void RequireState(const void*,uint32_t mip,uint32_t layer,ResourceState);
         std::vector<std::function<bool(ICommandList&)>> m_commands;
         ICommandList* m_preparedNative = nullptr;
+        bool m_uploadPageReuse=true,m_uploadSuballocation=true;
         uint64_t m_completion=0;
         uint64_t m_imageGeneration=0;
         bool m_rendering=false, m_viewport=false, m_scissor=false;

@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
 
+namespace dyf::RHI::Detail { struct UploadPolicy { bool reusePages=true,suballocate=true; }; }
+
 namespace dyf::RHI
 {
 // Internal native upload-page counters, distinct from public Buffer allocations. Request

@@ -26,6 +26,8 @@ struct VulkanContext {
     VkQueue graphicsQueue = VK_NULL_HANDLE;
     VkQueue presentQueue = VK_NULL_HANDLE;
     bool debugUtilsEnabled = false;
+    PFN_vkGetCalibratedTimestampsEXT getCalibratedTimestamps = nullptr;
+    uint64_t cpuTimestampFrequency = 0;
     PFN_vkCmdBeginDebugUtilsLabelEXT beginDebugLabel = nullptr;
     PFN_vkCmdEndDebugUtilsLabelEXT endDebugLabel = nullptr;
     PFN_vkCmdInsertDebugUtilsLabelEXT insertDebugLabel = nullptr;

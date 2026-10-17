@@ -30,7 +30,8 @@ namespace dyf::Backends
             std::shared_ptr<D3D12UploadPool> uploadPool = {},
             void* drawSignature = nullptr,
             void* drawIndexedSignature = nullptr,
-            void* dispatchSignature = nullptr);
+            void* dispatchSignature = nullptr,
+            RHI::Detail::UploadPolicy policy = {});
         void ResetTimestampsNative(RHI::TimestampQueryHandle, uint32_t, uint32_t) override;
         void WriteTimestampNative(RHI::TimestampQueryHandle, uint32_t) override;
         void MarkTimestampsSubmitted(uint64_t completion);

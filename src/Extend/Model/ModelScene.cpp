@@ -106,6 +106,7 @@ namespace dyf
 
 	bool ModelScene::UpdateAnimations(float deltaSeconds, ModelInstanceID resultInstance)
 	{
+        Diagnostics::LiveCpuScope timing(Diagnostics::LiveStage::Data,"Model animation arrays");
 		bool success = true;
 		const auto fail = [&](ModelInstanceID instance, EntityID entity, const char* reason)
 		{

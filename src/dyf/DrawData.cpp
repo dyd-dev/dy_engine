@@ -25,7 +25,8 @@ bool Renderer::Impl::UpdateInstanceBuffer(const Scene& scene,RHI::ICommandList& 
     if(!instanceBuffer)return false;
     const bool sameScene=!instanceScene.expired() &&
         !instanceScene.owner_before(pendingInstanceScene) && !pendingInstanceScene.owner_before(instanceScene);
-    bool full=!instanceReady || !sameScene || instanceCount!=pendingInstanceCount;
+    bool full=!config.enableIncrementalTransformUploads || !instanceReady || !sameScene || instanceCount!=pendingInstanceCount;
+    auto fullReason=!instanceReady?Diagnostics::LiveSplitReason::NewResource:!sameScene?Diagnostics::LiveSplitReason::SceneChanged:instanceCount!=pendingInstanceCount?Diagnostics::LiveSplitReason::ElementCountChanged:Diagnostics::LiveSplitReason::None;
     if(!full && instanceRevision==pendingInstanceRevision)return true;
 
     instanceScratch.resize(size_t(pendingInstanceCount)*2);
@@ -54,9 +55,15 @@ bool Renderer::Impl::UpdateInstanceBuffer(const Scene& scene,RHI::ICommandList& 
         const RHI::ResourceBarrierDesc barrier={instanceBuffer,nullptr,RHI::ResourceState::VertexBuffer,RHI::ResourceState::CopyDestination,{}};
         commands.ResourceBarrier(&barrier,1);
     }
-    for(const auto& range:instanceRanges)
+    for(const auto& range:instanceRanges) {
         if(!device->UpdateBuffer(commands,instanceBuffer,range.first*stride,
             instanceScratch.data()+size_t(range.first)*2,range.count*stride))return false;
+        Diagnostics::LiveEvent event;event.context=Diagnostics::GetLiveContext();event.context.object=scene.m_liveId;
+        event.kind=Diagnostics::LiveEventKind::DataRange;event.stage=Diagnostics::LiveStage::Data;
+        event.resource=Diagnostics::FindLiveObject(instanceBuffer);event.first=range.first;event.elements=range.count;
+        event.bytes=uint64_t(range.count)*stride;event.stride=stride;event.operations=1;event.fullUpload=full;event.reason=fullReason;
+        Diagnostics::RecordLiveEvent(event);
+    }
     const RHI::ResourceBarrierDesc ready={instanceBuffer,nullptr,RHI::ResourceState::CopyDestination,RHI::ResourceState::VertexBuffer,{}};
     commands.ResourceBarrier(&ready,1);
     return true;

@@ -8,6 +8,7 @@
 #include <chrono>
 #include <deque>
 #include <map>
+#include <mutex>
 #include <string>
 
 namespace dyf
@@ -65,6 +66,35 @@ struct Renderer::Impl
     bool SetConfig(const RendererConfig&);
     bool SetShaders(const RendererShaderDesc&);
     [[nodiscard]] RendererShaderDesc GetShaders() const;
+
+    void InitializeLiveProfiling() noexcept;
+    bool PrepareLiveFrame(Diagnostics::LiveFrameKey) noexcept;
+    void FinishLiveSettings(bool,Diagnostics::LiveFrameKey) noexcept;
+    void PublishLiveGeometryAvailability(bool customDraws) noexcept;
+    void CollectLiveGpuSamples() noexcept;
+    void SubmitLiveGpuSamples(RHI::FenceHandle,Diagnostics::LiveFrameKey) noexcept;
+    struct LiveGpuPass
+    {
+        Impl& renderer;
+        RHI::ICommandList& commands;
+        RHI::TimestampQueryHandle query=nullptr;
+        Diagnostics::LiveGpuSpan span;
+        LiveGpuPass(Impl&,RHI::ICommandList&,Diagnostics::LiveGpuScope) noexcept;
+        ~LiveGpuPass();
+    };
+    struct LiveGpuSample { RHI::TimestampQueryHandle query=nullptr; RHI::FenceHandle completion; Diagnostics::LiveGpuSpan span; std::optional<RHI::TimestampCalibration> calibration; std::uint64_t submittedNs=0; };
+    Diagnostics::LiveId liveId=0;
+    std::array<Diagnostics::ControlRegistration,16> liveControls;
+    std::array<Diagnostics::LiveId,16> liveRequests{};
+    std::array<Diagnostics::ControlRegistration,5> liveCatalog;
+    bool liveCustomDraws=false;
+    Diagnostics::LiveId livePreparedFrame=0;
+    RendererConfig liveAppliedConfig;
+    std::vector<LiveGpuSample> liveGpuSamples;
+    std::vector<RHI::TimestampQueryHandle> liveFreeQueries;
+    std::uint32_t liveQueryCount=0;
+    std::mutex liveGpuMutex;
+    bool SupportsBindlessMaterials() const;
 
     struct ShadowData
     {

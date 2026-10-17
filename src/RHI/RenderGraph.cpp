@@ -3,6 +3,7 @@
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/IDevice.h"
 #include "Validation.h"
+#include "LiveRhi.h"
 
 #include <atomic>
 
@@ -176,6 +177,7 @@ namespace dyf::RHI
         m_compiledRevisions.clear();
         m_executionOrder.clear();
         m_executionStages.clear();
+        m_dependencies.clear();
         m_passBarriers.clear();
         m_finalBarriers.clear();
         const uint32_t passCount = static_cast<uint32_t>(m_passes.size());
@@ -256,6 +258,8 @@ namespace dyf::RHI
             for(uint32_t next : edges[pass])
                 stageIndices[next] = (std::max)(stageIndices[next], stage + 1);
         }
+        for(uint32_t before=0;before<passCount;++before)
+            for(uint32_t after:edges[before])m_dependencies.push_back({before,after});
         for(const auto& pass : m_passes) m_compiledRevisions.push_back(pass->GetRevision());
         m_compiled = true;
         return true;
@@ -301,13 +305,41 @@ namespace dyf::RHI
         return true;
     }
 
-    bool RenderGraph::RecordPass(ICommandList* commands, uint32_t pass) const
+    bool RenderGraph::RecordPass(ICommandList* commands, uint32_t pass,uint64_t eventId) const
     {
         if(m_timestampQuery) commands->WriteTimestamp(m_timestampQuery,2+2*pass);
         if(m_passes[pass]->HasGlobalBarrier()) commands->GlobalBarrier();
         const auto& barriers = m_passBarriers[pass];
         commands->ResourceBarrier(barriers.data(), static_cast<uint32_t>(barriers.size()));
-        if(!m_passes[pass]->Execute(commands)) return false;
+        if(!eventId)
+        {
+            if(!m_passes[pass]->Execute(commands))return false;
+        }
+        else
+        {
+            Diagnostics::LiveEvent event;event.id=eventId;event.kind=Diagnostics::LiveEventKind::CpuWork;
+            event.stage=Diagnostics::LiveStage::CpuPrepare;event.arguments={pass,
+                static_cast<int64_t>(m_passes[pass]->GetReads().size()),static_cast<int64_t>(m_passes[pass]->GetWrites().size())};
+            event.arguments[4]=LiveRhiThreadToken();
+            const auto& name=m_passes[pass]->GetName();
+            for(size_t i=0;i<name.size()&&i+1<sizeof(event.label);++i)event.label[i]=name[i];
+            event.beginNs=Diagnostics::LiveNowNs();
+            bool executed=false;
+            try{executed=m_passes[pass]->Execute(commands);}
+            catch(...){event.endNs=Diagnostics::LiveNowNs();event.outcome=Diagnostics::LiveOutcome::Failed;commands->RecordLiveInfo(event);throw;}
+            event.endNs=Diagnostics::LiveNowNs();event.outcome=executed?Diagnostics::LiveOutcome::Observed:Diagnostics::LiveOutcome::Failed;
+            commands->RecordLiveInfo(event);
+            if(!executed)return false;
+            const auto linkResource=[&](const RGResourceBinding& binding,bool write)
+            {
+                const auto& resource=m_resources[m_resourceIndices.at(binding.handle.id)];
+                const auto id=Diagnostics::FindLiveObject(resource.buffer?static_cast<const void*>(resource.buffer):resource.texture);
+                commands->RecordLiveResourceLink(write?eventId:id,write?id:eventId);
+            };
+            for(const auto& binding:m_passes[pass]->GetReads())linkResource(binding,false);
+            for(const auto& binding:m_passes[pass]->GetWrites())linkResource(binding,true);
+        }
+
         for(const auto& binding : m_passes[pass]->GetReads())
             if(!RequireResource(commands, m_resources[m_resourceIndices.at(binding.handle.id)], binding.state)) return false;
         for(const auto& binding : m_passes[pass]->GetWrites())
@@ -325,8 +357,13 @@ namespace dyf::RHI
             return Fail("Compile must succeed before recording on an open command list outside rendering.");
         }
         if(!RecordBoundary(commands)) return false;
+        const bool live=Diagnostics::IsLiveCollectorEnabled();
+        std::vector<uint64_t> passEvents;
+        if(live){passEvents.resize(m_passes.size());for(auto& id:passEvents)id=Diagnostics::AllocateLiveId();}
         for(uint32_t pass : m_executionOrder)
-            if(!RecordPass(commands, pass)) return false;
+            if(!RecordPass(commands,pass,live?passEvents[pass]:0))return false;
+        if(live)for(const auto& dependency:m_dependencies)
+            commands->RecordLiveResourceLink(passEvents[dependency.before],passEvents[dependency.after]);
         commands->ResourceBarrier(m_finalBarriers.data(), static_cast<uint32_t>(m_finalBarriers.size()));
         if(m_timestampQuery) commands->WriteTimestamp(m_timestampQuery,1);
         return commands->CanRecordCommands();
@@ -337,6 +374,27 @@ namespace dyf::RHI
     {
         if(!device || !commandLists.empty() || !IsCompiled())
             return Fail("parallel recording requires a device, an empty output and an unchanged compiled graph.");
+        auto* liveState=device->GetLiveState();
+        const auto caller=Diagnostics::GetLiveContext();
+        if(liveState&&caller.frame.device==liveState->device&&caller.frame.frame)
+        {device->PrepareLiveControls(caller.frame);device->CaptureLiveGraphParallel(caller.frame);}
+        // Boundary, passes and an empty final list belong to this actual recording operation.
+        Diagnostics::LiveFrameScope liveFrame(liveState?liveState->device:0,liveState?liveState->recordingSource:0);
+        liveFrame.SetOutcome(Diagnostics::LiveOutcome::Failed);
+        if(liveState)device->PrepareLiveControls(liveFrame.GetKey());
+        const auto policyBegin=liveState?Diagnostics::LiveNowNs():0;
+        const bool requestedParallel=device->CaptureLiveGraphParallel(liveFrame.GetKey());
+        const uint32_t effectiveThreads=requestedParallel?threadCount:1;
+        if(liveState)
+        {
+            Diagnostics::LiveEvent policy;policy.context=Diagnostics::GetLiveContext();
+            policy.kind=Diagnostics::LiveEventKind::CpuWork;policy.stage=Diagnostics::LiveStage::CpuPrepare;
+            policy.beginNs=policyBegin;policy.endNs=Diagnostics::LiveNowNs();
+            const auto workers=effectiveThreads?effectiveThreads:(std::max)(1u,std::thread::hardware_concurrency());
+            policy.arguments={requestedParallel,workers>1,workers,!requestedParallel?1:workers<=1?3:0,LiveRhiThreadToken()};
+            const char label[]="RenderGraph recording policy";std::copy(std::begin(label),std::end(label),policy.label);
+            Diagnostics::RecordLiveEvent(policy);
+        }
         struct Recording
         {
             IDevice& device;
@@ -371,14 +429,19 @@ namespace dyf::RHI
         final->m_sharedReferences = references;
         final->m_imageGeneration = boundary->m_imageGeneration;
         std::vector<uint8_t> recorded(m_passes.size(), 0);
+        const bool live=Diagnostics::IsLiveCollectorEnabled();
+        std::vector<uint64_t> passEvents;
+        if(live){passEvents.resize(m_passes.size());for(auto& id:passEvents)id=Diagnostics::AllocateLiveId();}
+        const auto context=Diagnostics::GetLiveContext();
         const auto record = [&](uint32_t pass) {
-            recorded[pass] = RecordPass(passes[pass], pass) && passes[pass]->Close();
+            Diagnostics::LiveContextScope restore(context);
+            recorded[pass]=RecordPass(passes[pass],pass,live?passEvents[pass]:0)&&passes[pass]->Close();
         };
         std::vector<uint32_t> independent;
         independent.reserve(m_executionOrder.size());
         for(uint32_t pass : m_executionOrder)
             if(m_passes[pass]->GetRecordingMode()==RGRecordingMode::Independent) independent.push_back(pass);
-        device->RecordParallel(static_cast<uint32_t>(independent.size()), threadCount,
+        device->RecordParallel(static_cast<uint32_t>(independent.size()), effectiveThreads,
             [&](uint32_t index) { record(independent[index]); });
         for(uint32_t pass : independent) if(!recorded[pass]) return false;
         std::vector<uint32_t> ordered;
@@ -387,7 +450,7 @@ namespace dyf::RHI
             ordered.clear();
             for(uint32_t pass : stage.passIndices)
                 if(m_passes[pass]->GetRecordingMode()!=RGRecordingMode::Independent) ordered.push_back(pass);
-            device->RecordParallel(static_cast<uint32_t>(ordered.size()), threadCount,
+            device->RecordParallel(static_cast<uint32_t>(ordered.size()), effectiveThreads,
                 [&](uint32_t index) { record(ordered[index]); });
             for(uint32_t pass : ordered) if(!recorded[pass]) return false;
         }
@@ -395,8 +458,11 @@ namespace dyf::RHI
         if(m_timestampQuery) final->WriteTimestamp(m_timestampQuery,1);
         if(!final->Close()) return false;
         if(!device->PrepareCommandLists(recording.lists.data(),
-            static_cast<uint32_t>(recording.lists.size()), threadCount)) return false;
+            static_cast<uint32_t>(recording.lists.size()), effectiveThreads)) return false;
+        if(live)for(const auto& dependency:m_dependencies)
+            passes[dependency.after]->RecordLiveResourceLink(passEvents[dependency.before],passEvents[dependency.after]);
         commandLists.swap(recording.lists);
+        liveFrame.SetOutcome(Diagnostics::LiveOutcome::Observed);
         return true;
     }
 
@@ -411,6 +477,7 @@ namespace dyf::RHI
         m_compiledRevisions.clear();
         m_executionOrder.clear();
         m_executionStages.clear();
+        m_dependencies.clear();
         m_passBarriers.clear();
         m_finalBarriers.clear();
         m_compiled = false;

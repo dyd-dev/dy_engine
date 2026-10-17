@@ -1,6 +1,7 @@
 #include <dyf/Extends/Model/ModelRenderer.h>
 #include <dyf/Extends/Model/ModelScene.h>
 #include "ModelShaderAssets.h"
+#include "../../Diagnostics/LiveGpuTiming.h"
 #include "dyf/Image.h"
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/ICommandList.h"
@@ -18,6 +19,9 @@ namespace dyf
 {
 namespace
 {
+constexpr bool ModelOptimizationConfig::* ModelPolicies[]={&ModelOptimizationConfig::reuseFrameBuffers,&ModelOptimizationConfig::skipUnchangedUploads,&ModelOptimizationConfig::cacheStaticMeshes,&ModelOptimizationConfig::cacheInfluences};
+bool SameOptimizations(const ModelOptimizationConfig& a,const ModelOptimizationConfig& b) noexcept
+{for(const auto flag:ModelPolicies)if(a.*flag!=b.*flag)return false;return true;}
 template<class Cleanup>
 struct ScopeExit
 {
@@ -60,12 +64,88 @@ bool SameShader(const RHI::ShaderDesc& left, const RHI::ShaderDesc& right)
         left.entryPoint && right.entryPoint && std::strcmp(left.entryPoint, right.entryPoint) == 0 &&
         left.binary && right.binary && std::memcmp(left.binary, right.binary, left.binarySize) == 0;
 }
+const char* ComputeSkinningUnavailable(const RHI::IDevice& device,const RHI::ShaderDesc& shader) noexcept
+{
+    try {
+        if(!device.Supports(RHI::Feature::Compute))return "Compute skinning is not supported by this device";
+        if(shader.stage!=RHI::ShaderStage::Compute||!shader.binary||!shader.binarySize||!shader.entryPoint||!*shader.entryPoint)
+            return "Model compute shader unavailable for this backend";
+        return "";
+    } catch(...) {return "Model compute availability check failed";}
+}
 }
 
-ModelRenderer::ModelRenderer(Renderer& renderer) : m_renderer(renderer) {}
+ModelRenderer::ModelRenderer(Renderer& renderer) : m_renderer(renderer) {InitializeLiveProfiling();}
+
+void ModelRenderer::InitializeLiveProfiling() noexcept
+{
+    if(!Diagnostics::IsLiveCollectorEnabled()||m_skinningControl.GetId())return;
+    try {
+        m_renderer.InitializeLiveProfiling();
+        const auto device=Diagnostics::FindLiveObject(&m_renderer.GetDevice());
+        if(!m_liveId){m_liveId=Diagnostics::RegisterLiveObject(this,{Diagnostics::LiveObjectKind::Model,device,m_renderer.GetLiveSourceId(),0,0,"ModelRenderer"});m_liveAppliedMode=m_mode;}
+        Diagnostics::ControlDesc desc;desc.device=device;desc.source=m_renderer.GetLiveSourceId();desc.owner=m_liveId;
+        desc.key="model.skinning";desc.label="Skinning execution";desc.kind=Diagnostics::ControlKind::Enumeration;
+        desc.application=Diagnostics::ControlApplication::ResourceRebuild;desc.appliedValue=std::int64_t(m_liveAppliedMode);
+        desc.choices={{0,"Vertex shader"},{1,"Compute pre-skin"}};
+        desc.category=Diagnostics::ControlCategory::Optimization;desc.description="Select Model deformation execution stage";desc.onPath="Compute pre-skin dispatch writes a vertex buffer before raster draws";desc.offPath="Vertex shader deformation in each raster/shadow pass";desc.conditions="Compute requires the device feature and an actual Model compute shader for this backend";desc.tradeoffs="Compute dispatch, output buffers and barriers versus repeated vertex shader work; CPU/GPU scopes can overlap";
+        const auto reason=ComputeSkinningUnavailable(m_renderer.GetDevice(),ShaderDescription(2,GetModelComputeShader()));desc.writable=!*reason;desc.unavailableReason=reason;
+        m_skinningControl=Diagnostics::RegisterControl(std::move(desc),[this](const Diagnostics::ControlRequest& request,Diagnostics::LiveFrameKey){
+            const auto mode=static_cast<SkinningExecutionMode>(std::get<std::int64_t>(request.value));
+            if(mode!=m_mode&&mode==SkinningExecutionMode::ComputePreSkin&&!PrepareComputePipeline())
+                return Diagnostics::ControlApplyResult{Diagnostics::ControlState::Failed,std::int64_t(m_mode),"Compute skinning pipeline could not be prepared"};
+            const bool applied=SetSkinningExecutionMode(mode);
+            return Diagnostics::ControlApplyResult{applied?Diagnostics::ControlState::Applied:Diagnostics::ControlState::Failed,std::int64_t(m_mode),applied?"":"Compute skinning pipeline could not be prepared"};
+        });
+        const char* keys[]={"model.frameBufferReuse","model.skipUnchangedUploads","model.staticMeshCache","model.influenceCache"};
+        const char* descriptions[]={"Reuse completed Model frame resources","Skip equal Model upload bytes","Reuse immutable compute input meshes","Reuse packed and validated skin influences"};
+        const char* onPaths[]={"Retain size/stride/usage-compatible buffers and per-frame sets","Compare cached bytes before recording uploads","Keep each immutable source mesh's compute input buffer","Compare influence bytes/counts before reusing packed influences"};
+        const char* offPaths[]={"Wait for a completed frame slot and replace its buffers/sets","Upload every used palette/morph input each frame","Recreate each used compute input mesh once per frame","Pack, validate and upload the complete influences each frame"};
+        for(std::size_t i=0;i<m_optimizationControls.size();++i){Diagnostics::ControlDesc d;d.device=device;d.source=m_renderer.GetLiveSourceId();d.owner=m_liveId;d.key=keys[i];d.label=descriptions[i];d.description=descriptions[i];d.category=Diagnostics::ControlCategory::Optimization;d.appliedValue=m_optimizationConfig.*ModelPolicies[i];d.onPath=onPaths[i];d.offPath=offPaths[i];d.conditions=i==2?"Model ComputePreSkin path; immutable source meshes only, morphed inputs remain dynamic":"Model preparation after the frame boundary; per-entity palette checks and completion waits remain enabled";d.tradeoffs="CPU comparisons and retained buffers versus upload/allocation/command work; failed submissions still roll back";
+            if(i==2&&m_mode!=SkinningExecutionMode::ComputePreSkin){d.writable=false;d.unavailableReason="Static mesh input cache is used only by ComputePreSkin";}
+            m_optimizationControls[i]=Diagnostics::RegisterControl(std::move(d),[this,i](const Diagnostics::ControlRequest& request,Diagnostics::LiveFrameKey){auto next=GetOptimizationConfig();next.*ModelPolicies[i]=std::get<bool>(request.value);SetOptimizationConfig(next);m_optimizationRequests[i]=request.request;return Diagnostics::ControlApplyResult{Diagnostics::ControlState::PendingApply,m_optimizationConfig.*ModelPolicies[i],{}};});
+        }
+        const char* catalogKeys[]={"model.frameDescriptorCache","model.lazyUploadCommands","model.sharedAnimationPalettes","model.zeroMorphSkip"};
+        const char* descriptionsReadOnly[]={"Cache per-frame Model compute resource sets","Acquire Model upload commands only when needed","Share eligible animation palettes","Skip zero-weight morph targets"};
+        const char* conditionsReadOnly[]={"Completed frame resources and matching compute bindings","Model preparation with no uploads or dispatches can return without an upload command list","ModelScene animation/skin evaluation; updates outside Render have no current source-frame attribution","ModelScene morph evaluation; updates outside Render have no current source-frame attribution"};
+        for(std::size_t i=0;i<m_liveCatalog.size();++i){Diagnostics::ControlDesc d;d.device=device;d.source=m_renderer.GetLiveSourceId();d.owner=m_liveId;d.key=catalogKeys[i];d.label=descriptionsReadOnly[i];d.description=descriptionsReadOnly[i];d.category=Diagnostics::ControlCategory::Optimization;d.appliedValue=true;d.writable=false;d.onPath=conditionsReadOnly[i];d.offPath="No equivalent runtime reference path is implemented";d.conditions=conditionsReadOnly[i];d.tradeoffs=i<2?"Observation only; a separate equivalent experiment is needed":"Animation evaluation may occur outside the render frame; separate observation/experiment is needed";d.unavailableReason=d.offPath;m_liveCatalog[i]=Diagnostics::RegisterControl(std::move(d),{});}
+    } catch(...) {}
+}
+
+void ModelRenderer::PublishLiveAvailability() noexcept
+{
+    if(!m_skinningControl.GetId())return;
+    const auto reason=ComputeSkinningUnavailable(m_renderer.GetDevice(),ShaderDescription(2,GetModelComputeShader()));
+    Diagnostics::PublishControlAvailability(m_skinningControl.GetId(),!*reason,reason);
+    const bool compute=m_mode==SkinningExecutionMode::ComputePreSkin;Diagnostics::PublishControlAvailability(m_optimizationControls[2].GetId(),compute,compute?"":"Static mesh input cache is used only by ComputePreSkin");
+}
+
+void ModelRenderer::PrepareLiveFrame(Diagnostics::LiveFrameKey frame) noexcept
+{
+    if(m_pendingOptimizationConfig){m_optimizationConfig=*m_pendingOptimizationConfig;m_pendingOptimizationConfig.reset();}
+    if(!Diagnostics::IsLiveCollectorEnabled())return;
+    PublishLiveAvailability();
+    Diagnostics::NotifyLiveSettingsApplied(m_renderer.GetLiveSourceId(),frame,m_liveAppliedMode!=m_mode||!SameOptimizations(m_liveAppliedOptimizationConfig,m_optimizationConfig));
+    m_liveAppliedMode=m_mode;
+    m_liveAppliedOptimizationConfig=m_optimizationConfig;
+    Diagnostics::PublishControlValue(m_skinningControl.GetId(),std::int64_t(m_mode));
+    for(std::size_t i=0;i<m_optimizationControls.size();++i)Diagnostics::PublishControlValue(m_optimizationControls[i].GetId(),m_optimizationConfig.*ModelPolicies[i]);
+    Diagnostics::PollControls(m_liveId,frame);
+    PublishLiveAvailability();
+    if(m_pendingOptimizationConfig){m_optimizationConfig=*m_pendingOptimizationConfig;m_pendingOptimizationConfig.reset();}
+    Diagnostics::NotifyLiveSettingsApplied(m_renderer.GetLiveSourceId(),frame,!SameOptimizations(m_liveAppliedOptimizationConfig,m_optimizationConfig));
+    for(std::size_t i=0;i<m_optimizationControls.size();++i){const bool value=m_optimizationConfig.*ModelPolicies[i];if(m_optimizationRequests[i]){Diagnostics::CompleteControl(m_optimizationRequests[i],frame,value);m_optimizationRequests[i]=0;}Diagnostics::PublishControlValue(m_optimizationControls[i].GetId(),value);}
+    m_liveAppliedOptimizationConfig=m_optimizationConfig;
+    m_liveAppliedMode=m_mode;
+    Diagnostics::PublishControlValue(m_skinningControl.GetId(),std::int64_t(m_mode));
+}
 
 ModelRenderer::~ModelRenderer()
 {
+    for(auto& control:m_optimizationControls)control=Diagnostics::ControlRegistration{};
+    for(auto& control:m_liveCatalog)control=Diagnostics::ControlRegistration{};
+    m_skinningControl=Diagnostics::ControlRegistration{};
+    Diagnostics::RetireLiveObject(m_liveId);
     (void)RestoreShaders();
     auto& device = m_renderer.GetDevice();
     ReleaseFrameBuffers();
@@ -263,11 +343,15 @@ void ModelRenderer::CollectGpuSamples()
     {
         const auto sample = m_gpuSamples.front();
         uint64_t ticks[2];
-        if(device.ReadTimestamps(sample.query, 0, 2, ticks))
+        const bool read=device.ReadTimestamps(sample.query,0,2,ticks);
+        if(read)
         {
             const uint32_t bits = device.GetTimestampValidBits();
             const uint64_t mask = bits == 64 ? UINT64_MAX : (uint64_t{1} << bits) - 1;
             m_gpuMilliseconds = ((ticks[1] - ticks[0]) & mask) * device.GetTimestampPeriodNanoseconds() / 1e6;
+        }
+        if(sample.liveSpan.id){auto span=sample.liveSpan;span.outcome=Diagnostics::LiveOutcome::Completed;span.duration.state=Diagnostics::LiveValueState::Unavailable;
+            const auto bits=device.GetTimestampValidBits();const auto period=device.GetTimestampPeriodNanoseconds();if(read&&bits&&bits<=64&&period>0){const auto mask=bits==64?UINT64_MAX:(std::uint64_t(1)<<bits)-1;span.duration={Diagnostics::LiveValueState::Ready,double((ticks[1]-ticks[0])&mask)*period/1e6};if(sample.calibration)Diagnostics::Detail::CalibrateGpuSpan(span,*sample.calibration,ticks[0],ticks[1],Diagnostics::FindLiveObject(&device),sample.submittedNs,Diagnostics::LiveNowNs());}Diagnostics::RecordLiveGpuSpan(span);
         }
         device.DestroyTimestampQuery(sample.query);
         m_gpuSamples.pop_front();
@@ -276,6 +360,7 @@ void ModelRenderer::CollectGpuSamples()
 
 bool ModelRenderer::Prepare(const ModelScene& scene)
 {
+    Diagnostics::LiveCpuScope prepareTiming(Diagnostics::LiveStage::CpuPrepare,"Model preparation");
     static_assert(sizeof(ModelVertex) == 48);
     static_assert(sizeof(SkinInfluence) == 48 && offsetof(SkinInfluence, dqBlendWeight) == 32);
     static_assert(sizeof(SkinJointMatrices) == 176);
@@ -292,7 +377,7 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
 
     // Compare actual influence bytes, including edits made without changing mesh identity.
     // Packing and immutable validation are needed only when those bytes/counts change.
-    bool sameInfluences = m_influenceBuffer && m_influenceOffsets.size() == scene.Meshes().size();
+    bool sameInfluences = m_optimizationConfig.cacheInfluences && m_influenceBuffer && m_influenceOffsets.size() == scene.Meshes().size();
     for(uint32_t index = 0; sameInfluences && index < scene.Meshes().size(); ++index)
     {
         const auto& source = scene.GetMeshSkinInfluences(static_cast<MeshID>(index));
@@ -381,6 +466,7 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
     }
     m_frameIndex = selected;
     auto& frame = m_frames[selected];
+    if(!m_optimizationConfig.reuseFrameBuffers)ReleaseFrame(frame);
     m_draws.clear();
     m_draws.resize(scene.GetEntityCount());
     bool submitted = false;
@@ -476,7 +562,7 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
         const uint32_t bytes = static_cast<uint32_t>(count * stride);
         auto* cached = bufferSlot(bytes, stride, usage, RHI::ResourceState::CopyDestination);
         if(!cached) return nullptr;
-        if(cached->bytes.size() == bytes && std::memcmp(cached->bytes.data(), data, bytes) == 0)
+        if(m_optimizationConfig.skipUnchangedUploads && cached->bytes.size() == bytes && std::memcmp(cached->bytes.data(), data, bytes) == 0)
             return cached->buffer;
         if(!acquire()) return nullptr;
         if(cached->state != RHI::ResourceState::CopyDestination)
@@ -488,13 +574,14 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
         const RHI::ResourceBarrierDesc ready{cached->buffer, nullptr, RHI::ResourceState::CopyDestination, state, {}};
         commands->ResourceBarrier(&ready, 1);
         const auto* first = static_cast<const uint8_t*>(data);
-        cached->bytes.assign(first, first + bytes); cached->state = state;
+        if(m_optimizationConfig.skipUnchangedUploads)cached->bytes.assign(first, first + bytes);else cached->bytes.clear();cached->state = state;
         return cached->buffer;
     };
     const SkinJointMatrices identity;
     auto* paletteBuffer = upload(palette.empty() ? &identity : palette.data(), palette.empty() ? 1 : palette.size(),
         sizeof(SkinJointMatrices), RHI::BufferUsage::Storage, RHI::ResourceState::ShaderResource);
     if(!paletteBuffer) return Failure("Skin palette upload failed.");
+    if(compute&&!m_optimizationConfig.cacheStaticMeshes)ReleaseMeshBuffers();
     if(m_meshBuffers.size() != scene.Meshes().size()) { ReleaseMeshBuffers(); m_meshBuffers.resize(scene.Meshes().size()); }
     std::vector<bool> meshUsed(m_meshBuffers.size(), false);
     m_geometrySignatures.resize(scene.GetEntityCount());
@@ -608,6 +695,7 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
             std::memcpy(draw.inlineConstants.data(), constants.data(), sizeof(constants));
         }
     }
+    Diagnostics::LiveGpuSpan liveCompute;
     RHI::TimestampQueryHandle query = nullptr;
     ScopeExit discardQuery{[&] { if(query) device.DestroyTimestampQuery(query); }};
     if(frame.sets.size() < scene.GetEntityCount()) frame.sets.resize(scene.GetEntityCount());
@@ -619,8 +707,10 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
         }
     if(compute && prepared && acquire())
     {
+        if(Diagnostics::IsLiveCollectorEnabled()){const auto context=Diagnostics::GetLiveContext();liveCompute.id=Diagnostics::AllocateLiveId();liveCompute.frame=context.frame;liveCompute.appliedRevision=context.appliedRevision;liveCompute.owner=m_liveId;liveCompute.scope=Diagnostics::LiveGpuScope::ModelCompute;liveCompute.duration.state=device.Supports(RHI::Feature::TimestampQuery)?Diagnostics::LiveValueState::Pending:Diagnostics::LiveValueState::Unsupported;}
         if(device.Supports(RHI::Feature::TimestampQuery)) query = device.CreateTimestampQuery({2});
         if(query) { commands->ResetTimestamps(query, 0, 2); commands->WriteTimestamp(query, 0); }
+        if(liveCompute.id)liveCompute.begin.command=commands->GetLiveCommandPosition();
         commands->BindComputePipeline(m_computePipeline);
         for(uint32_t index = 0; index < scene.GetEntityCount(); ++index)
         {
@@ -682,6 +772,7 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
             draw.vertexBuffer = output;
         }
         if(query) commands->WriteTimestamp(query, 1);
+        if(liveCompute.id)liveCompute.end.command=commands->GetLiveCommandPosition();
     }
     // Shrink completed-slot storage to this scene's working set (no historical entity cache).
     for(size_t index = cursor; index < frame.buffers.size(); ++index) device.DestroyBuffer(frame.buffers[index].buffer);
@@ -696,13 +787,18 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
     submitted = prepared && closed && device.Submit({&commands, 1, nullptr, 0}, completion);
     // Publish ownership before an allocation in the timestamp handoff can throw.
     if(submitted) frame.completion = completion;
-    if(query && submitted) { m_gpuSamples.push_back({query, completion}); query = nullptr; }
+    if(liveCompute.id){liveCompute.begin.submission=liveCompute.end.submission=device.GetLiveSubmissionId(completion);liveCompute.outcome=submitted?Diagnostics::LiveOutcome::Submitted:Diagnostics::LiveOutcome::Failed;if(!submitted)liveCompute.duration.state=Diagnostics::LiveValueState::Unavailable;Diagnostics::RecordLiveGpuSpan(liveCompute);}
+    if(query && submitted) { std::optional<RHI::TimestampCalibration> calibration;if(liveCompute.id){RHI::TimestampCalibration pair;if(device.GetTimestampCalibration(pair))calibration=pair;}m_gpuSamples.push_back({query, completion,liveCompute,calibration,Diagnostics::LiveNowNs()}); query = nullptr; }
     if(!submitted) return Failure("Model deformation upload or compute submission failed.");
     return true;
 }
 
 bool ModelRenderer::RenderScene(const ModelScene& scene, const Camera* camera, const Canvas* overlay, Image* readback)
 {
+    InitializeLiveProfiling();
+    m_renderer.PublishLiveGeometryAvailability(true);
+    Diagnostics::LiveFrameScope liveFrame(Diagnostics::FindLiveObject(&m_renderer.GetDevice()),m_renderer.GetLiveSourceId());
+    m_renderer.GetDevice().PrepareLiveControls(liveFrame.GetKey());
     bool rendered = false;
     bool drawAttempted = false;
     RHI::FenceHandle previousDraw;
@@ -721,6 +817,7 @@ bool ModelRenderer::RenderScene(const ModelScene& scene, const Camera* camera, c
     {
         if(readback) *readback = {};
         CollectGpuSamples();
+        PrepareLiveFrame(liveFrame.GetKey());
         const auto& config = m_renderer.GetConfig();
         const bool stockGeometry = config.advanced.enabled && config.enableHdrRendering;
         if(stockGeometry && std::any_of(m_shaderBytes.begin(), m_shaderBytes.end(),
@@ -730,7 +827,8 @@ bool ModelRenderer::RenderScene(const ModelScene& scene, const Camera* camera, c
             return Failure("Advanced model rendering requires the standard deformation shaders.");
         }
         // 이전 복원 자체가 실패했다면 원래 설정을 덮어쓰지 않고 다시 복원부터 처리한다.
-        if(RestoreShaders() && (stockGeometry || ConfigureShaders()) && Prepare(scene))
+        if(RestoreShaders() && (stockGeometry || ConfigureShaders()) &&
+            m_renderer.PrepareLiveFrame(liveFrame.GetKey()) && Prepare(scene))
         {
             previousDraw = m_renderer.GetLastRenderCompletion();
             consumedHistoryFrame = m_historyFrame;
@@ -763,6 +861,7 @@ bool ModelRenderer::RenderScene(const ModelScene& scene, const Camera* camera, c
     catch(...) { (void)Failure("Model rendering failed."); }
     // 성공, 준비 실패, 예외 경로 모두 복원을 예약한 후 호출자에게 돌아간다.
     const bool restored = RestoreShaders();
+    liveFrame.SetOutcome(rendered&&restored?Diagnostics::LiveOutcome::Completed:Diagnostics::LiveOutcome::Failed);
     if(!rendered || !restored) InvalidateHistory();
     return rendered && restored;
 }

@@ -16,6 +16,8 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 	RHI::ICommandList& commands, const std::vector<RendererDrawDesc>* draws,
 	RHI::TextureHandle output)
 {
+    Diagnostics::LiveCpuScope cpuScope(Diagnostics::LiveStage::Record,"RendererMainForward");
+    LiveGpuPass liveGpu(*this,commands,Diagnostics::LiveGpuScope::RendererMainForward);
 	auto& materialSets=mainSetScratch;
     struct MaterialBufferTransaction {
         Impl& r;
@@ -123,7 +125,24 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 			const auto& mesh=m_meshes[draw.mesh];
 			const auto& material=scene.Materials()[draw.material];
 			const auto* input=draws ? &(*draws)[draw.entity] : nullptr;
-			const auto selectedPipeline=MaterialPipeline(material,Math::Determinant3x3(scene.GetTransform(entity))<0);
+	        auto batchContext=Diagnostics::GetLiveContext();
+        if(Diagnostics::IsLiveCollectorEnabled())
+        {
+            const auto sceneBatch=Diagnostics::GetLiveBatchId(liveId,scene.m_liveId);
+            const auto passBatch=Diagnostics::GetLiveBatchId(sceneBatch,1);
+            batchContext.batch=Diagnostics::GetLiveBatchId(passBatch,(uint64_t(entityIndex)<<32)|count);
+            batchContext.object=entityIndex<scene.m_liveEntities.size()?scene.m_liveEntities[entityIndex]:scene.m_liveId;
+            Diagnostics::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;
+            batch.kind=Diagnostics::LiveEventKind::Batch;batch.stage=Diagnostics::LiveStage::Data;
+            batch.first=entityIndex;batch.elements=count;batch.stride=2*sizeof(Math::float4x4);
+            batch.bytes=uint64_t(count)*batch.stride;batch.resource=Diagnostics::FindLiveObject(instanceBuffer);
+            batch.reason=!stock?Diagnostics::LiveSplitReason::CustomGeometry:!instanced?Diagnostics::LiveSplitReason::InstancingDisabled:Diagnostics::LiveSplitReason::None;
+            Diagnostics::RecordLiveEvent(batch);
+            for(uint32_t i=0;i<count&&entityIndex+i<scene.m_liveEntities.size();++i)
+                Diagnostics::RecordLiveLink({scene.m_liveEntities[entityIndex+i],batch.id});
+        }
+        Diagnostics::LiveContextScope linkedBatch(batchContext);
+		const auto selectedPipeline=MaterialPipeline(material,Math::Determinant3x3(scene.GetTransform(entity))<0);
 			if(selectedPipeline!=boundPipeline)
 			{
 				commands.BindGraphicsPipeline(selectedPipeline);boundPipeline=selectedPipeline;boundMaterial=nullptr;

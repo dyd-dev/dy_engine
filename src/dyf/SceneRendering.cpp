@@ -40,6 +40,11 @@ bool Renderer::Impl::RenderToTexture(const Scene& scene,const Camera& camera,RHI
 bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamera, const Canvas* overlay, Image* readback,
     const std::vector<RendererDrawDesc>* draws,RHI::TextureHandle selectedOutput,RHI::ResourceState before)
 {
+    InitializeLiveProfiling();PublishLiveGeometryAvailability(draws!=nullptr);
+    Diagnostics::LiveFrameScope liveFrame(Diagnostics::FindLiveObject(device),liveId);
+    device->PrepareLiveControls(liveFrame.GetKey());
+    Diagnostics::SetLiveObjectGauge(liveFrame.GetKey(),{Diagnostics::LiveValueState::Ready,scene.GetEntityCount()});
+    struct LivePending {Impl& r;Diagnostics::LiveFrameKey key;~LivePending(){r.SubmitLiveGpuSamples({},key);}} livePending{*this,liveFrame.GetKey()};
     try
     {
         struct ShadowFrame {
@@ -54,7 +59,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         } shadowFrame{*this};
         lastStatistics={};
         DY_PROFILE_CPU_ZONE_NAMED("Renderer::Impl::RenderScene");
-        if(!ApplySettings())return false;
+        if(!PrepareLiveFrame(liveFrame.GetKey()))return false;
         if(!selectedOutput && Platform::Window::ConsumeKeyPress(Platform::Key::F11,windowHandle))
             config.profilerStartsExpanded = !config.profilerStartsExpanded;
         if(draws && draws->size() != scene.GetEntityCount()) return RendererFailure("Draw input count must match the scene.");
@@ -81,6 +86,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             if(readback)*readback={};
             // No commands or atlas writes occurred on an ordinary acquire skip.
             shadowFrame.committed=true;
+            livePreparedFrame=0;liveFrame.SetOutcome(Diagnostics::LiveOutcome::Skipped);
             return true;
         }
         if(!selectedOutput) framePending=true;
@@ -366,6 +372,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             static_cast<uint32_t>(frame.lists.size()), nullptr, 0}, completion);
         timing.cpuSubmitMilliseconds+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-submitStart).count();
         if(drawn) {
+            SubmitLiveGpuSamples(completion,liveFrame.GetKey());
             if(fixedOutput) outputPresentation->CommitFrame();
             canvasFrame.Commit();
             if(samples.packet.query && completion) {
@@ -402,6 +409,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             DY_PROFILE_FRAME_MARK();
         }
         shadowFrame.committed=true;
+        liveFrame.SetOutcome(Diagnostics::LiveOutcome::Completed);
         return true;
     }
     catch(const std::exception& error)

@@ -50,7 +50,7 @@ namespace dyf::Backends
 	{
 	public:
 		explicit VulkanCommandList(const VulkanContext& context, std::shared_ptr<VulkanUploadPool> uploadPool = {},
-            std::shared_ptr<VulkanCommandPoolCache> commandPools = {});
+            std::shared_ptr<VulkanCommandPoolCache> commandPools = {},RHI::Detail::UploadPolicy policy = {});
         void BeginDebugEventNative(const char*,const RHI::DebugLabelColor&) override;
         void EndDebugEventNative() override;
         void InsertDebugMarkerNative(const char*,const RHI::DebugLabelColor&) override;

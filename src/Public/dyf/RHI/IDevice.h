@@ -7,6 +7,7 @@
 #include "ResourceState.h"
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -15,6 +16,7 @@
 #include "Swapchain.h"
 #include "Submission.h"
 #include "Feature.h"
+#include "dyf/Diagnostics/LiveProfiling.h"
 
 namespace dyf::RHI
 {
@@ -48,6 +50,16 @@ namespace dyf::RHI
 
     // 결과는 ReadTimestamps로 읽는다. 쿼리 객체는 핸들로만 사용한다.
     struct TimestampQueryDesc { uint32_t count = 0; };
+    enum class CpuTimestampDomain : uint8_t { Unsupported, QueryPerformanceCounter };
+    struct TimestampCalibration
+    {
+        CpuTimestampDomain cpuDomain = CpuTimestampDomain::Unsupported;
+        uint64_t cpuTicks = 0, cpuFrequency = 0, gpuTicks = 0;
+        double gpuPeriodNanoseconds = 0;
+        uint32_t gpuValidBits = 0;
+        std::optional<uint64_t> maximumDeviationNanoseconds;
+    };
+    struct UploadMemoryStatistics;
 
     struct ResourceCounter { uint64_t live = 0, created = 0, destroyed = 0; };
     struct ResourceAllocationCounters { ResourceCounter buffers, textures, pipelines; };
@@ -64,6 +76,7 @@ namespace dyf::RHI
         // Counts device-created resources, including resources retained by pending GPU work.
         // Swapchain-owned images are excluded.
         [[nodiscard]] ResourceAllocationCounters GetResourceAllocationCounters() const;
+        [[nodiscard]] UploadMemoryStatistics GetUploadMemoryStatistics() const;
         // 설정의 공통 규칙과 장치 한도를 검사한다. 셰이더는 이 장치에서 생성한 핸들을 사용한다.
         // 조회는 자원을 생성하지 않으며, 이후 생성 시 메모리·셰이더 오류까지 보장하지는 않는다.
         [[nodiscard]] bool Supports(const PipelineLayoutDesc&) const;
@@ -81,6 +94,14 @@ namespace dyf::RHI
         [[nodiscard]] bool ReadTimestamps(TimestampQueryHandle,uint32_t first,uint32_t count,uint64_t* ticks);
         [[nodiscard]] double GetTimestampPeriodNanoseconds() const {return GetTimestampPeriodNative();}
         [[nodiscard]] uint32_t GetTimestampValidBits() const {return GetTimestampValidBitsNative();}
+        // Returns a raw clock pair; failure clears the output, without waiting for GPU work.
+        [[nodiscard]] bool GetTimestampCalibration(TimestampCalibration&) const;
+        // Pending tokens and up to 4096 completed tokens (10 seconds); expired/omitted tokens return 0.
+        [[nodiscard]] Diagnostics::LiveId GetLiveSubmissionId(FenceHandle) const noexcept;
+        // Call at the source's first preparation boundary, before uploads/recording.
+        // Use its actual frame key; already-recorded lists retain their upload policy.
+        void PrepareLiveControls(Diagnostics::LiveFrameKey) noexcept;
+        void ReleaseLiveControls(Diagnostics::LiveId source) noexcept;
 
         // 성공하면 Present까지 같은 backbuffer를 사용한다. 중간에 여러 번 Submit할 수 있다.
 		[[nodiscard]] bool BeginFrame();
@@ -155,6 +176,10 @@ namespace dyf::RHI
 			uint32_t slicePitch);
 
 	protected:
+        IDevice();
+        void StopLiveProfiling() noexcept;
+        virtual UploadMemoryStatistics GetUploadMemoryStatisticsNative() const;
+        virtual bool SetUploadMemoryPolicyNative(bool,bool) { return false; }
         enum class DiagnosticSeverity : uint8_t { Info, Warning, Error };
         void ReportDiagnostic(DiagnosticSeverity severity, const char* message) const;
 		// Release common references while the native device is still alive.
@@ -174,6 +199,7 @@ namespace dyf::RHI
         virtual bool ReadTimestampsNative(TimestampQueryHandle,uint32_t,uint32_t,uint64_t*) {return false;}
         virtual double GetTimestampPeriodNative() const {return 0;}
         virtual uint32_t GetTimestampValidBitsNative() const {return 0;}
+        virtual bool GetTimestampCalibrationNative(TimestampCalibration&) const {return false;}
         virtual bool IsLostNative() const = 0;
         virtual bool SupportsNative(Feature) const = 0;
     virtual uint64_t GetLimitNative(Limit) const = 0;
@@ -187,6 +213,7 @@ namespace dyf::RHI
 		virtual bool PresentNative() = 0;
 		virtual bool SubmitNative(ICommandList** commandLists, uint32_t count) = 0;
 		virtual ICommandList* AcquireCommandListNative() = 0;
+        virtual ICommandList* AcquireCommandListNative(bool,bool) { return AcquireCommandListNative(); }
         virtual void DiscardCommandListNative(ICommandList*) = 0;
 		virtual TextureHandle GetBackBufferNative() = 0;
 		virtual BufferHandle CreateBufferNative(const BufferDesc& desc) = 0;
@@ -222,6 +249,21 @@ namespace dyf::RHI
 	private:
 		friend class ICommandList;
         friend class RenderGraph;
+        struct LiveState;
+        std::unique_ptr<LiveState> m_live;
+        LiveState* GetLiveState() noexcept;
+        void PublishLiveResources() noexcept;
+        void CaptureLiveUploadPolicy(ICommandList&) noexcept;
+        void BeginLiveRecording(ICommandList&) noexcept;
+        bool CaptureLiveGraphParallel(Diagnostics::LiveFrameKey) noexcept;
+        struct LiveExecutionScope;
+        void BeginLiveExecution(ICommandList* const*,uint32_t,LiveExecutionScope&) noexcept;
+        void EndLiveExecution(LiveExecutionScope&) noexcept;
+        bool ReadTimestampsInternal(TimestampQueryHandle,uint32_t,uint32_t,uint64_t*,bool observe);
+        void PumpLiveWork() noexcept;
+        uint32_t ReserveLiveQuery(ICommandList*) noexcept;
+        void DiscardLivePrepared(ICommandList*,Diagnostics::LiveOutcome) noexcept;
+        void SubmitLiveWork(ICommandList* const*,uint32_t,bool,uint64_t) noexcept;
         struct RecordingState;
         void RecordParallel(uint32_t count, uint32_t threadCount,
             const std::function<void(uint32_t)>& record);
@@ -234,7 +276,9 @@ namespace dyf::RHI
         uint64_t m_imageGeneration = 1;
 		std::unordered_set<const void*> m_borrowedTextures;
 		std::shared_ptr<void> Reference(const void* handle) const;
-		void Track(void* handle, void (*destroy)(IDevice&, void*), std::vector<std::shared_ptr<void>> dependencies = {});
+		void Track(void* handle, void (*destroy)(IDevice&, void*), std::vector<std::shared_ptr<void>> dependencies = {},
+            Diagnostics::LiveObjectKind kind=Diagnostics::LiveObjectKind::Entity,uint64_t elements=0,uint64_t bytes=0,
+            const char* label="RHI resource");
 		std::unordered_map<const void*, std::shared_ptr<void>> m_resources;
 
 		DeviceDesc m_desc = {};

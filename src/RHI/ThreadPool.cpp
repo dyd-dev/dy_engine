@@ -1,4 +1,5 @@
 #include "ThreadPool.h"
+#include "dyf/Diagnostics/LiveProfiling.h"
 #include <algorithm>
 #include <stdexcept>
 
@@ -34,7 +35,16 @@ ThreadPool::~ThreadPool()
 std::future<void> ThreadPool::Enqueue(std::function<void()> task)
 {
     if(!task) throw std::invalid_argument("ThreadPool requires a callable task.");
+#ifdef DY_LIVE_PROFILING_ENABLED
+    const auto context=Diagnostics::GetLiveContext();
+    std::packaged_task<void()> pending([context,task=std::move(task)]{
+        Diagnostics::LiveContextScope restored(context);
+        Diagnostics::LiveCpuScope timing(Diagnostics::LiveStage::CpuPrepare,"ThreadPool task");
+        task();
+    });
+#else
     std::packaged_task<void()> pending(std::move(task));
+#endif
     auto result = pending.get_future();
     {
         std::lock_guard<std::mutex> lock(m_mutex);

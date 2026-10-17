@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include "dyf/RendererConfig.h"
+#include "dyf/Diagnostics/LiveProfiling.h"
 #include "dyf/Platform/ProfilerSampler.h"
 #include "dyf/Material.h"
 #include "dyf/RHI/IDevice.h"
@@ -148,6 +149,8 @@ public:
     // 등록한 확장은 렌더러가 소유하며 매 프레임 같은 순서로 패스를 추가한다.
     bool AddExtension(std::unique_ptr<RenderExtension>);
     [[nodiscard]] const RendererConfig& GetConfig() const;
+    [[nodiscard]] const RendererConfig& GetAppliedConfig() const;
+    [[nodiscard]] Diagnostics::LiveId GetLiveSourceId() const noexcept;
     bool SetConfig(const RendererConfig&);
     // 선택적 셰이더 교체다. 입력 바이트와 진입점은 복사하며 다음 Render에서 적용한다.
     bool SetShaders(const RendererShaderDesc&);
@@ -155,6 +158,10 @@ public:
     [[nodiscard]] RendererShaderDesc GetShaders() const;
 
 private:
+    friend class ModelRenderer;
+    void InitializeLiveProfiling() noexcept;
+    bool PrepareLiveFrame(Diagnostics::LiveFrameKey) noexcept;
+    void PublishLiveGeometryAvailability(bool) noexcept;
     struct Impl;
     std::unique_ptr<Impl> m_impl;
     Renderer(RHI::IDevice&,const void* window,const RendererConfig&);

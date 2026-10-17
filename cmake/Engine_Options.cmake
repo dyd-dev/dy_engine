@@ -16,6 +16,11 @@ target_include_directories(Engine_Options INTERFACE
 # ===== ===== SIMD ===== =====
 option(DY_ENABLE_SIMD "Enable dy::Math SIMD code paths when supported by the target CPU." ON)
 option(DY_ENABLE_TRACY "Embed Tracy profiling instrumentation in engine applications." ON)
+option(DY_ENABLE_LIVE_PROFILING "Collect live execution diagnostics in engine applications." OFF)
+option(DY_BUILD_EXECUTION_VISUALIZER "Build the independent Windows execution visualizer." OFF)
+if(DY_ENABLE_LIVE_PROFILING)
+    target_compile_definitions(Engine_Options INTERFACE DY_LIVE_PROFILING_ENABLED=1)
+endif()
 option(DY_TRACY_RAW_PLOTS "Publish per-frame Tracy plots in addition to 5 Hz averages." OFF)
 option(DY_ENABLE_RENDERDOC "Enable capture controls for an already injected RenderDoc API." OFF)
 option(DY_ENABLE_PIX "Enable D3D12 PIX events using WinPixEventRuntime (MSVC)." ${MSVC})

@@ -1,4 +1,5 @@
 #include "D3D12Device.h"
+#include "../../RHI/LiveRhi.h"
 #include "D3D12Buffer.h"
 #include "D3D12CommandList.h"
 #include "D3D12PipelineState.h"
@@ -63,6 +64,7 @@ namespace dyf::Backends
         ComPtr<ID3D12InfoQueue> infoQueue; // 디버그 빌드: D3D12 검증 메시지 수집
         ComPtr<ID3D12CommandQueue> commandQueue;
         uint64_t timestampFrequency = 0;
+        uint64_t cpuTimestampFrequency = 0;
         HWND windowHandle = nullptr;
         ComPtr<IDXGISwapChain3> swapChain;
         ComPtr<ID3D12DescriptorHeap> rtvHeap;
@@ -229,7 +231,11 @@ namespace dyf::Backends
         commands->ResourceBarrier(1, &barrier);
         const CD3DX12_TEXTURE_COPY_LOCATION source(resource, 0u);
         const CD3DX12_TEXTURE_COPY_LOCATION destination(buffer.Get(), footprint);
-        commands->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        {
+            RHI::LiveRhiScope copy(Diagnostics::LiveEventKind::CpuWork,Diagnostics::LiveStage::NativeTranslate,"Readback: record texture copy");
+            copy.event.resource=Diagnostics::FindLiveObject(texture);copy.event.bytes=bytes;copy.event.operations=1;
+            commands->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        }
         std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
         commands->ResourceBarrier(1, &barrier);
         if(FAILED(commands->Close())) return false;
@@ -241,7 +247,16 @@ namespace dyf::Backends
         m_internal->readbackResources.emplace_back(commands.Get());
         m_internal->readbackResources.emplace_back(fence.Get());
         ID3D12CommandList* native = commands.Get();
-        m_internal->commandQueue->ExecuteCommandLists(1, &native);
+        const auto liveSubmission=Diagnostics::IsLiveCollectorEnabled()?Diagnostics::AllocateLiveId():0;
+        {
+            RHI::LiveRhiScope submit(Diagnostics::LiveEventKind::CpuWork,Diagnostics::LiveStage::Submit,"Readback: native submission");
+            submit.event.resource=Diagnostics::FindLiveObject(texture);submit.event.submission=liveSubmission;submit.event.operations=1;
+            m_internal->commandQueue->ExecuteCommandLists(1, &native);submit.event.outcome=Diagnostics::LiveOutcome::Submitted;
+        }
+        if(liveSubmission)Diagnostics::SetLiveGpuCoverage(Diagnostics::GetLiveContext().frame,false);
+        RHI::LiveRhiScope wait(Diagnostics::LiveEventKind::Wait,Diagnostics::LiveStage::Submit,"Readback: fence wait");
+        wait.event.resource=Diagnostics::FindLiveObject(texture);wait.event.submission=liveSubmission;wait.event.operations=1;
+        wait.event.outcome=Diagnostics::LiveOutcome::Failed;
         if(FAILED(m_internal->commandQueue->Signal(fence.Get(), 1)) ||
             FAILED(fence->SetEventOnCompletion(1, event.handle)) ||
             WaitForSingleObject(event.handle, INFINITE) != WAIT_OBJECT_0 ||
@@ -250,6 +265,8 @@ namespace dyf::Backends
             m_internal->submissionFaulted = true;
             return false;
         }
+        wait.event.outcome=Diagnostics::LiveOutcome::Completed;wait.Finish();
+        RHI::RecordLiveReadbackCompletion(liveSubmission,Diagnostics::FindLiveObject(texture));
         m_internal->readbackResources.resize(retirementBase);
         void* mapped = nullptr;
         const D3D12_RANGE range{0, static_cast<SIZE_T>(storageBytes)};
@@ -365,6 +382,7 @@ namespace dyf::Backends
 
     D3D12Device::~D3D12Device()
     {
+        StopLiveProfiling();
         if (m_internal == nullptr) return;
 
         const bool queueDrained = WaitIdleNative();
@@ -452,10 +470,21 @@ namespace dyf::Backends
         m_internal->frames.resize(desc.maxFramesInFlight);
         if(FAILED(m_internal->commandQueue->GetTimestampFrequency(&m_internal->timestampFrequency)))
             m_internal->timestampFrequency = 0;
+        LARGE_INTEGER cpuFrequency;
+        if(QueryPerformanceFrequency(&cpuFrequency) && cpuFrequency.QuadPart > 0)
+            m_internal->cpuTimestampFrequency = static_cast<uint64_t>(cpuFrequency.QuadPart);
         return 0;
     }
 
 
+RHI::UploadMemoryStatistics D3D12Device::GetUploadMemoryStatisticsNative() const
+{return m_internal&&m_internal->uploadPool?m_internal->uploadPool->GetStatistics():RHI::UploadMemoryStatistics{};}
+bool D3D12Device::SetUploadMemoryPolicyNative(bool reusePages,bool suballocate)
+{
+    if(!m_internal||!m_internal->device||m_internal->submissionFaulted)return false;
+    if(!m_internal->uploadPool)m_internal->uploadPool=MakeD3D12UploadPool(m_internal->device.Get());
+    m_internal->uploadPool->SetPolicy({reusePages,suballocate});return true;
+}
 uint64_t D3D12Device::GetLastSubmissionNative() const {return m_internal->lastSubmittedValue;}
 uint64_t D3D12Device::GetCompletedSubmissionNative() {uint64_t value=0; return m_internal->CollectCompletedWork(value)?value:0;}
 void D3D12Device::DiscardCommandListNative(RHI::ICommandList* list) {auto& active=m_internal->activeCommandLists; active.erase(std::remove_if(active.begin(),active.end(),[list](const auto& value){return value.get()==list;}),active.end());}
@@ -492,6 +521,20 @@ bool D3D12Device::ReadTimestampsNative(RHI::TimestampQueryHandle handle, uint32_
     query.readback->Unmap(0, &noWrites);
     return true;
 }
+bool D3D12Device::GetTimestampCalibrationNative(RHI::TimestampCalibration& calibration) const
+{
+    if(!m_internal || IsLostNative() || !m_internal->timestampFrequency || !m_internal->cpuTimestampFrequency) return false;
+    uint64_t gpuTicks = 0, cpuTicks = 0;
+    if(FAILED(m_internal->commandQueue->GetClockCalibration(&gpuTicks, &cpuTicks))) return false;
+    calibration = {};
+    calibration.cpuDomain = RHI::CpuTimestampDomain::QueryPerformanceCounter;
+    calibration.cpuTicks = cpuTicks;
+    calibration.cpuFrequency = m_internal->cpuTimestampFrequency;
+    calibration.gpuTicks = gpuTicks;
+    calibration.gpuPeriodNanoseconds = GetTimestampPeriodNative();
+    calibration.gpuValidBits = GetTimestampValidBitsNative();
+    return true;
+}
 double D3D12Device::GetTimestampPeriodNative() const
 {
     return m_internal->timestampFrequency ? 1e9 / double(m_internal->timestampFrequency) : 0;
@@ -503,6 +546,8 @@ uint32_t D3D12Device::GetTimestampValidBitsNative() const
 bool D3D12Device::SupportsNative(RHI::Feature feature) const
 {
     if(feature == RHI::Feature::TimestampQuery) return m_internal->timestampFrequency != 0;
+    if(feature == RHI::Feature::TimestampCalibration)
+        return m_internal && m_internal->timestampFrequency && m_internal->cpuTimestampFrequency;
     switch(feature)
     {
     case RHI::Feature::IndirectDraw:
@@ -749,17 +794,22 @@ void D3D12Device::DestroySwapchainNative()
 
         ComPtr<IDXGISwapChain1> swapchain1;
         ComPtr<IDXGISwapChain3> swapchain3;
-        if (FAILED(factory->CreateSwapChainForHwnd(
+        const HRESULT createResult=factory->CreateSwapChainForHwnd(
                 m_internal->commandQueue.Get(),
                 m_internal->windowHandle,
                 &requestedDesc,
                 nullptr,
                 nullptr,
-                &swapchain1)) ||
-            FAILED(swapchain1.As(&swapchain3)))
+                &swapchain1);
+        if (FAILED(createResult))
         {
+            char message[192];
+            std::snprintf(message,sizeof(message),"D3D12: CreateSwapChainForHwnd failed (HRESULT 0x%08lX, framebuffer %ux%u).",
+                static_cast<unsigned long>(createResult),requestedDesc.Width,requestedDesc.Height);
+            ReportDiagnostic(DiagnosticSeverity::Error,message);
             return false;
         }
+        if (FAILED(swapchain1.As(&swapchain3))) return false;
         // 자동 exclusive fullscreen 전환은 Immediate의 ALLOW_TEARING 계약과
         // 충돌한다. 창 모드 변경은 호출자가 명시적으로 관리한다.
         if (FAILED(factory->MakeWindowAssociation(m_internal->windowHandle, DXGI_MWA_NO_ALT_ENTER)))
@@ -796,6 +846,10 @@ void D3D12Device::DestroySwapchainNative()
         if((desc.initialWidth && desc.initialWidth != actualDesc.Width) ||
             (desc.initialHeight && desc.initialHeight != actualDesc.Height))
         {
+            char message[192];
+            std::snprintf(message,sizeof(message),"D3D12: requested initial extent %ux%u differs from native framebuffer %ux%u.",
+                desc.initialWidth,desc.initialHeight,actualDesc.Width,actualDesc.Height);
+            ReportDiagnostic(DiagnosticSeverity::Error,message);
             m_internal->swapChain.Reset();
             return false;
         }
@@ -953,6 +1007,12 @@ void D3D12Device::DestroySwapchainNative()
 
     RHI::ICommandList* D3D12Device::AcquireCommandListNative()
     {
+        const auto policy=m_internal&&m_internal->uploadPool?m_internal->uploadPool->GetPolicy():RHI::Detail::UploadPolicy{};
+        return AcquireCommandListNative(policy.reusePages,policy.suballocate);
+    }
+
+    RHI::ICommandList* D3D12Device::AcquireCommandListNative(bool reusePages,bool suballocate)
+    {
         if (m_internal == nullptr || m_internal->device == nullptr ||
             m_internal->submissionFaulted)
         {
@@ -969,7 +1029,7 @@ void D3D12Device::DestroySwapchainNative()
         auto commandList = std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>(
             new D3D12CommandList(m_internal->device.Get(), m_internal->uploadPool,
                 m_internal->drawSignature.Get(), m_internal->drawIndexedSignature.Get(),
-                m_internal->dispatchSignature.Get()));
+                m_internal->dispatchSignature.Get(),{reusePages,suballocate}));
         if (commandList->GetNativeList() == nullptr) return nullptr;
         return m_internal->activeCommandLists.emplace_back(std::move(commandList)).get();
     }

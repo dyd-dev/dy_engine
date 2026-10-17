@@ -1056,6 +1056,7 @@ namespace dyf::Backends
 
 	NullDevice::~NullDevice()
 	{
+        StopLiveProfiling();
         ReleaseResources();
 		m_impl->activeCommandLists.clear();
 		delete m_impl;

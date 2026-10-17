@@ -27,7 +27,7 @@ RHI::ResourceSetHandle Renderer::Impl::CachedResourceSet(RHI::PipelineHandle sel
     const auto first=std::lower_bound(cache.begin(),cache.end(),keyHash,
         [](const CachedSet& entry,size_t hash) {return entry.keyHash<hash;});
     // 해시는 후보만 좁힌다. 충돌은 전체 바인딩을 비교해 구분한다.
-    for(auto candidate=first;candidate!=cache.end() && candidate->keyHash==keyHash;++candidate) {
+    for(auto candidate=first;config.enableResourceSetCache && candidate!=cache.end() && candidate->keyHash==keyHash;++candidate) {
         auto& entry=*candidate;
         if(entry.set->GetPipeline()!=selectedPipeline || entry.set->GetBindingCount()!=bindings.size())continue;
         bool same=true;
@@ -51,7 +51,7 @@ void Renderer::Impl::PruneResourceSets(std::vector<CachedSet>& cache)
     // 캐시에서 제거해도 제출된 참조의 수명은 RHI가 유지한다.
     const auto frameWindow=std::max(1u,device->GetDesc().maxFramesInFlight);
     cache.erase(std::remove_if(cache.begin(),cache.end(),[&](const CachedSet& entry){
-        if(entry.unusedFrames<frameWindow)return false;device->DestroyResourceSet(entry.set);return true;
+        if(config.enableResourceSetCache && entry.unusedFrames<frameWindow)return false;device->DestroyResourceSet(entry.set);return true;
     }),cache.end());
 }
 

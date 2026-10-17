@@ -240,7 +240,8 @@ bool Renderer::Impl::ApplySettings()
         config.enableHdrRendering != nextConfig.enableHdrRendering ||
         config.advanced.enabled != nextConfig.advanced.enabled ||
         config.enableInstancing != nextConfig.enableInstancing ||
-        config.debugWireframe != nextConfig.debugWireframe;
+        config.debugWireframe != nextConfig.debugWireframe ||
+        config.enableBindlessMaterials != nextConfig.enableBindlessMaterials;
     const bool outputChanged = config.vsync != nextConfig.vsync ||
         config.allowReadback != nextConfig.allowReadback;
     RHI::SwapchainDesc output;
@@ -356,7 +357,16 @@ Renderer::Impl::Impl(Renderer& owner,RHI::IDevice& borrowedDevice,const void* wi
     : owner(owner),device(&borrowedDevice),windowHandle(window),config(desc)
 {
 }
-Renderer::Impl::~Impl() { Shutdown(); }
+Renderer::Impl::~Impl()
+{
+    if(liveId)device->ReleaseLiveControls(liveId);
+    for(auto& control:liveCatalog)control=Diagnostics::ControlRegistration{};
+    for(auto& control:liveControls)control=Diagnostics::ControlRegistration{};
+    for(const auto& sample:liveGpuSamples)device->DestroyTimestampQuery(sample.query);
+    for(const auto query:liveFreeQueries)device->DestroyTimestampQuery(query);
+    Diagnostics::RetireLiveObject(liveId);
+    Shutdown();
+}
 
 std::unique_ptr<Renderer> Renderer::Create(const void* window)
 {
@@ -389,6 +399,7 @@ std::unique_ptr<Renderer> Renderer::Create(RHI::IDevice& device, const void* win
     if(!ValidateRendererConfig(desc))return nullptr;
     auto renderer = std::unique_ptr<Renderer>(new Renderer(device, window, desc));
     if(!renderer->m_impl->Initialize()){RendererFailure("Renderer initialization failed.");return nullptr;}
+    renderer->m_impl->InitializeLiveProfiling();
     return renderer;
 
     }
@@ -412,11 +423,16 @@ bool Renderer::Impl::Render(const Scene& scene, const Camera& camera, const Canv
 }
 bool Renderer::Impl::Render(const Canvas& canvas, Image* readback)
 {
+    InitializeLiveProfiling();PublishLiveGeometryAvailability(false);
+    Diagnostics::LiveFrameScope liveFrame(Diagnostics::FindLiveObject(device),liveId);
+    device->PrepareLiveControls(liveFrame.GetKey());
     try
     {
-        if(!ApplySettings()) return false;
+        if(!PrepareLiveFrame(liveFrame.GetKey()))return false;
         if(readback && !config.allowReadback) return RendererFailure("Readback was not enabled.");
-        return RenderCanvas(canvas,readback);
+        const bool rendered=RenderCanvas(canvas,readback);
+        liveFrame.SetOutcome(rendered?Diagnostics::LiveOutcome::Completed:Diagnostics::LiveOutcome::Failed);
+        return rendered;
     }
     catch(const std::exception& error)
     {
@@ -530,6 +546,8 @@ RHI::PipelineHandle Renderer::Impl::MaterialPipeline(const MaterialDesc& materia
     return variant ? materialPipelines[variant-1] : pipeline;
 }
 bool Renderer::Impl::UsesBindlessMaterials() const
+{return config.enableBindlessMaterials&&SupportsBindlessMaterials();}
+bool Renderer::Impl::SupportsBindlessMaterials() const
 {
     // 사용자 Fragment는 기본 레이아웃 계약을 유지한다. 기본 셰이더의 최적화 가능 여부는 RHI에 묻는다.
     if(!shaderSources.bytes[MeshFragment].empty() || UsesAdvancedRendering()) return false;

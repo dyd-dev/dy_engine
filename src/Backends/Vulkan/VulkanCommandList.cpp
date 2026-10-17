@@ -295,10 +295,10 @@ namespace dyf::Backends
 	}
 
 	VulkanCommandList::VulkanCommandList(const VulkanContext& context, std::shared_ptr<VulkanUploadPool> uploadPool,
-        std::shared_ptr<VulkanCommandPoolCache> commandPools)
+        std::shared_ptr<VulkanCommandPoolCache> commandPools,RHI::Detail::UploadPolicy policy)
 		: m_context(context)
         , m_commandPools(commandPools ? std::move(commandPools) : std::make_shared<VulkanCommandPoolCache>(context))
-		, m_uploadArena(uploadPool ? std::move(uploadPool) : CreateVulkanUploadPool(context))
+		, m_uploadArena(uploadPool ? std::move(uploadPool) : CreateVulkanUploadPool(context),policy)
 	{
         if(!context.physicalInfo)throw std::runtime_error("Vulkan physical device information is unavailable");
         const auto& properties=context.physicalInfo->properties;

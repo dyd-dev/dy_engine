@@ -81,6 +81,8 @@ struct ShadowFrustum
 bool Renderer::Impl::RecordShadowPass(const Scene& scene, const Camera& camera, const ShadowData& shadows,
 	RHI::ICommandList& commands, const std::vector<RendererDrawDesc>* draws)
 {
+    Diagnostics::LiveCpuScope cpuScope(Diagnostics::LiveStage::Record,"RendererShadow");
+    LiveGpuPass liveGpu(*this,commands,Diagnostics::LiveGpuScope::RendererShadow);
 	// 그림자 윤곽은 원본 인덱스를 사용하여 카메라 LOD 변경에도 정적 아틀라스를 재사용한다.
 	const bool stock=stockDrawInputs;
 	const bool instanced=UsesInstanceStream();
@@ -196,6 +198,23 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene, const Camera& camera, 
                         ++count;
                     }
                 }
+        auto batchContext=Diagnostics::GetLiveContext();
+        if(Diagnostics::IsLiveCollectorEnabled())
+        {
+            const auto sceneBatch=Diagnostics::GetLiveBatchId(liveId,scene.m_liveId);
+            const auto passBatch=Diagnostics::GetLiveBatchId(sceneBatch,100+view);
+            batchContext.batch=Diagnostics::GetLiveBatchId(passBatch,(uint64_t(entityIndex)<<32)|count);
+            batchContext.object=entityIndex<scene.m_liveEntities.size()?scene.m_liveEntities[entityIndex]:scene.m_liveId;
+            Diagnostics::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;
+            batch.kind=Diagnostics::LiveEventKind::Batch;batch.stage=Diagnostics::LiveStage::Data;
+            batch.first=entityIndex;batch.elements=count;batch.stride=2*sizeof(Math::float4x4);
+            batch.bytes=uint64_t(count)*batch.stride;batch.resource=Diagnostics::FindLiveObject(instanceBuffer);
+            batch.reason=!stock?Diagnostics::LiveSplitReason::CustomGeometry:!instanced?Diagnostics::LiveSplitReason::InstancingDisabled:Diagnostics::LiveSplitReason::None;
+            Diagnostics::RecordLiveEvent(batch);
+            for(uint32_t i=0;i<count&&entityIndex+i<scene.m_liveEntities.size();++i)
+                Diagnostics::RecordLiveLink({scene.m_liveEntities[entityIndex+i],batch.id});
+        }
+        Diagnostics::LiveContextScope linkedBatch(batchContext);
 				const auto* input = draws ? &(*draws)[entityIndex] : nullptr;
 				const auto selectedPipeline=shadowPipelineFor(material,mirrored);
 				if(selectedPipeline!=boundPipeline)

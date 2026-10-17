@@ -10,6 +10,11 @@ Renderer::Renderer(RHI::IDevice& device, const void* window, const RendererConfi
 }
 
 Renderer::~Renderer() = default;
+const RendererConfig& Renderer::GetAppliedConfig() const { return m_impl->config; }
+Diagnostics::LiveId Renderer::GetLiveSourceId() const noexcept { return m_impl->liveId; }
+void Renderer::InitializeLiveProfiling() noexcept { m_impl->InitializeLiveProfiling(); }
+bool Renderer::PrepareLiveFrame(Diagnostics::LiveFrameKey frame) noexcept { return m_impl->PrepareLiveFrame(frame); }
+void Renderer::PublishLiveGeometryAvailability(bool custom) noexcept { m_impl->PublishLiveGeometryAvailability(custom); }
 
 bool Renderer::Render(const MeshData& mesh, Image* readback)
 {

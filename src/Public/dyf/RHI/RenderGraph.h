@@ -21,6 +21,7 @@ namespace dyf::RHI
     {
         std::vector<uint32_t> passIndices;
     };
+    struct RGDependency {uint32_t before=0,after=0;};
 
     struct RGResourceHandle
     {
@@ -134,6 +135,7 @@ namespace dyf::RHI
         [[nodiscard]] bool IsCompiled() const;
         [[nodiscard]] const std::vector<uint32_t>& GetExecutionOrderIndices() const { return m_executionOrder; }
         [[nodiscard]] const std::vector<RGExecutionStage>& GetExecutionStages() const { return m_executionStages; }
+        [[nodiscard]] const std::vector<RGDependency>& GetDependencies() const { return m_dependencies; }
         [[nodiscard]] std::vector<std::string> GetExecutionOrderNames() const;
         [[nodiscard]] const RenderGraphPass* GetPass(uint32_t index) const;
 
@@ -150,7 +152,7 @@ namespace dyf::RHI
             ResourceState initialState, ResourceState finalState);
         bool RequireResource(ICommandList* commands, const Resource& resource, ResourceState state) const;
         bool RecordBoundary(ICommandList* commands) const;
-        bool RecordPass(ICommandList* commands, uint32_t pass) const;
+        bool RecordPass(ICommandList* commands, uint32_t pass,uint64_t eventId=0) const;
         std::vector<Resource> m_resources;
         std::unordered_map<std::string, RGResourceHandle> m_resourceNameToHandle;
         std::unordered_map<uint64_t, uint32_t> m_resourceIndices;
@@ -159,6 +161,7 @@ namespace dyf::RHI
         std::vector<std::unique_ptr<RenderGraphPass>> m_passes;
         std::vector<uint32_t> m_executionOrder;
         std::vector<RGExecutionStage> m_executionStages;
+        std::vector<RGDependency> m_dependencies;
         std::vector<std::vector<ResourceBarrierDesc>> m_passBarriers;
         std::vector<ResourceBarrierDesc> m_finalBarriers;
         std::vector<uint64_t> m_compiledRevisions;

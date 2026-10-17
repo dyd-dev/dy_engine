@@ -1,6 +1,7 @@
 #include "dyf/RHI/ResourceScope.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI.h"
+#include "dyf/Diagnostics/LiveProfiling.h"
 #include "vertex.h"
 #include "fragment.h"
 
@@ -15,6 +16,7 @@
 #include <vector>
 
 namespace RHI = dyf::RHI;
+namespace Live = dyf::Diagnostics;
 using Clock = std::chrono::steady_clock;
 
 namespace {
@@ -202,6 +204,18 @@ int main(int argc, char** argv) {
         pipelineDesc.colorAttachmentCount = 1;
 
         auto* pipeline = resources.Keep(device.CreateGraphicsPipeline(pipelineDesc));
+        const auto liveOwner=Live::FindLiveObject(&device);
+        Live::ControlDesc reuse;reuse.device=reuse.source=reuse.owner=liveOwner;
+        reuse.key="example15.reuse";reuse.label="Reuse instance buffer";
+        reuse.application=Live::ControlApplication::ResourceRebuild;reuse.appliedValue=options.mode=="reuse";
+        auto reuseControl=Live::RegisterControl(reuse,[&](const Live::ControlRequest& request,Live::LiveFrameKey){
+            const bool enabled=std::get<bool>(request.value),previous=options.mode=="reuse";
+            if(enabled==previous)return Live::ControlApplyResult{Live::ControlState::Applied,previous,{}};
+            if(enabled&&!createReusable())return Live::ControlApplyResult{Live::ControlState::Failed,previous,"Instance buffer creation failed"};
+            if(!enabled){reusableResources.reset();reusableBuffer=nullptr;reusableUploaded=false;}
+            options.mode=enabled?"reuse":"create";
+            return Live::ControlApplyResult{Live::ControlState::Applied,enabled,{}};
+        });
 
         uint32_t frame = 0;
         uint64_t drawCalls = 0;
@@ -220,6 +234,9 @@ int main(int argc, char** argv) {
                 Check(!device.IsLost(), "Device lost during BeginFrame");
                 continue; // 최소화/resize로 준비되지 않은 프레임은 세지 않는다.
             }
+            const auto liveFrame=Live::GetLiveContext().frame;
+            Live::PollControls(liveOwner,liveFrame);
+            Live::SetLiveObjectGauge(liveFrame,{Live::LiveValueState::Ready,objectCount});
 
             // 제출된 명령이 참조 자원을 GPU 완료까지 유지하므로 이 scope는 프레임 끝에 해제할 수 있다.
             dyf::RHI::ResourceScope frameResources(device);
@@ -244,7 +261,7 @@ int main(int argc, char** argv) {
                 commands->ResourceBarrier(&uploaded, 1);
             }
 
-            if (options.mode == "reuse" && frame != 0) {
+            if (options.mode == "reuse" && reusableUploaded) {
                 // 이전 프레임의 vertex read가 끝난 뒤 같은 저장소에 다시 쓴다.
                 const RHI::ResourceBarrierDesc beforeUpload{
                     instanceBuffer, nullptr,
@@ -285,7 +302,18 @@ int main(int argc, char** argv) {
             commands->BindVertexBuffer(1, instanceBuffer, 0);
             commands->SetViewport({0, 0, float(extent.width), float(extent.height), 0, 1});
             commands->SetScissor({0, 0, extent.width, extent.height});
-            commands->DrawInstanced(uint32_t(vertices.size()), objectCount, 0, 0);
+            {
+#ifdef DY_LIVE_PROFILING_ENABLED
+                auto context=Live::GetLiveContext();context.batch=Live::GetLiveBatchId(liveOwner,0);
+                Live::LiveContextScope batchContext(context);
+                Live::LiveEvent batch;batch.id=context.batch;batch.context=context;
+                batch.kind=Live::LiveEventKind::Batch;batch.stage=Live::LiveStage::Data;batch.elements=objectCount;
+                batch.bytes=sizeof(instances);batch.stride=sizeof(Instance);batch.resource=Live::FindLiveObject(instanceBuffer);
+                batch.reason=Live::LiveSplitReason::EndOfInput;Live::RecordLiveEvent(batch);
+                Live::RecordLiveLink({batch.id,batch.resource});
+#endif
+                commands->DrawInstanced(uint32_t(vertices.size()), objectCount, 0, 0);
+            }
             ++drawCalls;
             commands->EndRendering();
 
@@ -299,6 +327,7 @@ int main(int argc, char** argv) {
             recordMilliseconds += std::chrono::duration<double, std::milli>(Clock::now() - recordStart).count();
 
             Check(device.Submit(&commands, 1), "Submission failed");
+            if(options.mode=="reuse")reusableUploaded=true;
 
 
             Check(device.Present(), "Present failed");

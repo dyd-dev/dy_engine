@@ -169,6 +169,12 @@ namespace dyf
 		// Stock Scene path only. Disable independently for output/performance comparisons.
 		bool enableInstancing = true;
 		bool enableFrustumCulling = true;
+        bool enableIncrementalTransformUploads = true;
+        bool enableResourceSetCache = true;
+        bool enableBindlessMaterials = true;
+        bool enableCanvasBatching = true;
+        bool enableCanvasImageCache = true;
+        bool enableCanvasVertexBufferReuse = true;
         // 지원 장치에서는 가시 인스턴스와 간접 명령을 GPU에서 생성한다.
         bool enableGpuCulling = false;
         // 현재 프레임의 깊이로 가려진 불투명 객체를 추가 제거한다.

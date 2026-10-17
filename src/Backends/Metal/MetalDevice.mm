@@ -255,8 +255,15 @@ namespace dyf::Backends
     {
     }
 
+    RHI::UploadMemoryStatistics MetalDevice::GetUploadMemoryStatisticsNative() const
+    {
+        return m_impl != nullptr && m_impl->uploadPool ?
+            m_impl->uploadPool->GetStatistics() : RHI::UploadMemoryStatistics{};
+    }
+
     MetalDevice::~MetalDevice()
     {
+        StopLiveProfiling();
         if(m_impl == nullptr) return;
 
         m_impl->StopDrawableAcquisition();

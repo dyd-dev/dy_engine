@@ -1,4 +1,5 @@
 #include "VulkanDevice.h"
+#include "RHI/LiveRhi.h"
 #include "VulkanQuery.h"
 #include "dyf/Platform/Log.h"
 
@@ -91,6 +92,40 @@ namespace dyf::Backends
 		explicit Impl(VulkanDevice& owner) : m_owner(owner) {}
 		~Impl();
         const VulkanContext& Context() const {return m_context;}
+        RHI::UploadMemoryStatistics GetUploadMemoryStatistics() const
+        {return m_uploadPool?m_uploadPool->GetStatistics():RHI::UploadMemoryStatistics{};}
+        bool SetUploadMemoryPolicy(bool reusePages,bool suballocate)
+        {
+            if(!m_context.device||m_submissionFaulted)return false;
+            if(!m_uploadPool)m_uploadPool=CreateVulkanUploadPool(m_context);
+            m_uploadPool->SetPolicy({reusePages,suballocate});return true;
+        }
+        bool GetTimestampCalibration(RHI::TimestampCalibration& calibration)
+        {
+#if defined(_WIN32)
+            if(m_submissionFaulted || !m_context.getCalibratedTimestamps || !m_context.cpuTimestampFrequency) return false;
+            const VkCalibratedTimestampInfoEXT clocks[2] = {
+                {VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, nullptr, VK_TIME_DOMAIN_DEVICE_EXT},
+                {VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, nullptr, VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT}};
+            uint64_t ticks[2]{}, deviation = 0;
+            const VkResult result = m_context.getCalibratedTimestamps(m_context.device, 2, clocks, ticks, &deviation);
+            if(result == VK_ERROR_DEVICE_LOST) m_submissionFaulted = true;
+            if(result != VK_SUCCESS || !deviation) return false;
+            calibration = {};
+            calibration.cpuDomain = RHI::CpuTimestampDomain::QueryPerformanceCounter;
+            calibration.cpuTicks = ticks[1];
+            calibration.cpuFrequency = m_context.cpuTimestampFrequency;
+            calibration.gpuTicks = ticks[0];
+            calibration.gpuPeriodNanoseconds = m_owner.GetTimestampPeriodNanoseconds();
+            calibration.gpuValidBits = m_owner.GetTimestampValidBits();
+            calibration.maximumDeviationNanoseconds = deviation;
+            return true;
+#else
+            (void)calibration;
+            return false;
+#endif
+        }
+
 		bool IsLost() const {return m_submissionFaulted || (m_commandPools && m_commandPools->IsDeviceLost());}
         bool Supports(RHI::Feature feature) const
         {
@@ -164,12 +199,38 @@ namespace dyf::Backends
             if(result==VK_ERROR_DEVICE_LOST) m_submissionFaulted=true;
             return result==VK_SUCCESS;
         }
+        bool GetTimestampCalibration(RHI::TimestampCalibration& calibration)
+        {
+#if defined(_WIN32)
+            if(m_submissionFaulted || !m_context.getCalibratedTimestamps || !m_context.cpuTimestampFrequency) return false;
+            const VkCalibratedTimestampInfoEXT clocks[2] = {
+                {VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, nullptr, VK_TIME_DOMAIN_DEVICE_EXT},
+                {VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_EXT, nullptr, VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT}};
+            uint64_t ticks[2]{}, deviation = 0;
+            const VkResult result = m_context.getCalibratedTimestamps(m_context.device, 2, clocks, ticks, &deviation);
+            if(result == VK_ERROR_DEVICE_LOST) m_submissionFaulted = true;
+            if(result != VK_SUCCESS || !deviation) return false;
+            calibration = {};
+            calibration.cpuDomain = RHI::CpuTimestampDomain::QueryPerformanceCounter;
+            calibration.cpuTicks = ticks[1];
+            calibration.cpuFrequency = m_context.cpuTimestampFrequency;
+            calibration.gpuTicks = ticks[0];
+            calibration.gpuPeriodNanoseconds = m_owner.GetTimestampPeriodNanoseconds();
+            calibration.gpuValidBits = m_owner.GetTimestampValidBits();
+            calibration.maximumDeviationNanoseconds = deviation;
+            return true;
+#else
+            (void)calibration;
+            return false;
+#endif
+        }
         void ClearSwapchain() { DestroyCurrentSwapchain(); DestroyRetiredSwapchains(); m_hasSwapchainDesc = false; }
 
 		int Initialize(const void* windowHandle, const dyf::RHI::DeviceDesc& desc);
 		bool CreateSwapchain(const dyf::RHI::SwapchainDesc& desc, VkSwapchainKHR oldSwapchain = VK_NULL_HANDLE);
 		bool BeginFrame();
 		dyf::RHI::ICommandList* AcquireCommandList();
+        RHI::ICommandList* AcquireCommandList(RHI::Detail::UploadPolicy);
 		bool Submit(dyf::RHI::ICommandList** commandLists, uint32_t count);
 		bool Present();
 		dyf::RHI::TextureHandle GetBackBuffer() const { return m_backBuffer; }
@@ -326,6 +387,7 @@ namespace dyf::Backends
 
 	VulkanDevice::~VulkanDevice()
 	{
+        StopLiveProfiling();
 		const VkResult result = m_impl->WaitForShutdown();
 		if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST)
 		{
@@ -338,12 +400,22 @@ namespace dyf::Backends
 	}
 
 
+RHI::UploadMemoryStatistics VulkanDevice::GetUploadMemoryStatisticsNative() const
+{return m_impl->GetUploadMemoryStatistics();}
+bool VulkanDevice::SetUploadMemoryPolicyNative(bool reusePages,bool suballocate)
+{return m_impl->SetUploadMemoryPolicy(reusePages,suballocate);}
+bool VulkanDevice::GetTimestampCalibrationNative(RHI::TimestampCalibration& calibration) const
+{return m_impl->GetTimestampCalibration(calibration);}
 uint64_t VulkanDevice::GetLastSubmissionNative() const {return m_impl->GetLastSubmission();}
 uint64_t VulkanDevice::GetCompletedSubmissionNative() {return m_impl->GetCompletedSubmission();}
 void VulkanDevice::DiscardCommandListNative(RHI::ICommandList* list) {m_impl->DiscardCommandList(list);}
 
 bool VulkanDevice::SupportsNative(RHI::Feature feature) const
-{return feature==RHI::Feature::TimestampQuery ? GetTimestampValidBitsNative()!=0 : m_impl->Supports(feature);}
+{
+    if(feature==RHI::Feature::TimestampQuery)return GetTimestampValidBitsNative()!=0;
+    if(feature==RHI::Feature::TimestampCalibration)return m_impl->Context().getCalibratedTimestamps&&m_impl->Context().cpuTimestampFrequency&&GetTimestampValidBitsNative();
+    return m_impl->Supports(feature);
+}
 RHI::TimestampQueryHandle VulkanDevice::CreateTimestampQueryNative(const RHI::TimestampQueryDesc& desc)
 {
     try {return new VulkanTimestampQuery(m_impl->Context().device,desc.count);}
@@ -551,6 +623,8 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
 	{
 		return m_impl->AcquireCommandList();
 	}
+    RHI::ICommandList* VulkanDevice::AcquireCommandListNative(bool reusePages,bool suballocate)
+    {return m_impl->AcquireCommandList({reusePages,suballocate});}
 
 	bool VulkanDevice::SubmitNative(dyf::RHI::ICommandList** commandLists, uint32_t count)
 	{
@@ -921,6 +995,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 	}
 
 	dyf::RHI::ICommandList* VulkanDevice::Impl::AcquireCommandList()
+    {return AcquireCommandList(m_uploadPool?m_uploadPool->GetPolicy():RHI::Detail::UploadPolicy{});}
+
+	dyf::RHI::ICommandList* VulkanDevice::Impl::AcquireCommandList(RHI::Detail::UploadPolicy policy)
 	{
 		CollectCompletedSubmissions();
 		if (m_context.device == VK_NULL_HANDLE || m_submissionFaulted) return nullptr;
@@ -929,7 +1006,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			if (!m_uploadPool) m_uploadPool = CreateVulkanUploadPool(m_context);
             if(!m_commandPools)m_commandPools=std::make_shared<VulkanCommandPoolCache>(m_context);
 			std::unique_ptr<VulkanCommandList, VulkanObjectDeleter> commandList(
-				new VulkanCommandList(m_context, m_uploadPool, m_commandPools));
+				new VulkanCommandList(m_context, m_uploadPool, m_commandPools,policy));
 			VulkanCommandList* result = commandList.get();
 			m_acquiredCommandLists.push_back(std::move(commandList));
 			return result;
@@ -1256,8 +1333,11 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		VkBufferImageCopy copy{};
 		copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
 		copy.imageExtent = {desc.width, desc.height, 1};
-		vkCmdCopyImageToBuffer(command, image->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-			resources.buffer, 1, &copy);
+		{
+			dyf::RHI::LiveRhiScope observed(dyf::Diagnostics::LiveEventKind::CpuWork,dyf::Diagnostics::LiveStage::NativeTranslate,"Readback: record texture copy");
+			observed.event.resource=dyf::Diagnostics::FindLiveObject(texture);observed.event.bytes=bytes;observed.event.operations=1;
+			vkCmdCopyImageToBuffer(command, image->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,resources.buffer,1,&copy);
+		}
 		VkBufferMemoryBarrier hostRead{};
 		hostRead.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
 		hostRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1279,7 +1359,14 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 		submit.commandBufferCount = 1;
 		submit.pCommandBuffers = &command;
-		const VkResult submitted = vkQueueSubmit(m_context.graphicsQueue, 1, &submit, VK_NULL_HANDLE);
+		const auto liveSubmission=dyf::Diagnostics::IsLiveCollectorEnabled()?dyf::Diagnostics::AllocateLiveId():0;
+		VkResult submitted;
+		{
+			dyf::RHI::LiveRhiScope observed(dyf::Diagnostics::LiveEventKind::CpuWork,dyf::Diagnostics::LiveStage::Submit,"Readback: native submission");
+			observed.event.resource=dyf::Diagnostics::FindLiveObject(texture);observed.event.submission=liveSubmission;observed.event.operations=1;
+			submitted=vkQueueSubmit(m_context.graphicsQueue,1,&submit,VK_NULL_HANDLE);
+			observed.event.outcome=submitted==VK_SUCCESS?dyf::Diagnostics::LiveOutcome::Submitted:dyf::Diagnostics::LiveOutcome::Failed;
+		}
 		if(submitted != VK_SUCCESS)
 		{
 			// OOM submit failures leave the commands unsubmitted. Other failures
@@ -1292,7 +1379,12 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			LogVulkanFailure("vkQueueSubmit(readback)", submitted);
 			return false;
 		}
+		if(liveSubmission)dyf::Diagnostics::SetLiveGpuCoverage(dyf::Diagnostics::GetLiveContext().frame,false);
+		dyf::RHI::LiveRhiScope observedWait(dyf::Diagnostics::LiveEventKind::Wait,dyf::Diagnostics::LiveStage::Submit,"Readback: queue wait");
+		observedWait.event.resource=dyf::Diagnostics::FindLiveObject(texture);observedWait.event.submission=liveSubmission;observedWait.event.operations=1;
 		const VkResult waited = vkQueueWaitIdle(m_context.graphicsQueue);
+		observedWait.event.outcome=waited==VK_SUCCESS?dyf::Diagnostics::LiveOutcome::Completed:dyf::Diagnostics::LiveOutcome::Failed;
+		observedWait.Finish();
 		if(waited != VK_SUCCESS)
 		{
 			m_submissionFaulted = true;
@@ -1302,6 +1394,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			return false;
 		}
 		dyf::RHI::TextureReadback output;
+		dyf::RHI::RecordLiveReadbackCompletion(liveSubmission,dyf::Diagnostics::FindLiveObject(texture));
 		output.width = desc.width; output.height = desc.height;
 		output.rowPitch = desc.width * 4u; output.format = desc.format;
 		output.pixels.resize(static_cast<size_t>(bytes));
@@ -1740,6 +1833,38 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		}
 
 		std::vector<const char*> extensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+        const char* calibrationFunction = nullptr;
+#if defined(_WIN32)
+        const char* calibrationExtension = nullptr;
+        for(const auto& extension : availableExtensions)
+        {
+            if(std::strcmp(extension.extensionName, "VK_KHR_calibrated_timestamps") == 0)
+            { calibrationExtension = "VK_KHR_calibrated_timestamps"; break; }
+            if(std::strcmp(extension.extensionName, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) == 0)
+                calibrationExtension = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
+        }
+        if(calibrationExtension && m_owner.GetTimestampValidBits())
+        {
+            const bool khr = std::strcmp(calibrationExtension, "VK_KHR_calibrated_timestamps") == 0;
+            const auto getDomains = reinterpret_cast<PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsEXT>(
+                vkGetInstanceProcAddr(m_context.instance, khr ? "vkGetPhysicalDeviceCalibrateableTimeDomainsKHR" : "vkGetPhysicalDeviceCalibrateableTimeDomainsEXT"));
+            uint32_t domainCount = 0;
+            LARGE_INTEGER frequency;
+            if(getDomains && getDomains(m_context.physicalDevice, &domainCount, nullptr) == VK_SUCCESS && domainCount &&
+                QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0)
+            {
+                std::vector<VkTimeDomainEXT> domains(domainCount);
+                if(getDomains(m_context.physicalDevice, &domainCount, domains.data()) == VK_SUCCESS &&
+                    std::find(domains.begin(), domains.begin() + domainCount, VK_TIME_DOMAIN_DEVICE_EXT) != domains.begin() + domainCount &&
+                    std::find(domains.begin(), domains.begin() + domainCount, VK_TIME_DOMAIN_QUERY_PERFORMANCE_COUNTER_EXT) != domains.begin() + domainCount)
+                {
+                    extensions.push_back(calibrationExtension);
+                    m_context.cpuTimestampFrequency = static_cast<uint64_t>(frequency.QuadPart);
+                    calibrationFunction = khr ? "vkGetCalibratedTimestampsKHR" : "vkGetCalibratedTimestampsEXT";
+                }
+            }
+        }
+#endif
 		if (enableMeshShader)
 		{
 			extensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
@@ -1788,6 +1913,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
             : "Swapchain retirement: presentation fences unavailable; replacement waits for image reacquisition.");
 		vkGetDeviceQueue(m_context.device, m_context.queueIndices.graphicsFamily, 0, &m_context.graphicsQueue);
 		vkGetDeviceQueue(m_context.device, m_context.queueIndices.presentFamily, 0, &m_context.presentQueue);
+        if(calibrationFunction)
+            m_context.getCalibratedTimestamps = reinterpret_cast<PFN_vkGetCalibratedTimestampsEXT>(
+                vkGetDeviceProcAddr(m_context.device, calibrationFunction));
 
 		if (enableMeshShader)
 		{
