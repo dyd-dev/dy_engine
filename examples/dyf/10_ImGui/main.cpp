@@ -1,3 +1,6 @@
+#include "dyf/Extends/Tracy.h"
+#include "dyf/Extends/RenderDoc.h"
+#include "dyf/RHI/IDevice.h"
 #include "EditorScene.h"
 #include "dyf/Camera.h"
 #include "dyf/Extends/ImGui/ImGui.h"
@@ -6,7 +9,6 @@
 #include "dyf/RHI.h"
 #include <imgui.h>
 #include <imgui_internal.h>
-#include <GLFW/glfw3.h>
 #include <algorithm>
 #include <charconv>
 #include <chrono>
@@ -448,6 +450,9 @@ int main(int argc,char** argv)
         project=fs::absolute(project);Editor app(project);
         if(selfTest){std::string error;if(!editor::SelfTest(project/"SelfTest",error)){std::fprintf(stderr,"FAIL model: %s\n",error.c_str());return 1;}std::puts("PASS model edit, duplicate, delete, undo/redo, scene roundtrip, malformed preservation, failed save preservation, preview restoration, picking.");}
         Platform::Window window(1440,900,"dy_engine - 3D Scene Editor");if(!window.GetHandle())return 1;
+#ifdef DY_PROFILER_TRACING_ENABLED
+        dyf::TracyAdapter tracy;
+#endif
         RendererConfig config;config.clearColor={.025f,.027f,.032f,1};config.enableProfilerHud=false;config.vsync=!selfTest;
         config.allowReadback=selfTest||!capture.empty();config.lighting.shadows=true;config.lighting.ambientIntensity=.12f;
         auto renderer=Renderer::Create(window.GetHandle(),config);if(!renderer)return 1;
@@ -467,25 +472,38 @@ int main(int argc,char** argv)
         for(int frame=0;!app.quit&&(!maxFrames||frame<maxFrames);++frame)
         {
             window.PollEvents();
+#ifdef DY_RENDERDOC_ENABLED
+            if(window.GetInput().WasPressed(dyf::Platform::Key::F12))
+                (void)dyf::RenderDocCapture::TriggerNextFrame();
+#endif
+            if(window.GetInput().WasPressed(dyf::Platform::Key::F11))
+            {
+                auto settings = renderer->GetConfig();
+                settings.profilerStartsExpanded = !settings.profilerStartsExpanded;
+                if(!renderer->SetConfig(settings)) return 1;
+            }
+
             if(!window.IsRunning())
             {
-                glfwSetWindowShouldClose(window.GetGlfwHandle(),GLFW_FALSE);app.Request(Action::Quit);if(app.quit)break;
-                if(glfwGetWindowAttrib(window.GetGlfwHandle(),GLFW_ICONIFIED))glfwRestoreWindow(window.GetGlfwHandle());
+                if(!window.CancelClose()) return 1;app.Request(Action::Quit);if(app.quit)break;
+                if(window.IsMinimized())window.Restore();
             }
             int framebufferWidth=0,framebufferHeight=0;
-            glfwGetFramebufferSize(window.GetGlfwHandle(),&framebufferWidth,&framebufferHeight);
-            if(!framebufferWidth || !framebufferHeight || glfwGetWindowAttrib(window.GetGlfwHandle(),GLFW_ICONIFIED))
-            {glfwWaitEventsTimeout(.05);continue;}
+            const auto framebuffer = window.GetFramebufferSize();
+            framebufferWidth = framebuffer.width;
+            framebufferHeight = framebuffer.height;
+            if(!framebufferWidth || !framebufferHeight || window.IsMinimized())
+            {Platform::Window::WaitEvents(.05);continue;}
             if(selfTest)
             {
                 if(frame==6){auto before=app.document.objects;for(auto& o:app.document.objects)if(o.primitive!=editor::Primitive::Floor)o.color={.05f,.12f,.95f,1};app.document.Commit(before);}
                 if(frame==10)app.document.Undo();
-                if(frame==14){glfwSetWindowSize(window.GetGlfwHandle(),1280,800);resized=true;}
+                if(frame==14){window.Resize(1280,800);resized=true;}
                 if(frame==18)app.document.Play();
                 if(frame==24)app.document.Stop();
             }
             const auto now=Clock::now();app.document.Tick(selfTest?.1f:std::min(.1f,std::chrono::duration<float>(now-previous).count()));previous=now;
-            if(!gui->BeginFrame()){if(device.IsLost())return 1;glfwWaitEventsTimeout(.01);continue;}
+            if(!gui->BeginFrame()){if(device.IsLost())return 1;Platform::Window::WaitEvents(.01);continue;}
             app.Menus();app.Dock();app.ScenePanel(viewport,selfTest?(frame<14?800:640):0,selfTest?(frame<14?500:400):0);
             app.Hierarchy();app.Inspector();app.Project();app.Console();app.Dialogs();gui->EndFrame();
             if(app.failed)return 1;
@@ -504,11 +522,11 @@ int main(int argc,char** argv)
             while(!(acquired=device.BeginFrame()))
             {
                 if(device.IsLost() || (maxFrames && Clock::now()-acquireStart>std::chrono::seconds(10)))return 1;
-                glfwWaitEventsTimeout(.001);
-                if(!maxFrames || !window.IsRunning() || glfwGetWindowAttrib(window.GetGlfwHandle(),GLFW_ICONIFIED))break;
+                Platform::Window::WaitEvents(.001);
+                if(!maxFrames || !window.IsRunning() || window.IsMinimized())break;
             }
             if(!acquired)continue; // Retry through the event/UI loop so close always reaches the dirty-scene dialog.
-            RHI::ResourceScope resources(device);auto* commands=resources.Keep(device.AcquireCommandList());auto* target=device.GetBackBuffer();if(!commands||!target)return 1;
+            dyf::RHI::ResourceScope resources(device);auto* commands=resources.Keep(device.AcquireCommandList());auto* target=device.GetBackBuffer();if(!commands||!target)return 1;
             const RHI::ResourceBarrierDesc begin{nullptr,target,RHI::ResourceState::Present,RHI::ResourceState::RenderTarget,{}};commands->ResourceBarrier(&begin,1);
             RHI::ColorAttachment color;color.texture=target;color.loadOp=RHI::LoadOp::Clear;color.storeOp=RHI::StoreOp::Store;color.clearColor[3]=1;
             commands->BeginRendering({&color,1,nullptr});commands->EndRendering();
@@ -522,7 +540,7 @@ int main(int argc,char** argv)
             if(!capture.empty()&&frame==maxFrames-1&&!Capture(device,target,capture))return 1;
             if(!device.Present())return 1;++completed;
             const auto title=std::string("dy_engine - ")+(app.document.path.empty()?"Untitled":app.document.path.filename().u8string())+(app.document.Dirty()?" *":"")+" - 3D Scene Editor";
-            glfwSetWindowTitle(window.GetGlfwHandle(),title.c_str());
+            window.SetTitle(title.c_str());
         }
         if(!device.WaitIdle())return 1;
         if(selfTest)

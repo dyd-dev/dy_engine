@@ -1,100 +1,186 @@
 cmake_minimum_required(VERSION 3.20)
 project(dy_engine CXX)
 
-# add module path
+# Configuration and external dependencies.
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
-
-if(USE_METAL AND APPLE)
-	enable_language(OBJCXX)
+if(APPLE)
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 17)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 endif()
+include(Engine_Options)
+find_package(Threads REQUIRED)
+include(Dependencies)
 
-# main target
-add_library(${PROJECT_NAME} STATIC
-	"src/Core/ThreadPool.cpp"
-	"src/RHI/IDevice.cpp"
-	"src/RHI/ICommandList.cpp"
-	"src/RHI/Resources.cpp"
-	"src/dyf/Renderer.cpp"
-	"src/dyf/Image.cpp"
-	"src/dyf/Canvas.cpp"
-	"src/dyf/Font.cpp"
-	"src/dyf/MeshPrimitives.cpp"
-	"src/dyf/Shaders.cpp"
-	"src/RHI/RenderGraph.cpp"
-	"src/dyf/CanvasRenderer.cpp"
-    "src/dyf/PostProcess.cpp"
-    "src/dyf/Lighting.cpp"
-    "src/dyf/Profiler.cpp"
-    "src/dyf/ProfilerSampler.cpp"
-    "src/Platform/RenderDocCapture.cpp"
-    "src/Platform/Log.cpp"
-    "src/Platform/LogSession.cpp"
-	"src/dyf/DrawData.cpp"
-	"src/dyf/TextureCache.cpp"
-	"src/dyf/Scene.cpp"
-	"src/Platform/Input.cpp"
-	"src/Platform/ActionMap.cpp"
+# Targets.
+add_library(dy_engine_options INTERFACE)
+add_library(dy_engine STATIC)
+
+# Sources.
+target_sources(dy_engine PRIVATE
+    src/RHI/ICommandList.cpp
+    src/RHI/IDevice.cpp
+    src/RHI/RenderGraph.cpp
+    src/RHI/Resources.cpp
+    src/RHI/ThreadPool.cpp
+
+    src/dyf/BasicEnvironmentResources.cpp
+    src/dyf/BasicLightingResources.cpp
+    src/dyf/Canvas.cpp
+    src/dyf/CanvasRenderer.cpp
+    src/dyf/DrawData.cpp
+    src/dyf/EnvironmentCapture.cpp
+    src/dyf/EnvironmentDepthCapture.cpp
+    src/dyf/Font.cpp
+    src/dyf/ForwardPass.cpp
+    src/dyf/FrameResources.cpp
+    src/dyf/GeometryUpload.cpp
+    src/dyf/GpuScene.cpp
+    src/dyf/GpuVisibility.cpp
+    src/dyf/Image.cpp
+    src/dyf/Lighting.cpp
+    src/dyf/LightingData.cpp
+    src/dyf/LocalLightData.cpp
+    src/dyf/Lod.cpp
+    src/dyf/MaterialBindings.cpp
+    src/dyf/MeshPrimitives.cpp
+    src/dyf/OutputColor.cpp
+    src/dyf/OutputPresentation.cpp
+    src/dyf/PostProcess.cpp
+    src/dyf/ProfilerOverlay.cpp
+    src/dyf/RenderResources.cpp
+    src/dyf/Renderer.cpp
+    src/dyf/RendererFacade.cpp
+    src/dyf/RendererLive.cpp
+    src/dyf/RendererPipelines.cpp
+    src/dyf/Scene.cpp
+    src/dyf/SceneRendering.cpp
+    src/dyf/Shaders.cpp
+    src/dyf/ShadowPass.cpp
+    src/dyf/TextureCache.cpp
+
+    src/Platform/ActionMap.cpp
+    src/Platform/Input.cpp
+    src/Platform/Windows/Window.cpp
+
+    src/Platform/Profiler/FrameProfiler.cpp
+    src/Platform/Profiler/RhiProfiler.cpp
 )
 
-# 데스크톱에서는 GLFW 기반 창 코드를 사용한다.
-# ios 화면은 앱의 UIKit 코드에서 관리한다.
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
-    target_sources(${PROJECT_NAME} PRIVATE "src/Platform/Window.cpp")
+set(dy_window_libraries)
+set(dy_window_include_directories)
+if(ANDROID)
+    set(DY_WINDOW_BACKEND_SOURCES src/Platform/Windows/AndroidWindow.cpp)
+    set(dy_window_libraries android log)
+    set(dy_window_include_directories "${ANDROID_NDK}/sources/android/native_app_glue")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(DY_WINDOW_BACKEND_SOURCES src/Platform/Windows/IOSWindow.mm)
+    set(dy_window_libraries "-framework UIKit")
+elseif(WIN32)
+    set(DY_WINDOW_BACKEND_SOURCES
+        src/Platform/Windows/GlfwWindow.cpp src/Platform/Windows/WindowsWindow.cpp)
+    set(dy_window_libraries glfw)
+elseif(APPLE)
+    set(DY_WINDOW_BACKEND_SOURCES
+        src/Platform/Windows/GlfwWindow.cpp src/Platform/Windows/MacOSWindow.mm)
+    set(dy_window_libraries glfw "-framework AppKit")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(DY_WINDOW_BACKEND_SOURCES
+        src/Platform/Windows/GlfwWindow.cpp src/Platform/Windows/LinuxWindow.cpp)
+    set(dy_window_libraries glfw)
+else()
+    message(FATAL_ERROR "No Window backend for ${CMAKE_SYSTEM_NAME}.")
+endif()
+target_sources(dy_engine PRIVATE ${DY_WINDOW_BACKEND_SOURCES})
+
+if(USE_D3D12)
+    set(dy_backend_name D3D12)
+elseif(USE_METAL)
+    set(dy_backend_name Metal)
+elseif(USE_VULKAN)
+    set(dy_backend_name Vulkan)
+else()
+    set(dy_backend_name Null)
+endif()
+string(TOUPPER "${dy_backend_name}" DY_BACKEND_NORMALIZED)
+add_subdirectory("src/Backends/${dy_backend_name}")
+add_subdirectory(src/Platform/Profiler)
+
+# Library dependencies.
+target_link_libraries(dy_engine
+    PUBLIC dy_engine_options Threads::Threads dyf::Profiler
+    PRIVATE meshoptimizer ${dy_window_libraries})
+
+# Include paths.
+target_include_directories(dy_engine_options INTERFACE "${PROJECT_SOURCE_DIR}/src/Public")
+target_include_directories(dy_engine PRIVATE
+    "${PROJECT_SOURCE_DIR}/src"
+    "${stb_SOURCE_DIR}"
+    "${bcdec_SOURCE_DIR}"
+    ${dy_window_include_directories})
+
+# Compile features and definitions.
+target_compile_features(dy_engine_options INTERFACE cxx_std_17)
+if(DY_ENABLE_LIVE_PROFILING)
+    target_compile_definitions(dy_engine_options INTERFACE DY_LIVE_PROFILING_ENABLED=1)
+endif()
+if(DY_ENABLE_TRACY)
+    target_compile_definitions(dy_engine_options INTERFACE DY_PROFILER_TRACING_ENABLED=1)
+endif()
+if(DY_ENABLE_RENDERDOC)
+    target_compile_definitions(dy_engine_options INTERFACE DY_RENDERDOC_ENABLED=1)
+endif()
+if(DY_ENABLE_SIMD)
+    target_compile_definitions(dy_engine_options INTERFACE DY_SIMD_ENABLED=1)
+endif()
+if(NOT DY_BACKEND_NORMALIZED STREQUAL "NULL")
+    target_compile_definitions(dy_engine PRIVATE "ENABLE_${DY_BACKEND_NORMALIZED}")
+endif()
+if("glfw" IN_LIST dy_window_libraries)
+    target_compile_definitions(dy_engine PRIVATE GLFW_INCLUDE_NONE)
 endif()
 
-# global options
-include(Engine_Options)
-add_library(dy_engine_options ALIAS Engine_Options)
-target_link_libraries(${PROJECT_NAME} PUBLIC Engine_Options)
-find_package(Threads REQUIRED)
-target_link_libraries(${PROJECT_NAME} PUBLIC Threads::Threads)
-target_include_directories(${PROJECT_NAME} BEFORE PUBLIC "${PROJECT_SOURCE_DIR}/src/Public")
-
-option(DY_EXTEND_MODEL "Build the optional Model extension." OFF)
-option(DY_EXTEND_IMGUI "Build the optional Dear ImGui extension." OFF)
-
-if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
-    include(.github/ci/CiChecks.cmake)
+# Compiler options.
+if(MSVC)
+    target_compile_options(dy_engine_options INTERFACE /W4 /utf-8 /wd4201)
+else()
+    target_compile_options(dy_engine_options INTERFACE -Wall -Wextra)
 endif()
-include(Dependencies)
-include(BuildOptions)
-include(LogCapture)
+if(DY_ENABLE_SIMD AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86|i[3-6]86)$")
+    if(MSVC)
+        target_compile_options(dy_engine_options INTERFACE /arch:SSE2)
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+        target_compile_options(dy_engine_options INTERFACE -msse2)
+    endif()
+endif()
 
-# 기본 구현과 내장 셰이더는 같은 엔진 타깃에서 공개 RHI를 사용한다.
-include(ShaderAssets)
+# Generated shaders.
+include(CompileShaders)
+dy_build_stock_shaders()
+
+# External tool adapters keep their SDK settings on their own targets.
+if(DY_ENABLE_TRACY)
+    add_subdirectory(src/Extends/Tracy)
+endif()
+if(DY_ENABLE_RENDERDOC)
+    add_subdirectory(src/Extends/RenderDoc)
+endif()
+
+# Extensions and applications.
+if(DY_EXTEND_ADVANCED_RENDERING)
+    add_subdirectory(src/Extends/AdvancedRendering)
+endif()
 
 if(DY_EXTEND_MODEL)
-	add_subdirectory(src/Extend/Model)
+    add_subdirectory(src/Extends/Model)
 endif()
 if(DY_EXTEND_IMGUI)
-	add_subdirectory(src/Extend/ImGui)
+    add_subdirectory(src/Extends/ImGui)
 endif()
 
-# Only add the executable if this is the main project being built (not when included as a subdirectory in another project)
+# Examples are added only for a top-level engine build.
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
-	option(DY_BUILD_EXAMPLES "Build the self-contained dyf and RHI examples." OFF)
-	if(DY_BUILD_EXAMPLES OR DY_CI)
-		add_subdirectory(examples)
-	endif()
-    if(DY_CI)
-        enable_testing()
-        add_subdirectory(.github/ci)
+    if(DY_BUILD_EXAMPLES)
+        add_subdirectory(examples)
     endif()
-    option(DY_BUILD_PROFILING_TESTS "Build profiling contract tests." ${DY_CI})
-    option(DY_BUILD_TESTS "Build RHI contract tests (Null backend requires no GPU)." ${DY_CI})
-    if(DY_BUILD_PROFILING_TESTS OR DY_BUILD_TESTS)
-        enable_testing()
-        add_subdirectory(tests)
-    endif()
-endif()
-
-# ===== Configuration Messages =====
-if(ANDROID)
-    message(STATUS "Android 환경 감지됨! (API ${ANDROID_PLATFORM_LEVEL}, ABI ${ANDROID_ABI})")
-elseif(WIN32)
-    message(STATUS "Windows 환경 감지됨!")
-elseif(APPLE)
-    message(STATUS "macOS 환경 감지됨!")
-elseif(UNIX)
-    message(STATUS "Linux 환경 감지됨!")
 endif()

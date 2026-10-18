@@ -1,3 +1,4 @@
+#include "dyf/RHI/IDevice.h"
 #include "dyf/RHI.h"
 #include "dyf/Platform/Window.h"
 #include "vertex.h"
@@ -123,12 +124,12 @@ int main(int argc, char** argv) try {
         return 77;
     }
 
-    ResourceScope resources(device);
+    dyf::RHI::ResourceScope resources(device);
 
     // 3. 스왑체인(Swapchain) 생성
     SwapchainDesc swapchain;
     swapchain.window = window.GetHandle();
-    swapchain.format = Format::B8G8R8A8_UNORM;
+    swapchain.format = DefaultSwapchainFormat;
     swapchain.minimumImageCount = 2;
 
     Check(device.CreateSwapchain(swapchain), "Requested swapchain configuration unsupported");
@@ -241,7 +242,7 @@ int main(int argc, char** argv) try {
             intermediateState = ResourceState::Undefined;
         }
 
-        ResourceScope frameResources(device);
+        dyf::RHI::ResourceScope frameResources(device);
         auto* commands = frameResources.Keep(device.AcquireCommandList());
         const auto start = std::chrono::steady_clock::now();
 

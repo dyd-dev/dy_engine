@@ -40,6 +40,7 @@ int main()
     float yaw = std::atan2(initialForward.y, initialForward.x);
     float pitch = std::asin(initialForward.z), moveSpeed = 2.5f;
     dyf::Platform::Time time;
+	bool ready = false;
 	while(true)
 	{
 		window.PollEvents();
@@ -49,7 +50,7 @@ int main()
         if(input.WasPressed(Key::Escape)) window.RequestClose();
 		if(!window.IsRunning()) break;
         const auto size = window.GetFramebufferSize();
-        const bool active = window.HasFocus() && !window.IsMinimized() && size.width > 0 && size.height > 0;
+        const bool active = (!ready || window.HasFocus()) && !window.IsMinimized() && size.width > 0 && size.height > 0;
         const float delta = static_cast<float>((std::min)(time.Tick(!active), 0.1));
         window.SetCursorMode(active && input.IsDown(MouseButton::Right)
             ? dyf::Platform::CursorMode::Locked : dyf::Platform::CursorMode::Normal);
@@ -70,5 +71,7 @@ int main()
         if(!camera.LookAt(eye, eye + forward) || !camera.SetPerspective(float(size.width)/size.height)) return 1;
 
 		if(!renderer->Render(triangle, material, camera)) return 1;
+		ready = ready || bool(renderer->GetLastRenderCompletion());
 	}
+	return 0;
 }

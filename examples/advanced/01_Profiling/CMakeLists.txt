@@ -16,3 +16,11 @@ dy_compile_shader(AdvancedProfiling fragment frag
     GLSL "${CMAKE_CURRENT_SOURCE_DIR}/Shaders/fragment.glsl"
     HLSL "${CMAKE_CURRENT_SOURCE_DIR}/Shaders/fragment.hlsl"
     METAL "${CMAKE_CURRENT_SOURCE_DIR}/Shaders/program.metal" METAL_ENTRY fragmentMain)
+
+
+if(DY_ENABLE_TRACY)
+    target_link_libraries(AdvancedProfiling PRIVATE dyf::Tracy)
+endif()
+if(DY_ENABLE_RENDERDOC)
+    target_link_libraries(AdvancedProfiling PRIVATE dyf::RenderDoc)
+endif()

@@ -1,7 +1,6 @@
 #pragma once
 
-#include "ResourceHandles.h"
-#include "ResourceState.h"
+#include "Binding.h"
 #include "Texture.h"
 
 namespace dyf::RHI

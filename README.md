@@ -7,6 +7,8 @@
 
 `dy_engine`은 현대 그래픽스 API의 설계 철학에 맞추어, 하드웨어 캐시 구조와 명시적 자원 모델에 맞춘 얇은 데이터 지향 렌더링 프레임워크입니다.
 
+예제는 통합 실행기 `visualizer`의 GUI에서 클릭해 실행합니다. 실행 방법은 [아래 안내](#실행-방법)를 참고하세요.
+
 ## 목차
 
 - [프로젝트 개요](#프로젝트-개요)
@@ -84,9 +86,24 @@ Cross-Cutting
 
 `Renderer`, `Scene`, `Mesh`, `RenderPath`를 중심으로 모델, 재질, 조명, 렌더링 경로를 관리합니다. 상위 계층은 RHI 인터페이스를 통해 리소스와 command list를 사용하고, API별 호출은 직접 다루지 않습니다.
 
+선택 기능은 `src/Extends`에 둡니다. LTC 면광원의 구현과 표는
+`src/Extends/AdvancedRendering`이 소유하며 코어에는 내장하거나 업로드하지 않습니다.
+면광원을 쓰는 렌더러는 `ClusteredLighting` 모듈을 등록합니다. `AdvancedRendering` 프리셋에는
+이 모듈이 포함되며, 공간 분류 옵션을 꺼도 LTC 조명은 유지됩니다.
+
 ### API 구현 계층
 
 그래픽스 API 구현은 [CMake 옵션](#cmake-옵션)으로 선택합니다.
+
+### Window와 진단 연결
+
+공개 `Platform::Window`는 공통 입력과 이벤트 펌프를 제공하는 진입점입니다. 내부 `WindowBackend`를 Android·iOS 구현과 GLFW 공통 구현이 상속하고, GLFW 구현을 Windows·macOS·Linux가 공유합니다. CMake는 해당 플랫폼 구현 하나를 선택합니다.
+
+데스크톱 창은 엔진이 생성하고 파괴합니다. Android의 `ANativeWindow`와 iOS의 `UIView`는 플랫폼이 소유하며, 이를 사용하는 Window와 RHI 장치보다 오래 살아 있어야 합니다. `GetNativeHandle()`은 주소와 종류를 함께 반환합니다. 플랫폼 앱의 연결은 내부 구현이 담당하며 공개 헤더로 노출하지 않습니다. iOS는 UIKit 메인 스레드에서 화면·입력을 관리하고, 한 실행 스레드가 공통 예제의 Window·입력·렌더링 루프를 순서대로 소유합니다.
+
+프로파일러 공개 API는 기존 `dyf/Platform/Profiler.h`와 `dyf::Platform`에 둡니다. 공통 시계·CPU 구간·프레임/GPU 집계·스냅샷은 `src/Platform/Profiler`가 담당하며, HUD와 UI는 같은 측정 데이터를 사용합니다. Tracy와 RenderDoc 어댑터는 각각 `src/Extends/Tracy`, `src/Extends/RenderDoc`에 두고, 앱이 필요한 `dyf::Tracy`, `dyf::RenderDoc` 타깃을 링크합니다. 내부 분석용 통신 구현은 `src/Platform/Profiler/Connection`에 두며 HUD와 예제 실행기에서는 사용하지 않습니다. 공개 측정·집계는 `dyf/Platform/Profiler.h`의 `Profiler`로 제공하고 상세 수집·통신 계약은 비공개로 두며, 코어는 외부 SDK를 포함하거나 어댑터를 링크하지 않습니다. Tracy·RenderDoc 전용 라벨·문자열 복사·마커 전달은 코드의 `#ifdef`로도 제외합니다. 사용법은 [프로파일링과 캡처](docs/profiling.md)를 참고하세요.
+
+Android 앱은 최상위 `android/`, iOS 앱과 Xcode 프로젝트는 최상위 `ios/`에 있습니다. Windows·Linux 실행 파일과 두 모바일 앱은 모두 `examples/main.cpp`의 선택 화면과 CMake 예제 목록을 사용합니다. 데스크톱은 선택한 실행 파일을 띄우고, 모바일은 같은 앱에 연결한 예제 진입 함수를 호출합니다. 예제가 끝나면 선택 화면으로 돌아옵니다.
 
 ## 요구 사항
 
@@ -128,13 +145,17 @@ sudo apt-get install -y libwayland-dev wayland-protocols libxkbcommon-dev
 
 | 옵션 | 기본값 | 설명 |
 | --- | --- | --- |
-| `USE_VULKAN` | `OFF` | Vulkan 사용 |
+| `USE_VULKAN` | `OFF` | Windows에서 Vulkan 선택 |
 | `USE_D3D12` | `OFF` | Direct3D 12 사용. Windows 전용 |
-| `USE_METAL` | `OFF` | Metal 사용. macOS 전용 |
 | `DY_ENABLE_SIMD` | `ON` | 지원 CPU에서 SIMD 수학 경로 사용 |
 | `DY_LINUX_WINDOW_SYSTEM` | `AUTO` | Linux GLFW window system 선택. `AUTO`, `X11`, `WAYLAND` |
+| `DY_ENABLE_TRACY` | `ON` | 선택적 Tracy CPU 구간·프레임·수치 연결 |
+| `DY_ENABLE_LIVE_PROFILING` | `OFF` | 내부 Live 실행 진단 수집 |
+| `DY_ENABLE_RENDERDOC` | `OFF` | 이미 주입된 RenderDoc API로 캡처 요청 및 D3D12 디버그 이벤트·마커 포함 |
 
-그래픽스 백엔드 옵션은 한 번에 하나만 켜는 것을 기준으로 합니다. 백엔드를 바꿔 실험할 때는 빌드 폴더를 분리하면 CMake cache 충돌을 피할 수 있습니다.
+Apple에서는 Metal, Linux·Android에서는 Vulkan을 자동 선택합니다. Windows에서만 `USE_D3D12` 또는 `USE_VULKAN` 중 하나를 켜며, 둘 다 끄면 Null을 사용합니다. Windows의 백엔드를 바꿀 때는 빌드 폴더를 분리하면 CMake cache 충돌을 피할 수 있습니다.
+
+D3D12에서 `DY_ENABLE_RENDERDOC=ON`이면 WinPixEventRuntime 이벤트·마커 지원도 포함하며, 이 구성은 MSVC가 필요합니다. `OFF`이면 해당 런타임을 다운로드하거나 링크하지 않습니다.
 
 ## 빌드 방법
 
@@ -201,44 +222,29 @@ python -B .github/ci/ci.py run --phase runtime --api vulkan
 
 ## 실행 방법
 
-예제는 빌드 후 생성된 실행 파일 위치에서 실행합니다. 셰이더와 모델 파일이 실행 파일 폴더로 복사되므로, 다른 작업 디렉터리에서 직접 실행하면 상대 경로가 맞지 않을 수 있습니다.
-
-먼저 필요한 예제 타깃을 빌드합니다.
+저장소 루트에서 예제와 통합 실행기를 빌드합니다. 아래 구성은 Model·ImGui·고급 렌더링을 포함합니다.
 
 ```bash
-cmake --build build/vulkan --config Release --target Cube
+cmake -S . -B build/examples -DDY_BUILD_EXAMPLES=ON -DDY_EXTEND_MODEL=ON -DDY_EXTEND_IMGUI=ON -DDY_EXTEND_ADVANCED_RENDERING=ON
+cmake --build build/examples --config Release --target dyf_examples
+./build/examples/visualizer
 ```
 
-실행 파일 위치는 사용하는 generator에 따라 조금 다릅니다.
-
-| 빌드 방식 | 실행 위치 예시 |
-| --- | --- |
-| Windows multi-config generator | `build/vulkan/examples/03_Cube/Release/Cube.exe` |
-| macOS multi-config generator | `build/metal/examples/03_Cube/Release/Cube` |
-| Ninja, Makefile 같은 single-config generator | `build/vulkan/examples/03_Cube/Cube` |
-
-대표 예제:
-
-| 예제 | CMake 타깃 | 예제 폴더 |
-| --- | --- |
-| Hello Window | `HelloWindow` | `examples/01_HelloWindow` |
-| Hello Renderer | `HelloRenderer` | `examples/02_HelloRenderer` |
-| Cube | `Cube` | `examples/03_Cube` |
-| Textured Cube | `TexturedCube` | `examples/04_TexturedCube` |
-| Load Model | `LoadModel` | `examples/05_LoadModel` |
-| Shadow Cube | `ShadowCube` | `examples/06_ShadowCube` |
-| Render Path | `07_RenderPath` | `examples/07_RenderPath` |
-
-`07_RenderPath`는 binding mode와 instance count를 실행 인자로 받을 수 있습니다.
-
-```powershell
-.\07_RenderPath.exe --per-draw --count=10000
-.\07_RenderPath.exe --batched --count=10000
-.\07_RenderPath.exe --bindless --count=10000
-```
+Windows의 multi-config 빌드에서는 `build/examples/Release/visualizer.exe`를 실행합니다.
+Windows에서는 구성 명령에 `-DUSE_D3D12=ON` 또는 `-DUSE_VULKAN=ON`을 추가해 그래픽 백엔드를 선택합니다.
+실행하면 GUI 예제 목록이 열립니다. 왼쪽에서 dyf·RHI·advanced·showcase 분류를 고르고, 목록을 스크롤하며 예제를 클릭해 실행합니다.
+예제 창을 닫으면 다른 예제를 실행할 수 있습니다. 실행기 창은 예제가 실행되는 동안에도 응답하며 종료 상태를 표시합니다.
+실행기가 각 예제의 작업 폴더를 맞추므로 저장소 루트에서 바로 실행할 수 있습니다.
+showcase의 에셋 경로는 `showcase/CMakeLists.txt`에서 설정합니다. 기본 에셋 루트는 저장소 옆 `../assets`이며,
+`-DDY_ASSET_ROOT=/경로/assets`로 바꿀 수 있습니다. Cinematic은 Model·AdvancedRendering, Culling은 AdvancedRendering 확장이 필요합니다.
+Android 프로젝트는 하나의 Examples APK를, iOS Xcode 프로젝트는 같은 선택 화면을 가진 앱을 만듭니다.
+모바일 에셋도 예제별로 묶어 배포하며, Android Back과 iOS 돌아가기 버튼은 실행 중인 예제를 닫고 목록으로 돌아옵니다.
+모바일에서 지원하지 않는 ImGui 편집기는 목록에 `N/A`로 표시됩니다. 각 예제의 GPU 기능 지원 여부는 별도로 적용됩니다.
 
 ```bash
-./07_RenderPath --per-draw --count=10000
-./07_RenderPath --batched --count=10000
-./07_RenderPath --bindless --count=10000
+./build/examples/visualizer --list
+./build/examples/visualizer DyfScene
+./build/examples/visualizer AdvancedProfiling --frames 120
 ```
+
+이 실행기는 GUI 예제 선택 창입니다.

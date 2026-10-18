@@ -21,3 +21,11 @@ dy_compile_shader(AdvancedInstancingBatching fragment frag
     METAL "${shader_dir}/canvas.metal"
     METAL_ENTRY canvasFragment
     INCLUDE_DIRS "${shader_dir}")
+
+
+if(DY_ENABLE_TRACY)
+    target_link_libraries(AdvancedInstancingBatching PRIVATE dyf::Tracy)
+endif()
+if(DY_ENABLE_RENDERDOC)
+    target_link_libraries(AdvancedInstancingBatching PRIVATE dyf::RenderDoc)
+endif()

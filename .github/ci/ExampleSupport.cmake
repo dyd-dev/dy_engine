@@ -1,7 +1,6 @@
 # Support exceptions live beside each example; CMake generates the inventory.
 include_guard(GLOBAL)
 include("${CMAKE_CURRENT_LIST_DIR}/../../cmake/ExampleAssets.cmake")
-option(DY_CI "Build offline shaders and CI checks" OFF)
 if(USE_D3D12)
     set(DY_SUPPORT_API d3d12)
 elseif(USE_METAL)

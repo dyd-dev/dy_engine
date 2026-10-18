@@ -65,4 +65,5 @@ int main()
 		if(!scene.UpdateAnimations(delta)) return 1;
 		if(!modelRenderer.Render(scene, camera)) return 1;
 	}
+	return 0;
 }

@@ -9,8 +9,16 @@ if(NOT TARGET dy_engine)
 endif()
 
 add_executable(DyEditor main.cpp EditorScene.cpp)
-target_link_libraries(DyEditor PRIVATE dy_imgui glfw)
+target_link_libraries(DyEditor PRIVATE dy_imgui)
 target_compile_definitions(DyEditor PRIVATE GLFW_INCLUDE_NONE)
 if(MSVC)
     target_link_options(DyEditor PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
+endif()
+
+
+if(DY_ENABLE_TRACY)
+    target_link_libraries(DyEditor PRIVATE dyf::Tracy)
+endif()
+if(DY_ENABLE_RENDERDOC)
+    target_link_libraries(DyEditor PRIVATE dyf::RenderDoc)
 endif()

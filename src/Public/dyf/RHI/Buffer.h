@@ -1,6 +1,6 @@
 #pragma once
 #include <cstdint>
-#include "ResourceState.h"
+#include "Binding.h"
 
 namespace dyf::RHI
 {

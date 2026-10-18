@@ -62,4 +62,5 @@ int main()
 		lastFrame = now;
 		time += delta;
 	}
+	return 0;
 }

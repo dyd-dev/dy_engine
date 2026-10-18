@@ -1,4 +1,5 @@
 #include "dyf.h"
+#include "dyf/Extends/AdvancedRendering.h"
 
 int main()
 {
@@ -9,6 +10,7 @@ int main()
 
 	auto renderer = dyf::Renderer::Create(window.GetHandle());
 	if(!renderer) return 1;
+	if(!renderer->AddExtension(dyf::CreateAdvancedRenderingModule(dyf::AdvancedRenderModule::ClusteredLighting))) return 1;
 
 	// 조명은 기본으로 켜진다. 그림자는 활성화만 요청하고 방식과 품질은 기본값을 사용한다.
 	// renderer->SetLightingEnabled(true);
@@ -81,4 +83,5 @@ int main()
 
 		if(!renderer->Render(scene, camera)) return 1;
 	}
+	return 0;
 }

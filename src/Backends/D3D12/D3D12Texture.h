@@ -1,7 +1,7 @@
 #pragma once
 
 #include "dyf/RHI/Texture.h"
-#include "dyf/RHI/ResourceState.h"
+#include "dyf/RHI/Binding.h"
 
 #include <cstddef>
 #include <cstdint>

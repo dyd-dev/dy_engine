@@ -1,5 +1,6 @@
 #include "dyf/Image.h"
 #include "dyf/Canvas.h"
+#include "../Platform/Profiler/CollectorInternal.h"
 #include "dyf/Font.h"
 #include "dyf/Utf8.h"
 #include <cmath>
@@ -11,18 +12,20 @@ namespace dyf
 {
 Canvas::Canvas(uint32_t width, uint32_t height)
 {
+    liveId=Platform::RegisterLiveObject(this,{Platform::LiveObjectKind::Canvas,0,0,0,0,"Canvas"});
     if(!width || !height) std::fprintf(stderr, "dyf: Canvas dimensions must be positive.\n");
     this->width = width; this->height = height;
     viewport = {0, 0, static_cast<float>(width), static_cast<float>(height)};
     ResetClipRect();
 }
-Canvas::~Canvas() = default;
+Canvas::~Canvas() {Platform::RetireLiveObject(liveId);}
 // 이동 뒤 원본은 기존과 같이 유효하지 않은 Canvas가 된다.
 Canvas::Canvas(Canvas&& other) noexcept { *this=std::move(other); }
 Canvas& Canvas::operator=(Canvas&& other) noexcept
 {
     if(this!=&other)
     {
+        Platform::RetireLiveObject(liveId);liveId=std::exchange(other.liveId,0);Platform::RebindLiveObject(liveId,this);
         width=std::exchange(other.width,0);height=std::exchange(other.height,0);
         clearColor=other.clearColor;viewport=other.viewport;clip=other.clip;
         vertices=std::move(other.vertices);draws=std::move(other.draws);

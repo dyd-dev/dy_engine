@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.20)
+project(ShowcaseCulling LANGUAGES CXX)
+
+include("${CMAKE_CURRENT_LIST_DIR}/../CMakeLists.txt")
+if(NOT TARGET dy_engine)
+    option(DY_EXTEND_ADVANCED_RENDERING "Build the optional AdvancedRendering extension." ON)
+    add_subdirectory("${DY_ENGINE_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/dy_engine" EXCLUDE_FROM_ALL)
+endif()
+
+if(NOT TARGET dyf::AdvancedRendering)
+    if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+        message(FATAL_ERROR "GPUCulling requires DY_EXTEND_ADVANCED_RENDERING=ON.")
+    endif()
+    message(STATUS "Skipping GPUCulling: enable DY_EXTEND_ADVANCED_RENDERING for the advanced raster passes.")
+    return()
+endif()
+
+add_executable(ShowcaseCulling main.cpp)
+target_link_libraries(ShowcaseCulling PRIVATE dy_engine dyf::AdvancedRendering)
+dyf_configure_showcase(ShowcaseCulling culling)

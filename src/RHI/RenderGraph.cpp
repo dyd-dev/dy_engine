@@ -1,9 +1,10 @@
-#include "dyf/Platform/Log.h"
+#include "../Platform/Profiler/CollectorInternal.h"
+#include <cstdio>
 #include "dyf/RHI/RenderGraph.h"
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/IDevice.h"
-#include "dyf/Core/ThreadPool.h"
 #include "Validation.h"
+#include "../Platform/Profiler/RhiProfiler.h"
 
 #include <atomic>
 
@@ -15,7 +16,7 @@ namespace dyf::RHI
 
         bool Fail(const char* message)
         {
-            dyf::Platform::Log::Writef(dyf::Platform::LogLevel::Error, "RenderGraph", __FILE__, __LINE__, "dyf::RHI [error]: RenderGraph: %s", message);
+            std::fprintf(stderr, "[RenderGraph] dyf::RHI [error]: RenderGraph: %s\n", message);
             return false;
         }
 
@@ -23,6 +24,7 @@ namespace dyf::RHI
         {
             return state == ResourceState::ShaderResource || state == ResourceState::VertexBuffer ||
                 state == ResourceState::IndexBuffer || state == ResourceState::ConstantBuffer ||
+                state == ResourceState::IndirectArgument ||
                 state == ResourceState::DepthRead || state == ResourceState::UnorderedAccess;
         }
 
@@ -128,9 +130,21 @@ namespace dyf::RHI
             Fail("an existing import name refers to different resources or boundary states.");
             return {};
         }
-        for(const auto& resource : m_resources)
+        // 같은 자원의 다른 이름을 찾기 위해 매번 전체 목록을 순회하지 않는다.
+        RGResourceHandle existing;
+        if(buffer)
         {
-            if(resource.buffer != buffer || resource.texture != texture) continue;
+            const auto found=m_bufferHandles.find(buffer);
+            if(found!=m_bufferHandles.end())existing=found->second;
+        }
+        else
+        {
+            const auto found=m_textureHandles.find(texture);
+            if(found!=m_textureHandles.end())existing=found->second;
+        }
+        if(existing.IsValid())
+        {
+            const auto& resource=m_resources[m_resourceIndices.at(existing.id)];
             if(!matches(resource))
             {
                 Fail("aliases of one resource must use identical boundary states.");
@@ -143,13 +157,15 @@ namespace dyf::RHI
         m_resourceIndices.emplace(handle.id, static_cast<uint32_t>(m_resources.size()));
         m_resources.push_back({buffer, texture, initialState, finalState, handle});
         m_resourceNameToHandle.emplace(name, handle);
+        if(buffer)m_bufferHandles.emplace(buffer,handle);
+        else m_textureHandles.emplace(texture,handle);
         m_compiled = false;
         return handle;
     }
 
-    RenderGraphPass& RenderGraph::AddPass(const std::string& name)
+    RenderGraphPass& RenderGraph::AddPass(const std::string& name, RGRecordingMode mode)
     {
-        auto pass = std::make_unique<RenderGraphPass>(name, static_cast<uint32_t>(m_passes.size()));
+        auto pass = std::make_unique<RenderGraphPass>(name, static_cast<uint32_t>(m_passes.size()), mode);
         auto& result = *pass;
         m_passes.push_back(std::move(pass));
         m_compiled = false;
@@ -162,6 +178,7 @@ namespace dyf::RHI
         m_compiledRevisions.clear();
         m_executionOrder.clear();
         m_executionStages.clear();
+        m_dependencies.clear();
         m_passBarriers.clear();
         m_finalBarriers.clear();
         const uint32_t passCount = static_cast<uint32_t>(m_passes.size());
@@ -242,6 +259,8 @@ namespace dyf::RHI
             for(uint32_t next : edges[pass])
                 stageIndices[next] = (std::max)(stageIndices[next], stage + 1);
         }
+        for(uint32_t before=0;before<passCount;++before)
+            for(uint32_t after:edges[before])m_dependencies.push_back({before,after});
         for(const auto& pass : m_passes) m_compiledRevisions.push_back(pass->GetRevision());
         m_compiled = true;
         return true;
@@ -272,6 +291,12 @@ namespace dyf::RHI
 
     bool RenderGraph::RecordBoundary(ICommandList* commands) const
     {
+        if(m_timestampQuery)
+        {
+            if(!commands->Track(m_timestampQuery)) return Fail("timestamp query is no longer owned by the command list's device.");
+            commands->ResetTimestamps(m_timestampQuery,0,2+2*static_cast<uint32_t>(m_passes.size()));
+            commands->WriteTimestamp(m_timestampQuery,0);
+        }
         // 모든 리소스를 먼저 검증/보유한다. 상태가 같아 배리어가 없어도 경계 계약은 검사한다.
         for(const auto& resource : m_resources)
             if(!RequireResource(commands, resource, resource.initialState)) return false;
@@ -281,16 +306,46 @@ namespace dyf::RHI
         return true;
     }
 
-    bool RenderGraph::RecordPass(ICommandList* commands, uint32_t pass) const
+    bool RenderGraph::RecordPass(ICommandList* commands, uint32_t pass,uint64_t eventId) const
     {
+        if(m_timestampQuery) commands->WriteTimestamp(m_timestampQuery,2+2*pass);
         if(m_passes[pass]->HasGlobalBarrier()) commands->GlobalBarrier();
         const auto& barriers = m_passBarriers[pass];
         commands->ResourceBarrier(barriers.data(), static_cast<uint32_t>(barriers.size()));
-        if(!m_passes[pass]->Execute(commands)) return false;
+        if(!eventId)
+        {
+            if(!m_passes[pass]->Execute(commands))return false;
+        }
+        else
+        {
+            Platform::LiveEvent event;event.id=eventId;event.kind=Platform::LiveEventKind::CpuWork;
+            event.stage=Platform::LiveStage::CpuPrepare;event.arguments={pass,
+                static_cast<int64_t>(m_passes[pass]->GetReads().size()),static_cast<int64_t>(m_passes[pass]->GetWrites().size())};
+            event.arguments[4]=LiveRhiThreadToken();
+            const auto& name=m_passes[pass]->GetName();
+            for(size_t i=0;i<name.size()&&i+1<sizeof(event.label);++i)event.label[i]=name[i];
+            event.beginNs=Platform::LiveNowNs();
+            bool executed=false;
+            try{executed=m_passes[pass]->Execute(commands);}
+            catch(...){event.endNs=Platform::LiveNowNs();event.outcome=Platform::LiveOutcome::Failed;commands->RecordLiveInfo(event);throw;}
+            event.endNs=Platform::LiveNowNs();event.outcome=executed?Platform::LiveOutcome::Observed:Platform::LiveOutcome::Failed;
+            commands->RecordLiveInfo(event);
+            if(!executed)return false;
+            const auto linkResource=[&](const RGResourceBinding& binding,bool write)
+            {
+                const auto& resource=m_resources[m_resourceIndices.at(binding.handle.id)];
+                const auto id=Platform::FindLiveObject(resource.buffer?static_cast<const void*>(resource.buffer):resource.texture);
+                commands->RecordLiveResourceLink(write?eventId:id,write?id:eventId);
+            };
+            for(const auto& binding:m_passes[pass]->GetReads())linkResource(binding,false);
+            for(const auto& binding:m_passes[pass]->GetWrites())linkResource(binding,true);
+        }
+
         for(const auto& binding : m_passes[pass]->GetReads())
             if(!RequireResource(commands, m_resources[m_resourceIndices.at(binding.handle.id)], binding.state)) return false;
         for(const auto& binding : m_passes[pass]->GetWrites())
             if(!RequireResource(commands, m_resources[m_resourceIndices.at(binding.handle.id)], binding.state)) return false;
+        if(m_timestampQuery) commands->WriteTimestamp(m_timestampQuery,3+2*pass);
         return commands->CanRecordCommands();
     }
 
@@ -303,17 +358,44 @@ namespace dyf::RHI
             return Fail("Compile must succeed before recording on an open command list outside rendering.");
         }
         if(!RecordBoundary(commands)) return false;
+        const bool live=Platform::IsLiveCollectorEnabled();
+        std::vector<uint64_t> passEvents;
+        if(live){passEvents.resize(m_passes.size());for(auto& id:passEvents)id=Platform::AllocateLiveId();}
         for(uint32_t pass : m_executionOrder)
-            if(!RecordPass(commands, pass)) return false;
+            if(!RecordPass(commands,pass,live?passEvents[pass]:0))return false;
+        if(live)for(const auto& dependency:m_dependencies)
+            commands->RecordLiveResourceLink(passEvents[dependency.before],passEvents[dependency.after]);
         commands->ResourceBarrier(m_finalBarriers.data(), static_cast<uint32_t>(m_finalBarriers.size()));
+        if(m_timestampQuery) commands->WriteTimestamp(m_timestampQuery,1);
         return commands->CanRecordCommands();
     }
 
-    bool RenderGraph::ExecuteParallel(IDevice* device, Core::ThreadPool* pool,
-        std::vector<ICommandList*>& commandLists) const
+    bool RenderGraph::ExecuteParallel(IDevice* device,
+        std::vector<ICommandList*>& commandLists, uint32_t threadCount) const
     {
         if(!device || !commandLists.empty() || !IsCompiled())
             return Fail("parallel recording requires a device, an empty output and an unchanged compiled graph.");
+        auto* liveState=device->GetLiveState();
+        const auto caller=Platform::GetLiveContext();
+        if(liveState&&caller.frame.device==liveState->device&&caller.frame.frame)
+        {device->PrepareLiveControls(caller.frame);device->CaptureLiveGraphParallel(caller.frame);}
+        // Boundary, passes and an empty final list belong to this actual recording operation.
+        Platform::LiveFrameScope liveFrame(liveState?liveState->device:0,liveState?liveState->recordingSource:0);
+        liveFrame.SetOutcome(Platform::LiveOutcome::Failed);
+        if(liveState)device->PrepareLiveControls(liveFrame.GetKey());
+        const auto policyBegin=liveState?Platform::LiveNowNs():0;
+        const bool requestedParallel=device->CaptureLiveGraphParallel(liveFrame.GetKey());
+        const uint32_t effectiveThreads=requestedParallel?threadCount:1;
+        if(liveState)
+        {
+            Platform::LiveEvent policy;policy.context=Platform::GetLiveContext();
+            policy.kind=Platform::LiveEventKind::CpuWork;policy.stage=Platform::LiveStage::CpuPrepare;
+            policy.beginNs=policyBegin;policy.endNs=Platform::LiveNowNs();
+            const auto workers=effectiveThreads?effectiveThreads:(std::max)(1u,std::thread::hardware_concurrency());
+            policy.arguments={requestedParallel,workers>1,workers,!requestedParallel?1:workers<=1?3:0,LiveRhiThreadToken()};
+            const char label[]="RenderGraph recording policy";std::copy(std::begin(label),std::end(label),policy.label);
+            Platform::RecordLiveEvent(policy);
+        }
         struct Recording
         {
             IDevice& device;
@@ -332,52 +414,56 @@ namespace dyf::RHI
         recording.lists.reserve(m_passes.size() + 2);
         auto* boundary = recording.Acquire();
         if(!boundary || !RecordBoundary(boundary) || !boundary->Close()) return false;
+        auto references=std::make_shared<ICommandList::ReferenceSnapshot>();
+        references->resources.swap(boundary->m_references);
+        references->handles.swap(boundary->m_referenceHandles);
+        boundary->m_sharedReferences=references;
         std::vector<ICommandList*> passes(m_passes.size(), nullptr);
         for(uint32_t pass : m_executionOrder)
         {
             if(!(passes[pass] = recording.Acquire())) return false;
-            passes[pass]->m_references = boundary->m_references;
+            passes[pass]->m_sharedReferences = references;
             passes[pass]->m_imageGeneration = boundary->m_imageGeneration;
         }
         auto* final = recording.Acquire();
         if(!final) return false;
-        final->m_references = boundary->m_references;
+        final->m_sharedReferences = references;
         final->m_imageGeneration = boundary->m_imageGeneration;
         std::vector<uint8_t> recorded(m_passes.size(), 0);
+        const bool live=Platform::IsLiveCollectorEnabled();
+        std::vector<uint64_t> passEvents;
+        if(live){passEvents.resize(m_passes.size());for(auto& id:passEvents)id=Platform::AllocateLiveId();}
+        const auto context=Platform::GetLiveContext();
         const auto record = [&](uint32_t pass) {
-            recorded[pass] = RecordPass(passes[pass], pass) && passes[pass]->Close();
+            Platform::LiveContextScope restore(context);
+            recorded[pass]=RecordPass(passes[pass],pass,live?passEvents[pass]:0)&&passes[pass]->Close();
         };
-        const bool parallel = pool && pool->GetThreadCount() > 1 && !pool->IsWorkerThread();
+        std::vector<uint32_t> independent;
+        independent.reserve(m_executionOrder.size());
+        for(uint32_t pass : m_executionOrder)
+            if(m_passes[pass]->GetRecordingMode()==RGRecordingMode::Independent) independent.push_back(pass);
+        device->RecordParallel(static_cast<uint32_t>(independent.size()), effectiveThreads,
+            [&](uint32_t index) { record(independent[index]); });
+        for(uint32_t pass : independent) if(!recorded[pass]) return false;
+        std::vector<uint32_t> ordered;
         for(const auto& stage : m_executionStages)
         {
-            if(!parallel || stage.passIndices.size() == 1)
-            {
-                for(uint32_t pass : stage.passIndices) record(pass);
-            }
-            else
-            {
-                std::vector<std::future<void>> pending;
-                pending.reserve(stage.passIndices.size());
-                std::exception_ptr failure;
-                try
-                {
-                    for(uint32_t pass : stage.passIndices)
-                        pending.push_back(pool->Enqueue([&, pass] { record(pass); }));
-                }
-                catch(...) { failure = std::current_exception(); }
-                // Even queue/allocation failures must join previously accepted jobs.
-                for(auto& job : pending)
-                    try { job.get(); }
-                    catch(...) { if(!failure) failure = std::current_exception(); }
-                if(failure) std::rethrow_exception(failure);
-            }
-            for(uint32_t pass : stage.passIndices) if(!recorded[pass]) return false;
+            ordered.clear();
+            for(uint32_t pass : stage.passIndices)
+                if(m_passes[pass]->GetRecordingMode()!=RGRecordingMode::Independent) ordered.push_back(pass);
+            device->RecordParallel(static_cast<uint32_t>(ordered.size()), effectiveThreads,
+                [&](uint32_t index) { record(ordered[index]); });
+            for(uint32_t pass : ordered) if(!recorded[pass]) return false;
         }
         final->ResourceBarrier(m_finalBarriers.data(), static_cast<uint32_t>(m_finalBarriers.size()));
+        if(m_timestampQuery) final->WriteTimestamp(m_timestampQuery,1);
         if(!final->Close()) return false;
         if(!device->PrepareCommandLists(recording.lists.data(),
-            static_cast<uint32_t>(recording.lists.size()), pool)) return false;
+            static_cast<uint32_t>(recording.lists.size()), effectiveThreads)) return false;
+        if(live)for(const auto& dependency:m_dependencies)
+            passes[dependency.after]->RecordLiveResourceLink(passEvents[dependency.before],passEvents[dependency.after]);
         commandLists.swap(recording.lists);
+        liveFrame.SetOutcome(Platform::LiveOutcome::Observed);
         return true;
     }
 
@@ -386,13 +472,17 @@ namespace dyf::RHI
         m_resources.clear();
         m_resourceNameToHandle.clear();
         m_resourceIndices.clear();
+        m_bufferHandles.clear();
+        m_textureHandles.clear();
         m_passes.clear();
         m_compiledRevisions.clear();
         m_executionOrder.clear();
         m_executionStages.clear();
+        m_dependencies.clear();
         m_passBarriers.clear();
         m_finalBarriers.clear();
         m_compiled = false;
+        m_timestampQuery=nullptr;
     }
 
     std::vector<std::string> RenderGraph::GetExecutionOrderNames() const

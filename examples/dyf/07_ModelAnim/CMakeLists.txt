@@ -16,9 +16,11 @@ add_executable(DyfModelAnim main.cpp)
 target_link_libraries(DyfModelAnim PRIVATE dyf::Model)
 
 # main.cpp의 상대 경로를 실행 파일의 작업 폴더에서 사용할 수 있도록 복사한다.
+if(NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
 add_custom_command(TARGET DyfModelAnim POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:DyfModelAnim>/Models"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/Models/Fox.glb" "$<TARGET_FILE_DIR:DyfModelAnim>/Models/Fox.glb"
     VERBATIM)
 set_target_properties(DyfModelAnim PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:DyfModelAnim>")
+endif()

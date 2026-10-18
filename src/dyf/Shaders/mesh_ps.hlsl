@@ -93,6 +93,24 @@ struct RendererLightingConstants
 	float4 shadowLight;
 };
 cbuffer RendererLighting : register(b1, space0) { RendererLightingConstants lighting; };
+struct ClusterLight {float4 positionRange;float4 colorIntensity;float4 directionOuterCos;float4 coneShadow;};
+StructuredBuffer<ClusterLight> clusterLights:register(t19,space0);
+StructuredBuffer<uint> clusterList:register(t20,space0);
+cbuffer ClusterParameters:register(b21,space0) {column_major float4x4 clusterView;column_major float4x4 clusterProjection;
+    column_major float4x4 clusterInverseProjection;float4 clusterDepth;uint4 clusterDimensions;uint4 clusterCounts;};
+uint ClusterBase(float3 position)
+{
+    if(clusterCounts.y==0)return 0xffffffffu;
+    float4 viewPosition=mul(clusterView,float4(position,1)),clip=mul(clusterProjection,viewPosition);
+    float distance=-viewPosition.z;
+    if(distance<clusterDepth.x || distance>clusterDepth.y || clip.w<=0)return 0xffffffffu;
+    float2 coordinate=clip.xy/clip.w*.5+.5;
+    if(any(coordinate<0) || any(coordinate>=1))return 0xffffffffu;
+    float slice=clusterCounts.z!=0?log(distance/clusterDepth.x)/clusterDepth.z:
+        (distance-clusterDepth.x)/(clusterDepth.y-clusterDepth.x);
+    uint3 index=min(uint3(coordinate*float2(clusterDimensions.xy),slice*float(clusterDimensions.z)),clusterDimensions.xyz-uint3(1,1,1));
+    return (index.x+clusterDimensions.x*(index.y+clusterDimensions.y*index.z))*(clusterDimensions.w+1);
+}
 
 #if !RENDERER_BINDLESS
 Texture2D BaseColorTexture : register(t0, space0);
@@ -109,6 +127,34 @@ Texture2D ShadowMap : register(t2, space0);
 #endif
 #endif
 SamplerState LinearSampler : register(s8, space0);
+Texture2D<float4> ltcMatrixTexture:register(t26,space0);
+Texture2D<float4> ltcAmplitudeTexture:register(t27,space0);
+#if !RENDERER_BINDLESS
+Texture2D<float4> ScreenAOTexture : register(t16,space0);
+Texture2D<float4> EnvironmentSpecularTexture : register(t13,space0);
+Texture2D<float4> EnvironmentDiffuseTexture : register(t17,space0);
+SamplerState ScreenSampler : register(s15,space0);
+cbuffer EnvironmentConstants : register(b14,space0)
+{
+    float4 environmentSH[9];
+    float4 environmentSettings;
+    float4 environmentScreen;
+    float4 environmentProbePosition;
+    float4 environmentProbeBoxMin;
+    float4 environmentProbeBoxMax;
+};
+float3 EnvironmentIrradiance(float3 n)
+{
+    float c=cos(environmentSettings.z),s=sin(environmentSettings.z);
+    n.xy=float2(c*n.x+s*n.y,-s*n.x+c*n.y);
+    float3 value=environmentSH[0].rgb*0.28209479177387814+
+        environmentSH[1].rgb*(0.4886025119029199*n.y)+environmentSH[2].rgb*(0.4886025119029199*n.z)+
+        environmentSH[3].rgb*(0.4886025119029199*n.x)+environmentSH[4].rgb*(1.0925484305920792*n.x*n.y)+
+        environmentSH[5].rgb*(1.0925484305920792*n.y*n.z)+environmentSH[6].rgb*(0.31539156525252005*(3*n.z*n.z-1))+
+        environmentSH[7].rgb*(1.0925484305920792*n.x*n.z)+environmentSH[8].rgb*(0.5462742152960396*(n.x*n.x-n.y*n.y));
+    return max(value,0);
+}
+#endif
 #if RENDERER_ENABLE_SHADOWS
 SamplerState ShadowSampler : register(s9, space0);
 #endif
@@ -132,9 +178,9 @@ float DistributionGGX(float3 normal, float3 halfway, float roughness)
     float a = roughness * roughness;
     float a2 = a * a;
     float ndoth = clamp(dot(normal, halfway), 0.0, 1.0);
-    float ndoth2 = ndoth * ndoth;
-    // roughness >= .01; this form retains a2 at the specular peak.
-    float denom = (1.0 - ndoth2) + ndoth2 * a2;
+    float3 crossNH = cross(normal, halfway);
+    // Avoid cancellation in 1 - (N.H)^2 near a narrow specular peak.
+    float denom = dot(crossNH, crossNH) + ndoth * ndoth * a2;
     return a2 / (PI * denom * denom);
 }
 
@@ -157,7 +203,7 @@ float3 FresnelSchlickRoughness(float cosTheta, float3 f0, float roughness)
 }
 
 #if RENDERER_BINDLESS
-Texture2D materialTextures[28]:register(t0, space0);
+Texture2D materialTextures[19]:register(t0, space0);
 StructuredBuffer<uint4> materialTextureIndices:register(t29, space0);
 #endif
 float4 SampleMaterial(uint kind,float2 uv)
@@ -187,6 +233,7 @@ float3 GetNormal(PSInput input, uint textureFlags)
     float3x3 tbn = float3x3(tangent, bitangent, normal);
     float3 tangentNormal = SampleMaterial(2u,input.uv).xyz * 2.0 - 1.0;
     tangentNormal.xy *= normalScale;
+    if((padding1 & 8u)!=0u) tangentNormal.y=-tangentNormal.y;
     return normalize(mul(tangentNormal, tbn));
 }
 
@@ -200,30 +247,26 @@ struct ShadowData {
     float4 directionalSplits[RENDERER_MAX_DIRECTIONAL_LIGHTS];
     float4x4 cameraView;
     float4 filterParams;
+    float4 viewProjectionParams[128];
+    float4 softShadowParams;
 };
 cbuffer ShadowMatrices:register(b3, space0) {ShadowData shadowMatrix;};
 
-float SampleShadow(int type,int lightIndex,float3 worldPosition,float3 normal,float3 lightDir )
+int2 DyShadowDimensions()
 {
-    if((drawTextureFlags & RENDERER_TEXTURE_FLAG_RECEIVE_SHADOW)==0u)return 1.0;
-    float4 views=type==1?shadowMatrix.directionalViews[lightIndex]:(type==2?shadowMatrix.pointViews[lightIndex]:shadowMatrix.spotViews[lightIndex]);
-    int count=int(views.y+.5);
-    if(count==0)return 1.0;
-    int local=0;
-    if(type==1 && count>1)
-    {
-        float depth=-mul(shadowMatrix.cameraView,float4(worldPosition,1.0)).z;
-        while(local<count-1 && depth>shadowMatrix.directionalSplits[lightIndex][local])++local;
-    }
-    if(type==2)
-    {
-        float3 direction=-lightDir;
-        float3 magnitude=abs(direction);
-        if(magnitude.x>=magnitude.y && magnitude.x>=magnitude.z)local=direction.x>=0?0:1;
-        else if(magnitude.y>=magnitude.z)local=direction.y>=0?2:3;
-        else local=direction.z>=0?4:5;
-    }
-    int index=int(views.x+.5)+local;
+    uint width,height;ShadowMap.GetDimensions(width,height);return int2(width,height);
+}
+#define DY_SHADOW_PROJECTION(index) shadowMatrix.viewProjectionParams[index]
+#define DY_SHADOW_MATRIX(index) shadowMatrix.lightViewProjectionMatrix[index]
+#define DY_SHADOW_TILE(index) shadowMatrix.atlasRect[index]
+#define DY_SHADOW_DIMENSIONS DyShadowDimensions()
+#define DY_SHADOW_READ(pixel) ShadowMap.Load(int3(pixel,0)).r
+#define DY_SHADOW_FILTER shadowMatrix.filterParams
+#define DY_SHADOW_SOFT shadowMatrix.softShadowParams
+#include "shadow_filter.hlsl"
+
+float SampleShadowView(int index,float3 worldPosition,float3 normal,float3 lightDir,float strength,float sourceRadius,int pointBase)
+{
     float4 clip=mul(shadowMatrix.lightViewProjectionMatrix[index],float4(worldPosition,1.0));
     if(clip.w<=0.0)return 1.0;
     float3 ndc=clip.xyz/clip.w;
@@ -234,27 +277,14 @@ float SampleShadow(int type,int lightIndex,float3 worldPosition,float3 normal,fl
     uint width,height;ShadowMap.GetDimensions(width,height);float2 texel=1.0/float2(width,height);
     float2 minUv=tile.xy+texel*.5;
     float2 maxUv=tile.xy+tile.zw-texel*.5;
+    float2 localUv=uv;
     uv=tile.xy+uv*tile.zw;
     float angle=1.0-max(dot(normal,lightDir),0.0);
     float bias=max(lighting.shadowParams.x,lighting.shadowParams.y*angle)+lighting.shadowParams.z*angle;
     float receiver=ndc.z-bias;
-    float radius=lighting.shadowParams.w;
-    if(shadowMatrix.filterParams.x>0.0 && shadowMatrix.filterParams.y>0.0)
-    {
-        float blockers=0.0,blockerDepth=0.0;
-        for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x)
-        {
-            float2 sampleUv=clamp(uv+float2(x,y)*texel*shadowMatrix.filterParams.y,minUv,maxUv);
-            float sampled=ShadowMap.Sample(ShadowSampler,sampleUv).r;
-            if(sampled<receiver){blockerDepth+=sampled;blockers+=1.0;}
-        }
-        if(blockers>0.0)
-        {
-            blockerDepth/=blockers;
-            radius=max(radius,shadowMatrix.filterParams.x*max(receiver-blockerDepth,0.0)/max(blockerDepth,.0001)/texel.x);
-        }
-    }
-    radius=min(radius,shadowMatrix.filterParams.z);
+    if(sourceRadius>0 && shadowMatrix.softShadowParams.x>0)
+        return 1-clamp(strength,0.0,1.0)*(1-DyShadowPcss(index,pointBase,localUv,receiver,clip.w,lightDir,sourceRadius));
+    float radius=min(lighting.shadowParams.w,shadowMatrix.filterParams.z);
     int extent=int(ceil(radius));
     float visible=0.0,samples=0.0;
     for(int y=-extent;y<=extent;++y)for(int x=-extent;x<=extent;++x)
@@ -263,7 +293,41 @@ float SampleShadow(int type,int lightIndex,float3 worldPosition,float3 normal,fl
         visible+=receiver<=ShadowMap.Sample(ShadowSampler,sampleUv).r?1.0:0.0;
         samples+=1.0;
     }
-    return 1.0-clamp(views.z,0.0,1.0)*(1.0-visible/max(samples,1.0));
+    return 1.0-clamp(strength,0.0,1.0)*(1.0-visible/max(samples,1.0));
+}
+
+float SampleShadow(int type,int lightIndex,float3 worldPosition,float3 normal,float3 lightDir)
+{
+    if((drawTextureFlags & RENDERER_TEXTURE_FLAG_RECEIVE_SHADOW)==0u)return 1.0;
+    float4 views=type==1?shadowMatrix.directionalViews[lightIndex]:(type==2?shadowMatrix.pointViews[lightIndex]:shadowMatrix.spotViews[lightIndex]);
+    int count=int(views.y+.5);
+    if(count==0)return 1.0;
+    int local=0;
+    float depth=0.0;
+    if(type==1)
+    {
+        depth=-mul(shadowMatrix.cameraView,float4(worldPosition,1.0)).z;
+        float finalSplit=shadowMatrix.directionalSplits[lightIndex][count-1];
+        if(finalSplit>0 && depth>finalSplit)return 1.0;
+        while(local<count-1 && depth>shadowMatrix.directionalSplits[lightIndex][local])++local;
+    }
+    if(type==2)
+    {
+        float3 direction=-lightDir, magnitude=abs(direction);
+        if(magnitude.x>=magnitude.y && magnitude.x>=magnitude.z)local=direction.x>=0?0:1;
+        else if(magnitude.y>=magnitude.z)local=direction.y>=0?2:3;
+        else local=direction.z>=0?4:5;
+    }
+    int index=int(views.x+.5)+local;
+    float visibility=SampleShadowView(index,worldPosition,normal,lightDir,views.z,views.w,type==2?int(views.x+.5):-1);
+    if(type==1 && local<count-1)
+    {
+        float previous=local==0?shadowMatrix.filterParams.w:shadowMatrix.directionalSplits[lightIndex][local-1];
+        float split=shadowMatrix.directionalSplits[lightIndex][local];
+        float blend=smoothstep(lerp(previous,split,.9),split,depth);
+        if(blend>0.0)visibility=lerp(visibility,SampleShadowView(index+1,worldPosition,normal,lightDir,views.z,views.w,type==2?int(views.x+.5):-1),blend);
+    }
+    return visibility;
 }
 
 #endif
@@ -315,80 +379,105 @@ inline float3 EvaluateDirectLight(
     return (diffuseWeight * albedo / PI + specular) * incidentIlluminance * ndotl * visibility;
 }
 
-inline float3 EvaluateAreaSample(
-    float3 normal,
-    float3 viewDir,
-    float3 samplePosition,
-    float3 emitterDirection,
-    float3 emittedRadiance,
-    float sampleArea,
-    float3 albedo,
-    float metallic,
-    float roughness,
-    float3 worldPosition) {
-    float3 toLight = samplePosition - worldPosition;
-    float distanceSquared = dot(toLight, toLight);
-    if (distanceSquared <= 0.000001 || sampleArea <= 0.0) {
-        return float3(0.0,0.0,0.0);
-    }
-    float3 lightDir = toLight * rsqrt(distanceSquared);
-    float emitterCosine = max(dot(emitterDirection, -lightDir), 0.0);
-    float3 incidentIlluminance = emittedRadiance * emitterCosine * sampleArea / distanceSquared;
-    return EvaluateDirectLight(normal, viewDir, lightDir, incidentIlluminance, albedo, metallic, roughness, 1.0);
+// LTC 적분과 표 배치는 Heitz 외 SIGGRAPH 2016 및 Assets/ltc/LICENSE를 따른다.
+inline float LtcEdgeIntegral(float3 a,float3 b)
+{
+    float3 edge=cross(a,b);
+    float sine=length(edge),cosine=clamp(dot(a,b),-1.0,1.0);
+    return edge.z*(atan2(sine,cosine)/max(sine,1e-12))*0.15915494309189535;
 }
-
-inline float3 EvaluateRectAreaLight(
-    RendererRectAreaLight light,
-    float3 normal,
-    float3 viewDir,
-    float3 albedo,
-    float metallic,
-    float roughness,
-    float3 worldPosition) {
-    float3 emitterDirection = normalize(light.directionWidth.xyz);
-    float3 emitterUp = normalize(light.upHeight.xyz);
-    float3 emitterRight = normalize(cross(emitterDirection, emitterUp));
-    emitterUp = normalize(cross(emitterRight, emitterDirection));
-    float width = max(light.directionWidth.w, 0.0);
-    float height = max(light.upHeight.w, 0.0);
-    float sampleArea = width * height * 0.25;
-    float3 emittedRadiance = light.color.rgb * max(light.positionIntensity.w, 0.0);
-    float3 result = float3(0.0,0.0,0.0);
-    for (int sampleIndex = 0; sampleIndex < 4; ++sampleIndex) {
-        float x = (sampleIndex & 1) == 0 ? -0.25 : 0.25;
-        float y = (sampleIndex & 2) == 0 ? -0.25 : 0.25;
-        float3 samplePosition = light.positionIntensity.xyz + emitterRight * (x * width) + emitterUp * (y * height);
-        result += EvaluateAreaSample(normal, viewDir, samplePosition, emitterDirection, emittedRadiance, sampleArea, albedo, metallic, roughness, worldPosition);
-    }
-    return result;
+inline float3 LtcTransform(float3 offset,float3 tangent,float3 bitangent,float3 normal,float4 inverseMatrix)
+{
+    float3 local=float3(dot(offset,tangent),dot(offset,bitangent),dot(offset,normal));
+    return float3(inverseMatrix.x*local.x+inverseMatrix.z*local.z,local.y,
+        inverseMatrix.y*local.x+inverseMatrix.w*local.z);
 }
-
-inline float3 EvaluateDiscAreaLight(
-    RendererDiscAreaLight light,
-    float3 normal,
-    float3 viewDir,
-    float3 albedo,
-    float metallic,
-    float roughness,
-    float3 worldPosition) {
-    const int sampleCount = 8;
-    const float goldenAngle = 2.39996323;
-    float3 emitterDirection = normalize(light.directionRadius.xyz);
-    float3 emitterUp = normalize(light.up.xyz);
-    float3 emitterRight = normalize(cross(emitterDirection, emitterUp));
-    emitterUp = normalize(cross(emitterRight, emitterDirection));
-    float radius = max(light.directionRadius.w, 0.0);
-    float sampleArea = PI * radius * radius / float(sampleCount);
-    float3 emittedRadiance = light.color.rgb * max(light.positionIntensity.w, 0.0);
-    float3 result = float3(0.0,0.0,0.0);
-    for (int sampleIndex = 0; sampleIndex < sampleCount; ++sampleIndex) {
-        float normalizedRadius = sqrt((float(sampleIndex) + 0.5) / float(sampleCount));
-        float angle = float(sampleIndex) * goldenAngle;
-        float2 discOffset = float2(cos(angle), sin(angle)) * (normalizedRadius * radius);
-        float3 samplePosition = light.positionIntensity.xyz + emitterRight * discOffset.x + emitterUp * discOffset.y;
-        result += EvaluateAreaSample(normal, viewDir, samplePosition, emitterDirection, emittedRadiance, sampleArea, albedo, metallic, roughness, worldPosition);
+inline float LtcPolygonIntegral(float3 normal,float3 viewDir,float3 position,
+    float4 inverseMatrix,float3 points[16],int count)
+{
+    float3 tangent=viewDir-normal*dot(normal,viewDir);
+    if(dot(tangent,tangent)<1e-8)
+        tangent=cross(abs(normal.z)<.999?float3(0,0,1):float3(0,1,0),normal);
+    tangent=normalize(tangent);
+    float3 bitangent=cross(normal,tangent);
+    float3 previous=LtcTransform(points[count-1]-position,tangent,bitangent,normal,inverseMatrix);
+    float3 first=float3(0,0,0),last=float3(0,0,0);bool haveVertex=false;float sum=0;
+    for(int edge=0;edge<count;++edge)
+    {
+        float3 current=LtcTransform(points[edge]-position,tangent,bitangent,normal,inverseMatrix);
+        bool previousInside=previous.z>=0,currentInside=current.z>=0;
+        // z=0 반구로 다각형을 자르되 정점 배열 대신 경계 순서대로 적분한다.
+        for(int candidate=0;candidate<2;++candidate)
+        {
+            float3 point;
+            if(candidate==0)
+            {
+                if(previousInside==currentInside)continue;
+                point=lerp(previous,current,clamp(previous.z/(previous.z-current.z),0.0,1.0));
+                point.z=0;
+            }
+            else
+            {
+                if(!currentInside)continue;
+                point=current;
+            }
+            float squared=dot(point,point);
+            if(squared<=1e-20)continue;
+            point*=rsqrt(squared);
+            if(haveVertex)sum+=LtcEdgeIntegral(last,point);else {first=point;haveVertex=true;}
+            last=point;
+        }
+        previous=current;
     }
-    return result;
+    if(haveVertex)sum+=LtcEdgeIntegral(last,first);
+    return clamp(abs(sum),0.0,1.0);
+}
+inline float3 EvaluateLtcPolygon(float3 normal,float3 viewDir,float3 position,float3 points[16],int count,
+    float3 albedo,float metallic,float roughness,float3 radiance)
+{
+    float ndotv=clamp(dot(normal,viewDir),0.0,1.0);
+    if(ndotv<=0)return float3(0,0,0);
+    float2 coordinate=(float2(clamp(roughness,0.0,1.0),sqrt(1-ndotv))*63.0+.5)/64.0;
+    float4 inverseMatrix=ltcMatrixTexture.SampleLevel(LinearSampler,coordinate,0);
+    float4 amplitude=ltcAmplitudeTexture.SampleLevel(LinearSampler,coordinate,0);
+    float specular=LtcPolygonIntegral(normal,viewDir,position,inverseMatrix,points,count);
+    float diffuse=LtcPolygonIntegral(normal,viewDir,position,float4(1,0,0,1),points,count);
+    float3 f0=lerp(float3(.04,.04,.04),albedo,metallic);
+    float3 specularWeight=f0*max(amplitude.x,0.0)+(float3(1,1,1)-f0)*max(amplitude.y,0.0);
+    float3 diffuseWeight=(float3(1,1,1)-FresnelSchlickRoughness(ndotv,f0,roughness))*(1-metallic);
+    // 정규화된 cosine 적분이므로 diffuse에 1/pi나 거리 감쇠를 다시 곱하지 않는다.
+    return radiance*(specularWeight*specular+diffuseWeight*albedo*diffuse);
+}
+inline float3 EvaluateRectAreaLight(RendererRectAreaLight light,float3 normal,float3 viewDir,
+    float3 albedo,float metallic,float roughness,float3 worldPosition)
+{
+    float3 direction=normalize(light.directionWidth.xyz);
+    if(light.directionWidth.w<=0 || light.upHeight.w<=0 || dot(direction,worldPosition-light.positionIntensity.xyz)<=0)
+        return float3(0,0,0);
+    float3 right=normalize(cross(direction,light.upHeight.xyz));
+    float3 up=normalize(cross(right,direction));
+    float3 x=right*(light.directionWidth.w*.5),y=up*(light.upHeight.w*.5),center=light.positionIntensity.xyz;
+    float3 points[16];
+    points[0]=center-x-y;points[1]=center+x-y;points[2]=center+x+y;points[3]=center-x+y;
+    return EvaluateLtcPolygon(normal,viewDir,worldPosition,points,4,albedo,metallic,roughness,
+        light.color.rgb*max(light.positionIntensity.w,0.0));
+}
+inline float3 EvaluateDiscAreaLight(RendererDiscAreaLight light,float3 normal,float3 viewDir,
+    float3 albedo,float metallic,float roughness,float3 worldPosition)
+{
+    float3 direction=normalize(light.directionRadius.xyz);
+    if(light.directionRadius.w<=0 || dot(direction,worldPosition-light.positionIntensity.xyz)<=0)return float3(0,0,0);
+    float3 right=normalize(cross(direction,light.up.xyz));
+    float3 up=normalize(cross(right,direction));
+    float3 points[16];
+    // 원판 경계를 16각형으로 근사한 뒤 면 전체를 LTC로 적분한다.
+    for(int corner=0;corner<16;++corner)
+    {
+        float angle=float(corner)*0.39269908169872415;
+        points[corner]=light.positionIntensity.xyz+(right*cos(angle)+up*sin(angle))*light.directionRadius.w;
+    }
+    return EvaluateLtcPolygon(normal,viewDir,worldPosition,points,16,albedo,metallic,roughness,
+        light.color.rgb*max(light.positionIntensity.w,0.0));
 }
 
 inline float3 EvaluateLights(RendererLightingConstants lighting, float3 worldPosition, float3 normal, float3 viewDir,
@@ -406,43 +495,29 @@ inline float3 EvaluateLights(RendererLightingConstants lighting, float3 worldPos
         directLight += EvaluateDirectLight(normal, viewDir, lightDir,
             light.color.rgb * max(light.directionIntensity.w, 0.0), albedo, metallic, roughness, visibility);
     }
-    int pointCount = clamp(int(lighting.lightCounts.y + 0.5), 0, RENDERER_MAX_POINT_LIGHTS);
-    for (int lightIndex = 0; lightIndex < pointCount; ++lightIndex) {
-        RendererPointLight light = lighting.pointLights[lightIndex];
-        float3 toLight = light.positionRange.xyz - worldPosition;
-        float distanceToLight = length(toLight);
-        if (distanceToLight <= 0.0001) {
-            continue;
-        }
-        float3 lightDir = toLight / distanceToLight;
+    uint base=ClusterBase(worldPosition);
+    uint listed=0xffffffffu;
+    if(base!=0xffffffffu)listed=clusterList[base];
+    uint localCount=listed==0xffffffffu?clusterCounts.x:listed;
+    for(uint item=0u;item<localCount;++item)
+    {
+        uint lightIndex=listed==0xffffffffu?item:clusterList[base+1u+item];
+        ClusterLight light=clusterLights[lightIndex];
+        float3 toLight=light.positionRange.xyz-worldPosition;
+        float distanceToLight=length(toLight);
+        if(distanceToLight<=0.0001 || distanceToLight>=light.positionRange.w)continue;
+        float3 lightDir=toLight/distanceToLight;
+        float attenuation=PunctualAttenuation(distanceToLight,light.positionRange.w);
+        int type=int(light.coneShadow.y+0.5),shadowIndex=int(light.coneShadow.z);
+        if(type==3)attenuation*=SpotConeAttenuation(dot(-lightDir,light.directionOuterCos.xyz),
+            light.coneShadow.x,light.directionOuterCos.w);
 #if RENDERER_ENABLE_SHADOWS
-        float visibility = SampleShadow(2,lightIndex,worldPosition,normal,lightDir);
+        float visibility=shadowIndex>=0?SampleShadow(type,shadowIndex,worldPosition,normal,lightDir):1.0;
 #else
-        float visibility = 1.0;
+        float visibility=1.0;
 #endif
-        float3 incidentIlluminance = light.colorIntensity.rgb * max(light.colorIntensity.w, 0.0) *
-            PunctualAttenuation(distanceToLight, light.positionRange.w);
-        directLight += EvaluateDirectLight(normal, viewDir, lightDir, incidentIlluminance, albedo, metallic, roughness, visibility);
-    }
-    int spotCount = clamp(int(lighting.lightCounts.z + 0.5), 0, RENDERER_MAX_SPOT_LIGHTS);
-    for (int lightIndex = 0; lightIndex < spotCount; ++lightIndex) {
-        RendererSpotLight light = lighting.spotLights[lightIndex];
-        float3 toLight = light.positionRange.xyz - worldPosition;
-        float distanceToLight = length(toLight);
-        if (distanceToLight <= 0.0001) {
-            continue;
-        }
-        float3 lightDir = toLight / distanceToLight;
-        float attenuation = PunctualAttenuation(distanceToLight, light.positionRange.w) *
-            SpotConeAttenuation(dot(-lightDir, normalize(light.directionOuterCos.xyz)),
-                light.coneParams.x, light.directionOuterCos.w);
-        float3 incidentIlluminance = light.colorIntensity.rgb * max(light.colorIntensity.w, 0.0) * attenuation;
-#if RENDERER_ENABLE_SHADOWS
-        float visibility = SampleShadow(3,lightIndex,worldPosition,normal,lightDir);
-#else
-        float visibility = 1.0;
-#endif
-        directLight += EvaluateDirectLight(normal, viewDir, lightDir, incidentIlluminance, albedo, metallic, roughness, visibility);
+        float3 incidentIlluminance=light.colorIntensity.rgb*max(light.colorIntensity.w,0.0)*attenuation;
+        directLight+=EvaluateDirectLight(normal,viewDir,lightDir,incidentIlluminance,albedo,metallic,roughness,visibility);
     }
     int rectAreaCount = clamp(int(lighting.areaLightCounts.x + 0.5), 0, RENDERER_MAX_RECT_AREA_LIGHTS);
     for (int lightIndex = 0; lightIndex < rectAreaCount; ++lightIndex) {
@@ -456,14 +531,37 @@ inline float3 EvaluateLights(RendererLightingConstants lighting, float3 worldPos
     return directLight;
 }
 
-float4 main(PSInput input) : SV_TARGET
+float4 main(PSInput input, bool frontFace : SV_IsFrontFace) : SV_TARGET
 {
     uint textureFlags = drawTextureFlags;
-    float3 albedo = baseColor.rgb;
+    float4 base = baseColor;
     if ((textureFlags & RENDERER_TEXTURE_FLAG_BASE_COLOR) != 0u)
     {
-        albedo *= SampleMaterial(0u,input.uv).rgb;
+        base *= SampleMaterial(0u,input.uv);
     }
+    uint alphaMode=padding1 & 3u;
+    if((textureFlags&64u)!=0u)
+    {
+        if(alphaMode==1u) clip(base.a-asfloat(padding0));
+        float3 color=baseColor.rgb;
+        if(lighting.pbrParams.z>.5) color=pow(color,1.0/2.2);
+        return float4(color,alphaMode==2u ? base.a : 1.0);
+    }
+    if((padding1&16u)!=0u)
+    {
+        if(alphaMode==1u)clip(base.a-asfloat(padding0));
+        float3 color=base.rgb;
+        if(lighting.pbrParams.z>=0.0)
+        {
+            color=min(color*lighting.pbrParams.w,16777216.0);
+            color=color/(color+1.0);
+            if(lighting.pbrParams.z>.5)color=pow(color,1.0/2.2);
+        }
+        color=float3(isnan(color.r)?0:clamp(color.r,0,65504),isnan(color.g)?0:clamp(color.g,0,65504),
+            isnan(color.b)?0:clamp(color.b,0,65504));
+        return float4(color,alphaMode==2u?base.a:1.0);
+    }
+    float3 albedo=base.rgb;
 
     float minRoughness = clamp(lighting.pbrParams.x, 0.01, 1.0);
     float ambientSpecularStrength = max(lighting.pbrParams.y, 0.0);
@@ -487,6 +585,13 @@ float4 main(PSInput input) : SV_TARGET
     }
 
     float3 normal = GetNormal(input, textureFlags);
+    // Derivatives precede discard and the two-sided normal orientation branch.
+    float3 normalDx=ddx(normal),normalDy=ddy(normal);
+    float normalVariance=0.25*(dot(normalDx,normalDx)+dot(normalDy,normalDy));
+    float filteredAlphaSquared=min(1.0,roughness*roughness*roughness*roughness+min(2.0*normalVariance,0.18));
+    roughness=sqrt(sqrt(filteredAlphaSquared));
+    if(alphaMode==1u) clip(base.a-asfloat(padding0));
+    if((padding1 & 4u)!=0u && !frontFace) normal=-normal;
     float3 viewDir = normalize(lighting.cameraPosition.xyz - input.worldPosition);
     float3 f0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
     float3 directLight = EvaluateLights(lighting, input.worldPosition, normal, viewDir, albedo, metallic, roughness);
@@ -495,6 +600,25 @@ float4 main(PSInput input) : SV_TARGET
     float3 ambientDiffuse = kD * albedo * lighting.ambientColor.rgb * lighting.ambientColor.a;
     float3 ambientSpecular = ambientFresnel * lighting.environmentColor.rgb * lighting.environmentColor.a * ambientSpecularStrength;
     float3 ambient = (ambientDiffuse + ambientSpecular) * occlusion;
+#if !RENDERER_BINDLESS
+    float2 screenUV=input.position.xy*environmentScreen.xy;
+    float screenAO=environmentScreen.z>0.5 ? ScreenAOTexture.SampleLevel(ScreenSampler,screenUV,0).r : 1.0;
+    ambient*=screenAO;
+    if(environmentSettings.x>0.5)
+    {
+        ambient=0;
+        if(alphaMode==2u)
+        {
+            if((uint(environmentScreen.w+0.5)&1u)!=0u)
+                ambient=kD*albedo*EnvironmentIrradiance(normal)*(0.3183098861837907*environmentSettings.y*occlusion*screenAO);
+        }
+        else
+        {
+            ambient=kD*albedo*EnvironmentDiffuseTexture.SampleLevel(ScreenSampler,screenUV,0).rgb;
+            ambient+=EnvironmentSpecularTexture.SampleLevel(ScreenSampler,screenUV,0).rgb;
+        }
+    }
+#endif
     float3 color = lighting.lightCounts.w > 0.5 ? ambient + directLight + emissive : albedo + emissive;
 
     if(lighting.pbrParams.z >= 0.0) {
@@ -502,5 +626,8 @@ float4 main(PSInput input) : SV_TARGET
     color = color / (color + float3(1.0, 1.0, 1.0));
     if (lighting.pbrParams.z > 0.5) color = pow(color, float3(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2));
     }
-    return float4(color, baseColor.a);
+    // Preserve finite RGBA16F scene values before screen-space/temporal filtering.
+    color=float3(isnan(color.r)?0.0:clamp(color.r,0.0,65504.0),
+        isnan(color.g)?0.0:clamp(color.g,0.0,65504.0),isnan(color.b)?0.0:clamp(color.b,0.0,65504.0));
+    return float4(color, alphaMode==2u ? base.a : 1.0);
 }

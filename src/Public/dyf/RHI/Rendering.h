@@ -2,8 +2,7 @@
 
 #include <cstdint>
 
-#include "ResourceHandles.h"
-#include "ResourceState.h"
+#include "Binding.h"
 
 namespace dyf::RHI
 {

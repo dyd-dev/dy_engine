@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "dyf/RHI/Texture.h"
-#include "dyf/RHI/ResourceState.h"
+#include "dyf/RHI/Binding.h"
 
 namespace dyf::Backends
 {

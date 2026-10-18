@@ -17,6 +17,12 @@ namespace dyf::RHI
     enum class ColorSpace : uint8_t { Srgb, LinearSrgb };
     enum class CompositeAlpha : uint8_t { Opaque, Premultiplied, Postmultiplied, Inherit };
 
+#if defined(__ANDROID__)
+    inline constexpr Format DefaultSwapchainFormat = Format::R8G8B8A8_UNORM;
+#else
+    inline constexpr Format DefaultSwapchainFormat = Format::B8G8R8A8_UNORM;
+#endif
+
 	struct SwapchainDesc
 	{
 		Format format = Format::Unknown;

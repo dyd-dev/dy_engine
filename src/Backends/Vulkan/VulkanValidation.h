@@ -2,7 +2,7 @@
 
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/Pipeline.h"
-#include "dyf/RHI/ResourceSet.h"
+#include "dyf/RHI/Binding.h"
 #include "dyf/RHI/Texture.h"
 
 namespace dyf::Backends::VulkanValidation
@@ -42,6 +42,8 @@ namespace dyf::Backends::VulkanValidation
             return VulkanValidation::HasUsage(desc.usage, RHI::BufferUsage::Vertex);
         case RHI::ResourceState::IndexBuffer:
             return VulkanValidation::HasUsage(desc.usage, RHI::BufferUsage::Index);
+        case RHI::ResourceState::IndirectArgument:
+            return VulkanValidation::HasUsage(desc.usage, RHI::BufferUsage::Indirect);
         case RHI::ResourceState::ConstantBuffer:
             return VulkanValidation::HasUsage(desc.usage, RHI::BufferUsage::Constant);
         case RHI::ResourceState::ShaderResource:

@@ -19,6 +19,7 @@ namespace dyf::Backends
             case RHI::ResourceState::ConstantBuffer:
                 return D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
             case RHI::ResourceState::IndexBuffer: return D3D12_RESOURCE_STATE_INDEX_BUFFER;
+            case RHI::ResourceState::IndirectArgument: return D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT;
             case RHI::ResourceState::ShaderResource:
                 return D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
                     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;

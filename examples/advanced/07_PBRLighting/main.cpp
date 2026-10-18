@@ -2,7 +2,7 @@
 // Renderer 생성 시 파이프라인을 준비하고, Draw에서 전체 화면 PBR 패스를 제출한다.
 #include "../common/Example.h"
 #ifndef DY_ADVANCED_IOS
-#include "dyf.h"
+#include "dyf/Platform/Window.h"
 #endif
 
 using namespace dyf::RHI;
@@ -12,52 +12,8 @@ namespace {
 #include "vertex.h"
 #include "lighting.h"
 
-// =============================================================================
-// [셰이더 상수 버퍼 구조체]
-// GLSL Push Constants, HLSL b15, Metal buffer(15) 대응 (총 64바이트)
-// =============================================================================
-struct alignas(16) Params {
-    float sizeTime[4] = {960, 640, 0, 0}; // width, height, time, mode(0:pbr, 1:lambert, 2:normal)
-    float settings[4] = {1, 0.45f, 0.8f, 0.9f}; // exposure, roughness, metallic, unused
-    float jitter[4] = {};
-    float extra[4] = {};
-};
-
-static_assert(sizeof(Params) == 64 && alignof(Params) == 16);
-static_assert(offsetof(Params, settings) == 16 &&
-              offsetof(Params, jitter) == 32 &&
-              offsetof(Params, extra) == 48);
-
-// 수치 인자 검증 및 파싱 도우미 함수
-double Number(const std::string& value, double minimum, double maximum) {
-    size_t consumed = 0;
-    double result = std::stod(value, &consumed);
-    if (consumed != value.size() || !std::isfinite(result) || result < minimum || result > maximum) {
-        throw std::runtime_error("Numeric option out of range: " + value);
-    }
-    return result;
-}
-
-
-} // namespace
-
-// =============================================================================
-// [메인 진입점]
-// =============================================================================
-#if defined(__ANDROID__)
-int RunPBRLighting() try {
-    int argc = 1;
-    char* argv[] = { const_cast<char*>("PBRLighting"), nullptr };
-#else
-int main(int argc, char** argv) try {
-#endif
-    Params params;
-
-    uint64_t frameLimit = 0;
-    bool framesSpecified = false;
-    bool validation = false;
-    bool fixedTime = false;
-    float timeValue = 0;
+Options ParseOptions(int argc, char **argv) {
+    Options options;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -107,27 +63,12 @@ int main(int argc, char** argv) try {
         } else
             throw std::runtime_error("Unknown option: " + arg);
     }
-    auto& device = *owner;
-
-    ResourceScope resources(device);
-
-    // 3. 스왑체인 생성
-#if defined(__ANDROID__)
-    constexpr Format swapchainFormat = Format::R8G8B8A8_UNORM;
-    constexpr CompositeAlpha swapchainAlpha = CompositeAlpha::Inherit;
-    constexpr uint32_t minImageCount = 3;
-#else
-    constexpr Format swapchainFormat = Format::B8G8R8A8_UNORM;
-    constexpr CompositeAlpha swapchainAlpha = CompositeAlpha::Opaque;
-    constexpr uint32_t minImageCount = 2;
-#endif
-
-    SwapchainDesc swap;
-    swap.window = window.GetHandle();
-    swap.format = swapchainFormat;
-    swap.compositeAlpha = swapchainAlpha;
-    swap.minimumImageCount = minImageCount;
-    swap.presentMode = PresentMode::Fifo;
+    if (!options.capture.empty() && !options.framesSpecified)
+        options.frameLimit = 1;
+    if (!options.capture.empty() && options.frameLimit == 0)
+        throw std::runtime_error("Capture requires a finite frame count.");
+    return options;
+}
 
 class Renderer final : public Example {
   public:
@@ -138,7 +79,7 @@ class Renderer final : public Example {
             resources.Keep(device.CreateShader({ShaderStage::Fragment, ShaderData::lightingEntryPoint,
                                                 ShaderData::lighting, ShaderData::lightingSize}));
         // PBR 조명을 그릴 파이프라인을 준비한다.
-        ColorAttachmentDesc colorDesc{Format::B8G8R8A8_UNORM, {}, ColorWriteMask::All};
+        ColorAttachmentDesc colorDesc{ExampleColorFormat, {}, ColorWriteMask::All};
         GraphicsPipelineDesc lightingDesc;
         lightingDesc.vertexShader = vertexShader;
         lightingDesc.fragmentShader = lightingShader;
@@ -151,56 +92,8 @@ class Renderer final : public Example {
         lightingPipeline = resources.Keep(device.CreateGraphicsPipeline(lightingDesc));
     }
 
-    // 4. PBR 라이팅 셰이더 및 파이프라인 생성
-    auto vertexShader = resources.Keep(device.CreateShader({
-        ShaderStage::Vertex,
-        ShaderData::vertexEntryPoint,
-        ShaderData::vertex,
-        ShaderData::vertexSize
-    }));
-    auto lightingShader = resources.Keep(device.CreateShader({
-        ShaderStage::Fragment,
-        ShaderData::lightingEntryPoint,
-        ShaderData::lighting,
-        ShaderData::lightingSize
-    }));
-
-    ColorAttachmentDesc colorDesc{swapchainFormat, {}, ColorWriteMask::All};
-
-    GraphicsPipelineDesc lightingDesc;
-    lightingDesc.vertexShader = vertexShader;
-    lightingDesc.fragmentShader = lightingShader;
-    lightingDesc.topology = PrimitiveTopology::TriangleList;
-    lightingDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
-    lightingDesc.colorAttachments = &colorDesc;
-    lightingDesc.colorAttachmentCount = 1;
-    lightingDesc.layout = {nullptr, 0, sizeof(Params), ShaderStageFlags::Fragment, 15};
-
-    auto lightingPipeline = resources.Keep(device.CreateGraphicsPipeline(lightingDesc));
-
-    uint64_t frame = 0;
-
-    // =========================================================================
-    // [메인 렌더 루프]
-    // =========================================================================
-    while (!frameLimit || frame < frameLimit) {
-        window.PollEvents();
-        if (!window.IsRunning()) {
-            break;
-        }
-
-        if (!device.BeginFrame()) {
-            if (device.IsLost()) {
-                throw std::runtime_error("Device lost.");
-            }
-            continue;
-        }
-
-        auto backbuffer = device.GetBackBuffer();
-        if (!backbuffer) {
-            throw std::runtime_error("Backbuffer unavailable.");
-        }
-
+  private:
+    void Draw(TextureHandle backbuffer) override {
         const auto dimensions = backbuffer->GetDesc();
         imageWidth = dimensions.width;
         imageHeight = dimensions.height;

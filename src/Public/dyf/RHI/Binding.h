@@ -2,12 +2,40 @@
 
 #include <cstdint>
 #include <limits>
-
-#include "ResourceHandles.h"
 #include "Texture.h"
 
 namespace dyf::RHI
 {
+	class Buffer;
+	class Texture;
+	class Shader;
+	class Pipeline;
+	class ResourceSet;
+	class TimestampQuery;
+
+	using BufferHandle = Buffer*;
+	using TextureHandle = Texture*;
+	using ShaderHandle = Shader*;
+	using PipelineHandle = Pipeline*;
+	using ResourceSetHandle = ResourceSet*;
+	using TimestampQueryHandle = TimestampQuery*;
+	enum class ResourceState : uint8_t
+	{
+		Undefined,
+		Common,
+		CopyDestination,
+		VertexBuffer,
+		IndexBuffer,
+		ConstantBuffer,
+		ShaderResource,
+		UnorderedAccess,
+		RenderTarget,
+		DepthRead,
+		DepthWrite,
+		Present,
+		IndirectArgument
+	};
+
 	enum class ShaderStageFlags : uint32_t
 	{
 		None = 0,
@@ -103,5 +131,13 @@ namespace dyf::RHI
 		uint32_t offset = 0;
 		uint32_t size = 0;
 		TextureSubresourceRange subresources = {};
+	};
+	// 생성한 세트는 ResourceSetHandle로 바인딩하고 장치의 DestroyResourceSet으로 해제한다.
+	struct ResourceSetDesc
+	{
+		// RHI retains the pipeline and binding resources for this set.
+		PipelineHandle pipeline = nullptr;
+		const ResourceBinding* bindings = nullptr;
+		uint32_t bindingCount = 0;
 	};
 }

@@ -52,4 +52,5 @@ int main()
 
 		if(!renderer->Render(scene, camera)) return 1;
 	}
+	return 0;
 }

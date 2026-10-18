@@ -31,4 +31,5 @@ int main()
 		
 		if(!renderer->Render(canvas)) return 1;
 	}
+	return 0;
 }

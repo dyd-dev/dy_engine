@@ -1,74 +1,202 @@
-#include <dyf/RHI/IDevice.h>
+#include "dyf/RHI/IDevice.h"
+#include "dyf/Platform/Window.h"
+#include "dyf/RHI.h"
+#include "generate.h"
+#include "vertex.h"
+#include "fragment.h"
 
-#include <cstring>
+#include <charconv>
+#include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <memory>
+#include <stdexcept>
+#include <string_view>
 
-namespace
+using namespace dyf::RHI;
+
+int main(int argc, char** argv) try
 {
-    // =============================================================================
-    // [예제 범위 및 안내 출력]
-    // 현재 RHI 수준에서의 간접 드로우(Indirect Drawing) 지원 현황 및 안내 출력
-    // =============================================================================
-    void PrintScope()
+    const auto check = [](bool ok, const char* message) {
+        if(!ok) throw std::runtime_error(message);
+    };
+    uint32_t frameLimit = 0;
+    bool validation = false;
+    for(int i = 1; i < argc; ++i)
     {
-        std::cout <<
-        "간접 드로우: 현재는 지원 조회와 미지원 단계 안내를 제공하는 예제입니다.\n"
-        "공개 BufferUsage::Indirect와 Feature::IndirectDraw 선언은 존재합니다.\n"
-        "ICommandList에는 GPU 버퍼의 인자를 읽어 드로우하는 간접 명령이 없으며, 인자 레이아웃/간접 인자 접근 상태도 없습니다.\n"
-        "DrawInstanced/DrawIndexedInstanced에 CPU 값을 전달하는 경로만 제공되어 이 예제의 간접 드로우 단계는 실행할 수 없습니다.\n"
-        "아직 제공되지 않는 실행 API를 호출하지 않으며 GPU 결과나 성능 수치를 만들지 않습니다.\n";
+        const std::string_view argument(argv[i]);
+        if(argument == "--help")
+        {
+            std::cout << "AdvancedIndirectDrawing [--frames N] [--validation]\n"
+                "GPU compute generates both draw argument structures; no CPU readback.\n"
+                "Left cyan: DrawIndirect. Right orange: DrawIndexedIndirect.\n"
+                "DispatchIndirect launches the generator from an uploaded {1,1,1} argument.\n"
+                "Instance counts vary between 0 and 64. Escape closes the window.\n"
+                "Exit codes: success 0, error 1, unsupported device 77.\n";
+            return 0;
+        }
+        if(argument == "--validation") validation = true;
+        else if(argument == "--frames" && i + 1 < argc)
+        {
+            const std::string_view value(argv[++i]);
+            const auto result = std::from_chars(value.data(), value.data() + value.size(), frameLimit);
+            check(result.ec == std::errc{} && result.ptr == value.data() + value.size(),
+                "--frames requires an unsigned 32-bit integer (0 = unlimited).");
+        }
+        else throw std::runtime_error("Unknown or incomplete argument; use --help.");
     }
 
-    // 개별 RHI 기능 지원 여부 출력 도우미 함수
-    void PrintFeature(const dyf::RHI::IDevice& device, const char* name, dyf::RHI::Feature feature)
+    dyf::Platform::Window window(1000, 650, "Advanced / GPU-generated indirect drawing");
+    check(window.GetHandle() != nullptr, "Window creation failed.");
+    DeviceDesc deviceDesc;
+    deviceDesc.enableValidation = validation;
+    std::unique_ptr<IDevice> owner(IDevice::Create(deviceDesc));
+    check(bool(owner), "Device creation failed.");
+    auto& device = *owner;
+    if(!device.Supports(Feature::Rasterization) || !device.Supports(Feature::Compute) ||
+        !device.Supports(Feature::IndirectDraw) || !device.Supports(Feature::IndirectDispatch))
     {
-        std::cout << "  Supports(" << name << ") = "
-            << (device.Supports(feature) ? "지원" : "미지원") << '\n';
+        std::cout << "UNSUPPORTED: requires rasterization, compute, indirect drawing and indirect dispatch.\n";
+        return 77;
     }
+    dyf::RHI::ResourceScope resources(device);
+    SwapchainDesc swapchain;
+    swapchain.window = window.GetHandle();
+    swapchain.format = DefaultSwapchainFormat;
+    check(device.CreateSwapchain(swapchain), "Swapchain creation failed.");
+
+    auto* cs = resources.Keep(device.CreateShader({ShaderStage::Compute,
+        ShaderData::generateEntryPoint, ShaderData::generate, ShaderData::generateSize}));
+    auto* vs = resources.Keep(device.CreateShader({ShaderStage::Vertex,
+        ShaderData::vertexEntryPoint, ShaderData::vertex, ShaderData::vertexSize}));
+    auto* fs = resources.Keep(device.CreateShader({ShaderStage::Fragment,
+        ShaderData::fragmentEntryPoint, ShaderData::fragment, ShaderData::fragmentSize}));
+
+    // Compute writes all 9 words: DrawIndirectArguments, then DrawIndexedIndirectArguments.
+    constexpr uint32_t indexedOffset = sizeof(DrawIndirectArguments);
+    BufferDesc argumentDesc;
+    argumentDesc.size = indexedOffset + sizeof(DrawIndexedIndirectArguments);
+    argumentDesc.stride = sizeof(uint32_t);
+    argumentDesc.usage = BufferUsage::Storage | BufferUsage::Indirect;
+    auto* drawArguments = resources.Keep(device.CreateBuffer(argumentDesc));
+    BufferDesc dispatchDesc;
+    dispatchDesc.size = sizeof(DispatchIndirectArguments);
+    dispatchDesc.usage = BufferUsage::Indirect;
+    dispatchDesc.initialState = ResourceState::CopyDestination;
+    auto* dispatchArguments = resources.Keep(device.CreateBuffer(dispatchDesc));
+    const uint32_t indices[] = {0, 1, 2};
+    BufferDesc indexDesc;
+    indexDesc.size = sizeof(indices);
+    indexDesc.usage = BufferUsage::Index;
+    indexDesc.initialState = ResourceState::CopyDestination;
+    auto* indexBuffer = resources.Keep(device.CreateBuffer(indexDesc));
+
+    const ResourceBindingLayout writable{0, ResourceBindingType::ReadWriteStorageBuffer,
+        1, ShaderStageFlags::Compute, {}};
+    ComputePipelineDesc computeDesc;
+    computeDesc.computeShader = cs;
+    computeDesc.layout = {&writable, 1, 16, ShaderStageFlags::Compute, 15};
+    auto* compute = resources.Keep(device.CreateComputePipeline(computeDesc));
+    const ResourceBinding output{0, 0, drawArguments, nullptr, 0, argumentDesc.size, {}};
+    auto* computeSet = resources.Keep(device.CreateResourceSet({compute, &output, 1}));
+
+    const ColorAttachmentDesc format{swapchain.format, {}, ColorWriteMask::All};
+    GraphicsPipelineDesc graphicsDesc;
+    graphicsDesc.vertexShader = vs;
+    graphicsDesc.fragmentShader = fs;
+    graphicsDesc.topology = PrimitiveTopology::TriangleList;
+    graphicsDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
+    graphicsDesc.colorAttachments = &format;
+    graphicsDesc.colorAttachmentCount = 1;
+    graphicsDesc.layout = {nullptr, 0, 16, ShaderStageFlags::Vertex, 15};
+    auto* graphics = resources.Keep(device.CreateGraphicsPipeline(graphicsDesc));
+
+    std::cout << "Left cyan: DrawIndirect | right orange: DrawIndexedIndirect\n"
+        "GPU-generated instance counts: 0..64; CPU does not read the argument buffer.\n";
+    const auto start = std::chrono::steady_clock::now();
+    uint32_t frame = 0;
+    while(window.IsRunning() && (!frameLimit || frame < frameLimit))
+    {
+        window.PollEvents();
+        if(!window.IsRunning() || window.GetInput().WasPressed(dyf::Platform::Key::Escape)) break;
+        if(!device.BeginFrame())
+        {
+            check(!device.IsLost(), "Device lost during BeginFrame.");
+            window.WaitEvents(0.001);
+            continue;
+        }
+        dyf::RHI::ResourceScope frameResources(device);
+        auto* commands = frameResources.Keep(device.AcquireCommandList());
+        if(frame == 0)
+        {
+            const DispatchIndirectArguments dispatch{1, 1, 1};
+            check(device.UpdateBuffer(*commands, dispatchArguments, 0, &dispatch, sizeof(dispatch)),
+                "Dispatch argument upload failed.");
+            check(device.UpdateBuffer(*commands, indexBuffer, 0, indices, sizeof(indices)),
+                "Index upload failed.");
+            const ResourceBarrierDesc ready[] = {
+                {dispatchArguments, nullptr, ResourceState::CopyDestination, ResourceState::IndirectArgument, {}},
+                {indexBuffer, nullptr, ResourceState::CopyDestination, ResourceState::IndexBuffer, {}}
+            };
+            commands->ResourceBarrier(ready, 2);
+        }
+
+        const ResourceBarrierDesc prepare{drawArguments, nullptr,
+            frame ? ResourceState::IndirectArgument : ResourceState::Undefined,
+            ResourceState::UnorderedAccess, {}};
+        commands->ResourceBarrier(&prepare, 1);
+        commands->BindComputePipeline(compute);
+        commands->BindResourceSet(computeSet);
+        const float time = std::chrono::duration<float>(std::chrono::steady_clock::now() - start).count();
+        const float computeConstants[4] = {time, 0, 0, 0};
+        commands->SetInlineConstants(0, sizeof(computeConstants), computeConstants);
+        commands->DispatchIndirect(dispatchArguments);
+        const ResourceBarrierDesc generated{drawArguments, nullptr,
+            ResourceState::UnorderedAccess, ResourceState::IndirectArgument, {}};
+        commands->ResourceBarrier(&generated, 1);
+
+        auto* target = device.GetBackBuffer();
+        check(target != nullptr, "Backbuffer unavailable.");
+        const auto& extent = target->GetDesc();
+        const ResourceBarrierDesc begin{nullptr, target,
+            ResourceState::Present, ResourceState::RenderTarget, {}};
+        commands->ResourceBarrier(&begin, 1);
+        ColorAttachment color;
+        color.texture = target;
+        color.loadOp = LoadOp::Clear;
+        color.storeOp = StoreOp::Store;
+        color.clearColor[0] = 0.018f;
+        color.clearColor[1] = 0.025f;
+        color.clearColor[2] = 0.045f;
+        color.clearColor[3] = 1.0f;
+        commands->BeginRendering({&color, 1, nullptr});
+        commands->BindGraphicsPipeline(graphics);
+        commands->SetViewport({0, 0, float(extent.width), float(extent.height), 0, 1});
+        commands->SetScissor({0, 0, extent.width, extent.height});
+        // Keep the grids and triangles proportional while the tiled window resizes.
+        const float aspect = float(extent.width) / float(extent.height);
+        float display[4] = {1.0f / (aspect > 1.5f ? aspect : 1.5f),
+            aspect < 1.5f ? aspect / 1.5f : 1.0f, 0, 0};
+        commands->SetInlineConstants(0, sizeof(display), display);
+        commands->DrawIndirect(drawArguments);
+        commands->BindIndexBuffer(indexBuffer, Format::R32_UINT, 0);
+        display[2] = 1;
+        commands->SetInlineConstants(0, sizeof(display), display);
+        commands->DrawIndexedIndirect(drawArguments, indexedOffset);
+        commands->EndRendering();
+        const ResourceBarrierDesc end{nullptr, target,
+            ResourceState::RenderTarget, ResourceState::Present, {}};
+        commands->ResourceBarrier(&end, 1);
+        check(commands->Close(), "Indirect command recording failed.");
+        check(device.Submit(&commands, 1), "Indirect submission failed.");
+        check(device.Present(), "Present failed.");
+        ++frame;
+    }
+    check(device.WaitIdle(), "WaitIdle failed.");
+    return 0;
 }
-
-// =============================================================================
-// [메인 진입점]
-// =============================================================================
-int main(int argc, char** argv)
+catch(const std::exception& error)
 {
-    // 1. 도움말(--help) 인수 확인
-    if(argc == 2 && std::strcmp(argv[1], "--help") == 0)
-    {
-        std::cout << "사용법: AdvancedIndirectDrawing [--help]\n"
-            "인수 없이 실행하면 RHI 장치를 생성하고 관련 기능을 조회합니다.\n"
-            "--help는 GPU 없이 실행됩니다. 종료 코드: 도움말 0, 장치 생성 실패 1, 잘못된 인수 2, 예제 미지원 77.\n";
-        PrintScope();
-        return 0;
-    }
-    if(argc != 1)
-    {
-        std::cerr << "지원하지 않는 인수입니다. --help를 확인하세요.\n";
-        return 2;
-    }
-
-    // 2. RHI 장치 생성
-    std::unique_ptr<dyf::RHI::IDevice> device(dyf::RHI::IDevice::Create(dyf::RHI::DeviceDesc{}));
-    if(!device)
-    {
-        std::cerr << "RHI 장치를 생성하지 못했습니다. 사용 가능한 GPU, 선택한 백엔드와 드라이버 초기화를 확인하세요.\n";
-        return 1;
-    }
-
-    // 3. 기능 및 백엔드 한도 조회
-    PrintScope();
-    std::cout << "다음 값은 현재 선택된 RHI 백엔드가 제공하는 기능/한도입니다.\n"
-        "물리 GPU의 전체 기능 및 아직 없는 공개 실행 API의 사용 가능 여부와는 구분합니다.\n";
-    PrintFeature(*device, "Rasterization", dyf::RHI::Feature::Rasterization);
-    PrintFeature(*device, "IndirectDraw", dyf::RHI::Feature::IndirectDraw);
-    PrintFeature(*device, "IndirectDispatch", dyf::RHI::Feature::IndirectDispatch);
-    std::cout << "  GetLimit(StorageBufferBytes) = "
-        << device->GetLimit(dyf::RHI::Limit::StorageBufferBytes) << " 바이트\n";
-    if(!device->Supports(dyf::RHI::Feature::Rasterization) && !device->Supports(dyf::RHI::Feature::Compute))
-        std::cout << "현재 장치는 GPU raster/compute 실행을 제공하지 않습니다. Null 백엔드일 수 있으며, 장치 생성 성공만으로 GPU 가용성을 보장하지 않습니다.\n";
-
-    // 완성 경로: 간접 인자 레이아웃/접근 상태 정의 → 인자 버퍼 준비 → 간접 드로우 명령/배리어 구현 → 결과 검증.
-    std::cout << "결과: 이 주제의 전체 실행 예제는 현재 제공하지 않습니다(종료 코드 77).\n";
-    return 77;
+    std::cerr << error.what() << '\n';
+    return 1;
 }

@@ -18,7 +18,8 @@ namespace dyf::RHI
 		D24_UNORM_S8_UINT,
 		R32_UINT,
 		R16_UINT,
-		D32_FLOAT_S8_UINT
+		D32_FLOAT_S8_UINT,
+		R32_FLOAT
 	};
 
 	[[nodiscard]] inline constexpr bool HasStencil(Format format)

@@ -86,19 +86,9 @@
               "Tracy 클라이언트와 프로파일링 계측 포함"
             ],
             [
-              "DY_TRACY_RAW_PLOTS",
-              "OFF",
-              "Tracy 계측이 켜졌을 때 프레임별 원시 측정값도 전송"
-            ],
-            [
               "DY_ENABLE_RENDERDOC",
               "OFF",
-              "Windows/Linux 앱에 이미 주입된 RenderDoc의 캡처 API 사용"
-            ],
-            [
-              "DY_ENABLE_PIX",
-              "MSVC: ON / 그 외: OFF",
-              "Windows D3D12의 PIX 이벤트 계측; 활성화하려면 MSVC 필요"
+              "Windows/Linux 앱에 이미 주입된 RenderDoc의 캡처 API 사용 및 D3D12 디버그 이벤트·마커 포함(MSVC 필요)"
             ],
             [
               "DY_LINUX_WINDOW_SYSTEM",
