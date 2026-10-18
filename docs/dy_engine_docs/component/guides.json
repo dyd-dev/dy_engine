@@ -189,7 +189,7 @@
     "sections": [
       {
         "id": "entrypoints",
-        "title": "세 가지 진입점",
+        "title": "공개 헤더와 모듈 목록",
         "paragraphs": [
           "dy_engine의 소비자용 헤더는 `src/Public` 아래에 있습니다. 기본 API는 `<dyf.h>`, 저수준 그래픽 API는 `<dyf/RHI.h>`, 선택 모델 확장은 `<dyf/Extends/Model.h>`로 포함합니다. 필요한 개별 공개 헤더만 포함할 수도 있습니다.",
           "네이티브 백엔드는 CMake 구성 시 하나를 선택합니다. 실행 중 [IDevice](api:dyf::RHI::IDevice)를 생성할 때 백엔드를 지정하는 인자는 없습니다."
@@ -197,24 +197,54 @@
         "table": {
           "headings": [
             "계층",
-            "주요 역할",
+            "공개 헤더",
             "CMake 링크 타깃"
           ],
           "rows": [
             [
               "dyf",
-              "CPU 장면·이미지·Canvas 입력과 기본 렌더링",
+              "dyf.h",
               "dy_engine"
             ],
             [
               "dyf::RHI",
-              "장치, GPU 자원, 파이프라인, 명령, 동기화의 명시적 제어",
+              "dyf/RHI.h",
+              "dy_engine"
+            ],
+            [
+              "dyf::Math",
+              "dyf/Math/Math.h",
+              "dy_engine"
+            ],
+            [
+              "dyf::Platform",
+              "dyf/Platform/Window.h · Input.h · ActionMap.h · Profiler.h · Time.h",
               "dy_engine"
             ],
             [
               "Model 확장",
-              "파일 로딩, 모델 인스턴스, 애니메이션, 스키닝",
+              "dyf/Extends/Model.h",
               "dyf::Model (DY_EXTEND_MODEL=ON)"
+            ],
+            [
+              "AdvancedRendering 확장",
+              "dyf/Extends/AdvancedRendering.h",
+              "dyf::AdvancedRendering (DY_EXTEND_ADVANCED_RENDERING=ON)"
+            ],
+            [
+              "ImGui 확장",
+              "dyf/Extends/ImGui/ImGui.h",
+              "dyf::ImGui (DY_EXTEND_IMGUI=ON)"
+            ],
+            [
+              "RenderDoc 확장",
+              "dyf/Extends/RenderDoc.h",
+              "dyf::RenderDoc (DY_ENABLE_RENDERDOC=ON)"
+            ],
+            [
+              "Tracy 확장",
+              "dyf/Extends/Tracy.h",
+              "dyf::Tracy (DY_ENABLE_TRACY=ON)"
             ]
           ]
         }
@@ -234,7 +264,7 @@
           ],
           "rows": [
             [
-              "dyf/Renderer.h · RendererConfig.h",
+              "dyf/Renderer.h",
               "Renderer, RendererConfig",
               "렌더링과 지연 적용되는 설정"
             ],

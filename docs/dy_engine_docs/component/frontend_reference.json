@@ -1114,24 +1114,6 @@
         "remarks": [
           "반환된 포인터로 창 소유권을 넘기지 않습니다."
         ]
-      },
-      "ConsumeKeyPress": {
-        "summary": "지정한 창의 대기 중인 F11 입력을 한 번 소비합니다.",
-        "returns": "그 창에 대기 중인 F11 입력이 있으면 true를 반환하고 입력을 지웁니다. 일치하는 창이나 입력이 없으면 false입니다.",
-        "parameters": [
-          [
-            "key",
-            "소비할 키이며 현재 Key::F11만 지원합니다."
-          ],
-          [
-            "nativeWindow",
-            "대상 Window의 GetHandle() 반환값입니다."
-          ]
-        ],
-        "remarks": [
-          "다른 창의 입력은 유지합니다. 소비하기 전 여러 번 누른 입력은 하나의 대기 상태로 합쳐집니다.",
-          "PollEvents로 이벤트를 처리한 뒤 사용합니다. 창 생성·파괴·이벤트 처리와 같은 스레드에서 호출합니다."
-        ]
       }
     }
   },
@@ -1216,7 +1198,7 @@
     }
   },
   "dyf::Platform::ProfilerTimingSample": {
-    "summary": "ProfilerSampler에 전달할 한 프레임의 시간 측정값입니다.",
+    "summary": "Profiler에 전달할 한 프레임의 시간 측정값입니다.",
     "remarks": [
       "모든 시간 단위는 밀리초입니다. GPU 값은 각 hasGpu 플래그와 값의 유효성을 함께 검사합니다."
     ],
@@ -1242,7 +1224,7 @@
     }
   },
   "dyf::Platform::ProfilerTimingSnapshot": {
-    "summary": "ProfilerSampler가 한 누적 구간에서 계산한 프레임·CPU·GPU 통계입니다.",
+    "summary": "Profiler가 한 누적 구간에서 계산한 프레임·CPU·GPU 통계입니다.",
     "remarks": [
       "시간 단위는 밀리초입니다. GPU 유효 샘플 수는 전체 frameCount와 다를 수 있으므로 GPU 평균은 각각의 유효한 샘플만 사용합니다.",
       "GPU 값은 해당 hasGpu 플래그가 true일 때 사용합니다."
@@ -1280,54 +1262,7 @@
       }
     }
   },
-  "dyf::Platform::ProfilerSampler": {
-    "summary": "프레임 측정값을 누적해 일정한 간격으로 통계를 발행합니다.",
-    "remarks": [
-      "내부에서 시계를 읽거나 GPU 측정을 수행하지 않습니다. 호출자가 제공한 시간 값의 합으로 구간을 계산합니다.",
-      "같은 인스턴스에 대한 AddSample과 Reset의 동시 호출은 호출자가 동기화합니다."
-    ],
-    "members": {
-      "ProfilerSampler": {
-        "summary": "통계 발행 간격과 긴 일시정지 판정 시간을 설정합니다.",
-        "parameters": [
-          [
-            "publishIntervalMilliseconds",
-            "발행 간격이며 기본값은 200ms입니다. 유한한 값을 전달하며 1ms 미만은 1ms로 올립니다."
-          ],
-          [
-            "pauseThresholdMilliseconds",
-            "이 값 이상의 프레임은 일시정지로 처리합니다. 기본값은 1000ms이며 발행 간격보다 작은 값은 발행 간격으로 올립니다."
-          ]
-        ]
-      },
-      "AddSample": {
-        "summary": "한 프레임을 누적하고 발행 간격에 도달하면 snapshot을 갱신합니다.",
-        "returns": "새 통계를 snapshot에 기록했으면 true, 아직 구간이 차지 않았거나 샘플을 제외했으면 false입니다.",
-        "parameters": [
-          [
-            "sample",
-            "현재 프레임의 경과 시간과 CPU·선택적 GPU 측정값입니다."
-          ],
-          [
-            "snapshot",
-            "true일 때만 교체하는 출력 통계입니다. false이면 기존 값은 유지됩니다."
-          ]
-        ],
-        "remarks": [
-          "발행 시 내부 누적값을 초기화합니다. 구간 판정에는 0.1ms의 허용 오차가 있습니다.",
-          "프레임 시간이 비유한 값이거나 0 이하이면 기존 누적값을 유지한 채 무시합니다. 일시정지 임계값 이상이면 누적값을 초기화하고 해당 샘플을 무시합니다.",
-          "GPU 평균은 유효한 GPU 샘플만 사용합니다. 측정되지 않은 프레임을 0ms GPU 샘플로 포함하지 않습니다."
-        ]
-      },
-      "Reset": {
-        "summary": "진행 중인 누적 구간의 합계·최댓값·샘플 수를 초기화합니다.",
-        "remarks": [
-          "생성 시 지정한 간격과 임계값은 유지합니다. 외부에 이미 전달한 snapshot은 변경하지 않습니다."
-        ]
-      }
-    }
-  },
-  "dyf::Platform::RenderDocCapture": {
+  "dyf::RenderDocCapture": {
     "summary": "프로세스에 이미 주입된 RenderDoc API를 이용해 다음 프레임 캡처를 요청합니다.",
     "remarks": [
       "RenderDoc을 실행하거나 주입하거나 백그라운드 서비스를 시작하지 않습니다. DY_ENABLE_RENDERDOC 빌드 옵션과 실행 전 RenderDoc 주입이 필요합니다.",

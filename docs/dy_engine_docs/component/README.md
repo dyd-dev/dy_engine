@@ -11,7 +11,7 @@
 - API 참조: 현재 `src/Public`에서 추출한 선언, 공개 멤버, 기본값, 원본 주석과 선언 행.
 - 주요 API 사용법: 구현과 예제로 확인한 한국어 설명, 매개 변수, 반환값과 수명 규칙.
 
-API 탐색은 기본 API(dyf), RHI, Math, Platform, Diagnostics와 Model·AdvancedRendering·ImGui 확장 모듈 아래에 기능별 그룹을 두고 각 API를 배치합니다. 현재 API가 속한 모듈과 그룹은 자동으로 펼쳐집니다. 홈은 가이드와 모듈별 API 목록으로 이동하는 개요입니다. 검색 결과와 좌측 탐색에서는 각 API의 상세 페이지로 이동합니다. 조건부 선언과 Model 확장도 포함하므로 사용 시 가이드의 빌드 조건을 확인하세요.
+API 탐색은 기본 API(dyf), RHI, Math, Platform과 Model·AdvancedRendering·ImGui·RenderDoc·Tracy 확장 모듈 아래에 기능별 그룹을 두고 각 API를 배치합니다. 현재 API가 속한 모듈과 그룹은 자동으로 펼쳐집니다. 홈은 가이드와 모듈별 API 목록으로 이동하는 개요입니다. 검색 결과와 좌측 탐색에서는 각 API의 상세 페이지로 이동합니다. 조건부 선언과 선택 확장도 포함하므로 사용 시 가이드의 빌드 조건을 확인하세요.
 
 특정 타입에 관련된 자유 함수와 연산자는 해당 타입 페이지의 `관련 함수` 또는 `연산자`에 함께 표시합니다. C++ 멤버로 변경하는 것은 아니며, 네임스페이스 함수의 원형과 선언 위치를 유지합니다. `operator*`, `Dot`, `Normalize`, `TransformPoint`처럼 타입에 따라 의미가 달라지는 오버로드는 각 타입 페이지로 나눕니다. `ToIndex`, `IsValid`, `DecodeUtf8`처럼 한 타입에 속하지 않는 함수는 독립 항목으로 유지합니다.
 
