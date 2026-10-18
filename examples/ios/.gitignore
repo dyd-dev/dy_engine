@@ -1,0 +1,3 @@
+# 개발자별 Xcode 화면 상태와 개인 설정은 공유하지 않는다.
+**/xcuserdata/
+*.xcuserstate

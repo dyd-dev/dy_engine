@@ -1,0 +1,21 @@
+# Xcode의 build-libraries.sh 진입점. 엔진과 07·08을 정적 라이브러리로 만들어 앱에 링크한다.
+# 실행할 예제를 늘리려면 이 빌드 목록과 스크립트의 타깃, 앱의 링크·선택 경로를 함께 추가한다.
+cmake_minimum_required(VERSION 3.20)
+project(AdvancedIOSLibraries LANGUAGES CXX OBJCXX)
+
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    message(FATAL_ERROR "Use the AdvancedMetalIOS Xcode project or configure with CMAKE_SYSTEM_NAME=iOS.")
+endif()
+set(USE_METAL ON CACHE BOOL "" FORCE)
+set(USE_VULKAN OFF CACHE BOOL "" FORCE)
+set(USE_D3D12 OFF CACHE BOOL "" FORCE)
+set(DY_ENABLE_TRACY OFF CACHE BOOL "" FORCE)
+set(DY_EXTEND_MODEL OFF CACHE BOOL "" FORCE)
+set(DY_EXTEND_IMGUI OFF CACHE BOOL "" FORCE)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+get_filename_component(DY_ENGINE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+list(APPEND CMAKE_MODULE_PATH "${DY_ENGINE_SOURCE_DIR}/cmake")
+include(MetalToolchain)
+add_subdirectory("${DY_ENGINE_SOURCE_DIR}" engine)
+add_subdirectory("${DY_ENGINE_SOURCE_DIR}/examples/advanced/07_PBRLighting" pbr)
+add_subdirectory("${DY_ENGINE_SOURCE_DIR}/examples/advanced/08_ShadowMapping" shadow)
