@@ -4,8 +4,8 @@
 // destroying the object at scope exit closes it, including on early returns.
 #if defined(DY_TRACY_ENABLED)
 #include <tracy/Tracy.hpp>
-#define DY_PROFILE_CPU_ZONE() ZoneScoped
-#define DY_PROFILE_CPU_ZONE_NAMED(name) ZoneScopedN(name)
+#define DY_PROFILE_CPU_ZONE() ZoneScopedS(8)
+#define DY_PROFILE_CPU_ZONE_NAMED(name) ZoneScopedNS(name, 8)
 #define DY_PROFILE_FRAME_MARK() FrameMark
 #define DY_PROFILE_GPU_MILLISECONDS(name, value) TracyPlot(name, value)
 #define DY_PROFILE_RESOURCE_COUNT(name, value) TracyPlot(name, static_cast<double>(value))

@@ -1,0 +1,12 @@
+Fonts are embedded unchanged from the Tracy v0.13.1 source archive.
+Tracy BSD-3-Clause and dependency license files are copied from their pinned sources during configuration.
+
+Roboto: Apache-2.0
+https://raw.githubusercontent.com/googlefonts/roboto/main/LICENSE
+Fira Code: SIL Open Font License 1.1
+https://raw.githubusercontent.com/tonsky/FiraCode/6.2/LICENSE
+Font Awesome 6 Free font: SIL Open Font License 1.1 (icons and code have separate terms in the bundled full license)
+https://raw.githubusercontent.com/FortAwesome/Font-Awesome/6.7.2/LICENSE.txt
+
+The binary distribution includes these notices in licenses/Tracy.
+font-sha256.txt records the exact source font files used by that build.

@@ -28,6 +28,7 @@ namespace dyf::Backends
     public:
         explicit D3D12CommandList(void* nativeDevice,
             std::shared_ptr<D3D12UploadPool> uploadPool = {});
+        D3D12CommandList(void*,std::shared_ptr<D3D12UploadPool>,D3D12Detail::UploadPolicy);
         void ResetTimestampsNative(RHI::TimestampQueryHandle, uint32_t, uint32_t) override;
         void WriteTimestampNative(RHI::TimestampQueryHandle, uint32_t) override;
         void MarkTimestampsSubmitted(uint64_t completion);

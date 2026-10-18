@@ -1,0 +1,65 @@
+cmake_minimum_required(VERSION 3.20)
+project(LiveProfilingContracts LANGUAGES CXX)
+enable_testing()
+get_filename_component(DY_LIVE_REPO "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
+add_executable(LiveAggregationTests ../LiveAggregationTests.cpp
+    "${DY_LIVE_REPO}/src/Diagnostics/LiveProfiling.cpp"
+    "${DY_LIVE_REPO}/src/Diagnostics/LiveProtocol.cpp"
+    "${DY_LIVE_REPO}/src/Diagnostics/LiveTransport.cpp")
+target_compile_features(LiveAggregationTests PRIVATE cxx_std_17)
+target_include_directories(LiveAggregationTests PRIVATE "${DY_LIVE_REPO}/src/Public" "${DY_LIVE_REPO}/src/Diagnostics")
+target_compile_definitions(LiveAggregationTests PRIVATE DY_LIVE_PROFILING_ENABLED=1 DY_LIVE_TEST_CLOCK=1)
+if(WIN32)
+    target_link_libraries(LiveAggregationTests PRIVATE advapi32)
+endif()
+add_test(NAME LiveCompletedSecondAggregation COMMAND LiveAggregationTests)
+set_tests_properties(LiveCompletedSecondAggregation PROPERTIES TIMEOUT 30)
+add_executable(LiveProfilingTests ../LiveProfilingTests.cpp)
+target_compile_features(LiveProfilingTests PRIVATE cxx_std_17)
+target_include_directories(LiveProfilingTests PRIVATE "${DY_LIVE_REPO}/src/Public")
+target_compile_definitions(LiveProfilingTests PRIVATE DY_LIVE_PROFILING_ENABLED=1 NOMINMAX WIN32_LEAN_AND_MEAN)
+if(EXISTS "${DY_LIVE_REPO}/src/Diagnostics/LiveProfiling.cpp")
+    target_sources(LiveProfilingTests PRIVATE "${DY_LIVE_REPO}/src/Diagnostics/LiveProfiling.cpp")
+endif()
+if(EXISTS "${DY_LIVE_REPO}/src/Diagnostics/LiveTransport.cpp")
+    target_sources(LiveProfilingTests PRIVATE "${DY_LIVE_REPO}/src/Diagnostics/LiveTransport.cpp" "${DY_LIVE_REPO}/src/Diagnostics/LiveProtocol.cpp")
+endif()
+if(WIN32)
+    target_link_libraries(LiveProfilingTests PRIVATE advapi32)
+endif()
+add_test(NAME LiveProfilingContracts COMMAND LiveProfilingTests)
+set_tests_properties(LiveProfilingContracts PROPERTIES TIMEOUT 30)
+add_test(NAME LiveProfilingColdLifecycle COMMAND LiveProfilingTests --cold-lifecycle)
+set_tests_properties(LiveProfilingColdLifecycle PROPERTIES TIMEOUT 10)
+add_test(NAME LiveControlCallbackLifetime COMMAND LiveProfilingTests --callback-lifecycle)
+add_test(NAME LiveOptimizationContracts COMMAND LiveProfilingTests --optimization-contracts)
+set_tests_properties(LiveOptimizationContracts PROPERTIES TIMEOUT 30)
+set_tests_properties(LiveControlCallbackLifetime PROPERTIES TIMEOUT 5)
+add_executable(LiveProtocolTests ../LiveProtocolTests.cpp
+    "${DY_LIVE_REPO}/src/Diagnostics/LiveProtocol.cpp"
+    "${DY_LIVE_REPO}/src/Diagnostics/LiveProfiling.cpp"
+    "${DY_LIVE_REPO}/src/Diagnostics/LiveTransport.cpp")
+target_include_directories(LiveProtocolTests PRIVATE "${DY_LIVE_REPO}/src/Public" "${DY_LIVE_REPO}/src/Diagnostics")
+target_compile_features(LiveProtocolTests PRIVATE cxx_std_17)
+target_compile_definitions(LiveProtocolTests PRIVATE DY_LIVE_PROFILING_ENABLED=1)
+add_test(NAME LiveProtocolContracts COMMAND LiveProtocolTests)
+if(WIN32)
+    target_link_libraries(LiveProtocolTests PRIVATE advapi32)
+    add_executable(LiveTransportClientOff ../LiveTransportClient.cpp
+        "${DY_LIVE_REPO}/src/Diagnostics/LiveProfiling.cpp"
+        "${DY_LIVE_REPO}/src/Diagnostics/LiveProtocol.cpp"
+        "${DY_LIVE_REPO}/src/Diagnostics/LiveTransport.cpp")
+    target_include_directories(LiveTransportClientOff PRIVATE "${DY_LIVE_REPO}/src/Public")
+    target_compile_features(LiveTransportClientOff PRIVATE cxx_std_17)
+    target_link_libraries(LiveTransportClientOff PRIVATE advapi32)
+    add_executable(LiveTransportTests ../LiveTransportTests.cpp
+        "${DY_LIVE_REPO}/src/Diagnostics/LiveProfiling.cpp"
+        "${DY_LIVE_REPO}/src/Diagnostics/LiveProtocol.cpp"
+        "${DY_LIVE_REPO}/src/Diagnostics/LiveTransport.cpp")
+    target_include_directories(LiveTransportTests PRIVATE "${DY_LIVE_REPO}/src/Public")
+    target_compile_features(LiveTransportTests PRIVATE cxx_std_17)
+    target_compile_definitions(LiveTransportTests PRIVATE DY_LIVE_PROFILING_ENABLED=1)
+    target_link_libraries(LiveTransportTests PRIVATE advapi32)
+    add_test(NAME LiveTransportReconnect COMMAND LiveTransportTests "$<TARGET_FILE:LiveTransportClientOff>")
+    set_tests_properties(LiveTransportReconnect PROPERTIES TIMEOUT 20)
+endif()

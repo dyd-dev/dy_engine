@@ -15,6 +15,7 @@ IDevice* IDevice::Create(const DeviceDesc& desc)
         Platform::Log::Write(Platform::LogLevel::Error, "RHI", "Device initialization failed");
         device.reset();
     }
+    if(device)device->GetLiveState();
     return device.release();
 }
 }

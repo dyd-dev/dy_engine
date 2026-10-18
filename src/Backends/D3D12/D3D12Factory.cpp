@@ -15,6 +15,7 @@ namespace dyf::RHI
             dyf::Platform::Log::Write(dyf::Platform::LogLevel::Error, "RHI", "Device initialization failed");
             device.reset();
         }
+        if(device)device->GetLiveState();
         return device.release();
     }
 }

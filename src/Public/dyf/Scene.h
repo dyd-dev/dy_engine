@@ -5,6 +5,7 @@
 #include "dyf/Light.h"
 #include "dyf/Material.h"
 #include "dyf/Mesh.h"
+#include "dyf/Diagnostics/LiveProfiling.h"
 
 namespace dyf
 {
@@ -101,5 +102,7 @@ namespace dyf
         std::vector<DiscAreaLight> m_discAreaLights;
         // Handles and Renderer caches compare the weak control block, including address reuse.
         std::shared_ptr<Scene> m_lifetime;
+        Diagnostics::LiveId m_liveId=0;
+        std::vector<Diagnostics::LiveId> m_liveEntities;
     };
 }

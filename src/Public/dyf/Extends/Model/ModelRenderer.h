@@ -25,6 +25,13 @@ struct ModelShaderDesc
     RHI::ShaderDesc shadowVertex;
     RHI::ShaderDesc skinningCompute;
 };
+struct ModelOptimizationConfig
+{
+    bool reuseFrameBuffers=true;
+    bool skipUnchangedUploads=true;
+    bool cacheStaticMeshes=true;
+    bool cacheInfluences=true;
+};
 
 // 모델 변형과 그 GPU 자원은 선택 확장이 소유한다. renderer는 이 객체보다 오래 살아 있어야 한다.
 // 각 Render가 끝나면 기존 정점 설정을 복원하여 같은 Renderer로 일반 Scene도 그릴 수 있다.
@@ -43,6 +50,9 @@ public:
 
     [[nodiscard]] SkinningExecutionMode GetSkinningExecutionMode() const { return m_mode; }
     bool SetSkinningExecutionMode(SkinningExecutionMode);
+    [[nodiscard]] ModelOptimizationConfig GetOptimizationConfig() const noexcept {return m_pendingOptimizationConfig?*m_pendingOptimizationConfig:m_optimizationConfig;}
+    [[nodiscard]] ModelOptimizationConfig GetAppliedOptimizationConfig() const noexcept {return m_optimizationConfig;}
+    bool SetOptimizationConfig(const ModelOptimizationConfig& value) noexcept {m_pendingOptimizationConfig=value;return true;}
     // 바이트와 진입점은 복사한다. 생략한 단계에는 모델 확장의 기본 셰이더를 사용한다.
     bool SetShaders(const ModelShaderDesc&);
     // 마지막 완료된 Compute 스키닝의 GPU 시간이다. 측정값이 없으면 -1이다.
@@ -58,6 +68,9 @@ private:
     {
         RHI::TimestampQueryHandle query = nullptr;
         RHI::FenceHandle completion;
+        Diagnostics::LiveGpuSpan liveSpan;
+        std::optional<RHI::TimestampCalibration> calibration;
+        std::uint64_t submittedNs=0;
     };
     struct FrameBuffer
     {
@@ -77,6 +90,9 @@ private:
     bool RestoreShaders();
     bool Prepare(const ModelScene&);
     bool PrepareComputePipeline();
+    void InitializeLiveProfiling() noexcept;
+    void PrepareLiveFrame(Diagnostics::LiveFrameKey) noexcept;
+    void PublishLiveAvailability() noexcept;
     RHI::ShaderDesc ShaderDescription(uint32_t slot, const RHI::ShaderDesc& stock) const;
     void ReleaseFrameBuffers();
     void ReleaseFrame(FrameResources&);
@@ -84,7 +100,15 @@ private:
     void CollectGpuSamples();
 
     Renderer& m_renderer;
+    Diagnostics::LiveId m_liveId=0;
+    Diagnostics::ControlRegistration m_skinningControl;
+    std::array<Diagnostics::ControlRegistration,4> m_optimizationControls;
+    std::array<Diagnostics::LiveId,4> m_optimizationRequests{};
+    std::array<Diagnostics::ControlRegistration,4> m_liveCatalog;
     SkinningExecutionMode m_mode = SkinningExecutionMode::VertexShader;
+    SkinningExecutionMode m_liveAppliedMode = SkinningExecutionMode::VertexShader;
+    ModelOptimizationConfig m_optimizationConfig,m_liveAppliedOptimizationConfig;
+    std::optional<ModelOptimizationConfig> m_pendingOptimizationConfig;
     std::array<std::vector<uint8_t>, 3> m_shaderBytes;
     std::array<std::string, 3> m_shaderEntries;
     std::array<std::vector<uint8_t>, 2> m_originalVertexBytes;
