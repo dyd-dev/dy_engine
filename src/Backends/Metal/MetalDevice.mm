@@ -18,11 +18,17 @@
 #include <mutex>
 #include <vector>
 
-#import <AppKit/AppKit.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <dispatch/dispatch.h>
+#import <TargetConditionals.h>
+
+#if TARGET_OS_IOS
+#import <UIKit/UIKit.h>
+#else
+#import <AppKit/AppKit.h>
+#endif
 
 namespace dyf::Backends
 {
@@ -316,17 +322,28 @@ namespace dyf::Backends
             return -1;
 
         m_impl->windowHandle = windowHandle;
-        NSArray<id<MTLDevice>>* adapters=MTLCopyAllDevices();
-        if(desc.adapterIndex>=adapters.count) {
+#if TARGET_OS_IOS
+        // iOS 경로는 기본 GPU만 사용한다. macOS의 다중 어댑터 선택 API는 사용하지 않는다.
+        if(desc.adapterIndex != 0) return -1;
+
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        if(device == nil) return -1;
+#else
+        // macOS에서는 지정한 번호의 GPU를 선택한다.
+        NSArray<id<MTLDevice>>* adapters = MTLCopyAllDevices();
+        if(desc.adapterIndex >= adapters.count)
+        {
 #if !__has_feature(objc_arc)
             [adapters release];
 #endif
             return -1;
         }
-        id<MTLDevice> device=adapters[desc.adapterIndex];
+
+        id<MTLDevice> device = adapters[desc.adapterIndex];
 #if !__has_feature(objc_arc)
         [device retain];
         [adapters release];
+#endif
 #endif
         m_impl->device = device;
 
@@ -482,12 +499,22 @@ void MetalDevice::DestroySwapchainNative()
             return false;
         }
 
+#if TARGET_OS_IOS
+        // iOS의 window 핸들은 NSWindow가 아닌 UIView다. UIKit이 소유한 레이어에 장치를 연결한다.
+        UIView* contentView = (__bridge UIView*)m_impl->windowHandle;
+        if(![contentView.layer isKindOfClass:[CAMetalLayer class]])
+            return false;
+
+        CAMetalLayer* layer = (CAMetalLayer*)contentView.layer;
+#else
+        // macOS에서는 창에 표시할 Metal 레이어를 생성한다
         NSWindow* window = (__bridge NSWindow*)m_impl->windowHandle;
         NSView* contentView = window.contentView;
         if(contentView == nil) return false;
 
         CAMetalLayer* layer = [CAMetalLayer layer];
         if(layer == nil) return false;
+#endif
         layer.device = m_impl->device;
 
         // 창 합성 의미를 요청값으로 정한다. Core Animation은 투명 layer를 premultiplied로 합성한다.
@@ -519,9 +546,13 @@ void MetalDevice::DestroySwapchainNative()
             if(layer.pixelFormat != requestedFormat) return false;
         }
 
-        if(@available(macOS 10.13.2, *))
+        if(@available(macOS 10.13.2, iOS 11.2, *))
         {
             layer.allowsNextDrawableTimeout = YES;
+#if TARGET_OS_IOS
+            // iOS의 CAMetalLayer는 화면 동기화를 끄는 설정을 제공하지 않는다.
+            if(desc.presentMode != RHI::PresentMode::Fifo) return false;
+#else
             switch(desc.presentMode)
             {
             case RHI::PresentMode::Fifo:
@@ -540,6 +571,7 @@ void MetalDevice::DestroySwapchainNative()
                 return false;
             }
 
+#endif
             if(layer.maximumDrawableCount < desc.minimumImageCount)
                 layer.maximumDrawableCount = desc.minimumImageCount;
             if(layer.maximumDrawableCount < desc.minimumImageCount) return false;
@@ -549,9 +581,14 @@ void MetalDevice::DestroySwapchainNative()
             return false;
         }
 
+#if TARGET_OS_IOS
+        const CGFloat scale = contentView.contentScaleFactor;
+#else
         const CGFloat scale = window.backingScaleFactor;
-        layer.contentsScale = scale;
         layer.frame = contentView.bounds;
+#endif
+        // 뷰의 포인트 단위 bounds를 실제 렌더링 픽셀 크기로 변환한다.
+        layer.contentsScale = scale;
         layer.drawableSize = CGSizeMake(
             contentView.bounds.size.width * scale,
             contentView.bounds.size.height * scale);
@@ -575,8 +612,10 @@ void MetalDevice::DestroySwapchainNative()
             "dy.engine.metal.drawable", DISPATCH_QUEUE_SERIAL);
         if(drawableQueue == nullptr) return false;
 
+#if !TARGET_OS_IOS
         [contentView setWantsLayer:YES];
         [contentView setLayer:layer];
+#endif
 #if !__has_feature(objc_arc)
         [layer retain];
 #endif
@@ -613,8 +652,12 @@ void MetalDevice::DestroySwapchainNative()
 				m_impl->backBufferTex->GetNativeTexture() != nullptr;
 		}
 
+#if TARGET_OS_IOS
+        UIView* contentView = (__bridge UIView*)m_impl->windowHandle;
+#else
         NSWindow* window = (__bridge NSWindow*)m_impl->windowHandle;
         NSView* contentView = window.contentView;
+#endif
         if(contentView == nil) return false;
 
         if(m_impl->frameSlots[m_impl->nextFrameSlot] > m_impl->completedSubmissionValue)
@@ -628,13 +671,20 @@ void MetalDevice::DestroySwapchainNative()
                 m_impl->drawableMutex, std::try_to_lock);
             if(!lock.owns_lock()) return false;
 
+#if TARGET_OS_IOS
+            const CGFloat scale = contentView.contentScaleFactor;
+#else
             const CGFloat scale = window.backingScaleFactor;
+#endif
+            // 프레임을 확보할 때 현재 크기를 읽어 회전·레이아웃 변경을 반영한다.
             const CGRect bounds = contentView.bounds;
             const CGSize drawableSize = CGSizeMake(
                 bounds.size.width * scale,
                 bounds.size.height * scale);
             m_impl->metalLayer.contentsScale = scale;
+#if !TARGET_OS_IOS
             m_impl->metalLayer.frame = bounds;
+#endif
             m_impl->metalLayer.drawableSize = drawableSize;
             if(m_impl->metalLayer.drawableSize.width <= 0.0 ||
                 m_impl->metalLayer.drawableSize.height <= 0.0)

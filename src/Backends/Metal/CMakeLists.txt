@@ -30,8 +30,15 @@ target_link_libraries(${BACKEND_NAME} PRIVATE
     dy_engine_options
 )
 
+# RHI 구현은 공유하고 네이티브 화면 API만 플랫폼별로 연결한다.
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    target_link_libraries(${PROJECT_NAME} PRIVATE "-framework UIKit")
+else()
+    target_link_libraries(${PROJECT_NAME} PRIVATE "-framework AppKit")
+endif()
+
+# 맥과 ios가 공통으로 사용하는 라이브러리
 target_link_libraries(${PROJECT_NAME} PRIVATE
-    "-framework AppKit"
     "-framework CoreGraphics"
     "-framework Metal"
     "-framework Foundation"
