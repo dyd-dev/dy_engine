@@ -1,5 +1,6 @@
+#include "../Platform/Profiler/CollectorInternal.h"
 #include "dyf/Image.h"
-#include "dyf/Renderer.h"
+#include "RendererInternal.h"
 #include "dyf/Platform/Profiler.h"
 #include "dyf/Canvas.h"
 
@@ -7,10 +8,9 @@
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/RHI/Pipeline.h"
-#include "dyf/RHI/ResourceSet.h"
+#include "dyf/RHI/Binding.h"
 #include "dyf/RHI/Shader.h"
 #include "dyf/RHI/Texture.h"
-#include "dyf/RHI/ResourceScope.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -19,13 +19,13 @@
 
 namespace dyf
 {
-Renderer::CanvasFrame::CanvasFrame(Renderer& renderer):owner(renderer),imageCount(renderer.canvasImages.size())
+Renderer::Impl::CanvasFrame::CanvasFrame(Impl& renderer):owner(renderer),imageCount(renderer.canvasImages.size())
 {
     owner.canvasPendingVertices=owner.canvasVertices;
     owner.canvasVertexCursor=0;
     for(auto& image:owner.canvasImages)image.used=false;
 }
-Renderer::CanvasFrame::~CanvasFrame()
+Renderer::Impl::CanvasFrame::~CanvasFrame()
 {
     if(committed)return;
     for(size_t i=0;i<owner.canvasPendingVertices.size();++i)
@@ -38,7 +38,7 @@ Renderer::CanvasFrame::~CanvasFrame()
         owner.canvasImages.pop_back();
     }
 }
-void Renderer::CanvasFrame::Commit()
+void Renderer::Impl::CanvasFrame::Commit()
 {
     for(size_t i=0;i<owner.canvasVertices.size();++i)
         if(owner.canvasVertices[i].buffer!=owner.canvasPendingVertices[i].buffer)
@@ -51,14 +51,14 @@ void Renderer::CanvasFrame::Commit()
     const auto window=std::max(1u,owner.device->GetDesc().maxFramesInFlight);
     owner.canvasImages.erase(std::remove_if(owner.canvasImages.begin(),owner.canvasImages.end(),[&](CanvasImageSlot& image) {
         if(image.used) {image.unusedFrames=0;return false;}
-        if(++image.unusedFrames<window)return false;
+        if(owner.config.enableCanvasImageCache&&++image.unusedFrames<window)return false;
         owner.device->DestroyResourceSet(image.set);owner.device->DestroyTexture(image.texture);return true;
     }),owner.canvasImages.end());
     committed=true;
 }
 
 // Canvas의 CPU 정점과 이미지를 그리는 기본 파이프라인을 공개 RHI로 작성한다.
-bool Renderer::InitializeCanvas(RHI::Format format)
+bool Renderer::Impl::InitializeCanvas(RHI::Format format)
 {
     using namespace RHI;
     if(canvasPipeline) return true;
@@ -86,8 +86,11 @@ bool Renderer::InitializeCanvas(RHI::Format format)
     canvasPipeline=device->CreateGraphicsPipeline(desc);
     return canvasPipeline!=nullptr;
 }
-bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList, RHI::TextureHandle target, bool overlay, bool graphManagedTarget)
+bool Renderer::Impl::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList, RHI::TextureHandle target, bool overlay, bool graphManagedTarget)
 {
+#if defined(DY_LIVE_PROFILING_ENABLED) || defined(DY_PROFILER_TRACING_ENABLED)
+    Platform::CpuScope cpuScope(Platform::LiveStage::Record,"Canvas recording");
+#endif
     using namespace RHI;
     if(!canvas.IsValid()) {std::fprintf(stderr,"dyf: Invalid canvas dimensions.\n");return false;}
     if(!target || !InitializeCanvas(target->GetDesc().format)) return false;
@@ -96,7 +99,7 @@ bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList
     const auto resolve=[&](const Image& image)->uint32_t {
         for(uint32_t i=0;i<canvasImages.size();++i) {
             auto& cached=canvasImages[i];
-            if(cached.source.GetPixels().data()==image.GetPixels().data() &&
+            if((config.enableCanvasImageCache||cached.used) && cached.source.GetPixels().data()==image.GetPixels().data() &&
                 cached.source.GetColorSpace()==image.GetColorSpace() &&
                 cached.source.GetWidth()==image.GetWidth() && cached.source.GetHeight()==image.GetHeight()) {
                 cached.used=true;return i;
@@ -133,8 +136,8 @@ bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList
         if(bytes>UINT32_MAX)return false;
         if(canvasVertexCursor==canvasPendingVertices.size())canvasPendingVertices.push_back({});
         auto& slot=canvasPendingVertices[canvasVertexCursor++];
-        if(!slot.buffer || slot.buffer->GetDesc().size<bytes) {
-            uint64_t capacity=slot.buffer ? slot.buffer->GetDesc().size : sizeof(Canvas::Vertex)*64;
+        if(!config.enableCanvasVertexBufferReuse || !slot.buffer || slot.buffer->GetDesc().size<bytes) {
+            uint64_t capacity=!config.enableCanvasVertexBufferReuse?bytes:slot.buffer ? slot.buffer->GetDesc().size : sizeof(Canvas::Vertex)*64;
             while(capacity<bytes)capacity=std::min(uint64_t(UINT32_MAX),capacity*2);
             auto* replacement=device->CreateBuffer({static_cast<uint32_t>(capacity),sizeof(Canvas::Vertex),BufferUsage::Vertex,ResourceState::CopyDestination});
             if(!replacement)return false;
@@ -172,15 +175,18 @@ bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList
                 const auto& draw=canvas.draws[drawIndex];
                 const auto imageSlot=canvasDrawImages[drawIndex];
                 uint32_t count=draw.count;
+                auto splitReason=config.enableCanvasBatching?Platform::LiveSplitReason::EndOfInput:Platform::LiveSplitReason::None;
                 size_t next=drawIndex+1;
                 const auto sameRect=[](const Rectangle& a,const Rectangle& b) {return a.x==b.x && a.y==b.y && a.width==b.width && a.height==b.height;};
                 // Only adjacent ranges with identical raster state may merge;
                 // vertex/alpha order and per-vertex tint remain unchanged.
-                while(next<canvas.draws.size()) {
+                while(config.enableCanvasBatching&&next<canvas.draws.size()) {
                     const auto& candidate=canvas.draws[next];
-                    if(canvasDrawImages[next]!=imageSlot || uint64_t(draw.first)+count!=candidate.first ||
-                        !sameRect(draw.viewport,candidate.viewport) || !sameRect(draw.clip,candidate.clip) ||
-                        uint64_t(count)+candidate.count>UINT32_MAX)break;
+                    if(canvasDrawImages[next]!=imageSlot){splitReason=Platform::LiveSplitReason::Texture;break;}
+                    if(uint64_t(draw.first)+count!=candidate.first){splitReason=Platform::LiveSplitReason::Noncontiguous;break;}
+                    if(!sameRect(draw.viewport,candidate.viewport)){splitReason=Platform::LiveSplitReason::Viewport;break;}
+                    if(!sameRect(draw.clip,candidate.clip)){splitReason=Platform::LiveSplitReason::Scissor;break;}
+                    if(uint64_t(count)+candidate.count>UINT32_MAX){splitReason=Platform::LiveSplitReason::Capacity;break;}
                     count+=candidate.count;++next;
                 }
                 drawIndex=next;
@@ -191,6 +197,12 @@ bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList
                 if(right<=left || bottom<=top) continue;
                 const Rect scissor{static_cast<int32_t>(left),static_cast<int32_t>(top),static_cast<uint32_t>(right-left),static_cast<uint32_t>(bottom-top)};
                 if(!scissor.width || !scissor.height) continue;
+                auto batchContext=Platform::GetLiveContext();batchContext.object=canvas.liveId;
+                if(Platform::IsLiveCollectorEnabled()){
+                    const auto canvasBatch=Platform::GetLiveBatchId(liveId,canvas.liveId);batchContext.batch=Platform::GetLiveBatchId(canvasBatch,(std::uint64_t(draw.first)<<32)|count);
+                    Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Data;batch.first=draw.first;batch.elements=count;batch.bytes=std::uint64_t(count)*sizeof(Canvas::Vertex);batch.stride=sizeof(Canvas::Vertex);batch.resource=Platform::FindLiveObject(vertexBuffer);batch.reason=splitReason;Platform::RecordLiveEvent(batch);Platform::RecordLiveLink({canvas.liveId,batch.id});
+                }
+                Platform::LiveContextScope linkedBatch(batchContext);
                 commandList.SetViewport({v.x,v.y,v.width,v.height,0,1});
                 commandList.SetScissor(scissor);
                 const float transform[8]={2/v.width,-2/v.height,-1,1,
@@ -207,12 +219,14 @@ bool Renderer::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList
     return true;
 }
 
-bool Renderer::RenderCanvas(const Canvas& canvas, Image* readback)
+bool Renderer::Impl::RenderCanvas(const Canvas& canvas, Image* readback)
 {
+    Platform::SetLiveObjectGauge(Platform::GetLiveContext().frame,{Platform::LiveValueState::Ready,canvas.draws.size()});
     if(!canvas.IsValid()) {std::fprintf(stderr,"dyf: Invalid canvas dimensions.\n");return false;}
     if(!device->BeginFrame())
     {
         if(device->IsLost()) {std::fprintf(stderr,"dyf: Canvas device lost.\n");return false;}
+        livePreparedFrame=0;
         if(readback)*readback={};
         return true;
     }
@@ -228,8 +242,10 @@ bool Renderer::RenderCanvas(const Canvas& canvas, Image* readback)
     resources.Keep(commands);
     const bool recorded=RecordCanvas(canvas,*commands,device->GetBackBuffer(),false);
     const bool closed=recorded && commands->Close();
-    const bool submitted=closed && device->Submit(&commands,1);
+    RHI::FenceHandle completion;
+    const bool submitted=closed && device->Submit({&commands,1,nullptr,0},completion);
     if(!recorded || !closed || !submitted) {std::fprintf(stderr,"dyf: Canvas command assembly/submission failed.\n");return false;}
+    lastRenderCompletion=completion;
     canvasFrame.Commit();
     if(readback && !CaptureFrame(*readback))return false;
     const bool presented=device->Present();

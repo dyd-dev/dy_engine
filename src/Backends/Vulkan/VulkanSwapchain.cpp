@@ -45,12 +45,14 @@ VulkanSwapchain& VulkanSwapchain::operator=(VulkanSwapchain&& other) noexcept
     m_swapchain = other.m_swapchain;
     m_swapchainImageFormat = other.m_swapchainImageFormat;
     m_swapchainExtent = other.m_swapchainExtent;
+    m_preTransform = other.m_preTransform;
     m_swapchainImages = std::move(other.m_swapchainImages);
     m_swapchainImageViews = std::move(other.m_swapchainImageViews);
 
     other.m_swapchain = VK_NULL_HANDLE;
     other.m_swapchainImageFormat = VK_FORMAT_UNDEFINED;
     other.m_swapchainExtent = {};
+    other.m_preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     return *this;
 }
 
@@ -180,6 +182,7 @@ bool VulkanSwapchain::Initialize(
     m_swapchainImageViews = std::move(imageViews);
     m_swapchainImageFormat = requestedFormat;
     m_swapchainExtent = extent;
+    m_preTransform = createInfo.preTransform;
     pending.handle = VK_NULL_HANDLE;
     return true;
 }
@@ -197,6 +200,25 @@ void VulkanSwapchain::Cleanup(VkDevice device) {
     }
     m_swapchainImageFormat = VK_FORMAT_UNDEFINED;
     m_swapchainExtent = {};
+    m_preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+}
+
+bool VulkanSwapchain::IsSurfaceConfigurationChanged(
+    const VulkanContext& context,
+    void* windowHandle,
+    bool& changed,
+    InitializationStatus& status) const
+{
+    status = {};
+    changed = false;
+    VkSurfaceCapabilitiesKHR capabilities{};
+    if (!status.Check(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(context.physicalDevice, context.surface, &capabilities),
+        "vkGetPhysicalDeviceSurfaceCapabilitiesKHR")) return false;
+    VkExtent2D extent{};
+    if (!ChooseSwapExtent(capabilities, windowHandle, extent, status)) return false;
+    changed = extent.width != m_swapchainExtent.width || extent.height != m_swapchainExtent.height ||
+        capabilities.currentTransform != m_preTransform;
+    return true;
 }
 
 VulkanSwapchain::SwapchainSupportDetails VulkanSwapchain::QuerySwapchainSupport(VkPhysicalDevice device, VkSurfaceKHR surface, InitializationStatus& status) {

@@ -15,10 +15,12 @@ add_library(${BACKEND_NAME} OBJECT
 target_link_libraries(${BACKEND_NAME} PRIVATE
 	dy_engine_options
 )
-if(DY_ENABLE_PIX)
-    target_link_libraries(${BACKEND_NAME} PRIVATE WinPixEventRuntime::WinPixEventRuntime)
-    target_compile_definitions(${BACKEND_NAME} PRIVATE USE_PIX)
+add_library(dy_pix_events STATIC PixEvents.cpp)
+target_link_libraries(dy_pix_events PRIVATE dy_engine_options)
+if(DY_ENABLE_RENDERDOC)
+    target_link_libraries(dy_pix_events PRIVATE WinPixEventRuntime::WinPixEventRuntime)
 endif()
+target_link_libraries(${PROJECT_NAME} PRIVATE dy_pix_events)
 
 target_link_libraries(${PROJECT_NAME} PRIVATE d3d12 dxgi dxguid)
 

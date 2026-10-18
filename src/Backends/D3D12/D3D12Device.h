@@ -21,6 +21,7 @@ namespace dyf::Backends
         bool ReadTimestampsNative(RHI::TimestampQueryHandle, uint32_t, uint32_t, uint64_t*) override;
         double GetTimestampPeriodNative() const override;
         uint32_t GetTimestampValidBitsNative() const override;
+        bool GetTimestampCalibrationNative(RHI::TimestampCalibration&) const override;
         uint64_t GetLimitNative(RHI::Limit) const override;
         bool SupportsSamplerNative(const RHI::SamplerDesc&) const override;
         bool SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc&) const override;
@@ -29,10 +30,12 @@ namespace dyf::Backends
         uint64_t GetCompletedSubmissionNative() override;
         uint64_t GetLastSubmissionNative() const override;
         RHI::UploadMemoryStatistics GetUploadMemoryStatisticsNative() const override;
+        bool SetUploadMemoryPolicyNative(bool,bool) override;
 
         bool CreateSwapchainNative(const RHI::SwapchainDesc& desc) override;
         bool BeginFrameNative() override;
         RHI::ICommandList* AcquireCommandListNative() override;
+        RHI::ICommandList* AcquireCommandListNative(bool,bool) override;
         void DiscardCommandListNative(RHI::ICommandList*) override;
         bool SubmitNative(RHI::ICommandList** commandLists, uint32_t count) override;
         bool PresentNative() override;

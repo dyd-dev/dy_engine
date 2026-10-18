@@ -2,7 +2,7 @@
 // Draw는 그림자 깊이 패스 → 그림자 맵을 읽는 조명 패스 순서로 명령을 제출한다.
 #include "../common/Example.h"
 #ifndef DY_ADVANCED_IOS
-#include "dyf.h"
+#include "dyf/Platform/Window.h"
 #endif
 #include <array>
 #include <vector>
@@ -15,24 +15,13 @@ namespace {
 #include "shadowDepth.h"
 #include "lighting.h"
 
-#if defined(__ANDROID__)
-int RunShadowMapping() try {
-    int argc = 1;
-    char* argv[] = { const_cast<char*>("ShadowMapping"), nullptr };
-#else
-int main(int argc, char** argv) try {
-#endif
-    // 그림자의 바이어스·필터 범위·종류와 분할 거리·광원 높이의 기본값을 준비한다.
-    Params params;
-    params.settings[1] = 0.0015f;
-    params.settings[2] = 1;
-    params.settings[3] = 0;
-    params.extra[0] = 8;
-    params.extra[1] = 4;
-    uint64_t frameLimit = 0;
-    bool framesSpecified = false, validation = false, fixedTime = false;
-    float timeValue = 0;
-    std::string capture;
+Options ParseOptions(int argc, char **argv) {
+    Options options;
+    options.params.settings[1] = 0.0015f;
+    options.params.settings[2] = 1;
+    options.params.settings[3] = 0;
+    options.params.extra[0] = 8;
+    options.params.extra[1] = 4;
 
     // 실행 인자를 읽어 표시 모드와 관찰할 값을 변경한다. 도움말 요청은 여기서 종료한다.
     for (int i = 1; i < argc; i++) {
@@ -114,92 +103,33 @@ int main(int argc, char** argv) try {
     if (!options.capture.empty() && options.frameLimit == 0)
         throw std::runtime_error("Capture requires a finite frame count.");
 
-    // 창과 그래픽 장치, 화면 표시용 스왑체인을 생성한다.
-    dyf::Platform::Window window(960, 640, "Advanced / ShadowMapping");
-    if (!window.GetHandle()) throw std::runtime_error("Window creation failed.");
-    DeviceDesc deviceDesc;
-    deviceDesc.enableValidation = validation;
-    std::unique_ptr<IDevice> owner(IDevice::Create(deviceDesc));
-    if (!owner) throw std::runtime_error("Device creation failed.");
-    auto& device = *owner;
+    return options;
+}
 
-    ResourceScope resources(device);
-#if defined(__ANDROID__)
-    constexpr Format swapchainFormat = Format::R8G8B8A8_UNORM;
-    constexpr CompositeAlpha swapchainAlpha = CompositeAlpha::Inherit;
-    constexpr uint32_t minImageCount = 3;
-#else
-    constexpr Format swapchainFormat = Format::B8G8R8A8_UNORM;
-    constexpr CompositeAlpha swapchainAlpha = CompositeAlpha::Opaque;
-    constexpr uint32_t minImageCount = 2;
-#endif
-    SwapchainDesc swap;
-    swap.window = window.GetHandle();
-    swap.format = swapchainFormat;
-    swap.compositeAlpha = swapchainAlpha;
-    swap.minimumImageCount = minImageCount;
-    swap.presentMode = PresentMode::Fifo;
-    swap.allowReadback = !capture.empty();
-    if (!device.CreateSwapchain(swap)) throw std::runtime_error("Swapchain creation failed.");
-
-    // 빌드 시 포함된 셰이더와 텍스처를 읽을 샘플러를 준비한다.
-    auto vertexShader = resources.Keep(device.CreateShader(
-        {ShaderStage::Vertex, ShaderData::vertexEntryPoint, ShaderData::vertex, ShaderData::vertexSize}));
-    auto shadowDepthShader =
-        resources.Keep(device.CreateShader({ShaderStage::Fragment, ShaderData::shadowDepthEntryPoint,
-                                            ShaderData::shadowDepth, ShaderData::shadowDepthSize}));
-    auto lightingShader = resources.Keep(device.CreateShader(
-        {ShaderStage::Fragment, ShaderData::lightingEntryPoint, ShaderData::lighting, ShaderData::lightingSize}));
-    SamplerDesc sampler;
-    sampler.minFilter = SamplerFilter::Nearest;
-    sampler.magFilter = SamplerFilter::Nearest;
-    sampler.mipFilter = SamplerFilter::Nearest;
-    sampler.addressU = sampler.addressV = sampler.addressW = SamplerAddressMode::ClampToEdge;
-    sampler.mipLodBias = sampler.minLod = sampler.maxLod = 0;
-
-    // 광원에서 본 깊이를 그림자 텍스처에 기록할 파이프라인.
-    std::vector<ResourceBindingLayout> shadowBindings;
-    std::array<ColorAttachmentDesc, 0> shadowColors{};
-    for (auto& attachment : shadowColors)
-        attachment = {Format::B8G8R8A8_UNORM, {}, ColorWriteMask::All};
-    GraphicsPipelineDesc shadowDesc;
-    shadowDesc.vertexShader = vertexShader;
-    shadowDesc.fragmentShader = shadowDepthShader;
-    shadowDesc.topology = PrimitiveTopology::TriangleList;
-    shadowDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
-    shadowDesc.colorAttachments = shadowColors.data();
-    shadowDesc.colorAttachmentCount = uint32_t(shadowColors.size());
-    shadowDesc.depthStencil.format = Format::D32_FLOAT;
-    shadowDesc.depthStencil.depthWriteEnabled = true;
-    shadowDesc.depthStencil.depthTestEnabled = true;
-    shadowDesc.depthStencil.depthCompareOp = CompareOp::Always;
-    shadowDesc.layout = {shadowBindings.data(), uint32_t(shadowBindings.size()), sizeof(Params),
-                         ShaderStageFlags::Fragment, 15};
-    auto shadowPipeline = resources.Keep(device.CreateGraphicsPipeline(shadowDesc));
-
-    // 앞 단계에서 만든 텍스처를 읽어 최종 조명 결과를 계산할 파이프라인.
-    std::vector<ResourceBindingLayout> lightingBindings;
-    lightingBindings.push_back({0, ResourceBindingType::SampledTexture, 1, ShaderStageFlags::Fragment, {}});
-    lightingBindings.push_back({8, ResourceBindingType::StaticSampler, 1, ShaderStageFlags::Fragment, sampler});
-    std::array<ColorAttachmentDesc, 1> lightingColors{};
-    for (auto& attachment : lightingColors)
-        attachment = {swapchainFormat, {}, ColorWriteMask::All};
-    GraphicsPipelineDesc lightingDesc;
-    lightingDesc.vertexShader = vertexShader;
-    lightingDesc.fragmentShader = lightingShader;
-    lightingDesc.topology = PrimitiveTopology::TriangleList;
-    lightingDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
-    lightingDesc.colorAttachments = lightingColors.data();
-    lightingDesc.colorAttachmentCount = uint32_t(lightingColors.size());
-    lightingDesc.layout = {lightingBindings.data(), uint32_t(lightingBindings.size()), sizeof(Params),
-                           ShaderStageFlags::Fragment, 15};
-    auto lightingPipeline = resources.Keep(device.CreateGraphicsPipeline(lightingDesc));
+class Renderer final : public Example {
+  public:
+    Renderer(const void *window, const Options &options) : Example(window, options) {
+        // 빌드 시 포함된 셰이더와 텍스처를 읽을 샘플러를 준비한다.
+        auto vertexShader = resources.Keep(device.CreateShader(
+            {ShaderStage::Vertex, ShaderData::vertexEntryPoint, ShaderData::vertex, ShaderData::vertexSize}));
+        auto shadowDepthShader =
+            resources.Keep(device.CreateShader({ShaderStage::Fragment, ShaderData::shadowDepthEntryPoint,
+                                                ShaderData::shadowDepth, ShaderData::shadowDepthSize}));
+        auto lightingShader =
+            resources.Keep(device.CreateShader({ShaderStage::Fragment, ShaderData::lightingEntryPoint,
+                                                ShaderData::lighting, ShaderData::lightingSize}));
+        SamplerDesc sampler;
+        sampler.minFilter = SamplerFilter::Nearest;
+        sampler.magFilter = SamplerFilter::Nearest;
+        sampler.mipFilter = SamplerFilter::Nearest;
+        sampler.addressU = sampler.addressV = sampler.addressW = SamplerAddressMode::ClampToEdge;
+        sampler.mipLodBias = sampler.minLod = sampler.maxLod = 0;
 
         // 광원에서 본 깊이를 그림자 텍스처에 기록할 파이프라인.
         std::vector<ResourceBindingLayout> shadowBindings;
         std::array<ColorAttachmentDesc, 0> shadowColors{};
         for (auto &attachment : shadowColors)
-            attachment = {Format::B8G8R8A8_UNORM, {}, ColorWriteMask::All};
+            attachment = {ExampleColorFormat, {}, ColorWriteMask::All};
         GraphicsPipelineDesc shadowDesc;
         shadowDesc.vertexShader = vertexShader;
         shadowDesc.fragmentShader = shadowDepthShader;
@@ -223,7 +153,7 @@ int main(int argc, char** argv) try {
             {8, ResourceBindingType::StaticSampler, 1, ShaderStageFlags::Fragment, sampler});
         std::array<ColorAttachmentDesc, 1> lightingColors{};
         for (auto &attachment : lightingColors)
-            attachment = {Format::B8G8R8A8_UNORM, {}, ColorWriteMask::All};
+            attachment = {ExampleColorFormat, {}, ColorWriteMask::All};
         GraphicsPipelineDesc lightingDesc;
         lightingDesc.vertexShader = vertexShader;
         lightingDesc.fragmentShader = lightingShader;

@@ -1,43 +1,52 @@
 #pragma once
+
 #include "dyf/Platform/Input.h"
 #include <exception>
-
-#if !defined(__ANDROID__)
-struct GLFWwindow;
-#else
-struct ANativeWindow;
-struct android_app;
-#endif
+#include <memory>
 
 namespace dyf::Platform
 {
-	struct WindowSize { int width = 0, height = 0; };
-	struct ContentScale { float x = 1, y = 1; };
-	enum class CursorMode { Normal, Hidden, Locked };
+	struct WindowSize
+	{
+		int width = 0, height = 0;
+	};
 
-	// Window creation, destruction, event processing and access are main-thread only.
+	struct ContentScale
+	{
+		float x = 1, y = 1;
+	};
+
+	enum class CursorMode { Normal, Hidden, Locked };
+	enum class NativeWindowKind { None, Win32, Glfw, Cocoa, Android, UIKit };
+
+	// Platform-owned windows/views must outlive Window and every RHI swapchain using them.
+	struct NativeWindowHandle
+	{
+		NativeWindowKind kind = NativeWindowKind::None;
+		void* value = nullptr;
+	};
+
+	class WindowBackend;
+	struct WindowPlatformAccess;
+
+	// One window/event thread owns this facade. UIKit view work is dispatched to its main thread.
 	class Window
 	{
 	public:
-		~Window();
-
 		Window(unsigned int width, unsigned int height);
-		Window(unsigned int width, unsigned int height, const char *title);
+		Window(unsigned int width, unsigned int height, const char* title);
+		explicit Window(NativeWindowHandle borrowedWindow);
+		~Window();
 		Window(const Window&) = delete;
 		Window& operator=(const Window&) = delete;
 
-#if defined(__ANDROID__)
-		static void SetAndroidApp(struct android_app* app);
-		static struct android_app* GetAndroidApp();
-#endif
-
 		bool IsRunning() const;
 		void RequestClose() const;
-		// Call once per application frame, even when rendering multiple windows.
-		// Input snapshots are published before a native callback failure is rethrown.
+		bool CancelClose() const;
+		void SetTitle(const char* title) const;
+		void Restore() const;
+		// One application-wide event pump; publishes all windows' input snapshots.
 		static void PollEvents();
-		// Wait without publishing input. Call PollEvents afterwards to read the events.
-		// Callback failures are rethrown here instead of crossing the native dispatcher.
 		static void WaitEvents(double timeoutSeconds = 0.1);
 		void Resize(unsigned int width, unsigned int height) const;
 		[[nodiscard]] WindowSize GetSize() const;
@@ -46,36 +55,26 @@ namespace dyf::Platform
 		[[nodiscard]] bool HasFocus() const;
 		[[nodiscard]] bool IsMinimized() const;
 		[[nodiscard]] const Input& GetInput() const { return m_input; }
-		void SetCursorMode(CursorMode mode);
+		void SetCursorMode(CursorMode);
 		[[nodiscard]] CursorMode GetCursorMode() const;
 		[[nodiscard]] bool IsRawMouseMotionSupported() const;
-		// Opt-in flag; GLFW delivers raw motion only while CursorMode::Locked.
-		// Unsupported enable returns false and leaves ordinary mouse input available.
 		bool SetRawMouseMotion(bool enabled);
 		[[nodiscard]] bool IsRawMouseMotionEnabled() const;
-		// Consume this window's profiler shortcut without consuming input snapshots.
-		[[nodiscard]] static bool ConsumeKeyPress(Key key, const void* nativeWindow);
-
+		[[nodiscard]] NativeWindowHandle GetNativeHandle() const;
+		// Compatibility with existing RHI SwapchainDesc::window; see GetNativeHandle for its kind.
 		void* GetHandle() const;
-#if !defined(__ANDROID__)
-		// GLFW backend integration only. GetHandle remains the RHI native-window handle.
-		[[nodiscard]] GLFWwindow* GetGlfwHandle() const { return m_window; }
-#endif
-
-		void HandleInputEvent(const InputEvent& event) noexcept;
-
 	private:
-		void ResetCursorDelta();
-		static void RethrowCallbackError();
+		friend class WindowBackend;
+		friend struct WindowPlatformAccess;
+		// Native callbacks enqueue input only; errors are rethrown at the event-pump boundary.
+		void HandleInputEvent(const InputEvent&) noexcept;
 
-#if !defined(__ANDROID__)
-		struct GLFWwindow* m_window = nullptr;
-		bool m_profilerToggle = false;
-#else
-		void* m_nativeWindow = nullptr;
-		mutable bool m_shouldClose = false;
-#endif
+		void Initialize(unsigned int, unsigned int, const char*, NativeWindowHandle);
+		static void RethrowCallbackError();
+		void ResetCursorPosition(double, double);
+
 		Input m_input;
 		std::exception_ptr m_callbackError;
+		std::unique_ptr<WindowBackend> m_backend;
 	};
 }

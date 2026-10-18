@@ -8,4 +8,4 @@ if(NOT TARGET dy_engine)
 endif()
 
 add_executable(DyfLight main.cpp)
-target_link_libraries(DyfLight PRIVATE dy_engine)
+target_link_libraries(DyfLight PRIVATE dy_engine dyf::AdvancedRendering)

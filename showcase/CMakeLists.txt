@@ -1,0 +1,137 @@
+cmake_minimum_required(VERSION 3.20)
+
+get_filename_component(engine_default "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
+set(DY_ENGINE_SOURCE_DIR "${engine_default}" CACHE PATH "dy_engine source directory.")
+get_filename_component(asset_default "${DY_ENGINE_SOURCE_DIR}/../assets" ABSOLUTE)
+set(DY_ASSET_ROOT "${asset_default}" CACHE PATH "Showcase asset directory.")
+set(DY_DENSE_ARENA_ASSETS "${DY_ASSET_ROOT}/kenney_tiny-dungeon" CACHE PATH "Extracted Kenney Tiny Dungeon CC0 asset directory.")
+set(DY_SHOWCASE_SCENE "${DY_ASSET_ROOT}/Bistro_v5_2/BistroExterior.fbx" CACHE FILEPATH "Default external glTF, GLB, FBX or OBJ environment.")
+set(DY_SHOWCASE_ENVIRONMENT "${DY_ASSET_ROOT}/Bistro_v5_2/san_giuseppe_bridge_4k.hdr" CACHE FILEPATH "Default external equirectangular HDR sky (.hdr).")
+set(DY_SHOWCASE_EMERALD_SCENE "${DY_ASSET_ROOT}/EmeraldSquare_v4_1/EmeraldSquare_Day.fbx" CACHE FILEPATH "Original Emerald Square daytime FBX.")
+set(DY_SHOWCASE_EMERALD_ENVIRONMENT "${DY_ASSET_ROOT}/EmeraldSquare_v4_1/symmetrical_garden_4k.hdr" CACHE FILEPATH "Original Emerald Square daytime HDR environment.")
+set(DY_SHOWCASE_KNIGHT_ACTOR "${DY_ASSET_ROOT}/Intel_Animated_Knight/pkg_e_knight_anim/Exports/FBX/Knight_USD_002.fbx" CACHE FILEPATH "Original Intel animated Knight FBX, selected with --actor knight.")
+set(DY_SHOWCASE_COMPARISON_SCENE "${DY_ASSET_ROOT}/main_sponza/NewSponza_Main_glTF_003.gltf" CACHE FILEPATH "Original Sponza for comparison with the legacy-renderer branch.")
+
+function(dyf_configure_showcase target output_name)
+    get_target_property(mobile_entry ${target} DY_EXAMPLE_ENTRY)
+    set_target_properties(${target} PROPERTIES
+        OUTPUT_NAME "${output_name}"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+        FOLDER "Showcase")
+    if(DY_ENABLE_TRACY)
+        target_link_libraries(${target} PRIVATE dyf::Tracy)
+    endif()
+    if(DY_ENABLE_RENDERDOC)
+        target_link_libraries(${target} PRIVATE dyf::RenderDoc)
+    endif()
+    # 실행 파일만 배포할 때도 원저자 LTC 표의 배포 조건을 함께 전달한다.
+    if(mobile_entry)
+        dy_example_asset_file(${target}
+            "${DY_ENGINE_SOURCE_DIR}/src/Extends/AdvancedRendering/Assets/ltc/LICENSE"
+            "AreaLightingLtc.LICENSE")
+    else()
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${DY_ENGINE_SOURCE_DIR}/src/Extends/AdvancedRendering/Assets/ltc/LICENSE"
+                "$<TARGET_FILE_DIR:${target}>/AreaLightingLtc.LICENSE" VERBATIM)
+    endif()
+
+    set(asset_definitions)
+    if(target STREQUAL "ShowcaseArena")
+        set(asset_definitions DY_DENSE_ARENA_ASSETS)
+        set(asset_base "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/arena")
+    elseif(target STREQUAL "ShowcaseCinematic")
+        set(DY_SHOWCASE_DEFAULT_SCENE "${DY_SHOWCASE_SCENE}")
+        set(DY_SHOWCASE_DEFAULT_ENVIRONMENT "${DY_SHOWCASE_ENVIRONMENT}")
+        set(DY_SHOWCASE_COMPARISON_CAMERA "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/cinematic/SponzaComparison.camera.csv")
+        set(asset_definitions
+            DY_SHOWCASE_DEFAULT_SCENE DY_SHOWCASE_DEFAULT_ENVIRONMENT
+            DY_SHOWCASE_EMERALD_SCENE DY_SHOWCASE_EMERALD_ENVIRONMENT
+            DY_SHOWCASE_KNIGHT_ACTOR DY_SHOWCASE_COMPARISON_SCENE
+            DY_SHOWCASE_COMPARISON_CAMERA)
+        set(asset_base "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/cinematic")
+    endif()
+
+    # Assets stay beside their original external buffers and textures.
+    foreach(definition IN LISTS asset_definitions)
+        if("${${definition}}" STREQUAL "" AND
+                NOT definition STREQUAL "DY_DENSE_ARENA_ASSETS" AND
+                NOT definition STREQUAL "DY_SHOWCASE_COMPARISON_SCENE")
+            continue()
+        endif()
+        if(definition STREQUAL "DY_DENSE_ARENA_ASSETS" AND "${${definition}}" STREQUAL "")
+            set(asset "")
+        else()
+            get_filename_component(asset "${${definition}}" ABSOLUTE BASE_DIR "${asset_base}")
+        endif()
+        if(definition STREQUAL "DY_SHOWCASE_KNIGHT_ACTOR")
+            if(NOT EXISTS "${asset}" OR IS_DIRECTORY "${asset}")
+                continue()
+            endif()
+        elseif(definition STREQUAL "DY_SHOWCASE_DEFAULT_SCENE")
+            if(NOT EXISTS "${asset}" OR IS_DIRECTORY "${asset}")
+                message(FATAL_ERROR "DY_SHOWCASE_SCENE must name an existing file: ${asset}")
+            endif()
+        elseif(definition STREQUAL "DY_SHOWCASE_DEFAULT_ENVIRONMENT")
+            if(NOT EXISTS "${asset}" OR IS_DIRECTORY "${asset}")
+                message(FATAL_ERROR "DY_SHOWCASE_ENVIRONMENT must name an existing .hdr file: ${asset}")
+            endif()
+        endif()
+        if(mobile_entry)
+            if(NOT EXISTS "${asset}")
+                set(asset "")
+            elseif(definition STREQUAL "DY_SHOWCASE_COMPARISON_CAMERA")
+                get_filename_component(filename "${asset}" NAME)
+                dy_example_asset_file(${target} "${asset}" "Assets/${filename}")
+                set(asset "Assets/${filename}")
+            else()
+                if(IS_DIRECTORY "${asset}")
+                    set(asset_directory "${asset}")
+                else()
+                    get_filename_component(asset_directory "${asset}" DIRECTORY)
+                    if(definition STREQUAL "DY_SHOWCASE_KNIGHT_ACTOR")
+                        # The knight resolves Textures beside its Exports folder.
+                        get_filename_component(asset_directory "${asset_directory}/../.." ABSOLUTE)
+                    endif()
+                endif()
+                string(SHA256 asset_group "${asset_directory}")
+                string(SUBSTRING "${asset_group}" 0 12 asset_group)
+                dy_example_assets(${target} "${asset_directory}" "Assets/${asset_group}")
+                file(RELATIVE_PATH asset_relative "${asset_directory}" "${asset}")
+                if(asset_relative STREQUAL "")
+                    set(asset "Assets/${asset_group}")
+                else()
+                    set(asset "Assets/${asset_group}/${asset_relative}")
+                endif()
+            endif()
+        endif()
+        file(TO_CMAKE_PATH "${asset}" asset)
+        string(REPLACE "\"" "\\\"" asset "${asset}")
+        target_compile_definitions(${target} PRIVATE "${definition}=\"${asset}\"")
+    endforeach()
+endfunction()
+
+# Standalone children include this file to share the same asset configuration.
+if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_CURRENT_LIST_DIR)
+    return()
+endif()
+
+project(DyfShowcase LANGUAGES CXX)
+
+if(NOT TARGET dy_engine)
+    option(DY_EXTEND_MODEL "Build the optional Model extension." ON)
+    option(DY_EXTEND_ADVANCED_RENDERING "Build the optional AdvancedRendering extension." ON)
+    add_subdirectory("${DY_ENGINE_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/dy_engine" EXCLUDE_FROM_ALL)
+endif()
+
+add_subdirectory(arena targets/arena)
+if(TARGET dyf::AdvancedRendering)
+    add_subdirectory(culling targets/culling)
+    if(TARGET dyf::Model)
+        add_subdirectory(cinematic targets/cinematic)
+    else()
+        message(STATUS "Skipping ShowcaseCinematic: enable DY_EXTEND_MODEL to load environment assets.")
+    endif()
+else()
+    message(STATUS "Skipping ShowcaseCulling and ShowcaseCinematic: enable DY_EXTEND_ADVANCED_RENDERING.")
+endif()

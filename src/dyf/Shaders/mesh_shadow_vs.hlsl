@@ -30,26 +30,41 @@ cbuffer ShadowMatrix : register(
     float4 directionalSplits[RENDERER_MAX_DIRECTIONAL_LIGHTS];
     float4x4 cameraView;
     float4 filterParams;
+    float4 viewProjectionParams[128];
+    float4 softShadowParams;
+};
+
+struct ShadowOutput
+{
+    float4 position : SV_POSITION;
+    float2 uv : TEXCOORD0;
 };
 
 #if RENDERER_INSTANCING
 struct ShadowVertex
 {
     float3 position : TEXCOORD0;
+    float2 uv : TEXCOORD2;
     float4 model0 : TEXCOORD4;
     float4 model1 : TEXCOORD5;
     float4 model2 : TEXCOORD6;
     float4 model3 : TEXCOORD7;
 };
 
-float4 main(ShadowVertex input) : SV_POSITION
+ShadowOutput main(ShadowVertex input)
 {
     const float4x4 world = transpose(float4x4(input.model0, input.model1, input.model2, input.model3));
-    return mul(lightViewProjectionMatrix[padding2], mul(world, float4(input.position, 1.0)));
+    ShadowOutput output;
+    output.position=mul(lightViewProjectionMatrix[padding2], mul(world, float4(input.position, 1.0)));
+    output.uv=input.uv;
+    return output;
 }
 #else
-float4 main(float3 position : TEXCOORD0) : SV_POSITION
+ShadowOutput main(float3 position : TEXCOORD0, float2 uv : TEXCOORD2)
 {
-    return mul(lightViewProjectionMatrix[padding2], mul(modelMatrix, float4(position, 1.0)));
+    ShadowOutput output;
+    output.position=mul(lightViewProjectionMatrix[padding2], mul(modelMatrix, float4(position, 1.0)));
+    output.uv=uv;
+    return output;
 }
 #endif

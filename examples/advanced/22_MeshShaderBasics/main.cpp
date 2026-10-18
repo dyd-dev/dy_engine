@@ -1,3 +1,4 @@
+#include "dyf/RHI/IDevice.h"
 #include <dyf/RHI.h>
 #include <dyf/Platform/Window.h>
 
@@ -66,6 +67,7 @@ int main(int argc, char** argv)
     deviceDesc.enableValidation = options.validation;
     deviceDesc.maxFramesInFlight = 2;
 
+    std::unique_ptr<dyf::Platform::Window> window;
     std::unique_ptr<IDevice> device(IDevice::Create(deviceDesc));
     if(!device)
     {
@@ -84,18 +86,18 @@ int main(int argc, char** argv)
     }
 
     const uint32_t width = 800, height = 600;
-    dyf::Platform::Window window(width, height, "Advanced / Mesh Shader Basics");
-    if(!window.GetHandle())
+    window = std::make_unique<dyf::Platform::Window>(width, height, "Advanced / Mesh Shader Basics");
+    if(!window->GetHandle())
     {
         std::cerr << "Failed to create window.\n";
         return 1;
     }
 
-    ResourceScope resources(*device);
+    dyf::RHI::ResourceScope resources(*device);
 
     SwapchainDesc swapchain{};
-    swapchain.window = window.GetHandle();
-    swapchain.format = Format::B8G8R8A8_UNORM;
+    swapchain.window = window->GetHandle();
+    swapchain.format = DefaultSwapchainFormat;
     swapchain.minimumImageCount = 2;
     swapchain.presentMode = PresentMode::Fifo;
     if(!device->CreateSwapchain(swapchain))
@@ -152,8 +154,8 @@ int main(int argc, char** argv)
     uint32_t currentFrame = 0;
     while(true)
     {
-        window.PollEvents();
-        if(!window.IsRunning()) break;
+        window->PollEvents();
+        if(!window->IsRunning()) break;
         if(options.frames > 0 && currentFrame >= options.frames) break;
 
         if(!device->BeginFrame())
@@ -161,7 +163,7 @@ int main(int argc, char** argv)
             continue;
         }
 
-        ResourceScope frameScope(*device);
+        dyf::RHI::ResourceScope frameScope(*device);
         auto* commands = frameScope.Keep(device->AcquireCommandList());
         if(!commands)
         {

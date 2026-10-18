@@ -50,13 +50,15 @@ namespace dyf
         [[nodiscard]] LightHandle<SpotLight> Add(const SpotLight& light);
         [[nodiscard]] LightHandle<RectAreaLight> Add(const RectAreaLight& light);
         [[nodiscard]] LightHandle<DiscAreaLight> Add(const DiscAreaLight& light);
+        // 가져온 광원도 추가 순번으로 핸들을 얻어 같은 방식으로 수정한다.
+        template<typename LightType> [[nodiscard]] LightHandle<LightType> GetLight(uint32_t index);
 
         // 객체 ID는 0부터 GetEntityCount()-1까지다. 변경은 Handle을 통해 수행한다.
         [[nodiscard]] uint32_t GetEntityCount() const;
         [[nodiscard]] EntityHandle GetEntity(EntityID entity);
         [[nodiscard]] MeshID GetEntityMesh(EntityID entity) const;
         [[nodiscard]] MaterialID GetEntityMaterial(EntityID entity) const;
-        [[nodiscard]] const Transform& GetTransform(EntityID entity) const;
+        [[nodiscard]] const Math::float4x4& GetTransform(EntityID entity) const;
         [[nodiscard]] const EntityLightingDesc& GetEntityLighting(EntityID entity) const;
 
         // ID는 해당 컬렉션의 인덱스다. 메시 입력은 등록 후 변경하지 않는다.
@@ -89,7 +91,7 @@ namespace dyf
         std::vector<MaterialDesc> m_materials;
         std::vector<MeshID> m_entityMeshes;
         std::vector<MaterialID> m_entityMaterials;
-        std::vector<Transform> m_entityTransforms;
+        std::vector<Math::float4x4> m_entityTransforms;
         std::vector<EntityLightingDesc> m_entityLighting;
         // Append and real transform edits stamp entities; each Renderer keeps its own cursor.
         uint64_t m_transformRevision=0;
@@ -101,5 +103,7 @@ namespace dyf
         std::vector<DiscAreaLight> m_discAreaLights;
         // Handles and Renderer caches compare the weak control block, including address reuse.
         std::shared_ptr<Scene> m_lifetime;
+        uint64_t m_liveId=0;
+        std::vector<uint64_t> m_liveEntities;
     };
 }

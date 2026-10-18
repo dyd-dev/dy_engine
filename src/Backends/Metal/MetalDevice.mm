@@ -43,6 +43,19 @@ namespace dyf::Backends
 
     namespace
     {
+        void DetachWindowLayer(CAMetalLayer* layer)
+        {
+            if(layer == nil) return;
+#if TARGET_OS_IOS
+            if(![NSThread isMainThread])
+            {
+                dispatch_sync(dispatch_get_main_queue(), ^{ layer.device = nil; });
+                return;
+            }
+#endif
+            layer.device = nil;
+        }
+
         RHI::Format FromLayerPixelFormat(MTLPixelFormat format)
         {
             switch(format)
@@ -268,6 +281,7 @@ namespace dyf::Backends
 
     MetalDevice::~MetalDevice()
     {
+        StopLiveProfiling();
         if(m_impl == nullptr) return;
 
         m_impl->StopDrawableAcquisition();
@@ -299,8 +313,7 @@ namespace dyf::Backends
         delete m_impl->backBufferTex;
         m_impl->backBufferTex = nullptr;
 
-        if(m_impl->metalLayer != nil)
-            m_impl->metalLayer.device = nil;
+        DetachWindowLayer(m_impl->metalLayer);
         m_impl->uploadPool.reset();
 #if !__has_feature(objc_arc)
         [m_impl->metalLayer release];
@@ -372,6 +385,25 @@ bool MetalDevice::SupportsNative(RHI::Feature feature) const
     if(!m_impl || m_impl->device == nil) return false;
     switch(feature)
     {
+    case RHI::Feature::IndirectDraw:
+    case RHI::Feature::IndirectDispatch:
+    case RHI::Feature::IndirectFirstInstance:
+        // Native indirect arguments and base vertex/instance require Apple3
+        // on iOS; every Mac Metal GPU supports these commands.
+        // https://developer.apple.com/metal/capabilities/
+#if TARGET_OS_OSX || TARGET_OS_MACCATALYST
+        return true;
+#else
+        if(@available(iOS 13.0, tvOS 13.0, *))
+            return [m_impl->device supportsFamily:MTLGPUFamilyApple3];
+#if TARGET_OS_TV
+        if(@available(tvOS 11.0, *))
+            return [m_impl->device supportsFeatureSet:MTLFeatureSet_tvOS_GPUFamily2_v1];
+        return false;
+#else
+        return [m_impl->device supportsFeatureSet:MTLFeatureSet_iOS_GPUFamily3_v1];
+#endif
+#endif
     case RHI::Feature::Compute:
     case RHI::Feature::Rasterization:
     case RHI::Feature::Tessellation:
@@ -417,6 +449,10 @@ uint64_t MetalDevice::GetLimitNative(RHI::Limit limit) const
             if([device supportsFamily:MTLGPUFamilyApple10]) return 32768;
 #endif
         return 16384;
+    case RHI::Limit::TextureArrayLayers:
+        // Apple의 arrayLength 명세와 모든 지원 GPU family 표의 실제 한도다.
+        // https://developer.apple.com/documentation/metal/mtltexture/arraylength
+        return 2048;
     case RHI::Limit::UniformBufferOffsetAlignment:
         // Apple GPU의 constant 정렬은 4B, Mac2의 정렬은 32B다. 장치 family를 확인한다.
         if(@available(macOS 11.0, *))
@@ -465,11 +501,18 @@ bool MetalDevice::WaitIdleNative()
 }
 void MetalDevice::DestroySwapchainNative()
 {
+#if TARGET_OS_IOS
+    if(![NSThread isMainThread])
+    {
+        dispatch_sync(dispatch_get_main_queue(), ^{ DestroySwapchainNative(); });
+        return;
+    }
+#endif
     m_impl->StopDrawableAcquisition();
     m_impl->ClearCurrentDrawable();
     delete m_impl->backBufferTex;
     m_impl->backBufferTex = nullptr;
-    if(m_impl->metalLayer != nil) m_impl->metalLayer.device = nil;
+    DetachWindowLayer(m_impl->metalLayer);
 #if !__has_feature(objc_arc)
     [m_impl->metalLayer release];
     if(m_impl->drawableQueue != nullptr) dispatch_release(m_impl->drawableQueue);
@@ -483,6 +526,16 @@ void MetalDevice::DestroySwapchainNative()
 
     bool MetalDevice::CreateSwapchainNative(const RHI::SwapchainDesc& desc)
     {
+#if TARGET_OS_IOS
+        // The examples' runner owns the device; UIKit owns the layer and layout.
+        if(![NSThread isMainThread])
+        {
+            __block bool created = false;
+            const auto description = desc;
+            dispatch_sync(dispatch_get_main_queue(), ^{ created = CreateSwapchainNative(description); });
+            return created;
+        }
+#endif
         // CAMetalLayer는 2/3개만 지원한다. 범위 밖 값을 setter에 넘기면 예외를 유발할 수 있다.
         if(desc.minimumImageCount > 3)
         {
@@ -638,6 +691,15 @@ void MetalDevice::DestroySwapchainNative()
 
     bool MetalDevice::BeginFrameNative()
     {
+#if TARGET_OS_IOS
+        if(![NSThread isMainThread])
+        {
+            __block bool ready = false;
+            dispatch_sync(dispatch_get_main_queue(), ^{ ready = BeginFrameNative(); });
+            return ready;
+        }
+        if(UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return false;
+#endif
         m_impl->CollectCompletedSubmissions();
         if(m_impl->asyncWorkFailed ||
             m_impl->metalLayer == nil ||

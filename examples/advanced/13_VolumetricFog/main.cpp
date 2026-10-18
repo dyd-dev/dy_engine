@@ -1,3 +1,4 @@
+#include "dyf/RHI/IDevice.h"
 #include "dyf.h"
 #include "dyf/RHI.h"
 #include "vertex.h"
@@ -142,12 +143,12 @@ int main(int argc, char** argv) try {
     }
     auto& device = *owner;
 
-    ResourceScope resources(device);
+    dyf::RHI::ResourceScope resources(device);
 
     // 3. 스왑체인 생성
     SwapchainDesc swap;
     swap.window = window.GetHandle();
-    swap.format = Format::B8G8R8A8_UNORM;
+    swap.format = DefaultSwapchainFormat;
     swap.minimumImageCount = 2;
     swap.presentMode = PresentMode::Fifo;
 
@@ -183,7 +184,7 @@ int main(int argc, char** argv) try {
     sampler.mipLodBias = sampler.minLod = sampler.maxLod = 0;
 
     ColorAttachmentDesc sceneColorDesc{Format::R16G16B16A16_FLOAT, {}, ColorWriteMask::All};
-    ColorAttachmentDesc fogColorDesc{Format::B8G8R8A8_UNORM, {}, ColorWriteMask::All};
+    ColorAttachmentDesc fogColorDesc{DefaultSwapchainFormat, {}, ColorWriteMask::All};
 
     // --- 파이프라인 1: 불투명 씬 컬러 및 선형 레이 거리 렌더링 ---
     GraphicsPipelineDesc sceneDesc;
@@ -211,7 +212,7 @@ int main(int argc, char** argv) try {
     fogDesc.layout = {fogBindings.data(), uint32_t(fogBindings.size()), sizeof(Params), ShaderStageFlags::Fragment, 15};
     auto fogPipeline = resources.Keep(device.CreateGraphicsPipeline(fogDesc));
 
-    std::unique_ptr<ResourceScope> imageResources;
+    std::unique_ptr<dyf::RHI::ResourceScope> imageResources;
     uint32_t imageWidth = 0;
     uint32_t imageHeight = 0;
     bool initializeImages = true;
@@ -249,7 +250,7 @@ int main(int argc, char** argv) try {
             if (!device.WaitIdle()) {
                 throw std::runtime_error("Resize wait failed.");
             }
-            imageResources = std::make_unique<ResourceScope>(device);
+            imageResources = std::make_unique<dyf::RHI::ResourceScope>(device);
             imageWidth = dimensions.width;
             imageHeight = dimensions.height;
             initializeImages = true;
@@ -270,7 +271,7 @@ int main(int argc, char** argv) try {
         params.sizeTime[1] = float(imageHeight);
         params.sizeTime[2] = fixedTime ? timeValue : float(frame) / 60.0f;
 
-        ResourceScope frameResources(device);
+        dyf::RHI::ResourceScope frameResources(device);
         auto* commands = frameResources.Keep(device.AcquireCommandList());
 
         // 초기 텍스처 상태 클리어

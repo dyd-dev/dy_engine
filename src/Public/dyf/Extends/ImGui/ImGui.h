@@ -1,5 +1,5 @@
 #pragma once
-#include "dyf/RHI/ResourceHandles.h"
+#include "dyf/RHI/Binding.h"
 #include <cstdint>
 #include <memory>
 

@@ -1,7 +1,10 @@
+#include "../../../src/Platform/Profiler/CollectorInternal.h"
+#include "dyf/Extends/Tracy.h"
+#include "dyf/Extends/RenderDoc.h"
+#include "dyf/RHI/IDevice.h"
 #include "dyf/RHI.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/Platform/Profiler.h"
-#include "dyf/Platform/RenderDocCapture.h"
 #include "vertex.h"
 #include "fragment.h"
 
@@ -111,6 +114,9 @@ int main(int argc, char** argv) try {
 
     // 1. 윈도우 생성 (해상도: 800x600)
     dyf::Platform::Window window(800, 600, "Advanced / 01_Profiling");
+#ifdef DY_PROFILER_TRACING_ENABLED
+    dyf::TracyAdapter tracy;
+#endif
     Check(window.GetHandle() != nullptr, "Window creation failed");
 
     // 2. RHI 렌더 디바이스 생성
@@ -129,12 +135,12 @@ int main(int argc, char** argv) try {
     }
 
     // 디바이스 리소스 자동 관리를 위한 Scope
-    ResourceScope resources(device);
+    dyf::RHI::ResourceScope resources(device);
 
     // 3. 스왑체인(Swapchain) 생성
     SwapchainDesc swapchain;
     swapchain.window = window.GetHandle();
-    swapchain.format = Format::B8G8R8A8_UNORM;
+    swapchain.format = DefaultSwapchainFormat;
     swapchain.minimumImageCount = 2;
 
     Check(device.CreateSwapchain(swapchain), "Requested swapchain configuration unsupported");
@@ -207,6 +213,11 @@ int main(int argc, char** argv) try {
     while (!options.frames || frame < options.frames) {
         // 윈도우 OS 이벤트 처리
         window.PollEvents();
+#ifdef DY_RENDERDOC_ENABLED
+        if(window.GetInput().WasPressed(dyf::Platform::Key::F12))
+            (void)dyf::RenderDocCapture::TriggerNextFrame();
+#endif
+
         if (!window.IsRunning()) {
             break;
         }

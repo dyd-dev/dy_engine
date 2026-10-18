@@ -1,23 +1,31 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <tuple>
-#include "ResourceState.h"
+#include "Binding.h"
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-
-#include "ResourceHandles.h"
 #include "Swapchain.h"
 #include "Submission.h"
 #include "Feature.h"
-#include "Query.h"
-#include "UploadMemory.h"
+#include "dyf/Platform/Profiler.h"
+#include <stdexcept>
 
-namespace dyf::Core { class ThreadPool; }
+namespace dyf { class Renderer; class ModelRenderer; }
+
+namespace dyf::Platform
+{
+    class FrameProfiler;
+    struct LiveFrameKey;
+    enum class LiveOutcome : std::uint8_t;
+    enum class LiveObjectKind : std::uint8_t;
+}
 
 namespace dyf::RHI
 {
@@ -33,12 +41,40 @@ namespace dyf::RHI
 	struct TextureDesc;
 	struct TextureReadback;
 
+    // 장치가 실제로 제공하는 한도다. 바이트 단위와 정렬 조건은 값 이름에 따른다.
+    enum class Limit : uint8_t
+    {
+        InlineConstantBytes, Texture2DDimension,
+        UniformBufferOffsetAlignment, StorageBufferOffsetAlignment,
+        UniformBufferBytes, StorageBufferBytes, SamplerAnisotropy, TessellationPatchControlPoints,
+        TextureArrayLayers
+    };
+
 	struct DeviceDesc
 	{
 		uint32_t maxFramesInFlight = 2;
         uint32_t adapterIndex = 0;
         bool enableValidation = false;
 	};
+
+    // 결과는 ReadTimestamps로 읽는다. 쿼리 객체는 핸들로만 사용한다.
+    struct TimestampQueryDesc { uint32_t count = 0; };
+    enum class CpuTimestampDomain : uint8_t { Unsupported, QueryPerformanceCounter };
+    struct TimestampCalibration
+    {
+        CpuTimestampDomain cpuDomain = CpuTimestampDomain::Unsupported;
+        uint64_t cpuTicks = 0, cpuFrequency = 0, gpuTicks = 0;
+        double gpuPeriodNanoseconds = 0;
+        uint32_t gpuValidBits = 0;
+        std::optional<uint64_t> maximumDeviationNanoseconds;
+    };
+    // Upload-page statistics for profiling; request bytes include row padding, not alignment gaps.
+    struct UploadMemoryStatistics
+    {
+        uint64_t allocationCount=0, reuseCount=0, allocationBytes=0;
+        uint64_t requestCount=0, requestedBytes=0;
+        uint64_t cachedBytes=0, inUseBytes=0, peakInUseBytes=0;
+    };
 
     struct ResourceCounter { uint64_t live = 0, created = 0, destroyed = 0; };
     struct ResourceAllocationCounters { ResourceCounter buffers, textures, pipelines; };
@@ -55,9 +91,7 @@ namespace dyf::RHI
         // Counts device-created resources, including resources retained by pending GPU work.
         // Swapchain-owned images are excluded.
         [[nodiscard]] ResourceAllocationCounters GetResourceAllocationCounters() const;
-        // Thread-safe native staging snapshot; backends without staging report zero.
-        [[nodiscard]] UploadMemoryStatistics GetUploadMemoryStatistics() const
-        { std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);return GetUploadMemoryStatisticsNative(); }
+        [[nodiscard]] UploadMemoryStatistics GetUploadMemoryStatistics() const;
         // 설정의 공통 규칙과 장치 한도를 검사한다. 셰이더는 이 장치에서 생성한 핸들을 사용한다.
         // 조회는 자원을 생성하지 않으며, 이후 생성 시 메모리·셰이더 오류까지 보장하지는 않는다.
         [[nodiscard]] bool Supports(const PipelineLayoutDesc&) const;
@@ -75,6 +109,9 @@ namespace dyf::RHI
         [[nodiscard]] bool ReadTimestamps(TimestampQueryHandle,uint32_t first,uint32_t count,uint64_t* ticks);
         [[nodiscard]] double GetTimestampPeriodNanoseconds() const {return GetTimestampPeriodNative();}
         [[nodiscard]] uint32_t GetTimestampValidBits() const {return GetTimestampValidBitsNative();}
+        // Returns a raw clock pair; failure clears the output, without waiting for GPU work.
+        [[nodiscard]] bool GetTimestampCalibration(TimestampCalibration&) const;
+
 
         // 성공하면 Present까지 같은 backbuffer를 사용한다. 중간에 여러 번 Submit할 수 있다.
 		[[nodiscard]] bool BeginFrame();
@@ -86,8 +123,10 @@ namespace dyf::RHI
         // Only native recording runs on workers; allocation, validation and submission
         // remain owned by the common RHI. Join before changing lists/device lifetime.
         // Resources and frame/swapchain state must remain unchanged during this call.
+        // Workers are owned by the device. threadCount=0 selects hardware concurrency;
+        // 1 records on the calling thread. All recording finishes before returning.
         [[nodiscard]] bool PrepareCommandLists(ICommandList* const* commandLists, uint32_t count,
-            Core::ThreadPool* pool = nullptr);
+            uint32_t threadCount = 1);
         [[nodiscard]] bool ResetCommandList(ICommandList*);
         void DestroyCommandList(ICommandList*);
 
@@ -147,12 +186,21 @@ namespace dyf::RHI
 			uint32_t slicePitch);
 
 	protected:
-        virtual UploadMemoryStatistics GetUploadMemoryStatisticsNative() const { return {}; }
+        IDevice();
+        void StopLiveProfiling() noexcept;
+        virtual UploadMemoryStatistics GetUploadMemoryStatisticsNative() const;
+        virtual bool SetUploadMemoryPolicyNative(bool,bool) { return false; }
         enum class DiagnosticSeverity : uint8_t { Info, Warning, Error };
         void ReportDiagnostic(DiagnosticSeverity severity, const char* message) const;
 		// Release common references while the native device is still alive.
 		void ReleaseResources();
 		void AbandonResources();
+        // Reserve before retiring native swapchain resources. Only one replacement
+        // may await reclamation; false defers another replacement without losing
+        // the device. Complete only after native completion has been confirmed
+        // and the retired resources have been released.
+        [[nodiscard]] bool TryBeginSwapchainRetirement();
+        void CompleteSwapchainRetirement();
 		virtual bool CreateSwapchainNative(const SwapchainDesc&) = 0;
 		virtual void DestroySwapchainNative() = 0;
 		virtual bool WaitIdleNative() = 0;
@@ -161,6 +209,7 @@ namespace dyf::RHI
         virtual bool ReadTimestampsNative(TimestampQueryHandle,uint32_t,uint32_t,uint64_t*) {return false;}
         virtual double GetTimestampPeriodNative() const {return 0;}
         virtual uint32_t GetTimestampValidBitsNative() const {return 0;}
+        virtual bool GetTimestampCalibrationNative(TimestampCalibration&) const {return false;}
         virtual bool IsLostNative() const = 0;
         virtual bool SupportsNative(Feature) const = 0;
     virtual uint64_t GetLimitNative(Limit) const = 0;
@@ -174,6 +223,7 @@ namespace dyf::RHI
 		virtual bool PresentNative() = 0;
 		virtual bool SubmitNative(ICommandList** commandLists, uint32_t count) = 0;
 		virtual ICommandList* AcquireCommandListNative() = 0;
+        virtual ICommandList* AcquireCommandListNative(bool,bool) { return AcquireCommandListNative(); }
         virtual void DiscardCommandListNative(ICommandList*) = 0;
 		virtual TextureHandle GetBackBufferNative() = 0;
 		virtual BufferHandle CreateBufferNative(const BufferDesc& desc) = 0;
@@ -207,7 +257,37 @@ namespace dyf::RHI
 		virtual int Initialize(const void* windowHandle, const DeviceDesc& desc) = 0;
 
 	private:
+        friend struct ProfilerAccess;
+        friend class dyf::Renderer;
+        friend class dyf::ModelRenderer;
+        friend class Platform::FrameProfiler;
+        // Pending tokens and up to 4096 completed tokens (10 seconds); expired/omitted tokens return 0.
+        [[nodiscard]] std::uint64_t GetLiveSubmissionId(FenceHandle) const noexcept;
+        // Call at the source's first preparation boundary, before uploads/recording.
+        // Use its actual frame key; already-recorded lists retain their upload policy.
+        void PrepareLiveControls(Platform::LiveFrameKey) noexcept;
+        void ReleaseLiveControls(std::uint64_t source) noexcept;
+
 		friend class ICommandList;
+        friend class RenderGraph;
+        struct LiveState;
+        std::unique_ptr<LiveState> m_live;
+        LiveState* GetLiveState() noexcept;
+        void PublishLiveResources() noexcept;
+        void CaptureLiveUploadPolicy(ICommandList&) noexcept;
+        void BeginLiveRecording(ICommandList&) noexcept;
+        bool CaptureLiveGraphParallel(Platform::LiveFrameKey) noexcept;
+        struct LiveExecutionScope;
+        void BeginLiveExecution(ICommandList* const*,uint32_t,LiveExecutionScope&) noexcept;
+        void EndLiveExecution(LiveExecutionScope&) noexcept;
+        bool ReadTimestampsInternal(TimestampQueryHandle,uint32_t,uint32_t,uint64_t*,bool observe);
+        void PumpLiveWork() noexcept;
+        uint32_t ReserveLiveQuery(ICommandList*) noexcept;
+        void DiscardLivePrepared(ICommandList*,Platform::LiveOutcome) noexcept;
+        void SubmitLiveWork(ICommandList* const*,uint32_t,bool,uint64_t) noexcept;
+        struct RecordingState;
+        void RecordParallel(uint32_t count, uint32_t threadCount,
+            const std::function<void(uint32_t)>& record);
 		mutable std::recursive_mutex m_resourceMutex;
         ResourceAllocationCounters m_allocationCounters;
 		bool m_nativeResourcesAlive = true;
@@ -218,12 +298,67 @@ namespace dyf::RHI
 		std::unordered_set<const void*> m_borrowedTextures;
 		std::shared_ptr<void> Reference(const void* handle) const;
 		void Track(void* handle, void (*destroy)(IDevice&, void*), std::vector<std::shared_ptr<void>> dependencies = {});
+		void Track(void* handle, void (*destroy)(IDevice&, void*), std::vector<std::shared_ptr<void>> dependencies,
+            Platform::LiveObjectKind kind,uint64_t elements=0,uint64_t bytes=0,
+            const char* label="RHI resource");
 		std::unordered_map<const void*, std::shared_ptr<void>> m_resources;
 
 		DeviceDesc m_desc = {};
 		SwapchainDesc m_swapchainDesc = {};
 		bool m_hasSwapchain = false;
+        bool m_swapchainRetirementPending = false;
 		bool m_frameActive = false;
+        std::shared_ptr<RecordingState> m_recording;
 		void InvalidateBackBuffers();
 	};
+// 명시적으로 등록한 자원만 소유하며 장치는 이 객체보다 오래 유지해야 한다.
+// 기록된 네이티브 명령은 GPU 작업이 끝날 때까지 참조 자원을 유지한다.
+// 자원 생성·설정·업로드·배리어·제출은 호출자가 담당한다.
+class ResourceScope
+{
+public:
+    explicit ResourceScope(IDevice& device) : m_device(device) {}
+    ResourceScope(const ResourceScope&) = delete;
+    ResourceScope& operator=(const ResourceScope&) = delete;
+
+    ~ResourceScope()
+    {
+        for(auto* query:m_queries) m_device.DestroyTimestampQuery(query);
+        for(auto* commands:m_commands) m_device.DestroyCommandList(commands);
+        for (auto it = m_sets.rbegin(); it != m_sets.rend(); ++it) m_device.DestroyResourceSet(*it);
+        for (auto it = m_pipelines.rbegin(); it != m_pipelines.rend(); ++it) m_device.DestroyPipeline(*it);
+        for (auto it = m_shaders.rbegin(); it != m_shaders.rend(); ++it) m_device.DestroyShader(*it);
+        for (auto it = m_textures.rbegin(); it != m_textures.rend(); ++it) m_device.DestroyTexture(*it);
+        for (auto it = m_buffers.rbegin(); it != m_buffers.rend(); ++it) m_device.DestroyBuffer(*it);
+    }
+
+    // 소유권은 한 번만 등록하고 빈 핸들은 생성 실패로 처리한다.
+    // 스왑체인이 소유한 텍스처는 등록하지 않는다.
+    ICommandList* Keep(ICommandList* value) { return Keep(value,m_commands,&IDevice::DestroyCommandList); }
+    TimestampQueryHandle Keep(TimestampQueryHandle value) {return Keep(value,m_queries,&IDevice::DestroyTimestampQuery);}
+    BufferHandle Keep(BufferHandle value) { return Keep(value, m_buffers, &IDevice::DestroyBuffer); }
+    TextureHandle Keep(TextureHandle value) { return Keep(value, m_textures, &IDevice::DestroyTexture); }
+    ShaderHandle Keep(ShaderHandle value) { return Keep(value, m_shaders, &IDevice::DestroyShader); }
+    PipelineHandle Keep(PipelineHandle value) { return Keep(value, m_pipelines, &IDevice::DestroyPipeline); }
+    ResourceSetHandle Keep(ResourceSetHandle value) { return Keep(value, m_sets, &IDevice::DestroyResourceSet); }
+
+private:
+    template<class Handle>
+    Handle Keep(Handle value, std::vector<Handle>& handles, void (IDevice::*destroy)(Handle))
+    {
+        if (!value) throw std::runtime_error("RHI resource creation failed.");
+        try { handles.push_back(value); }
+        catch (...) { (m_device.*destroy)(value); throw; }
+        return value;
+    }
+
+    IDevice& m_device;
+    std::vector<TimestampQueryHandle> m_queries;
+    std::vector<ICommandList*> m_commands;
+    std::vector<BufferHandle> m_buffers;
+    std::vector<TextureHandle> m_textures;
+    std::vector<ShaderHandle> m_shaders;
+    std::vector<PipelineHandle> m_pipelines;
+    std::vector<ResourceSetHandle> m_sets;
+};
 }

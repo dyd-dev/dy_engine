@@ -1,4 +1,4 @@
-#include <dyf/Core/ThreadPool.h>
+#include "dyf/RHI/IDevice.h"
 #include <dyf/RHI.h>
 #include <array>
 #include <chrono>
@@ -10,6 +10,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 
 namespace RHI = dyf::RHI;
 using Clock = std::chrono::steady_clock;
@@ -86,10 +87,9 @@ int main(int argc, char** argv)
         deviceDesc.enableValidation = validation;
         std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(deviceDesc));
         Check(bool(device), "Device creation failed");
-        RHI::ResourceScope resources(*device);
+        dyf::RHI::ResourceScope resources(*device);
 
-        // 3. 작업자 스레드 풀 생성 (병렬 모드일 경우 지정된 작업자 수 사용)
-        dyf::Core::ThreadPool pool(mode == "parallel" ? workers : 1);
+        // 3. 병렬 기록 작업자는 RHI 장치가 내부에서 관리한다.
         constexpr uint32_t width = 256, height = 256;
 
         // 4. 대상 텍스처 리소스 생성 (2개의 256x256 RGBA8 텍스처)
@@ -155,7 +155,7 @@ int main(int argc, char** argv)
             CommandLists commands(*device);
             const auto recordStart = Clock::now();
             if(mode == "parallel")
-                Check(graph.ExecuteParallel(device.get(), &pool, commands.lists), "Parallel recording failed");
+                Check(graph.ExecuteParallel(device.get(), commands.lists, workers), "Parallel recording failed");
             else
             {
                 auto* list = device->AcquireCommandList();
@@ -212,8 +212,8 @@ int main(int argc, char** argv)
 
         // 7. 디바이스 유휴 대기 및 성능 측정 요약 정보 출력
         Check(device->WaitIdle(), "WaitIdle failed");
-        std::printf("mode=%s frames=%u workers=%u observed_recording_threads=%zu command_lists=%zu cpu_record_ms=%.3f cpu_submit_ms=%.3f\n",
-            mode.c_str(), frames, pool.GetThreadCount(), recordingThreads.size(), submittedLists, recordMilliseconds, submitMilliseconds);
+        std::printf("mode=%s frames=%u requested_workers=%u observed_recording_threads=%zu command_lists=%zu cpu_record_ms=%.3f cpu_submit_ms=%.3f\n",
+            mode.c_str(), frames, workers, recordingThreads.size(), submittedLists, recordMilliseconds, submitMilliseconds);
         std::puts("CPU recording includes native translation; submission is measured separately. These are not GPU timings.");
         return 0;
     }

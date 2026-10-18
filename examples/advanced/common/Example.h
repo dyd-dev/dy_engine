@@ -2,6 +2,8 @@
 // Tick: 프레임 확보 → 예제별 Draw(명령 제출 포함) → 선택적 캡처 → Present.
 #pragma once
 #include "dyf/RHI.h"
+#include "dyf/RHI/IDevice.h"
+#include "dyf/RHI/Readback.h"
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -13,6 +15,11 @@
 
 namespace advanced {
 using namespace dyf::RHI;
+#if defined(__ANDROID__)
+inline constexpr Format ExampleColorFormat=Format::R8G8B8A8_UNORM;
+#else
+inline constexpr Format ExampleColorFormat=Format::B8G8R8A8_UNORM;
+#endif
 // GPU에 그대로 전달하는 64바이트 ABI다. 멤버 순서·정렬은 GLSL/HLSL/Metal과 맞춰야 한다.
 // sizeTime은 화면 크기·시간·모드이며, settings/extra의 의미는 각 예제의 파서에서 정한다.
 struct alignas(16) Params {
@@ -110,8 +117,13 @@ class Example {
           params(selected.params), options(selected) {
         SwapchainDesc swap;
         swap.window = window;
-        swap.format = Format::B8G8R8A8_UNORM;
-        swap.minimumImageCount = 2;
+        swap.format = ExampleColorFormat;
+#if defined(__ANDROID__)
+        swap.compositeAlpha=CompositeAlpha::Inherit;
+        swap.minimumImageCount=3;
+#else
+        swap.minimumImageCount=2;
+#endif
         swap.presentMode = PresentMode::Fifo;
         swap.allowReadback = !options.capture.empty();
         if (!device.CreateSwapchain(swap))

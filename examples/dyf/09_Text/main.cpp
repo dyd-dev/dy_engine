@@ -1,10 +1,13 @@
 #include "dyf.h"
+#include <cstdlib>
 
 // 사용할 폰트 경로는 이 파일에서 지정한다.
 #if defined(_WIN32)
 #define DY_EXAMPLE_FONT "C:/Windows/Fonts/malgun.ttf"
 #elif defined(__APPLE__)
 #define DY_EXAMPLE_FONT "/System/Library/Fonts/Helvetica.ttc"
+#elif defined(__ANDROID__)
+#define DY_EXAMPLE_FONT "/system/fonts/Roboto-Regular.ttf"
 #else
 #define DY_EXAMPLE_FONT "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 #endif
@@ -19,7 +22,8 @@ int main()
 	auto renderer = dyf::Renderer::Create(window.GetHandle());
 	if(!renderer) return 1;
 
-	auto font = dyf::Font::Load(DY_EXAMPLE_FONT, 32);
+	const auto* appFont = std::getenv("DY_EXAMPLES_FONT");
+	auto font = dyf::Font::Load(appFont && *appFont ? appFont : DY_EXAMPLE_FONT, 32);
 	if(!font) return 1;
 
 	dyf::Canvas canvas(width, height);
@@ -48,4 +52,5 @@ int main()
 
 		if(!renderer->Render(canvas)) return 1;
 	}
+	return 0;
 }

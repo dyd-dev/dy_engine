@@ -1,0 +1,20 @@
+# Intel NewSponza_Main_glTF_003: 300-second authored camera draft.
+# seconds,eyeX,eyeY,eyeZ,targetX,targetY,targetZ,fovDegrees
+# Coordinates use the viewer's normalized Z-up world, not original glTF coordinates.
+# Source bounds min=(-16.245575,-1.131135,-9.402088), max=(20.001305,18.757230,14.363933).
+# center=(1.877865,8.8130475,2.4809225), scale=80/36.246880.
+# source (x,y,z) -> viewer ((x-center.x)*scale,-(z-center.z)*scale,(y-center.y)*scale).
+# The first keyframe uses source camera001 and its direction; later shots travel
+# along the central court, rise to the upper gallery, then reveal the roof and exterior.
+# Derived from the actual asset's coordinates; framing and collision clearance are
+# drafts for the user's visual review. The source model and textures are unchanged.
+0,-23.583370,7.369860,-15.936993,-2.309021,3.353316,-11.648315,58.512000
+20,-19.594216,6.579154,-15.919820,9.097909,5.475611,-13.492025,54.000000
+65,-8.558784,5.475611,-15.809466,15.719168,5.475611,-13.271316,50.000000
+105,11.746412,5.475611,-15.699111,17.926255,5.475611,-10.622812,50.000000
+125,11.746412,5.475611,-13.271316,0.269563,-4.456279,-6.208639,50.000000
+170,2.476649,5.475611,-2.456592,-15.180043,5.475611,-12.829899,50.000000
+205,-10.765870,5.475611,-1.353049,-24.008389,5.475611,-12.829899,50.000000
+260,-20.697759,5.475611,-0.249506,4.683736,5.475611,-2.235883,50.000000
+280,-19.594216,5.475611,20.276399,-4.144611,5.475611,-10.622812,52.000000
+300,-35.043822,34.167735,44.554351,-4.144611,5.475611,-8.415726,54.000000

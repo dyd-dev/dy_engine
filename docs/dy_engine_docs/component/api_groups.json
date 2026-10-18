@@ -4,13 +4,17 @@
       "dyf::Renderer",
       "dyf::RendererConfig",
       "dyf::RendererShaderDesc",
-      "dyf::RendererDrawDesc"
+      "dyf::RendererDrawDesc",
+      "dyf::SurfaceDebugView",
+      "dyf::EnvironmentProbeDesc",
+      "dyf::VolumetricFogConfig",
+      "dyf::AdvancedRenderingConfig",
+      "dyf::PostProcessConfig"
     ],
     "장면·카메라": [
       "dyf::Scene",
       "dyf::Camera",
       "dyf::EntityHandle",
-      "dyf::Transform",
       "dyf::EntityID",
       "dyf::ToIndex",
       "dyf::IsValid"
@@ -20,7 +24,6 @@
       "dyf::Vertex",
       "dyf::MaterialDesc",
       "dyf::MaterialTextureKind",
-      "dyf::kMaterialTextureCount",
       "dyf::MeshID",
       "dyf::MaterialID"
     ],
@@ -51,7 +54,30 @@
     "이미지": [
       "dyf::Image",
       "dyf::ColorSpace",
-      "dyf::TextureID"
+      "dyf::TextureID",
+      "dyf::HdrImage",
+      "dyf::LoadHdrImage",
+      "dyf::GetImageDimensions"
+    ],
+    "추가 API": [
+      "dyf::MaterialAlphaMode",
+      "dyf::MeshLod",
+      "dyf::BuildMeshLods",
+      "dyf::RendererStatistics"
+    ],
+    "렌더 확장": [
+      "dyf::RenderStage",
+      "dyf::RenderPreparation",
+      "dyf::RenderRequirements",
+      "dyf::RenderFrame",
+      "dyf::RenderExtension",
+      "dyf::RenderTexture",
+      "dyf::RenderBuffer",
+      "dyf::RenderEnvironmentConstants",
+      "dyf::RenderEnvironmentResources",
+      "dyf::RenderLightingResources",
+      "dyf::RenderHistory",
+      "dyf::RenderGeometryDraw"
     ]
   },
   "RHI": {
@@ -85,7 +111,6 @@
       "dyf::RHI::ShaderHandle",
       "dyf::RHI::ShaderStage",
       "dyf::RHI::ShaderStageFlags",
-      "dyf::RHI::ResourceSet",
       "dyf::RHI::ResourceSetDesc",
       "dyf::RHI::ResourceSetHandle",
       "dyf::RHI::ResourceBindingLayout",
@@ -139,15 +164,28 @@
       "dyf::RHI::RenderGraphPass",
       "dyf::RHI::RGResourceHandle",
       "dyf::RHI::RGResourceBinding",
-      "dyf::RHI::RGExecutionStage"
+      "dyf::RHI::RGExecutionStage",
+      "dyf::RHI::RGRecordingMode",
+      "dyf::RHI::RGDependency"
     ],
     "진단·측정": [
       "dyf::RHI::ResourceAllocationCounters",
       "dyf::RHI::ResourceCounter",
       "dyf::RHI::DebugLabelColor",
-      "dyf::RHI::TimestampQuery",
       "dyf::RHI::TimestampQueryDesc",
-      "dyf::RHI::TimestampQueryHandle"
+      "dyf::RHI::TimestampQueryHandle",
+      "dyf::RHI::HasStencil",
+      "dyf::RHI::CpuTimestampDomain",
+      "dyf::RHI::TimestampCalibration",
+      "dyf::RHI::TessellationDomain",
+      "dyf::RHI::TessellationPartitioning",
+      "dyf::RHI::TessellationState",
+      "dyf::RHI::MeshPipelineDesc"
+    ],
+    "간접 실행": [
+      "dyf::RHI::DrawIndirectArguments",
+      "dyf::RHI::DrawIndexedIndirectArguments",
+      "dyf::RHI::DispatchIndirectArguments"
     ]
   },
   "Math": {
@@ -176,9 +214,6 @@
     "시간": [
       "dyf::Platform::Time"
     ],
-    "스레드 풀": [
-      "dyf::Platform::ThreadPool"
-    ],
     "프로파일링": [
       "dyf::Platform::ProfilerSampler",
       "dyf::Platform::ProfilerTimingSample",
@@ -192,6 +227,141 @@
     ],
     "RenderDoc 캡처": [
       "dyf::Platform::RenderDocCapture"
+    ],
+    "추가 API": [
+      "dyf::Platform::ActionId",
+      "dyf::Platform::InputCapture",
+      "dyf::Platform::ActionMap",
+      "dyf::Platform::MouseButton",
+      "dyf::Platform::InputPoint",
+      "dyf::Platform::InputEventType",
+      "dyf::Platform::InputAction",
+      "dyf::Platform::InputEvent",
+      "dyf::Platform::LogLevel",
+      "dyf::Platform::LogRecord",
+      "dyf::Platform::Log::Initialize",
+      "dyf::Platform::Log::GetSessionDirectory",
+      "dyf::Platform::Log::Callback",
+      "dyf::Platform::Log::SetLevel",
+      "dyf::Platform::Log::SetCallback",
+      "dyf::Platform::Log::SetDefaultOutputEnabled",
+      "dyf::Platform::Log::Write",
+      "dyf::Platform::Log::Writef",
+      "dyf::Platform::LogBuffer",
+      "dyf::Platform::ProfilerPassTiming",
+      "dyf::Platform::WindowSize",
+      "dyf::Platform::ContentScale",
+      "dyf::Platform::CursorMode"
+    ]
+  },
+  "Diagnostics": {
+    "진단 데이터·수명": [
+      "dyf::Diagnostics::LiveId",
+      "dyf::Diagnostics::LiveProtocolVersion",
+      "dyf::Diagnostics::LiveTransferLimit",
+      "dyf::Diagnostics::LivePublishIntervalNs",
+      "dyf::Diagnostics::LiveAverageWindowNs",
+      "dyf::Diagnostics::LiveHistoryWindowNs",
+      "dyf::Diagnostics::LiveSessionId",
+      "dyf::Diagnostics::LiveFrameKey",
+      "dyf::Diagnostics::LiveCommandRef",
+      "dyf::Diagnostics::LiveContext",
+      "dyf::Diagnostics::LiveValueState",
+      "dyf::Diagnostics::LiveSample",
+      "dyf::Diagnostics::LiveObjectGauge",
+      "dyf::Diagnostics::LiveStage",
+      "dyf::Diagnostics::LiveStageCount",
+      "dyf::Diagnostics::LiveStageMetrics",
+      "dyf::Diagnostics::LiveCounters",
+      "dyf::Diagnostics::LiveOutcome",
+      "dyf::Diagnostics::LiveFrameSummary",
+      "dyf::Diagnostics::LiveMetricAggregate",
+      "dyf::Diagnostics::LiveStageAggregate",
+      "dyf::Diagnostics::LiveAggregate",
+      "dyf::Diagnostics::LiveMetricRange",
+      "dyf::Diagnostics::LiveRunRanges",
+      "dyf::Diagnostics::LiveObjectKind",
+      "dyf::Diagnostics::LiveObjectDesc",
+      "dyf::Diagnostics::LiveObjectInfo",
+      "dyf::Diagnostics::LiveResourceCount",
+      "dyf::Diagnostics::LiveUploadMemoryStatistics",
+      "dyf::Diagnostics::LiveCpuClock",
+      "dyf::Diagnostics::LiveClockInfo",
+      "dyf::Diagnostics::LiveDeviceSnapshot",
+      "dyf::Diagnostics::LiveCommandKind",
+      "dyf::Diagnostics::LiveEventKind",
+      "dyf::Diagnostics::LiveSplitReason",
+      "dyf::Diagnostics::LiveEvent",
+      "dyf::Diagnostics::LiveFlowLink",
+      "dyf::Diagnostics::LiveGpuScope",
+      "dyf::Diagnostics::LiveGpuAggregation",
+      "dyf::Diagnostics::LiveGpuEndpoint",
+      "dyf::Diagnostics::LiveGpuSpan",
+      "dyf::Diagnostics::LiveFlowSnapshot",
+      "dyf::Diagnostics::LiveLoss",
+      "dyf::Diagnostics::LiveFrameEvidence",
+      "dyf::Diagnostics::LiveComparisonEvidence",
+      "dyf::Diagnostics::LiveSourceSnapshot",
+      "dyf::Diagnostics::ControlValue",
+      "dyf::Diagnostics::ControlKind",
+      "dyf::Diagnostics::ControlApplication",
+      "dyf::Diagnostics::ControlState",
+      "dyf::Diagnostics::ControlCategory",
+      "dyf::Diagnostics::ControlChoice",
+      "dyf::Diagnostics::ControlDesc",
+      "dyf::Diagnostics::ControlRequest",
+      "dyf::Diagnostics::ControlStatus",
+      "dyf::Diagnostics::ControlApplyResult",
+      "dyf::Diagnostics::ControlHandler",
+      "dyf::Diagnostics::ControlRegistration",
+      "dyf::Diagnostics::LiveCollectorStatistics",
+      "dyf::Diagnostics::LiveSnapshot",
+      "dyf::Diagnostics::LiveTarget",
+      "dyf::Diagnostics::LiveClientState",
+      "dyf::Diagnostics::LiveClient",
+      "dyf::Diagnostics::LiveFrameToken",
+      "dyf::Diagnostics::LiveEventSummary",
+      "dyf::Diagnostics::LiveContextScope",
+      "dyf::Diagnostics::LiveFrameScope",
+      "dyf::Diagnostics::LiveCpuScope"
+    ],
+    "수집·제어": [
+      "dyf/Diagnostics/LiveProfiling-dyf::Diagnostics::operator==",
+      "dyf/Diagnostics/LiveProfiling-dyf::Diagnostics::operator!=",
+      "dyf::Diagnostics::LiveNowNs",
+      "dyf::Diagnostics::GetLiveClockInfo",
+      "dyf::Diagnostics::SetLiveCollectorEnabled",
+      "dyf::Diagnostics::IsLiveCollectorEnabled",
+      "dyf::Diagnostics::AllocateLiveId",
+      "dyf::Diagnostics::RegisterLiveObject",
+      "dyf::Diagnostics::FindLiveObject",
+      "dyf::Diagnostics::UpdateLiveObject",
+      "dyf::Diagnostics::RebindLiveObject",
+      "dyf::Diagnostics::RetireLiveObject",
+      "dyf::Diagnostics::GetLiveBatchId",
+      "dyf::Diagnostics::PublishLiveDevice",
+      "dyf::Diagnostics::GetLiveContext",
+      "dyf::Diagnostics::SetLiveContext",
+      "dyf::Diagnostics::BeginLiveFrame",
+      "dyf::Diagnostics::EndLiveFrame",
+      "dyf::Diagnostics::AccumulateLiveEventSummary",
+      "dyf::Diagnostics::ReserveLiveDetailBytes",
+      "dyf::Diagnostics::ReleaseLiveDetailBytes",
+      "dyf::Diagnostics::RecordLiveEventSummary",
+      "dyf::Diagnostics::RecordLiveEvent",
+      "dyf::Diagnostics::RecordLiveLink",
+      "dyf::Diagnostics::RecordLiveGpuSpan",
+      "dyf::Diagnostics::SetLiveGpuCoverage",
+      "dyf::Diagnostics::SetLiveObjectGauge",
+      "dyf::Diagnostics::ReadLiveSnapshot",
+      "dyf::Diagnostics::NotifyLiveSettingsApplied",
+      "dyf::Diagnostics::RegisterControl",
+      "dyf::Diagnostics::PollControls",
+      "dyf::Diagnostics::PublishControlValue",
+      "dyf::Diagnostics::PublishControlAvailability",
+      "dyf::Diagnostics::CompleteControl",
+      "dyf::Diagnostics::FailControl",
+      "dyf::Diagnostics::RequestLiveControl"
     ]
   },
   "확장: Model": {
@@ -235,7 +405,23 @@
     "모델 렌더링": [
       "dyf::ModelRenderer",
       "dyf::ModelShaderDesc",
-      "dyf::SkinningExecutionMode"
+      "dyf::SkinningExecutionMode",
+      "dyf::ModelMaterialOverride",
+      "dyf::LoadModelLights",
+      "dyf::ModelOptimizationConfig"
+    ]
+  },
+  "확장: AdvancedRendering": {
+    "렌더 모듈": [
+      "dyf::AdvancedRenderModule",
+      "dyf::CreateAdvancedRenderingModule",
+      "dyf::AdvancedRendering"
+    ]
+  },
+  "확장: ImGui": {
+    "추가 API": [
+      "dyf::GuiStats",
+      "dyf::Gui"
     ]
   }
 }

@@ -34,9 +34,27 @@ namespace dyf
 		ColorSpace m_colorSpace = ColorSpace::Srgb;
 		std::string m_sourcePath;
 	};
+	// Linear HDR RGBA pixels. Copies share immutable storage and preserve values above 1.
+	class HdrImage
+	{
+	public:
+		HdrImage() = default;
+		HdrImage(uint32_t width,uint32_t height,std::vector<float> rgba);
+		[[nodiscard]] bool IsValid() const;
+		[[nodiscard]] uint32_t GetWidth() const { return m_width; }
+		[[nodiscard]] uint32_t GetHeight() const { return m_height; }
+		[[nodiscard]] const std::vector<float>& GetPixels() const;
+	private:
+		uint32_t m_width=0,m_height=0;
+		std::shared_ptr<const std::vector<float>> m_pixels;
+	};
+	[[nodiscard]] bool LoadHdrImage(const std::string& path,HdrImage& image);
 
-	// 실패하면 stderr로 원인을 알리고 false를 반환한다.
+	// 실패하면 stderr로 원인을 알리고 false를 반환한다. DDS BC1/2/3/4/5/7 및
+	// RGBA/BGRA8도 CPU에서 RGBA8로 해제한다. 원본 크기·알파를 유지하며 색 변환은 하지 않는다.
 	[[nodiscard]] bool LoadImage(const std::string& path, Image& image);
+	// Reads file metadata (including DDS) without decoding pixel storage. Failure clears both dimensions.
+	[[nodiscard]] bool GetImageDimensions(const std::string& path, uint32_t& width, uint32_t& height);
 	// 메모리 입력은 모델에 내장된 이미지 등에서 사용한다.
 	[[nodiscard]] bool LoadImage(const uint8_t* encodedBytes, size_t encodedSize, Image& image,
 		uint64_t maxDecodedBytes = UINT64_MAX, bool* outLimitExceeded = nullptr);

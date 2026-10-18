@@ -4,8 +4,8 @@
 #include <memory>
 #include <vector>
 
-#include "dyf/RHI/ResourceSet.h"
-#include "dyf/RHI/ResourceState.h"
+#include "../../RHI/ResourceSet.h"
+#include "dyf/RHI/Binding.h"
 
 namespace dyf::Backends
 {

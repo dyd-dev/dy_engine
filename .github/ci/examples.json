@@ -474,14 +474,14 @@
       "coverage": "backend capability report and explicit unavailable-example exit; GPU rendering is not implemented"
     },
     "examples/advanced/18_GPUCulling": {
-      "kind": "capability",
-      "expected_exit": 77,
-      "markers": [
-        "Supports(Compute)",
-        "Supports(IndirectDraw)",
-        "종료 코드 77"
+      "kind": "visible",
+      "seconds": 3,
+      "warmup": 1,
+      "region": [0.05, 0.05, 0.95, 0.95],
+      "unsupported_markers": [
+        "UNSUPPORTED: rasterization, compute and indirect drawing are required."
       ],
-      "coverage": "backend capability report and explicit unavailable-example exit; GPU rendering is not implemented"
+      "coverage": "standalone compute frustum culling compacts visible IDs for indirect rendering; GPU visible counts are not read back"
     },
     "examples/advanced/19_MultithreadRecording": {
       "kind": "headless-compare",

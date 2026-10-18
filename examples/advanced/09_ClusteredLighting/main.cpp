@@ -1,3 +1,4 @@
+#include "dyf/RHI/IDevice.h"
 #include "dyf.h"
 #include "dyf/RHI.h"
 #include "vertex.h"
@@ -140,12 +141,12 @@ int main(int argc, char** argv) try {
         return 77;
     }
 
-    ResourceScope resources(device);
+    dyf::RHI::ResourceScope resources(device);
 
     // 3. 스왑체인 생성
     SwapchainDesc swap;
     swap.window = window.GetHandle();
-    swap.format = Format::B8G8R8A8_UNORM;
+    swap.format = DefaultSwapchainFormat;
     swap.minimumImageCount = 2;
     swap.presentMode = PresentMode::Fifo;
 
@@ -177,7 +178,7 @@ int main(int argc, char** argv) try {
     std::vector<ResourceBindingLayout> lightingBindings;
     lightingBindings.push_back({0, ResourceBindingType::ReadOnlyStorageBuffer, 1, ShaderStageFlags::Fragment, {}});
 
-    ColorAttachmentDesc colorDesc{Format::B8G8R8A8_UNORM, {}, ColorWriteMask::All};
+    ColorAttachmentDesc colorDesc{DefaultSwapchainFormat, {}, ColorWriteMask::All};
 
     GraphicsPipelineDesc lightingDesc;
     lightingDesc.vertexShader = vertexShader;
@@ -251,7 +252,7 @@ int main(int argc, char** argv) try {
         params.sizeTime[1] = float(dimensions.height);
         params.sizeTime[2] = fixedTime ? timeValue : float(frame) / 60.0f;
 
-        ResourceScope frameResources(device);
+        dyf::RHI::ResourceScope frameResources(device);
         auto* commands = frameResources.Keep(device.AcquireCommandList());
 
         // --- 1단계: GPU 컴퓨트 클러스터 빌드 ---
