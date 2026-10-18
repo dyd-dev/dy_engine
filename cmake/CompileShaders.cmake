@@ -61,6 +61,7 @@ function(dy_compile_shader target name stage)
             COMMAND "${DY_DXC}" -T "${profile}" -E "${entry}" ${includes} -Fo "${binary}" "${SHADER_HLSL}"
             DEPENDS ${dependencies} VERBATIM)
     elseif(USE_METAL)
+        # 대상 SDK의 AIR → metallib로 빌드한다. 아래 공통 단계에서 C++ 헤더로 내장한다.
         include(MetalToolchain)
         if(NOT SHADER_METAL_ENTRY)
             message(FATAL_ERROR "A Metal entry point is required for ${target}/${name}")
@@ -69,7 +70,7 @@ function(dy_compile_shader target name stage)
         add_custom_command(OUTPUT "${binary}"
             BYPRODUCTS "${directory}/${name}.air"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${directory}"
-            COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal ${includes}
+            COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal ${DY_METAL_COMPILE_ARGS} ${includes}
                 -c "${SHADER_METAL}" -o "${directory}/${name}.air"
             COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metallib "${directory}/${name}.air" -o "${binary}"
             DEPENDS ${dependencies} VERBATIM)

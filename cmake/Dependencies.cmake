@@ -118,18 +118,16 @@ if(USE_D3D12 AND WIN32 AND DY_ENABLE_PIX)
     target_link_libraries(${PROJECT_NAME} PRIVATE WinPixEventRuntime::WinPixEventRuntime)
 endif()
 
-if(NOT ANDROID)
-	FetchContent_Declare(
-		glfw
-		GIT_REPOSITORY "https://github.com/glfw/glfw.git"
-		GIT_TAG "3.4"
-	)
-	FetchContent_MakeAvailable(glfw)
-	target_link_libraries(${PROJECT_NAME} PRIVATE glfw)
-	target_compile_definitions(${PROJECT_NAME} PRIVATE GLFW_INCLUDE_NONE)
-else()
-	target_link_libraries(${PROJECT_NAME} PRIVATE android log)
-	target_include_directories(${PROJECT_NAME} PRIVATE "${ANDROID_NDK}/sources/android/native_app_glue")
+if(NOT ANDROID NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    FetchContent_Declare(
+        glfw
+        GIT_REPOSITORY "https://github.com/glfw/glfw.git"
+        GIT_TAG "3.4"
+    )
+    FetchContent_MakeAvailable(glfw)
+
+    target_link_libraries(${PROJECT_NAME} PRIVATE glfw)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE GLFW_INCLUDE_NONE)
 endif()
 
 # stb 자동 다운로드 설정
