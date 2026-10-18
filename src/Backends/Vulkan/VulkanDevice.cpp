@@ -15,7 +15,12 @@
 #include "VulkanResources.h"
 #include "VulkanSwapchain.h"
 
+#if !defined(__ANDROID__)
 #include <GLFW/glfw3.h>
+#else
+#include <vulkan/vulkan_android.h>
+#include <android/native_window.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -788,10 +793,15 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 		if (!m_imageAcquired)
 		{
+#if defined(__ANDROID__)
+			constexpr uint64_t acquireTimeout = 1000000000ULL; // 1s timeout for Android SurfaceFlinger VSync
+#else
+			constexpr uint64_t acquireTimeout = 0;
+#endif
 			const VkResult result = vkAcquireNextImageKHR(
 				m_context.device,
 				m_swapchain.GetHandle(),
-				0,
+				acquireTimeout,
 				m_imageAvailableSemaphores[m_currentFrameSlot],
 				VK_NULL_HANDLE,
 				&m_currentImageIndex);
@@ -1437,6 +1447,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         if(supported(VK_KHR_SURFACE_EXTENSION_NAME))extensions.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
 #if defined(_WIN32)
         if(supported("VK_KHR_win32_surface"))extensions.push_back("VK_KHR_win32_surface");
+#elif defined(__ANDROID__)
+        if(supported("VK_KHR_android_surface"))extensions.push_back("VK_KHR_android_surface");
 #else
         for(const char* name:{"VK_KHR_xlib_surface","VK_KHR_xcb_surface","VK_KHR_wayland_surface"})
             if(supported(name))extensions.push_back(name);
@@ -1496,6 +1508,11 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		info.hinstance = GetModuleHandle(nullptr);
 		info.hwnd = static_cast<HWND>(m_windowHandle);
 		return vkCreateWin32SurfaceKHR(m_context.instance, &info, nullptr, &m_context.surface);
+#elif defined(__ANDROID__)
+		VkAndroidSurfaceCreateInfoKHR info{};
+		info.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR;
+		info.window = static_cast<ANativeWindow*>(m_windowHandle);
+		return vkCreateAndroidSurfaceKHR(m_context.instance, &info, nullptr, &m_context.surface);
 #else
 		return glfwCreateWindowSurface(
 			m_context.instance,
