@@ -489,6 +489,9 @@ bool IDevice::ResetCommandList(ICommandList* commands)
     commands->m_stateOperations.clear();
     commands->m_recordedStates.clear();
     commands->m_requiredResourceSets.clear();
+#ifdef DY_LIVE_PROFILING_ENABLED
+    commands->m_liveDeferred->objectIds.clear();
+#endif
     commands->m_references.clear();
     commands->m_referenceHandles.clear();
     commands->m_sharedReferences.reset();

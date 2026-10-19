@@ -19,6 +19,9 @@ Platform::LiveCommandRef ICommandList::GetLiveCommandPosition() const noexcept
 namespace
 {
 #ifdef DY_LIVE_PROFILING_ENABLED
+constexpr size_t LiveEventBatchSize=128;
+constexpr size_t LiveLinkBatchSize=512;
+
 template<class T> void DeferDetail(std::vector<T>& values,const T& value,size_t limit,uint64_t& omitted) noexcept
 {
     if(values.size()>=limit){++omitted;return;}
@@ -45,6 +48,9 @@ void ICommandList::DeferLiveEvent(const D::LiveEvent& event) noexcept
 {
 #ifdef DY_LIVE_PROFILING_ENABLED
     auto& deferred=*m_liveDeferred;
+    if(deferred.m_liveContext.frame.frame &&
+        (deferred.events.size() >= LiveEventBatchSize || deferred.links.size() >= LiveLinkBatchSize))
+        FlushLiveDeferred(deferred.m_liveContext);
     D::AccumulateLiveEventSummary(deferred.summary,event);
     DeferDetail(deferred.events,event,8192,deferred.summary.omittedEvents);
 #else
@@ -65,15 +71,15 @@ void ICommandList::DiscardLiveDeferred() noexcept
 void ICommandList::FlushLiveDeferred(D::LiveContext context) noexcept
 {
 #ifdef DY_LIVE_PROFILING_ENABLED
-    const auto& deferred=*m_liveDeferred;
+    auto& deferred=*m_liveDeferred;
     if(deferred.events.empty() && deferred.links.empty() &&
         !deferred.summary.omittedEvents && !deferred.summary.omittedLinks) return;
     D::LiveContextScope restore(context);
-    // Fixed counters never depend on retained detail or space remaining for publication.
-    D::RecordLiveEventSummary(m_liveDeferred->m_livePosition,deferred.summary);
-    for(auto event:deferred.events){event.context=context;D::RecordLiveEvent(event,false);}
-    for(const auto& link:deferred.links)D::RecordLiveLink(link);
-    DiscardLiveDeferred();
+    // Publish exact counters and detail together, without locking the frame per command.
+    D::RecordLiveCommandBatch(deferred.m_livePosition,deferred.summary,deferred.events,deferred.links);
+    deferred.events.clear();
+    deferred.links.clear();
+    deferred.summary={};
 #else
     (void)context;
 #endif
@@ -87,7 +93,9 @@ void ICommandList::RecordLiveInfo(D::LiveEvent event) noexcept
         auto context=event.context.frame.frame?event.context:D::GetLiveContext();
         if(!context.frame.frame||context.frame.device!=m_liveDeferred->m_liveContext.frame.device)context=m_liveDeferred->m_liveContext;
         event.context=context;
-        if(context.frame.frame)D::RecordLiveEvent(event);else DeferLiveEvent(event);
+        if(context.frame.frame && context.frame != m_liveDeferred->m_liveContext.frame)
+            D::RecordLiveEvent(event);
+        else DeferLiveEvent(event);
     }
     catch(...){}
 #else
@@ -100,9 +108,10 @@ void ICommandList::RecordLiveResourceLink(D::LiveId from,D::LiveId to) noexcept
     if(!from||!to||!D::IsLiveCollectorEnabled())return;
     try
     {
-        if(!m_liveDeferred->m_liveContext.frame.frame)
-            DeferDetail(m_liveDeferred->links,D::LiveFlowLink{from,to},16384,m_liveDeferred->summary.omittedLinks);
-        else {D::LiveContextScope context(m_liveDeferred->m_liveContext);D::RecordLiveLink({from,to});}
+        auto& deferred=*m_liveDeferred;
+        if(deferred.m_liveContext.frame.frame && deferred.links.size() >= LiveLinkBatchSize)
+            FlushLiveDeferred(deferred.m_liveContext);
+        DeferDetail(deferred.links,D::LiveFlowLink{from,to},16384,deferred.summary.omittedLinks);
     }
     catch(...){}
 #else
@@ -125,13 +134,13 @@ void ICommandList::RecordLiveCommand(D::LiveCommandKind commandKind,std::array<i
         if(!context.frame.frame||context.frame!=m_liveDeferred->m_liveContext.frame)context=m_liveDeferred->m_liveContext;
         D::LiveEvent event;event.id=D::AllocateLiveId();event.context=context;
         event.command=m_liveDeferred->m_livePosition;event.command.index=++m_liveDeferred->m_livePosition.index;
-        event.resource=D::FindLiveObject(resource);event.kind=kind;event.commandKind=commandKind;
+        event.resource=m_liveDeferred->FindObject(resource);event.kind=kind;event.commandKind=commandKind;
         event.stage=kind==D::LiveEventKind::Upload?D::LiveStage::Upload:D::LiveStage::Record;
         event.beginNs=m_liveDeferred->m_liveCommandBeginNs;event.endNs=D::LiveNowNs();event.arguments=arguments;
         event.elements=elements;event.bytes=bytes;event.operations=operations;event.fullUpload=fullUpload;
         for(size_t i=0;label&&label[i]&&i+1<sizeof(event.label);++i)event.label[i]=label[i];
         if(!event.beginNs)event.beginNs=event.endNs;
-        if(context.frame.frame)D::RecordLiveEvent(event);else DeferLiveEvent(event);
+        DeferLiveEvent(event);
         RecordLiveResourceLink(event.resource,event.id);
         RecordLiveBindings(event.id,commandKind);
         RecordLiveResourceLink(context.batch,event.id);
@@ -148,16 +157,17 @@ void ICommandList::RecordLiveBindings(D::LiveId event,D::LiveCommandKind kind) n
 #ifdef DY_LIVE_PROFILING_ENABLED
     const bool draw=kind==D::LiveCommandKind::Draw||kind==D::LiveCommandKind::DrawIndexed;
     if(!draw&&kind!=D::LiveCommandKind::Dispatch&&kind!=D::LiveCommandKind::DispatchMesh)return;
-    RecordLiveResourceLink(D::FindLiveObject(m_pipeline),event);
+    RecordLiveResourceLink(m_liveDeferred->FindObject(m_pipeline),event);
     if(draw&&m_pipeline)for(const auto binding:m_pipeline->m_requiredVertexBindings)
-    {const auto found=m_vertexBuffers.find(binding);if(found!=m_vertexBuffers.end())RecordLiveResourceLink(D::FindLiveObject(found->second),event);}
-    if(kind==D::LiveCommandKind::DrawIndexed)RecordLiveResourceLink(D::FindLiveObject(m_indexBuffer),event);
+    {const auto found=m_vertexBuffers.find(binding);if(found!=m_vertexBuffers.end())RecordLiveResourceLink(m_liveDeferred->FindObject(found->second),event);}
+    if(kind==D::LiveCommandKind::DrawIndexed)RecordLiveResourceLink(m_liveDeferred->FindObject(m_indexBuffer),event);
     if(m_resourceSet&&m_resourceSet->GetPipeline()==m_pipeline)
     {
-        RecordLiveResourceLink(D::FindLiveObject(m_resourceSet),event);
+        RecordLiveResourceLink(m_liveDeferred->FindObject(m_resourceSet),event);
         for(uint32_t i=0;i<m_resourceSet->GetBindingCount();++i)
         {const auto& binding=m_resourceSet->GetBindings()[i];
-            RecordLiveResourceLink(D::FindLiveObject(binding.buffer),event);RecordLiveResourceLink(D::FindLiveObject(binding.texture),event);}
+            RecordLiveResourceLink(m_liveDeferred->FindObject(binding.buffer),event);
+            RecordLiveResourceLink(m_liveDeferred->FindObject(binding.texture),event);}
     }
 #else
     (void)event;(void)kind;

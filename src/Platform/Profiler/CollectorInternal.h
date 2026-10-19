@@ -542,7 +542,9 @@ namespace dyf::Platform
 	void AccumulateLiveEventSummary(LiveEventSummary&, const LiveEvent&) noexcept;
 	bool ReserveLiveDetailBytes(std::size_t bytes) noexcept;
 	void ReleaseLiveDetailBytes(std::size_t bytes) noexcept;
-	void RecordLiveEventSummary(LiveCommandRef, const LiveEventSummary&) noexcept;
+	// Events retain their full provenance and belong to the current recording frame.
+	void RecordLiveCommandBatch(LiveCommandRef, const LiveEventSummary&,
+		const std::vector<LiveEvent>&, const std::vector<LiveFlowLink>&) noexcept;
 }
 
 namespace dyf::Platform::Detail

@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <deque>
 #include <thread>
+#include <unordered_map>
 
 namespace dyf::RHI
 {
@@ -26,6 +27,16 @@ namespace dyf::RHI
         std::vector<Platform::LiveEvent> events;
         std::vector<Platform::LiveFlowLink> links;
         Platform::LiveEventSummary summary;
+        std::unordered_map<const void*, Platform::LiveId> objectIds;
+        Platform::LiveId FindObject(const void* object) noexcept
+        {
+            if(!object || !Platform::IsLiveCollectorEnabled()) return 0;
+            const auto found = objectIds.find(object);
+            if(found != objectIds.end()) return found->second;
+            const auto id = Platform::FindLiveObject(object);
+            if(id) try { objectIds.emplace(object, id); } catch(...) {}
+            return id;
+        }
 #endif
     };
 
