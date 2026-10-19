@@ -2,6 +2,7 @@
 #include <dyf/Extends/Model/ModelRenderer.h>
 #include <dyf/Extends/Model/ModelScene.h>
 #include "ModelShaderAssets.h"
+#include "ModelSkinning.h"
 #include "../../Platform/Profiler/GpuTimestamp.h"
 #include "dyf/Image.h"
 #include "dyf/RHI/Buffer.h"
@@ -471,7 +472,12 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
             return Failure("Skin influence references an invalid joint or weight.");
     }
 
-    const uint32_t limit = std::max(stockGeometry ? 2u : 1u, device.GetDesc().maxFramesInFlight);
+    const uint32_t inFlight = std::max(1u, device.GetDesc().maxFramesInFlight);
+    if(stockGeometry && inFlight == UINT32_MAX)
+        return Failure("Model frame history exceeds the frame slot limit.");
+    // Surface motion reads the previous deformation as well as this frame's
+    // output. Keep its slot in addition to the configured in-flight outputs.
+    const uint32_t limit = inFlight + (stockGeometry ? 1u : 0u);
     uint32_t selected = 0;
     for(; selected < m_frames.size(); ++selected)
         if(selected != m_historyFrame && (!m_frames[selected].completion || device.IsComplete(m_frames[selected].completion))) break;
@@ -528,6 +534,8 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
     };
     if(!sameInfluences)
     {
+        const bool changed = m_influences.size() != influences.size() ||
+            (!influences.empty() && std::memcmp(m_influences.data(), influences.data(), influences.size() * sizeof(SkinInfluence)) != 0);
         auto* buffer = createUpload(influences.data(), influences.size(), sizeof(SkinInfluence),
             RHI::BufferUsage::Storage, RHI::ResourceState::ShaderResource);
         if(!buffer) return Failure("Skin influence upload failed.");
@@ -536,6 +544,7 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
         m_influences = std::move(influences); m_influenceOffsets = std::move(offsets);
         m_influenceCounts = std::move(counts); m_requiredInfluenceJoints = std::move(requiredJoints);
         m_validInfluences = std::move(validInfluences);
+        if(changed && !++m_influenceRevision) ++m_influenceRevision;
     }
     // activeOffsets may refer to a moved local vector; all subsequent reads use the published cache.
     auto* influenceBuffer = m_influenceBuffer;
@@ -644,18 +653,40 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
             };
             const auto identity = reinterpret_cast<uintptr_t>(sourceMesh.get());
             hashBytes(&identity, sizeof(identity));
+            // Compute already evaluates normals/tangents. On the CPU evaluate
+            // only the position needed for exact bounds, and identify geometry
+            // by its complete deterministic inputs rather than re-skinning it.
+            const bool positionsOnly = compute && paletteOffset != UINT32_MAX;
+            if(positionsOnly)
+            {
+                const size_t vertexCount = input.vertices.size();
+                hashBytes(&vertexCount, sizeof(vertexCount));
+                hashBytes(&m_influenceRevision, sizeof(m_influenceRevision));
+                hashBytes(&m_influenceOffsets[meshIndex], sizeof(m_influenceOffsets[meshIndex]));
+                hashBytes(entityPalette.data(), entityPalette.size() * sizeof(SkinJointMatrices));
+            }
             for(size_t vertexIndex = 0; vertexIndex < input.vertices.size(); ++vertexIndex)
             {
                 Vertex output = input.vertices[vertexIndex];
-                if(paletteOffset != UINT32_MAX &&
-                    !SkinVertex(input.vertices[vertexIndex], influences[vertexIndex], entityPalette, output))
-                    return Failure("Deformed bounds evaluation failed.");
+                if(paletteOffset != UINT32_MAX)
+                {
+                    const bool valid = positionsOnly ?
+                        Detail::SkinPosition(input.vertices[vertexIndex], influences[vertexIndex], entityPalette, output.position) :
+                        SkinVertex(input.vertices[vertexIndex], influences[vertexIndex], entityPalette, output);
+                    if(!valid) return Failure("Deformed bounds evaluation failed.");
+                }
                 if(!std::isfinite(output.position.x) || !std::isfinite(output.position.y) || !std::isfinite(output.position.z))
                     return Failure("Deformed geometry contains a non-finite position.");
                 draw.localBounds.Include(output.position);
-                const auto packed = PackVertex(output);
-                hashBytes(&packed, sizeof(packed));
-                if(cpuVerticesNeeded) cpuVertices.push_back(packed);
+                // Scene meshes are immutable after registration. Their owner
+                // identity plus skin inputs determines compute output; only
+                // a per-entity morph input needs its vertex bytes inspected.
+                if(!positionsOnly || morphed)
+                {
+                    const auto packed = PackVertex(positionsOnly ? input.vertices[vertexIndex] : output);
+                    hashBytes(&packed, sizeof(packed));
+                    if(cpuVerticesNeeded) cpuVertices.push_back(packed);
+                }
             }
             // CPU·GPU 연산 순서 차이로 경계 정점이 컬링되지 않도록 작은 여유를 둔다.
             const auto& bounds = draw.localBounds;
@@ -665,7 +696,9 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
             draw.localBounds.min = draw.localBounds.min - padding;
             draw.localBounds.max = draw.localBounds.max + padding;
             draw.hasLocalBounds = true;
-            if(!m_geometryRevisions[index] || m_geometrySignatures[index] != signature)
+            const bool changedOwner = positionsOnly && (m_historyScene != &scene ||
+                index >= m_historyMeshes.size() || m_historyMeshes[index].lock() != sourceMesh);
+            if(!m_geometryRevisions[index] || m_geometrySignatures[index] != signature || changedOwner)
             {
                 m_geometrySignatures[index] = signature;
                 m_geometryRevisions[index] = m_nextGeometryRevision++;
