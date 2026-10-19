@@ -552,7 +552,8 @@ bool IDevice::PrepareCommandLists(ICommandList* const* commands, uint32_t count,
                 native->m_owner = this;
                 m_recordedCommands.insert(native);
                 native->m_references = commands[i]->m_references;
-                native->m_referenceHandles = commands[i]->m_referenceHandles;
+                // Native replay calls *Native directly; only the shared owners
+                // are needed here, not the logical recorder's Track lookup index.
                 native->m_sharedReferences = commands[i]->m_sharedReferences;
                 const auto slot=ReserveLiveQuery(commands[i]);
                 if(slot!=UINT32_MAX&&m_live)

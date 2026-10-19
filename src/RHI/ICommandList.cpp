@@ -730,11 +730,13 @@ class RecordedCommandList final : public ICommandList
         std::vector<ResourceBarrierDesc> copy;
         if(count) copy.assign(values,values+count);
         m_commands.push_back([copy=std::move(copy)](ICommandList& native) { native.ResourceBarrierNative(copy.data(),static_cast<uint32_t>(copy.size())); return true; });
-        for(uint32_t i=0;i<count;++i)RecordLiveCommand(D::LiveCommandKind::Barrier,
+#ifdef DY_LIVE_PROFILING_ENABLED
+        if(D::IsLiveCollectorEnabled())for(uint32_t i=0;i<count;++i)RecordLiveCommand(D::LiveCommandKind::Barrier,
             {static_cast<int64_t>(values[i].before),static_cast<int64_t>(values[i].after),values[i].subresources.firstMipLevel,
              values[i].subresources.firstArrayLayer,values[i].subresources.mipLevelCount},
             values[i].buffer?static_cast<const void*>(values[i].buffer):values[i].texture,
             values[i].subresources.arrayLayerCount,0,1,D::LiveEventKind::Command,false,"Resource barrier");
+#endif
     }
     void BeginRenderingNative(const RenderingDesc& desc) override
     {
@@ -793,13 +795,19 @@ class RecordedCommandList final : public ICommandList
     void BindResourceSetNative(ResourceSetHandle resources) override
     {
         m_commands.push_back([=](ICommandList& n){n.BindResourceSetNative(resources);return true;});
-        RecordLiveCommand(D::LiveCommandKind::Bind,{},resources,resources->GetBindingCount(),0,1,D::LiveEventKind::Command,false,"Resource set");
-        for(uint32_t i=0;i<resources->GetBindingCount();++i)
+#ifdef DY_LIVE_PROFILING_ENABLED
+        // A no-op collector would still evaluate the per-binding object lookups.
+        if(D::IsLiveCollectorEnabled())
         {
-            const auto& binding=resources->GetBindings()[i];
-            RecordLiveResourceLink(D::FindLiveObject(binding.buffer),D::FindLiveObject(resources));
-            RecordLiveResourceLink(D::FindLiveObject(binding.texture),D::FindLiveObject(resources));
+            RecordLiveCommand(D::LiveCommandKind::Bind,{},resources,resources->GetBindingCount(),0,1,D::LiveEventKind::Command,false,"Resource set");
+            for(uint32_t i=0;i<resources->GetBindingCount();++i)
+            {
+                const auto& binding=resources->GetBindings()[i];
+                RecordLiveResourceLink(D::FindLiveObject(binding.buffer),D::FindLiveObject(resources));
+                RecordLiveResourceLink(D::FindLiveObject(binding.texture),D::FindLiveObject(resources));
+            }
         }
+#endif
     }
     void BindVertexBufferNative(uint32_t binding, BufferHandle buffer, uint32_t offset) override
     { m_commands.push_back([=](ICommandList& n){n.BindVertexBufferNative(binding,buffer,offset);return true;});
