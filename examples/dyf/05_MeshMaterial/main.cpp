@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf.h"
 
 #define DY_EXAMPLE_IMAGE "Assets/Default_albedo.jpg"
@@ -6,7 +7,7 @@ int main()
 {
 	const uint32_t width = 640, height = 480;
 
-	dyf::Platform::Window window(width, height, "dyf / Mesh and Material");
+	DY_EXAMPLE_WINDOW(window, width, height, "dyf / Mesh and Material");
 	if(!window.GetHandle()) return 1;
 
 	auto renderer = dyf::Renderer::Create(window.GetHandle());
@@ -42,13 +43,15 @@ int main()
 	dyf::Camera camera;
 	dyf::Math::float3 eye = {0, -3, 1.6f}, target = {0, 0, 0};
 	if(!camera.LookAt(eye, target)) return 1;
-	const float aspect = width / static_cast<float>(height);
-	if(!camera.SetPerspective(aspect)) return 1;
 
 	while(true)
 	{
 		window.PollEvents();
-		if(!window.IsRunning()) break;
+		if(!dy_examples::BeginExampleFrame(window)) break;
+		if(!dy_examples::ExampleRunning(window)) break;
+		const auto framebuffer = window.GetFramebufferSize();
+		if(framebuffer.width > 0 && framebuffer.height > 0 &&
+			!camera.SetPerspective(float(framebuffer.width) / framebuffer.height)) return 1;
 
 		if(!renderer->Render(scene, camera)) return 1;
 	}

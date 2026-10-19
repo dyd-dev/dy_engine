@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/RHI.h"
 #include "dyf/Platform/Window.h"
@@ -83,7 +84,7 @@ int main(int argc, char** argv) try {
     const auto options = Parse(argc, argv);
 
     // 창과 그래픽 장치를 생성한다. 화면 그리기를 지원하지 않는 백엔드는 건너뛴다.
-    dyf::Platform::Window window(800, 600, "Advanced / Stencil mask");
+    DY_EXAMPLE_WINDOW(window, 800, 600, "Advanced / Stencil mask");
     Check(window.GetHandle() != nullptr, "Window creation failed");
     DeviceDesc deviceDesc;
     deviceDesc.enableValidation = options.validation;
@@ -151,7 +152,8 @@ int main(int argc, char** argv) try {
     // 창이 닫히거나 지정한 프레임 수에 도달할 때까지 반복한다. frames가 0이면 횟수 제한이 없다.
     while (!options.frames || frame < options.frames) {
         window.PollEvents();
-        if (!window.IsRunning()) break;
+        if(!dy_examples::BeginExampleFrame(window)) break;
+        if (!dy_examples::ExampleRunning(window)) break;
         if (!device.BeginFrame()) {
             Check(!device.IsLost(), "Device lost");
             std::this_thread::sleep_for(std::chrono::milliseconds(1));

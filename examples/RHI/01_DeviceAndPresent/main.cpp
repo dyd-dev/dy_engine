@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf/RHI.h"
 #include "dyf/Platform/Window.h"
 
@@ -31,7 +32,7 @@ int main()
     try
     {
         // 1. 창은 표시 대상만 제공한다. GPU 작업은 공개 RHI로 직접 구성한다.
-        Platform::Window window(960, 640, "RHI / 01 Device and Present");
+        DY_EXAMPLE_WINDOW(window, 960, 640, "RHI / 01 Device and Present");
         Require(window.GetHandle() != nullptr, "Window creation failed.");
         std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create({}));
         Require(device != nullptr, "Device creation failed.");
@@ -50,10 +51,11 @@ int main()
 
         // 이 예제는 셰이더·파이프라인·Draw 없이 clear와 제출 수명을 먼저 보여준다.
 
-        while(window.IsRunning())
+        while(dy_examples::ExampleRunning(window))
         {
             Platform::Window::PollEvents();
-            if(!window.IsRunning()) break;
+            if(!dy_examples::BeginExampleFrame(window)) break;
+            if(!dy_examples::ExampleRunning(window)) break;
             if(!device->BeginFrame())
             {
                 Require(!device->IsLost(), "Device lost.");

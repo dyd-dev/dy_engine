@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/RHI.h"
 #include "dyf/Platform/Window.h"
@@ -98,7 +99,7 @@ int main(int argc, char** argv) try {
     const auto options = Parse(argc, argv);
 
     // 창과 그래픽 장치를 생성한다. 화면 그리기를 지원하지 않는 백엔드는 건너뛴다.
-    dyf::Platform::Window window(800, 600, "Advanced / Frames and Present");
+    DY_EXAMPLE_WINDOW(window, 800, 600, "Advanced / Frames and Present");
     Check(window.GetHandle() != nullptr, "Window creation failed");
     DeviceDesc deviceDesc;
     deviceDesc.enableValidation = options.validation;
@@ -159,7 +160,8 @@ int main(int argc, char** argv) try {
     // 창이 닫히거나 지정한 프레임 수에 도달할 때까지 반복한다. frames가 0이면 횟수 제한이 없다.
     while (!options.frames || frame < options.frames) {
         window.PollEvents();
-        if (!window.IsRunning()) break;
+        if(!dy_examples::BeginExampleFrame(window)) break;
+        if (!dy_examples::ExampleRunning(window)) break;
 
         // 같은 슬롯의 이전 GPU 작업이 끝난 후 명령 목록을 초기화한다.
         // BeginFrame 재시도 시간까지 포함해 슬롯 대기와 이미지 획득 시간을 측정한다.

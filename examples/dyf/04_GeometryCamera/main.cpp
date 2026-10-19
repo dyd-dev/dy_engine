@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf.h"
 #include "dyf/Platform/Time.h"
 #include <algorithm>
@@ -7,7 +8,7 @@ int main()
 {
 	const uint32_t width = 640, height = 480;
 
-	dyf::Platform::Window window(width, height, "Geometry and Camera - WASD | RMB look | Wheel speed | Esc");
+	DY_EXAMPLE_WINDOW(window, width, height, "Geometry and Camera - WASD | RMB look | Wheel speed | Esc");
 	if(!window.GetHandle()) return 1;
 
 	auto renderer = dyf::Renderer::Create(window.GetHandle());
@@ -33,8 +34,6 @@ int main()
 	dyf::Camera camera;
 	dyf::Math::float3 eye = {0, -3, 1.6f}, target = {0, 0, 0};
 	if(!camera.LookAt(eye, target)) return 1;
-	const float aspect = width / static_cast<float>(height);
-	if(!camera.SetPerspective(aspect)) return 1;
 
 	const auto initialForward = dyf::Math::Normalize(target - eye);
     float yaw = std::atan2(initialForward.y, initialForward.x);
@@ -44,11 +43,12 @@ int main()
 	while(true)
 	{
 		window.PollEvents();
-        const auto& input = window.GetInput();
+		if(!dy_examples::BeginExampleFrame(window)) break;
+        const auto& input = dy_examples::ExampleInput(window);
         using dyf::Platform::Key;
         using dyf::Platform::MouseButton;
-        if(input.WasPressed(Key::Escape)) window.RequestClose();
-		if(!window.IsRunning()) break;
+        if(input.WasPressed(Key::Escape)) dy_examples::RequestExampleClose(window);
+		if(!dy_examples::ExampleRunning(window)) break;
         const auto size = window.GetFramebufferSize();
         const bool active = (!ready || window.HasFocus()) && !window.IsMinimized() && size.width > 0 && size.height > 0;
         const float delta = static_cast<float>((std::min)(time.Tick(!active), 0.1));

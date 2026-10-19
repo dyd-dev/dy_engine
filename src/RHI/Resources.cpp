@@ -19,6 +19,15 @@ Texture::~Texture()
 
 namespace
 {
+thread_local DevicePresentationObserver presentationObserver;
+
+struct PresentationCallbackScope
+{
+    explicit PresentationCallbackScope(bool& active) : active(active) { active = true; }
+    ~PresentationCallbackScope() { active = false; }
+    bool& active;
+};
+
 const char* LiveShaderStage(ShaderStage stage) noexcept
 {
     switch(stage)
@@ -53,6 +62,12 @@ IDevice::~IDevice()
         Platform::RetireLiveObject(m_live->recordingSource);
         Platform::RetireLiveObject(m_live->device);
     }
+}
+DevicePresentationObserver IDevice::SetPresentationObserver(DevicePresentationObserver observer) noexcept
+{
+    const auto previous = presentationObserver;
+    presentationObserver = observer;
+    return previous;
 }
 UploadMemoryStatistics IDevice::GetUploadMemoryStatistics() const
 {
@@ -248,7 +263,7 @@ void IDevice::CompleteSwapchainRetirement()
 bool IDevice::CreateSwapchain(const SwapchainDesc& desc)
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
-    if(m_frameActive || desc.format == Format::Unknown || !desc.minimumImageCount ||
+    if(m_presentationCallbackActive || m_frameActive || desc.format == Format::Unknown || !desc.minimumImageCount ||
         (desc.presentMode != PresentMode::Fifo && desc.presentMode != PresentMode::Immediate && desc.presentMode != PresentMode::Mailbox)) return false;
     const bool replacing = m_hasSwapchain;
     const auto previous = m_swapchainDesc;
@@ -272,12 +287,23 @@ bool IDevice::CreateSwapchain(const SwapchainDesc& desc)
     }
     m_swapchainDesc = desc;
     m_hasSwapchain = true;
+    if(!m_presentationObserverCaptured)
+    {
+        m_presentationObserver = presentationObserver;
+        m_presentationObserverCaptured = true;
+    }
+    if(m_presentationObserver.onSwapchain)
+    {
+        PresentationCallbackScope callback(m_presentationCallbackActive);
+        m_presentationObserver.onSwapchain(m_presentationObserver.context, *this, desc);
+    }
     return true;
 }
 
 bool IDevice::BeginFrame()
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+    if(m_presentationCallbackActive) return false;
     if(m_frameActive) return true;
     auto* live=GetLiveState();
     if(live)
@@ -302,7 +328,15 @@ bool IDevice::BeginFrame()
 bool IDevice::Present()
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+    if(m_presentationCallbackActive)
+    {std::fprintf(stderr, "[RHI] dyf::RHI: Presentation callbacks cannot recursively present.\n");return false;}
     if(!m_frameActive) {std::fprintf(stderr, "[RHI] dyf::RHI: Present requires an active frame.\n");return false;}
+    if(m_presentationObserver.beforePresent)
+    {
+        PresentationCallbackScope callback(m_presentationCallbackActive);
+        if(!m_presentationObserver.beforePresent(m_presentationObserver.context, *this))
+        {std::fprintf(stderr, "[RHI] dyf::RHI: Presentation observer rejected the frame.\n");return false;}
+    }
     auto* backBuffer = GetBackBuffer();
     const auto state = m_resourceStates.find({reinterpret_cast<uintptr_t>(backBuffer),0,0});
     if(!backBuffer || state == m_resourceStates.end() || state->second != ResourceState::Present)
@@ -376,6 +410,15 @@ void IDevice::ReleaseResources()
 {
     StopLiveProfiling();
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+    // Native destructors call this while their resource operations are still valid.
+    // Clear first so abandoned shutdown and repeated cleanup cannot detach twice.
+    const auto observer = m_presentationObserver;
+    m_presentationObserver = {};
+    if(observer.beforeRelease)
+    {
+        PresentationCallbackScope callback(m_presentationCallbackActive);
+        observer.beforeRelease(observer.context, *this);
+    }
     std::vector<std::shared_ptr<void>> references;
     std::vector<std::shared_ptr<const ICommandList::ReferenceSnapshot>> snapshots;
     for(auto* commands : m_recordedCommands)

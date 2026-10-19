@@ -1,3 +1,4 @@
+#include "../../examples/HostedExample.h"
 #include "dyf/Extends/Tracy.h"
 #include "dyf/Extends/RenderDoc.h"
 #include "dyf/Camera.h"
@@ -12,6 +13,9 @@
 #include "AnimatedActor.h"
 #include "KnightMaterials.h"
 #include "../CameraPath.h"
+#ifdef DY_SHOWCASE_GUI
+#include "CinemaGui.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -64,6 +68,9 @@ int main(int argc, char** argv)
         std::string cameraPath,exportCameraPath;
         double initialTourTime=0;
         bool initiallyPaused=false;
+#ifdef DY_SHOWCASE_GUI
+        bool guiEnabled = true;
+#endif
         const char* const surfaceViews[] = {"off", "base color", "normal", "roughness", "metallic", "depth", "motion"};
         // Intel New Sponza, centered and normalized to 80 units in Z-up world.
         std::vector<Shot> shots{
@@ -101,6 +108,7 @@ int main(int argc, char** argv)
                 "  --export-camera FILE     Write a 60 Hz camera CSV without creating a window or GPU device\n"
                 "  --start N --paused       Hold an identical comparison timestamp in both renderers\n"
                 "  --no-probes              Skip 3 spatial probe bakes; interior keeps its single room fallback\n"
+                "  --no-gui                 Use the original direct window/HUD render path\n"
                 "  --shadow-quality MODE    low, medium, high (default high)\n"
                 "  --shadow-distance N      Directional shadow view distance in world units; 0 keeps scene/camera fit\n"
                 "  --shadow-split N         Cascade logarithmic split weight, 0..1 (default 0.65)\n"
@@ -116,7 +124,13 @@ int main(int argc, char** argv)
         {
             const std::string argument = argv[i];
             if(argument == "--help") { usage(); return 0; }
-            if(argument == "--no-probes") bakeSpatialProbes = false;
+            if(argument == "--no-gui")
+            {
+#ifdef DY_SHOWCASE_GUI
+                guiEnabled = false;
+#endif
+            }
+            else if(argument == "--no-probes") bakeSpatialProbes = false;
             else if(argument == "--paused") initiallyPaused=true;
             else if(argument == "--start" && i + 1 < argc) initialTourTime=std::stod(argv[++i]);
             else if(argument == "--path" && i + 1 < argc) cameraPath=argv[++i];
@@ -536,7 +550,7 @@ int main(int argc, char** argv)
         }
 
         constexpr uint32_t renderWidth=1920,renderHeight=1080;
-        Platform::Window window(renderWidth, renderHeight, "dy_engine / Cinematic Showcase - Space pause | R restart | Tab free camera");
+        DY_EXAMPLE_WINDOW(window, renderWidth, renderHeight, "dy_engine / Cinematic Showcase - Space pause | R restart | Tab free camera");
 #ifdef DY_PROFILER_TRACING_ENABLED
         dyf::TracyAdapter tracy;
 #endif
@@ -669,6 +683,10 @@ int main(int argc, char** argv)
         showcase::AnimatedActor actor;
         if(!actor.Load(scene,actorDescription,actorClip,shots.front().eye,shots.front().target,actorPositioned)) return 1;
         ModelRenderer modelRenderer(*renderer);
+#ifdef DY_SHOWCASE_GUI
+        std::unique_ptr<showcase::CinemaGui> gui;
+        if(guiEnabled) gui = std::make_unique<showcase::CinemaGui>(window, *renderer);
+#endif
         Camera camera;
         Platform::Time clock;
         Shot pose = shots.front();
@@ -684,7 +702,7 @@ int main(int argc, char** argv)
         bool baselineWindEnabled = windEnabled;
         // Indoor point shadows are camera independent; exterior CSM is not.
         unsigned comparisonMode = emerald ? 3u : bistroInterior ? 0u : 1u;
-        const char* const comparisonLabels[] = {"STATIC SHADOW CACHE", "PARALLEL RECORDING", "INSTANCING", "INDEXED LOD"};
+        const char* const comparisonLabels[] = {"STATIC SHADOW CACHE", "PARALLEL RECORDING", "INSTANCING", "INDEXED LOD", "CPU / GPU DEFORMATION"};
         std::fputs("Space pause tour/actor/wind | R restart | Tab tour/free | RMB look | WASD/QE move | Shift faster | N wind\n"
             "Left/Right seek 5 s | Home/End first/last pose | U GPU frustum/LOD | O Hi-Z occlusion\n"
             "1 lit/base-color | 2 shadows | 3 HDR | 4 CPU culling | 5 instancing | 6 parallel recording\n"
@@ -695,27 +713,16 @@ int main(int argc, char** argv)
             "F volumetric fog | K sharpening | J clustered lighting | I spatial probes\n"
             "P soft shadows / fixed PCF | F10 one/two glass layers\n"
             "- / + exposure | M submitted frames/s | F11 profiler | Escape close\n"
-            "F8 comparison: static shadows / parallel recording / instancing / LOD\n"
-            "F5 baseline OFF | F6 candidate ON at saved view | F7 clear comparison\n"
+            "F8 comparison: static shadows / parallel recording / instancing / LOD / CPU-GPU deformation\n"
+            "F5 baseline OFF (CPU for deformation) | F6 candidate ON (GPU compute) at saved view | F7 clear comparison\n"
             "Preparing first frame: uploading scene textures and meshes...\n", stderr);
 
-        while(window.IsRunning())
+        while(dy_examples::ExampleRunning(window))
         {
             window.PollEvents();
-#ifdef DY_RENDERDOC_ENABLED
-            if(window.GetInput().WasPressed(dyf::Platform::Key::F12))
-                (void)dyf::RenderDocCapture::TriggerNextFrame();
-#endif
-            if(window.GetInput().WasPressed(dyf::Platform::Key::F11))
-            {
-                auto settings = renderer->GetConfig();
-                settings.profilerStartsExpanded = !settings.profilerStartsExpanded;
-                if(!renderer->SetConfig(settings)) return 1;
-            }
-
-            const auto& input = window.GetInput();
-            if(input.WasPressed(Key::Escape)) window.RequestClose();
-            if(!window.IsRunning()) break;
+            if(!dy_examples::BeginExampleFrame(window)) break;
+            const auto& input = dy_examples::ExampleInput(window);
+            if(!dy_examples::ExampleRunning(window)) break;
             const auto size = window.GetFramebufferSize();
             const bool focused = window.HasFocus();
             // Present once before requiring focus: Wayland maps the first buffer.
@@ -728,18 +735,78 @@ int main(int argc, char** argv)
                 Platform::Window::WaitEvents();
                 continue;
             }
+#ifdef DY_SHOWCASE_GUI
+            if(gui && !gui->Begin(renderer->GetConfig(), paused, freeCamera, windEnabled, !windObjects.empty(),
+                tourTime, tourSeconds, pose, yaw, pitch, metrics, comparisonMode, comparisonLabels,
+                comparison, modelRenderer, actor.Loaded())) return 1;
+#endif
+            const auto pressed = [&](Key key) {
+#ifdef DY_SHOWCASE_GUI
+                if(gui) return gui->Pressed(key) || dy_examples::ExampleAction(key, 1) ||
+                    (!gui->WantsKeyboard() && input.WasPressed(key));
+#endif
+                return input.WasPressed(key);
+            };
+            const auto down = [&](Key key) {
+#ifdef DY_SHOWCASE_GUI
+                if(gui) return gui->Held(key) || dy_examples::ExampleAction(key, 0) ||
+                    (!gui->WantsKeyboard() && input.IsDown(key));
+#endif
+                return input.IsDown(key);
+            };
+            bool mouseLook = input.IsDown(MouseButton::Right);
+#ifdef DY_SHOWCASE_GUI
+            if(gui) mouseLook = dy_examples::ExampleLooking() || (!gui->WantsMouse() &&
+                (mouseLook || (gui->TouchCamera() && input.IsDown(MouseButton::Left))));
+#endif
+            if(pressed(Key::Escape)) dy_examples::RequestExampleClose(window);
+            if(!dy_examples::ExampleRunning(window)) break;
+#ifdef DY_RENDERDOC_ENABLED
+            if(pressed(Key::F12)) (void)dyf::RenderDocCapture::TriggerNextFrame();
+#endif
             const auto previousPose = pose;
             bool historyDiscontinuity = false;
-            if(input.WasPressed(Key::F7)) comparison.Clear();
-            if(input.WasPressed(Key::F8))
+            double requestedSeek = -1;
+#ifdef DY_SHOWCASE_GUI
+            if(gui)
+            {
+                requestedSeek = gui->seekSeconds;
+                if(gui->resolutionChanged)
+                {
+                    comparison.Cancel("scene resolution changed");
+                    auto settings = renderer->GetConfig();
+                    settings.renderWidth = gui->renderWidth; settings.renderHeight = gui->renderHeight;
+                    if(!renderer->SetConfig(settings)) return 1;
+                    config = renderer->GetConfig();
+                    historyDiscontinuity = true;
+                }
+                if(gui->skinning >= 0)
+                {
+                    comparison.Clear();
+                    if(!modelRenderer.SetSkinningExecutionMode(static_cast<SkinningExecutionMode>(gui->skinning)))
+                        std::fputs("Actor deformation mode is unavailable; keeping the previous mode.\n", stderr);
+                    else historyDiscontinuity = true;
+                }
+                if(gui->cameraEdited && freeCamera)
+                {
+                    comparison.Cancel("camera controls changed");
+                    pose.eye = gui->eye; yaw = gui->yaw; pitch = gui->pitch;
+                    historyDiscontinuity = true;
+                }
+            }
+#endif
+            if(pressed(Key::F7)) comparison.Clear();
+            if(pressed(Key::F8))
             {
                 comparison.Clear();
-                comparisonMode = (comparisonMode + 1) % 4;
+                comparisonMode = (comparisonMode + 1) % 5;
                 std::fprintf(stderr, "Comparison mode: %s\n", comparisonLabels[comparisonMode]);
+                if(comparisonMode == 4)
+                    std::fputs("Deformation comparison: F5 CPU skinning / F6 GPU compute; an animated actor is required.\n", stderr);
             }
-            const bool captureA = input.WasPressed(Key::F5);
-            const bool captureB = input.WasPressed(Key::F6);
-            if(input.WasPressed(Key::N))
+            const bool captureA = pressed(Key::F5);
+            const bool captureB = pressed(Key::F6);
+            if(pressed(Key::N))
             {
                 comparison.Clear();
                 windEnabled = !windEnabled && !windObjects.empty();
@@ -765,19 +832,19 @@ int main(int argc, char** argv)
                 historyDiscontinuity = true;
             }
             if(captureA || (captureB && comparison.HasBaseline())) paused = true;
-            if(input.WasPressed(Key::Space) || input.WasPressed(Key::R) || input.WasPressed(Key::Tab) ||
-                input.IsDown(MouseButton::Right) || input.IsDown(Key::W) || input.IsDown(Key::A) ||
-                input.IsDown(Key::S) || input.IsDown(Key::D) || input.IsDown(Key::Q) || input.IsDown(Key::E) ||
-                input.WasPressed(Key::Left) || input.WasPressed(Key::Right) ||
-                input.WasPressed(Key::Home) || input.WasPressed(Key::End))
+            if(pressed(Key::Space) || pressed(Key::R) || pressed(Key::Tab) ||
+                mouseLook || down(Key::W) || down(Key::A) ||
+                down(Key::S) || down(Key::D) || down(Key::Q) || down(Key::E) ||
+                pressed(Key::Left) || pressed(Key::Right) ||
+                pressed(Key::Home) || pressed(Key::End) || requestedSeek >= 0)
                 comparison.Cancel("camera or tour input");
-            if(input.WasPressed(Key::Space))
+            if(pressed(Key::Space))
             {
                 paused = !paused;
                 std::fprintf(stderr, "Tour %s at %.1f s%s\n", paused ? "paused" : "enabled", tourTime,
                     freeCamera ? " | free camera active; Tab returns to tour" : "");
             }
-            const bool restart = input.WasPressed(Key::R);
+            const bool restart = pressed(Key::R);
             if(restart)
             {
                 tourTime = 0;
@@ -786,19 +853,20 @@ int main(int argc, char** argv)
                 historyDiscontinuity = true;
                 std::fputs("Tour restarted (playing).\n", stderr);
             }
-            const bool seek = input.WasPressed(Key::Left) || input.WasPressed(Key::Right) ||
-                input.WasPressed(Key::Home) || input.WasPressed(Key::End);
+            const bool seek = pressed(Key::Left) || pressed(Key::Right) ||
+                pressed(Key::Home) || pressed(Key::End) || requestedSeek >= 0;
             if(seek)
             {
-                if(input.WasPressed(Key::Home)) tourTime = 0;
-                else if(input.WasPressed(Key::End)) tourTime = tourSeconds;
-                else tourTime = std::clamp(tourTime + (input.WasPressed(Key::Right) ? 5.0 : -5.0), 0.0, tourSeconds);
+                if(requestedSeek >= 0) tourTime = std::clamp(requestedSeek, 0.0, tourSeconds);
+                else if(pressed(Key::Home)) tourTime = 0;
+                else if(pressed(Key::End)) tourTime = tourSeconds;
+                else tourTime = std::clamp(tourTime + (pressed(Key::Right) ? 5.0 : -5.0), 0.0, tourSeconds);
                 sceneTime = tourTime;
                 freeCamera = false;
                 historyDiscontinuity = true;
                 std::fprintf(stderr,"Tour seek: %.1f/%.0f s.\n",tourTime,tourSeconds);
             }
-            if(input.WasPressed(Key::Tab))
+            if(pressed(Key::Tab))
             {
                 freeCamera = !freeCamera;
                 historyDiscontinuity = true;
@@ -831,7 +899,7 @@ int main(int argc, char** argv)
                     if(!entity.SetTransform(windEnabled ? sway * part.second : part.second)) return 1;
                 }
             }
-            window.SetCursorMode(freeCamera && input.IsDown(MouseButton::Right) ?
+            window.SetCursorMode(freeCamera && mouseLook ?
                 Platform::CursorMode::Locked : Platform::CursorMode::Normal);
             if(comparison.IsRunning() || captureA || (captureB && comparison.HasBaseline()))
             {
@@ -840,7 +908,7 @@ int main(int argc, char** argv)
             }
             else if(freeCamera)
             {
-                if(input.IsDown(MouseButton::Right))
+                if(mouseLook)
                 {
                     const auto mouse = input.GetCursorDelta();
                     yaw -= float(mouse.x) * .0025f;
@@ -848,10 +916,10 @@ int main(int argc, char** argv)
                 }
                 const float3 forward{std::cos(pitch) * std::cos(yaw), std::cos(pitch) * std::sin(yaw), std::sin(pitch)};
                 const auto right = Math::Normalize(Math::Cross(forward, {0, 0, 1}));
-                const auto movement = forward * (float(input.IsDown(Key::W)) - float(input.IsDown(Key::S))) +
-                    right * (float(input.IsDown(Key::D)) - float(input.IsDown(Key::A))) +
-                    float3(0, 0, float(input.IsDown(Key::E)) - float(input.IsDown(Key::Q)));
-                const float speed = input.IsDown(Key::LeftShift) || input.IsDown(Key::RightShift) ? 32.0f : 8.0f;
+                const auto movement = forward * (float(down(Key::W)) - float(down(Key::S))) +
+                    right * (float(down(Key::D)) - float(down(Key::A))) +
+                    float3(0, 0, float(down(Key::E)) - float(down(Key::Q)));
+                const float speed = down(Key::LeftShift) || down(Key::RightShift) ? 32.0f : 8.0f;
                 pose.eye = pose.eye + Math::Normalize(movement) * (speed * float(std::min(elapsed, .1)));
                 pose.target = pose.eye + forward;
                 pose.up = {0, 0, 1};
@@ -872,14 +940,16 @@ int main(int argc, char** argv)
                 renderer->InvalidateHistory();
             }
             if(!camera.LookAt(pose.eye, pose.target, pose.up) ||
-                !camera.SetPerspective(float(config.renderWidth) / config.renderHeight, pose.fov * pi / 180, .03f, cameraFarPlane)) return 1;
+                !camera.SetPerspective(float(config.renderWidth ? config.renderWidth : size.width) /
+                    (config.renderHeight ? config.renderHeight : size.height), pose.fov * pi / 180, .03f, cameraFarPlane)) return 1;
 
             config = renderer->GetConfig();
             bool changed = false;
-            for(const auto& event : input.GetEvents())
+            for(int code = static_cast<int>(Key::Space); code <= static_cast<int>(Key::Menu); ++code)
             {
-                if(event.type != Platform::InputEventType::Key || event.action != Platform::InputAction::Press) continue;
-                switch(static_cast<Key>(event.code))
+                const auto key = static_cast<Key>(code);
+                if(!pressed(key)) continue;
+                switch(key)
                 {
                 case Key::Num1: config.lighting.enabled = !config.lighting.enabled; break;
                 case Key::Num2: config.lighting.shadows = !config.lighting.shadows; break;
@@ -921,7 +991,10 @@ int main(int argc, char** argv)
                 case Key::F2: config.lighting.environment.diffuse = !config.lighting.environment.diffuse; break;
                 case Key::F3: config.lighting.environment.specular = !config.lighting.environment.specular; break;
                 case Key::F4: config.lighting.environment.background = !config.lighting.environment.background; break;
-                case Key::F11: config.enableProfilerHud = !config.enableProfilerHud; break;
+                case Key::F11:
+                    config.enableProfilerHud = !config.enableProfilerHud;
+                    config.profilerStartsExpanded = !config.profilerStartsExpanded;
+                    break;
                 case Key::L: config.enableLod = !config.enableLod; break;
                 case Key::C: config.debugLodColor = !config.debugLodColor; break;
                 case Key::F9:
@@ -943,9 +1016,9 @@ int main(int argc, char** argv)
                 }
                 changed = true;
             }
-            if(input.WasPressed(Key::Minus) || input.WasPressed(Key::Equal))
+            if(pressed(Key::Minus) || pressed(Key::Equal))
             {
-                config.exposure = std::clamp(config.exposure * (input.WasPressed(Key::Equal) ? 1.15f : 1 / 1.15f), .001f, 20.0f);
+                config.exposure = std::clamp(config.exposure * (pressed(Key::Equal) ? 1.15f : 1 / 1.15f), .001f, 20.0f);
                 changed = true;
             }
             if(changed)
@@ -975,7 +1048,7 @@ int main(int argc, char** argv)
                 std::fprintf(stderr,"GPU frustum/LOD %d | Hi-Z occlusion %d | GPU-selected visible object/triangle counts: N/A (no count readback).\n",
                     config.enableGpuCulling,config.enableOcclusionCulling);
             }
-            if(input.WasPressed(Key::M))
+            if(pressed(Key::M))
             {
                 metrics = !metrics;
                 metricsTime = 0;
@@ -1035,6 +1108,7 @@ int main(int argc, char** argv)
                 if(comparisonMode != 1) text << " parallel=" << current.enableParallelRenderGraph;
                 if(comparisonMode != 2) text << " instancing=" << current.enableInstancing;
                 if(comparisonMode != 3) text << " lod=" << current.enableLod;
+                if(comparisonMode != 4) text << " skinning=" << static_cast<int>(modelRenderer.GetSkinningExecutionMode());
                 for(float value : camera.view.m) text << ' ' << value;
                 for(float value : camera.projection.m) text << ' ' << value;
                 return text.str();
@@ -1049,17 +1123,45 @@ int main(int argc, char** argv)
                 else if(comparisonMode == 0 && (!bistroInterior || !config.lighting.enabled ||
                     !config.lighting.direct || !config.lighting.shadows))
                     std::fputs("Static-shadow comparison needs the interior point lights and enabled shadows. Use F8 for another mode.\n", stderr);
-                else if(comparison.Begin(captureB, conditions(), comparisonLabels[comparisonMode]))
+                else if(comparisonMode == 4 && !actor.Loaded())
+                    std::fputs("CPU/GPU deformation comparison requires --actor FILE or --actor knight.\n", stderr);
+                else
                 {
-                    if(comparisonMode == 0) config.lighting.reuseStaticShadows = captureB;
-                    if(comparisonMode == 1) config.enableParallelRenderGraph = captureB;
-                    if(comparisonMode == 2) config.enableInstancing = captureB;
-                    if(comparisonMode == 3) config.enableLod = captureB;
-                    if(!renderer->SetConfig(config)) return 1;
+                    const auto previousMode = modelRenderer.GetSkinningExecutionMode();
+                    const auto captureMode = captureB ? SkinningExecutionMode::ComputePreSkin : SkinningExecutionMode::Cpu;
+                    // Preflight the compute pipeline before beginning capture;
+                    // rejection leaves the existing mode and application alive.
+                    if(comparisonMode == 4 && !modelRenderer.SetSkinningExecutionMode(captureMode))
+                        std::fputs("GPU deformation comparison is unavailable; capture was not started.\n", stderr);
+                    else if(comparison.Begin(captureB, conditions(), comparisonLabels[comparisonMode]))
+                    {
+                        if(comparisonMode == 0) config.lighting.reuseStaticShadows = captureB;
+                        if(comparisonMode == 1) config.enableParallelRenderGraph = captureB;
+                        if(comparisonMode == 2) config.enableInstancing = captureB;
+                        if(comparisonMode == 3) config.enableLod = captureB;
+                        if(comparisonMode == 4)
+                            std::fprintf(stderr, "Deformation %c: %s at the same frozen scene/actor pose.\n",
+                                captureB ? 'B' : 'A', captureB ? "GPU compute" : "CPU skinning");
+                        if(!renderer->SetConfig(config)) return 1;
+                    }
+                    else if(comparisonMode == 4 && !modelRenderer.SetSkinningExecutionMode(previousMode))
+                        std::fputs("Could not restore the previous deformation mode after capture rejection.\n", stderr);
                 }
             }
             comparison.CheckConditions(conditions());
             const auto previous = renderer->GetLastRenderCompletion();
+#ifdef DY_SHOWCASE_GUI
+            if(gui)
+            {
+                if(!gui->Render(scene, camera, modelRenderer, actor.Loaded())) return 1;
+                if(!gui->Presented())
+                {
+                    comparison.Cancel("window acquisition skipped GUI presentation");
+                    Platform::Window::WaitEvents(.001);
+                }
+            }
+            else
+#endif
             if(comparison.IsRunning() || comparison.HasBaseline())
             {
                 Canvas overlay(uint32_t(size.width), uint32_t(size.height));
@@ -1095,6 +1197,9 @@ int main(int argc, char** argv)
             }
             if(completion == previous) Platform::Window::WaitEvents(.001);
         }
+#ifdef DY_SHOWCASE_GUI
+        if(gui && !renderer->GetDevice().WaitIdle()) return 1;
+#endif
         return 0;
     }
     catch(const std::exception& error)

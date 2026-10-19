@@ -1,3 +1,4 @@
+#include "../../examples/HostedExample.h"
 #include "dyf/Extends/Tracy.h"
 #include "dyf/Extends/RenderDoc.h"
 #include "dyf/Camera.h"
@@ -70,7 +71,7 @@ int main(int argc,char** argv) try
         }
         else throw std::runtime_error("Unknown or incomplete option; use --help.");
     }
-    Platform::Window window(1280,720,"GPU Culling / 4 frustum | U GPU/CPU | L LOD | O HiZ | Space pause | F11 profiler");
+    DY_EXAMPLE_WINDOW(window, 1280,720,"GPU Culling / 4 frustum | U GPU/CPU | L LOD | O HiZ | Space pause | F11 profiler");
 #ifdef DY_PROFILER_TRACING_ENABLED
     dyf::TracyAdapter tracy;
 #endif
@@ -120,22 +121,23 @@ int main(int argc,char** argv) try
     Camera camera;Platform::Time clock;
     double time=0,reportTime=0;uint32_t submitted=0,reportFrames=0;
     bool paused=false,ready=false;
-    while(window.IsRunning() && (!frameLimit || submitted<frameLimit))
+    while(dy_examples::ExampleRunning(window) && (!frameLimit || submitted<frameLimit))
     {
         window.PollEvents();
+        if(!dy_examples::BeginExampleFrame(window)) break;
 #ifdef DY_RENDERDOC_ENABLED
-        if(window.GetInput().WasPressed(dyf::Platform::Key::F12))
+        if(dy_examples::ExampleInput(window).WasPressed(dyf::Platform::Key::F12))
             (void)dyf::RenderDocCapture::TriggerNextFrame();
 #endif
-        if(window.GetInput().WasPressed(dyf::Platform::Key::F11))
+        if(dy_examples::ExampleInput(window).WasPressed(dyf::Platform::Key::F11))
         {
             auto settings = renderer->GetConfig();
             settings.profilerStartsExpanded = !settings.profilerStartsExpanded;
             if(!renderer->SetConfig(settings)) return 1;
         }
-const auto& input=window.GetInput();
-        if(input.WasPressed(Platform::Key::Escape)) window.RequestClose();
-        if(!window.IsRunning()) break;
+const auto& input=dy_examples::ExampleInput(window);
+        if(input.WasPressed(Platform::Key::Escape)) dy_examples::RequestExampleClose(window);
+        if(!dy_examples::ExampleRunning(window)) break;
         const auto extent=window.GetFramebufferSize();
         const bool suspended=window.IsMinimized() || extent.width<=0 || extent.height<=0 || (ready && !window.HasFocus());
         const double dt=clock.Tick(suspended);

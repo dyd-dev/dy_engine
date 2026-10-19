@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI.h"
@@ -46,7 +47,7 @@ int main(int argc, char** argv) try
         else throw std::runtime_error("Unknown or incomplete argument; use --help.");
     }
 
-    dyf::Platform::Window window(1000, 650, "Advanced / GPU-generated indirect drawing");
+    DY_EXAMPLE_WINDOW(window, 1000, 650, "Advanced / GPU-generated indirect drawing");
     check(window.GetHandle() != nullptr, "Window creation failed.");
     DeviceDesc deviceDesc;
     deviceDesc.enableValidation = validation;
@@ -115,10 +116,11 @@ int main(int argc, char** argv) try
         "GPU-generated instance counts: 0..64; CPU does not read the argument buffer.\n";
     const auto start = std::chrono::steady_clock::now();
     uint32_t frame = 0;
-    while(window.IsRunning() && (!frameLimit || frame < frameLimit))
+    while(dy_examples::ExampleRunning(window) && (!frameLimit || frame < frameLimit))
     {
         window.PollEvents();
-        if(!window.IsRunning() || window.GetInput().WasPressed(dyf::Platform::Key::Escape)) break;
+        if(!dy_examples::BeginExampleFrame(window)) break;
+        if(!dy_examples::ExampleRunning(window) || dy_examples::ExampleInput(window).WasPressed(dyf::Platform::Key::Escape)) break;
         if(!device.BeginFrame())
         {
             check(!device.IsLost(), "Device lost during BeginFrame.");

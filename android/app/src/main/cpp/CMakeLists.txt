@@ -5,8 +5,7 @@ get_filename_component(DY_ENGINE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../../.."
 option(DY_EXTEND_MODEL "Build the optional Model extension." ON)
 option(DY_EXTEND_ADVANCED_RENDERING "Build the optional AdvancedRendering extension." ON)
 option(DY_ENABLE_TRACY "Embed Tracy profiling instrumentation in engine applications." OFF)
-# The optional ImGui extension requires a desktop GLFW window backend.
-set(DY_EXTEND_IMGUI OFF CACHE BOOL "Build the optional Dear ImGui extension." FORCE)
+set(DY_EXTEND_IMGUI ON CACHE BOOL "Build the optional Dear ImGui extension." FORCE)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 add_subdirectory("${DY_ENGINE_ROOT}" dy_engine_core EXCLUDE_FROM_ALL)
 

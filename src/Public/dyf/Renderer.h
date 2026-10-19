@@ -291,6 +291,8 @@ public:
     // Prefer SRGB targets for Gui::RegisterTexture: UNORM output already carries display gamma.
     [[nodiscard]] bool RenderToTexture(const Scene&, const Camera&, RHI::TextureHandle target,
         RHI::ResourceState before);
+    [[nodiscard]] bool RenderToTexture(const Scene&, const Camera&, const std::vector<RendererDrawDesc>&,
+        RHI::TextureHandle target, RHI::ResourceState before);
 
     // Startup-only static radiance capture: six opaque/masked raster views,
     // decoded to a linear HDR lat-long image (4*faceSize by 2*faceSize).
@@ -310,9 +312,12 @@ public:
         const Canvas* overlay = nullptr, Image* readback = nullptr);
     [[nodiscard]] RHI::IDevice& GetDevice() const;
 
-    // Published window Scene timings, approximately every 200 ms. CPU wall-clock
+    // Published Scene timings, approximately every 200 ms. CPU wall-clock
     // stages and completed asynchronous GPU frame/pass samples are separate.
-    // Reading the snapshot never waits. RenderToTexture does not add timing samples.
+    // Reading never waits. Viewport CPU stages exclude Model preparation, GUI
+    // and presentation; frame intervals include time between Scene calls. The
+    // GPU span excludes Model compute and may include idle time between submits.
+    // Startup environment captures are excluded.
     [[nodiscard]] const Platform::ProfilerTimingSnapshot& GetProfilerTimingSnapshot() const;
 
     // Most recent Scene call: submitted main/shadow counts, or zero before submission.

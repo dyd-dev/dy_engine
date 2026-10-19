@@ -41,6 +41,10 @@ namespace dyf::Platform
 		Window& operator=(const Window&) = delete;
 
 		bool IsRunning() const;
+		struct CloseRequestHandler { void* context=nullptr; bool (*handle)(void*)=nullptr; };
+		// An embedded activity can consume app-level Back/Escape without closing
+		// its native host window. Native OS window close remains an OS request.
+		CloseRequestHandler SetCloseRequestHandler(CloseRequestHandler) noexcept;
 		void RequestClose() const;
 		bool CancelClose() const;
 		void SetTitle(const char* title) const;
@@ -74,6 +78,7 @@ namespace dyf::Platform
 		void ResetCursorPosition(double, double);
 
 		Input m_input;
+		CloseRequestHandler m_closeRequestHandler;
 		std::exception_ptr m_callbackError;
 		std::unique_ptr<WindowBackend> m_backend;
 	};

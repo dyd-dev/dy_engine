@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI.h"
 #include "dyf/RHI/IDevice.h"
@@ -51,7 +52,7 @@ int main(int argc,char** argv) try
         else throw std::runtime_error("Unknown or incomplete option; use --help.");
     }
 
-    dyf::Platform::Window window(1100,720,"Advanced / GPU frustum culling - U GPU/CPU | C culling | Space pause");
+    DY_EXAMPLE_WINDOW(window, 1100,720,"Advanced / GPU frustum culling - U GPU/CPU | C culling | Space pause");
     check(window.GetHandle()!=nullptr,"Window creation failed.");
     DeviceDesc deviceDesc;deviceDesc.enableValidation=validation;
     std::unique_ptr<IDevice> owner(IDevice::Create(deviceDesc));
@@ -128,11 +129,12 @@ int main(int argc,char** argv) try
     float time=0,reportTime=0;
     auto previous=std::chrono::steady_clock::now();
     ResourceState argumentState=ResourceState::Undefined;
-    while(window.IsRunning() && (!frameLimit || frame<frameLimit))
+    while(dy_examples::ExampleRunning(window) && (!frameLimit || frame<frameLimit))
     {
         window.PollEvents();
-        const auto& input=window.GetInput();
-        if(!window.IsRunning() || input.WasPressed(dyf::Platform::Key::Escape)) break;
+        if(!dy_examples::BeginExampleFrame(window)) break;
+        const auto& input=dy_examples::ExampleInput(window);
+        if(!dy_examples::ExampleRunning(window) || input.WasPressed(dyf::Platform::Key::Escape)) break;
         if(input.WasPressed(dyf::Platform::Key::U)) gpu=!gpu;
         if(input.WasPressed(dyf::Platform::Key::C)) culling=!culling;
         if(input.WasPressed(dyf::Platform::Key::Space)) paused=!paused;

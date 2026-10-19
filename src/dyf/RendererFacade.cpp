@@ -73,6 +73,12 @@ bool Renderer::RenderToTexture(const Scene& scene, const Camera& camera, RHI::Te
     return m_impl->RenderToTexture(scene, camera, target, before);
 }
 
+bool Renderer::RenderToTexture(const Scene& scene, const Camera& camera, const std::vector<RendererDrawDesc>& draws,
+    RHI::TextureHandle target, RHI::ResourceState before)
+{
+    return m_impl->RenderToTexture(scene, camera, target, before, &draws);
+}
+
 bool Renderer::CaptureEnvironment(const Scene& scene, Math::float3 position, uint32_t faceSize,
     float nearPlane, float farPlane, HdrImage& result, bool includeEmitters, HdrImage* visibility)
 {

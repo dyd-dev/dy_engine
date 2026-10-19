@@ -129,7 +129,13 @@ namespace dyf::Platform
 	}
 
 	bool Window::IsRunning() const { return m_backend && m_backend->IsRunning(); }
-	void Window::RequestClose() const { if(m_backend) m_backend->RequestClose(); }
+	Window::CloseRequestHandler Window::SetCloseRequestHandler(CloseRequestHandler value) noexcept
+	{ return std::exchange(m_closeRequestHandler,value); }
+	void Window::RequestClose() const
+	{
+		if(m_closeRequestHandler.handle && m_closeRequestHandler.handle(m_closeRequestHandler.context)) return;
+		if(m_backend) m_backend->RequestClose();
+	}
 	bool Window::CancelClose() const { return m_backend && m_backend->CancelClose(); }
 	void Window::SetTitle(const char* title) const { if(m_backend) m_backend->SetTitle(title); }
 	void Window::Restore() const { if(m_backend) m_backend->Restore(); }

@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/RHI.h"
 #include "dyf/Platform/Window.h"
@@ -107,7 +108,7 @@ int main(int argc, char** argv) try {
     const auto options = Parse(argc, argv);
 
     // 1. 윈도우 생성 (해상도: 800x600)
-    dyf::Platform::Window window(800, 600, "Advanced / 05_ResourceBarriers");
+    DY_EXAMPLE_WINDOW(window, 800, 600, "Advanced / 05_ResourceBarriers");
     Check(window.GetHandle() != nullptr, "Window creation failed");
 
     // 2. RHI 렌더 디바이스 생성
@@ -202,7 +203,8 @@ int main(int argc, char** argv) try {
     // =========================================================================
     while (!options.frames || frame < options.frames) {
         window.PollEvents();
-        if (!window.IsRunning()) {
+        if(!dy_examples::BeginExampleFrame(window)) break;
+        if (!dy_examples::ExampleRunning(window)) {
             break;
         }
 

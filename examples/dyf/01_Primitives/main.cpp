@@ -1,10 +1,11 @@
+#include "../../HostedExample.h"
 #include "dyf.h"
 
 int main()
 {
 	const uint32_t width = 640, height = 480;
 
-	dyf::Platform::Window window(width, height, "dyf / Primitives");
+	DY_EXAMPLE_WINDOW(window, width, height, "dyf / Primitives");
 	if(!window.GetHandle()) return 1;
 	
 	auto renderer = dyf::Renderer::Create(window.GetHandle());
@@ -33,7 +34,8 @@ int main()
 	while (true)
 	{
 		window.PollEvents();
-		if(!window.IsRunning()) break;
+		if(!dy_examples::BeginExampleFrame(window)) break;
+		if(!dy_examples::ExampleRunning(window)) break;
 		
 		if(!renderer->Render(canvas)) return 1;
 	}

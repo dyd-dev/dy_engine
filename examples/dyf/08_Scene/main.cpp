@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf.h"
 
 #include <array>
@@ -7,7 +8,7 @@ int main()
 {
 	const uint32_t width = 640, height = 480;
 
-	dyf::Platform::Window window(width, height, "dyf / Scene");
+	DY_EXAMPLE_WINDOW(window, width, height, "dyf / Scene");
 	if(!window.GetHandle()) return 1;
 
 	auto renderer = dyf::Renderer::Create(window.GetHandle());
@@ -36,8 +37,6 @@ int main()
 	dyf::Camera camera;
 	dyf::Math::float3 eye = {0, -3, 1.6f}, target = {0, 0, 0};
 	if(!camera.LookAt(eye, target)) return 1;
-	const float aspect = width / static_cast<float>(height);
-	if(!camera.SetPerspective(aspect)) return 1;
 
 	dyf::Math::float3 leftPosition = {-0.8f, 0, 0};
 	dyf::Math::float3 lowerPosition = {0.6f, 0, 0.2f}, upperPosition = {0.6f, 0, 0.85f};
@@ -46,7 +45,11 @@ int main()
 	while(true)
 	{
 		window.PollEvents();
-		if(!window.IsRunning()) break;
+		if(!dy_examples::BeginExampleFrame(window)) break;
+		if(!dy_examples::ExampleRunning(window)) break;
+		const auto framebuffer = window.GetFramebufferSize();
+		if(framebuffer.width > 0 && framebuffer.height > 0 &&
+			!camera.SetPerspective(float(framebuffer.width) / framebuffer.height)) return 1;
 
 		const auto parent = dyf::Math::RotationZ(time);
 		const auto leftTransform = parent * dyf::Math::Translation(leftPosition) * dyf::Math::RotationX(0.4f);

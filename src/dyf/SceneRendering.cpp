@@ -20,7 +20,8 @@
 
 using namespace dyf;
 
-bool Renderer::Impl::RenderToTexture(const Scene& scene,const Camera& camera,RHI::TextureHandle target,RHI::ResourceState before)
+bool Renderer::Impl::RenderToTexture(const Scene& scene,const Camera& camera,RHI::TextureHandle target,RHI::ResourceState before,
+    const std::vector<RendererDrawDesc>* draws)
 {
     lastStatistics={};
     if(!target) return RendererFailure("RenderToTexture requires a target.");
@@ -32,7 +33,7 @@ bool Renderer::Impl::RenderToTexture(const Scene& scene,const Camera& camera,RHI
     if(before!=RHI::ResourceState::Undefined && before!=RHI::ResourceState::ShaderResource &&
         before!=RHI::ResourceState::RenderTarget)
         return RendererFailure("RenderToTexture before state must be Undefined, ShaderResource or RenderTarget.");
-    return RenderScene(scene,&camera,nullptr,nullptr,nullptr,target,before);
+    return RenderScene(scene,&camera,nullptr,nullptr,draws,target,before);
 }
 
 bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamera, const Canvas* overlay, Image* readback,
@@ -88,7 +89,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         FrameEnd frameEnd{*nativeDevice,framePending};
         timing.cpuAcquireMilliseconds=selectedOutput?0.0:m_profiler.TakeAcquireWait()+acquireTimer.ElapsedMilliseconds();
         Platform::CpuTimer prepareTimer;
-        if(!selectedOutput)m_profiler.PollGpuSamples();
+        if(!m_environmentCapture)m_profiler.PollGpuSamples();
         auto* windowOutput=selectedOutput ? nullptr : nativeDevice->GetBackBuffer();
         auto* output=selectedOutput ? selectedOutput : windowOutput;
         const bool fixedOutput=!selectedOutput && config.renderWidth && config.renderHeight;
@@ -145,7 +146,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             Platform::FrameProfiler::GpuSample packet;
             ~GpuSamples() {device.DestroyTimestampQuery(packet.query);device.DestroyTimestampQuery(packet.start);}
         } samples{*nativeDevice,{}};
-        if(!selectedOutput) samples.packet.start=m_profiler.AcquireQuery(1);
+        if(!m_environmentCapture) samples.packet.start=m_profiler.AcquireQuery(1);
 
         {
             // Replace only size-mismatched buffers. Roll back ownership and committed
@@ -334,7 +335,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
                     }
                 });
         if(!graph.Compile()) return RendererFailure("Scene RenderGraph compilation failed.");
-        if(!selectedOutput)
+        if(!m_environmentCapture)
         {
             samples.packet.passes=graph.GetExecutionOrderNames();
             samples.packet.query=m_profiler.AcquireQuery(2+2*static_cast<uint32_t>(samples.packet.passes.size()));
@@ -400,6 +401,9 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             timing.cpuPresentMilliseconds=presentTimer.ElapsedMilliseconds();
             framePending=false;
             if(!presented) return RendererFailure("Scene presentation failed.");
+        }
+        if(!m_environmentCapture)
+        {
             timing.cpuRenderMilliseconds=timing.cpuPrepareMilliseconds+timing.cpuRecordMilliseconds+timing.cpuSubmitMilliseconds;
             RecordProfilerFrame(timing,scene.GetEntityCount());
             DY_PROFILE_FRAME_MARK();

@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf/Extends/Tracy.h"
 #include "dyf/Extends/RenderDoc.h"
 #include "dyf/RHI/IDevice.h"
@@ -371,7 +372,7 @@ struct Editor
                 else if(Save(document.path)){Execute(pending,pendingPath);pending=Action::None;ImGui::CloseCurrentPopup();}
             }
             ImGui::SameLine();if(ImGui::Button("Discard",{85,0})){Execute(pending,pendingPath);pending=Action::None;ImGui::CloseCurrentPopup();}
-            ImGui::SameLine();if(ImGui::Button("Cancel",{85,0})){pending=Action::None;ImGui::CloseCurrentPopup();}
+            ImGui::SameLine();if(ImGui::Button("Cancel",{85,0})){if(pending==Action::Quit)dy_examples::CancelExampleNavigation();pending=Action::None;ImGui::CloseCurrentPopup();}
             if(!fileError.empty())ImGui::TextWrapped("%s",fileError.c_str());ImGui::EndPopup();
         }
         if(saveDialog){ImGui::OpenPopup("Save scene");saveDialog=false;}
@@ -389,7 +390,7 @@ struct Editor
                     else if(saving){if(Save(chosen)){ImGui::CloseCurrentPopup();if(pending!=Action::None){Execute(pending,pendingPath);pending=Action::None;}}}
                     else{ImGui::CloseCurrentPopup();Request(Action::Open,chosen);}
                 }
-                ImGui::SameLine();if(ImGui::Button("Cancel",{85,0})){pending=Action::None;ImGui::CloseCurrentPopup();}ImGui::EndPopup();
+                ImGui::SameLine();if(ImGui::Button("Cancel",{85,0})){if(pending==Action::Quit)dy_examples::CancelExampleNavigation();pending=Action::None;ImGui::CloseCurrentPopup();}ImGui::EndPopup();
             }
         }
     }
@@ -449,7 +450,7 @@ int main(int argc,char** argv)
     {
         project=fs::absolute(project);Editor app(project);
         if(selfTest){std::string error;if(!editor::SelfTest(project/"SelfTest",error)){std::fprintf(stderr,"FAIL model: %s\n",error.c_str());return 1;}std::puts("PASS model edit, duplicate, delete, undo/redo, scene roundtrip, malformed preservation, failed save preservation, preview restoration, picking.");}
-        Platform::Window window(1440,900,"dy_engine - 3D Scene Editor");if(!window.GetHandle())return 1;
+        DY_EXAMPLE_WINDOW(window, 1440,900,"dy_engine - 3D Scene Editor");if(!window.GetHandle())return 1;
 #ifdef DY_PROFILER_TRACING_ENABLED
         dyf::TracyAdapter tracy;
 #endif
@@ -461,7 +462,7 @@ int main(int argc,char** argv)
         const auto ini=(configDirectory/"editor-layout.ini").u8string(); // The context retains this pointer until Gui destruction.
         auto& device=renderer->GetDevice();auto gui=Gui::Create(window,device);if(!gui)return 1;
         ImGui::GetIO().ConfigFlags|=ImGuiConfigFlags_DockingEnable|ImGuiConfigFlags_NavEnableKeyboard;
-        ImGui::GetIO().IniFilename=selfTest?nullptr:ini.c_str();
+        ImGui::GetIO().IniFilename=dy_examples::ActiveExampleWindow()||selfTest?nullptr:ini.c_str();
 #ifdef _WIN32
         ImFontConfig font;font.OversampleH=font.OversampleV=1;
         ImGui::GetIO().Fonts->AddFontFromFileTTF("C:/Windows/Fonts/malgun.ttf",15,&font,ImGui::GetIO().Fonts->GetGlyphRangesKorean());
@@ -472,20 +473,11 @@ int main(int argc,char** argv)
         for(int frame=0;!app.quit&&(!maxFrames||frame<maxFrames);++frame)
         {
             window.PollEvents();
-#ifdef DY_RENDERDOC_ENABLED
-            if(window.GetInput().WasPressed(dyf::Platform::Key::F12))
-                (void)dyf::RenderDocCapture::TriggerNextFrame();
-#endif
-            if(window.GetInput().WasPressed(dyf::Platform::Key::F11))
+            // The editor owns the unsaved-document close/cancel flow below.
+            (void)dy_examples::BeginExampleFrame(window);
+            if(!dy_examples::ExampleRunning(window))
             {
-                auto settings = renderer->GetConfig();
-                settings.profilerStartsExpanded = !settings.profilerStartsExpanded;
-                if(!renderer->SetConfig(settings)) return 1;
-            }
-
-            if(!window.IsRunning())
-            {
-                if(!window.CancelClose()) return 1;app.Request(Action::Quit);if(app.quit)break;
+                if(!dy_examples::CancelExampleClose(window)) return 1;app.Request(Action::Quit);if(app.quit)break;
                 if(window.IsMinimized())window.Restore();
             }
             int framebufferWidth=0,framebufferHeight=0;
@@ -504,6 +496,17 @@ int main(int argc,char** argv)
             }
             const auto now=Clock::now();app.document.Tick(selfTest?.1f:std::min(.1f,std::chrono::duration<float>(now-previous).count()));previous=now;
             if(!gui->BeginFrame()){if(device.IsLost())return 1;Platform::Window::WaitEvents(.01);continue;}
+            dy_examples::DrawExampleControls();
+#ifdef DY_RENDERDOC_ENABLED
+            if(dy_examples::ExampleInput(window).WasPressed(dyf::Platform::Key::F12))
+                (void)dyf::RenderDocCapture::TriggerNextFrame();
+#endif
+            if(dy_examples::ExampleInput(window).WasPressed(dyf::Platform::Key::F11))
+            {
+                auto settings = renderer->GetConfig();
+                settings.profilerStartsExpanded = !settings.profilerStartsExpanded;
+                if(!renderer->SetConfig(settings)) return 1;
+            }
             app.Menus();app.Dock();app.ScenePanel(viewport,selfTest?(frame<14?800:640):0,selfTest?(frame<14?500:400):0);
             app.Hierarchy();app.Inspector();app.Project();app.Console();app.Dialogs();gui->EndFrame();
             if(app.failed)return 1;
@@ -523,7 +526,7 @@ int main(int argc,char** argv)
             {
                 if(device.IsLost() || (maxFrames && Clock::now()-acquireStart>std::chrono::seconds(10)))return 1;
                 Platform::Window::WaitEvents(.001);
-                if(!maxFrames || !window.IsRunning() || window.IsMinimized())break;
+                if(!maxFrames || !dy_examples::ExampleRunning(window) || window.IsMinimized())break;
             }
             if(!acquired)continue; // Retry through the event/UI loop so close always reaches the dirty-scene dialog.
             dyf::RHI::ResourceScope resources(device);auto* commands=resources.Keep(device.AcquireCommandList());auto* target=device.GetBackBuffer();if(!commands||!target)return 1;

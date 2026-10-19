@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf.h"
 #include <dyf/Extends/Model.h>
 
@@ -10,7 +11,7 @@ int main()
 {
 	const uint32_t width = 640, height = 480;
 
-	dyf::Platform::Window window(width, height, "dyf / Model and Animation");
+	DY_EXAMPLE_WINDOW(window, width, height, "dyf / Model and Animation");
 	if(!window.GetHandle()) return 1;
 
 	auto renderer = dyf::Renderer::Create(window.GetHandle());
@@ -50,14 +51,16 @@ int main()
 	dyf::Camera camera;
 	dyf::Math::float3 eye = {2.6f, -3, 1.8f}, target = {0, 0, 0.4f};
 	if(!camera.LookAt(eye, target)) return 1;
-	const float aspect = width / static_cast<float>(height);
-	if(!camera.SetPerspective(aspect)) return 1;
 
 	auto lastFrame = std::chrono::steady_clock::now();
 	while(true)
 	{
 		window.PollEvents();
-		if(!window.IsRunning()) break;
+		if(!dy_examples::BeginExampleFrame(window)) break;
+		if(!dy_examples::ExampleRunning(window)) break;
+		const auto framebuffer = window.GetFramebufferSize();
+		if(framebuffer.width > 0 && framebuffer.height > 0 &&
+			!camera.SetPerspective(float(framebuffer.width) / framebuffer.height)) return 1;
 
 		const auto now = std::chrono::steady_clock::now();
 		const float delta = std::chrono::duration<float>(now - lastFrame).count();

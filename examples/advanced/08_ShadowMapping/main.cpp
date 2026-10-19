@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 // 데스크톱은 main의 루프, iOS는 CreateShadowMapping으로 만든 객체의 Tick을 사용한다.
 // Draw는 그림자 깊이 패스 → 그림자 맵을 읽는 조명 패스 순서로 명령을 제출한다.
 #include "../common/Example.h"
@@ -288,13 +289,14 @@ int main(int argc, char **argv) try {
     const auto options = ParseOptions(argc, argv);
     if (options.help)
         return 0;
-    dyf::Platform::Window window(960, 640, "Advanced / ShadowMapping");
+    DY_EXAMPLE_WINDOW(window, 960, 640, "Advanced / ShadowMapping");
     if (!window.GetHandle())
         throw std::runtime_error("Window creation failed.");
     Renderer renderer(window.GetHandle(), options);
-    while (window.IsRunning()) {
+    while (dy_examples::ExampleRunning(window)) {
         window.PollEvents();
-        if (!window.IsRunning() || !renderer.Tick())
+        if(!dy_examples::BeginExampleFrame(window)) break;
+        if (!dy_examples::ExampleRunning(window) || !renderer.Tick())
             break;
     }
     renderer.WaitIdle();

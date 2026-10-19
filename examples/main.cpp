@@ -1,57 +1,57 @@
-#include "dyf/Canvas.h"
-#include "dyf/Font.h"
+#include "ExampleHost.h"
+#include "ExampleCatalog.h"
+#include "SceneAssets.h"
 #include "dyf/Platform/Window.h"
-#include "dyf/Renderer.h"
-#include <algorithm>
-#include <cerrno>
+#include "ExampleDeclarations.inc"
 #include <charconv>
-#include <cctype>
-#include <cstdio>
-#include <cstring>
+#include <cstdint>
 #include <cstdlib>
-#include <filesystem>
+#include <exception>
 #include <iostream>
-#include <stdexcept>
-#include <string>
+#include <iterator>
 #include <string_view>
-#include <vector>
+#include <utility>
 
 #ifdef __APPLE__
 #include <TargetConditionals.h>
 #endif
-#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
-#include "ExampleDeclarations.inc"
-#else
 #ifdef _WIN32
 #include <Windows.h>
-#else
-#include <sys/wait.h>
-#include <unistd.h>
-#endif
+#elif defined(__APPLE__) && !TARGET_OS_IPHONE
+#include <mach-o/dyld.h>
 #endif
 
 namespace
 {
-struct Example
-{
-    const char* name;
-    const char* executable;
-    const char* category;
-    int (*entry)(int, char**) = nullptr;
-};
+namespace fs = std::filesystem;
+using dy_examples::Example;
 const Example examples[] = {
 #include "ExampleTargets.inc"
 };
 
-void List()
+void ListExamples()
 {
-    for(size_t i = 0; i < std::size(examples); ++i)
-        std::cout << i + 1 << ". " << examples[i].name << '\n';
+    for(std::size_t i = 0; i < std::size(examples); ++i)
+    {
+        const auto& example = examples[i];
+        std::cout << i + 1 << ". " << example.name << " [" << example.category << "]\n";
+        if(const auto* metadata = example_catalog::Find(example.name))
+            std::cout << "   " << example_catalog::StatusLabel(metadata->status) << " / " << metadata->title
+                << "\n   " << metadata->summary << "\n   Requires: " << metadata->requirements << '\n';
+    }
+}
+
+void ListScenes()
+{
+    for(const auto& asset : dy_examples::sceneAssets)
+        std::cout << asset.id << " / " << asset.name << " [" << asset.format << "]\n"
+            << "   " << dy_examples::AssetAvailabilityName(asset.availability) << "\n   " << asset.workload
+            << "\n   " << asset.license << "\n   " << asset.platformNotes << '\n';
 }
 
 const Example* Find(std::string_view selection)
 {
-    size_t number = 0;
+    std::size_t number = 0;
     const auto parsed = std::from_chars(selection.data(), selection.data() + selection.size(), number);
     if(parsed.ec == std::errc{} && parsed.ptr == selection.data() + selection.size() &&
         number > 0 && number <= std::size(examples)) return &examples[number - 1];
@@ -60,371 +60,43 @@ const Example* Find(std::string_view selection)
     return nullptr;
 }
 
-#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IPHONE)
-class Process
+void Help()
 {
-public:
-    ~Process()
-    {
-#ifdef _WIN32
-        if(process) CloseHandle(process);
-#endif
-    }
-    bool Running() const { return process != 0; }
-    bool Start(const Example& example, const std::vector<std::string>& arguments, std::string& error)
-    {
-        if(Running()) return false;
-        const std::filesystem::path executable(example.executable);
-        std::error_code fileError;
-        if(!std::filesystem::is_regular_file(executable, fileError))
-        {
-            error = std::string("Executable is missing: ") + example.name;
-            return false;
-        }
-        const auto directory = executable.parent_path();
-#ifdef _WIN32
-        // Quote each argument according to the Windows C runtime's argv rules.
-        const auto quote = [](const std::wstring& value)
-        {
-            std::wstring result = L"\"";
-            size_t slashes = 0;
-            for(const auto character : value)
-            {
-                if(character == L'\\') { ++slashes; continue; }
-                result.append(slashes * (character == L'\"' ? 2 : 1), L'\\');
-                slashes = 0;
-                if(character == L'\"') result += L'\\';
-                result += character;
-            }
-            result.append(slashes * 2, L'\\');
-            return result + L'\"';
-        };
-        std::wstring command = quote(executable.wstring());
-        for(const auto& argument : arguments)
-            command += L" " + quote(std::filesystem::path(argument).wstring());
-        STARTUPINFOW startup{};
-        startup.cb = sizeof(startup);
-        PROCESS_INFORMATION info{};
-        if(!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, 0,
-            nullptr, directory.c_str(), &startup, &info))
-        {
-            error = "Cannot start example (Windows error " + std::to_string(GetLastError()) + ").";
-            return false;
-        }
-        CloseHandle(info.hThread);
-        process = info.hProcess;
-#else
-        std::vector<std::string> values{executable.string()};
-        values.insert(values.end(), arguments.begin(), arguments.end());
-        std::vector<char*> argv;
-        for(auto& value : values) argv.push_back(value.data());
-        argv.push_back(nullptr);
-        // Prepare everything before fork: the GUI renderer may own worker threads.
-        const auto* executablePath = executable.c_str();
-        const auto* workingDirectory = directory.c_str();
-        auto* const* childArguments = argv.data();
-        const auto child = fork();
-        if(child == -1) { error = std::strerror(errno); return false; }
-        if(child == 0)
-        {
-            if(chdir(workingDirectory) == -1) _exit(126);
-            execv(executablePath, childArguments);
-            _exit(127);
-        }
-        process = child;
-#endif
-        return true;
-    }
-    // Poll never waits; the launcher remains responsive while an example runs.
-    bool Finish(int& result, bool wait = false)
-    {
-        if(!Running()) return false;
-#ifdef _WIN32
-        const auto state = WaitForSingleObject(process, wait ? INFINITE : 0);
-        if(state == WAIT_TIMEOUT) return false;
-        DWORD exitCode = 1;
-        if(state == WAIT_OBJECT_0) GetExitCodeProcess(process, &exitCode);
-        CloseHandle(process);
-        process = nullptr;
-        result = static_cast<int>(exitCode);
-#else
-        int status = 0;
-        pid_t finished;
-        do { finished = waitpid(process, &status, wait ? 0 : WNOHANG); }
-        while(finished == -1 && errno == EINTR);
-        if(finished == 0) return false;
-        process = 0;
-        result = finished == -1 ? 1 : WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
-#endif
-        return true;
-    }
-private:
-#ifdef _WIN32
-    HANDLE process = nullptr;
-#else
-    pid_t process = 0;
-#endif
-};
-#endif
+    std::cout << "visualizer [--asset-root DIR] [--scene ID|PATH]\n"
+        "visualizer --list | --scenes\n"
+        "visualizer number|target-name [example arguments...]\n"
+        "Without a target name, open the scene workbench. Examples run in the same\n"
+        "window; use the example controls to switch examples or return to the workbench.\n"
+        "Arguments after a target name pass through unchanged. --list and --scenes need no GPU.\n";
+}
 
-std::unique_ptr<dyf::Font> LoadFont(float size)
+#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IPHONE)
+fs::path ExecutableDirectory(const char* argument)
 {
-    if(const auto* path = std::getenv("DY_EXAMPLES_FONT"))
-        if(auto font = dyf::Font::Load(path, size)) return font;
-#ifdef __ANDROID__
-    for(const auto* path : {"/system/fonts/Roboto-Regular.ttf", "/system/fonts/NotoSans-Regular.ttf"})
-        if(auto font = dyf::Font::Load(path, size)) return font;
-#elif defined(_WIN32)
-    wchar_t directory[MAX_PATH];
-    const auto length = GetWindowsDirectoryW(directory, MAX_PATH);
-    if(!length || length >= MAX_PATH) return nullptr;
-    const auto fonts = std::filesystem::path(directory) / "Fonts";
-    for(const auto* name : {"segoeui.ttf", "arial.ttf"})
-        if(auto font = dyf::Font::Load((fonts / name).u8string(), size)) return font;
+#ifdef _WIN32
+    std::vector<wchar_t> buffer(512);
+    for(;;)
+    {
+        const auto length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
+        if(!length) break;
+        if(length < buffer.size()) return fs::path(std::wstring(buffer.data(), length)).parent_path();
+        buffer.resize(buffer.size() * 2);
+    }
 #elif defined(__APPLE__)
-    for(const auto* path : {"/System/Library/Fonts/Helvetica.ttc", "/System/Library/Fonts/SFNS.ttf"})
-        if(auto font = dyf::Font::Load(path, size)) return font;
+    uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::vector<char> buffer(size);
+    if(size && _NSGetExecutablePath(buffer.data(), &size) == 0)
+        return fs::weakly_canonical(fs::path(buffer.data())).parent_path();
 #else
-    for(const auto* path : {"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"})
-        if(auto font = dyf::Font::Load(path, size)) return font;
+    std::error_code error;
+    const auto executable = fs::read_symlink("/proc/self/exe", error);
+    if(!error) return executable.parent_path();
 #endif
-    return nullptr;
+    return fs::absolute(argument && *argument ? fs::u8path(argument) : fs::path("visualizer")).parent_path();
 }
 
-std::string Title(const Example& example)
-{
-    std::string_view name(example.name);
-    for(const auto prefix : {std::string_view("Advanced"), std::string_view("Showcase"), std::string_view("Dyf"), std::string_view("Rhi"), std::string_view("RHI")})
-        if(name.substr(0, prefix.size()) == prefix) { name.remove_prefix(prefix.size()); break; }
-    std::string result;
-    for(size_t i = 0; i < name.size(); ++i)
-    {
-        const auto upper = [](char c) { return std::isupper(static_cast<unsigned char>(c)); };
-        const auto lower = [](char c) { return std::islower(static_cast<unsigned char>(c)); };
-        if(i && upper(name[i]) && (lower(name[i - 1]) || (i + 1 < name.size() && lower(name[i + 1]))))
-            result += ' ';
-        result += name[i];
-    }
-    return result;
-}
-
-using Color = dyf::Math::float4;
-const Color white{.90f,.93f,.97f,1}, muted{.48f,.55f,.65f,1}, accent{.35f,.74f,.98f,1};
-
-bool Contains(dyf::Rectangle rect, dyf::Platform::InputPoint point)
-{
-    return point.x >= rect.x && point.y >= rect.y && point.x < rect.x + rect.width && point.y < rect.y + rect.height;
-}
-
-struct View
-{
-    dyf::Canvas& canvas;
-    dyf::Font& font;
-    dyf::Font& heading;
-    float scaleX, scaleY;
-    dyf::Rectangle Pixels(dyf::Rectangle rect) const
-    {
-        return {rect.x * scaleX, rect.y * scaleY, rect.width * scaleX, rect.height * scaleY};
-    }
-    void Fill(dyf::Rectangle rect, Color color) { canvas.FillRect(Pixels(rect), color); }
-    void Text(std::string_view text, float x, float y, Color color = white, bool large = false)
-    {
-        if(!canvas.Text(large ? heading : font, text, {x * scaleX, y * scaleY}, color))
-            throw std::runtime_error("Cannot draw launcher text.");
-    }
-    void Clip(dyf::Rectangle rect) { canvas.SetClipRect(Pixels(rect)); }
-};
-
-int OpenGui([[maybe_unused]] const Example*& selected, std::string status)
-{
-    using namespace dyf::Platform;
-    Window window(1080, 760, "dy_engine / Examples");
-    if(!window.GetHandle()) return 1;
-    dyf::RendererConfig config;
-    config.recordingThreadCount = 1;
-    auto renderer = dyf::Renderer::Create(window.GetHandle(), config);
-    if(!renderer) return 1;
-
-#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IPHONE)
-    Process child;
 #endif
-    const Example* active = nullptr;
-    int category = 0, lastWidth = 0, lastHeight = 0, redrawFrames = 3;
-    float scroll = 0, fontScale = 0, dragOffset = 0;
-    bool dragging = false;
-    std::unique_ptr<dyf::Canvas> canvas;
-    std::unique_ptr<dyf::Font> font, heading;
-    constexpr const char* categories[] = {"All examples", "dyf", "RHI", "advanced", "showcase"};
-    std::vector<size_t> visible;
-
-    while(window.IsRunning())
-    {
-        Window::PollEvents();
-        if(!window.IsRunning()) break;
-#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IPHONE)
-        int result = 0;
-        if(child.Finish(result))
-        {
-            status = std::string(active->name) + (result == 0 ? " closed." : result == 77 ?
-                ": unavailable on this backend, or not implemented." : ": exited with code " + std::to_string(result) + ".");
-            active = nullptr;
-            redrawFrames = 3;
-        }
-#endif
-        const auto size = window.GetSize(), pixels = window.GetFramebufferSize();
-        if(size.width <= 0 || size.height <= 0 || pixels.width <= 0 || pixels.height <= 0 || window.IsMinimized())
-        {
-            Window::WaitEvents(.05);
-            continue;
-        }
-#ifdef __ANDROID__
-        const float uiScale = std::max(1.f, static_cast<float>(size.width) / 1080.f);
-#else
-        const float uiScale = 1;
-#endif
-        const float width = size.width / uiScale, height = size.height / uiScale;
-        const float sx = static_cast<float>(pixels.width) / width;
-        const float sy = static_cast<float>(pixels.height) / height;
-        if(fontScale != sy)
-        {
-            font = LoadFont(18 * sy);
-            heading = LoadFont(28 * sy);
-            if(!font || !heading) throw std::runtime_error("No supported system font found for the launcher.");
-            fontScale = sy;
-            redrawFrames = 3;
-        }
-        if(lastWidth != pixels.width || lastHeight != pixels.height)
-        {
-            canvas = std::make_unique<dyf::Canvas>(pixels.width, pixels.height);
-            lastWidth = pixels.width;
-            lastHeight = pixels.height;
-            redrawFrames = 3;
-        }
-        // This static browser should leave the GPU available to the running example.
-        if(!window.GetInput().GetEvents().empty()) redrawFrames = 3;
-        if(!redrawFrames) { Window::WaitEvents(.05); continue; }
-        --redrawFrames;
-        canvas->Clear({.045f,.055f,.075f,1});
-        View view{*canvas, *font, *heading, sx, sy};
-        const auto& input = window.GetInput();
-        auto pointer = input.GetCursorPosition();
-        pointer.x /= uiScale;
-        pointer.y /= uiScale;
-        const bool click = input.WasPressed(MouseButton::Left);
-        const float sidebar = width >= 700 ? 190.f : 130.f, left = sidebar + 24;
-        const float contentWidth = std::max(1.f, width - left - 24);
-
-        view.Fill({0,0,sidebar,height}, {.065f,.08f,.105f,1});
-        view.Text("dy_engine", 18, 24, accent, width >= 700);
-        view.Text("EXAMPLES", 18, 68, muted);
-        for(int i = 0; i < static_cast<int>(std::size(categories)); ++i)
-        {
-            const dyf::Rectangle button{10, 112.f + i * 48, sidebar - 20, 40};
-            if(click && Contains(button, pointer)) { category = i; scroll = 0; }
-            const bool hover = Contains(button, pointer);
-            if(category == i || hover) view.Fill(button, category == i ? Color{.10f,.22f,.31f,1} : Color{.10f,.13f,.17f,1});
-            view.Clip(button);
-            view.Text(categories[i], button.x + 12, button.y + 10, category == i ? accent : white);
-            canvas->ResetClipRect();
-        }
-        view.Clip({left,0,contentWidth,96});
-        view.Text(category ? categories[category] : "All examples", left, 24, white, true);
-        view.Text("Select an example to launch it.", left, 65, muted);
-        canvas->ResetClipRect();
-
-        if(input.WasPressed(Key::Escape)) window.RequestClose();
-
-        visible.clear();
-        for(size_t i = 0; i < std::size(examples); ++i)
-            if(!category || std::string_view(examples[i].category) == categories[category])
-                visible.push_back(i);
-        view.Text(std::to_string(visible.size()) + " examples", left, 108, muted);
-        const dyf::Rectangle list{left,136,contentWidth,std::max(0.f,height - 212)};
-        constexpr float rowHeight = 64;
-        const float total = visible.size() * rowHeight;
-        const float maxScroll = std::max(0.f, total - list.height);
-        const dyf::Rectangle previous{left + contentWidth - 132,100,60,30};
-        const dyf::Rectangle next{left + contentWidth - 64,100,64,30};
-        view.Fill(previous, {.10f,.14f,.19f,1});
-        view.Fill(next, {.10f,.14f,.19f,1});
-        view.Text("UP", previous.x + 16, previous.y + 5, scroll > 0 ? accent : muted);
-        view.Text("DOWN", next.x + 7, next.y + 5, scroll < maxScroll ? accent : muted);
-        if(click && Contains(previous, pointer)) scroll -= list.height;
-        if(click && Contains(next, pointer)) scroll += list.height;
-        if(Contains(list, pointer)) scroll -= static_cast<float>(input.GetScrollDelta().y) * rowHeight * 2;
-        if(input.WasPressed(Key::PageDown)) scroll += list.height;
-        if(input.WasPressed(Key::PageUp)) scroll -= list.height;
-        if(input.WasPressed(Key::Home)) scroll = 0;
-        if(input.WasPressed(Key::End)) scroll = maxScroll;
-        scroll = std::clamp(scroll, 0.f, maxScroll);
-        if(maxScroll > 0 && list.height > 0)
-        {
-            const dyf::Rectangle track{list.x + list.width - 12,list.y,12,list.height};
-            const float thumbHeight = std::min(list.height, std::max(28.f, list.height * list.height / total));
-            const float travel = list.height - thumbHeight;
-            const float thumbY = list.y + scroll / maxScroll * travel;
-            if(click && Contains(track, pointer))
-            {
-                dragging = true;
-                dragOffset = pointer.y >= thumbY && pointer.y < thumbY + thumbHeight ? static_cast<float>(pointer.y) - thumbY : thumbHeight / 2;
-            }
-            if(!input.IsDown(MouseButton::Left)) dragging = false;
-            if(dragging && travel > 0) scroll = std::clamp((static_cast<float>(pointer.y) - list.y - dragOffset) / travel * maxScroll, 0.f, maxScroll);
-            view.Fill(track, {.08f,.10f,.13f,1});
-            view.Fill({track.x,list.y + scroll / maxScroll * travel,track.width,thumbHeight}, dragging ? accent : muted);
-        }
-        else dragging = false;
-        view.Clip(list);
-        if(visible.empty()) view.Text("No examples in this category.", left + 16, list.y + 24, muted);
-        for(size_t row = 0; row < visible.size(); ++row)
-        {
-            const auto index = visible[row];
-            const auto& example = examples[index];
-            const dyf::Rectangle rect{left,list.y + row * rowHeight - scroll,contentWidth - 16,rowHeight - 6};
-            if(rect.y + rect.height <= list.y || rect.y >= list.y + list.height) continue;
-            const bool hover = Contains(list, pointer) && Contains(rect, pointer);
-            view.Fill(rect, active == &example ? Color{.09f,.22f,.28f,1} : hover ? Color{.11f,.16f,.22f,1} : Color{.075f,.095f,.125f,1});
-            view.Text(std::to_string(index + 1), rect.x + 12, rect.y + 18, muted);
-            view.Clip({rect.x + 46,std::max(rect.y,list.y),std::max(0.f,rect.width - 130),
-                std::max(0.f,std::min(rect.y + rect.height,list.y + list.height) - std::max(rect.y,list.y))});
-            view.Text(Title(example), rect.x + 48, rect.y + 7);
-            view.Text(example.name, rect.x + 48, rect.y + 32, muted);
-            view.Clip(list);
-#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
-            view.Text(example.entry ? "RUN" : "N/A", rect.x + rect.width - 62, rect.y + 18,
-                example.entry ? accent : muted);
-            if(click && hover)
-            {
-                if(!example.entry) status = "This example requires a desktop-only extension.";
-                else { selected = &example; return 0; }
-            }
-#else
-            view.Text(active == &example ? "OPEN" : "RUN", rect.x + rect.width - 62, rect.y + 18,
-                child.Running() ? muted : accent);
-            if(click && hover && !child.Running())
-            {
-                std::string error;
-                if(child.Start(example, {}, error))
-                {
-                    active = &example;
-                    status = std::string("Running: ") + example.name + ". Close its window to run another example.";
-                }
-                else status = error;
-            }
-#endif
-        }
-        canvas->ResetClipRect();
-        view.Fill({sidebar,height - 60,width - sidebar,60}, {.06f,.08f,.10f,1});
-        view.Clip({left,height - 60,contentWidth,60});
-        view.Text(status, left, height - 44, active ? accent : white);
-        view.Text("Scroll to browse. Escape closes this window.", left, height - 22, muted);
-        canvas->ResetClipRect();
-        if(!renderer->Render(*canvas)) return 1;
-    }
-    return 0;
-}
 }
 
 int DyfRunExamples(int argc, char** argv, const char* assetRoot, const char* fontPath,
@@ -439,69 +111,79 @@ int DyfRunExamples(int argc, char** argv, const char* assetRoot, const char* fon
 #endif
     }
 #if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
-    const auto root = std::filesystem::absolute(assetRoot ? assetRoot : ".");
-    const auto invoke = [&](const Example& example, const std::vector<std::string>& arguments)
-    {
-        if(!example.entry) return 77;
-        auto directory = root / example.executable;
-        if(!std::filesystem::is_directory(directory)) directory = root;
-        std::filesystem::current_path(directory);
-        std::vector<std::string> values{example.name};
-        values.insert(values.end(), arguments.begin(), arguments.end());
-        std::vector<char*> pointers;
-        for(auto& value : values) pointers.push_back(value.data());
-        pointers.push_back(nullptr);
-        if(onExampleChanged) onExampleChanged(true);
-        int result = 1;
-        try { result = example.entry(static_cast<int>(values.size()), pointers.data()); }
-        catch(const std::exception& error) { std::cerr << example.name << ": " << error.what() << '\n'; }
-        if(onExampleChanged) onExampleChanged(false);
-        std::filesystem::current_path(root);
-        return result;
-    };
+    const fs::path repositoryRoot = fs::absolute(assetRoot && *assetRoot ? fs::u8path(assetRoot) : fs::path("."));
+    fs::path assets = repositoryRoot;
 #else
-    (void)assetRoot;
-    (void)onExampleChanged;
+    const fs::path repositoryRoot = fs::weakly_canonical(
+        ExecutableDirectory(argc > 0 ? argv[0] : nullptr) / DY_EXAMPLES_REPOSITORY_RELATIVE);
+    fs::path assets = assetRoot && *assetRoot ? fs::absolute(fs::u8path(assetRoot)) : repositoryRoot.parent_path() / "assets";
 #endif
-    if(argc > 1)
+    fs::path initialScene;
+    const Example* explicitExample = nullptr;
+    std::vector<std::string> arguments;
+    bool list = false, scenes = false;
+    for(int i = 1; i < argc; ++i)
     {
-        const std::string_view selection(argv[1]);
-        if(selection == "--list") { List(); return 0; }
-        if(selection == "--help")
+        const std::string_view argument(argv[i]);
+        if(argument == "--help" || argument == "-h") { Help(); return 0; }
+        if(argument == "--list") { list = true; continue; }
+        if(argument == "--scenes") { scenes = true; continue; }
+        if(argument == "--asset-root" || argument == "--scene")
         {
-            std::cout << "visualizer [--list | number | target-name] [example arguments...]\n"
-                "Without arguments, open the GUI example browser.\n";
-            return 0;
+            if(++i == argc) { std::cerr << argument << " requires a value.\n"; return 2; }
+            if(argument == "--asset-root") assets = fs::absolute(fs::u8path(argv[i]));
+            else initialScene = fs::u8path(argv[i]);
+            continue;
         }
-        const auto* example = Find(selection);
-        if(!example) { std::cerr << "Unknown example. Use --list.\n"; return 2; }
-#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
-        return invoke(*example, {argv + 2, argv + argc});
-#else
-        Process process;
-        std::string error;
-        if(!process.Start(*example, {argv + 2, argv + argc}, error))
-        {
-            std::cerr << error << '\n';
-            return 1;
-        }
-        int result = 1;
-        process.Finish(result, true);
-        return result;
-#endif
+        explicitExample = Find(argument);
+        if(!explicitExample) { std::cerr << "Unknown example or option: " << argument << ". Use --help.\n"; return 2; }
+        arguments.assign(argv + i + 1, argv + argc);
+        break; // All following arguments belong to the selected example.
     }
-    std::string status = "Click an example to open its window.";
-    while(true)
+    if(list || scenes)
     {
-        const Example* selected = nullptr;
-        const int result = OpenGui(selected, status);
-        if(result || !selected) return result;
-#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
-        const int exitCode = invoke(*selected, {});
-        status = std::string(selected->name) + (exitCode == 0 ? " closed." : exitCode == 77 ?
-            ": unavailable on this backend, or not implemented." : ": exited with code " + std::to_string(exitCode) + ".");
-#endif
+        if(list) ListExamples();
+        if(scenes) ListScenes();
+        return 0;
     }
+    if(explicitExample && !initialScene.empty())
+    {
+        std::cerr << "--scene opens a workbench scene; use it without an example target.\n";
+        return 2;
+    }
+    if(!initialScene.empty())
+    {
+        bool catalogId = false;
+        for(const auto& asset : dy_examples::sceneAssets) catalogId |= initialScene.u8string() == asset.id;
+        if(!catalogId) initialScene = fs::absolute(initialScene);
+    }
+    if(onExampleChanged) onExampleChanged(false);
+    dyf::Platform::Window window(1280, 800, "dy_engine / Examples workbench");
+    if(!window.GetHandle()) return 1;
+    // The state is released before the shared native window and survives every
+    // module visit. Each module scopes its rendering resources to that visit.
+    std::shared_ptr<dy_examples::WorkbenchState> workbench;
+    const Example* selected = explicitExample;
+    std::string status;
+    while(window.IsRunning())
+    {
+        if(!selected)
+        {
+            arguments.clear();
+            const int result = dy_examples::OpenWorkbench(window, workbench, examples,
+                std::size(examples), selected, arguments, status, assets, repositoryRoot, initialScene);
+            initialScene.clear();
+            if(result || !selected) return result;
+        }
+        auto result = dy_examples::RunHostedExample(window, examples, std::size(examples),
+            *selected, arguments, repositoryRoot);
+        status = !result.message.empty() ? std::move(result.message) : std::string(selected->name) +
+            (result.code == 0 ? " closed." : result.code == 77 ? ": unavailable on this backend." :
+                ": exited with code " + std::to_string(result.code) + ".");
+        selected = result.next;
+        arguments = std::move(result.arguments);
+    }
+    return 0;
 }
 catch(const std::exception& error)
 {

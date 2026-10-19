@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "../../../src/Platform/Profiler/CollectorInternal.h"
 #include "dyf/Extends/Tracy.h"
 #include "dyf/Extends/RenderDoc.h"
@@ -113,7 +114,7 @@ int main(int argc, char** argv) try {
     const auto options = Parse(argc, argv);
 
     // 1. 윈도우 생성 (해상도: 800x600)
-    dyf::Platform::Window window(800, 600, "Advanced / 01_Profiling");
+    DY_EXAMPLE_WINDOW(window, 800, 600, "Advanced / 01_Profiling");
 #ifdef DY_PROFILER_TRACING_ENABLED
     dyf::TracyAdapter tracy;
 #endif
@@ -213,12 +214,13 @@ int main(int argc, char** argv) try {
     while (!options.frames || frame < options.frames) {
         // 윈도우 OS 이벤트 처리
         window.PollEvents();
+        if(!dy_examples::BeginExampleFrame(window)) break;
 #ifdef DY_RENDERDOC_ENABLED
-        if(window.GetInput().WasPressed(dyf::Platform::Key::F12))
+        if(dy_examples::ExampleInput(window).WasPressed(dyf::Platform::Key::F12))
             (void)dyf::RenderDocCapture::TriggerNextFrame();
 #endif
 
-        if (!window.IsRunning()) {
+        if (!dy_examples::ExampleRunning(window)) {
             break;
         }
 

@@ -2,7 +2,6 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <CoreText/CoreText.h>
 #include "Platform/Windows/IOSApplication.h"
-#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -17,8 +16,6 @@ using dyf::Platform::Key;
 
 @interface MetalView : UIView {
     __weak UITouch* _primaryTouch;
-    CGPoint _origin, _previous;
-    BOOL _scrolling;
 }
 @property(nonatomic, copy) void (^sendInput)(const InputEvent&);
 @property(nonatomic) BOOL exampleRunning;
@@ -63,41 +60,27 @@ static Key PhysicalKey(UIKeyboardHIDUsage usage) {
     (void)event;
     if(_primaryTouch) return;
     _primaryTouch = touches.anyObject;
-    _origin = _previous = [_primaryTouch locationInView:self];
-    _scrolling = NO;
-    [self cursor:_origin];
-    if(self.exampleRunning) [self button:InputAction::Press];
+    [self cursor:[_primaryTouch locationInView:self]];
+    // GUI controls and scenes both need a drag from touch-down to touch-up.
+    // exampleRunning only controls native navigation, not input semantics.
+    [self button:InputAction::Press];
 }
 - (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     (void)event;
     if(!_primaryTouch || ![touches containsObject:_primaryTouch]) return;
-    const auto point = [_primaryTouch locationInView:self];
-    [self cursor:point];
-    if(!self.exampleRunning) {
-        if(std::hypot(point.x-_origin.x, point.y-_origin.y)>8) _scrolling=YES;
-        if(_scrolling && self.sendInput) {
-            InputEvent scroll; scroll.type=InputEventType::Scroll;
-            scroll.y=(point.y-_previous.y)/40.0;
-            self.sendInput(scroll);
-        }
-    }
-    _previous=point;
+    [self cursor:[_primaryTouch locationInView:self]];
 }
 - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     (void)event;
     if(!_primaryTouch || ![touches containsObject:_primaryTouch]) return;
     [self cursor:[_primaryTouch locationInView:self]];
-    if(self.exampleRunning) [self button:InputAction::Release];
-    else if(!_scrolling) {
-        // Delay a menu click until touch-up so a swipe only scrolls the list.
-        [self button:InputAction::Press];
-        [self button:InputAction::Release];
-    }
+    [self button:InputAction::Release];
     _primaryTouch=nil;
 }
 - (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
-    (void)touches; (void)event;
-    if(_primaryTouch && self.exampleRunning) [self button:InputAction::Release];
+    (void)event;
+    if(!_primaryTouch || ![touches containsObject:_primaryTouch]) return;
+    [self button:InputAction::Release];
     _primaryTouch=nil;
 }
 - (void)keys:(NSSet<UIPress*>*)presses action:(InputAction)action {

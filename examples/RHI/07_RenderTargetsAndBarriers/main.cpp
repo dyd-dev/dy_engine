@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf/RHI.h"
 #include "dyf/Platform/Window.h"
 #include "scene_vertex.h"
@@ -34,7 +35,7 @@ int main()
     try
     {
         // 1. 창은 표시 대상만 제공한다. GPU 작업은 공개 RHI로 직접 구성한다.
-        Platform::Window window(960, 640, "RHI / 07 Render Targets and Barriers");
+        DY_EXAMPLE_WINDOW(window, 960, 640, "RHI / 07 Render Targets and Barriers");
         Require(window.GetHandle() != nullptr, "Window creation failed.");
         std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create({}));
         Require(device != nullptr, "Device creation failed.");
@@ -115,10 +116,11 @@ int main()
         Require(displaySet != nullptr, "Display bindings failed.");
         RHI::ResourceState offscreenState = RHI::ResourceState::Undefined;
 
-        while(window.IsRunning())
+        while(dy_examples::ExampleRunning(window))
         {
             Platform::Window::PollEvents();
-            if(!window.IsRunning()) break;
+            if(!dy_examples::BeginExampleFrame(window)) break;
+            if(!dy_examples::ExampleRunning(window)) break;
             if(!device->BeginFrame())
             {
                 Require(!device->IsLost(), "Device lost.");

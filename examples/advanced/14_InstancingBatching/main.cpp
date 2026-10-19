@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "../../../src/Platform/Profiler/CollectorInternal.h"
 #include "dyf/Extends/Tracy.h"
 #include "dyf/Extends/RenderDoc.h"
@@ -95,7 +96,7 @@ int main(int argc, char** argv) {
         Check(options.mode == "draws" || options.mode == "instanced", "Invalid --mode");
 
         // 창과 그래픽 장치, 캡처 옵션을 반영한 스왑체인을 준비한다.
-        dyf::Platform::Window window(800, 600, "Advanced / Instancing and batching");
+        DY_EXAMPLE_WINDOW(window, 800, 600, "Advanced / Instancing and batching");
 #ifdef DY_PROFILER_TRACING_ENABLED
         dyf::TracyAdapter tracy;
 #endif
@@ -191,14 +192,15 @@ int main(int argc, char** argv) {
         bool captured = false;
 
         // 렌더링 가능한 프레임에서 명령을 기록하고, 지정한 프레임 수 또는 창 종료까지 반복한다.
-        while (window.IsRunning() && (options.frames == 0 || frame < options.frames)) {
+        while (dy_examples::ExampleRunning(window) && (options.frames == 0 || frame < options.frames)) {
             window.PollEvents();
+            if(!dy_examples::BeginExampleFrame(window)) break;
 #ifdef DY_RENDERDOC_ENABLED
-            if(window.GetInput().WasPressed(dyf::Platform::Key::F12))
+            if(dy_examples::ExampleInput(window).WasPressed(dyf::Platform::Key::F12))
                 (void)dyf::RenderDocCapture::TriggerNextFrame();
 #endif
 
-            if (!window.IsRunning()) break;
+            if (!dy_examples::ExampleRunning(window)) break;
             if (!device.BeginFrame()) {
                 Check(!device.IsLost(), "Device lost during BeginFrame");
                 continue; // 최소화·크기 변경으로 준비되지 않은 프레임은 세지 않는다.

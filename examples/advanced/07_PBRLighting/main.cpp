@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 // 데스크톱은 main의 루프, iOS는 CreatePBRLighting으로 만든 객체의 Tick을 사용한다.
 // Renderer 생성 시 파이프라인을 준비하고, Draw에서 전체 화면 PBR 패스를 제출한다.
 #include "../common/Example.h"
@@ -144,13 +145,14 @@ int main(int argc, char **argv) try {
     const auto options = ParseOptions(argc, argv);
     if (options.help)
         return 0;
-    dyf::Platform::Window window(960, 640, "Advanced / 07_PBRLighting");
+    DY_EXAMPLE_WINDOW(window, 960, 640, "Advanced / 07_PBRLighting");
     if (!window.GetHandle())
         throw std::runtime_error("Window creation failed.");
     Renderer renderer(window.GetHandle(), options);
-    while (window.IsRunning()) {
+    while (dy_examples::ExampleRunning(window)) {
         window.PollEvents();
-        if (!window.IsRunning() || !renderer.Tick())
+        if(!dy_examples::BeginExampleFrame(window)) break;
+        if (!dy_examples::ExampleRunning(window) || !renderer.Tick())
             break;
     }
     renderer.WaitIdle();

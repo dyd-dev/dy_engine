@@ -26,4 +26,8 @@ endif()
 
 add_executable(ShowcaseCinematic main.cpp)
 target_link_libraries(ShowcaseCinematic PRIVATE dyf::Model dyf::AdvancedRendering)
+if(TARGET dyf::ImGui)
+    target_link_libraries(ShowcaseCinematic PRIVATE dyf::ImGui)
+    target_compile_definitions(ShowcaseCinematic PRIVATE DY_SHOWCASE_GUI=1)
+endif()
 dyf_configure_showcase(ShowcaseCinematic showcase)

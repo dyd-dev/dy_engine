@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf/RHI.h"
 #include "dyf/Platform/Window.h"
 #include "scene_vertex.h"
@@ -29,7 +30,7 @@ int main()
 {
     try
     {
-        Platform::Window window(960, 640, "RHI / 10 Parallel Recording");
+        DY_EXAMPLE_WINDOW(window, 960, 640, "RHI / 10 Parallel Recording");
         Require(window.GetHandle() != nullptr, "Window creation failed.");
         std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create({}));
         Require(device != nullptr, "Device creation failed.");
@@ -136,10 +137,11 @@ int main()
         const auto started = std::chrono::steady_clock::now();
         uint64_t frameIndex = 0;
 
-        while(window.IsRunning())
+        while(dy_examples::ExampleRunning(window))
         {
             Platform::Window::PollEvents();
-            if(!window.IsRunning()) break;
+            if(!dy_examples::BeginExampleFrame(window)) break;
+            if(!dy_examples::ExampleRunning(window)) break;
             auto& frame = frames[frameIndex % frames.size()];
 
             // Fence: GPU가 이전 제출을 끝낸 후 같은 슬롯의 목록과 텍스처를 재사용한다.

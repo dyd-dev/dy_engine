@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf.h"
 #include "dyf/RHI.h"
@@ -124,7 +125,7 @@ int main(int argc, char** argv) try {
     if (!capture.empty() && frameLimit == 0) throw std::runtime_error("Capture requires a finite frame count.");
 
     // 창과 그래픽 장치, 화면 표시용 스왑체인을 생성한다.
-    dyf::Platform::Window window(960, 640, "Advanced / DeferredLighting");
+    DY_EXAMPLE_WINDOW(window, 960, 640, "Advanced / DeferredLighting");
     if (!window.GetHandle()) throw std::runtime_error("Window creation failed.");
     DeviceDesc deviceDesc;
     deviceDesc.enableValidation = validation;
@@ -205,7 +206,8 @@ int main(int argc, char** argv) try {
     // 창 이벤트를 처리하고 렌더링 가능한 프레임에서만 작업을 진행한다.
     while (!frameLimit || frame < frameLimit) {
         window.PollEvents();
-        if (!window.IsRunning()) break;
+        if(!dy_examples::BeginExampleFrame(window)) break;
+        if (!dy_examples::ExampleRunning(window)) break;
         if (!device.BeginFrame()) {
             if (device.IsLost()) throw std::runtime_error("Device lost.");
             continue;

@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI.h"
@@ -76,7 +77,7 @@ int main(int argc, char** argv)
         Check(options.mode == "manual" || options.mode == "graph", "Invalid --mode");
 
         // 2. 윈도우 생성 및 RHI 디바이스 초기화
-        dyf::Platform::Window window(800, 600, "Advanced / 21_RenderGraph");
+        DY_EXAMPLE_WINDOW(window, 800, 600, "Advanced / 21_RenderGraph");
         Check(window.GetHandle() != nullptr, "Window creation failed");
         RHI::DeviceDesc deviceDesc;
         deviceDesc.enableValidation = options.validation;
@@ -130,10 +131,11 @@ int main(int argc, char** argv)
         // 5. 메인 렌더 루프
         uint32_t frame = 0, callbacks = 0;
         double compileMilliseconds = 0.0, recordMilliseconds = 0.0;
-        while (window.IsRunning() && (options.frames == 0 || frame < options.frames))
+        while (dy_examples::ExampleRunning(window) && (options.frames == 0 || frame < options.frames))
         {
             window.PollEvents();
-            if (!window.IsRunning()) break;
+            if(!dy_examples::BeginExampleFrame(window)) break;
+            if (!dy_examples::ExampleRunning(window)) break;
             if (!device.BeginFrame())
             {
                 Check(!device.IsLost(), "Device lost during BeginFrame");

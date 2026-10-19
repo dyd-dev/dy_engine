@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf/RHI.h"
 #include "dyf/Platform/Window.h"
 #include "vertex.h"
@@ -32,7 +33,7 @@ int main()
     try
     {
         // 1. 창은 표시 대상만 제공한다. GPU 작업은 공개 RHI로 직접 구성한다.
-        Platform::Window window(960, 640, "RHI / 04 Constants and Bindings");
+        DY_EXAMPLE_WINDOW(window, 960, 640, "RHI / 04 Constants and Bindings");
         Require(window.GetHandle() != nullptr, "Window creation failed.");
         std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create({}));
         Require(device != nullptr, "Device creation failed.");
@@ -152,10 +153,11 @@ int main()
         auto* rightSet = device->CreateResourceSet({pipeline, &binding, 1});
         Require(leftSet && rightSet, "Resource set creation failed.");
 
-        while(window.IsRunning())
+        while(dy_examples::ExampleRunning(window))
         {
             Platform::Window::PollEvents();
-            if(!window.IsRunning()) break;
+            if(!dy_examples::BeginExampleFrame(window)) break;
+            if(!dy_examples::ExampleRunning(window)) break;
             if(!device->BeginFrame())
             {
                 Require(!device->IsLost(), "Device lost.");

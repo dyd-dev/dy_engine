@@ -13,8 +13,9 @@ struct SkinInfluence;
 
 enum class SkinningExecutionMode : uint8_t
 {
-    VertexShader,
-    ComputePreSkin
+    VertexShader = 0,
+    ComputePreSkin = 1,
+    Cpu = 2
 };
 
 // 모델 변형에 사용하는 단계만 교체한다. 다른 렌더링 단계는 Renderer의 설정을 사용한다.
@@ -46,6 +47,8 @@ public:
     [[nodiscard]] bool Render(const ModelScene&, const Camera&, Image* readback = nullptr);
     [[nodiscard]] bool Render(const ModelScene&, const Canvas& overlay, Image* readback = nullptr);
     [[nodiscard]] bool Render(const ModelScene&, const Camera&, const Canvas& overlay, Image* readback = nullptr);
+    [[nodiscard]] bool RenderToTexture(const ModelScene&, const Camera&, RHI::TextureHandle,
+        RHI::ResourceState before);
 
     [[nodiscard]] SkinningExecutionMode GetSkinningExecutionMode() const { return m_mode; }
     bool SetSkinningExecutionMode(SkinningExecutionMode);
@@ -56,6 +59,9 @@ public:
     bool SetShaders(const ModelShaderDesc&);
     // 마지막 완료된 Compute 스키닝의 GPU 시간이다. 측정값이 없으면 -1이다.
     [[nodiscard]] double GetGpuMilliseconds() const { return m_gpuMilliseconds; }
+    // 마지막 Model 준비의 CPU 벽시계 시간. 경계 계산·업로드·슬롯 대기를 포함하고
+    // Renderer의 기록·제출, GUI 및 Present는 제외한다.
+    [[nodiscard]] double GetCpuPrepareMilliseconds() const { return m_cpuPrepareMilliseconds; }
     // 시점 이동·재시작·비교 복원 직후 이전 변형 위치를 재사용하지 않는다.
     void InvalidateHistory();
 
@@ -84,7 +90,8 @@ private:
         std::vector<uintptr_t> workingSet;
         RHI::FenceHandle completion;
     };
-    bool RenderScene(const ModelScene&, const Camera*, const Canvas*, Image*);
+    bool RenderScene(const ModelScene&, const Camera*, const Canvas*, Image*,
+        RHI::TextureHandle target = nullptr, RHI::ResourceState before = RHI::ResourceState::Undefined);
     bool ConfigureShaders();
     bool RestoreShaders();
     bool Prepare(const ModelScene&);
@@ -135,6 +142,7 @@ private:
     std::vector<uint64_t> m_geometrySignatures, m_geometryRevisions;
     uint64_t m_nextGeometryRevision = 1;
     uint64_t m_influenceRevision = 1;
+    double m_cpuPrepareMilliseconds = 0;
     double m_gpuMilliseconds = -1;
 };
 }

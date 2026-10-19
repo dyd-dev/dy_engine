@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf.h"
 #include "dyf/RHI.h"
@@ -120,7 +121,7 @@ int main(int argc, char** argv) try {
 
 
     // 1. 윈도우 생성 (해상도: 960x640)
-    dyf::Platform::Window window(960, 640, "Advanced / 09_ClusteredLighting");
+    DY_EXAMPLE_WINDOW(window, 960, 640, "Advanced / 09_ClusteredLighting");
     if (!window.GetHandle()) {
         throw std::runtime_error("Window creation failed.");
     }
@@ -230,7 +231,8 @@ int main(int argc, char** argv) try {
     // =========================================================================
     while (!frameLimit || frame < frameLimit) {
         window.PollEvents();
-        if (!window.IsRunning()) {
+        if(!dy_examples::BeginExampleFrame(window)) break;
+        if (!dy_examples::ExampleRunning(window)) {
             break;
         }
 

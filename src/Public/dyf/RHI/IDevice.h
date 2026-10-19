@@ -29,6 +29,7 @@ namespace dyf::Platform
 
 namespace dyf::RHI
 {
+	class IDevice;
 	class ICommandList;
 	struct BufferDesc;
 	struct GraphicsPipelineDesc;
@@ -79,6 +80,26 @@ namespace dyf::RHI
     struct ResourceCounter { uint64_t live = 0, created = 0, destroyed = 0; };
     struct ResourceAllocationCounters { ResourceCounter buffers, textures, pipelines; };
 
+    // Optional application presentation integration, with no GUI/platform dependency.
+    // Register on the presentation thread before creating a swapchain. The device
+    // copies this value on its first successful CreateSwapchain; context must remain
+    // alive until beforeRelease returns. Restoring registration affects future devices.
+    // Callbacks run synchronously on the calling thread; do not destroy the device,
+    // change its swapchain, or recursively begin/present a frame from a callback.
+    struct DevicePresentationObserver
+    {
+        void* context = nullptr;
+        // Called after each successful swapchain creation/replacement. Registration
+        // only: defer presentation resources until the application is ready for them.
+        void (*onSwapchain)(void*, IDevice&, const SwapchainDesc&) = nullptr;
+        // May record/submit an overlay; must leave the backbuffer in Present state.
+        // False skips native presentation and keeps the acquired frame active.
+        bool (*beforePresent)(void*, IDevice&) = nullptr;
+        // Exactly once before native teardown. Release owned handles here; do not
+        // submit work. This is also called during abandoned/device-lost shutdown.
+        void (*beforeRelease)(void*, IDevice&) noexcept = nullptr;
+    };
+
 	class IDevice
 	{
 	public:
@@ -87,6 +108,9 @@ namespace dyf::RHI
 		virtual ~IDevice();
 
 		[[nodiscard]] static IDevice* Create(const DeviceDesc& desc);
+        // Thread-local, copied registration. Pass {} to clear; returns the old value
+        // for scoped restoration. It does not detach observers from existing devices.
+        static DevicePresentationObserver SetPresentationObserver(DevicePresentationObserver) noexcept;
 		[[nodiscard]] bool Supports(Feature) const;
         // Counts device-created resources, including resources retained by pending GPU work.
         // Swapchain-owned images are excluded.
@@ -308,6 +332,9 @@ namespace dyf::RHI
 		bool m_hasSwapchain = false;
         bool m_swapchainRetirementPending = false;
 		bool m_frameActive = false;
+        DevicePresentationObserver m_presentationObserver;
+        bool m_presentationObserverCaptured = false;
+        bool m_presentationCallbackActive = false;
         std::shared_ptr<RecordingState> m_recording;
 		void InvalidateBackBuffers();
 	};

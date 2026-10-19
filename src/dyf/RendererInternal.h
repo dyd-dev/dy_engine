@@ -34,7 +34,7 @@ struct Renderer::Impl
     [[nodiscard]] bool Render(const Scene&, const Camera&, const Canvas& overlay, Image* readback = nullptr);
 
     [[nodiscard]] bool RenderToTexture(const Scene&, const Camera&, RHI::TextureHandle target,
-        RHI::ResourceState before);
+        RHI::ResourceState before, const std::vector<RendererDrawDesc>* draws = nullptr);
 
     [[nodiscard]] bool CaptureEnvironment(const Scene&,Math::float3 position,uint32_t faceSize,
         float nearPlane,float farPlane,HdrImage& result,bool includeEmitters=true,HdrImage* visibility=nullptr);

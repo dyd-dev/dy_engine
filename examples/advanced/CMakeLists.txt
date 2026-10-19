@@ -2,6 +2,11 @@ file(GLOB directories RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}" CONFIGURE_DEPENDS "
 list(SORT directories)
 set(advanced_targets)
 foreach(directory IN LISTS directories)
+    # Keep unfinished placeholders and ray-tracing topics out of the host build.
+    # Their sources can still be configured independently when work resumes.
+    if(directory MATCHES "^(20_|23_|2[4-8]_)")
+        continue()
+    endif()
     if(NOT IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/${directory}")
         continue()
     endif()

@@ -1,3 +1,4 @@
+#include "../../examples/HostedExample.h"
 #include "dyf/Extends/Tracy.h"
 #include "dyf/Extends/RenderDoc.h"
 #include "dyf/Camera.h"
@@ -227,7 +228,7 @@ int main(int argc, char** argv)
         auto hero = scene.Add(quad, material(tile(98)));
         if(!hero) return 1;
 
-        Platform::Window window(1280, 720, "dy_engine / Dense Arena - Space pause | 4 culling | 5 instancing | F11 profiler");
+        DY_EXAMPLE_WINDOW(window, 1280, 720, "dy_engine / Dense Arena - Space pause | 4 culling | 5 instancing | F11 profiler");
 #ifdef DY_PROFILER_TRACING_ENABLED
         dyf::TracyAdapter tracy;
 #endif
@@ -266,23 +267,24 @@ int main(int argc, char** argv)
             "M submitted frames/s and draw counts | F11 profiler | Escape close\n", enemyCount, bulletCount,
             debrisCount, scene.GetEntityCount(), assets.string().c_str());
 
-        while(window.IsRunning())
+        while(dy_examples::ExampleRunning(window))
         {
             window.PollEvents();
+            if(!dy_examples::BeginExampleFrame(window)) break;
 #ifdef DY_RENDERDOC_ENABLED
-            if(window.GetInput().WasPressed(dyf::Platform::Key::F12))
+            if(dy_examples::ExampleInput(window).WasPressed(dyf::Platform::Key::F12))
                 (void)dyf::RenderDocCapture::TriggerNextFrame();
 #endif
-            if(window.GetInput().WasPressed(dyf::Platform::Key::F11))
+            if(dy_examples::ExampleInput(window).WasPressed(dyf::Platform::Key::F11))
             {
                 auto settings = renderer->GetConfig();
                 settings.profilerStartsExpanded = !settings.profilerStartsExpanded;
                 if(!renderer->SetConfig(settings)) return 1;
             }
 
-            const auto& input = window.GetInput();
-            if(input.WasPressed(Key::Escape)) window.RequestClose();
-            if(!window.IsRunning()) break;
+            const auto& input = dy_examples::ExampleInput(window);
+            if(input.WasPressed(Key::Escape)) dy_examples::RequestExampleClose(window);
+            if(!dy_examples::ExampleRunning(window)) break;
             const auto size = window.GetFramebufferSize();
             const bool focused = window.HasFocus();
             const bool suspended = window.IsMinimized() || size.width <= 0 || size.height <= 0 || (ready && !focused);

@@ -1,3 +1,4 @@
+#include "../../HostedExample.h"
 #include "dyf/RHI/IDevice.h"
 #include <dyf/RHI.h>
 #include <dyf/Platform/Window.h>
@@ -67,27 +68,28 @@ int main(int argc, char** argv)
     deviceDesc.enableValidation = options.validation;
     deviceDesc.maxFramesInFlight = 2;
 
-    std::unique_ptr<dyf::Platform::Window> window;
-    std::unique_ptr<IDevice> device(IDevice::Create(deviceDesc));
-    if(!device)
+    std::unique_ptr<IDevice> probeDevice(IDevice::Create(deviceDesc));
+    if(!probeDevice)
     {
         std::cerr << "Failed to create RHI device.\n";
         return 1;
     }
 
     std::cout << "Device Feature Check:\n";
-    std::cout << "  Supports(MeshShader): " << (device->Supports(Feature::MeshShader) ? "Supported" : "Unsupported") << "\n";
-    std::cout << "  Supports(TaskShader): " << (device->Supports(Feature::TaskShader) ? "Supported" : "Unsupported") << "\n";
+    std::cout << "  Supports(MeshShader): " << (probeDevice->Supports(Feature::MeshShader) ? "Supported" : "Unsupported") << "\n";
+    std::cout << "  Supports(TaskShader): " << (probeDevice->Supports(Feature::TaskShader) ? "Supported" : "Unsupported") << "\n";
 
-    if(!device->Supports(Feature::MeshShader))
+    if(!probeDevice->Supports(Feature::MeshShader))
     {
         std::cout << "Result: Current RHI backend or GPU does not support Mesh Shader (exit code 77).\n";
         return 77;
     }
 
     const uint32_t width = 800, height = 600;
-    window = std::make_unique<dyf::Platform::Window>(width, height, "Advanced / Mesh Shader Basics");
-    if(!window->GetHandle())
+    DY_EXAMPLE_WINDOW(window, width, height, "Advanced / Mesh Shader Basics");
+    // The device must be released before a standalone window lease is destroyed.
+    auto device = std::move(probeDevice);
+    if(!window.GetHandle())
     {
         std::cerr << "Failed to create window.\n";
         return 1;
@@ -96,7 +98,7 @@ int main(int argc, char** argv)
     dyf::RHI::ResourceScope resources(*device);
 
     SwapchainDesc swapchain{};
-    swapchain.window = window->GetHandle();
+    swapchain.window = window.GetHandle();
     swapchain.format = DefaultSwapchainFormat;
     swapchain.minimumImageCount = 2;
     swapchain.presentMode = PresentMode::Fifo;
@@ -154,8 +156,9 @@ int main(int argc, char** argv)
     uint32_t currentFrame = 0;
     while(true)
     {
-        window->PollEvents();
-        if(!window->IsRunning()) break;
+        window.PollEvents();
+        if(!dy_examples::BeginExampleFrame(window)) break;
+        if(!dy_examples::ExampleRunning(window)) break;
         if(options.frames > 0 && currentFrame >= options.frames) break;
 
         if(!device->BeginFrame())

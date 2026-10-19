@@ -108,15 +108,19 @@ void ModelRenderer::InitializeLiveProfiling() noexcept
         Platform::ControlDesc desc;desc.device=device;desc.source=m_renderer.GetLiveSourceId();desc.owner=m_profiling->id;
         desc.key="model.skinning";desc.label="Skinning execution";desc.kind=Platform::ControlKind::Enumeration;
         desc.application=Platform::ControlApplication::ResourceRebuild;desc.appliedValue=std::int64_t(m_liveAppliedMode);
-        desc.choices={{0,"Vertex shader"},{1,"Compute pre-skin"}};
-        desc.category=Platform::ControlCategory::Optimization;desc.description="Select Model deformation execution stage";desc.onPath="Compute pre-skin dispatch writes a vertex buffer before raster draws";desc.offPath="Vertex shader deformation in each raster/shadow pass";desc.conditions="Compute requires the device feature and an actual Model compute shader for this backend";desc.tradeoffs="Compute dispatch, output buffers and barriers versus repeated vertex shader work; CPU/GPU scopes can overlap";
-        const auto reason=ComputeSkinningUnavailable(m_renderer.GetDevice(),ShaderDescription(2,GetModelComputeShader()));desc.writable=!*reason;desc.unavailableReason=reason;
+        desc.choices={{0,"Vertex shader"},{1,"Compute pre-skin"},{2,"CPU"}};
+        desc.category=Platform::ControlCategory::Optimization;desc.description="Select Model deformation execution stage";desc.onPath="Compute pre-skin dispatch writes a vertex buffer before raster draws";desc.offPath="CPU evaluates and uploads deformed vertices; vertex mode deforms in raster/shadow passes";desc.conditions="CPU is available without compute; compute requires the device feature and an actual Model compute shader for this backend. Advanced rendering prepares shared deformed geometry for GPU modes.";desc.tradeoffs="CPU evaluation and vertex uploads versus compute output buffers/barriers or repeated vertex shader work; CPU/GPU scopes can overlap";
+        desc.writable=true;
         m_profiling->skinningControl=Platform::RegisterControl(std::move(desc),[this](const Platform::ControlRequest& request,Platform::LiveFrameKey){
             const auto mode=static_cast<SkinningExecutionMode>(std::get<std::int64_t>(request.value));
-            if(mode!=m_mode&&mode==SkinningExecutionMode::ComputePreSkin&&!PrepareComputePipeline())
-                return Platform::ControlApplyResult{Platform::ControlState::Failed,std::int64_t(m_mode),"Compute skinning pipeline could not be prepared"};
+            if(mode!=m_mode&&mode==SkinningExecutionMode::ComputePreSkin)
+            {
+                const auto reason=ComputeSkinningUnavailable(m_renderer.GetDevice(),ShaderDescription(2,GetModelComputeShader()));
+                if(*reason)return Platform::ControlApplyResult{Platform::ControlState::Failed,std::int64_t(m_mode),reason};
+                if(!PrepareComputePipeline())return Platform::ControlApplyResult{Platform::ControlState::Failed,std::int64_t(m_mode),"Compute skinning pipeline could not be prepared"};
+            }
             const bool applied=SetSkinningExecutionMode(mode);
-            return Platform::ControlApplyResult{applied?Platform::ControlState::Applied:Platform::ControlState::Failed,std::int64_t(m_mode),applied?"":"Compute skinning pipeline could not be prepared"};
+            return Platform::ControlApplyResult{applied?Platform::ControlState::Applied:Platform::ControlState::Failed,std::int64_t(m_mode),applied?"":"Skinning execution mode could not be applied"};
         });
         const char* keys[]={"model.frameBufferReuse","model.skipUnchangedUploads","model.staticMeshCache","model.influenceCache"};
         const char* descriptions[]={"Reuse completed Model frame resources","Skip equal Model upload bytes","Reuse immutable compute input meshes","Reuse packed and validated skin influences"};
@@ -136,8 +140,9 @@ void ModelRenderer::InitializeLiveProfiling() noexcept
 void ModelRenderer::PublishLiveAvailability() noexcept
 {
     if(!m_profiling->skinningControl.GetId())return;
-    const auto reason=ComputeSkinningUnavailable(m_renderer.GetDevice(),ShaderDescription(2,GetModelComputeShader()));
-    Platform::PublishControlAvailability(m_profiling->skinningControl.GetId(),!*reason,reason);
+    // Lack of compute must not disable switching between CPU and vertex modes.
+    // The compute choice reports its own precise failure when requested.
+    Platform::PublishControlAvailability(m_profiling->skinningControl.GetId(),true,"");
     const bool compute=m_mode==SkinningExecutionMode::ComputePreSkin;Platform::PublishControlAvailability(m_profiling->optimizationControls[2].GetId(),compute,compute?"":"Static mesh input cache is used only by ComputePreSkin");
 }
 
@@ -178,12 +183,18 @@ ModelRenderer::~ModelRenderer()
 
 bool ModelRenderer::SetSkinningExecutionMode(SkinningExecutionMode mode)
 {
-    if(mode > SkinningExecutionMode::ComputePreSkin) return Failure("Unknown skinning execution mode.");
-    if(mode == SkinningExecutionMode::ComputePreSkin && !m_renderer.GetDevice().Supports(RHI::Feature::Compute))
-        return Failure("Compute skinning is not supported by this device.");
+    if(mode > SkinningExecutionMode::Cpu) return Failure("Unknown skinning execution mode.");
+    if(mode == SkinningExecutionMode::ComputePreSkin)
+    {
+        const auto reason = ComputeSkinningUnavailable(m_renderer.GetDevice(), ShaderDescription(2, GetModelComputeShader()));
+        if(*reason) return Failure(reason);
+        // Reject an unavailable selection while the caller can keep displaying
+        // its current mode, rather than failing the next viewport render.
+        if(!PrepareComputePipeline()) return false;
+    }
     if(m_mode != mode) InvalidateHistory();
     m_mode = mode;
-    if(mode == SkinningExecutionMode::VertexShader) m_gpuMilliseconds = -1;
+    if(mode != SkinningExecutionMode::ComputePreSkin) m_gpuMilliseconds = -1;
     return true;
 }
 
@@ -365,11 +376,13 @@ void ModelRenderer::CollectGpuSamples()
         const auto sample = m_profiling->gpuSamples.front();
         uint64_t ticks[2];
         const bool read=device.ReadTimestamps(sample.query,0,2,ticks);
-        if(read)
+        const uint32_t bits = device.GetTimestampValidBits();
+        const double period = device.GetTimestampPeriodNanoseconds();
+        const bool validClock = bits > 0 && bits <= 64 && std::isfinite(period) && period > 0;
+        if(read && validClock && m_mode != SkinningExecutionMode::Cpu)
         {
-            const uint32_t bits = device.GetTimestampValidBits();
             const uint64_t mask = bits == 64 ? UINT64_MAX : (uint64_t{1} << bits) - 1;
-            m_gpuMilliseconds = ((ticks[1] - ticks[0]) & mask) * device.GetTimestampPeriodNanoseconds() / 1e6;
+            m_gpuMilliseconds = ((ticks[1] - ticks[0]) & mask) * period / 1e6;
         }
         if(sample.liveSpan.id){auto span=sample.liveSpan;span.outcome=Platform::LiveOutcome::Completed;span.duration.state=Platform::LiveValueState::Unavailable;
             const auto bits=device.GetTimestampValidBits();const auto period=device.GetTimestampPeriodNanoseconds();if(read&&bits&&bits<=64&&period>0){const auto mask=bits==64?UINT64_MAX:(std::uint64_t(1)<<bits)-1;span.duration={Platform::LiveValueState::Ready,double((ticks[1]-ticks[0])&mask)*period/1e6};if(sample.calibration)Platform::Detail::CalibrateGpuSpan(span,*sample.calibration,ticks[0],ticks[1],Platform::FindLiveObject(&device),sample.submittedNs,Platform::LiveNowNs());}Platform::RecordLiveGpuSpan(span);
@@ -393,8 +406,9 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
     bool hasSkin = false;
     for(uint32_t index = 0; index < scene.GetEntityCount(); ++index)
         hasSkin |= scene.GetEntitySkinPaletteOffset(static_cast<EntityID>(index)) != UINT32_MAX;
-    const bool compute = stockGeometry ? hasSkin && device.Supports(RHI::Feature::Compute) :
-        m_mode == SkinningExecutionMode::ComputePreSkin;
+    const bool cpu = m_mode == SkinningExecutionMode::Cpu;
+    const bool compute = !cpu && (stockGeometry ? hasSkin && device.Supports(RHI::Feature::Compute) :
+        m_mode == SkinningExecutionMode::ComputePreSkin);
     if(compute && !PrepareComputePipeline()) return false;
     if(!stockGeometry || m_historyScene != &scene) InvalidateHistory();
 
@@ -550,7 +564,7 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
     auto* influenceBuffer = m_influenceBuffer;
     // Completed unused slots must not pin buffers from historical scenes indefinitely.
     // Pointer identity is only a retirement key; uploads/validation use the actual data above.
-    std::vector<uintptr_t> workingSet = {uintptr_t(compute), reinterpret_cast<uintptr_t>(influenceBuffer),
+    std::vector<uintptr_t> workingSet = {uintptr_t(compute), uintptr_t(cpu), reinterpret_cast<uintptr_t>(influenceBuffer),
         compute ? reinterpret_cast<uintptr_t>(m_computePipeline) : 0,
         scene.Meshes().size(), scene.GetEntityCount(), std::max(size_t{1}, palette.size())};
     for(const auto& mesh : scene.Meshes())
@@ -609,9 +623,17 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
         return cached->buffer;
     };
     const SkinJointMatrices identity;
-    auto* paletteBuffer = upload(palette.empty() ? &identity : palette.data(), palette.empty() ? 1 : palette.size(),
-        sizeof(SkinJointMatrices), RHI::BufferUsage::Storage, RHI::ResourceState::ShaderResource);
-    if(!paletteBuffer) return Failure("Skin palette upload failed.");
+    RHI::BufferHandle paletteBuffer = nullptr;
+    if(compute || !stockGeometry)
+    {
+        // CPU-deformed stock geometry has no palette binding. The basic CPU
+        // shader only needs a valid dummy binding because its skin offsets are
+        // disabled; do not upload an animated palette that no shader reads.
+        const bool needsPalette = !cpu && !palette.empty();
+        paletteBuffer = upload(needsPalette ? palette.data() : &identity, needsPalette ? palette.size() : 1,
+            sizeof(SkinJointMatrices), RHI::BufferUsage::Storage, RHI::ResourceState::ShaderResource);
+        if(!paletteBuffer) return Failure("Skin palette upload failed.");
+    }
     if(compute&&!m_optimizationConfig.cacheStaticMeshes)ReleaseMeshBuffers();
     if(m_meshBuffers.size() != scene.Meshes().size()) { ReleaseMeshBuffers(); m_meshBuffers.resize(scene.Meshes().size()); }
     std::vector<bool> meshUsed(m_meshBuffers.size(), false);
@@ -627,7 +649,7 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
         const auto* morphed = scene.TryGetEntityMorphedMesh(entity);
         const bool deformed = paletteOffset != UINT32_MAX || morphed || scene.HasEntityMorphTargets(entity);
         draw.stockGeometry = stockGeometry;
-        if(stockGeometry && deformed)
+        if((stockGeometry || cpu) && deformed)
         {
             if(!IsValid(mesh) || meshIndex >= scene.Meshes().size())
                 return Failure("A deformed entity requires valid source geometry.");
@@ -745,7 +767,8 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
                 {11, 0, influenceBuffer, nullptr, 0, influenceBuffer->GetDesc().size, {}},
                 {12, 0, paletteBuffer, nullptr, 0, paletteBuffer->GetDesc().size, {}}};
             const std::array<uint32_t, 4> constants = {
-                compute || !IsValid(mesh) || meshIndex >= m_influenceOffsets.size() ? UINT32_MAX : m_influenceOffsets[meshIndex], paletteOffset, 0, 0};
+                compute || cpu || !IsValid(mesh) || meshIndex >= m_influenceOffsets.size() ? UINT32_MAX : m_influenceOffsets[meshIndex],
+                cpu ? UINT32_MAX : paletteOffset, 0, 0};
             draw.inlineConstants.resize(sizeof(constants));
             std::memcpy(draw.inlineConstants.data(), constants.data(), sizeof(constants));
         }
@@ -848,7 +871,8 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
     return true;
 }
 
-bool ModelRenderer::RenderScene(const ModelScene& scene, const Camera* camera, const Canvas* overlay, Image* readback)
+bool ModelRenderer::RenderScene(const ModelScene& scene, const Camera* camera, const Canvas* overlay, Image* readback,
+    RHI::TextureHandle target, RHI::ResourceState before)
 {
     InitializeLiveProfiling();
     m_renderer.PublishLiveGeometryAvailability(true);
@@ -882,14 +906,25 @@ bool ModelRenderer::RenderScene(const ModelScene& scene, const Camera* camera, c
             return Failure("Advanced model rendering requires the standard deformation shaders.");
         }
         // 이전 복원 자체가 실패했다면 원래 설정을 덮어쓰지 않고 다시 복원부터 처리한다.
+        bool prepared = false;
+        m_cpuPrepareMilliseconds = 0;
         if(RestoreShaders() && (stockGeometry || ConfigureShaders()) &&
-            m_renderer.PrepareLiveFrame(liveFrame.GetKey()) && Prepare(scene))
+            m_renderer.PrepareLiveFrame(liveFrame.GetKey()))
+        {
+            Platform::CpuTimer timer;
+            ScopeExit samplePrepare{[&] { m_cpuPrepareMilliseconds = timer.ElapsedMilliseconds(); }};
+            prepared = Prepare(scene);
+        }
+        if(prepared)
         {
             previousDraw = m_renderer.GetLastRenderCompletion();
             consumedHistoryFrame = m_historyFrame;
             drawAttempted = true;
-            rendered = camera ? m_renderer.Render(scene, *camera, m_draws, overlay, readback) :
-                m_renderer.Render(scene, m_draws, overlay, readback);
+            if(target)
+                rendered = m_renderer.RenderToTexture(scene, *camera, m_draws, target, before);
+            else
+                rendered = camera ? m_renderer.Render(scene, *camera, m_draws, overlay, readback) :
+                    m_renderer.Render(scene, m_draws, overlay, readback);
             const auto completion = m_renderer.GetLastRenderCompletion();
             if(rendered && stockGeometry && completion && completion != previousDraw)
             {
@@ -929,4 +964,10 @@ bool ModelRenderer::Render(const ModelScene& scene, const Canvas& overlay, Image
 { return RenderScene(scene, nullptr, &overlay, readback); }
 bool ModelRenderer::Render(const ModelScene& scene, const Camera& camera, const Canvas& overlay, Image* readback)
 { return RenderScene(scene, &camera, &overlay, readback); }
+bool ModelRenderer::RenderToTexture(const ModelScene& scene, const Camera& camera,
+    RHI::TextureHandle target, RHI::ResourceState before)
+{
+    if(!target) return Failure("An offscreen model render requires a target texture.");
+    return RenderScene(scene, &camera, nullptr, nullptr, target, before);
+}
 }
