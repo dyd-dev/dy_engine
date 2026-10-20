@@ -675,7 +675,10 @@ class GenerateTests(unittest.TestCase):
             with self.subTest(api=expected):
                 self.assertIn(expected, declared)
         self.assertFalse(any("Backends" in header or "Private" in header for header, _, _ in declared))
-        self.assertEqual(list(reference.by_module), ["dyf", "RHI", "Math", "Platform", "확장: Model"])
+        self.assertEqual(list(reference.by_module), [
+            "dyf", "RHI", "Math", "Platform",
+            "확장: Model", "확장: AdvancedRendering", "확장: ImGui", "확장: RenderDoc", "확장: Tracy",
+        ])
         for module, name in (("dyf", "Renderer"), ("RHI", "RenderGraph"), ("Math", "float3"),
                              ("Platform", "DY_PROFILE_FRAME_MARK"), ("확장: Model", "ModelAsset")):
             self.assertIn(name, [decl.name for _, decl in reference.by_module[module]])
