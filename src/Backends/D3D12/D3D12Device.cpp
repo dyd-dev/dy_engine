@@ -78,6 +78,7 @@ namespace dyf::Backends
         std::vector<uint64_t> frames;
         std::vector<D3D12SubmissionRecord> submissions;
         std::vector<std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>> activeCommandLists;
+        std::shared_ptr<D3D12CommandPoolCache> commandPool;
         // Keep diagnostic work alive if native submission succeeds but its
         // completion signal fails. Device teardown drains the queue.
         std::vector<ComPtr<ID3D12Object>> readbackResources;
@@ -159,7 +160,9 @@ namespace dyf::Backends
                     submissions.end(),
                     [completedValue](const D3D12SubmissionRecord& submission)
                     {
-                        return submission.completionValue <= completedValue;
+                        if(submission.completionValue>completedValue)return false;
+                        for(const auto& commands:submission.commandLists)commands->AllowPoolReuse();
+                        return true;
                     }),
                 submissions.end());
             return true;
@@ -1026,11 +1029,13 @@ void D3D12Device::DestroySwapchainNative()
         if (!m_internal->uploadPool)
             m_internal->uploadPool = MakeD3D12UploadPool(m_internal->device.Get());
         if (!m_internal->InitializeIndirectSignatures()) return nullptr;
+        if (!m_internal->commandPool)
+            m_internal->commandPool=std::make_shared<D3D12CommandPoolCache>(m_internal->device.Get());
 
         auto commandList = std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>(
             new D3D12CommandList(m_internal->device.Get(), m_internal->uploadPool,
                 m_internal->drawSignature.Get(), m_internal->drawIndexedSignature.Get(),
-                m_internal->dispatchSignature.Get(),{reusePages,suballocate}));
+                m_internal->dispatchSignature.Get(),{reusePages,suballocate},m_internal->commandPool));
         if (commandList->GetNativeList() == nullptr) return nullptr;
         return m_internal->activeCommandLists.emplace_back(std::move(commandList)).get();
     }

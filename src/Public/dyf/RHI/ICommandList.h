@@ -177,6 +177,8 @@ namespace dyf::RHI
         std::unordered_set<ResourceSetHandle> m_requiredResourceSets;
         void RequireState(const void*,uint32_t mip,uint32_t layer,ResourceState);
         std::vector<std::function<bool(ICommandList&)>> m_commands;
+        // Recorded payloads own their bytes until this list is reset or destroyed.
+        std::vector<uint8_t> m_commandBytes;
         ICommandList* m_preparedNative = nullptr;
         bool m_uploadPageReuse=true,m_uploadSuballocation=true;
         uint64_t m_completion=0;

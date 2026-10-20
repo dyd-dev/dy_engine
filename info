@@ -1,0 +1,21 @@
+performance
+갱신: 2026-10-20
+
+목적: Bistro의 안정적인 60 FPS와 Android/iOS의 CPU·GPU 시간 및 메모리 사용량 개선.
+최적화 기준은 현재 performance 구현이며, 적용 전후를 비교한다.
+
+반영된 내용
+- 기존 커밋: 비활성 Live 진단 비용과 RHI 재생 조회를 줄이고, Live 이벤트 일괄 처리·객체 ID 캐시를 적용했다.
+- 기존 커밋: 모델 bounds 계산과 변형 이력 슬롯의 대기 부담을 줄였다.
+- CPU instancing을 엔티티 순서와 무관하게 묶고, Surface 패스도 같은 instance·모션 데이터를 사용한다.
+- RHI draw·바인딩·dispatch·상수 인자를 연속 저장하고, 컬링 평면과 텍스처 identity 캐시를 재사용한다.
+- GPU visibility 입력이 같으면 업로드를 생략하며, 중복 상태 요구와 꺼진 Profiler HUD의 빈 패스를 줄였다.
+- Metal 상수 업로드 영역, D3D12 자원 검색·완료된 명령 목록, Vulkan 완료 fence를 재사용한다.
+
+진행: problems.md의 32개 관측 중 구현 적용 6개, 부분 적용 7개. 나머지 항목은 후속 작업이다.
+남은 범위: 모바일 압축 텍스처, descriptor·GPU 메모리 할당, 나머지 draw·로딩·계측 비용 및 장치별 검증.
+검증: git diff --check와 컬링 수학식 20,000건 교차 검산 완료. 빌드·native 실행·FPS 측정은 하지 않았다.
+Public 변경은 public_changed.txt에 기록했다. ABI 호환성을 보장하지 않으므로 엔진·사용 코드 재빌드가 필요하다.
+상세 관측과 검증 한계는 problems.md를 참고한다.
+
+브랜치 관계: demo-exhibition은 이 최적화를 포함하고 시연·전시용 GUI와 예제 작업을 추가한다.

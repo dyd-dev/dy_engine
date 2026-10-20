@@ -155,11 +155,12 @@ bool TransparentRendering::Prepare(IDevice& device,ICommandList& uploads,const C
     if(layers!=1 && layers!=2) return false;
     m_layers=layers;
     m_device=&device;m_draws.clear();m_data.clear();m_recorded=false;m_layeredRecorded=false;m_noShadowPending=false;
+    const CameraFrustum frustum(camera);
     for(const auto& draw:draws)
     {
         if(!draw.material) return false;
         if(draw.material->alphaMode==MaterialAlphaMode::Blend && draw.indexCount &&
-            (!frustumCulling || !OutsideCamera(draw.localBounds,draw.model,camera))) m_draws.push_back(draw);
+            (!frustumCulling || !frustum.Outside(draw.localBounds,draw.model))) m_draws.push_back(draw);
     }
     if(m_draws.empty()) return true;
     if(m_draws.size()>UINT32_MAX/sizeof(DrawGPU) || !CreatePipelines()) return false;

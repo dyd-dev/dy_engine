@@ -10,6 +10,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <tuple>
 
 namespace dyf
 {
@@ -126,6 +127,7 @@ struct Renderer::Impl
         Image source;
         RHI::TextureHandle texture=nullptr;
         RHI::ResourceState state=RHI::ResourceState::Undefined;
+        bool used=false;
     };
     struct CanvasImageSlot
     {
@@ -182,6 +184,7 @@ struct Renderer::Impl
     bool UsesGpuVisibility() const;
     bool PrepareVisibility(const Scene&,const Camera&,RHI::ICommandList&,uint32_t,uint32_t,
         const std::vector<RendererDrawDesc>*);
+    bool PrepareCpuBatches(const Scene&,const Camera&,RHI::ICommandList&,const std::vector<RendererDrawDesc>*,bool motion);
     bool PrepareFrameResources(RenderFrame&,RHI::ICommandList&);
     void CommitFrameResources(const RenderFrame&);
     void InvalidateFrameHistory(bool release = false);
@@ -300,6 +303,7 @@ struct Renderer::Impl
     std::vector<std::weak_ptr<const MeshData>> lodMeshSources;
     bool lodDebugActive=false,wireframeActive=false;
     std::vector<TextureSlot> m_textures;
+    std::vector<uint32_t> m_freeTextureSlots;
     std::map<std::pair<const uint8_t*,ColorSpace>,uint32_t> m_indices;
     std::vector<SceneMaterialState> materialStates;
     std::unique_ptr<BasicEnvironmentResources> basicEnvironment;
@@ -311,12 +315,22 @@ struct Renderer::Impl
     struct VisibilityDraw
     {
         uint32_t entity=0,mesh=0,material=0,level=0;
+        uint32_t instanceOffset=0,instanceCount=1;
     };
     std::unique_ptr<GpuVisibility> gpuVisibility;
     std::vector<VisibilityDraw> visibilityDraws;
     std::vector<uint64_t> visibilityKeys;
     std::weak_ptr<Scene> visibilityScene;
     bool visibilityActive=false;
+    using CpuDrawKey=std::tuple<uint32_t,uint32_t,uint32_t,uintptr_t,uintptr_t,bool,bool,bool>;
+    struct CpuDrawInput {CpuDrawKey key;uint32_t entity;};
+    std::vector<CpuDrawInput> cpuDrawInputs;
+    std::vector<VisibilityDraw> cpuDraws;
+    std::vector<uint32_t> cpuBatchIndices,cpuInstanceEntities,cpuMeshCounts;
+    std::vector<Math::float4x4> cpuInstanceScratch,cpuInstanceBytes;
+    RHI::BufferHandle cpuInstanceBuffer=nullptr;
+    bool cpuInstanceReady=false,cpuBatchesActive=false;
+    uint32_t cpuCulledEntities=0;
     std::weak_ptr<Scene> historyScene;
     std::vector<Math::float4x4> previousModels,pendingModels;
     Math::float4x4 previousViewProjection=Math::float4x4::Identity();

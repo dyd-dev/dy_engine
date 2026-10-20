@@ -390,12 +390,14 @@ bool ScreenSpaceLighting::Prepare(IDevice& device,ICommandList& uploads,TextureH
     m_depth=depth;m_settings=settings;m_draws.clear();
     m_gpuScratch.clear();m_gpuScratch.reserve(draws.size());
     m_draws.reserve(draws.size());m_drawSets.reserve(draws.size());
+    const CameraFrustum frustum(camera);
     for(const auto& draw:draws)
     {
         if(!draw.material) return fail();
         const auto& material=*draw.material;
         if(material.alphaMode==MaterialAlphaMode::Blend || !draw.indexCount) continue;
-        if(settings.frustumCulling && !draw.indirectArguments && OutsideCamera(draw.localBounds,draw.model,camera)) continue;
+        // Instance providers already cull each row; representative bounds cannot reject the whole batch.
+        if(settings.frustumCulling && !draw.instanceBuffer && !draw.indirectArguments && frustum.Outside(draw.localBounds,draw.model)) continue;
         if(!draw.vertexBuffer || !draw.indexBuffer) return fail();
         for(auto* texture:draw.textures) if(!texture) return fail();
         DrawGPU gpu;
@@ -577,7 +579,7 @@ bool ScreenSpaceLighting::AddSurface(RenderGraph& graph,RGResourceHandle depth,
             const uint32_t index[4]={i,draw.instanceBuffer?1u:0u,draw.deformationHistoryValid?1u:0u,0};
             commands->SetInlineConstants(0,sizeof(index),index);
             if(draw.indirectArguments) commands->DrawIndexedIndirect(draw.indirectArguments,draw.indirectOffset);
-            else commands->DrawIndexedInstanced(draw.indexCount,1,0,0,0);
+            else commands->DrawIndexedInstanced(draw.indexCount,draw.instanceCount,0,0,0);
         }
         commands->EndRendering();
     });

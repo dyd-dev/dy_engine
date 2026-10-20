@@ -15,6 +15,19 @@ namespace dyf::Backends
     struct D3D12CommandListInternal;
     class D3D12Buffer;
     class D3D12Texture;
+    struct D3D12CommandStorage;
+
+    class D3D12CommandPoolCache
+    {
+    public:
+        explicit D3D12CommandPoolCache(void* nativeDevice);
+        ~D3D12CommandPoolCache();
+        std::unique_ptr<D3D12CommandStorage> Acquire();
+        void Return(std::unique_ptr<D3D12CommandStorage>) noexcept;
+    private:
+        struct Impl;
+        std::unique_ptr<Impl> m_impl;
+    };
 
     struct D3D12SubmissionState
     {
@@ -31,7 +44,9 @@ namespace dyf::Backends
             void* drawSignature = nullptr,
             void* drawIndexedSignature = nullptr,
             void* dispatchSignature = nullptr,
-            RHI::Detail::UploadPolicy policy = {});
+            RHI::Detail::UploadPolicy policy = {},
+            std::shared_ptr<D3D12CommandPoolCache> commandPool = {});
+        void AllowPoolReuse();
         void ResetTimestampsNative(RHI::TimestampQueryHandle, uint32_t, uint32_t) override;
         void WriteTimestampNative(RHI::TimestampQueryHandle, uint32_t) override;
         void MarkTimestampsSubmitted(uint64_t completion);

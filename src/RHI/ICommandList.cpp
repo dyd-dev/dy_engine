@@ -5,7 +5,11 @@
 #include "../Platform/Profiler/RhiProfiler.h"
 #include "../Platform/Profiler/CollectorInternal.h"
 #include <algorithm>
+#include <cstring>
+#include <stdexcept>
 #include <string>
+#include <tuple>
+#include <type_traits>
 
 namespace dyf::RHI
 {
@@ -710,6 +714,31 @@ namespace dyf::RHI
 {
 class RecordedCommandList final : public ICommandList
 {
+    template<auto Method,class... Args>
+    void RecordNative(Args... args)
+    {
+        static_assert((std::is_trivially_copyable_v<Args> && ...));
+        static_assert(((sizeof(Args)%alignof(uint32_t)==0) && ...));
+        const size_t position=m_commandBytes.size();
+        const auto append=[this](const auto& value) {
+            const auto* first=reinterpret_cast<const uint8_t*>(&value);
+            m_commandBytes.insert(m_commandBytes.end(),first,first+sizeof(value));
+        };
+        (append(args),...);
+        // Replay closures only hold an owner and an offset; draw/binding arguments share storage.
+        m_commands.push_back([this,position](ICommandList& native) {
+            size_t cursor=position;
+            std::tuple<Args...> values{};
+            std::apply([&](auto&... value) {
+                const auto read=[&](auto& field) {
+                    std::memcpy(&field,m_commandBytes.data()+cursor,sizeof(field));cursor+=sizeof(field);
+                };
+                (read(value),...);
+            },values);
+            std::apply([&](const auto&... value) {(native.*Method)(value...);},values);
+            return true;
+        });
+    }
     void GlobalBarrierNative() override
     { m_commands.push_back([](ICommandList& native) { native.GlobalBarrierNative(); return true; });
       RecordLiveCommand(D::LiveCommandKind::Barrier,{},nullptr,0,0,1,D::LiveEventKind::Command,false,"Global barrier"); }
@@ -737,8 +766,9 @@ class RecordedCommandList final : public ICommandList
     }
     void ResourceBarrierNative(const ResourceBarrierDesc* values, uint32_t count) override
     {
+        if(!count)return;
         std::vector<ResourceBarrierDesc> copy;
-        if(count) copy.assign(values,values+count);
+        copy.assign(values,values+count);
         m_commands.push_back([copy=std::move(copy)](ICommandList& native) { native.ResourceBarrierNative(copy.data(),static_cast<uint32_t>(copy.size())); return true; });
 #ifdef DY_LIVE_PROFILING_ENABLED
         if(D::IsLiveCollectorEnabled())for(uint32_t i=0;i<count;++i)RecordLiveCommand(D::LiveCommandKind::Barrier,
@@ -782,29 +812,29 @@ class RecordedCommandList final : public ICommandList
     void BindComputePipelineNative(PipelineHandle pipeline) override
     {
         m_pipeline=pipeline;
-        m_commands.push_back([=](ICommandList& n){n.BindComputePipelineNative(pipeline);return true;});
+        RecordNative<&ICommandList::BindComputePipelineNative>(pipeline);
     }
     void ResetTimestampsNative(TimestampQueryHandle query,uint32_t first,uint32_t count) override
-    {m_commands.push_back([=](ICommandList& n){n.ResetTimestampsNative(query,first,count);return true;});
+    {RecordNative<&ICommandList::ResetTimestampsNative>(query,first,count);
      RecordLiveCommand(D::LiveCommandKind::None,{first,count},query);}
     void WriteTimestampNative(TimestampQueryHandle query,uint32_t index) override
-    {m_commands.push_back([=](ICommandList& n){n.WriteTimestampNative(query,index);return true;});
+    {RecordNative<&ICommandList::WriteTimestampNative>(query,index);
      RecordLiveCommand(D::LiveCommandKind::None,{index},query);}
     void DispatchNative(uint32_t x,uint32_t y,uint32_t z) override
-    {m_commands.push_back([=](ICommandList& n){n.DispatchNative(x,y,z);return true;});
+    {RecordNative<&ICommandList::DispatchNative>(x,y,z);
      RecordLiveCommand(D::LiveCommandKind::Dispatch,{x,y,z});}
     void DispatchIndirectNative(BufferHandle arguments,uint32_t offset) override
-    {m_commands.push_back([=](ICommandList& n){n.DispatchIndirectNative(arguments,offset);return true;});}
+    {RecordNative<&ICommandList::DispatchIndirectNative>(arguments,offset);}
     void BindGraphicsPipelineNative(PipelineHandle pipeline) override
     {
         m_pipeline=pipeline;
         // A graph may select its pipeline before the callback opens rendering.
-        if(m_rendering)m_commands.push_back([=](ICommandList& n){n.BindGraphicsPipelineNative(pipeline);return true;});
+        if(m_rendering)RecordNative<&ICommandList::BindGraphicsPipelineNative>(pipeline);
         RecordLiveCommand(D::LiveCommandKind::Bind,{},pipeline,0,0,1,D::LiveEventKind::Command,false,"Graphics pipeline");
     }
     void BindResourceSetNative(ResourceSetHandle resources) override
     {
-        m_commands.push_back([=](ICommandList& n){n.BindResourceSetNative(resources);return true;});
+        RecordNative<&ICommandList::BindResourceSetNative>(resources);
 #ifdef DY_LIVE_PROFILING_ENABLED
         // A no-op collector would still evaluate the per-binding object lookups.
         if(D::IsLiveCollectorEnabled())
@@ -820,56 +850,69 @@ class RecordedCommandList final : public ICommandList
 #endif
     }
     void BindVertexBufferNative(uint32_t binding, BufferHandle buffer, uint32_t offset) override
-    { m_commands.push_back([=](ICommandList& n){n.BindVertexBufferNative(binding,buffer,offset);return true;});
+    { RecordNative<&ICommandList::BindVertexBufferNative>(binding,buffer,offset);
       RecordLiveCommand(D::LiveCommandKind::Bind,{binding,offset},buffer,0,0,1,D::LiveEventKind::Command,false,"Vertex buffer"); }
     void BindIndexBufferNative(BufferHandle buffer, Format format, uint32_t offset) override
     {
         m_indexBuffer=buffer;
-        m_commands.push_back([=](ICommandList& n){n.BindIndexBufferNative(buffer,format,offset);return true;});
+        RecordNative<&ICommandList::BindIndexBufferNative>(buffer,format,offset);
         RecordLiveCommand(D::LiveCommandKind::Bind,{static_cast<int64_t>(format),offset},buffer,0,0,1,D::LiveEventKind::Command,false,"Index buffer");
     }
     void SetInlineConstantsNative(uint32_t offset,uint32_t size,const void* data) override
     {
-        const auto* first=static_cast<const uint8_t*>(data);
-        std::vector<uint8_t> bytes(first,first+size);
-        m_commands.push_back([offset,bytes=std::move(bytes)](ICommandList& n){n.SetInlineConstantsNative(offset,static_cast<uint32_t>(bytes.size()),bytes.data());return true;});
+        const uint32_t header[]={offset,size};
+        const size_t position=m_commandBytes.size();
+        if(m_commandBytes.max_size()-position<sizeof(header) ||
+            m_commandBytes.max_size()-position-sizeof(header)<size)
+            throw std::length_error("Recorded inline constants exceed the command-list storage limit.");
+        const auto* headerBytes=reinterpret_cast<const uint8_t*>(header);
+        const auto* bytes=static_cast<const uint8_t*>(data);
+        m_commandBytes.insert(m_commandBytes.end(),headerBytes,headerBytes+sizeof(header));
+        m_commandBytes.insert(m_commandBytes.end(),bytes,bytes+size);
+        // Capture an offset rather than a data pointer: later records may grow the storage.
+        m_commands.push_back([this,position](ICommandList& n) {
+            uint32_t saved[2];
+            std::memcpy(saved,m_commandBytes.data()+position,sizeof(saved));
+            n.SetInlineConstantsNative(saved[0],saved[1],m_commandBytes.data()+position+sizeof(saved));
+            return true;
+        });
         RecordLiveCommand(D::LiveCommandKind::Bind,{offset,size},nullptr,0,size,1,D::LiveEventKind::Command,false,"Inline constants");
     }
     void SetViewportNative(const Viewport& viewport) override
-    { m_viewport=true; m_commands.push_back([=](ICommandList& n){n.SetViewportNative(viewport);return true;});
+    { m_viewport=true; RecordNative<&ICommandList::SetViewportNative>(viewport);
       RecordLiveCommand(D::LiveCommandKind::None,{},nullptr,0,0,1,D::LiveEventKind::Command,false,"Viewport"); }
     void SetScissorNative(const Rect& rect) override
-    { m_scissor=true; m_commands.push_back([=](ICommandList& n){n.SetScissorNative(rect);return true;});
+    { m_scissor=true; RecordNative<&ICommandList::SetScissorNative>(rect);
       RecordLiveCommand(D::LiveCommandKind::None,{rect.x,rect.y,rect.width,rect.height},nullptr,0,0,1,D::LiveEventKind::Command,false,"Scissor"); }
     void SetStencilReferenceNative(uint32_t reference) override
-    { m_commands.push_back([=](ICommandList& n){n.SetStencilReferenceNative(reference);return true;});
+    { RecordNative<&ICommandList::SetStencilReferenceNative>(reference);
       RecordLiveCommand(D::LiveCommandKind::Bind,{reference},nullptr,0,0,1,D::LiveEventKind::Command,false,"Stencil reference"); }
     void DrawInstancedNative(uint32_t vertices,uint32_t instances,uint32_t firstVertex,uint32_t firstInstance) override
     {
         if(!m_rendering || !m_pipeline || !m_viewport || !m_scissor) {m_recordingFailed=true;return;}
-        m_commands.push_back([=](ICommandList& n){n.DrawInstancedNative(vertices,instances,firstVertex,firstInstance);return true;});
+        RecordNative<&ICommandList::DrawInstancedNative>(vertices,instances,firstVertex,firstInstance);
         RecordLiveCommand(D::LiveCommandKind::Draw,{vertices,instances,firstVertex,firstInstance},nullptr,uint64_t(vertices)*instances);
     }
     void DrawIndexedInstancedNative(uint32_t indices,uint32_t instances,uint32_t firstIndex,int32_t vertexOffset,uint32_t firstInstance) override
     {
         if(!m_rendering || !m_pipeline || !m_indexBuffer || !m_viewport || !m_scissor) {m_recordingFailed=true;return;}
-        m_commands.push_back([=](ICommandList& n){n.DrawIndexedInstancedNative(indices,instances,firstIndex,vertexOffset,firstInstance);return true;});
+        RecordNative<&ICommandList::DrawIndexedInstancedNative>(indices,instances,firstIndex,vertexOffset,firstInstance);
         RecordLiveCommand(D::LiveCommandKind::DrawIndexed,{indices,instances,firstIndex,vertexOffset,firstInstance},nullptr,uint64_t(indices)*instances);
     }
     void DrawIndirectNative(BufferHandle arguments,uint32_t offset) override
     {
         if(!m_rendering || !m_pipeline || !m_viewport || !m_scissor) {m_recordingFailed=true;return;}
-        m_commands.push_back([=](ICommandList& n){n.DrawIndirectNative(arguments,offset);return true;});
+        RecordNative<&ICommandList::DrawIndirectNative>(arguments,offset);
     }
     void DrawIndexedIndirectNative(BufferHandle arguments,uint32_t offset) override
     {
         if(!m_rendering || !m_pipeline || !m_indexBuffer || !m_viewport || !m_scissor) {m_recordingFailed=true;return;}
-        m_commands.push_back([=](ICommandList& n){n.DrawIndexedIndirectNative(arguments,offset);return true;});
+        RecordNative<&ICommandList::DrawIndexedIndirectNative>(arguments,offset);
     }
     void DispatchMeshNative(uint32_t x,uint32_t y,uint32_t z) override
     {
         if(!m_rendering || !m_pipeline || !m_viewport || !m_scissor) {m_recordingFailed=true;return;}
-        m_commands.push_back([=](ICommandList& n){n.DispatchMeshNative(x,y,z);return true;});
+        RecordNative<&ICommandList::DispatchMeshNative>(x,y,z);
         RecordLiveCommand(D::LiveCommandKind::DispatchMesh,{x,y,z});
     }
     bool CloseNative() override {return !m_rendering && !m_recordingFailed;}

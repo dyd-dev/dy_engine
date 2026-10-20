@@ -337,6 +337,12 @@ void Renderer::Impl::SwapResources(Impl& other)
     swap(gpuVisibility,other.gpuVisibility);swap(visibilityDraws,other.visibilityDraws);
     swap(visibilityKeys,other.visibilityKeys);swap(visibilityScene,other.visibilityScene);
     swap(visibilityActive,other.visibilityActive);
+    swap(cpuDrawInputs,other.cpuDrawInputs);swap(cpuDraws,other.cpuDraws);
+    swap(cpuBatchIndices,other.cpuBatchIndices);swap(cpuInstanceEntities,other.cpuInstanceEntities);
+    swap(cpuMeshCounts,other.cpuMeshCounts);
+    swap(cpuInstanceScratch,other.cpuInstanceScratch);swap(cpuInstanceBytes,other.cpuInstanceBytes);
+    swap(cpuInstanceBuffer,other.cpuInstanceBuffer);swap(cpuInstanceReady,other.cpuInstanceReady);
+    swap(cpuBatchesActive,other.cpuBatchesActive);swap(cpuCulledEntities,other.cpuCulledEntities);
     swap(mainSetScratch,other.mainSetScratch);
     swap(shadowSetScratch,other.shadowSetScratch);
     swap(mainBindingScratch,other.mainBindingScratch);
@@ -601,7 +607,7 @@ void Renderer::Impl::Shutdown()
     m_profiler.ResetGpuQueries();
     for(auto* texture:{depthStencilTarget,shadowDepthTarget,hdrTarget})if(texture)device->DestroyTexture(texture);
     for(auto* texture:defaultMaterialTextures)if(texture)device->DestroyTexture(texture);
-    for(auto* buffer:{lightingBuffer,shadowMatrixBuffer,instanceBuffer,materialIndexBuffer})if(buffer)device->DestroyBuffer(buffer);
+    for(auto* buffer:{lightingBuffer,shadowMatrixBuffer,instanceBuffer,materialIndexBuffer,cpuInstanceBuffer})if(buffer)device->DestroyBuffer(buffer);
     for(auto* value:{pipeline,shadowPipeline,canvasPipeline,tonePipeline})if(value)device->DestroyPipeline(value);
     for(auto* value:materialPipelines)if(value)device->DestroyPipeline(value);
     for(auto* value:wireframePipelines)if(value)device->DestroyPipeline(value);

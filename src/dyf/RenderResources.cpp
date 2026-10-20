@@ -100,6 +100,8 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
         if(meshIndex>=m_meshes.size() || materialIndex>=materialStates.size()) continue;
         const auto& mesh=m_meshes[meshIndex];
         if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount) continue;
+        const bool cpuBatch=cpuBatchesActive && scene.Materials()[materialIndex].alphaMode!=MaterialAlphaMode::Blend;
+        if(cpuBatch && cpuBatchIndices[i]==UINT32_MAX)continue;
         RenderGeometryDraw draw;
         const auto* input=frame.draws ? &(*frame.draws)[i] : nullptr;
         const auto level=std::min<uint32_t>(EntityLod(i),mesh.lods.size());
@@ -122,7 +124,15 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
         draw.textures=materialStates[materialIndex].textures;
         draw.textureFlags=materialStates[materialIndex].textureFlags |
             (scene.GetEntityLighting(entity).receiveShadow ? 32u : 0u) | (lodDebugActive ? 64u : 0u);
-        if(visibilityActive && draw.material->alphaMode!=MaterialAlphaMode::Blend)
+        if(cpuBatch)
+        {
+            const auto& batch=cpuDraws[cpuBatchIndices[i]];
+            draw.instanceBuffer=cpuInstanceBuffer;
+            draw.instanceOffset=batch.instanceOffset*2*sizeof(Math::float4x4);
+            draw.instanceCount=batch.instanceCount;
+            frame.geometry.push_back(std::move(draw));
+        }
+        else if(visibilityActive && draw.material->alphaMode!=MaterialAlphaMode::Blend)
         {
             while(visibilityIndex<visibilityDraws.size() && visibilityDraws[visibilityIndex].entity==i)
             {
@@ -161,5 +171,7 @@ void Renderer::Impl::UpdateFrameLighting(RenderFrame& frame,bool graphReady) con
         frame.visibleInstances={gpuVisibility->GetInstanceBuffer(),handle(gpuVisibility->GetInstancesHandle())};
         frame.indirectArguments={gpuVisibility->GetArgumentsBuffer(),handle(gpuVisibility->GetArgumentsHandle())};
     }
+    else if(cpuBatchesActive)
+        frame.visibleInstances={cpuInstanceBuffer,handle(frame.visibleInstances.resource)};
 }
 }

@@ -1,0 +1,33 @@
+Public 변경 기록
+
+기록 시작: 2026-10-19
+시작 시점: performance / 9437dd95b5cf
+
+기록 대상
+- src/Public/ 아래 파일 내용의 추가·수정·삭제·이동 전부.
+- API 시그니처뿐 아니라 타입·기본값·동작 계약·레이아웃·private 멤버·주석 변경도 포함한다.
+- Public을 변경하는 작업과 함께 이 파일에 변경 내용을 추가한다.
+
+각 변경의 기록 항목
+- 날짜와 변경 식별자
+- 변경 파일
+- 변경 전후 내용
+- 최적화 또는 수정 이유
+- API·소스·ABI·동작 호환성 영향
+- 검증 결과 또는 미검증 사항
+
+변경 이력
+
+2026-10-19 / PERF-20261019-01 / P06
+- 파일: src/Public/dyf/RHI/ICommandList.h
+- 변경: private m_commandBytes 저장소 추가. draw·바인딩·dispatch·상수의 인자를 명령 목록이 연속 저장하고 reset 시 비운다.
+- 이유: draw·바인딩별 큰 람다와 inline constants별 별도 vector의 할당을 줄이면서 호출 시점 데이터 복사를 보장한다.
+- 호환성: 공개 함수 시그니처와 명령의 동작 계약은 유지한다. private 멤버 추가로 클래스 크기·레이아웃이 달라져 기존 바이너리와의 ABI 호환성은 보장하지 않으며 엔진·사용 코드 재빌드가 필요하다.
+- 검증: 빌드·native 실행은 수행하지 않음. 변경 전체의 검증 결과는 problems.md에 기록한다.
+
+2026-10-19 / PERF-20261019-02 / P04·P05
+- 파일: src/Public/dyf/RenderExtension.h
+- 변경: RenderGeometryDraw 끝에 기본값 1인 instanceCount 추가. direct draw가 기존 128바이트 model/previous-MVP instanceBuffer를 사용하도록 계약을 명시한다. indirect draw의 개수는 기존 argument buffer에서 읽는다.
+- 이유: CPU가 묶은 불투명·알파 마스크 instance를 Surface 등 렌더 확장에서도 같은 모션 데이터로 그리기 위한 일반 렌더 계약이다.
+- 호환성: 기존 direct draw의 기본 동작은 1 instance로 유지된다. 공개 구조체에 필드가 추가되어 기존 바이너리와의 ABI 호환성은 보장하지 않으며 엔진·사용 코드 재빌드가 필요하다. instanceBuffer를 제공하는 확장은 개별 instance를 컬링하거나 batch 전체를 포함하는 경계를 관리해야 한다.
+- 검증: 빌드·native 실행은 수행하지 않음. 변경 전체의 검증 결과는 problems.md에 기록한다.

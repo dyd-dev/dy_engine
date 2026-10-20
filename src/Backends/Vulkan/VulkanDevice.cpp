@@ -270,6 +270,8 @@ namespace dyf::Backends
 		VkSwapchainKHR RetireSwapchainGeneration();
 		void UpdateBackBuffers();
 		void CollectCompletedSubmissions();
+        VkResult AcquireSubmissionFence(VkFence& fence);
+        void RecycleSubmissionFence(VkFence fence) noexcept;
 		void DestroySwapchainSyncObjects();
 		void DestroyCurrentSwapchain();
         void DestroyRetiredSwapchains(bool completedOnly=false);
@@ -301,6 +303,7 @@ namespace dyf::Backends
 			uint32_t imageIndex = std::numeric_limits<uint32_t>::max();
 		};
 		std::vector<SubmissionRecord> m_submissions;
+        std::vector<VkFence> m_availableFences;
 		std::vector<std::unique_ptr<VulkanCommandList, VulkanObjectDeleter>> m_acquiredCommandLists;
 		struct ReadbackResources
 		{
@@ -1080,9 +1083,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		SubmissionRecord submission{};
 		submission.commandLists = std::move(consumed);
 		m_submissions.reserve(m_submissions.size() + 1);
-		VkFenceCreateInfo fenceInfo{};
-		fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-		if (vkCreateFence(m_context.device, &fenceInfo, nullptr, &submission.fence) != VK_SUCCESS) return false;
+            const auto fenceCreated=AcquireSubmissionFence(submission.fence);
+            if(fenceCreated!=VK_SUCCESS) {LogVulkanFailure("AcquireSubmissionFence",fenceCreated);return false;}
 
 		const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 		VkSubmitInfo submitInfo{};
@@ -1129,13 +1131,11 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         // 모든 이미지 작업 뒤에서 한 번만 표시 세마포어를 신호한다.
         SubmissionRecord completion{};
         m_submissions.reserve(m_submissions.size()+1);
-        VkFenceCreateInfo fenceInfo{};
-        fenceInfo.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        const VkResult fenceCreated=vkCreateFence(m_context.device,&fenceInfo,nullptr,&completion.fence);
+        const VkResult fenceCreated=AcquireSubmissionFence(completion.fence);
         if(fenceCreated!=VK_SUCCESS)
         {
             m_submissionFaulted=true;
-            LogVulkanFailure("vkCreateFence(Present)",fenceCreated);
+            LogVulkanFailure("AcquireSubmissionFence(Present)",fenceCreated);
             return false;
         }
         const VkPipelineStageFlags waitStage=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -1990,6 +1990,37 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		m_backBuffer = m_backBuffers.front().get();
 	}
 
+    VkResult VulkanDevice::Impl::AcquireSubmissionFence(VkFence& fence)
+    {
+        fence=VK_NULL_HANDLE;
+        if(!m_availableFences.empty())
+        {
+            const auto available=m_availableFences.back();m_availableFences.pop_back();
+            const auto result=vkResetFences(m_context.device,1,&available);
+            if(result!=VK_SUCCESS)
+            {
+                vkDestroyFence(m_context.device,available,nullptr);
+                if(result==VK_ERROR_DEVICE_LOST)m_submissionFaulted=true;
+                return result;
+            }
+            fence=available;return VK_SUCCESS;
+        }
+        VkFenceCreateInfo desc{};desc.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        const auto result=vkCreateFence(m_context.device,&desc,nullptr,&fence);
+        if(result==VK_ERROR_DEVICE_LOST)m_submissionFaulted=true;
+        return result;
+    }
+
+    void VulkanDevice::Impl::RecycleSubmissionFence(VkFence fence) noexcept
+    {
+        try
+        {
+            if(m_availableFences.size()<64) {m_availableFences.push_back(fence);return;}
+        }
+        catch(...) {} // Caching is optional; completion already made destruction safe.
+        vkDestroyFence(m_context.device,fence,nullptr);
+    }
+
 	void VulkanDevice::Impl::CollectCompletedSubmissions()
 	{
         if(m_commandPools && m_commandPools->IsDeviceLost())m_submissionFaulted=true;
@@ -2022,7 +2053,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
                 commands->AllowPoolReuse();
             }
 			m_completedSubmission=std::max(m_completedSubmission,submission.serial);
-            vkDestroyFence(m_context.device, submission.fence, nullptr);
+            RecycleSubmissionFence(submission.fence);
 			m_submissions.erase(m_submissions.begin() + static_cast<std::ptrdiff_t>(i));
 		}
         DestroyRetiredSwapchains(true);
@@ -2158,6 +2189,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 				if (submission.fence != VK_NULL_HANDLE) vkDestroyFence(m_context.device, submission.fence, nullptr);
 			}
 			m_submissions.clear();
+            for(const auto fence:m_availableFences)vkDestroyFence(m_context.device,fence,nullptr);
+            m_availableFences.clear();
 		}
 		m_acquiredCommandLists.clear();
         m_commandPools.reset();
