@@ -675,7 +675,10 @@ class GenerateTests(unittest.TestCase):
             with self.subTest(api=expected):
                 self.assertIn(expected, declared)
         self.assertFalse(any("Backends" in header or "Private" in header for header, _, _ in declared))
-        self.assertEqual(list(reference.by_module), ["dyf", "RHI", "Math", "Platform", "확장: Model"])
+        self.assertEqual(list(reference.by_module), [
+            "dyf", "RHI", "Math", "Platform", "확장: Model",
+            "확장: AdvancedRendering", "확장: ImGui", "확장: RenderDoc", "확장: Tracy",
+        ])
         for module, name in (("dyf", "Renderer"), ("RHI", "RenderGraph"), ("Math", "float3"),
                              ("Platform", "DY_PROFILE_FRAME_MARK"), ("확장: Model", "ModelAsset")):
             self.assertIn(name, [decl.name for _, decl in reference.by_module[module]])
@@ -907,6 +910,20 @@ class GenerateTests(unittest.TestCase):
             self.assertEqual(custom.api_groups, {"기본": {"API": ["Entry"]}})
             self.assertNotIn("api_groups.json", custom.authored_hashes)
             self.assert_local_links_resolve(custom.build())
+
+    def test_guide_links_validate_targets_and_escape_labels(self):
+        reference = generate.Reference()
+        reference.guides = [
+            {"slug": "setup", "sections": [{"id": "options"}]},
+        ]
+        self.assertEqual(
+            reference.rich("[<설정>](guide:setup#options)"),
+            '<a href="component/setup.html#options">&lt;설정&gt;</a>',
+        )
+        with self.assertRaisesRegex(ValueError, "Unknown guide link"):
+            reference.rich("[설정](guide:missing)")
+        with self.assertRaisesRegex(ValueError, "Unknown guide anchor"):
+            reference.rich("[설정](guide:setup#missing)")
 
     def test_authored_member_contracts_and_guides_have_valid_links(self):
         project = Path(self.temporary.name)

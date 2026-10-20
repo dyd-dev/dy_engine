@@ -4,7 +4,8 @@
 
 ## 문서 내용
 
-- 빠른 시작: CMake 구성, 기본 렌더러와 Canvas 예제.
+- 시작하기: 개발 도구, 플랫폼별 백엔드, CMake 옵션, 예제 빌드·실행과 자산 경로.
+- 빠른 시작: 앱의 CMake 연결, 기본 렌더러와 Canvas 예제.
 - 모듈 안내: 기본 API, RHI, Model 확장의 진입점과 사용 범위.
 - RHI 가이드: 명령 기록·제출·표시 흐름과 리소스 소유권.
 - `확장: Model`: 선택 빌드와 모델·애니메이션 입력.
@@ -20,7 +21,7 @@ API 탐색은 기본 API(dyf), RHI, Math, Platform과 Model·AdvancedRendering·
 ```text
 dy_engine/
 ├─ src/Public/                      # 문서 입력
-└─ docs/dy_engine_docs/
+└─ docs/
    ├─ index.html                    # 브라우저 진입점
    └─ component/
       ├─ generate.py                # 문서 생성기
@@ -37,7 +38,7 @@ dy_engine/
 
 ## 갱신과 검증
 
-Python 3.10 이상을 사용합니다. 외부 Python 패키지는 필요하지 않습니다. 저장소의 `docs/dy_engine_docs` 폴더에서 실행합니다.
+Python 3.10 이상을 사용합니다. 외부 Python 패키지는 필요하지 않습니다. 저장소의 `docs` 폴더에서 실행합니다.
 
 ```sh
 python component/generate.py
@@ -46,7 +47,7 @@ python -m unittest discover -s component -p 'test_*.py'
 python component/verify.py
 ```
 
-기본 엔진 위치는 문서 폴더를 포함하는 저장소 루트(`../..`)에서 찾습니다. 문서 폴더를 저장소 밖에 별도로 배치한 경우에는 나란히 있는 `../dy_engine`을 확인합니다. 다른 위치라면 엔진 루트를 명시합니다. 생성 결과는 작업 디렉터리와 관계없이 생성기 옆의 문서 폴더에만 기록합니다.
+기본 엔진 위치는 문서 폴더를 포함하는 저장소 루트(`..`)에서 찾습니다. 예전 `docs/dy_engine_docs` 배치도 지원합니다. 문서 폴더를 저장소 밖에 별도로 배치한 경우에는 나란히 있는 `../dy_engine`을 확인합니다. 다른 위치라면 엔진 루트를 명시합니다. 생성 결과는 작업 디렉터리와 관계없이 생성기 옆의 문서 폴더에만 기록합니다.
 
 ```sh
 python component/generate.py --project-root D:/dev/dy_engine
@@ -61,6 +62,8 @@ python component/generate.py --project-root D:/dev/dy_engine --source-dir src
 
 생성 HTML을 직접 편집하면 다음 갱신에서 덮어씁니다. API 설명은 `frontend_reference.json`, `rhi_reference.json`, 가이드는 `guides.json`, 좌측 기능별 분류와 나열 순서는 `api_groups.json`을 수정하세요. 각 독립 API는 소속 모듈의 한 그룹에만 배치합니다. 타입 페이지에 포함된 함수는 좌측 탐색에 별도 항목을 만들지 않습니다. 분류의 누락·중복·잘못된 모듈이나 존재하지 않는 API·멤버를 지정하면 생성이 실패합니다.
 
+가이드 본문에서 다른 안내 문서를 연결하려면 `[시작하기](guide:getting-started)`처럼 작성합니다. 특정 구역은 `[CMake 옵션](guide:getting-started#options)`처럼 지정합니다. 생성기가 문서와 구역의 존재 여부를 검사하며, 잘못된 링크는 생성 단계에서 오류로 알립니다.
+
 `api_owners.json`은 함수의 symbol key를 소유 타입의 symbol key에 연결합니다. 모든 오버로드를 같은 페이지에 두면 문자열 하나를, 오버로드별 페이지가 다르면 후보 타입 key의 배열을 지정합니다. 배열을 쓸 때는 각 선언의 타입명 토큰과 일치하는 후보가 정확히 하나여야 합니다. 헤더와 소유 페이지가 다른 모듈에 있더라도 함수의 원래 선언 위치는 유지합니다. 예를 들어 Model 확장의 `LoadMesh`는 `MeshData`, `ToString(MaterialTextureKind)`은 `MaterialTextureKind` 페이지에서 읽습니다.
 
 `--check`는 헤더·설명·가이드·분류·함수 소유 관계에서 다시 만든 결과와 저장된 문서를 비교하며 파일을 쓰지 않습니다. 오래된 파일 중 생성기 표시가 있는 HTML만 정리하고 수동 작성 파일은 보존합니다.
@@ -72,7 +75,7 @@ python component/generate.py --project-root D:/dev/dy_engine --source-dir src
 문서 폴더에서 다음 명령으로 공개 헤더 사용을 확인할 수 있습니다.
 
 ```sh
-g++ -std=c++17 -Wall -Wextra -Werror -I../../src/Public -fsyntax-only component/examples/quickstart-canvas.cpp component/examples/quickstart-rhi.cpp component/examples/clear-frame.cpp component/examples/resource-scope.cpp component/examples/render-graph.cpp
+g++ -std=c++17 -Wall -Wextra -Werror -I../src/Public -fsyntax-only component/examples/quickstart-canvas.cpp component/examples/quickstart-rhi.cpp component/examples/clear-frame.cpp component/examples/resource-scope.cpp component/examples/render-graph.cpp
 ```
 
 문서 폴더를 저장소 밖에 둔 경우 `-I` 경로를 실제 엔진의 `src/Public`로 바꿉니다. 문법 검사만으로 링크·GPU 실행·화면 결과를 확인할 수는 없습니다. 실행하려면 빠른 시작의 CMake 설정으로 엔진과 연결합니다. Apple은 Metal, Linux는 Vulkan을 자동 선택하며, Windows에서는 D3D12 또는 Vulkan을 지정합니다. `verify.py`는 생성된 HTML의 링크·앵커, 검색 링크와 인코딩을 검사합니다.
