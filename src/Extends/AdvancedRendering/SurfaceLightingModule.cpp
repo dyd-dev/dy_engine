@@ -72,8 +72,7 @@ public:
         if(stage==RenderStage::BeforeOpaque)
         {
             if(!m_lighting->Import(graph) || !m_lighting->AddSurface(graph,frame.depth.resource,
-                frame.gpuVisibility?frame.visibleInstances.resource:RHI::RGResourceHandle{},
-                frame.gpuVisibility?frame.indirectArguments.resource:RHI::RGResourceHandle{}) ||
+                frame.visibleInstances.resource,frame.indirectArguments.resource) ||
                 !m_lighting->AddAO(graph)) return AdvancedPassFailure("Surface/AO pass creation failed.");
             const auto& surface=m_lighting->GetGraphResources();
             frame.normal={m_lighting->GetNormal(),surface.normal};

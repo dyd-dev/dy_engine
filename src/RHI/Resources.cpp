@@ -529,6 +529,7 @@ bool IDevice::ResetCommandList(ICommandList* commands)
     }
     DiscardLivePrepared(commands,Platform::LiveOutcome::Discarded);
     commands->m_commands.clear();
+    commands->m_commandBytes.clear();
     commands->m_stateOperations.clear();
     commands->m_recordedStates.clear();
     commands->m_requiredResourceSets.clear();

@@ -3,6 +3,7 @@
 #include "dyf/Scene.h"
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/ICommandList.h"
+#include <algorithm>
 
 namespace dyf
 {
@@ -12,7 +13,13 @@ bool Renderer::Impl::UpdateInstanceBuffer(const Scene& scene,RHI::ICommandList& 
     pendingInstanceScene=scene.m_lifetime;
     pendingInstanceRevision=scene.m_transformRevision;
     pendingInstanceCount=scene.GetEntityCount();
-    if(!UsesInstanceStream() || !pendingInstanceCount) {
+    const bool separateTransparency=m_environmentCapture || wireframeActive || UsesSeparateTransparency();
+    const bool legacyDraws=(!visibilityActive && !cpuBatchesActive) || (!separateTransparency &&
+        std::any_of(scene.Materials().begin(),scene.Materials().end(),[](const MaterialDesc& material) {
+            return material.alphaMode==MaterialAlphaMode::Blend;
+        }));
+    const bool shadows=config.lighting.enabled && config.lighting.direct && config.lighting.shadows;
+    if(!UsesInstanceStream() || !pendingInstanceCount || (!legacyDraws && !shadows)) {
         instanceBuffer=nullptr;instanceReady=false;return true;
     }
     // GPU 가시 목록과 같은 128바이트 간격을 사용한다. 기본 셰이더는 앞 행렬만 읽는다.
@@ -73,6 +80,7 @@ bool Renderer::Impl::UpdateInstanceBuffer(const Scene& scene,RHI::ICommandList& 
 void Renderer::Impl::CommitFrameData()
 {
     instanceScene=pendingInstanceScene;instanceRevision=pendingInstanceRevision;instanceCount=pendingInstanceCount;
+    if(cpuBatchesActive)cpuInstanceBytes.swap(cpuInstanceScratch);
     lightingBytes.swap(pendingLightingBytes);
     if(config.lighting.enabled && config.lighting.direct && config.lighting.shadows)shadowBytes.swap(pendingShadowBytes);
 }

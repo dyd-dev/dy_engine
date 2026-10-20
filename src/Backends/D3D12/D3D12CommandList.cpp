@@ -16,12 +16,63 @@
 #include <cstring>
 #include <d3d12.h>
 #include <limits>
+#include <mutex>
 #include <wrl.h>
 
 using Microsoft::WRL::ComPtr;
 
 namespace dyf::Backends
 {
+    struct D3D12CommandStorage
+    {
+        ComPtr<ID3D12CommandAllocator> allocator;
+        ComPtr<ID3D12GraphicsCommandList> commands;
+    };
+
+    struct D3D12CommandPoolCache::Impl
+    {
+        ComPtr<ID3D12Device> device;
+        std::mutex mutex;
+        std::vector<std::unique_ptr<D3D12CommandStorage>> available;
+    };
+
+    D3D12CommandPoolCache::D3D12CommandPoolCache(void* device) :m_impl(std::make_unique<Impl>())
+    {m_impl->device=static_cast<ID3D12Device*>(device);}
+    D3D12CommandPoolCache::~D3D12CommandPoolCache()=default;
+
+    std::unique_ptr<D3D12CommandStorage> D3D12CommandPoolCache::Acquire()
+    {
+        if(!m_impl->device)return {};
+        std::unique_ptr<D3D12CommandStorage> storage;
+        {
+            std::lock_guard<std::mutex> lock(m_impl->mutex);
+            if(!m_impl->available.empty())
+            {storage=std::move(m_impl->available.back());m_impl->available.pop_back();}
+        }
+        if(storage)
+        {
+            if(FAILED(storage->allocator->Reset()) || FAILED(storage->commands->Reset(storage->allocator.Get(),nullptr)))return {};
+        }
+        else
+        {
+            storage=std::make_unique<D3D12CommandStorage>();
+            if(FAILED(m_impl->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&storage->allocator))) ||
+                FAILED(m_impl->device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,storage->allocator.Get(),nullptr,
+                    IID_PPV_ARGS(&storage->commands))))return {};
+        }
+        return storage;
+    }
+
+    void D3D12CommandPoolCache::Return(std::unique_ptr<D3D12CommandStorage> storage) noexcept
+    {
+        try
+        {
+            std::lock_guard<std::mutex> lock(m_impl->mutex);
+            if(m_impl->available.size()<64)m_impl->available.push_back(std::move(storage));
+        }
+        catch(...) {} // Reuse is optional; release excess storage outside the lock.
+    }
+
     namespace
     {
         D3D12_RESOURCE_STATES ToNativeState(RHI::ResourceState state)
@@ -58,14 +109,11 @@ namespace dyf::Backends
                 images.push_back(texture);
         }
 
-        void RetainObject(
-            std::vector<ComPtr<ID3D12Object>>& objects,
-            ID3D12Object* object)
+        using RetainedObjects = std::unordered_map<ID3D12Object*, ComPtr<ID3D12Object>>;
+
+        void RetainObject(RetainedObjects& objects, ID3D12Object* object)
         {
-            if (object == nullptr) return;
-            if (std::none_of(objects.begin(), objects.end(),
-                    [object](const ComPtr<ID3D12Object>& retained) { return retained.Get() == object; }))
-                objects.emplace_back(object);
+            if (object != nullptr) objects.try_emplace(object, object);
         }
 
         bool IsBufferStateValid(
@@ -171,10 +219,13 @@ namespace dyf::Backends
 
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> commandList;
+        std::shared_ptr<D3D12CommandPoolCache> commandPool;
+        std::unique_ptr<D3D12CommandStorage> commandStorage;
+        bool reuseAllowed=false;
         ComPtr<ID3D12CommandSignature> drawSignature;
         ComPtr<ID3D12CommandSignature> drawIndexedSignature;
         ComPtr<ID3D12CommandSignature> dispatchSignature;
-        // The native command is destroyed only after fence-safe retirement or discard.
+        // Staging leases survive until retirement; native recording storage is cached separately.
         D3D12Detail::UploadArena<D3D12UploadPage> uploads;
         ID3D12Device* device = nullptr;
         D3D12PipelineState* pipeline = nullptr;
@@ -182,7 +233,7 @@ namespace dyf::Backends
         uint32_t depthMipLevel = 0;
         uint32_t depthArrayLayer = 0;
         std::vector<D3D12Texture*> referencedSwapchainImages;
-        std::vector<ComPtr<ID3D12Object>> retainedObjects;
+        RetainedObjects retainedObjects;
         std::vector<DiscardRequest> storeDiscardResources;
         std::vector<D3D12Operation> operations;
         std::unordered_map<D3D12Buffer*, RHI::ResourceState> bufferStates;
@@ -219,16 +270,13 @@ namespace dyf::Backends
             RHI::ResourceState state)
         {
             const auto found = internal->bufferStates.find(buffer);
-            if (found != internal->bufferStates.end() &&
-                found->second != state)
-            {
-                return false;
-            }
+            if (found != internal->bufferStates.end()) return found->second == state;
             D3D12Operation operation = {};
             operation.kind = OperationKind::BufferRequirement;
             operation.buffer = buffer;
             operation.before = state;
             internal->operations.push_back(operation);
+            internal->bufferStates.emplace(buffer, state);
             return true;
         }
 
@@ -241,11 +289,7 @@ namespace dyf::Backends
         {
             const auto key = TextureKey(texture, mipLevel, arrayLayer);
             const auto found = internal->textureStates.find(key);
-            if (found != internal->textureStates.end() &&
-                found->second != state)
-            {
-                return false;
-            }
+            if (found != internal->textureStates.end()) return found->second == state;
             D3D12Operation operation = {};
             operation.kind = OperationKind::TextureRequirement;
             operation.texture = texture;
@@ -253,6 +297,7 @@ namespace dyf::Backends
             operation.arrayLayer = arrayLayer;
             operation.before = state;
             internal->operations.push_back(operation);
+            internal->textureStates.emplace(key, state);
             return true;
         }
 
@@ -300,7 +345,8 @@ namespace dyf::Backends
 
     D3D12CommandList::D3D12CommandList(void* nativeDevice,
         std::shared_ptr<D3D12UploadPool> uploadPool,
-        void* drawSignature, void* drawIndexedSignature, void* dispatchSignature, RHI::Detail::UploadPolicy policy)
+        void* drawSignature, void* drawIndexedSignature, void* dispatchSignature, RHI::Detail::UploadPolicy policy,
+        std::shared_ptr<D3D12CommandPoolCache> commandPool)
         : m_internal(new D3D12CommandListInternal(uploadPool ? std::move(uploadPool)
             : MakeD3D12UploadPool(static_cast<ID3D12Device*>(nativeDevice)),policy))
     {
@@ -314,6 +360,16 @@ namespace dyf::Backends
         m_internal->drawSignature = static_cast<ID3D12CommandSignature*>(drawSignature);
         m_internal->drawIndexedSignature = static_cast<ID3D12CommandSignature*>(drawIndexedSignature);
         m_internal->dispatchSignature = static_cast<ID3D12CommandSignature*>(dispatchSignature);
+        if(commandPool)
+        {
+            m_internal->commandPool=std::move(commandPool);
+            try {m_internal->commandStorage=m_internal->commandPool->Acquire();}
+            catch(...) {delete m_internal;m_internal=nullptr;throw;}
+            if(!m_internal->commandStorage) {m_internal->recordingFailed=true;return;}
+            m_internal->allocator=m_internal->commandStorage->allocator;
+            m_internal->commandList=m_internal->commandStorage->commands;
+            return;
+        }
         if (FAILED(device->CreateCommandAllocator(
                 D3D12_COMMAND_LIST_TYPE_DIRECT,
                 IID_PPV_ARGS(&m_internal->allocator))))
@@ -335,8 +391,12 @@ namespace dyf::Backends
 
     D3D12CommandList::~D3D12CommandList()
     {
+        if(m_internal && m_internal->reuseAllowed && IsClosed() && m_internal->commandStorage)
+            m_internal->commandPool->Return(std::move(m_internal->commandStorage));
         delete m_internal;
     }
+
+    void D3D12CommandList::AllowPoolReuse() {m_internal->reuseAllowed=true;}
 
     void D3D12CommandList::ResetTimestampsNative(RHI::TimestampQueryHandle handle, uint32_t first, uint32_t count)
     {

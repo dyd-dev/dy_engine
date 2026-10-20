@@ -61,6 +61,7 @@ bool Renderer::Impl::PrepareFrameResources(RenderFrame& frame,RHI::ICommandList&
     for(auto& extension:extensions)
         if(!extension->PrepareCamera(frame)) return false;
     if(!PrepareVisibility(scene,camera,uploads,target.width,target.height,frame.draws)) return false;
+    if(!PrepareCpuBatches(scene,camera,uploads,frame.draws,frame.requirements.needsGeometry)) return false;
     if(shaderSources.bytes[MeshFragment].empty())
     {
         if(!frame.requirements.providesEnvironment)

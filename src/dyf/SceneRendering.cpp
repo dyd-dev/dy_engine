@@ -153,10 +153,11 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             // states if any upload/close/submit step fails (including exceptions).
             struct FrameBuffers {
                 Impl& r;
-                RHI::BufferHandle light,shadow,instances;
-                bool lightReady,shadowReady,instancesReady,committed=false;
+                RHI::BufferHandle light,shadow,instances,cpuInstances;
+                bool lightReady,shadowReady,instancesReady,cpuInstancesReady,committed=false;
                 explicit FrameBuffers(Impl& owner):r(owner),light(r.lightingBuffer),shadow(r.shadowMatrixBuffer),instances(r.instanceBuffer),
-                    lightReady(r.lightingReady),shadowReady(r.shadowReady),instancesReady(r.instanceReady) {}
+                    cpuInstances(r.cpuInstanceBuffer),lightReady(r.lightingReady),shadowReady(r.shadowReady),
+                    instancesReady(r.instanceReady),cpuInstancesReady(r.cpuInstanceReady) {}
                 ~FrameBuffers() {
                     const auto finish=[&](RHI::BufferHandle& current,RHI::BufferHandle previous,bool& ready,bool oldReady) {
                         if(committed) {if(current!=previous)r.device->DestroyBuffer(previous);}
@@ -165,6 +166,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
                     finish(r.lightingBuffer,light,r.lightingReady,lightReady);
                     finish(r.shadowMatrixBuffer,shadow,r.shadowReady,shadowReady);
                     finish(r.instanceBuffer,instances,r.instanceReady,instancesReady);
+                    finish(r.cpuInstanceBuffer,cpuInstances,r.cpuInstanceReady,cpuInstancesReady);
                 }
             } buffers(*this);
             RHI::ResourceScope resources(*nativeDevice);
@@ -192,6 +194,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             timing.cpuSubmitMilliseconds+=uploadSubmitTimer.ElapsedMilliseconds();
             if(!submitted) return RendererFailure("Frame upload submission failed.");
             lightingReady=true;shadowReady=shadowMatrixBuffer!=nullptr;instanceReady=instanceBuffer!=nullptr;
+            cpuInstanceReady=cpuInstanceBuffer!=nullptr;
             if(visibilityActive) gpuVisibility->CommitUploads();
             if(basicEnvironment) basicEnvironment->CommitUploads();
             CommitFrameData();
@@ -255,6 +258,12 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         };
         if(visibilityActive && !gpuVisibility->AddPasses(graph))
             return RendererFailure("GPU visibility pass creation failed.");
+        if(cpuBatchesActive && !cpuDraws.empty())
+        {
+            renderFrame.visibleInstances={cpuInstanceBuffer,graph.ImportBuffer("CPU visible instances",cpuInstanceBuffer,
+                State::VertexBuffer,State::VertexBuffer)};
+            if(!renderFrame.visibleInstances.resource.IsValid())return RendererFailure("CPU instance import failed.");
+        }
         if(!requirements.providesLocalLights && basicLighting && !basicLighting->Import(graph,renderFrame.lighting))
             return RendererFailure("Basic local light resource import failed.");
         if(drawShadows)
@@ -295,6 +304,8 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         if(visibilityActive)
             mainPass.Read(gpuVisibility->GetInstancesHandle(),State::VertexBuffer)
                 .Read(gpuVisibility->GetArgumentsHandle(),State::IndirectArgument);
+        else if(cpuBatchesActive && !cpuDraws.empty())
+            mainPass.Read(renderFrame.visibleInstances.resource,State::VertexBuffer);
         if(shadowDepthTarget) mainPass.Read(shadow, State::ShaderResource);
         if(environment.diffuse.resource.IsValid()) mainPass.Read(environment.diffuse.resource,State::ShaderResource);
         if(environment.specular.resource.IsValid()) mainPass.Read(environment.specular.resource,State::ShaderResource);
@@ -318,21 +329,18 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
                 .SetExecute([&](RHI::ICommandList* commands) {
                     require(RecordCanvas(*overlay, *commands, overlayTarget, true, true));
                 });
-        if(!selectedOutput)
+        if(!selectedOutput && config.enableProfilerHud)
             graph.AddPass("Profiler HUD").Write(overlayHandle, State::RenderTarget)
                 .SetExecute([&](RHI::ICommandList* commands) {
-                    if(config.enableProfilerHud)
-                    {
 #ifdef DY_RENDERDOC_ENABLED
-                        commands->BeginDebugEvent("Profiler HUD");
+                    commands->BeginDebugEvent("Profiler HUD");
 #endif
-                        auto hud = BuildProfilerOverlay(overlayTarget->GetDesc().width, overlayTarget->GetDesc().height,
-                            config.profilerStartsExpanded);
-                        require(RecordCanvas(hud, *commands, overlayTarget, true, true));
+                    auto hud = BuildProfilerOverlay(overlayTarget->GetDesc().width, overlayTarget->GetDesc().height,
+                        config.profilerStartsExpanded);
+                    require(RecordCanvas(hud, *commands, overlayTarget, true, true));
 #ifdef DY_RENDERDOC_ENABLED
-                        commands->EndDebugEvent();
+                    commands->EndDebugEvent();
 #endif
-                    }
                 });
         if(!graph.Compile()) return RendererFailure("Scene RenderGraph compilation failed.");
         if(!m_environmentCapture)

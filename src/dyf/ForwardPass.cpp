@@ -40,6 +40,7 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
     materialTransaction.committed=true;
 	auto* target = config.enableHdrRendering ? hdrTarget : output;
 	const auto viewProjection = camera.projection * camera.view;
+	const CameraFrustum frustum(camera);
 #ifdef DY_RENDERDOC_ENABLED
 	commands.BeginDebugEvent("MainForward");
 #endif
@@ -100,7 +101,7 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 	mainEntityOrder.clear();
 	mainEntityOrder.reserve(scene.GetEntityCount());
 	for(uint32_t i=0;i<scene.GetEntityCount();++i)
-		if((!separateTransparency || !blended(i)) && (!visibilityActive || blended(i))) mainEntityOrder.push_back(i);
+		if((!separateTransparency || !blended(i)) && ((!visibilityActive && !cpuBatchesActive) || blended(i))) mainEntityOrder.push_back(i);
 	if(batchBindings && !separateTransparency)
 	{
 		const auto transparent=std::stable_partition(mainEntityOrder.begin(),mainEntityOrder.end(),[&](uint32_t i) {return !blended(i);});
@@ -121,12 +122,14 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 	}
 	RHI::ResourceSetHandle boundMaterial = nullptr;
 	RHI::PipelineHandle boundPipeline=pipeline;
-	if(visibilityActive)
+	if(visibilityActive || cpuBatchesActive)
 	{
-		recordingStatistics.gpuVisibility=true;
-		for(uint32_t batchIndex=0;batchIndex<visibilityDraws.size();++batchIndex)
+		recordingStatistics.gpuVisibility=visibilityActive;
+        if(cpuBatchesActive)recordingStatistics.culledEntityCount+=cpuCulledEntities;
+        const auto& batches=visibilityActive ? visibilityDraws : cpuDraws;
+		for(uint32_t batchIndex=0;batchIndex<batches.size();++batchIndex)
 		{
-			const auto& draw=visibilityDraws[batchIndex];
+			const auto& draw=batches[batchIndex];
 			const auto entity=static_cast<EntityID>(draw.entity);
 			const auto& mesh=m_meshes[draw.mesh];
 			const auto& material=scene.Materials()[draw.material];
@@ -139,13 +142,28 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
                 batchContext.batch=Platform::GetLiveBatchId(passBatch,(uint64_t(1)<<63)|batchIndex);
                 Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;
                 batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Record;
-                batch.first=batchIndex;batch.stride=sizeof(RHI::DrawIndexedIndirectArguments);
-                batch.bytes=batch.stride;batch.operations=1;
-                batch.resource=Platform::FindLiveObject(gpuVisibility->GetArgumentsBuffer());
-                // GPU compaction determines the visible instance count; CPU capacity is not a measurement.
-                std::strncpy(batch.label,"GPU indirect batch: visible count unknown",sizeof(batch.label)-1);
+                if(visibilityActive)
+                {
+                    batch.first=batchIndex;batch.stride=sizeof(RHI::DrawIndexedIndirectArguments);
+                    batch.bytes=batch.stride;batch.operations=1;
+                    batch.resource=Platform::FindLiveObject(gpuVisibility->GetArgumentsBuffer());
+                    // GPU compaction determines the visible instance count; CPU capacity is not a measurement.
+                    std::strncpy(batch.label,"GPU indirect batch: visible count unknown",sizeof(batch.label)-1);
+                    Platform::RecordLiveLink({Platform::FindLiveObject(gpuVisibility->GetInstanceBuffer()),batch.id});
+                }
+                else
+                {
+                    batch.first=draw.instanceOffset;batch.elements=draw.instanceCount;
+                    batch.stride=2*sizeof(Math::float4x4);batch.bytes=uint64_t(batch.elements)*batch.stride;batch.operations=1;
+                    batch.resource=Platform::FindLiveObject(cpuInstanceBuffer);
+                    std::strncpy(batch.label,"CPU compacted instance batch",sizeof(batch.label)-1);
+                    for(uint32_t i=0;i<draw.instanceCount;++i)
+                    {
+                        const auto source=cpuInstanceEntities[draw.instanceOffset+i];
+                        if(source<scene.m_liveEntities.size())Platform::RecordLiveLink({scene.m_liveEntities[source],batch.id});
+                    }
+                }
                 Platform::RecordLiveEvent(batch);
-                Platform::RecordLiveLink({Platform::FindLiveObject(gpuVisibility->GetInstanceBuffer()),batch.id});
             }
             Platform::LiveContextScope linkedBatch(batchContext);
 			const auto selectedPipeline=MaterialPipeline(material,Math::Determinant3x3(scene.GetTransform(entity))<0);
@@ -165,8 +183,8 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 				boundMaterial=selectedSet;commands.BindResourceSet(boundMaterial);
 			}
 			commands.BindVertexBuffer(0,input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer,0);
-			commands.BindVertexBuffer(1,gpuVisibility->GetInstanceBuffer(),
-				gpuVisibility->GetBatch(batchIndex).instanceOffset*sizeof(GpuVisibility::VisibleInstance));
+			commands.BindVertexBuffer(1,visibilityActive ? gpuVisibility->GetInstanceBuffer() : cpuInstanceBuffer,
+				(visibilityActive ? gpuVisibility->GetBatch(batchIndex).instanceOffset : draw.instanceOffset)*sizeof(GpuVisibility::VisibleInstance));
 			commands.BindIndexBuffer(draw.level ? mesh.lods[draw.level-1].buffer : mesh.indexBuffer,RHI::Format::R32_UINT,0);
 			const uint32_t flags=materialStates[draw.material].textureFlags |
 				(scene.GetEntityLighting(entity).receiveShadow ? 32u : 0u);
@@ -176,10 +194,24 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 				const float alpha=constants.baseColor.w;
 				constants.baseColor=LodColor(draw.level);constants.baseColor.w=alpha;constants.textureFlags|=64u;
 			}
+			if(m_environmentCapture && !m_environmentCaptureEmitters)constants.emissiveColor={};
 			constants.padding2=draw.material;
 			commands.SetInlineConstants(0,sizeof(constants),&constants);
-			commands.DrawIndexedIndirect(gpuVisibility->GetArgumentsBuffer(),batchIndex*sizeof(RHI::DrawIndexedIndirectArguments));
-			++recordingStatistics.mainDrawCount;++recordingStatistics.indirectBatchCount;
+            if(visibilityActive)
+            {
+                commands.DrawIndexedIndirect(gpuVisibility->GetArgumentsBuffer(),batchIndex*sizeof(RHI::DrawIndexedIndirectArguments));
+                ++recordingStatistics.indirectBatchCount;
+            }
+            else
+            {
+                const auto indexCount=draw.level ? mesh.lods[draw.level-1].count : mesh.indexCount;
+                commands.DrawIndexedInstanced(indexCount,draw.instanceCount,0,0,0);
+                recordingStatistics.mainInstanceCount+=draw.instanceCount;
+                recordingStatistics.mainTriangleCount+=uint64_t(indexCount/3)*draw.instanceCount;
+                recordingStatistics.mainOriginalTriangleCount+=uint64_t(mesh.indexCount/3)*draw.instanceCount;
+                recordingStatistics.lodInstanceCounts[draw.level]+=draw.instanceCount;
+            }
+			++recordingStatistics.mainDrawCount;
 		}
 	}
 	for(uint32_t orderIndex = 0; orderIndex < mainEntityOrder.size(); ++orderIndex)
@@ -198,7 +230,7 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
         const auto indexBuffer=level ? mesh.lods[level-1].buffer : mesh.indexBuffer;
         const auto indexCount=level ? mesh.lods[level-1].count : mesh.indexCount;
         const auto& localBounds=draws && (*draws)[entityIndex].hasLocalBounds ? (*draws)[entityIndex].localBounds : mesh.bounds;
-        if(stock && config.enableFrustumCulling && OutsideCamera(localBounds,scene.GetTransform(entity),camera)) {
+        if(stock && config.enableFrustumCulling && frustum.Outside(localBounds,scene.GetTransform(entity))) {
             ++recordingStatistics.culledEntityCount;continue;
         }
         const bool mirrored=Math::Determinant3x3(scene.GetTransform(entity))<0;
@@ -216,8 +248,8 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
                     materialStates[index].textures!=materialStates[materialIndex].textures ||
                     materialStates[index].textureFlags!=materialStates[materialIndex].textureFlags ||
                     !EqualMaterial(scene.Materials()[index],scene.Materials()[materialIndex]) ||
-                    (config.enableFrustumCulling && OutsideCamera(draws && (*draws)[entityIndex+count].hasLocalBounds ?
-                        (*draws)[entityIndex+count].localBounds : mesh.bounds,scene.GetTransform(next),camera)))break;
+                    (config.enableFrustumCulling && frustum.Outside(draws && (*draws)[entityIndex+count].hasLocalBounds ?
+                        (*draws)[entityIndex+count].localBounds : mesh.bounds,scene.GetTransform(next))))break;
                 ++count;
             }
         }
