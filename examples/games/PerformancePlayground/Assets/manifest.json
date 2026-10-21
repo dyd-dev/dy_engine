@@ -1,0 +1,254 @@
+[
+  {
+    "file": "Kenney/commercial/License.txt",
+    "archiveEntry": "License.txt",
+    "bytes": 708,
+    "sha256": "C38CEE408D022E57E44E49F1CD655C2FE0DC881A07B881276B795215CDC0DE69"
+  },
+  {
+    "file": "Kenney/commercial/building-a.glb",
+    "archiveEntry": "Models/GLB format/building-a.glb",
+    "bytes": 108936,
+    "sha256": "5CF220F90EE3F21E7ABE38055CA409A48AA8EF1D5FFAB6E2DEB99E5A5E1ED5E0"
+  },
+  {
+    "file": "Kenney/commercial/building-b.glb",
+    "archiveEntry": "Models/GLB format/building-b.glb",
+    "bytes": 106408,
+    "sha256": "3B5D3AC0799C024781D92BB15971D42F4F8E380554DC5CF6A40C2F07D948947A"
+  },
+  {
+    "file": "Kenney/commercial/building-c.glb",
+    "archiveEntry": "Models/GLB format/building-c.glb",
+    "bytes": 102788,
+    "sha256": "F6887608A95A165503561730252C30506938803731C6546EFCA12BD47B1666BD"
+  },
+  {
+    "file": "Kenney/commercial/building-d.glb",
+    "archiveEntry": "Models/GLB format/building-d.glb",
+    "bytes": 95160,
+    "sha256": "40605608E9ACA0C98E294ACFF4AF0F74AFA417A51D589BE490CA98F33CE4C2F5"
+  },
+  {
+    "file": "Kenney/commercial/building-f.glb",
+    "archiveEntry": "Models/GLB format/building-f.glb",
+    "bytes": 148952,
+    "sha256": "633A25F7FB3CCF98E304A885A36ED900AECEE5BDE7ECD554729DEC753CCEEA78"
+  },
+  {
+    "file": "Kenney/commercial/building-k.glb",
+    "archiveEntry": "Models/GLB format/building-k.glb",
+    "bytes": 246976,
+    "sha256": "AFD36F573B9D6A6A890675AA0FBE762B29EFB6258F322990752D79D9F0DA42C6"
+  },
+  {
+    "file": "Kenney/commercial/building-skyscraper-a.glb",
+    "archiveEntry": "Models/GLB format/building-skyscraper-a.glb",
+    "bytes": 111336,
+    "sha256": "D8339BBB75944FF91D1EC9A70EC6DEAD71BD98B94A42D3DD0FC1F3B107DDBE85"
+  },
+  {
+    "file": "Kenney/commercial/detail-awning.glb",
+    "archiveEntry": "Models/GLB format/detail-awning.glb",
+    "bytes": 5528,
+    "sha256": "386978DAF81DC11AC601638F19A41918A391FF882A8C518AE5A3215A1BED4D8A"
+  },
+  {
+    "file": "Kenney/commercial/detail-awning-wide.glb",
+    "archiveEntry": "Models/GLB format/detail-awning-wide.glb",
+    "bytes": 5544,
+    "sha256": "D37BA34BE414CEF84DB966E548E2C558088AEC3FDF68763565B9CAF95C11AC5F"
+  },
+  {
+    "file": "Kenney/commercial/detail-overhang.glb",
+    "archiveEntry": "Models/GLB format/detail-overhang.glb",
+    "bytes": 6704,
+    "sha256": "291B00C1F698296B50CF25C393777EEE9547A4AA0F912EFE73CB9789D104BA2B"
+  },
+  {
+    "file": "Kenney/commercial/detail-parasol-a.glb",
+    "archiveEntry": "Models/GLB format/detail-parasol-a.glb",
+    "bytes": 10320,
+    "sha256": "70E636BEA8DC67C3BFD19B163333E824356118458C8C401017322EC43C10A7F7"
+  },
+  {
+    "file": "Kenney/commercial/Textures/colormap.png",
+    "archiveEntry": "Models/GLB format/Textures/colormap.png",
+    "bytes": 11002,
+    "sha256": "191BEC3889AAACA5018380038FECC129EBB5C2182879A099B7B538B3FA050B5D"
+  },
+  {
+    "file": "Kenney/industrial/License.txt",
+    "archiveEntry": "License.txt",
+    "bytes": 708,
+    "sha256": "60A8C5C31191256EC9779DC18745DEA6D69C46F4B29703459CE064C1765A59EA"
+  },
+  {
+    "file": "Kenney/industrial/building-a.glb",
+    "archiveEntry": "Models/GLB format/building-a.glb",
+    "bytes": 177316,
+    "sha256": "0E6EF8EB1E1BDBB9D06B5496B5DAF3066E00EAF74B3FCD61B74072116A1C86CF"
+  },
+  {
+    "file": "Kenney/industrial/building-b.glb",
+    "archiveEntry": "Models/GLB format/building-b.glb",
+    "bytes": 212040,
+    "sha256": "2AE65BD9166449F0BEF438FBEFB75D57451CB15C16659D7F22A7D895296A46AF"
+  },
+  {
+    "file": "Kenney/industrial/building-c.glb",
+    "archiveEntry": "Models/GLB format/building-c.glb",
+    "bytes": 175844,
+    "sha256": "94EB05ACEF8D8E4C1D817EB12E1C2A1287FFED625879170663A8C4F48786B465"
+  },
+  {
+    "file": "Kenney/industrial/chimney-small.glb",
+    "archiveEntry": "Models/GLB format/chimney-small.glb",
+    "bytes": 10536,
+    "sha256": "22B09845E3DF85102278EB440A1CBF9751790D5133A847469E112C55F8B44FF2"
+  },
+  {
+    "file": "Kenney/industrial/chimney-medium.glb",
+    "archiveEntry": "Models/GLB format/chimney-medium.glb",
+    "bytes": 15020,
+    "sha256": "EF1605601D85B5FFF97D6596B6552D936A1D6BE06EC0609242F6BCFB640D91F6"
+  },
+  {
+    "file": "Kenney/industrial/detail-tank.glb",
+    "archiveEntry": "Models/GLB format/detail-tank.glb",
+    "bytes": 31436,
+    "sha256": "9E955732E4EF9CCFF4A4D6967D29D8A7D2F9ED16C903923F2568216D9F0B50D2"
+  },
+  {
+    "file": "Kenney/industrial/shipping-container-a.glb",
+    "archiveEntry": "Models/GLB format/shipping-container-a.glb",
+    "bytes": 36624,
+    "sha256": "7B2D5CA874C8E659EE6CFD1614F0470B70410B2DDC7620AC83B8954DEDEB861D"
+  },
+  {
+    "file": "Kenney/industrial/solar-panel-landscape.glb",
+    "archiveEntry": "Models/GLB format/solar-panel-landscape.glb",
+    "bytes": 21776,
+    "sha256": "719AE34E0D312E8B2E94D813DA2C4147E7B0FCBC4C4A5304FC32E88B4D97402C"
+  },
+  {
+    "file": "Kenney/industrial/water-tower.glb",
+    "archiveEntry": "Models/GLB format/water-tower.glb",
+    "bytes": 93836,
+    "sha256": "11AC7AE19F32CE889BFE7A9C8E78C8CE8C77B7A76B52FD4FFA439A022EA2EF40"
+  },
+  {
+    "file": "Kenney/industrial/windmill-low.glb",
+    "archiveEntry": "Models/GLB format/windmill-low.glb",
+    "bytes": 46296,
+    "sha256": "2E3DA40D2F41454BF5AF3B07CDAD841ABD5E06CA77560DC460633BC1F195A528"
+  },
+  {
+    "file": "Kenney/industrial/Textures/colormap.png",
+    "archiveEntry": "Models/GLB format/Textures/colormap.png",
+    "bytes": 11986,
+    "sha256": "950F4F891EBD05A2AFFAC810E6EEB0FEA1511BC39039B65A3CBF2E17D17BC6A2"
+  },
+  {
+    "file": "Kenney/building/License.txt",
+    "archiveEntry": "License.txt",
+    "bytes": 715,
+    "sha256": "60A07F9108F5A3FC5F9429FD1FAA5B168C05CC085354F78ED48180EF32EC6209"
+  },
+  {
+    "file": "Kenney/building/wall.glb",
+    "archiveEntry": "Models/GLB format/wall.glb",
+    "bytes": 2664,
+    "sha256": "769A02A70327132BA864C04299631C65FB08E96E01E1796BA73DDF7F44679A36"
+  },
+  {
+    "file": "Kenney/building/wall-window-square.glb",
+    "archiveEntry": "Models/GLB format/wall-window-square.glb",
+    "bytes": 8964,
+    "sha256": "099D332DE4C632CB03692140F9A4004B5D6508CEA6A7E3A80268564976CC8B7E"
+  },
+  {
+    "file": "Kenney/building/wall-doorway-wide-square.glb",
+    "archiveEntry": "Models/GLB format/wall-doorway-wide-square.glb",
+    "bytes": 6324,
+    "sha256": "4D95DBE33A03B4E5624C6040F4E87610A3B6B6E2F5AD1C798867ECA655534996"
+  },
+  {
+    "file": "Kenney/building/floor.glb",
+    "archiveEntry": "Models/GLB format/floor.glb",
+    "bytes": 2832,
+    "sha256": "FBE8E907E502381DB5D9F87676EF9E34522E35FC95A401A754D3E4984819338B"
+  },
+  {
+    "file": "Kenney/building/roof-flat-center.glb",
+    "archiveEntry": "Models/GLB format/roof-flat-center.glb",
+    "bytes": 2864,
+    "sha256": "8C4FC6FE46640B1F69818B668C8C3ECCA03C9DF6CACC698073774C716FAC4A1F"
+  },
+  {
+    "file": "Kenney/building/column.glb",
+    "archiveEntry": "Models/GLB format/column.glb",
+    "bytes": 4268,
+    "sha256": "F2BBC1799CAA57C433F18B4B35ED69B9A464285EEFE2C291CEC04B8A01795F30"
+  },
+  {
+    "file": "Kenney/building/detail-pipe.glb",
+    "archiveEntry": "Models/GLB format/detail-pipe.glb",
+    "bytes": 7428,
+    "sha256": "D380DC7C5B7960AD537633BEDE26420CA311AFA7B453827BF9E4032CA52D724F"
+  },
+  {
+    "file": "Kenney/building/gutter-vertical.glb",
+    "archiveEntry": "Models/GLB format/gutter-vertical.glb",
+    "bytes": 8892,
+    "sha256": "A567911E30388348E5E79F386CEDCEC45522C3975AA17CCCD7C4B61EBC16F6F4"
+  },
+  {
+    "file": "Kenney/building/plating-detailed.glb",
+    "archiveEntry": "Models/GLB format/plating-detailed.glb",
+    "bytes": 17024,
+    "sha256": "88B22DB6C01138A4946B8FA05D60B9632854C9B4B594BA4EFC75F86C4B7671B9"
+  },
+  {
+    "file": "Kenney/building/border.glb",
+    "archiveEntry": "Models/GLB format/border.glb",
+    "bytes": 3488,
+    "sha256": "1128C29D8489992AA382FF003B0DCE5BBD26F5B65A06AF374DC2863A304F71BE"
+  },
+  {
+    "file": "Kenney/building/Textures/colormap.png",
+    "archiveEntry": "Models/GLB format/Textures/colormap.png",
+    "bytes": 10051,
+    "sha256": "01741A46A279BEF667DE3143EE653D0073ED7CAE925D88341281391D9220092B"
+  },
+  {
+    "file": "Kenney/characters/License.txt",
+    "archiveEntry": "License.txt",
+    "bytes": 699,
+    "sha256": "68280323C6DCA1F532C71FB248A6F344ABED39A574278A2EDFA27801AEA3D0CD"
+  },
+  {
+    "file": "Kenney/characters/Model/characterMedium.fbx",
+    "archiveEntry": "Model/characterMedium.fbx",
+    "bytes": 167212,
+    "sha256": "18835FEF534EEDE635B081EE7FE647D01A885550A591D2E6BF071010906167D8"
+  },
+  {
+    "file": "Kenney/characters/Animations/idle.fbx",
+    "archiveEntry": "Animations/idle.fbx",
+    "bytes": 608188,
+    "sha256": "C8A24E0294376EE5A195C56752A13310E1C0B5F8588A4DB50E094120E3E4CC74"
+  },
+  {
+    "file": "Kenney/characters/Animations/run.fbx",
+    "archiveEntry": "Animations/run.fbx",
+    "bytes": 572732,
+    "sha256": "E635461FC8DACE85EC67A7F7941E949A7C3F108B51AE4D2DA1557E6E01749DF8"
+  },
+  {
+    "file": "Kenney/characters/Skins/skaterMaleA.png",
+    "archiveEntry": "Skins/skaterMaleA.png",
+    "bytes": 41705,
+    "sha256": "CABEED9D1BE58037CC1CF3E29FDB42A0CB6AF15BEBEED877C41A758A932D14F8"
+  }
+]

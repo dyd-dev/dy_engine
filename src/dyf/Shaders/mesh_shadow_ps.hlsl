@@ -12,7 +12,8 @@ cbuffer DrawConstants : register(b10,space0)
     float4 baseColor;
     float4 materialParams;
 };
-void main(float2 uv : TEXCOORD0, bool frontFace : SV_IsFrontFace)
+// Keep TEXCOORD0 in the same register as ShadowOutput after SV_POSITION.
+void main(float4 position : SV_POSITION, float2 uv : TEXCOORD0, bool frontFace : SV_IsFrontFace)
 {
     if((padding1 & 4u)==0u && !frontFace) discard;
     if((padding1 & 3u)==1u)

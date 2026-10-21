@@ -409,23 +409,23 @@ inline float LtcPolygonIntegral(float3 normal,float3 viewDir,float3 position,
         // z=0 반구로 다각형을 자르되 정점 배열 대신 경계 순서대로 적분한다.
         for(int candidate=0;candidate<2;++candidate)
         {
-            float3 point;
+            float3 clippedVertex;
             if(candidate==0)
             {
                 if(previousInside==currentInside)continue;
-                point=lerp(previous,current,clamp(previous.z/(previous.z-current.z),0.0,1.0));
-                point.z=0;
+                clippedVertex=lerp(previous,current,clamp(previous.z/(previous.z-current.z),0.0,1.0));
+                clippedVertex.z=0;
             }
             else
             {
                 if(!currentInside)continue;
-                point=current;
+                clippedVertex=current;
             }
-            float squared=dot(point,point);
+            float squared=dot(clippedVertex,clippedVertex);
             if(squared<=1e-20)continue;
-            point*=rsqrt(squared);
-            if(haveVertex)sum+=LtcEdgeIntegral(last,point);else {first=point;haveVertex=true;}
-            last=point;
+            clippedVertex*=rsqrt(squared);
+            if(haveVertex)sum+=LtcEdgeIntegral(last,clippedVertex);else {first=clippedVertex;haveVertex=true;}
+            last=clippedVertex;
         }
         previous=current;
     }

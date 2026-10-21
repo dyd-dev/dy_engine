@@ -1,0 +1,2 @@
+# Preserve the upstream license bytes recorded in manifest.json on every checkout.
+Kenney/**/License.txt -text
