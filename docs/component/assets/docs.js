@@ -227,17 +227,28 @@
   const apiFilter = $("#api-filter");
   if (apiFilter) {
     const sections = $$(".index-section");
-    const rows = sections.flatMap(section => $$("tbody tr", section));
-    const descriptions = rows.map(row => row.textContent.toLocaleLowerCase());
+    const items = sections.flatMap(section => {
+      const cards = $$(".rhi-class-card", section);
+      return cards.length ? cards : $$("tbody tr", section);
+    });
+    const descriptions = items.map(item => item.textContent.toLocaleLowerCase());
     function filterIndex() {
       const terms = apiFilter.value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
       let count = 0;
-      rows.forEach((row, i) => {
-        row.hidden = !terms.every(term => descriptions[i].includes(term));
-        if (!row.hidden) count++;
+      items.forEach((item, i) => {
+        item.hidden = !terms.every(term => descriptions[i].includes(term));
+        if (!item.hidden) count++;
       });
-      sections.forEach(section => { section.hidden = !$$("tbody tr", section).some(row => !row.hidden); });
-      $("#filter-status").textContent = `${rows.length}개 중 ${count}개 표시`;
+      $$(".rhi-category-block").forEach(block => {
+        block.hidden = !$$(".rhi-class-card", block).some(card => !card.hidden);
+      });
+      sections.forEach(section => {
+        const cards = $$(".rhi-class-card", section);
+        section.hidden = cards.length
+          ? !cards.some(card => !card.hidden)
+          : !$$("tbody tr", section).some(row => !row.hidden);
+      });
+      $("#filter-status").textContent = `${items.length}개 중 ${count}개 표시`;
     }
     apiFilter.addEventListener("input", filterIndex);
     filterIndex();

@@ -9,13 +9,13 @@
     "dyf::Platform",
     "dyf::RHI"
   ],
-  "authored_api_count": 65,
+  "authored_api_count": 106,
   "authored_files": {
     "api_owners.json": "57d827a5c171252e444a0425d230c9de410eddd77961438880fe9db7e9d5e92b",
     "api_groups.json": "b7c40e588c10eb7152f0cbfe20d9e6d06c38aebb16e49f1e3d560155a85ccb5b",
-    "frontend_reference.json": "f79339c577120c99d7968263ec279181d6e2bd7e0dc3bb33f0eed335622011b7",
+    "frontend_reference.json": "d59d1f01050ea61a11ab81b01f516c49ec6dff8cded7f2160a3bf656a09bb424",
     "rhi_reference.json": "ecef7a3d0527f9f00c3befad7bfbefe812f9185b042d9b01980156b4bfa3aa0c",
-    "guides.json": "35b89ff0faa984073741663fca34cdd3d60c4b4ccfb98256e756212af1ff067b"
+    "guides.json": "4d42cf01a43325cf593816076cc7f5bcba76743fc105893e7d3f92d6a6362cf4"
   },
   "diagnostics": [],
   "headers": {
@@ -41,6 +41,8 @@
     "dyf/Platform/Profiler.h": "9f499b20cf1020a8d244da31818666aed428d5ab9049452c9db7abe78e2bde87",
     "dyf/Platform/Time.h": "4987cf65ea1eb22ef5ca45145ac98684e03729f2803cbdf4b589e7cdf4d080e9",
     "dyf/Platform/Window.h": "e51a70bb9544bdf1715d2e9863e842e387adb38259e2846eba0644c7b9cf62a3",
+    "dyf/Renderer.h": "8c86cd1aa5c0de33b40159ab054b0e628795b1f6d6ba2e358513e8599c3c263c",
+    "dyf/RenderExtension.h": "b4b4e696a82a683c1cf9a50974f137fbed2710aa6fa91cd549c36dbf191765eb",
     "dyf/RHI/Barrier.h": "9eb631bd5cc98638ffcf98c5a1081f81ff7b85d33f51d7a7e7690b40e3d08d44",
     "dyf/RHI/Binding.h": "d72073aac5a248933215937b6f79b3af65eeab9aed5cec7c655a4b4315dc9fe2",
     "dyf/RHI/Buffer.h": "9130c610394875b2dbd611e8adecaaf8013452a89a304d81142894b5a0e02320",
@@ -58,15 +60,13 @@
     "dyf/RHI/Swapchain.h": "2ec67ecaa8a5e11f56bc2d518c41cc972a64a960e7e84b492be83c0a8b777846",
     "dyf/RHI/Texture.h": "e45edbd3cae351e35f6f751022f19ad9f2a923d057c71df4361e5281ac95fac9",
     "dyf/RHI.h": "b9b212b34cb07bdfccccc044cf2e8c765d371440bb881d8548cd049bb4b2a400",
-    "dyf/RenderExtension.h": "b4b4e696a82a683c1cf9a50974f137fbed2710aa6fa91cd549c36dbf191765eb",
-    "dyf/Renderer.h": "8c86cd1aa5c0de33b40159ab054b0e628795b1f6d6ba2e358513e8599c3c263c",
     "dyf/Scene.h": "950ddd2443a17aefbd442f99d2322ad4958dfe5cedf4919d996ec71708b3b6fd",
     "dyf/Types.h": "32ace8709c049a78c99091aec397f4a9d2586dd3c4cb47d35e5be8b434eb55e1",
     "dyf/Utf8.h": "fbca5fe3052862a586ca2991d4aabb0bcc03d30a36e451225d72d240c70e088b",
     "dyf.h": "128e6fe6426c59f679b4f5dd53fe50ae803d165434305161f222f835c234cd22"
   },
   "symbols": 306,
-  "search_entries": 1880,
+  "search_entries": 1881,
   "pages": [
     "component/api-dy-profile-cpu-zone-named.html",
     "component/api-dy-profile-cpu-zone.html",
@@ -360,6 +360,7 @@
     "component/model-extension.html",
     "component/modules.html",
     "component/quickstart.html",
+    "component/renderer-inputs.html",
     "component/rhi-lifecycle.html",
     "index.html"
   ]
