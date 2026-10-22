@@ -99,6 +99,8 @@ namespace dyf::Backends
 		{
 			return m_referencedSwapchainImages;
 		}
+        [[nodiscard]] VkPipelineStageFlags GetSwapchainAcquireWaitStage(
+            VulkanTexture* image,bool firstReference) const;
 		[[nodiscard]] bool ValidateForSubmit(VulkanSubmissionState& state) const;
 		void CommitResourceStates();
         void CompleteTimestampResets();

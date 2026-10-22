@@ -993,7 +993,16 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
     void VulkanDevice::Impl::TryPrefetchImage()
     {
-        if(!m_asyncPresent || m_prefetchedImage || m_swapchainNeedsRecreate || m_recreateAfterPresent)return;
+        if(!m_asyncPresent || m_prefetchedImage || m_swapchainNeedsRecreate)return;
+        if(m_recreateAfterPresent)
+        {
+            // SUBOPTIMAL can remain an unchanged advisory on Wayland. Keep
+            // pre-acquisition available until the surface actually needs a
+            // new swapchain, just as ApplyPresentResult does after Present.
+            bool changed=false;
+            VulkanSwapchain::InitializationStatus status;
+            if(!m_swapchain.IsSurfaceConfigurationChanged(m_context,m_windowHandle,changed,status) || changed)return;
+        }
         CollectCompletedSubmissions();
         const uint32_t slot=(m_currentFrameSlot+1)%m_owner.GetDesc().maxFramesInFlight;
         if(m_submissionFaulted || slot==m_currentFrameSlot)return;
@@ -1267,7 +1276,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 	dyf::RHI::ICommandList* VulkanDevice::Impl::AcquireCommandList(RHI::Detail::UploadPolicy policy)
 	{
-		CollectCompletedSubmissions();
+        // BeginFrame and the RHI preparation batch already collected completions;
+        // avoid polling the same pending fence again for each native list.
 		if (m_context.device == VK_NULL_HANDLE || m_submissionFaulted) return nullptr;
 		try
 		{
@@ -1334,12 +1344,19 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			activeBackBuffer = m_backBuffers[m_currentImageIndex].get();
 		}
 		bool frameSubmission = false;
-		for (VulkanCommandList* commandList : selected)
+		uint32_t firstSwapchainCommand=count;
+        VkPipelineStageFlags acquireWaitStage=VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		for (uint32_t i=0;i<count;++i)
 		{
+			auto* commandList=selected[i];
 			if (!commandList->IsValid()) return false;
 			for (VulkanTexture* image : commandList->GetReferencedSwapchainImages())
 			{
 				if (activeBackBuffer == nullptr || image != activeBackBuffer) return false;
+                const bool firstReference=!frameSubmission;
+                if(firstReference)firstSwapchainCommand=i;
+                if(!m_presentPending && acquireWaitStage!=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
+                    acquireWaitStage=commandList->GetSwapchainAcquireWaitStage(image,firstReference);
 				frameSubmission = true;
 			}
 		}
@@ -1371,24 +1388,36 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
             const auto fenceCreated=AcquireSubmissionFence(submission.fence);
             if(fenceCreated!=VK_SUCCESS) {LogVulkanFailure("AcquireSubmissionFence",fenceCreated);return false;}
 
-		const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-		VkSubmitInfo submitInfo{};
-		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-		submitInfo.commandBufferCount = count;
-		submitInfo.pCommandBuffers = nativeCommandBuffers.data();
+		const VkPipelineStageFlags waitStage = acquireWaitStage;
+		VkSubmitInfo submitInfos[2]{};
+		submitInfos[0].sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submitInfos[0].commandBufferCount = count;
+		submitInfos[0].pCommandBuffers = nativeCommandBuffers.data();
+        uint32_t submitCount=1;
 		const bool waitsForAcquire = frameSubmission && !m_presentPending;
 		if (waitsForAcquire)
 		{
-			submitInfo.waitSemaphoreCount = 1;
-			submitInfo.pWaitSemaphores = &m_imageAvailableSemaphores[m_currentFrameSlot];
-			submitInfo.pWaitDstStageMask = &waitStage;
+            auto* imageSubmit=&submitInfos[0];
+            if(firstSwapchainCommand>0)
+            {
+                // Prefix command lists never touch the acquired image. Keep
+                // their work and timestamps outside the semaphore wait batch.
+                submitInfos[1]=submitInfos[0];
+                submitInfos[0].commandBufferCount=firstSwapchainCommand;
+                imageSubmit=&submitInfos[1];submitCount=2;
+                imageSubmit->commandBufferCount=count-firstSwapchainCommand;
+                imageSubmit->pCommandBuffers=nativeCommandBuffers.data()+firstSwapchainCommand;
+            }
+			imageSubmit->waitSemaphoreCount = 1;
+			imageSubmit->pWaitSemaphores = &m_imageAvailableSemaphores[m_currentFrameSlot];
+			imageSubmit->pWaitDstStageMask = &waitStage;
             // 표시 신호는 Present의 마지막 제출에서만 보낸다.
 		}
 
 #ifdef DY_PROFILER_TRACING_ENABLED
         Platform::CpuTimer queueSubmitTimer;
 #endif
-		const VkResult result = vkQueueSubmit(m_context.graphicsQueue, 1, &submitInfo, submission.fence);
+		const VkResult result = vkQueueSubmit(m_context.graphicsQueue, submitCount, submitInfos, submission.fence);
 #ifdef DY_PROFILER_TRACING_ENABLED
         Platform::PublishValue("Vulkan queue submit ms",queueSubmitTimer.ElapsedMilliseconds(),true);
 #endif

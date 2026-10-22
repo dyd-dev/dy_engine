@@ -6,6 +6,7 @@
 #include "Validation.h"
 #include "../Platform/Profiler/RhiProfiler.h"
 
+#include <algorithm>
 #include <atomic>
 
 namespace dyf::RHI
@@ -181,13 +182,28 @@ namespace dyf::RHI
         m_dependencies.clear();
         m_passBarriers.clear();
         m_finalBarriers.clear();
+        m_passUses.clear();
+        m_passUseOffsets.clear();
         const uint32_t passCount = static_cast<uint32_t>(m_passes.size());
         const uint32_t noPass = UINT32_MAX;
+        size_t bindingCount = 0;
+        for(const auto& pass : m_passes)
+            bindingCount += pass->GetReads().size() + pass->GetWrites().size();
+        m_executionOrder.reserve(passCount);
+        m_compiledRevisions.reserve(passCount);
+        m_passUses.reserve(bindingCount);
+        m_passUseOffsets.reserve(size_t(passCount) + 1);
+        m_passUseOffsets.push_back(0);
         std::vector<std::vector<uint32_t>> edges(passCount);
         std::vector<uint32_t> lastWriter(m_resources.size(), noPass);
         std::vector<std::vector<uint32_t>> readers(m_resources.size());
         std::vector<ResourceState> states;
+        states.reserve(m_resources.size());
         for(const auto& resource : m_resources) states.push_back(resource.initialState);
+        struct Use { ResourceState state = ResourceState::Undefined; bool write = false; };
+        std::vector<Use> uses(m_resources.size());
+        std::vector<uint32_t> usedIndices;
+        usedIndices.reserve(m_resources.size());
         m_passBarriers.resize(passCount);
         uint32_t lastGlobal = noPass;
 
@@ -202,8 +218,7 @@ namespace dyf::RHI
                 for(uint32_t previous = first; previous < pass; ++previous) edges[previous].push_back(pass);
                 lastGlobal = pass;
             }
-            struct Use { ResourceState state; bool write; };
-            std::map<uint32_t, Use> uses;
+            usedIndices.clear();
             const auto collect = [&](const std::vector<RGResourceBinding>& bindings, bool write) {
                 for(const auto& binding : bindings)
                 {
@@ -213,7 +228,12 @@ namespace dyf::RHI
                     const auto& resource = m_resources[found->second];
                     if(!(resource.buffer ? IsBufferStateAllowed(resource.buffer->GetDesc(), binding.state) :
                         IsTextureStateAllowed(resource.texture->GetDesc(), binding.state))) return false;
-                    auto& use = uses.emplace(found->second, Use{binding.state, write}).first->second;
+                    auto& use = uses[found->second];
+                    if(use.state == ResourceState::Undefined)
+                    {
+                        use = {binding.state, write};
+                        usedIndices.push_back(found->second);
+                    }
                     if(use.state != binding.state) return false;
                     use.write |= write;
                 }
@@ -222,8 +242,13 @@ namespace dyf::RHI
             if(!collect(m_passes[pass]->GetReads(), false) || !collect(m_passes[pass]->GetWrites(), true))
                 return Fail("invalid resource handle, read/write state, resource usage or conflicting states in one pass.");
 
-            for(const auto& [index, use] : uses)
+            // Preserve the resource-index order of barriers without allocating
+            // a tree node for every resource binding in every pass.
+            std::sort(usedIndices.begin(), usedIndices.end());
+            for(uint32_t index : usedIndices)
             {
+                const auto use = uses[index];
+                m_passUses.push_back({index, use.state});
                 if(lastWriter[index] != noPass) edges[lastWriter[index]].push_back(pass);
                 // Read/read의 상태가 달라도 layout/state 전환에는 실행 순서가 필요하다.
                 if(use.write || states[index] != use.state)
@@ -238,7 +263,9 @@ namespace dyf::RHI
                 if(states[index] != use.state || CanWrite(use.state))
                     m_passBarriers[pass].push_back({resource.buffer, resource.texture, states[index], use.state, {}});
                 states[index] = use.state;
+                uses[index] = {};
             }
+            m_passUseOffsets.push_back(m_passUses.size());
         }
         for(uint32_t index = 0; index < m_resources.size(); ++index)
         {
@@ -341,10 +368,12 @@ namespace dyf::RHI
             for(const auto& binding:m_passes[pass]->GetWrites())linkResource(binding,true);
         }
 
-        for(const auto& binding : m_passes[pass]->GetReads())
-            if(!RequireResource(commands, m_resources[m_resourceIndices.at(binding.handle.id)], binding.state)) return false;
-        for(const auto& binding : m_passes[pass]->GetWrites())
-            if(!RequireResource(commands, m_resources[m_resourceIndices.at(binding.handle.id)], binding.state)) return false;
+        // Compile resolves aliases and duplicate declarations to one resource use.
+        for(size_t index = m_passUseOffsets[pass]; index < m_passUseOffsets[pass + 1]; ++index)
+        {
+            const auto& use = m_passUses[index];
+            if(!RequireResource(commands, m_resources[use.index], use.state)) return false;
+        }
         if(m_timestampQuery) commands->WriteTimestamp(m_timestampQuery,3+2*pass);
         return commands->CanRecordCommands();
     }
@@ -483,6 +512,8 @@ namespace dyf::RHI
         m_dependencies.clear();
         m_passBarriers.clear();
         m_finalBarriers.clear();
+        m_passUses.clear();
+        m_passUseOffsets.clear();
         m_compiled = false;
         m_timestampQuery=nullptr;
     }

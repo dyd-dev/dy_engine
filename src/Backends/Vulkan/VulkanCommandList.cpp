@@ -131,7 +131,10 @@ namespace dyf::Backends
 
 		StateInfo GetStateInfo(dyf::RHI::ResourceState state, bool supportsCompute)
 		{
-			const VkPipelineStageFlags2 shaderStages = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+			// Include every supported shader stage without also waiting for vertex
+			// input, attachment output or depth/stencil tests on unrelated resources.
+			const VkPipelineStageFlags2 shaderStages = VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT |
+				VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
 				(supportsCompute ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE);
 			switch (state)
 			{
@@ -445,8 +448,11 @@ namespace dyf::Backends
 				}
 				VkImageMemoryBarrier2 barrier{};
 				barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-				barrier.srcStageMask = before.stages;
-				barrier.srcAccessMask = before.access;
+                const bool acquireColor=texture->IsSwapchainImage() &&
+                    source.before==RHI::ResourceState::Present && source.after==RHI::ResourceState::RenderTarget;
+                // Chain the layout transition to a color-output acquire wait.
+				barrier.srcStageMask = acquireColor?VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT:before.stages;
+				barrier.srcAccessMask = acquireColor?VK_ACCESS_2_NONE:before.access;
 				barrier.dstStageMask = after.stages;
 				barrier.dstAccessMask = after.access;
 				barrier.oldLayout = texture->GetBarrierOldLayout(source.before);
@@ -1194,6 +1200,31 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 			m_referencedSwapchainImages.push_back(texture);
 		}
 	}
+
+    VkPipelineStageFlags VulkanCommandList::GetSwapchainAcquireWaitStage(
+        VulkanTexture* image,bool firstReference) const
+    {
+        bool found=false;
+        const auto colorState=[](RHI::ResourceState state) {
+            return state==RHI::ResourceState::Present || state==RHI::ResourceState::RenderTarget;
+        };
+        for(const auto& operation:m_operations)
+        {
+            if(operation.texture!=image)continue;
+            if(!found && firstReference && (operation.kind!=OperationKind::TextureBarrier ||
+                operation.before!=RHI::ResourceState::Present || operation.after!=RHI::ResourceState::RenderTarget))
+                return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            found=true;
+            if(operation.kind==OperationKind::TextureBarrier)
+            {
+                if(!colorState(operation.before) || !colorState(operation.after))
+                    return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            }
+            else if(operation.kind!=OperationKind::TextureRequirement || operation.before!=RHI::ResourceState::RenderTarget)
+                return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        }
+        return found?VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT:VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    }
 
 	bool VulkanCommandList::ValidateDraw(
 		bool indexed,

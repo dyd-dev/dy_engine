@@ -5,6 +5,7 @@
 #include "../Platform/Profiler/RhiProfiler.h"
 #include "../Platform/Profiler/CollectorInternal.h"
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -731,17 +732,40 @@ namespace dyf::RHI
 {
 class RecordedCommandList final : public ICommandList
 {
+    struct VertexBinding
+    {
+        BufferHandle buffer=nullptr;
+        uint32_t offset=0;
+    };
+    std::array<VertexBinding,8> m_emittedVertexBindings={};
+    BufferHandle m_emittedIndexBuffer=nullptr;
+    Format m_emittedIndexFormat=Format::Unknown;
+    uint32_t m_emittedIndexOffset=0;
+
+    void InvalidateBufferBindings() noexcept
+    {
+        m_emittedVertexBindings={};
+        m_emittedIndexBuffer=nullptr;
+        m_emittedIndexFormat=Format::Unknown;
+        m_emittedIndexOffset=0;
+    }
     template<auto Method,class... Args>
     void RecordNative(Args... args)
     {
         static_assert((std::is_trivially_copyable_v<Args> && ...));
         static_assert(((sizeof(Args)%alignof(uint32_t)==0) && ...));
         const size_t position=m_commandBytes.size();
-        const auto append=[this](const auto& value) {
-            const auto* first=reinterpret_cast<const uint8_t*>(&value);
-            m_commandBytes.insert(m_commandBytes.end(),first,first+sizeof(value));
-        };
-        (append(args),...);
+        if constexpr(sizeof...(Args)>0)
+        {
+            constexpr size_t argumentBytes=(size_t{0}+...+sizeof(Args));
+            std::array<uint8_t,argumentBytes> packed;
+            size_t cursor=0;
+            const auto append=[&](const auto& value) {
+                std::memcpy(packed.data()+cursor,&value,sizeof(value));cursor+=sizeof(value);
+            };
+            (append(args),...);
+            m_commandBytes.insert(m_commandBytes.end(),packed.begin(),packed.end());
+        }
         // Replay closures only hold an owner and an offset; draw/binding arguments share storage.
         m_commands.push_back([this,position](ICommandList& native) {
             size_t cursor=position;
@@ -798,6 +822,9 @@ class RecordedCommandList final : public ICommandList
     void BeginRenderingNative(const RenderingDesc& desc) override
     {
         if(m_rendering) { m_recordingFailed=true; return; }
+        // Every legal VB/IB bind follows BeginRendering, including after Reset
+        // or cached-wrapper reuse; no private binding cache can cross that boundary.
+        InvalidateBufferBindings();
         m_rendering=true;
         const auto pipeline=m_pipeline && !m_pipeline->IsCompute() ? m_pipeline : nullptr;
         m_pipeline=pipeline;
@@ -817,6 +844,7 @@ class RecordedCommandList final : public ICommandList
     void EndRenderingNative() override
     {
         if(!m_rendering) { m_recordingFailed=true; return; }
+        InvalidateBufferBindings();
         m_rendering=false;
         m_pipeline=nullptr;
         m_resourceSet=nullptr;
@@ -828,6 +856,7 @@ class RecordedCommandList final : public ICommandList
     }
     void BindComputePipelineNative(PipelineHandle pipeline) override
     {
+        InvalidateBufferBindings();
         m_pipeline=pipeline;
         RecordNative<&ICommandList::BindComputePipelineNative>(pipeline);
     }
@@ -844,6 +873,7 @@ class RecordedCommandList final : public ICommandList
     {RecordNative<&ICommandList::DispatchIndirectNative>(arguments,offset);}
     void BindGraphicsPipelineNative(PipelineHandle pipeline) override
     {
+        InvalidateBufferBindings();
         m_pipeline=pipeline;
         // A graph may select its pipeline before the callback opens rendering.
         if(m_rendering)RecordNative<&ICommandList::BindGraphicsPipelineNative>(pipeline);
@@ -867,12 +897,25 @@ class RecordedCommandList final : public ICommandList
 #endif
     }
     void BindVertexBufferNative(uint32_t binding, BufferHandle buffer, uint32_t offset) override
-    { RecordNative<&ICommandList::BindVertexBufferNative>(binding,buffer,offset);
-      RecordLiveCommand(D::LiveCommandKind::Bind,{binding,offset},buffer,0,0,1,D::LiveEventKind::Command,false,"Vertex buffer"); }
+    {
+        // Public validation, state requirements and ownership tracking already ran.
+        // Only omit the repeated native opcode; keep the caller's Live Bind event.
+        auto* cached=binding<m_emittedVertexBindings.size()?&m_emittedVertexBindings[binding]:nullptr;
+        if(!cached || cached->buffer!=buffer || cached->offset!=offset)
+        {
+            RecordNative<&ICommandList::BindVertexBufferNative>(binding,buffer,offset);
+            if(cached)*cached={buffer,offset};
+        }
+        RecordLiveCommand(D::LiveCommandKind::Bind,{binding,offset},buffer,0,0,1,D::LiveEventKind::Command,false,"Vertex buffer");
+    }
     void BindIndexBufferNative(BufferHandle buffer, Format format, uint32_t offset) override
     {
         m_indexBuffer=buffer;
-        RecordNative<&ICommandList::BindIndexBufferNative>(buffer,format,offset);
+        if(m_emittedIndexBuffer!=buffer || m_emittedIndexFormat!=format || m_emittedIndexOffset!=offset)
+        {
+            RecordNative<&ICommandList::BindIndexBufferNative>(buffer,format,offset);
+            m_emittedIndexBuffer=buffer;m_emittedIndexFormat=format;m_emittedIndexOffset=offset;
+        }
         RecordLiveCommand(D::LiveCommandKind::Bind,{static_cast<int64_t>(format),offset},buffer,0,0,1,D::LiveEventKind::Command,false,"Index buffer");
     }
     void SetInlineConstantsNative(uint32_t offset,uint32_t size,const void* data) override
