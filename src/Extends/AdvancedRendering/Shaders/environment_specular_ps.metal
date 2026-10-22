@@ -27,7 +27,11 @@ inline float4 LinearFloatTexture(texture2d<float> image,float2 coordinate,uint m
     const int2 size=int2(image.get_width(mip),image.get_height(mip));
     const float2 pixel=coordinate*float2(size)-0.5f,weight=fract(pixel);
     int2 low=int2(floor(pixel)),high=low+1;
-    if(repeatU) {low.x=(low.x%size.x+size.x)%size.x;high.x=(high.x%size.x+size.x)%size.x;}
+    if(repeatU)
+    {
+        const int2 wrappedX=DyWrapBilinearX(low.x,high.x,size.x);
+        low.x=wrappedX.x;high.x=wrappedX.y;
+    }
     else {low.x=clamp(low.x,0,size.x-1);high.x=clamp(high.x,0,size.x-1);}
     low.y=clamp(low.y,0,size.y-1);high.y=clamp(high.y,0,size.y-1);
     return mix(mix(image.read(uint2(low),mip),image.read(uint2(high.x,low.y),mip),weight.x),
@@ -54,19 +58,34 @@ inline float3 SpatialMip(texture2d_array<float> image,float2 coordinate,uint mip
     const int2 dimensions=int2(image.get_width(mip),image.get_height(mip));
     const float2 pixel=coordinate*float2(dimensions)-.5f,w=fract(pixel);
     int2 a=int2(floor(pixel)),b=a+1;
-    a.x=(a.x%dimensions.x+dimensions.x)%dimensions.x;b.x=(b.x%dimensions.x+dimensions.x)%dimensions.x;
+    const int2 wrappedX=DyWrapBilinearX(a.x,b.x,dimensions.x);
+    a.x=wrappedX.x;b.x=wrappedX.y;
     a.y=clamp(a.y,0,dimensions.y-1);b.y=clamp(b.y,0,dimensions.y-1);
     return mix(mix(image.read(uint2(a),layer,mip),image.read(uint2(b.x,a.y),layer,mip),w.x),
         mix(image.read(uint2(a.x,b.y),layer,mip),image.read(uint2(b),layer,mip),w.x),w.y).rgb;
+}
+inline bool NativeEnvironmentSample(float2 coordinate,float mip,float maximumMip,uint enabled)
+{
+    return enabled==1u && all(coordinate>=0) && all(coordinate<=1)
+        && mip>=0 && mip<=maximumMip && maximumMip<=32;
 }
 inline float ProbeVisibility(float3 position,device const SpatialProbe& probe,uint index,
     texture2d_array<float> image,uint count)
 {
     return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,count+index,image);
 }
-inline float3 BlendProbeRadiance(float3 fallback,float3 position,float3 direction,float roughness,
-    device const SpatialProbe* probes,texture2d_array<float> image,uint count)
+inline float3 BlendProbeRadiance(float3 position,float3 direction,float roughness,
+    constant FrameConstants& frame,texture2d<float> prefilterTexture,
+    device const SpatialProbe* probes,texture2d_array<float> image,constant uint4& parameters,sampler environmentLinearSampler)
 {
+    const float3 projected=ProbeDirection(position,direction,frame);
+    const float c=cos(frame.settings.z),s=sin(frame.settings.z);
+    const float3 reflection=float3(c*projected.x+s*projected.y,-s*projected.x+c*projected.y,projected.z);
+    const float2 envUV=float2(atan2(reflection.y,reflection.x)*0.15915494309189535f+0.5f,
+        acos(clamp(reflection.z,-1.0f,1.0f))*0.3183098861837907f);
+    const float mip=roughness*frame.settings.w;
+    const uint lo=uint(floor(mip)),hi=min(lo+1,uint(frame.settings.w));
+    const uint count=parameters.x;
     float3 sum=0;float weights=0,coverage=0;
     for(uint i=0;i<count;++i)
     {
@@ -79,10 +98,25 @@ inline float3 BlendProbeRadiance(float3 fallback,float3 position,float3 directio
         const float3 d=BoxDirection(position,direction,probe.positionIntensity.xyz,probe.boxMinFade.xyz,probe.boxMaxMip.xyz);
         const float2 coordinate=float2(atan2(d.y,d.x)*.15915494309189535f+.5f,acos(clamp(d.z,-1.f,1.f))*.3183098861837907f);
         const float mip=roughness*probe.boxMaxMip.w;const uint lo=uint(floor(mip)),hi=min(lo+1,uint(probe.boxMaxMip.w));
-        sum+=mix(SpatialMip(image,coordinate,lo,i),SpatialMip(image,coordinate,hi,i),fract(mip))*
+        float3 sampledRadiance;
+        if(NativeEnvironmentSample(coordinate,mip,probe.boxMaxMip.w,parameters.z))
+            sampledRadiance=image.sample(environmentLinearSampler,coordinate,i,level(mip)).rgb;
+        else sampledRadiance=mix(SpatialMip(image,coordinate,lo,i),SpatialMip(image,coordinate,hi,i),fract(mip));
+        sum+=sampledRadiance*
             probe.positionIntensity.w*(weight*ProbeVisibility(position,probe,i,image,count));
         weights+=weight;coverage+=edge;
     }
+    if(parameters.y!=0u && weights>0 && coverage>=1 && all(isfinite(envUV)) && isfinite(mip))
+    {
+        float3 local=sum/weights;
+        if(all(abs(local)<=2.1267646e37f))return local;
+    }
+    float3 fallback;
+    if(NativeEnvironmentSample(envUV,mip,frame.settings.w,parameters.z))
+        fallback=prefilterTexture.sample(environmentLinearSampler,envUV,level(mip)).rgb;
+    else fallback=mix(LinearFloatTexture(prefilterTexture,envUV,lo,true),
+        LinearFloatTexture(prefilterTexture,envUV,hi,true),fract(mip)).rgb;
+    fallback*=frame.settings.y;
     return weights>0?mix(fallback,sum/weights,clamp(coverage,0.f,1.f)):fallback;
 }
 fragment float4 environmentSpecular(EnvironmentVertex input [[stage_in]],
@@ -90,7 +124,7 @@ fragment float4 environmentSpecular(EnvironmentVertex input [[stage_in]],
     texture2d<float> albedoTexture [[texture(2)]],texture2d<float> aoTexture [[texture(3)]],
     texture2d<float> prefilterTexture [[texture(4)]],texture2d<float> brdfTexture [[texture(5)]],
     sampler environmentSampler [[sampler(7)]],sampler clampSampler [[sampler(8)]],
-    sampler aoSampler [[sampler(10)]],
+    sampler aoSampler [[sampler(10)]],sampler environmentLinearSampler [[sampler(15)]],
     constant FrameConstants& frame [[buffer(9)]],device const SpatialProbe* probes [[buffer(22)]],
     texture2d_array<float> probePrefilterTexture [[texture(23)]],constant uint4& probeParameters [[buffer(24)]])
 {
@@ -104,15 +138,7 @@ fragment float4 environmentSpecular(EnvironmentVertex input [[stage_in]],
     const float3 normal=DecodeEnvironmentNormal(surface.xy),view=normalize(frame.cameraPosition.xyz-position);
     const float roughness=clamp(surface.z,0.01f,1.0f),nDotV=max(dot(normal,view),0.0f);
     const float3 worldReflection=reflect(-view,normal);
-    float3 reflection=ProbeDirection(position,worldReflection,frame);
-    const float c=cos(frame.settings.z),s=sin(frame.settings.z);
-    reflection.xy=float2(c*reflection.x+s*reflection.y,-s*reflection.x+c*reflection.y);
-    const float2 envUV=float2(atan2(reflection.y,reflection.x)*0.15915494309189535f+0.5f,
-        acos(clamp(reflection.z,-1.0f,1.0f))*0.3183098861837907f);
-    const float mip=roughness*frame.settings.w;
-    const uint lo=uint(floor(mip)),hi=min(lo+1,uint(frame.settings.w));
-    float3 radiance=mix(LinearFloatTexture(prefilterTexture,envUV,lo,true),LinearFloatTexture(prefilterTexture,envUV,hi,true),fract(mip)).rgb;
-    radiance=BlendProbeRadiance(radiance*frame.settings.y,position,worldReflection,roughness,probes,probePrefilterTexture,probeParameters.x);
+    float3 radiance=BlendProbeRadiance(position,worldReflection,roughness,frame,prefilterTexture,probes,probePrefilterTexture,probeParameters,environmentLinearSampler);
     const float2 brdf=LinearFloatTexture(brdfTexture,float2(nDotV,roughness),0,false).rg;
     const float3 f0=mix(float3(0.04f),albedo.rgb,saturate(albedo.a));
     float ao=saturate(surface.w);

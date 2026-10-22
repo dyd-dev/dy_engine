@@ -103,7 +103,7 @@ private:
     };
     struct ScreenSet
     {
-        std::array<RHI::TextureHandle,7> textures={};
+        std::array<RHI::TextureHandle,8> textures={};
         RHI::PipelineHandle pipeline=nullptr;
         RHI::ResourceSetHandle set=nullptr;
         uint32_t unusedFrames=0;
@@ -129,6 +129,7 @@ private:
         uint32_t unusedFrames=0;
     };
     bool CreatePipelines();
+    void PrepareDepthPlane(bool enabled);
     bool CreateDenoisePipelines();
     bool PrepareDenoise(uint32_t effect,bool enabled);
     void ReleaseDenoise(uint32_t effect);
@@ -145,6 +146,13 @@ private:
     void DestroySets();
     RHI::IDevice* m_device=nullptr;
     RHI::TextureHandle m_depth=nullptr;
+    RHI::TextureHandle m_depthPlane=nullptr;
+    RHI::ResourceState m_depthPlaneState=RHI::ResourceState::Undefined;
+    RHI::RGResourceHandle m_depthPlaneHandle;
+    RHI::ShaderHandle m_depthCopyShader=nullptr;
+    RHI::PipelineHandle m_depthCopyPipeline=nullptr;
+    RHI::ResourceSetHandle m_depthCopySet=nullptr;
+    bool m_depthPlaneAttempted=false,m_depthPlaneActive=false;
     RHI::TextureHandle m_whiteAO=nullptr,m_colorOutput=nullptr;
     std::array<RHI::TextureHandle,ImageCount> m_textures={};
     std::array<RHI::ResourceState,ImageCount> m_states={};

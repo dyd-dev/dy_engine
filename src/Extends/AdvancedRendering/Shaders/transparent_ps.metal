@@ -1,5 +1,11 @@
+#ifndef RENDERER_ENABLE_AREA_LIGHTS
+#define RENDERER_ENABLE_AREA_LIGHTS 1
+#endif
 #include <metal_stdlib>
 using namespace metal;
+#ifndef TRANSPARENT_FRAGMENT_ENTRY
+#define TRANSPARENT_FRAGMENT_ENTRY transparentFragment
+#endif
 #include "probe_visibility.metal"
 struct TransparentDraw {float4x4 model;float4x4 normalMatrix;float4 baseColor;float4 emissive;float4 material;float4 optics;float4 attenuation;uint4 flags;};
 struct TransparentFrame {float4x4 viewProjection;float4x4 view;float4x4 inverseViewProjection;float4 camera;float4 sh[9];float4 settings;float4 screen;float4 probePosition;float4 probeBoxMin;float4 probeBoxMax;float4 specularColor;};
@@ -131,7 +137,8 @@ float3 TransparentEnvMip(texture2d<float> image,float2 coordinate,int mip)
 {
     const int2 size=int2(image.get_width(uint(mip)),image.get_height(uint(mip)));
     float2 pixel=coordinate*float2(size)-.5f,w=fract(pixel);int2 a=int2(floor(pixel)),b=a+1;
-    a.x=(a.x%size.x+size.x)%size.x;b.x=(b.x%size.x+size.x)%size.x;
+    const int2 wrappedX=DyWrapBilinearX(a.x,b.x,size.x);
+    a.x=wrappedX.x;b.x=wrappedX.y;
     a.y=clamp(a.y,0,size.y-1);b.y=clamp(b.y,0,size.y-1);
     return mix(mix(image.read(uint2(a),uint(mip)),image.read(uint2(b.x,a.y),uint(mip)),w.x),
         mix(image.read(uint2(a.x,b.y),uint(mip)),image.read(uint2(b),uint(mip)),w.x),w.y).rgb;
@@ -156,10 +163,16 @@ float3 TransparentSpatialMip(texture2d_array<float> image,float2 coordinate,int 
 {
     const int2 dimensions=int2(image.get_width(uint(mip)),image.get_height(uint(mip)));
     float2 pixel=coordinate*float2(dimensions)-.5f,w=fract(pixel);int2 a=int2(floor(pixel)),b=a+1;
-    a.x=(a.x%dimensions.x+dimensions.x)%dimensions.x;b.x=(b.x%dimensions.x+dimensions.x)%dimensions.x;
+    const int2 wrappedX=DyWrapBilinearX(a.x,b.x,dimensions.x);
+    a.x=wrappedX.x;b.x=wrappedX.y;
     a.y=clamp(a.y,0,dimensions.y-1);b.y=clamp(b.y,0,dimensions.y-1);
     return mix(mix(image.read(uint2(a),layer,uint(mip)),image.read(uint2(b.x,a.y),layer,uint(mip)),w.x),
         mix(image.read(uint2(a.x,b.y),layer,uint(mip)),image.read(uint2(b),layer,uint(mip)),w.x),w.y).rgb;
+}
+inline bool NativeEnvironmentSample(float2 coordinate,float mip,float maximumMip,uint enabled,uint nativeAllowed)
+{
+    return nativeAllowed==1u && enabled==1u && all(coordinate>=0) && all(coordinate<=1)
+        && mip>=0 && mip<=maximumMip && maximumMip<=32;
 }
 float TransparentProbeVisibility(float3 position,const device TransparentSpatialProbe& probe,uint index,
     texture2d_array<float> image,uint count)
@@ -167,11 +180,10 @@ float TransparentProbeVisibility(float3 position,const device TransparentSpatial
     return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,count+index,image);
 }
 float3 TransparentRadiance(texture2d<float> image,float3 position,float3 d,float roughness,constant TransparentFrame& frame,
-    texture2d_array<float> probeImage,const device TransparentSpatialProbe* probes,constant uint4& probeParameters)
+    texture2d_array<float> probeImage,const device TransparentSpatialProbe* probes,constant uint4& probeParameters,sampler environmentLinearSampler,uint nativeAllowed)
 {
     float mip=roughness*frame.settings.w;int lo=int(floor(mip)),hi=min(lo+1,int(frame.settings.w));
     float2 coordinate=TransparentEnvUV(TransparentProbeDirection(position,d,frame),frame);
-    float3 fallback=mix(TransparentEnvMip(image,coordinate,lo),TransparentEnvMip(image,coordinate,hi),fract(mip))*frame.settings.y;
     float3 sum=0;float weights=0,coverage=0;
     for(uint i=0;i<probeParameters.x;++i)
     {
@@ -181,10 +193,24 @@ float3 TransparentRadiance(texture2d<float> image,float3 position,float3 d,float
         float2 localUV=float2(atan2(direction.y,direction.x)*.15915494309189535f+.5f,
             acos(clamp(direction.z,-1.0f,1.0f))*.3183098861837907f);
         float localMip=roughness*probe.boxMaxMip.w;int a=int(floor(localMip)),b=min(a+1,int(probe.boxMaxMip.w));
-        sum+=mix(TransparentSpatialMip(probeImage,localUV,a,i),TransparentSpatialMip(probeImage,localUV,b,i),fract(localMip))*probe.positionIntensity.w*
+        float3 sampledRadiance;
+        if(NativeEnvironmentSample(localUV,localMip,probe.boxMaxMip.w,probeParameters.z,nativeAllowed))
+            sampledRadiance=probeImage.sample(environmentLinearSampler,localUV,i,level(localMip)).rgb;
+        else sampledRadiance=mix(TransparentSpatialMip(probeImage,localUV,a,i),TransparentSpatialMip(probeImage,localUV,b,i),fract(localMip));
+        sum+=sampledRadiance*probe.positionIntensity.w*
             (weight*TransparentProbeVisibility(position,probe,i,probeImage,probeParameters.x));
         weights+=weight;coverage+=edge;
     }
+    if(probeParameters.y!=0u && weights>0 && coverage>=1 && all(isfinite(coordinate)) && isfinite(mip))
+    {
+        float3 local=sum/weights;
+        if(all(abs(local)<=2.1267646e37f))return local;
+    }
+    float3 fallback;
+    if(NativeEnvironmentSample(coordinate,mip,frame.settings.w,probeParameters.z,nativeAllowed))
+        fallback=image.sample(environmentLinearSampler,coordinate,level(mip)).rgb;
+    else fallback=mix(TransparentEnvMip(image,coordinate,lo),TransparentEnvMip(image,coordinate,hi),fract(mip));
+    fallback*=frame.settings.y;
     return weights>0?mix(fallback,sum/weights,clamp(coverage,0.0f,1.0f)):fallback;
 }
 float3 TransparentIrradiance(float3 position,float3 n,constant TransparentFrame& frame,
@@ -221,6 +247,7 @@ float TransparentFalloff(float distance,float range)
     if(range<=0 || distance>=range)return 0;float x=distance/range;
     return pow(max(1-x*x*x*x,0.0f),2.0f)/max(distance*distance,.0001f);
 }
+#if RENDERER_ENABLE_AREA_LIGHTS
 // LTC 적분과 표 배치는 Heitz 외 SIGGRAPH 2016 및 Assets/ltc/LICENSE를 따른다.
 inline float LtcEdgeIntegral(float3 a,float3 b)
 {
@@ -320,14 +347,17 @@ inline float3 EvaluateDiscAreaLight(RendererDiscAreaLight light,float3 normal,fl
     return EvaluateLtcPolygon(normal,viewDir,worldPosition,points,16,albedo,f0,diffuseFactor,roughness,
         light.color.rgb*max(light.positionIntensity.w,0.0),ltcMatrixTexture,ltcAmplitudeTexture,materialSampler);
 }
+#endif
 
-fragment TransparentOutput transparentFragment(TransparentVertex input [[stage_in]],bool frontFacing [[front_facing]],
+[[early_fragment_tests]]
+fragment TransparentOutput TRANSPARENT_FRAGMENT_ENTRY(TransparentVertex input [[stage_in]],bool frontFacing [[front_facing]],
     texture2d<float> baseTexture [[texture(0)]],texture2d<float> materialTexture [[texture(1)]],
     texture2d<float> normalTexture [[texture(2)]],texture2d<float> aoTexture [[texture(3)]],
     texture2d<float> emissiveTexture [[texture(4)]],texture2d<float> opaqueTexture [[texture(5)]],
-    depth2d<float> depthTexture [[texture(6)]],texture2d<float> prefilterTexture [[texture(7)]],
+    texture2d<float> depthTexture [[texture(6)]],texture2d<float> prefilterTexture [[texture(7)]],
     depth2d<float> shadowTexture [[texture(14)]],
     sampler materialSampler [[sampler(8)]],sampler screenSampler [[sampler(9)]],sampler pointSampler [[sampler(10)]],
+    sampler environmentLinearSampler [[sampler(15)]],
     device const TransparentDraw* draws [[buffer(11)]],constant TransparentFrame& frame [[buffer(12)]],
     constant TransparentLights& lights [[buffer(13)]],constant uint4& index [[buffer(15)]],
     constant TransparentShadows& shadows [[buffer(16)]],
@@ -340,8 +370,10 @@ fragment TransparentOutput transparentFragment(TransparentVertex input [[stage_i
     texture2d<float> ltcMatrixTexture [[texture(26)]],
     texture2d<float> ltcAmplitudeTexture [[texture(27)]],texture2d<float> nearestDepthTexture [[texture(28)]])
 {
+    // Preserve material gradients while all lanes still participate.
+    float2 uvDx=dfdx(input.uv),uvDy=dfdy(input.uv);
     float2 screenUV=input.position.xy*frame.screen.xy;
-    float opaqueDepth=depthTexture.read(uint2(input.position.xy));
+    float opaqueDepth=depthTexture.read(uint2(input.position.xy)).r;
     bool excludedLayer=false;
     if(index.y!=0u)
     {
@@ -351,39 +383,43 @@ fragment TransparentOutput transparentFragment(TransparentVertex input [[stage_i
         bool frontLayer=max(currentBits,nearestBits)-min(currentBits,nearestBits)<=1u;
         excludedLayer=index.y==1u?frontLayer:!frontLayer;
     }
-    TransparentDraw draw=draws[index.x];uint flags=draw.flags.x;float4 base=draw.baseColor;
-    if((flags&1u)!=0u)base*=baseTexture.sample(materialSampler,input.uv);
-    float2 mr=draw.material.xy;if((flags&2u)!=0u)mr*=materialTexture.sample(materialSampler,input.uv).bg;
+    TransparentDraw draw=draws[index.x];uint flags=draw.flags.x;
+    float3 geometricNormal=float3(0,0,1),n=geometricNormal,v=geometricNormal;
+    float normalVariance=0;
+    // These flags are uniform for the draw; debug/unlit materials need no normal footprint.
+    if((flags&(64u|128u))==0u)
+    {
+        geometricNormal=TransparentPixelNormalizeOr(input.worldNormal,float3(0,0,1));n=geometricNormal;
+        v=TransparentPixelNormalizeOr(frame.camera.xyz-input.worldPosition,geometricNormal);
+        if((flags&4u)!=0u)
+        {
+            float3 fallback=normalize(cross(abs(n.z)<.99f?float3(0,0,1):float3(0,1,0),n));
+            float3 t=TransparentPixelNormalizeOr(input.worldTangent.xyz-n*dot(n,input.worldTangent.xyz),fallback),b=cross(n,t)*input.worldTangent.w;
+            float3 mapped=normalTexture.sample(materialSampler,input.uv).xyz*2-1;
+            mapped.xy*=draw.material.z;mapped.y*=(draw.emissive.w<0?-1.0f:1.0f);
+            n=TransparentPixelNormalizeOr(t*mapped.x+b*mapped.y+n*mapped.z,n);
+        }
+        // Keep mapped-normal derivatives before discard or visible-side selection.
+        float3 normalDx=dfdx(n),normalDy=dfdy(n);
+        normalVariance=0.25f*(dot(normalDx,normalDx)+dot(normalDy,normalDy));
+    }
+    if(input.position.z>opaqueDepth || excludedLayer)discard_fragment();
+    float4 base=draw.baseColor;
+    if((flags&1u)!=0u)base*=baseTexture.sample(materialSampler,input.uv,gradient2d(uvDx,uvDy));
+    float2 mr=draw.material.xy;if((flags&2u)!=0u)mr*=materialTexture.sample(materialSampler,input.uv,gradient2d(uvDx,uvDy)).bg;
     float metal=clamp(mr.x,0.0f,1.0f),rough=clamp(mr.y,.04f,1.0f),transmission=clamp(draw.optics.x,0.0f,1.0f)*(1-metal);
     if((flags&64u)!=0u)
     {
-        if(input.position.z>opaqueDepth || excludedLayer)discard_fragment();
         float coverage=mix(clamp(base.a,0.0f,1.0f),1.0f,transmission);
         TransparentOutput output;output.color=float4(draw.baseColor.rgb*coverage,coverage);output.reactive=float4(coverage);return output;
     }
     if((flags&128u)!=0u)
     {
-        if(input.position.z>opaqueDepth || excludedLayer)discard_fragment();
         float coverage=clamp(base.a,0.0f,1.0f);
         TransparentOutput output;output.color=float4(clamp(base.rgb,0.0f,65504.0f)*coverage,coverage);output.reactive=float4(coverage);return output;
     }
-    float3 geometricNormal=TransparentPixelNormalizeOr(input.worldNormal,float3(0,0,1)),n=geometricNormal;
-    float3 v=TransparentPixelNormalizeOr(frame.camera.xyz-input.worldPosition,geometricNormal);
-    if((flags&4u)!=0u)
-    {
-        float3 fallback=normalize(cross(abs(n.z)<.99f?float3(0,0,1):float3(0,1,0),n));
-        float3 t=TransparentPixelNormalizeOr(input.worldTangent.xyz-n*dot(n,input.worldTangent.xyz),fallback),b=cross(n,t)*input.worldTangent.w;
-        float3 mapped=normalTexture.sample(materialSampler,input.uv).xyz*2-1;
-        mapped.xy*=draw.material.z;mapped.y*=(draw.emissive.w<0?-1.0f:1.0f);
-        n=TransparentPixelNormalizeOr(t*mapped.x+b*mapped.y+n*mapped.z,n);
-    }
-    // Keep the original material roughness on a constant normal footprint.
-    // Derivatives precede discard and the visible-interface orientation branch.
-    float3 normalDx=dfdx(n),normalDy=dfdy(n);
-    float normalVariance=0.25f*(dot(normalDx,normalDx)+dot(normalDy,normalDy));
     float filteredAlphaSquared=min(1.0f,rough*rough*rough*rough+min(2.0f*normalVariance,0.18f));
     float specularRoughness=sqrt(sqrt(filteredAlphaSquared));
-    if(input.position.z>opaqueDepth || excludedLayer)discard_fragment();
     if(transmission>0)
     {
         // Explicit-thickness thin-wall approximation: either visible mesh side
@@ -399,7 +435,7 @@ fragment TransparentOutput transparentFragment(TransparentVertex input [[stage_i
     float ao=1;if((flags&8u)!=0u)ao=mix(1.0f,aoTexture.sample(materialSampler,input.uv).r,draw.material.w);
     float3 lit=(1-f)*base.rgb*(1-metal)*(1-transmission)*TransparentIrradiance(input.worldPosition,n,frame,probes,probeParameters,probePrefilterTexture)*ao;
     if((uint(frame.screen.w+.5f)&2u)!=0u)lit+=TransparentRadiance(prefilterTexture,input.worldPosition,reflect(-v,n),specularRoughness,frame,
-        probePrefilterTexture,probes,probeParameters)*f*frame.specularColor.rgb;
+        probePrefilterTexture,probes,probeParameters,environmentLinearSampler,index.z)*f*frame.specularColor.rgb;
     for(int i=0;i<clamp(int(lights.counts.x+.5f),0,4);++i)
     {
         float3 l=normalize(lights.directional[i].directionIntensity.xyz);
@@ -425,12 +461,14 @@ fragment TransparentOutput transparentFragment(TransparentVertex input [[stage_i
         lit+=TransparentDirect(n,v,l,light.colorIntensity.rgb*light.colorIntensity.w*TransparentFalloff(distance,light.positionRange.w)*cone*visibility,
             base.rgb,f0,specularRoughness,(1-metal)*(1-transmission));
     }
+#if RENDERER_ENABLE_AREA_LIGHTS
     for(int i=0;i<clamp(int(lights.areaCounts.x+.5f),0,4);++i)
         lit+=EvaluateRectAreaLight(lights.rectAreaLights[i],n,v,base.rgb,f0,(1-metal)*(1-transmission),specularRoughness,input.worldPosition,
             ltcMatrixTexture,ltcAmplitudeTexture,materialSampler);
     for(int i=0;i<clamp(int(lights.areaCounts.y+.5f),0,4);++i)
         lit+=EvaluateDiscAreaLight(lights.discAreaLights[i],n,v,base.rgb,f0,(1-metal)*(1-transmission),specularRoughness,input.worldPosition,
             ltcMatrixTexture,ltcAmplitudeTexture,materialSampler);
+#endif
     float3 refracted=0;
     if(transmission>0 && !totalInternalReflection)
     {
@@ -439,9 +477,9 @@ fragment TransparentOutput transparentFragment(TransparentVertex input [[stage_i
         float2 target=exitClip.xy/max(exitClip.w,1e-5f)*float2(.5f,-.5f)+.5f;
         float exitDepth=exitClip.z/max(exitClip.w,1e-5f);
         bool onScreen=exitClip.w>0 && exitDepth>=0 && exitDepth<=1 && all(target>=0) && all(target<=1);
-        if(onScreen && depthTexture.sample(pointSampler,target,level(0))<exitDepth)target=screenUV;
+        if(onScreen && depthTexture.sample(pointSampler,target,level(0)).r<exitDepth)target=screenUV;
         refracted=onScreen?opaqueTexture.sample(screenSampler,target,level(0)).rgb:TransparentRadiance(prefilterTexture,input.worldPosition,ray,rough,frame,
-            probePrefilterTexture,probes,probeParameters);
+            probePrefilterTexture,probes,probeParameters,environmentLinearSampler,index.z);
         float3 absorption=draw.optics.w>0?pow(clamp(draw.attenuation.rgb,.0001f,1.0f),float3(path/draw.optics.w)):float3(1);
         refracted*=absorption*base.rgb*(1-f)*transmission;
     }

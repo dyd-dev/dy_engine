@@ -483,6 +483,58 @@ macro(dy_build_stock_shaders)
             dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.${shader_extension}" frag BindlessFragmentNoShadows kBindlessFragmentNoShadows -DRENDERER_BINDLESS=1 -DRENDERER_ENABLE_SHADOWS=0)
         endif()
 
+        foreach(enable_shadows IN ITEMS 1 0)
+            if(enable_shadows)
+                set(depth_prepass_suffix "")
+            else()
+                set(depth_prepass_suffix NoShadows)
+            endif()
+            if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
+                dy_embed_stock_metal_library(StockDepthPrepassFragment${depth_prepass_suffix} kStockDepthPrepassFragment${depth_prepass_suffix} mesh_ps
+                    "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}" -DRENDERER_DEPTH_PREPASS=1
+                    -DRENDERER_FRAGMENT_ENTRY=depthPrepassFragment)
+                dy_embed_stock_metal_library(BindlessDepthPrepassFragment${depth_prepass_suffix} kBindlessDepthPrepassFragment${depth_prepass_suffix} mesh_ps
+                    "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}" -DRENDERER_BINDLESS=1 -DRENDERER_DEPTH_PREPASS=1
+                    -DRENDERER_FRAGMENT_ENTRY=depthPrepassFragment)
+            else()
+                dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.${shader_extension}" frag StockDepthPrepassFragment${depth_prepass_suffix} kStockDepthPrepassFragment${depth_prepass_suffix}
+                    "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}" -DRENDERER_DEPTH_PREPASS=1)
+                dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.${shader_extension}" frag BindlessDepthPrepassFragment${depth_prepass_suffix} kBindlessDepthPrepassFragment${depth_prepass_suffix}
+                    "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}" -DRENDERER_BINDLESS=1 -DRENDERER_DEPTH_PREPASS=1)
+            endif()
+        endforeach()
+
+        foreach(no_area_depth IN ITEMS 0 1)
+            foreach(no_area_shadows IN ITEMS 1 0)
+                foreach(no_area_bindless IN ITEMS 0 1)
+                    if(no_area_bindless)
+                        set(no_area_name Bindless)
+                    else()
+                        set(no_area_name Stock)
+                    endif()
+                    if(no_area_depth)
+                        string(APPEND no_area_name NoAreaDepthPrepassFragment)
+                    else()
+                        string(APPEND no_area_name NoAreaFragment)
+                    endif()
+                    if(NOT no_area_shadows)
+                        string(APPEND no_area_name NoShadows)
+                    endif()
+                    set(no_area_defines -DRENDERER_ENABLE_AREA_LIGHTS=0
+                        "-DRENDERER_ENABLE_SHADOWS=${no_area_shadows}"
+                        "-DRENDERER_BINDLESS=${no_area_bindless}"
+                        "-DRENDERER_DEPTH_PREPASS=${no_area_depth}")
+                    if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
+                        dy_embed_stock_metal_library(${no_area_name} k${no_area_name} mesh_ps
+                            ${no_area_defines} -DRENDERER_FRAGMENT_ENTRY=noAreaFragment)
+                    else()
+                        dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.${shader_extension}" frag
+                            ${no_area_name} k${no_area_name} ${no_area_defines})
+                    endif()
+                endforeach()
+            endforeach()
+        endforeach()
+
         if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
             dy_embed_stock_metal_library(GpuVisibilityCompute kGpuVisibilityCompute gpu_visibility)
             dy_embed_stock_metal_library(GpuOcclusionCompute kGpuOcclusionCompute gpu_visibility -DGPU_VISIBILITY_OCCLUSION=1)

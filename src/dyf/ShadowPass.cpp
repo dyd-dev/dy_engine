@@ -6,6 +6,7 @@
 #include "../RHI/ResourceSet.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 
 namespace dyf
@@ -77,6 +78,28 @@ struct ShadowFrustum
     }
 };
 
+bool ShadowSortProjection(const Math::float4x4& matrix)
+{
+    // Canonical orthographic light views keep clip w exactly one in either
+    // light*(world*position) or (light*world)*position evaluation order.
+    if(matrix.m[3]!=0 || matrix.m[7]!=0 || matrix.m[11]!=0 || matrix.m[15]!=1)return false;
+    for(float value:matrix.m)if(!std::isfinite(value) || std::abs(value)>1e10f)return false;
+    return true;
+}
+
+bool ShadowBatchNearDepth(const Math::Bounds3& bounds,const Math::float4x4& matrix,double& depth)
+{
+    const double minimum[]={bounds.min.x,bounds.min.y,bounds.min.z};
+    const double maximum[]={bounds.max.x,bounds.max.y,bounds.max.z};
+    depth=matrix.m[14];
+    for(uint32_t axis=0;axis<3;++axis)
+    {
+        const double coefficient=matrix.m[axis*4+2];
+        depth+=coefficient*(coefficient>=0?minimum[axis]:maximum[axis]);
+    }
+    return std::isfinite(depth) && std::abs(depth)<=1e32;
+}
+
 }
 
 bool Renderer::Impl::RecordShadowPass(const Scene& scene, const Camera& camera, const ShadowData& shadows,
@@ -89,25 +112,75 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene, const Camera& camera, 
 	// 그림자 윤곽은 원본 인덱스를 사용하여 카메라 LOD 변경에도 정적 아틀라스를 재사용한다.
 	const bool stock=stockDrawInputs;
 	const bool instanced=UsesInstanceStream();
+    const bool baseInstance=stock && instanced;
 	const bool perEntity=draws && !stock;
 	const bool cull=stock && config.enableFrustumCulling;
-    const auto shadowPipelineFor=[&](const MaterialDesc& material,bool mirrored) {
+    const auto shadowPipelineFor=[&](const MaterialDesc& material,bool mirrored,bool compact=false) {
         // 비표준 입력에는 기존 fragment의 재질별 면 판정을 유지한다.
         if(!stock) return UsesStockGeometry() ? shadowMaterialPipelines[2] : shadowPipeline;
         const uint32_t variant=(material.doubleSided?1u:0u) |
             (material.alphaMode==MaterialAlphaMode::Mask?2u:0u) | (mirrored?4u:0u);
+        if(compact)return compactShadowPipelines[variant];
         return variant ? shadowMaterialPipelines[variant-1] : shadowPipeline;
     };
-	if(cull) {
-        shadowBoundsScratch.resize(scene.GetEntityCount());
-        for(uint32_t i=0;i<scene.GetEntityCount();++i) {
-            auto& bounds=shadowBoundsScratch[i];bounds={};
-            const auto entity=static_cast<EntityID>(i);
-            const auto meshId=scene.GetEntityMesh(entity);
-            if(scene.GetEntityLighting(entity).castShadow && IsValid(meshId) && ToIndex(meshId)<m_meshes.size())
-                bounds.bounds=ShadowWorldBounds(draws && (*draws)[i].hasLocalBounds ? (*draws)[i].localBounds :
-                    m_meshes[ToIndex(meshId)].bounds,scene.GetTransform(entity),bounds.magnitude);
+    auto& casters=shadowCasterScratch;
+    casters.clear();
+    casters.reserve(scene.GetEntityCount());
+    // Validate and classify casters once; all atlas views share these inputs.
+    for(uint32_t i=0;i<scene.GetEntityCount();++i) {
+        const auto entity=static_cast<EntityID>(i);
+        if(!scene.GetEntityLighting(entity).castShadow)continue;
+        const auto meshId=scene.GetEntityMesh(entity);
+        const auto materialId=scene.GetEntityMaterial(entity);
+        if(!IsValid(meshId) || !IsValid(materialId))continue;
+        const uint32_t meshIndex=ToIndex(meshId),materialIndex=ToIndex(materialId);
+        if(meshIndex>=m_meshes.size() || materialIndex>=materialStates.size())continue;
+        const auto& mesh=m_meshes[meshIndex];
+        if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount)continue;
+        const auto& material=scene.Materials()[materialIndex];
+        // A binary shadow map cannot represent translucent coverage.
+        if(shadowFragmentShader && material.alphaMode==MaterialAlphaMode::Blend)continue;
+        ShadowCaster caster;
+        caster.entity=i;caster.mesh=meshIndex;caster.material=materialIndex;
+        const auto vertexBuffer=draws && (*draws)[i].vertexBuffer ? (*draws)[i].vertexBuffer : mesh.vertexBuffer;
+        const bool originalVertices=stock && vertexBuffer==mesh.vertexBuffer;
+        caster.arena=originalVertices && shadowArenaVertices && shadowArenaIndices && shadowArenaGeneration &&
+            mesh.shadowArena.generation==shadowArenaGeneration && mesh.shadowVertexReady && mesh.shadowIndexReady;
+        caster.compact=originalVertices && (caster.arena || (mesh.shadowVertexBuffer && mesh.shadowVertexReady &&
+            mesh.shadowIndexBuffer && mesh.shadowIndexReady));
+        caster.batch=static_cast<uint32_t>(casters.size());
+        const auto& transform=scene.GetTransform(entity);
+        caster.mirrored=Math::Determinant3x3(transform)<0;
+        if(cull)
+            caster.worldBounds.bounds=ShadowWorldBounds(draws && (*draws)[i].hasLocalBounds ? (*draws)[i].localBounds :
+                mesh.bounds,transform,caster.worldBounds.magnitude);
+        caster.sortSafe=caster.arena && mesh.shadowArena.sortSafeInputs && caster.worldBounds.bounds.valid;
+        if(caster.sortSafe)
+        {
+            // Bound raw matrix inputs as well as transformed magnitudes: GLSL/Metal
+            // can multiply light*world before position, so cancellation alone is insufficient.
+            for(float value:transform.m)
+                if(!std::isfinite(value) || std::abs(value)>1e10f)caster.sortSafe=false;
+            for(double value:caster.worldBounds.magnitude)
+                if(!std::isfinite(value) || value>1e21)caster.sortSafe=false;
         }
+        if(stock && instanced && !casters.empty()) {
+            const auto& previous=casters.back();
+            const auto& previousMaterial=scene.Materials()[previous.material];
+            // The canonical instance stream still requires consecutive entity indices.
+            bool same=previous.entity+1==i && previous.mesh==meshIndex && previous.compact==caster.compact &&
+                previous.arena==caster.arena &&
+                (!draws || (*draws)[previous.entity].vertexBuffer==(*draws)[i].vertexBuffer) &&
+                material.alphaMode!=MaterialAlphaMode::Blend &&
+                previousMaterial.doubleSided==material.doubleSided && previous.mirrored==caster.mirrored &&
+                (previousMaterial.alphaMode==MaterialAlphaMode::Mask)==(material.alphaMode==MaterialAlphaMode::Mask);
+            if(same && material.alphaMode==MaterialAlphaMode::Mask)
+                same=materialStates[previous.material].textures[0]==materialStates[materialIndex].textures[0] &&
+                    (materialStates[previous.material].textureFlags&1u)==(materialStates[materialIndex].textureFlags&1u) &&
+                    previousMaterial.baseColor.w==material.baseColor.w && previousMaterial.alphaCutoff==material.alphaCutoff;
+            if(same)caster.batch=previous.batch;
+        }
+        casters.push_back(caster);
     }
 	auto& shadowSets=shadowSetScratch;
 	{
@@ -132,12 +205,26 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene, const Camera& camera, 
 				const auto& extra = (*draws)[i].vertexResources;
 				bindings.insert(bindings.end(), extra.begin(), extra.end());
 			}
-			shadowSets[i] = CachedResourceSet(shadowPipelineFor(material,false),bindings,this->shadowSets);
+			shadowSets[i] = CachedResourceSet(shadowPipelineFor(material,false,stock),bindings,this->shadowSets);
 			if(!shadowSets[i])
 			{
 				return false;
 			}
 		}
+        // Resolve immutable bindings once rather than repeating the mirrored
+        // pipeline lookup and binding copy in every atlas view.
+        for(auto& caster:casters)
+        {
+            const auto& material=scene.Materials()[caster.material];
+            caster.pipeline=shadowPipelineFor(material,caster.mirrored,caster.compact);
+            caster.set=shadowSets[perEntity ? caster.entity : shadowFragmentShader ? caster.material : 0];
+            if(caster.set && caster.set->GetPipeline()!=caster.pipeline)
+            {
+                shadowBindingScratch.assign(caster.set->GetBindings(),caster.set->GetBindings()+caster.set->GetBindingCount());
+                caster.set=CachedResourceSet(caster.pipeline,shadowBindingScratch,this->shadowSets);
+            }
+            if(!caster.set)return false;
+        }
 	}
 	const auto viewProjection = camera.projection * camera.view;
 	{
@@ -149,59 +236,78 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene, const Camera& camera, 
 		commands.BeginRendering({nullptr, 0, &depth});
 		RHI::PipelineHandle boundPipeline=nullptr;
 		RHI::ResourceSetHandle boundSet=nullptr;
+        RHI::BufferHandle boundVertices=nullptr,boundIndices=nullptr;
+        RHI::Format boundIndexFormat=RHI::Format::Unknown;
 		for(uint32_t view = 0; view < shadows.viewCount; ++view)
 		{
+			bool inlineConstantsValid=false;
+            bool instanceStreamBound=false;
 			const ShadowFrustum frustum(shadows.constants.lightViewProjectionMatrix[view]);
-			const auto outside=[&](uint32_t index) {
-                const auto& bounds=shadowBoundsScratch[index];
-                return frustum.Outside(bounds.bounds,bounds.magnitude);
+            auto& visible=shadowViewScratch;
+            if(cull) {
+                visible.clear();
+                visible.reserve(casters.size());
+                for(uint32_t i=0;i<casters.size();++i) {
+                    const auto& bounds=casters[i].worldBounds;
+                    if(!frustum.Outside(bounds.bounds,bounds.magnitude))visible.push_back(i);
+                }
+            }
+            const auto casterAt=[&](uint32_t index) -> const ShadowCaster& {
+                return casters[cull ? visible[index] : index];
             };
+            const auto visibleCount=cull ? visible.size() : casters.size();
+            if(stock && cull && visibleCount>1 && UsesStockGeometry() &&
+                ShadowSortProjection(shadows.constants.lightViewProjectionMatrix[view]))
+            {
+                auto& depths=shadowBatchDepthScratch;
+                depths.assign(casters.size(),std::numeric_limits<double>::infinity());
+                bool safe=true;
+                for(uint32_t index:visible)
+                {
+                    const auto& caster=casters[index];double depth=0;
+                    if(!caster.sortSafe || !ShadowBatchNearDepth(caster.worldBounds.bounds,
+                        shadows.constants.lightViewProjectionMatrix[view],depth))
+                    {
+                        safe=false;break;
+                    }
+                    depths[caster.batch]=std::min(depths[caster.batch],depth);
+                }
+                if(safe)
+                {
+                    // All members keep the same batch key. Original caster indices
+                    // provide a stable tie break without a temporary sort allocation.
+                    // Contiguous entity runs and every draw's primitive order survive.
+                    std::sort(visible.begin(),visible.end(),[&](uint32_t a,uint32_t b) {
+                        const double first=depths[casters[a].batch],second=depths[casters[b].batch];
+                        return first<second || (first==second && a<b);
+                    });
+                    if(!shadowBatchSortReported && !std::is_sorted(visible.begin(),visible.end()))
+                    {
+                        std::fprintf(stderr,"[Renderer] Shadow batch depth ordering selected: orthographic view=%u casters=%zu; finite bounded inputs, unchanged instance runs.\n",
+                            view,visible.size());
+                        shadowBatchSortReported=true;
+                    }
+                }
+            }
 			const uint32_t x = (view % shadows.columns) * shadows.resolution;
 			const uint32_t y = (view / shadows.columns) * shadows.resolution;
 			commands.SetViewport({static_cast<float>(x), static_cast<float>(y),
 				static_cast<float>(shadows.resolution), static_cast<float>(shadows.resolution), 0, 1});
 			commands.SetScissor({static_cast<int32_t>(x), static_cast<int32_t>(y), shadows.resolution, shadows.resolution});
-			for(uint32_t entityIndex = 0; entityIndex < scene.GetEntityCount(); ++entityIndex)
+			for(uint32_t drawIndex=0;drawIndex<visibleCount;)
 			{
+				const auto& caster=casterAt(drawIndex);
+				const uint32_t entityIndex=caster.entity;
 				const auto entity = static_cast<EntityID>(entityIndex);
 				const auto& lighting = scene.GetEntityLighting(entity);
-				if(!lighting.castShadow) continue;
-				const auto meshId = scene.GetEntityMesh(entity);
-				const auto materialId = scene.GetEntityMaterial(entity);
-				if(!IsValid(meshId) || !IsValid(materialId)) continue;
-				const uint32_t meshIndex = ToIndex(meshId), materialIndex = ToIndex(materialId);
-				if(meshIndex >= m_meshes.size() || materialIndex >= materialStates.size()) continue;
-				const auto& mesh = m_meshes[meshIndex];
-				if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount) continue;
+				const uint32_t materialIndex=caster.material;
+				const auto& mesh = m_meshes[caster.mesh];
 				const auto& material=scene.Materials()[materialIndex];
-				// 블렌드 표면의 투과율은 이진 깊이맵으로 표현할 수 없다.
-				if(shadowFragmentShader && material.alphaMode==MaterialAlphaMode::Blend) continue;
-				if(cull && outside(entityIndex))continue;
-				const bool mirrored=Math::Determinant3x3(scene.GetTransform(entity))<0;
 				uint32_t count=1;
-				if(stock && instanced) {
-					// 알파 검사 그림자는 기본색의 알파 커버리지도 같아야 묶는다.
-                    while(entityIndex+count<scene.GetEntityCount()) {
-                        const auto next=static_cast<EntityID>(entityIndex+count);
-                        if(draws && (*draws)[entityIndex+count].vertexBuffer!=(*draws)[entityIndex].vertexBuffer) break;
-                        const auto material=scene.GetEntityMaterial(next);
-                        if(scene.GetEntityMesh(next)!=meshId || !scene.GetEntityLighting(next).castShadow ||
-                            !IsValid(material) || ToIndex(material)>=materialStates.size() ||
-                            (cull && outside(entityIndex+count)))break;
-                        const auto nextIndex=ToIndex(material);
-                        const auto& nextMaterial=scene.Materials()[nextIndex];
-                        const auto& currentMaterial=scene.Materials()[materialIndex];
-                        // 깊이와 알파 커버리지가 같으면 PBR 표면 색·거칠기 차이는 배치를 나누지 않는다.
-                        if(nextMaterial.alphaMode==MaterialAlphaMode::Blend ||
-                            nextMaterial.doubleSided!=currentMaterial.doubleSided ||
-                            (Math::Determinant3x3(scene.GetTransform(next))<0)!=mirrored ||
-                            (nextMaterial.alphaMode==MaterialAlphaMode::Mask)!=(currentMaterial.alphaMode==MaterialAlphaMode::Mask))break;
-                        if(currentMaterial.alphaMode==MaterialAlphaMode::Mask &&
-                            (materialStates[nextIndex].textures[0]!=materialStates[materialIndex].textures[0] ||
-                            (materialStates[nextIndex].textureFlags&1u)!=(materialStates[materialIndex].textureFlags&1u) ||
-                            nextMaterial.baseColor.w!=currentMaterial.baseColor.w || nextMaterial.alphaCutoff!=currentMaterial.alphaCutoff))break;
-                        ++count;
-                    }
+                while(drawIndex+count<visibleCount) {
+                    const auto& next=casterAt(drawIndex+count);
+                    if(next.batch!=caster.batch || next.entity!=entityIndex+count)break;
+                    ++count;
                 }
         auto batchContext=Platform::GetLiveContext();
         if(Platform::IsLiveCollectorEnabled())
@@ -221,34 +327,69 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene, const Camera& camera, 
         }
         Platform::LiveContextScope linkedBatch(batchContext);
 				const auto* input = draws ? &(*draws)[entityIndex] : nullptr;
-				const auto selectedPipeline=shadowPipelineFor(material,mirrored);
+				const auto selectedPipeline=caster.pipeline;
 				if(selectedPipeline!=boundPipeline)
 				{
 					commands.BindGraphicsPipeline(selectedPipeline);boundPipeline=selectedPipeline;boundSet=nullptr;
+                    inlineConstantsValid=false;
 				}
-				auto selectedSet=shadowSets[perEntity ? entityIndex : shadowFragmentShader ? materialIndex : 0];
-				if(selectedSet && selectedSet->GetPipeline()!=selectedPipeline)
-				{
-					shadowBindingScratch.assign(selectedSet->GetBindings(),selectedSet->GetBindings()+selectedSet->GetBindingCount());
-					selectedSet=CachedResourceSet(selectedPipeline,shadowBindingScratch,this->shadowSets);
-				}
-				if(!selectedSet) return false;
+				const auto selectedSet=caster.set;
 				if(selectedSet!=boundSet) {commands.BindResourceSet(selectedSet);boundSet=selectedSet;}
-				commands.BindVertexBuffer(0, input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer, 0);
-                if(instanced)commands.BindVertexBuffer(1,instanceBuffer,entityIndex*2*sizeof(Math::float4x4));
-				commands.BindIndexBuffer(mesh.indexBuffer, RHI::Format::R32_UINT, 0);
-				const uint32_t flags = materialStates[materialIndex].textureFlags |
-					(lighting.receiveShadow ? 32u : 0u);
-				auto constants = MakeDrawConstants(viewProjection, scene.Materials()[materialIndex], scene.GetTransform(entity), flags);
-				constants.padding2 = view;
-				commands.SetInlineConstants(0, sizeof(constants), &constants);
-				if(input && !input->inlineConstants.empty())
-					commands.SetInlineConstants(sizeof(constants), static_cast<uint32_t>(input->inlineConstants.size()), input->inlineConstants.data());
-				commands.DrawIndexedInstanced(mesh.indexCount,count,0,0,0);
+				const auto vertexBuffer=input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer;
+                const auto selectedVertices=caster.arena ? shadowArenaVertices :
+                    caster.compact ? mesh.shadowVertexBuffer : vertexBuffer;
+                if(!caster.arena || selectedVertices!=boundVertices)
+                {
+                    commands.BindVertexBuffer(0,selectedVertices,0);
+                    boundVertices=selectedVertices;
+                }
+                if(instanced)
+                {
+                    // Stock shaders consume only instance attributes: offset zero
+                    // plus firstInstance selects the same consecutive entity rows.
+                    if(!baseInstance)commands.BindVertexBuffer(1,instanceBuffer,entityIndex*2*sizeof(Math::float4x4));
+                    else if(!instanceStreamBound)
+                    {
+                        commands.BindVertexBuffer(1,instanceBuffer,0);
+                        instanceStreamBound=true;
+                    }
+                }
+                const auto selectedIndices=caster.arena ? shadowArenaIndices :
+                    caster.compact ? mesh.shadowIndexBuffer : mesh.indexBuffer;
+                const auto indexFormat=caster.arena ? mesh.shadowArena.indexFormat :
+                    caster.compact ? mesh.shadowIndexFormat : RHI::Format::R32_UINT;
+                if(!caster.arena || selectedIndices!=boundIndices || indexFormat!=boundIndexFormat)
+                {
+                    commands.BindIndexBuffer(selectedIndices,indexFormat,0);
+                    boundIndices=selectedIndices;boundIndexFormat=indexFormat;
+                }
+                // Instanced opaque stock shadows only read the view index here;
+                // their model comes from the instance stream and they have no FS.
+                const bool reuseConstants=stock && instanced && material.alphaMode==MaterialAlphaMode::Opaque;
+                if(!reuseConstants || !inlineConstantsValid)
+                {
+                    const uint32_t flags=materialStates[materialIndex].textureFlags | (lighting.receiveShadow ? 32u : 0u);
+                    auto constants=MakeDrawConstants(viewProjection,material,scene.GetTransform(entity),flags);
+                    constants.padding2=view;
+                    commands.SetInlineConstants(0,sizeof(constants),&constants);
+                    if(input && !input->inlineConstants.empty())
+                        commands.SetInlineConstants(sizeof(constants),static_cast<uint32_t>(input->inlineConstants.size()),input->inlineConstants.data());
+                    inlineConstantsValid=true;
+                }
+                const uint32_t firstIndex=caster.arena ? mesh.shadowArena.indexByteOffset/
+                    (indexFormat==RHI::Format::R16_UINT?2u:4u) : 0;
+                const int32_t baseVertex=caster.arena ? static_cast<int32_t>(mesh.shadowArena.baseVertex) : 0;
+				commands.DrawIndexedInstanced(mesh.indexCount,count,firstIndex,baseVertex,baseInstance?entityIndex:0);
+                if(caster.arena && !shadowArenaReported)
+                {
+                    std::fprintf(stderr,"[Renderer] Shared shadow arena selected: generation=%llu mixed R16/R32 index ranges; original draw/triangle order.\n",
+                        static_cast<unsigned long long>(shadowArenaGeneration));
+                    shadowArenaReported=true;
+                }
 				++recordingStatistics.shadowDrawCount;
 				recordingStatistics.shadowInstanceCount+=count;
 				recordingStatistics.shadowTriangleCount+=uint64_t(mesh.indexCount/3)*count;
-				entityIndex+=count-1;
+				drawIndex+=count;
 			}
 		}
 		commands.EndRendering();

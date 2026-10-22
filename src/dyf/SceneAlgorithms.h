@@ -2,6 +2,7 @@
 #include "dyf/Camera.h"
 #include "dyf/Material.h"
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cmath>
 #include <iterator>
@@ -39,54 +40,91 @@ namespace dyf
         return seed;
     }
 
-    inline bool OutsideCamera(const Math::Bounds3& bounds,const Math::float4x4& world,const Camera& camera)
+    class CameraFrustum
     {
-        if(!bounds.valid)return false;
-        // Unknown projective world/view contracts fail open. Standard perspective and
-        // orthographic projections (including reversed axes) use homogeneous ZO planes.
-        const auto affine=[](const Math::float4x4& m) {return m.m[3]==0 && m.m[7]==0 && m.m[11]==0 && m.m[15]==1;};
-        const auto& p=camera.projection;
-        if(!affine(world) || !affine(camera.view) ||
-            !((p.m[11]==-1 && p.m[15]==0) || (p.m[11]==0 && p.m[15]==1)) ||
-            p.m[1]!=0 || p.m[2]!=0 || p.m[3]!=0 || p.m[4]!=0 || p.m[6]!=0 || p.m[7]!=0 ||
-            p.m[0]==0 || p.m[5]==0 || p.m[10]==0)return false;
-        const auto viewProjection=p*camera.view;
-        for(float v:viewProjection.m)if(!std::isfinite(v))return false;
-        for(float v:world.m)if(!std::isfinite(v))return false;
-        bool outside[6]={true,true,true,true,true,true};
-        for(uint32_t corner=0;corner<8;++corner) {
-            const double x=(corner&1)?bounds.max.x:bounds.min.x;
-            const double y=(corner&2)?bounds.max.y:bounds.min.y;
-            const double z=(corner&4)?bounds.max.z:bounds.min.z;
-            const double point[]={x,y,z,1};
-            double transformed[4]={},magnitude[4]={},clip[4]={};
-            for(uint32_t row=0;row<4;++row)for(uint32_t column=0;column<4;++column) {
-                const double term=world.m[column*4+row]*point[column];
-                transformed[row]+=term;magnitude[row]+=std::abs(term);
-            }
-            double errorScale=1;
-            for(uint32_t row=0;row<4;++row) {
-                double sum=0;
-                for(uint32_t column=0;column<4;++column) {
-                    const double coefficient=viewProjection.m[column*4+row];
-                    clip[row]+=coefficient*transformed[column];sum+=std::abs(coefficient)*magnitude[column];
+        static bool Affine(const Math::float4x4& m)
+        {return m.m[3]==0 && m.m[7]==0 && m.m[11]==0 && m.m[15]==1;}
+        Math::float4x4 m_viewProjection={};
+        std::array<std::array<double,4>,6> m_planes={};
+        bool m_valid=false;
+    public:
+        explicit CameraFrustum(const Camera& camera)
+        {
+            // Unknown projection contracts fail open, including oblique/projective views.
+            const auto& p=camera.projection;
+            if(!Affine(camera.view) ||
+                !((p.m[11]==-1 && p.m[15]==0) || (p.m[11]==0 && p.m[15]==1)) ||
+                p.m[1]!=0 || p.m[2]!=0 || p.m[3]!=0 || p.m[4]!=0 || p.m[6]!=0 || p.m[7]!=0 ||
+                p.m[0]==0 || p.m[5]==0 || p.m[10]==0)return;
+            m_viewProjection=p*camera.view;
+            for(float value:m_viewProjection.m)if(!std::isfinite(value))return;
+            for(uint32_t plane=0;plane<6;++plane)
+                for(uint32_t column=0;column<4;++column)
+                {
+                    const double a=m_viewProjection.m[column*4+3];
+                    const double b=m_viewProjection.m[column*4+plane/2];
+                    m_planes[plane][column]=plane==4 ? b : a+(plane%2 ? -b : b);
                 }
+            m_valid=true;
+        }
+        bool Outside(const Math::Bounds3& bounds,const Math::float4x4& world) const
+        {
+            if(!m_valid || !bounds.valid || !Affine(world))return false;
+            for(float value:world.m)if(!std::isfinite(value))return false;
+            const double minimum[]={bounds.min.x,bounds.min.y,bounds.min.z};
+            const double maximum[]={bounds.max.x,bounds.max.y,bounds.max.z};
+            double magnitude[4]={};
+            for(uint32_t axis=0;axis<3;++axis)
+                if(!std::isfinite(minimum[axis]) || !std::isfinite(maximum[axis]) || minimum[axis]>maximum[axis])return false;
+            double center[4]={0,0,0,1},clip[4]={};
+            for(uint32_t row=0;row<3;++row)
+            {
+                center[row]=world.m[12+row];
+                for(uint32_t column=0;column<3;++column)
+                    center[row]+=world.m[column*4+row]*(minimum[column]+maximum[column])*.5;
+            }
+            for(uint32_t row=0;row<4;++row)
+                for(uint32_t column=0;column<4;++column)
+                    clip[row]+=m_viewProjection.m[column*4+row]*center[column];
+            // An interior point proves intersection. Most visible objects stop before support tests.
+            if(clip[2]>=0 && clip[3]>=clip[2] && clip[3]>=std::abs(clip[0]) && clip[3]>=std::abs(clip[1]))return false;
+            for(uint32_t row=0;row<4;++row)
+            {
+                magnitude[row]=std::abs(double(world.m[12+row]));
+                for(uint32_t column=0;column<3;++column)
+                    magnitude[row]+=std::abs(double(world.m[column*4+row]))*
+                        std::max(std::abs(minimum[column]),std::abs(maximum[column]));
+            }
+            // This bound covers the cancellation scale of every corner in the old test.
+            double errorScale=1;
+            for(uint32_t row=0;row<4;++row)
+            {
+                double sum=0;
+                for(uint32_t column=0;column<4;++column)
+                    sum+=std::abs(double(m_viewProjection.m[column*4+row]))*magnitude[column];
                 errorScale=std::max(errorScale,sum);
             }
-            for(double v:clip)if(!std::isfinite(v))return false;
-            // Includes cancellation at large world coordinates, not just final clip size.
             const double epsilon=1e-5*errorScale;
-            const double distances[]={clip[3]+clip[0],clip[3]-clip[0],clip[3]+clip[1],clip[3]-clip[1],clip[2],clip[3]-clip[2]};
-            bool canReject=false;
-            for(uint32_t plane=0;plane<6;++plane) {
-                outside[plane]=outside[plane] && distances[plane]<-epsilon;
-                canReject=canReject || outside[plane];
+            for(const auto& plane:m_planes)
+            {
+                // Pull the world-space plane into local space and test its support vertex.
+                double distance=plane[3];
+                for(uint32_t row=0;row<3;++row)distance+=plane[row]*world.m[12+row];
+                for(uint32_t axis=0;axis<3;++axis)
+                {
+                    double coefficient=0;
+                    for(uint32_t row=0;row<3;++row)coefficient+=plane[row]*world.m[axis*4+row];
+                    distance+=coefficient*(coefficient>=0 ? maximum[axis] : minimum[axis]);
+                }
+                if(distance < -epsilon)return true;
             }
-            // Each flag can only change from true to false. Once every plane has
-            // an inside corner, later corners cannot make this box rejectable.
-            if(!canReject)return false;
+            return false;
         }
-        return std::any_of(std::begin(outside),std::end(outside),[](bool value){return value;});
+    };
+
+    inline bool OutsideCamera(const Math::Bounds3& bounds,const Math::float4x4& world,const Camera& camera)
+    {
+        return CameraFrustum(camera).Outside(bounds,world);
     }
 
     struct SpotConeAngles { float inner,outer; };

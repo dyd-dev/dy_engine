@@ -5,6 +5,15 @@
 #ifndef RENDERER_BINDLESS
 #define RENDERER_BINDLESS 0
 #endif
+#ifndef RENDERER_DEPTH_PREPASS
+#define RENDERER_DEPTH_PREPASS 0
+#endif
+#ifndef RENDERER_ENABLE_AREA_LIGHTS
+#define RENDERER_ENABLE_AREA_LIGHTS 1
+#endif
+#if RENDERER_DEPTH_PREPASS
+layout(early_fragment_tests) in;
+#endif
 #define RENDERER_DESCRIPTOR_SET 0
 #define RENDERER_MAX_DIRECTIONAL_LIGHTS 4
 #define RENDERER_MAX_POINT_LIGHTS 16
@@ -62,11 +71,17 @@ layout(set = RENDERER_DESCRIPTOR_SET, binding = RENDERER_BINDING_EMISSIVE_TEXTUR
 layout(set = RENDERER_DESCRIPTOR_SET, binding = RENDERER_BINDING_MATERIAL_SAMPLER) uniform sampler materialSampler;
 layout(set=0,binding=26) uniform texture2D ltcMatrixTexture;
 layout(set=0,binding=27) uniform texture2D ltcAmplitudeTexture;
-#if !RENDERER_BINDLESS
+#if RENDERER_BINDLESS
+layout(set=0,binding=22) uniform texture2D screenAOTexture;
+layout(set=0,binding=23) uniform texture2D environmentSpecularTexture;
+layout(set=0,binding=24) uniform texture2D environmentDiffuseTexture;
+#else
 layout(set=0,binding=16) uniform texture2D screenAOTexture;
 layout(set=0,binding=13) uniform texture2D environmentSpecularTexture;
 layout(set=0,binding=17) uniform texture2D environmentDiffuseTexture;
+#endif
 layout(set=0,binding=15) uniform sampler screenSampler;
+// Basic bindless rendering supplies neutral settings.x=0 and screen.z=0.
 layout(set=0,binding=14) uniform EnvironmentConstants
 {
     vec4 sh[9];
@@ -87,7 +102,6 @@ vec3 EnvironmentIrradiance(vec3 n)
         environment.sh[7].rgb*(1.0925484305920792*n.x*n.z)+environment.sh[8].rgb*(0.5462742152960396*(n.x*n.x-n.y*n.y));
     return max(value,vec3(0));
 }
-#endif
 #if RENDERER_ENABLE_SHADOWS
 layout(set = RENDERER_DESCRIPTOR_SET, binding = RENDERER_BINDING_SHADOW_SAMPLER) uniform sampler shadowSampler;
 #endif
@@ -290,7 +304,7 @@ float SampleShadowView(int index,vec3 worldPosition,vec3 normal,vec3 lightDir,fl
     for(int y=-extent;y<=extent;++y)for(int x=-extent;x<=extent;++x)
     {
         vec2 sampleUv=clamp(uv+vec2(x,y)*texel,minUv,maxUv);
-        visible+=receiver<=texture(sampler2D(shadowMap,shadowSampler),sampleUv).r?1.0:0.0;
+        visible+=receiver<=textureLod(sampler2D(shadowMap,shadowSampler),sampleUv,0).r?1.0:0.0;
     }
     return 1.0-clamp(strength,0.0,1.0)*(1.0-visible/max(samples,1.0));
 }
@@ -378,6 +392,7 @@ vec3 EvaluateDirectLight(
     return (diffuseWeight * albedo / PI + specular) * incidentIlluminance * ndotl * visibility;
 }
 
+#if RENDERER_ENABLE_AREA_LIGHTS
 // LTC 적분과 표 배치는 Heitz 외 SIGGRAPH 2016 및 Assets/ltc/LICENSE를 따른다.
 float LtcEdgeIntegral(vec3 a,vec3 b)
 {
@@ -478,14 +493,18 @@ vec3 EvaluateDiscAreaLight(RendererDiscAreaLight light,vec3 normal,vec3 viewDir,
     return EvaluateLtcPolygon(normal,viewDir,worldPosition,points,16,albedo,metallic,roughness,
         light.color.rgb*max(light.positionIntensity.w,0.0));
 }
+#endif
 
 vec3 EvaluateLights(RendererLightingConstants lighting, vec3 worldPosition, vec3 normal, vec3 viewDir,
     vec3 albedo, float metallic, float roughness) {
     vec3 directLight = vec3(0.0,0.0,0.0);
+    float ndotv=max(dot(normal,viewDir),0.0);
     int directionalCount = clamp(int(lighting.lightCounts.x + 0.5), 0, RENDERER_MAX_DIRECTIONAL_LIGHTS);
     for (int lightIndex = 0; lightIndex < directionalCount; ++lightIndex) {
         RendererDirectionalLight light = lighting.directionalLights[lightIndex];
         vec3 lightDir = normalize(light.directionIntensity.xyz);
+        // Match EvaluateDirectLight's zero result before sampling its shadow.
+        if(ndotv<=0.0 || max(dot(normal,lightDir),0.0)<=0.0)continue;
 #if RENDERER_ENABLE_SHADOWS
         float visibility = SampleShadow(1,lightIndex,worldPosition,normal,lightDir);
 #else
@@ -506,6 +525,7 @@ vec3 EvaluateLights(RendererLightingConstants lighting, vec3 worldPosition, vec3
         float distanceToLight=length(toLight);
         if(distanceToLight<=0.0001 || distanceToLight>=light.positionRange.w)continue;
         vec3 lightDir=toLight/distanceToLight;
+        if(ndotv<=0.0 || max(dot(normal,lightDir),0.0)<=0.0)continue;
         float attenuation=PunctualAttenuation(distanceToLight,light.positionRange.w);
         int type=int(light.coneShadow.y+0.5),shadowIndex=int(light.coneShadow.z);
         if(type==3)attenuation*=SpotConeAttenuation(dot(-lightDir,light.directionOuterCos.xyz),
@@ -518,6 +538,7 @@ vec3 EvaluateLights(RendererLightingConstants lighting, vec3 worldPosition, vec3
         vec3 incidentIlluminance=light.colorIntensity.rgb*max(light.colorIntensity.w,0.0)*attenuation;
         directLight+=EvaluateDirectLight(normal,viewDir,lightDir,incidentIlluminance,albedo,metallic,roughness,visibility);
     }
+#if RENDERER_ENABLE_AREA_LIGHTS
     int rectAreaCount = clamp(int(lighting.areaLightCounts.x + 0.5), 0, RENDERER_MAX_RECT_AREA_LIGHTS);
     for (int lightIndex = 0; lightIndex < rectAreaCount; ++lightIndex) {
         directLight += EvaluateRectAreaLight(lighting.rectAreaLights[lightIndex], normal, viewDir, albedo, metallic, roughness, worldPosition);
@@ -526,6 +547,7 @@ vec3 EvaluateLights(RendererLightingConstants lighting, vec3 worldPosition, vec3
     for (int lightIndex = 0; lightIndex < discAreaCount; ++lightIndex) {
         directLight += EvaluateDiscAreaLight(lighting.discAreaLights[lightIndex], normal, viewDir, albedo, metallic, roughness, worldPosition);
     }
+#endif
 
     return directLight;
 }
@@ -567,12 +589,14 @@ void main() {
     float metallic = clamp(pushConstants.materialParams.x, 0.0, 1.0);
     float roughness = clamp(pushConstants.materialParams.y, minRoughness, 1.0);
     float occlusion = 1.0;
+    // Opaque environment buffers already include authored AO and screen AO.
+    bool usesEnvironmentBuffers=environment.settings.x>0.5 && alphaMode!=2u;
     if ((textureFlags & RENDERER_TEXTURE_FLAG_METALLIC_ROUGHNESS) != 0) {
         vec4 metallicRoughness = SampleMaterial(1u,fragUv);
         roughness = clamp(roughness * metallicRoughness.g, minRoughness, 1.0);
         metallic = clamp(metallic * metallicRoughness.b, 0.0, 1.0);
     }
-    if ((textureFlags & RENDERER_TEXTURE_FLAG_OCCLUSION) != 0) {
+    if ((textureFlags & RENDERER_TEXTURE_FLAG_OCCLUSION) != 0 && !usesEnvironmentBuffers) {
         occlusion = mix(1.0, SampleMaterial(3u,fragUv).r, clamp(pushConstants.materialParams.w, 0.0, 1.0));
     }
 
@@ -593,9 +617,8 @@ void main() {
     vec3 ambientDiffuse = kD * albedo * lighting.ambientColor.rgb * lighting.ambientColor.a;
     vec3 ambientSpecular = ambientFresnel * lighting.environmentColor.rgb * lighting.environmentColor.a * ambientSpecularStrength;
     vec3 ambient = (ambientDiffuse + ambientSpecular) * occlusion;
-#if !RENDERER_BINDLESS
     vec2 screenUV=gl_FragCoord.xy*environment.screen.xy;
-    float screenAO=environment.screen.z>0.5 ? texture(sampler2D(screenAOTexture,screenSampler),screenUV).r : 1.0;
+    float screenAO=!usesEnvironmentBuffers && environment.screen.z>0.5 ? texture(sampler2D(screenAOTexture,screenSampler),screenUV).r : 1.0;
     ambient*=screenAO;
     if(environment.settings.x>0.5)
     {
@@ -611,7 +634,6 @@ void main() {
             ambient+=texture(sampler2D(environmentSpecularTexture,screenSampler),screenUV).rgb;
         }
     }
-#endif
     vec3 emissive = pushConstants.emissiveColor.rgb;
     if ((textureFlags & RENDERER_TEXTURE_FLAG_EMISSIVE) != 0) {
         emissive *= SampleMaterial(4u,fragUv).rgb;

@@ -179,4 +179,9 @@ RendererShaderDesc Renderer::GetShaders() const
 namespace dyf::RHI
 {
 std::uint64_t ProfilerAccess::Source(const dyf::Renderer& renderer) noexcept { return renderer.GetLiveSourceId(); }
+bool ProfilerAccess::GetCurrentNoAreaProof(const dyf::Renderer& renderer,BufferHandle lights) noexcept
+{
+    const auto* state=renderer.m_impl.get();
+    return state && lights && state->frameNoAreaLights && lights==state->lightingBuffer;
+}
 }

@@ -90,10 +90,17 @@ float DyShadowPcss(int index,int pointBase,vec2 coordinate,float receiverNdc,flo
     searchRadius=min(searchRadius,maximumRadius);
     int blockerCount=clamp(int(DY_SHADOW_FILTER.x+.5),1,32);
     float blockerSum=0,blockers=0;
-    for(int sampleIndex=0;sampleIndex<blockerCount;++sampleIndex)
+    // Paired taps share the direction and radius; keep their accumulation order.
+    for(int sampleIndex=0;sampleIndex<blockerCount;sampleIndex+=2)
     {
-        float depth=DyShadowDepthTap(index,pointBase,coordinate+DyShadowDiskOffset(sampleIndex,blockerCount)*searchRadius);
+        vec2 offset=DyShadowDiskOffset(sampleIndex,blockerCount);
+        float depth=DyShadowDepthTap(index,pointBase,coordinate+offset*searchRadius);
         if(depth<receiver){blockerSum+=depth;blockers+=1;}
+        if(sampleIndex+1<blockerCount)
+        {
+            depth=DyShadowDepthTap(index,pointBase,coordinate+(-offset)*searchRadius);
+            if(depth<receiver){blockerSum+=depth;blockers+=1;}
+        }
     }
     if(blockers==0)return 1;
     float blocker=blockerSum/blockers;
@@ -102,10 +109,16 @@ float DyShadowPcss(int index,int pointBase,vec2 coordinate,float receiverNdc,flo
     vec2 filterRadius=max(min(penumbra*projection.xy,maximumRadius),min(texel*.5,maximumRadius));
     int filterCount=clamp(int(DY_SHADOW_FILTER.y+.5),1,32);
     float visible=0;
-    for(int sampleIndex=0;sampleIndex<filterCount;++sampleIndex)
+    for(int sampleIndex=0;sampleIndex<filterCount;sampleIndex+=2)
     {
-        float depth=DyShadowDepthTap(index,pointBase,coordinate+DyShadowDiskOffset(sampleIndex,filterCount)*filterRadius);
+        vec2 offset=DyShadowDiskOffset(sampleIndex,filterCount);
+        float depth=DyShadowDepthTap(index,pointBase,coordinate+offset*filterRadius);
         visible+=receiver<=depth?1:0;
+        if(sampleIndex+1<filterCount)
+        {
+            depth=DyShadowDepthTap(index,pointBase,coordinate+(-offset)*filterRadius);
+            visible+=receiver<=depth?1:0;
+        }
     }
     return visible/float(filterCount);
 }

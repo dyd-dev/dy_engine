@@ -25,51 +25,54 @@ namespace dyf
 	{
 		if(device == nullptr) return false;
 
-		m_indices.clear();
-		std::vector<const Image*> images;
+		for(auto& slot:m_textures) slot.used=false;
+		std::vector<uint32_t> pending;
 		for(const auto& material : scene.Materials())
 		{
 			for(const Image* image : {&material.baseColorTexture, &material.metallicRoughnessTexture,
 				&material.normalTexture, &material.occlusionTexture, &material.emissiveTexture})
 			{
-				if(image->IsValid() && m_indices.emplace(
-					std::make_pair(image->GetPixels().data(), image->GetColorSpace()),
-					static_cast<uint32_t>(images.size())).second)
+				if(!image->IsValid()) continue;
+				const auto key=std::make_pair(image->GetPixels().data(),image->GetColorSpace());
+				auto found=m_indices.find(key);
+				if(found==m_indices.end())
 				{
-					images.push_back(image);
+					Image source=*image;
+					const bool append=m_freeTextureSlots.empty();
+					if(append && m_textures.size()>=UINT32_MAX) return false;
+					const auto index=append ? static_cast<uint32_t>(m_textures.size()) : m_freeTextureSlots.back();
+					if(append) m_textures.emplace_back();
+					try {found=m_indices.emplace(key,index).first;}
+					catch(...) {if(append)m_textures.pop_back();throw;}
+					if(!append) m_freeTextureSlots.pop_back();
+					m_textures[index].source=std::move(source);
 				}
+				auto& slot=m_textures[found->second];
+				if(slot.used) continue;
+				slot.used=true;
+				if(slot.state==RHI::ResourceState::ShaderResource) continue;
+				if(image->GetPixels().size()>std::numeric_limits<uint32_t>::max() ||
+					image->GetWidth()>static_cast<uint32_t>(std::numeric_limits<int>::max()/4) ||
+					image->GetHeight()>static_cast<uint32_t>(std::numeric_limits<int>::max()))
+				{
+					std::fprintf(stderr,"dyf: texture exceeds the upload or mipmap size limit.\n");
+					return false;
+				}
+				pending.push_back(found->second);
 			}
 		}
-
-		while(m_textures.size() > images.size())
+		// Stable identities survive material reordering. Only unused owners are retired.
+		m_freeTextureSlots.reserve(m_textures.size());
+		for(uint32_t i=0;i<m_textures.size();++i)
 		{
-			if(m_textures.back().texture) device->DestroyTexture(m_textures.back().texture);
-			m_textures.pop_back();
-		}
-		m_textures.resize(images.size());
-
-		std::vector<uint32_t> pending;
-		for(uint32_t textureIndex = 0; textureIndex < images.size(); ++textureIndex)
-		{
-			const Image& image = *images[textureIndex];
-			TextureSlot& slot = m_textures[textureIndex];
-			if(slot.source.GetPixels().data() != image.GetPixels().data() ||
-				slot.source.GetColorSpace() != image.GetColorSpace())
+			auto& slot=m_textures[i];
+			if(!slot.used && slot.source.IsValid())
 			{
-				if(slot.texture) device->DestroyTexture(slot.texture);
-				slot = {};
-				slot.source = image;
+				device->DestroyTexture(slot.texture);
+				m_indices.erase({slot.source.GetPixels().data(),slot.source.GetColorSpace()});
+				slot={};
+				m_freeTextureSlots.push_back(i);
 			}
-			if(slot.state == RHI::ResourceState::ShaderResource) continue;
-			if(image.GetPixels().size() > std::numeric_limits<uint32_t>::max() ||
-				image.GetWidth() > static_cast<uint32_t>(std::numeric_limits<int>::max() / 4) ||
-				image.GetHeight() > static_cast<uint32_t>(std::numeric_limits<int>::max()))
-			{
-				std::fprintf(stderr, "dyf: texture %u/%zu exceeds the upload or mipmap size limit.\n",
-					textureIndex + 1, images.size());
-				return false;
-			}
-			pending.push_back(textureIndex);
 		}
 		if(pending.empty()) return true;
 
@@ -79,7 +82,7 @@ namespace dyf
 			bool valid = true;
 		};
 		const auto prepareMips = [&](uint32_t textureIndex) {
-			const Image& image = *images[textureIndex];
+			const Image& image = m_textures[textureIndex].source;
 			PreparedMips result;
 			uint32_t width = image.GetWidth(), height = image.GetHeight();
 			const uint8_t* source = image.GetPixels().data();
@@ -115,10 +118,10 @@ namespace dyf
 		constexpr uint64_t uploadTimeoutNanoseconds = 5000000000ull;
 		for(uint32_t textureIndex : pending)
 		{
-			const Image& image = *images[textureIndex];
+			const Image& image = m_textures[textureIndex].source;
 			const auto fail = [&](const char* reason) {
 				std::fprintf(stderr, "dyf: texture upload %u/%zu (%u x %u): %s\n",
-					textureIndex + 1, images.size(), image.GetWidth(), image.GetHeight(), reason);
+					textureIndex + 1, m_textures.size(), image.GetWidth(), image.GetHeight(), reason);
 				return false;
 			};
 			TextureSlot& slot = m_textures[textureIndex];
@@ -193,12 +196,14 @@ namespace dyf
 			if(slot.texture) device->DestroyTexture(slot.texture);
 		}
 		m_textures.clear();
+		m_freeTextureSlots.clear();
 		m_indices.clear();
 	}
 
 void Renderer::Impl::UpdateMaterialStates(const Scene& scene)
 {
 	const uint32_t materialCount = scene.Materials().size();
+	const bool stockShaders = UsesStockGeometry();
 	constexpr std::array<uint32_t,ToIndex(MaterialTextureKind::Count)> defaults = {0u,0u,1u,0u,2u};
 	for(uint32_t materialIndex = 0; materialIndex < materialCount; ++materialIndex)
 	{
@@ -223,6 +228,15 @@ void Renderer::Impl::UpdateMaterialStates(const Scene& scene)
 				materialState.textureFlags |= 1u << slot;
 			else
 				texture = defaultMaterialTextures[defaults[slot]];
+		}
+		// These samples cannot contribute to the stock shading result. Keep the
+		// texture owners/bindings, and preserve presence flags for custom shaders.
+		if(stockShaders)
+		{
+			if(material.occlusionStrength == 0.0f)
+				materialState.textureFlags &= ~(1u << ToIndex(MaterialTextureKind::Occlusion));
+			if(material.emissiveColor.x == 0.0f && material.emissiveColor.y == 0.0f && material.emissiveColor.z == 0.0f)
+				materialState.textureFlags &= ~(1u << ToIndex(MaterialTextureKind::Emissive));
 		}
 	}
 }

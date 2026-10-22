@@ -61,13 +61,17 @@ bool Renderer::Impl::PrepareFrameResources(RenderFrame& frame,RHI::ICommandList&
     for(auto& extension:extensions)
         if(!extension->PrepareCamera(frame)) return false;
     if(!PrepareVisibility(scene,camera,uploads,target.width,target.height,frame.draws)) return false;
+    if(!PrepareCpuBatches(scene,camera,uploads,frame.draws,frame.requirements.needsGeometry)) return false;
     if(shaderSources.bytes[MeshFragment].empty())
     {
-        if(!frame.requirements.providesEnvironment)
+        // Basic material paging uses neutral environment inputs even when an
+        // extension provides the frame environment. Upload them with frame data.
+        if(!frame.requirements.providesEnvironment || (UsesBindlessMaterials() && !active))
         {
             if(!basicEnvironment) basicEnvironment=std::make_unique<BasicEnvironmentResources>();
             if(!basicEnvironment->Prepare(*device,uploads)) return false;
-            frame.lighting.environment=basicEnvironment->GetResources(defaultMaterialTextures[2]);
+            if(!frame.requirements.providesEnvironment)
+                frame.lighting.environment=basicEnvironment->GetResources(defaultMaterialTextures[2]);
         }
         if(!frame.requirements.providesLocalLights)
         {
@@ -81,12 +85,24 @@ bool Renderer::Impl::PrepareFrameResources(RenderFrame& frame,RHI::ICommandList&
     }
     UpdateFrameLighting(frame);
     PrepareRenderGeometry(frame);
+    depthGeometryUnchanged=stockDrawInputs && UsesStockGeometry() && UsesAdvancedRendering() &&
+        !frame.wireframe && frame.requirements.needsSurface && frame.requirements.handlesTransparency;
+    if(depthGeometryUnchanged)
+    {
+        depthGeometrySnapshot.Capture(frame.geometry);
+        depthGeometryView=frame.camera.view;depthGeometryProjection=frame.camera.projection;
+    }
     for(auto stage:{RenderPreparation::Lighting,RenderPreparation::Effects})
         for(auto& extension:extensions)
-            if(extension->GetPreparationStage()==stage && !extension->Prepare(frame,uploads))
+            if(extension->GetPreparationStage()==stage)
             {
-                std::fprintf(stderr,"dyf: Render module %s preparation failed.\n",extension->GetName());
-                return false;
+                if(!extension->Prepare(frame,uploads))
+                {
+                    std::fprintf(stderr,"dyf: Render module %s preparation failed.\n",extension->GetName());
+                    return false;
+                }
+                if(depthGeometryUnchanged && (!depthGeometrySnapshot.Matches(frame.geometry) ||
+                    !SameDepthCamera(depthGeometryView,depthGeometryProjection,frame.camera)))depthGeometryUnchanged=false;
             }
     frameAmbientOcclusion=frame.ao.texture;
     frameLighting=frame.lighting;

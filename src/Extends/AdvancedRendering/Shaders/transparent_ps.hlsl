@@ -1,3 +1,7 @@
+#ifndef RENDERER_ENABLE_AREA_LIGHTS
+#define RENDERER_ENABLE_AREA_LIGHTS 1
+#endif
+#include "probe_visibility.hlsl"
 struct Draw {column_major float4x4 model;column_major float4x4 normalMatrix;float4 baseColor;float4 emissive;float4 material;float4 optics;float4 attenuation;uint4 flags;};
 StructuredBuffer<Draw> draws:register(t11);
 cbuffer Frame:register(b12) {column_major float4x4 viewProjection;column_major float4x4 view;column_major float4x4 inverseViewProjection;float4 camera;float4 sh[9];float4 settings;float4 screen;float4 probePosition;float4 probeBoxMin;float4 probeBoxMax;float4 specularColor;};
@@ -17,6 +21,7 @@ Texture2D<float> nearestDepthTexture:register(t28);
 SamplerState materialSampler:register(s8);
 SamplerState screenSampler:register(s9);
 SamplerState pointSampler:register(s10);
+SamplerState environmentLinearSampler:register(s15);
 struct Directional {float4 directionIntensity;float4 color;};
 struct PointLight {float4 positionRange;float4 colorIntensity;};
 struct SpotLight {float4 positionRange;float4 directionOuterCos;float4 colorIntensity;float4 cone;};
@@ -148,7 +153,8 @@ float3 EnvMip(float2 coordinate,int mip)
 {
     uint width,height,levels;prefilterTexture.GetDimensions(uint(mip),width,height,levels);int2 size=int2(width,height);
     float2 pixel=coordinate*float2(size)-.5,w=frac(pixel);int2 a=int2(floor(pixel)),b=a+1;
-    a.x=(a.x%size.x+size.x)%size.x;b.x=(b.x%size.x+size.x)%size.x;
+    int2 wrappedX=DyWrapBilinearX(a.x,b.x,size.x);
+    a.x=wrappedX.x;b.x=wrappedX.y;
     a.y=clamp(a.y,0,size.y-1);b.y=clamp(b.y,0,size.y-1);
     return lerp(lerp(prefilterTexture.Load(int3(a,mip)),prefilterTexture.Load(int3(b.x,a.y,mip)),w.x),
         lerp(prefilterTexture.Load(int3(a.x,b.y,mip)),prefilterTexture.Load(int3(b,mip)),w.x),w.y).rgb;
@@ -176,12 +182,17 @@ float3 SpatialMip(float2 coordinate,int mip,int layer)
     uint width,height,layers,levels;probePrefilterTexture.GetDimensions(uint(mip),width,height,layers,levels);
     int2 dimensions=int2(width,height);float2 pixel=coordinate*float2(dimensions)-.5,w=frac(pixel);
     int2 a=int2(floor(pixel)),b=a+1;
-    a.x=(a.x%dimensions.x+dimensions.x)%dimensions.x;b.x=(b.x%dimensions.x+dimensions.x)%dimensions.x;
+    int2 wrappedX=DyWrapBilinearX(a.x,b.x,dimensions.x);
+    a.x=wrappedX.x;b.x=wrappedX.y;
     a.y=clamp(a.y,0,dimensions.y-1);b.y=clamp(b.y,0,dimensions.y-1);
     return lerp(lerp(probePrefilterTexture.Load(int4(a,layer,mip)),probePrefilterTexture.Load(int4(b.x,a.y,layer,mip)),w.x),
         lerp(probePrefilterTexture.Load(int4(a.x,b.y,layer,mip)),probePrefilterTexture.Load(int4(b,layer,mip)),w.x),w.y).rgb;
 }
-#include "probe_visibility.hlsl"
+bool NativeEnvironmentSample(float2 coordinate,float mip,float maximumMip,uint enabled)
+{
+    return drawIndex.z==1u && enabled==1u && all(coordinate>=0) && all(coordinate<=1)
+        && mip>=0 && mip<=maximumMip && maximumMip<=32;
+}
 float ProbeVisibility(float3 position,SpatialProbe probe,uint index)
 {
     return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,
@@ -191,7 +202,6 @@ float3 Radiance(float3 position,float3 d,float roughness)
 {
     float mip=roughness*settings.w;int lo=int(floor(mip)),hi=min(lo+1,int(settings.w));
     float2 coordinate=EnvUV(ProbeDirection(position,d));
-    float3 fallback=lerp(EnvMip(coordinate,lo),EnvMip(coordinate,hi),frac(mip))*settings.y;
     float3 sum=0;float weights=0,coverage=0;
     for(uint i=0;i<probeParameters.x;++i)
     {
@@ -199,10 +209,24 @@ float3 Radiance(float3 position,float3 d,float roughness)
         float3 direction=BoxDirection(position,d,probes[i].positionIntensity.xyz,probes[i].boxMinFade.xyz,probes[i].boxMaxMip.xyz);
         float2 localUV=float2(atan2(direction.y,direction.x)*.15915494309189535+.5,acos(clamp(direction.z,-1,1))*.3183098861837907);
         float localMip=roughness*probes[i].boxMaxMip.w;int a=int(floor(localMip)),b=min(a+1,int(probes[i].boxMaxMip.w));
-        sum+=lerp(SpatialMip(localUV,a,int(i)),SpatialMip(localUV,b,int(i)),frac(localMip))*probes[i].positionIntensity.w*
+        float3 sampledRadiance;
+        if(NativeEnvironmentSample(localUV,localMip,probes[i].boxMaxMip.w,probeParameters.z))
+            sampledRadiance=probePrefilterTexture.SampleLevel(environmentLinearSampler,float3(localUV,float(i)),localMip).rgb;
+        else sampledRadiance=lerp(SpatialMip(localUV,a,int(i)),SpatialMip(localUV,b,int(i)),frac(localMip));
+        sum+=sampledRadiance*probes[i].positionIntensity.w*
             (weight*ProbeVisibility(position,probes[i],i));
         weights+=weight;coverage+=edge;
     }
+    if(probeParameters.y!=0u && weights>0 && coverage>=1 && all(isfinite(coordinate)) && isfinite(mip))
+    {
+        float3 local=sum/weights;
+        if(all(abs(local)<=2.1267646e37))return local;
+    }
+    float3 fallback;
+    if(NativeEnvironmentSample(coordinate,mip,settings.w,probeParameters.z))
+        fallback=prefilterTexture.SampleLevel(environmentLinearSampler,coordinate,mip).rgb;
+    else fallback=lerp(EnvMip(coordinate,lo),EnvMip(coordinate,hi),frac(mip));
+    fallback*=settings.y;
     return weights>0?lerp(fallback,sum/weights,saturate(coverage)):fallback;
 }
 float3 Irradiance(float3 position,float3 n)
@@ -239,6 +263,7 @@ float Falloff(float distance,float range)
 }
 struct Input {float4 position:SV_Position;float2 uv:TEXCOORD0;float3 worldPosition:TEXCOORD1;float3 worldNormal:TEXCOORD2;float4 worldTangent:TEXCOORD3;};
 struct Output {float4 color:SV_Target0;float4 reactive:SV_Target1;};
+#if RENDERER_ENABLE_AREA_LIGHTS
 // LTC 적분과 표 배치는 Heitz 외 SIGGRAPH 2016 및 Assets/ltc/LICENSE를 따른다.
 inline float LtcEdgeIntegral(float3 a,float3 b)
 {
@@ -269,23 +294,23 @@ inline float LtcPolygonIntegral(float3 normal,float3 viewDir,float3 position,
         // z=0 반구로 다각형을 자르되 정점 배열 대신 경계 순서대로 적분한다.
         for(int candidate=0;candidate<2;++candidate)
         {
-            float3 point;
+            float3 clippedPoint;
             if(candidate==0)
             {
                 if(previousInside==currentInside)continue;
-                point=lerp(previous,current,clamp(previous.z/(previous.z-current.z),0.0,1.0));
-                point.z=0;
+                clippedPoint=lerp(previous,current,clamp(previous.z/(previous.z-current.z),0.0,1.0));
+                clippedPoint.z=0;
             }
             else
             {
                 if(!currentInside)continue;
-                point=current;
+                clippedPoint=current;
             }
-            float squared=dot(point,point);
+            float squared=dot(clippedPoint,clippedPoint);
             if(squared<=1e-20)continue;
-            point*=rsqrt(squared);
-            if(haveVertex)sum+=LtcEdgeIntegral(last,point);else {first=point;haveVertex=true;}
-            last=point;
+            clippedPoint*=rsqrt(squared);
+            if(haveVertex)sum+=LtcEdgeIntegral(last,clippedPoint);else {first=clippedPoint;haveVertex=true;}
+            last=clippedPoint;
         }
         previous=current;
     }
@@ -338,9 +363,13 @@ inline float3 EvaluateDiscAreaLight(RendererDiscAreaLight light,float3 normal,fl
     return EvaluateLtcPolygon(normal,viewDir,worldPosition,points,16,albedo,f0,diffuseFactor,roughness,
         light.color.rgb*max(light.positionIntensity.w,0.0));
 }
+#endif
 
+[earlydepthstencil]
 Output main(Input input,bool frontFacing:SV_IsFrontFace)
 {
+    // Preserve material gradients while all lanes still participate.
+    float2 uvDx=ddx(input.uv),uvDy=ddy(input.uv);
     float2 screenUV=input.position.xy*screen.xy;
     float opaqueDepth=depthTexture.Load(int3(int2(input.position.xy),0));
     bool excludedLayer=false;
@@ -352,39 +381,43 @@ Output main(Input input,bool frontFacing:SV_IsFrontFace)
         bool frontLayer=max(currentBits,nearestBits)-min(currentBits,nearestBits)<=1u;
         excludedLayer=drawIndex.y==1u?frontLayer:!frontLayer;
     }
-    Draw draw=draws[drawIndex.x];uint flags=draw.flags.x;float4 base=draw.baseColor;
-    if((flags&1u)!=0u)base*=baseTexture.Sample(materialSampler,input.uv);
-    float2 mr=draw.material.xy;if((flags&2u)!=0u)mr*=materialTexture.Sample(materialSampler,input.uv).bg;
+    Draw draw=draws[drawIndex.x];uint flags=draw.flags.x;
+    float3 geometricNormal=float3(0,0,1),n=geometricNormal,v=geometricNormal;
+    float normalVariance=0;
+    // These flags are uniform for the draw; debug/unlit materials need no normal footprint.
+    if((flags&(64u|128u))==0u)
+    {
+        geometricNormal=TransparentPixelNormalizeOr(input.worldNormal,float3(0,0,1));n=geometricNormal;
+        v=TransparentPixelNormalizeOr(camera.xyz-input.worldPosition,geometricNormal);
+        if((flags&4u)!=0u)
+        {
+            float3 fallback=normalize(cross(abs(n.z)<.99?float3(0,0,1):float3(0,1,0),n));
+            float3 t=TransparentPixelNormalizeOr(input.worldTangent.xyz-n*dot(n,input.worldTangent.xyz),fallback),b=cross(n,t)*input.worldTangent.w;
+            float3 mapped=normalTexture.Sample(materialSampler,input.uv).xyz*2-1;
+            mapped.xy*=draw.material.z;mapped.y*=(draw.emissive.w<0?-1.0:1.0);
+            n=TransparentPixelNormalizeOr(t*mapped.x+b*mapped.y+n*mapped.z,n);
+        }
+        // Keep mapped-normal derivatives before discard or visible-side selection.
+        float3 normalDx=ddx(n),normalDy=ddy(n);
+        normalVariance=0.25*(dot(normalDx,normalDx)+dot(normalDy,normalDy));
+    }
+    if(input.position.z>opaqueDepth || excludedLayer)discard;
+    float4 base=draw.baseColor;
+    if((flags&1u)!=0u)base*=baseTexture.SampleGrad(materialSampler,input.uv,uvDx,uvDy);
+    float2 mr=draw.material.xy;if((flags&2u)!=0u)mr*=materialTexture.SampleGrad(materialSampler,input.uv,uvDx,uvDy).bg;
     float metal=saturate(mr.x),rough=clamp(mr.y,.04,1),transmission=saturate(draw.optics.x)*(1-metal);
     if((flags&64u)!=0u)
     {
-        if(input.position.z>opaqueDepth || excludedLayer)discard;
         float coverage=lerp(saturate(base.a),1,transmission);
         Output output;output.color=float4(draw.baseColor.rgb*coverage,coverage);output.reactive=coverage;return output;
     }
     if((flags&128u)!=0u)
     {
-        if(input.position.z>opaqueDepth || excludedLayer)discard;
         float coverage=saturate(base.a);
         Output output;output.color=float4(clamp(base.rgb,0,65504)*coverage,coverage);output.reactive=coverage;return output;
     }
-    float3 geometricNormal=TransparentPixelNormalizeOr(input.worldNormal,float3(0,0,1)),n=geometricNormal;
-    float3 v=TransparentPixelNormalizeOr(camera.xyz-input.worldPosition,geometricNormal);
-    if((flags&4u)!=0u)
-    {
-        float3 fallback=normalize(cross(abs(n.z)<.99?float3(0,0,1):float3(0,1,0),n));
-        float3 t=TransparentPixelNormalizeOr(input.worldTangent.xyz-n*dot(n,input.worldTangent.xyz),fallback),b=cross(n,t)*input.worldTangent.w;
-        float3 mapped=normalTexture.Sample(materialSampler,input.uv).xyz*2-1;
-        mapped.xy*=draw.material.z;mapped.y*=(draw.emissive.w<0?-1.0:1.0);
-        n=TransparentPixelNormalizeOr(t*mapped.x+b*mapped.y+n*mapped.z,n);
-    }
-    // Keep the original material roughness on a constant normal footprint.
-    // Derivatives precede discard and the visible-interface orientation branch.
-    float3 normalDx=ddx(n),normalDy=ddy(n);
-    float normalVariance=0.25*(dot(normalDx,normalDx)+dot(normalDy,normalDy));
     float filteredAlphaSquared=min(1.0,rough*rough*rough*rough+min(2.0*normalVariance,0.18));
     float specularRoughness=sqrt(sqrt(filteredAlphaSquared));
-    if(input.position.z>opaqueDepth || excludedLayer)discard;
     if(transmission>0)
     {
         // Explicit-thickness thin-wall approximation: either visible mesh side
@@ -425,10 +458,12 @@ Output main(Input input,bool frontFacing:SV_IsFrontFace)
         lit+=Direct(n,v,l,light.colorIntensity.rgb*light.colorIntensity.w*Falloff(distance,light.positionRange.w)*cone*visibility,
             base.rgb,f0,specularRoughness,(1-metal)*(1-transmission));
     }
+#if RENDERER_ENABLE_AREA_LIGHTS
     for(int i=0;i<clamp(int(areaCounts.x+.5),0,4);++i)
         lit+=EvaluateRectAreaLight(rectAreaLights[i],n,v,base.rgb,f0,(1-metal)*(1-transmission),specularRoughness,input.worldPosition);
     for(int i=0;i<clamp(int(areaCounts.y+.5),0,4);++i)
         lit+=EvaluateDiscAreaLight(discAreaLights[i],n,v,base.rgb,f0,(1-metal)*(1-transmission),specularRoughness,input.worldPosition);
+#endif
     float3 refracted=0;
     if(transmission>0 && !totalInternalReflection)
     {

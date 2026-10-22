@@ -8,6 +8,7 @@
 #include "dyf/RHI/Texture.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #if defined(ENABLE_METAL) || defined(ENABLE_D3D12) || defined(ENABLE_VULKAN)
@@ -18,6 +19,28 @@
 
 namespace dyf
 {
+namespace
+{
+bool DefinitelyOutside(const GpuVisibility::Instance& instance,const std::array<Math::float4,6>& planes)
+{
+    const auto& sphere=instance.centerRadius;
+    if(!(instance.flags&1u) || sphere.w<0 || !std::isfinite(sphere.x) || !std::isfinite(sphere.y) ||
+        !std::isfinite(sphere.z) || !std::isfinite(sphere.w))return false;
+    for(const auto& plane:planes)
+    {
+        const double x=double(plane.x)*sphere.x,y=double(plane.y)*sphere.y,z=double(plane.z)*sphere.z;
+        const double magnitude=std::abs(x)+std::abs(y)+std::abs(z)+std::abs(double(plane.w))+sphere.w+1;
+        // The shader uses 1e-5 of this magnitude. Double precision and twice
+        // that margin cover f32 dot/add rounding, including fused operations.
+        // Avoid predicting any case whose shader intermediates could overflow.
+        if(!std::isfinite(magnitude) || magnitude>double(std::numeric_limits<float>::max())/16)continue;
+        const double distance=x+y+z+plane.w;
+        if(distance < -double(sphere.w)-2e-5*magnitude)return true;
+    }
+    return false;
+}
+}
+
 GpuVisibility::~GpuVisibility()
 {
     ReleaseBuffers();
@@ -33,6 +56,8 @@ void GpuVisibility::ReleaseBuffers()
     for(auto* buffer:{m_inputs,m_batchData,m_frame,m_instances,m_arguments,m_lodHistory}) m_device.DestroyBuffer(buffer);
     m_inputs=m_batchData=m_frame=m_instances=m_arguments=m_lodHistory=nullptr;
     m_uploadReady=false;m_ready=false;m_pending=false;m_resetHistory=true;m_capacity=0;
+    m_uploadDirty.fill(true);
+    m_possibleBatches.clear();
     m_instancesGraph={};m_argumentsGraph={};
 }
 
@@ -119,7 +144,15 @@ bool GpuVisibility::Prepare(const std::vector<Instance>& inputs,const std::vecto
         if(!m_resources) {ReleaseBuffers();return false;}
         m_capacity=static_cast<uint32_t>(capacity);
     }
-    m_inputData=inputs;m_batches=batches;m_pending=false;m_pendingOcclusion=false;
+    const bool sameInputs=m_inputData.size()==inputs.size() &&
+        std::memcmp(m_inputData.data(),inputs.data(),inputs.size()*sizeof(Instance))==0;
+    const bool sameBatches=m_batches.size()==batches.size() &&
+        std::memcmp(m_batches.data(),batches.data(),batches.size()*sizeof(Batch))==0;
+    m_uploadDirty[0]=m_uploadDirty[0] || !sameInputs;
+    m_uploadDirty[1]=m_uploadDirty[1] || !sameBatches;
+    if(!sameInputs)m_inputData=inputs;
+    if(!sameBatches)m_batches=batches;
+    m_pending=false;m_pendingOcclusion=false;
     m_resetHistory=m_resetHistory || settings.resetHistory;
     const auto vp=settings.camera.projection*settings.camera.view;
     const auto row=[&](uint32_t r) {return Math::float4{vp.m[r],vp.m[4+r],vp.m[8+r],vp.m[12+r]};};
@@ -133,6 +166,7 @@ bool GpuVisibility::Prepare(const std::vector<Instance>& inputs,const std::vecto
     // 지터로 화면 안에 들어오는 가장자리도 유지하도록 한 픽셀의 여유를 둔다.
     const auto expand=[&](float amount) {return Math::float4{w.x*amount,w.y*amount,w.z*amount,w.w*amount};};
     const auto horizontal=expand(1.f+2.f/settings.width),vertical=expand(1.f+2.f/settings.height);
+    const auto previousFrame=m_frameData;
     m_frameData.planes={combine(horizontal,x,1),combine(horizontal,x,-1),combine(vertical,y,1),combine(vertical,y,-1),
         combine(z,{0,0,0,0},1),combine(w,z,-1)};
     const auto& view=settings.camera.view;const auto& projection=settings.camera.projection;
@@ -140,6 +174,14 @@ bool GpuVisibility::Prepare(const std::vector<Instance>& inputs,const std::vecto
     m_frameData.projection={std::max(std::abs(projection.m[0])*settings.width,std::abs(projection.m[5])*settings.height)*.5f,
         settings.pixelError,settings.hysteresis,std::abs(projection.m[15])<1e-6f ? 1.f : 0.f};
     m_frameData.counts={static_cast<uint32_t>(inputs.size()),static_cast<uint32_t>(batches.size()),settings.frustum?1u:0u,settings.lod?1u:0u};
+    m_uploadDirty[2]=m_uploadDirty[2] || std::memcmp(&previousFrame,&m_frameData,sizeof(Frame))!=0;
+    m_possibleBatches.assign(batches.size(),settings.frustum?0u:1u);
+    if(settings.frustum)
+        for(const auto& input:inputs)
+        {
+            if(DefinitelyOutside(input,m_frameData.planes))continue;
+            for(uint32_t level=0;level<input.lodCount;++level)m_possibleBatches[input.batches[level]]=1;
+        }
     return true;
 }
 
@@ -154,6 +196,7 @@ bool GpuVisibility::RecordUploads(RHI::ICommandList& commands)
         static_cast<uint32_t>(m_batches.size()*sizeof(Batch)),sizeof(Frame)};
     for(uint32_t i=0;i<3;++i)
     {
+        if(m_uploadReady && !m_uploadDirty[i])continue;
         if(m_uploadReady) {const ResourceBarrierDesc barrier={buffers[i],nullptr,states[i],ResourceState::CopyDestination,{}};commands.ResourceBarrier(&barrier,1);}
         if(!m_device.UpdateBuffer(commands,buffers[i],0,data[i],sizes[i])) return false;
         const ResourceBarrierDesc barrier={buffers[i],nullptr,ResourceState::CopyDestination,states[i],{}};

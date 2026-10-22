@@ -3,6 +3,7 @@
 
 #include "dyf/Renderer.h"
 #include "ShaderLayout.h"
+#include "DepthPrepassValidation.h"
 #include "dyf/RenderExtension.h"
 #include "dyf/RHI/IDevice.h"
 #include "Platform/Profiler/FrameProfiler.h"
@@ -10,6 +11,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <tuple>
 
 namespace dyf
 {
@@ -90,6 +92,18 @@ struct Renderer::Impl
         std::array<RHI::TextureHandle,ToIndex(MaterialTextureKind::Count)> textures={};
         uint32_t textureFlags=0;
     };
+    struct CompactShadowVertex
+    {
+        float px,py,pz,u,v;
+    };
+    static_assert(sizeof(CompactShadowVertex)==20);
+    struct ShadowArenaRange
+    {
+        uint64_t generation=0;
+        uint32_t baseVertex=0,indexByteOffset=0;
+        RHI::Format indexFormat=RHI::Format::R32_UINT;
+        bool sortSafeInputs=false;
+    };
     struct SceneMeshState
     {
         struct IndexLod
@@ -100,17 +114,28 @@ struct Renderer::Impl
             bool ready=false;
             std::vector<uint32_t> indices;
         };
-        RHI::BufferHandle vertexBuffer=nullptr,indexBuffer=nullptr;
+        RHI::BufferHandle vertexBuffer=nullptr,indexBuffer=nullptr,shadowVertexBuffer=nullptr,shadowIndexBuffer=nullptr,mainIndexBuffer=nullptr;
+        RHI::Format shadowIndexFormat=RHI::Format::R32_UINT;
+        ShadowArenaRange shadowArena;
         uint32_t indexCount=0;
         std::vector<IndexLod> lods;
         Math::Bounds3 bounds;
         std::weak_ptr<const MeshData> source;
-        bool vertexReady=false,indexReady=false,prepared=false,lodsGenerated=false;
+        // Ready caches also record geometry that needs no extra buffers.
+        bool vertexReady=false,indexReady=false,shadowVertexReady=false,shadowIndexReady=false,mainIndexReady=false,prepared=false,lodsGenerated=false;
     };
     struct ShadowBounds
     {
         Math::Bounds3 bounds;
         std::array<double,3> magnitude={};
+    };
+    struct ShadowCaster
+    {
+        uint32_t entity=0,mesh=0,material=0,batch=0;
+        bool mirrored=false,compact=false,arena=false,sortSafe=false;
+        RHI::PipelineHandle pipeline=nullptr;
+        RHI::ResourceSetHandle set=nullptr;
+        ShadowBounds worldBounds;
     };
     struct CachedSet { RHI::ResourceSetHandle set=nullptr; uint32_t unusedFrames=0; size_t keyHash=0; };
     struct ShadowAtlasCache
@@ -126,6 +151,7 @@ struct Renderer::Impl
         Image source;
         RHI::TextureHandle texture=nullptr;
         RHI::ResourceState state=RHI::ResourceState::Undefined;
+        bool used=false;
     };
     struct CanvasImageSlot
     {
@@ -164,12 +190,15 @@ struct Renderer::Impl
     Impl(Renderer&,RHI::IDevice&,const void* window,const RendererConfig&);
     static RendererShaderDesc DefaultShaders(bool shadows = false, bool bindless = false, bool instanced = false);
     static RHI::ShaderDesc DefaultShadowFragment();
+    static RHI::ShaderDesc DefaultDepthPrepassFragment(bool shadows,bool bindless);
+    static RHI::ShaderDesc DefaultNoAreaFragment(bool shadows,bool bindless,bool depthPrepass);
     RHI::PipelineHandle MaterialPipeline(const MaterialDesc&,bool mirrored=false) const;
     bool CaptureFrame(Image&);
     bool Initialize();
     bool InitializeMesh(RHI::TextureHandle output = nullptr,bool compositeAlpha = false);
     bool UsesBindlessMaterials() const;
     bool UsesStockGeometry() const;
+    RHI::BufferHandle MainIndexBuffer(const SceneMeshState&,uint32_t,const MaterialDesc&,const RendererDrawDesc*) const;
     bool UsesAdvancedRendering() const;
     bool NeedsSurfacePass() const;
     RenderRequirements CollectRequirements() const;
@@ -182,6 +211,7 @@ struct Renderer::Impl
     bool UsesGpuVisibility() const;
     bool PrepareVisibility(const Scene&,const Camera&,RHI::ICommandList&,uint32_t,uint32_t,
         const std::vector<RendererDrawDesc>*);
+    bool PrepareCpuBatches(const Scene&,const Camera&,RHI::ICommandList&,const std::vector<RendererDrawDesc>*,bool motion);
     bool PrepareFrameResources(RenderFrame&,RHI::ICommandList&);
     void CommitFrameResources(const RenderFrame&);
     void InvalidateFrameHistory(bool release = false);
@@ -209,6 +239,9 @@ struct Renderer::Impl
     RHI::ShaderDesc ShaderDescription(ShaderSlot,const RHI::ShaderDesc& stock) const;
 
     bool PrepareGeometry(const Scene&,RHI::IDevice*);
+    static bool BuildCompactShadowGeometry(const std::vector<RendererVertex>&,const std::vector<uint32_t>&,
+        std::vector<CompactShadowVertex>&,std::vector<uint32_t>&);
+    bool PrepareShadowArena(const Scene&,RHI::IDevice*);
     void SelectLods(const Scene&,const Camera&,uint32_t width,uint32_t height,const std::vector<RendererDrawDesc>*);
     uint32_t EntityLod(uint32_t entity) const;
     static Math::float4 LodColor(uint32_t level);
@@ -245,11 +278,24 @@ struct Renderer::Impl
     bool stockDrawInputs=false;
     RHI::ShaderHandle vertexShader=nullptr,fragmentShader=nullptr,shadowVertexShader=nullptr;
     RHI::ShaderHandle shadowFragmentShader=nullptr;
+    RHI::ShaderHandle depthPrepassFragmentShader=nullptr;
+    RHI::ShaderHandle noAreaFragmentShader=nullptr,noAreaDepthPrepassFragmentShader=nullptr;
     RHI::ShaderHandle canvasVertexShader=nullptr,canvasFragmentShader=nullptr;
     RHI::ShaderHandle toneVertexShader=nullptr,toneFragmentShader=nullptr;
     RHI::PipelineHandle pipeline=nullptr,shadowPipeline=nullptr;
     std::array<RHI::PipelineHandle,7> shadowMaterialPipelines={};
+    std::array<RHI::PipelineHandle,8> compactShadowPipelines={};
     std::array<RHI::PipelineHandle,7> materialPipelines={};
+    std::array<RHI::PipelineHandle,8> depthPrepassPipelines={};
+    std::array<RHI::PipelineHandle,8> noAreaMaterialPipelines={},noAreaDepthPrepassPipelines={};
+    bool frameNoAreaLights=false,noAreaReported=false;
+    bool frameOpaqueDepthComplete=false;
+    bool depthPrepassReported=false;
+    std::vector<uint64_t> depthPassRevisions;
+    std::vector<uint64_t> depthProtectedInputs;
+    DepthGeometrySnapshot depthGeometrySnapshot;
+    Math::float4x4 depthGeometryView,depthGeometryProjection;
+    bool depthGeometryUnchanged=false;
     std::array<RHI::PipelineHandle,4> wireframePipelines={};
     std::vector<uint32_t> mainEntityOrder;
     RHI::PipelineHandle canvasPipeline=nullptr,tonePipeline=nullptr;
@@ -284,7 +330,10 @@ struct Renderer::Impl
     std::vector<MaterialPageScratch> materialPages;
     std::vector<RHI::ResourceSetHandle> mainSetScratch,shadowSetScratch;
     std::vector<RHI::ResourceBinding> mainBindingScratch,mainCombinedBindingScratch,shadowBindingScratch;
-    std::vector<ShadowBounds> shadowBoundsScratch;
+    std::vector<ShadowCaster> shadowCasterScratch;
+    std::vector<uint32_t> shadowViewScratch;
+    std::vector<double> shadowBatchDepthScratch;
+    bool shadowBatchSortReported=false;
     ShadowAtlasCache shadowAtlasCache;
     std::array<float,4> shadowCascadeRadii={};
     float shadowCascadeNear=0,shadowCascadeFar=0,shadowCascadeAspect=0;
@@ -295,11 +344,17 @@ struct Renderer::Impl
     RendererStatistics recordingStatistics,lastStatistics;
     RHI::FenceHandle lastRenderCompletion;
     std::vector<SceneMeshState> m_meshes;
+    // Only this Impl owns arena buffers; mesh ranges never own/alias their handles.
+    RHI::BufferHandle shadowArenaVertices=nullptr,shadowArenaIndices=nullptr;
+    uint64_t shadowArenaGeneration=0;
+    uint32_t shadowArenaStablePreparations=0;
+    bool shadowArenaDirty=true,shadowArenaAttempted=false,shadowArenaReported=false;
     std::weak_ptr<Scene> lodScene;
     std::vector<uint8_t> entityLods;
     std::vector<std::weak_ptr<const MeshData>> lodMeshSources;
     bool lodDebugActive=false,wireframeActive=false;
     std::vector<TextureSlot> m_textures;
+    std::vector<uint32_t> m_freeTextureSlots;
     std::map<std::pair<const uint8_t*,ColorSpace>,uint32_t> m_indices;
     std::vector<SceneMaterialState> materialStates;
     std::unique_ptr<BasicEnvironmentResources> basicEnvironment;
@@ -311,12 +366,22 @@ struct Renderer::Impl
     struct VisibilityDraw
     {
         uint32_t entity=0,mesh=0,material=0,level=0;
+        uint32_t instanceOffset=0,instanceCount=1;
     };
     std::unique_ptr<GpuVisibility> gpuVisibility;
     std::vector<VisibilityDraw> visibilityDraws;
     std::vector<uint64_t> visibilityKeys;
     std::weak_ptr<Scene> visibilityScene;
     bool visibilityActive=false;
+    using CpuDrawKey=std::tuple<uint32_t,uint32_t,uint32_t,uintptr_t,uintptr_t,bool,bool,bool>;
+    struct CpuDrawInput {CpuDrawKey key;uint32_t entity;};
+    std::vector<CpuDrawInput> cpuDrawInputs;
+    std::vector<VisibilityDraw> cpuDraws;
+    std::vector<uint32_t> cpuBatchIndices,cpuInstanceEntities,cpuMeshCounts;
+    std::vector<Math::float4x4> cpuInstanceScratch,cpuInstanceBytes;
+    RHI::BufferHandle cpuInstanceBuffer=nullptr;
+    bool cpuInstanceReady=false,cpuBatchesActive=false;
+    uint32_t cpuCulledEntities=0;
     std::weak_ptr<Scene> historyScene;
     std::vector<Math::float4x4> previousModels,pendingModels;
     Math::float4x4 previousViewProjection=Math::float4x4::Identity();

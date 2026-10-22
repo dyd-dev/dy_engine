@@ -9,6 +9,7 @@ namespace
 class EnvironmentLightingModule final : public RenderExtension
 {
 public:
+    explicit EnvironmentLightingModule(std::shared_ptr<EnvironmentFilteringProof> proof):m_proof(std::move(proof)) {}
     const char* GetName() const override { return "EnvironmentLighting"; }
 
     RenderPreparation GetPreparationStage() const override { return RenderPreparation::Lighting; }
@@ -30,6 +31,7 @@ public:
     bool Prepare(RenderFrame& frame,RHI::ICommandList& uploads) override
     {
         m_prepared=false;
+        if(m_proof) *m_proof={};
         const bool advanced=AdvancedModuleEnabled(frame.renderer);
         // 캡처는 고급 효과가 꺼진 상태에서도 원본 배경과 환경 입력을 준비한다.
         if(!advanced && !frame.environmentCapture) return true;
@@ -49,6 +51,7 @@ public:
         resources.probeParameters=m_environment->GetProbeParameters();
         resources.diffuse={m_environment->GetDiffuse(),{}};
         resources.specular={m_environment->GetSpecular(),{}};
+        if(m_proof) *m_proof={&frame,&frame.renderer.GetDevice(),resources,m_environment->UsesNativeFiltering()};
         m_prepared=true;
         return true;
     }
@@ -91,10 +94,12 @@ public:
     {
         if(m_prepared) m_environment->CommitFrame();
         m_prepared=false;
+        if(m_proof) *m_proof={};
     }
 
     void InvalidateHistory(bool release) override
     {
+        if(m_proof) *m_proof={};
         if(release)
         {
             m_environment.reset();
@@ -103,13 +108,14 @@ public:
     }
 
 private:
+    std::shared_ptr<EnvironmentFilteringProof> m_proof;
     std::unique_ptr<EnvironmentLighting> m_environment;
     bool m_prepared=false;
 };
 }
 
-std::unique_ptr<RenderExtension> CreateEnvironmentLightingModule()
+std::unique_ptr<RenderExtension> CreateEnvironmentLightingModule(std::shared_ptr<EnvironmentFilteringProof> proof)
 {
-    return std::make_unique<EnvironmentLightingModule>();
+    return std::make_unique<EnvironmentLightingModule>(std::move(proof));
 }
 }

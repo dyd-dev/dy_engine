@@ -13,6 +13,7 @@
 #include "dyf/RHI/Readback.h"
 #include "dyf/RHI/IDevice.h"
 #include <algorithm>
+#include <cstdio>
 #include <exception>
 #include <stdexcept>
 #include <utility>
@@ -38,6 +39,7 @@ bool Renderer::Impl::RenderToTexture(const Scene& scene,const Camera& camera,RHI
 bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamera, const Canvas* overlay, Image* readback,
     const std::vector<RendererDrawDesc>* draws,RHI::TextureHandle selectedOutput,RHI::ResourceState before)
 {
+    frameOpaqueDepthComplete=false;frameNoAreaLights=false;depthGeometryUnchanged=false;depthProtectedInputs.clear();
     InitializeLiveProfiling();PublishLiveGeometryAvailability(draws!=nullptr);
     Platform::LiveFrameScope liveFrame(Platform::FindLiveObject(device),liveId);
     device->PrepareLiveControls(liveFrame.GetKey());
@@ -152,10 +154,11 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             // states if any upload/close/submit step fails (including exceptions).
             struct FrameBuffers {
                 Impl& r;
-                RHI::BufferHandle light,shadow,instances;
-                bool lightReady,shadowReady,instancesReady,committed=false;
+                RHI::BufferHandle light,shadow,instances,cpuInstances;
+                bool lightReady,shadowReady,instancesReady,cpuInstancesReady,committed=false;
                 explicit FrameBuffers(Impl& owner):r(owner),light(r.lightingBuffer),shadow(r.shadowMatrixBuffer),instances(r.instanceBuffer),
-                    lightReady(r.lightingReady),shadowReady(r.shadowReady),instancesReady(r.instanceReady) {}
+                    cpuInstances(r.cpuInstanceBuffer),lightReady(r.lightingReady),shadowReady(r.shadowReady),
+                    instancesReady(r.instanceReady),cpuInstancesReady(r.cpuInstanceReady) {}
                 ~FrameBuffers() {
                     const auto finish=[&](RHI::BufferHandle& current,RHI::BufferHandle previous,bool& ready,bool oldReady) {
                         if(committed) {if(current!=previous)r.device->DestroyBuffer(previous);}
@@ -164,6 +167,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
                     finish(r.lightingBuffer,light,r.lightingReady,lightReady);
                     finish(r.shadowMatrixBuffer,shadow,r.shadowReady,shadowReady);
                     finish(r.instanceBuffer,instances,r.instanceReady,instancesReady);
+                    finish(r.cpuInstanceBuffer,cpuInstances,r.cpuInstanceReady,cpuInstancesReady);
                 }
             } buffers(*this);
             RHI::ResourceScope resources(*nativeDevice);
@@ -191,6 +195,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             timing.cpuSubmitMilliseconds+=uploadSubmitTimer.ElapsedMilliseconds();
             if(!submitted) return RendererFailure("Frame upload submission failed.");
             lightingReady=true;shadowReady=shadowMatrixBuffer!=nullptr;instanceReady=instanceBuffer!=nullptr;
+            cpuInstanceReady=cpuInstanceBuffer!=nullptr;
             if(visibilityActive) gpuVisibility->CommitUploads();
             if(basicEnvironment) basicEnvironment->CommitUploads();
             CommitFrameData();
@@ -217,8 +222,14 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             shadowMatrixBuffer && shadowDepthTarget->GetDesc().width;
         const bool cachedShadows=hasShadows && ReuseShadowAtlas(scene,shadows,draws);
         const bool drawShadows=hasShadows && !cachedShadows;
+        frameNoAreaLights=frameNoAreaLights && stockDrawInputs && UsesStockGeometry() && !wireframeActive &&
+            noAreaMaterialPipelines[0];
         using State = RHI::ResourceState;
         RHI::RenderGraph graph;
+        const auto ownedLighting=frameNoAreaLights
+            ? graph.ImportBuffer("Renderer owned lighting constants",lightingBuffer,State::ConstantBuffer,State::ConstantBuffer)
+            : RHI::RGResourceHandle{};
+        if(frameNoAreaLights && !ownedLighting.IsValid())return RendererFailure("Lighting resource import failed.");
         const auto outputHandle = graph.ImportTexture("Output", output, outputBefore, after);
         if(!outputHandle.IsValid()) return RendererFailure("Output resource import failed.");
         auto* overlayTarget=fixedOutput ? windowOutput : output;
@@ -254,6 +265,12 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         };
         if(visibilityActive && !gpuVisibility->AddPasses(graph))
             return RendererFailure("GPU visibility pass creation failed.");
+        if(cpuBatchesActive && !cpuDraws.empty())
+        {
+            renderFrame.visibleInstances={cpuInstanceBuffer,graph.ImportBuffer("CPU visible instances",cpuInstanceBuffer,
+                State::VertexBuffer,State::VertexBuffer)};
+            if(!renderFrame.visibleInstances.resource.IsValid())return RendererFailure("CPU instance import failed.");
+        }
         if(!requirements.providesLocalLights && basicLighting && !basicLighting->Import(graph,renderFrame.lighting))
             return RendererFailure("Basic local light resource import failed.");
         if(drawShadows)
@@ -281,8 +298,13 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             }
         }
         if(!AddExtensionPasses(RenderStage::OpaqueLighting,renderFrame,graph)) return false;
+        frameOpaqueDepthComplete=renderFrame.opaqueDepthComplete && depthGeometryUnchanged &&
+            stockDrawInputs && UsesStockGeometry() && shaderSources.bytes[MeshFragment].empty() &&
+            advanced && !wireframeActive && requirements.needsSurface && UsesSeparateTransparency() &&
+            renderFrame.depth.texture==depthStencilTarget && renderFrame.depth.resource==depth && depthPrepassPipelines[0];
         auto& mainPass = graph.AddPass("MainForward", RHI::RGRecordingMode::Independent);
         mainPass.Write(color, State::RenderTarget).Write(depth, State::DepthWrite);
+        if(ownedLighting.IsValid())mainPass.Read(ownedLighting,State::ConstantBuffer);
         if(renderFrame.lighting.areaMatrix.resource.IsValid())
             mainPass.Read(renderFrame.lighting.areaMatrix.resource,State::ShaderResource);
         if(renderFrame.lighting.areaAmplitude.resource.IsValid())
@@ -294,6 +316,8 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         if(visibilityActive)
             mainPass.Read(gpuVisibility->GetInstancesHandle(),State::VertexBuffer)
                 .Read(gpuVisibility->GetArgumentsHandle(),State::IndirectArgument);
+        else if(cpuBatchesActive && !cpuDraws.empty())
+            mainPass.Read(renderFrame.visibleInstances.resource,State::VertexBuffer);
         if(shadowDepthTarget) mainPass.Read(shadow, State::ShaderResource);
         if(environment.diffuse.resource.IsValid()) mainPass.Read(environment.diffuse.resource,State::ShaderResource);
         if(environment.specular.resource.IsValid()) mainPass.Read(environment.specular.resource,State::ShaderResource);
@@ -317,22 +341,34 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
                 .SetExecute([&](RHI::ICommandList* commands) {
                     require(RecordCanvas(*overlay, *commands, overlayTarget, true, true));
                 });
-        if(!selectedOutput)
+        if(!selectedOutput && config.enableProfilerHud)
             graph.AddPass("Profiler HUD").Write(overlayHandle, State::RenderTarget)
                 .SetExecute([&](RHI::ICommandList* commands) {
-                    if(config.enableProfilerHud)
-                    {
 #ifdef DY_RENDERDOC_ENABLED
-                        commands->BeginDebugEvent("Profiler HUD");
+                    commands->BeginDebugEvent("Profiler HUD");
 #endif
-                        auto hud = BuildProfilerOverlay(overlayTarget->GetDesc().width, overlayTarget->GetDesc().height,
-                            config.profilerStartsExpanded);
-                        require(RecordCanvas(hud, *commands, overlayTarget, true, true));
+                    auto hud = BuildProfilerOverlay(overlayTarget->GetDesc().width, overlayTarget->GetDesc().height,
+                        config.profilerStartsExpanded);
+                    require(RecordCanvas(hud, *commands, overlayTarget, true, true));
 #ifdef DY_RENDERDOC_ENABLED
-                        commands->EndDebugEvent();
+                    commands->EndDebugEvent();
 #endif
-                    }
                 });
+        frameOpaqueDepthComplete=frameOpaqueDepthComplete && depthGeometryUnchanged &&
+            depthGeometrySnapshot.Matches(renderFrame.geometry) &&
+            SameDepthCamera(depthGeometryView,depthGeometryProjection,renderFrame.camera);
+        if(frameNoAreaLights)
+        {
+            // Any graph writer may replace the uploaded zero counts. Unknown
+            // callbacks with a global barrier may also touch resources outside RG.
+            for(uint32_t index=0;const auto* pass=graph.GetPass(index);++index)
+            {
+                if(pass->HasGlobalBarrier()) {frameNoAreaLights=false;break;}
+                for(const auto& write:pass->GetWrites())if(write.handle==ownedLighting) {frameNoAreaLights=false;break;}
+                if(!frameNoAreaLights)break;
+            }
+            if(frameOpaqueDepthComplete && !noAreaDepthPrepassPipelines[0])frameNoAreaLights=false;
+        }
         if(!graph.Compile()) return RendererFailure("Scene RenderGraph compilation failed.");
         if(!selectedOutput)
         {
@@ -368,6 +404,16 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             static_cast<uint32_t>(frame.lists.size()), nullptr, 0}, completion);
         timing.cpuSubmitMilliseconds+=submitTimer.ElapsedMilliseconds();
         if(drawn) {
+            if(frameNoAreaLights && recordingStatistics.mainDrawCount && !noAreaReported)
+            {
+                std::fputs("[Renderer] Main area-light-free shader active: uploaded Rect/Disc counts are zero; no graph lighting writes or global barriers.\n",stderr);
+                noAreaReported=true;
+            }
+            if(frameOpaqueDepthComplete && !depthPrepassReported)
+            {
+                std::fputs("[Renderer] Main depth prepass active: early fragment tests, depth writes disabled, LessEqual.\n",stderr);
+                depthPrepassReported=true;
+            }
             m_profiler.SubmitGpuScopes(completion,liveFrame.GetKey());
             if(fixedOutput) outputPresentation->CommitFrame();
             canvasFrame.Commit();

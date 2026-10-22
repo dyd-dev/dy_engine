@@ -49,7 +49,7 @@ public:
     // flags의 비트 0이 없으면 경계를 알 수 없는 객체로 취급하여 제거하지 않는다.
     bool Prepare(const std::vector<Instance>&,const std::vector<Batch>&,const Settings&);
     bool RecordUploads(RHI::ICommandList&);
-    void CommitUploads() {m_uploadReady=true;}
+    void CommitUploads() {m_uploadReady=true;m_uploadDirty.fill(false);}
     bool AddPasses(RHI::RenderGraph&);
     bool AddOcclusionPasses(RHI::RenderGraph&,RHI::TextureHandle depth,
         RHI::RGResourceHandle depthHandle,const Camera& jitteredCamera);
@@ -61,6 +61,9 @@ public:
     RHI::RGResourceHandle GetArgumentsHandle() const {return m_argumentsGraph;}
     uint32_t GetBatchCount() const {return static_cast<uint32_t>(m_batches.size());}
     const Batch& GetBatch(uint32_t index) const {return m_batches[index];}
+    // False proves that the unchanged GPU frustum test cannot append an instance.
+    // Unknown/invalid bounds stay visible; this does not predict occlusion or LOD.
+    bool MayDrawBatch(uint32_t index) const {return index>=m_possibleBatches.size() || m_possibleBatches[index]!=0;}
 
 private:
     struct Frame
@@ -96,10 +99,12 @@ private:
     RHI::RGResourceHandle m_instancesGraph,m_argumentsGraph;
     std::vector<Instance> m_inputData;
     std::vector<Batch> m_batches;
+    std::vector<uint8_t> m_possibleBatches;
     Frame m_frameData;
     uint32_t m_capacity=0;
     bool m_hizReady=false,m_occlusionReady=false,m_pendingOcclusion=false;
     bool m_uploadReady=false,m_ready=false,m_resetHistory=true,m_pending=false;
+    std::array<bool,3> m_uploadDirty={true,true,true};
 };
 static_assert(sizeof(GpuVisibility::Instance)==192);
 static_assert(sizeof(GpuVisibility::VisibleInstance)==128);

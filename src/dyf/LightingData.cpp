@@ -199,7 +199,8 @@ bool Renderer::Impl::UpdateLightingBuffer(
 
     const auto* first=reinterpret_cast<const uint8_t*>(&constants);
     pendingLightingBytes.assign(first,first+sizeof(constants));
-    if(lightingReady && pendingLightingBytes==lightingBytes)return true;
+    const bool noAreaLights=constants.areaLightCounts.x==0.0f && constants.areaLightCounts.y==0.0f;
+    if(lightingReady && pendingLightingBytes==lightingBytes) {frameNoAreaLights=noAreaLights;return true;}
 	if(lightingReady) { const RHI::ResourceBarrierDesc barrier={lightingBuffer,nullptr,RHI::ResourceState::ConstantBuffer,RHI::ResourceState::CopyDestination,{}}; commandList.ResourceBarrier(&barrier,1); }
 	if(!device->UpdateBuffer(
 			commandList,
@@ -215,6 +216,7 @@ bool Renderer::Impl::UpdateLightingBuffer(
 		{}
 	};
 	commandList.ResourceBarrier(&after, 1);
+	frameNoAreaLights=noAreaLights;
 	return true;
 }
 

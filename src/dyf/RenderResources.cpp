@@ -61,12 +61,60 @@ bool Renderer::Impl::ValidateModules(const RenderRequirements& combined) const
 bool Renderer::Impl::AddExtensionPasses(RenderStage stage,RenderFrame& frame,RHI::RenderGraph& graph)
 {
     for(auto& extension:extensions)
+    {
+        const bool previous=frame.opaqueDepthComplete;
+        const auto oldDepth=frame.depth;
+        const auto oldView=frame.camera.view,oldProjection=frame.camera.projection;
+        depthPassRevisions.clear();
+        if(previous || frameOpaqueDepthComplete)
+            for(uint32_t i=0;const auto* pass=graph.GetPass(i);++i)depthPassRevisions.push_back(pass->GetRevision());
+        frame.opaqueDepthComplete=false;
         if(!extension->AddPasses(stage,frame,graph))
         {
             std::fprintf(stderr,"dyf: Render module %s failed while adding stage %u.\n",
                 extension->GetName(),static_cast<unsigned>(stage));
             return false;
         }
+        const bool beforeMain=stage==RenderStage::BeforeOpaque || stage==RenderStage::OpaqueLighting;
+        bool cpuChanged=!SameDepthCamera(oldView,oldProjection,frame.camera);
+        bool changed=cpuChanged || oldDepth.texture!=frame.depth.texture || oldDepth.resource!=frame.depth.resource;
+        if(previous || frameOpaqueDepthComplete)
+        {
+            for(uint32_t i=0;i<depthPassRevisions.size();++i)
+            {
+                const auto* pass=graph.GetPass(i);
+                if(!pass || pass->GetRevision()!=depthPassRevisions[i])cpuChanged=changed=true;
+            }
+            for(uint32_t i=static_cast<uint32_t>(depthPassRevisions.size());const auto* pass=graph.GetPass(i);++i)
+            {
+                if(beforeMain && pass->HasGlobalBarrier())changed=true;
+                for(const auto& write:pass->GetWrites())
+                    if(write.handle==oldDepth.resource || std::binary_search(depthProtectedInputs.begin(),
+                        depthProtectedInputs.end(),write.handle.id))changed=true;
+            }
+        }
+        // New GPU passes registered after Main execute after it. Only CPU input
+        // changes or edits of earlier passes can invalidate its captured prepass.
+        if(cpuChanged || (beforeMain && changed))frameOpaqueDepthComplete=false;
+        const bool explicitOptIn=frame.opaqueDepthComplete;
+        if(!explicitOptIn)frame.opaqueDepthComplete=previous && !changed;
+        if(explicitOptIn && beforeMain)
+        {
+            depthProtectedInputs.clear();
+            const RHI::RenderGraphPass* writer=nullptr;
+            for(uint32_t i=0;const auto* pass=graph.GetPass(i);++i)
+                for(const auto& write:pass->GetWrites())if(write.handle==frame.depth.resource)writer=pass;
+            if(writer)
+            {
+                for(const auto& read:writer->GetReads())depthProtectedInputs.push_back(read.handle.id);
+                std::sort(depthProtectedInputs.begin(),depthProtectedInputs.end());
+                depthProtectedInputs.erase(std::unique(depthProtectedInputs.begin(),depthProtectedInputs.end()),depthProtectedInputs.end());
+            }
+            else frame.opaqueDepthComplete=false;
+        }
+        if(depthGeometryUnchanged && (!depthGeometrySnapshot.Matches(frame.geometry) ||
+            !SameDepthCamera(depthGeometryView,depthGeometryProjection,frame.camera)))depthGeometryUnchanged=false;
+    }
     frameLighting=frame.lighting;
     return true;
 }
@@ -100,6 +148,8 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
         if(meshIndex>=m_meshes.size() || materialIndex>=materialStates.size()) continue;
         const auto& mesh=m_meshes[meshIndex];
         if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount) continue;
+        const bool cpuBatch=cpuBatchesActive && scene.Materials()[materialIndex].alphaMode!=MaterialAlphaMode::Blend;
+        if(cpuBatch && cpuBatchIndices[i]==UINT32_MAX)continue;
         RenderGeometryDraw draw;
         const auto* input=frame.draws ? &(*frame.draws)[i] : nullptr;
         const auto level=std::min<uint32_t>(EntityLod(i),mesh.lods.size());
@@ -122,25 +172,35 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
         draw.textures=materialStates[materialIndex].textures;
         draw.textureFlags=materialStates[materialIndex].textureFlags |
             (scene.GetEntityLighting(entity).receiveShadow ? 32u : 0u) | (lodDebugActive ? 64u : 0u);
-        if(visibilityActive && draw.material->alphaMode!=MaterialAlphaMode::Blend)
+        if(cpuBatch)
+        {
+            const auto& batch=cpuDraws[cpuBatchIndices[i]];
+            draw.instanceBuffer=cpuInstanceBuffer;
+            draw.instanceOffset=batch.instanceOffset*2*sizeof(Math::float4x4);
+            draw.instanceCount=batch.instanceCount;
+            frame.geometry.push_back(std::move(draw));
+        }
+        else if(visibilityActive && draw.material->alphaMode!=MaterialAlphaMode::Blend)
         {
             while(visibilityIndex<visibilityDraws.size() && visibilityDraws[visibilityIndex].entity==i)
             {
-                const auto& selected=visibilityDraws[visibilityIndex];
-                const auto& batch=gpuVisibility->GetBatch(visibilityIndex);
+                const auto batchIndex=visibilityIndex++;
+                if(!gpuVisibility->MayDrawBatch(batchIndex))continue;
+                const auto& selected=visibilityDraws[batchIndex];
+                const auto& batch=gpuVisibility->GetBatch(batchIndex);
                 auto indirect=draw;
                 indirect.indexBuffer=selected.level ? mesh.lods[selected.level-1].buffer : mesh.indexBuffer;
                 indirect.indexCount=batch.indexCount;
                 indirect.instanceBuffer=gpuVisibility->GetInstanceBuffer();
                 indirect.indirectArguments=gpuVisibility->GetArgumentsBuffer();
                 indirect.instanceOffset=batch.instanceOffset*sizeof(GpuVisibility::VisibleInstance);
-                indirect.indirectOffset=visibilityIndex*sizeof(RHI::DrawIndexedIndirectArguments);
+                indirect.indirectOffset=batchIndex*sizeof(RHI::DrawIndexedIndirectArguments);
                 if(lodDebugActive)
                 {
                     indirect.baseColor=LodColor(selected.level);
                     indirect.baseColor.w=draw.baseColor.w;
                 }
-                frame.geometry.push_back(std::move(indirect));++visibilityIndex;
+                frame.geometry.push_back(std::move(indirect));
             }
         }
         else frame.geometry.push_back(std::move(draw));
@@ -161,5 +221,7 @@ void Renderer::Impl::UpdateFrameLighting(RenderFrame& frame,bool graphReady) con
         frame.visibleInstances={gpuVisibility->GetInstanceBuffer(),handle(gpuVisibility->GetInstancesHandle())};
         frame.indirectArguments={gpuVisibility->GetArgumentsBuffer(),handle(gpuVisibility->GetArgumentsHandle())};
     }
+    else if(cpuBatchesActive)
+        frame.visibleInstances={cpuInstanceBuffer,handle(frame.visibleInstances.resource)};
 }
 }

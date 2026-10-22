@@ -1,5 +1,6 @@
 #include "AdvancedRenderingInternal.h"
 #include "ScreenSpaceLighting.h"
+#include "DepthPrepassValidation.h"
 #include "dyf/Camera.h"
 #include <cmath>
 
@@ -59,6 +60,9 @@ public:
         if(!m_lighting) m_lighting=std::make_unique<ScreenSpaceLighting>();
         if(!m_lighting->Prepare(frame.renderer.GetDevice(),uploads,frame.depth.texture,
             frame.camera,frame.geometry,settings)) return false;
+        m_depthGeometry.Capture(frame.geometry);
+        m_depthView=frame.camera.view;m_depthProjection=frame.camera.projection;
+        m_depthTexture=frame.depth.texture;
         frame.ao.texture=m_lighting->GetAO();
         m_prepared=true;
         return true;
@@ -72,9 +76,11 @@ public:
         if(stage==RenderStage::BeforeOpaque)
         {
             if(!m_lighting->Import(graph) || !m_lighting->AddSurface(graph,frame.depth.resource,
-                frame.gpuVisibility?frame.visibleInstances.resource:RHI::RGResourceHandle{},
-                frame.gpuVisibility?frame.indirectArguments.resource:RHI::RGResourceHandle{}) ||
+                frame.visibleInstances.resource,frame.indirectArguments.resource) ||
                 !m_lighting->AddAO(graph)) return AdvancedPassFailure("Surface/AO pass creation failed.");
+            frame.opaqueDepthComplete=m_depthTexture==frame.depth.texture &&
+                SameDepthCamera(m_depthView,m_depthProjection,frame.camera) &&
+                m_depthGeometry.Matches(frame.geometry);
             const auto& surface=m_lighting->GetGraphResources();
             frame.normal={m_lighting->GetNormal(),surface.normal};
             frame.albedo={m_lighting->GetAlbedoMetal(),surface.albedo};
@@ -116,6 +122,9 @@ public:
 
 private:
     std::unique_ptr<ScreenSpaceLighting> m_lighting;
+    DepthGeometrySnapshot m_depthGeometry;
+    Math::float4x4 m_depthView,m_depthProjection;
+    RHI::TextureHandle m_depthTexture=nullptr;
     bool m_prepared=false,m_recorded=false;
 };
 }

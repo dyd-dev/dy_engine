@@ -57,19 +57,18 @@ RHI::PipelineLayoutDesc Renderer::Impl::MeshLayout(bool bindless, std::vector<RH
             {7u,RHI::ResourceBindingType::SampledTexture,1,RHI::ShaderStageFlags::Fragment,{}},
             {8u,RHI::ResourceBindingType::StaticSampler,1,RHI::ShaderStageFlags::Fragment,materialSampler}
         };
-        if(shaderSources.bytes[MeshFragment].empty())
-        {
-            auto screenSampler=shadowSampler;
-            screenSampler.minFilter=screenSampler.magFilter=RHI::SamplerFilter::Linear;
-            bindings.push_back({16u,RHI::ResourceBindingType::SampledTexture,1,RHI::ShaderStageFlags::Fragment,{}});
-            bindings.push_back({13u,RHI::ResourceBindingType::SampledTexture,1,RHI::ShaderStageFlags::Fragment,{}});
-            bindings.push_back({17u,RHI::ResourceBindingType::SampledTexture,1,RHI::ShaderStageFlags::Fragment,{}});
-            bindings.push_back({14u,RHI::ResourceBindingType::ConstantBuffer,1,RHI::ShaderStageFlags::Fragment,{}});
-            bindings.push_back({15u,RHI::ResourceBindingType::StaticSampler,1,RHI::ShaderStageFlags::Fragment,screenSampler});
-        }
     }
     if(shaderSources.bytes[MeshFragment].empty())
     {
+        // The material array occupies t0..t18 in HLSL/Metal. Environment
+        // textures use separate slots in the paged stock path on every backend.
+        auto screenSampler=shadowSampler;
+        screenSampler.minFilter=screenSampler.magFilter=RHI::SamplerFilter::Linear;
+        bindings.push_back({bindless ? 22u : 16u,RHI::ResourceBindingType::SampledTexture,1,RHI::ShaderStageFlags::Fragment,{}});
+        bindings.push_back({bindless ? 23u : 13u,RHI::ResourceBindingType::SampledTexture,1,RHI::ShaderStageFlags::Fragment,{}});
+        bindings.push_back({bindless ? 24u : 17u,RHI::ResourceBindingType::SampledTexture,1,RHI::ShaderStageFlags::Fragment,{}});
+        bindings.push_back({14u,RHI::ResourceBindingType::ConstantBuffer,1,RHI::ShaderStageFlags::Fragment,{}});
+        bindings.push_back({15u,RHI::ResourceBindingType::StaticSampler,1,RHI::ShaderStageFlags::Fragment,screenSampler});
         bindings.push_back({19,RHI::ResourceBindingType::ReadOnlyStorageBuffer,1,RHI::ShaderStageFlags::Fragment,{}});
         bindings.push_back({20,RHI::ResourceBindingType::ReadOnlyStorageBuffer,1,RHI::ShaderStageFlags::Fragment,{}});
         bindings.push_back({21,RHI::ResourceBindingType::ConstantBuffer,1,RHI::ShaderStageFlags::Fragment,{}});
@@ -154,6 +153,62 @@ bool Renderer::Impl::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorF
         }
     }
 
+    if(noAreaFragmentShader && UsesStockGeometry())
+    {
+        desc.fragmentShader=noAreaFragmentShader;
+        for(uint32_t variant=0;variant<noAreaMaterialPipelines.size();++variant)
+        {
+            const bool transparent=(variant&2u)!=0;
+            colorAttachment.blend.enabled=transparent;
+            desc.raster.cullMode=(variant&1u) ? RHI::CullMode::None : RHI::CullMode::Back;
+            desc.raster.frontFace=(variant&4u) ? RHI::FrontFace::Clockwise : RHI::FrontFace::CounterClockwise;
+            desc.depthStencil.depthWriteEnabled=!transparent;
+            noAreaMaterialPipelines[variant]=device->CreateGraphicsPipeline(desc);
+            if(!noAreaMaterialPipelines[variant])
+            {
+                for(auto& value:noAreaMaterialPipelines) {device->DestroyPipeline(value);value=nullptr;}
+                break;
+            }
+        }
+        desc.fragmentShader=fragmentShader;
+    }
+
+    if(depthPrepassFragmentShader && UsesStockGeometry() && UsesAdvancedRendering())
+    {
+        desc.fragmentShader=depthPrepassFragmentShader;
+        desc.depthStencil.depthWriteEnabled=false;
+        desc.depthStencil.depthCompareOp=RHI::CompareOp::LessEqual;
+        colorAttachment.blend.enabled=false;
+        for(uint32_t variant=0;variant<depthPrepassPipelines.size();++variant)
+        {
+            if(variant&2u)continue;
+            desc.raster.cullMode=(variant&1u) ? RHI::CullMode::None : RHI::CullMode::Back;
+            desc.raster.frontFace=(variant&4u) ? RHI::FrontFace::Clockwise : RHI::FrontFace::CounterClockwise;
+            depthPrepassPipelines[variant]=device->CreateGraphicsPipeline(desc);
+            if(!depthPrepassPipelines[variant])return false;
+        }
+        desc.fragmentShader=fragmentShader;
+    }
+    if(noAreaDepthPrepassFragmentShader && UsesStockGeometry() && UsesAdvancedRendering())
+    {
+        desc.fragmentShader=noAreaDepthPrepassFragmentShader;
+        desc.depthStencil.depthWriteEnabled=false;
+        desc.depthStencil.depthCompareOp=RHI::CompareOp::LessEqual;
+        colorAttachment.blend.enabled=false;
+        for(uint32_t variant=0;variant<noAreaDepthPrepassPipelines.size();++variant)
+        {
+            if(variant&2u)continue;
+            desc.raster.cullMode=(variant&1u) ? RHI::CullMode::None : RHI::CullMode::Back;
+            desc.raster.frontFace=(variant&4u) ? RHI::FrontFace::Clockwise : RHI::FrontFace::CounterClockwise;
+            noAreaDepthPrepassPipelines[variant]=device->CreateGraphicsPipeline(desc);
+            if(!noAreaDepthPrepassPipelines[variant])
+            {
+                for(auto& value:noAreaDepthPrepassPipelines) {device->DestroyPipeline(value);value=nullptr;}
+                break;
+            }
+        }
+        desc.fragmentShader=fragmentShader;
+    }
     if(config.debugWireframe && UsesAdvancedRendering())
     {
         if(!device->Supports(RHI::Feature::Wireframe)) return false;
@@ -210,8 +265,19 @@ bool Renderer::Impl::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorF
 	shadowDesc.depthStencil.depthTestEnabled = true;
 	shadowDesc.depthStencil.depthWriteEnabled = true;
 	shadowDesc.depthStencil.depthCompareOp = RHI::CompareOp::Less;
+    auto compactVertexBuffers=vertexBuffers;
+    compactVertexBuffers[0].stride=sizeof(CompactShadowVertex);
+    std::vector<RHI::VertexAttribute> compactAttributes={
+        {0,0,RHI::Format::R32G32B32_FLOAT,static_cast<uint32_t>(offsetof(CompactShadowVertex,px))},
+        {2,0,RHI::Format::R32G32_FLOAT,static_cast<uint32_t>(offsetof(CompactShadowVertex,u))}};
+    for(const auto& attribute:attributes)if(attribute.binding==1)compactAttributes.push_back(attribute);
+    for(uint32_t compact=0;compact<(stockShadow?2u:1u);++compact)
     for(uint32_t variant=0;variant<(stockShadow?8u:1u);++variant)
     {
+        shadowDesc.vertexBuffers=compact ? compactVertexBuffers.data() : vertexBuffers.data();
+        shadowDesc.vertexBufferCount=static_cast<uint32_t>(vertexBuffers.size());
+        shadowDesc.vertexAttributes=compact ? compactAttributes.data() : attributes.data();
+        shadowDesc.vertexAttributeCount=static_cast<uint32_t>(compact ? compactAttributes.size() : attributes.size());
         // 불투명 그림자는 깊이만 기록하고 알파 마스크만 기존 fragment 판정을 유지한다.
         const bool coverage=stockShadow ? (variant&2u)!=0 : shadowFragmentShader!=nullptr;
         shadowDesc.fragmentShader=coverage ? shadowFragmentShader : nullptr;
@@ -221,7 +287,7 @@ bool Renderer::Impl::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorF
         shadowDesc.layout={selectedBindings.data(),static_cast<uint32_t>(selectedBindings.size()),
             static_cast<uint32_t>(sizeof(DrawConstants))+shaderSources.additionalConstantBytes,
             coverage ? RHI::ShaderStageFlags::Vertex|RHI::ShaderStageFlags::Fragment : RHI::ShaderStageFlags::Vertex,10u};
-        auto& selected=variant ? shadowMaterialPipelines[variant-1] : shadowPipeline;
+        auto& selected=compact ? compactShadowPipelines[variant] : variant ? shadowMaterialPipelines[variant-1] : shadowPipeline;
         selected=device->CreateGraphicsPipeline(shadowDesc);
         if(!selected) return false;
     }

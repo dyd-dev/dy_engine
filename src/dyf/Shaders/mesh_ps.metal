@@ -3,6 +3,12 @@
 #ifndef RENDERER_BINDLESS
 #define RENDERER_BINDLESS 0
 #endif
+#ifndef RENDERER_DEPTH_PREPASS
+#define RENDERER_DEPTH_PREPASS 0
+#endif
+#ifndef RENDERER_ENABLE_AREA_LIGHTS
+#define RENDERER_ENABLE_AREA_LIGHTS 1
+#endif
 #define RENDERER_MAX_DIRECTIONAL_LIGHTS 4
 #define RENDERER_MAX_POINT_LIGHTS 16
 #define RENDERER_MAX_SPOT_LIGHTS 16
@@ -41,7 +47,7 @@
 #endif
 
 using namespace metal;
-#if !RENDERER_BINDLESS
+// Basic bindless rendering supplies neutral settings.x=0 and screen.z=0.
 struct EnvironmentConstants
 {
     float4 sh[9];
@@ -62,7 +68,6 @@ inline float3 EnvironmentIrradiance(float3 n,constant EnvironmentConstants& envi
         environment.sh[7].rgb*(1.0925484305920792f*n.x*n.z)+environment.sh[8].rgb*(0.5462742152960396f*(n.x*n.x-n.y*n.y));
     return max(value,0.0f);
 }
-#endif
 
 struct DrawConstants
 {
@@ -244,7 +249,7 @@ float SampleShadowView(int index,float3 worldPosition,float3 normal,float3 light
     for(int y=-extent;y<=extent;++y)for(int x=-extent;x<=extent;++x)
     {
         float2 sampleUv=clamp(uv+float2(x,y)*texel,minUv,maxUv);
-        visible+=receiver<=shadowMap.sample(shadowSampler,sampleUv)?1.0:0.0;
+        visible+=receiver<=shadowMap.sample(shadowSampler,sampleUv,level(0))?1.0:0.0;
         samples+=1.0;
     }
     return 1.0-clamp(strength,0.0,1.0)*(1.0-visible/max(samples,1.0));
@@ -335,6 +340,7 @@ inline float3 EvaluateDirectLight(
     return (diffuseWeight * albedo / kPi + specular) * incidentIlluminance * ndotl * visibility;
 }
 
+#if RENDERER_ENABLE_AREA_LIGHTS
 // LTC 적분과 표 배치는 Heitz 외 SIGGRAPH 2016 및 Assets/ltc/LICENSE를 따른다.
 inline float LtcEdgeIntegral(float3 a,float3 b)
 {
@@ -435,6 +441,7 @@ inline float3 EvaluateDiscAreaLight(RendererDiscAreaLight light,float3 normal,fl
     return EvaluateLtcPolygon(normal,viewDir,worldPosition,points,16,albedo,metallic,roughness,
         light.color.rgb*max(light.positionIntensity.w,0.0),ltcMatrixTexture,ltcAmplitudeTexture,materialSampler);
 }
+#endif
 
 struct ClusterLight {float4 positionRange;float4 colorIntensity;float4 directionOuterCos;float4 coneShadow;};
 struct ClusterParameters {float4x4 view;float4x4 projection;float4x4 inverseProjection;float4 depth;uint4 dimensions;uint4 counts;};
@@ -461,10 +468,13 @@ inline float3 EvaluateLights(constant RendererLightingConstants& lighting,
     float3 worldPosition, float3 normal, float3 viewDir,
     float3 albedo, float metallic, float roughness) {
     float3 directLight = float3(0.0,0.0,0.0);
+    float ndotv=max(dot(normal,viewDir),0.0f);
     int directionalCount = clamp(int(lighting.lightCounts.x + 0.5), 0, RENDERER_MAX_DIRECTIONAL_LIGHTS);
     for (int lightIndex = 0; lightIndex < directionalCount; ++lightIndex) {
         RendererDirectionalLight light = lighting.directionalLights[lightIndex];
         float3 lightDir = normalize(light.directionIntensity.xyz);
+        // Match EvaluateDirectLight's zero result before sampling its shadow.
+        if(ndotv<=0.0f || max(dot(normal,lightDir),0.0f)<=0.0f)continue;
 #if RENDERER_ENABLE_SHADOWS
         float visibility = SampleShadow(1,lightIndex,worldPosition,normal,lightDir,lighting,shadowMatrix,shadowMap,shadowSampler,drawFlags);
 #else
@@ -485,6 +495,7 @@ inline float3 EvaluateLights(constant RendererLightingConstants& lighting,
         float distanceToLight=length(toLight);
         if(distanceToLight<=0.0001 || distanceToLight>=light.positionRange.w)continue;
         float3 lightDir=toLight/distanceToLight;
+        if(ndotv<=0.0f || max(dot(normal,lightDir),0.0f)<=0.0f)continue;
         float attenuation=PunctualAttenuation(distanceToLight,light.positionRange.w);
         int type=int(light.coneShadow.y+0.5),shadowIndex=int(light.coneShadow.z);
         if(type==3)attenuation*=SpotConeAttenuation(dot(-lightDir,light.directionOuterCos.xyz),
@@ -497,6 +508,7 @@ inline float3 EvaluateLights(constant RendererLightingConstants& lighting,
         float3 incidentIlluminance=light.colorIntensity.rgb*max(light.colorIntensity.w,0.0)*attenuation;
         directLight+=EvaluateDirectLight(normal,viewDir,lightDir,incidentIlluminance,albedo,metallic,roughness,visibility);
     }
+#if RENDERER_ENABLE_AREA_LIGHTS
     int rectAreaCount = clamp(int(lighting.areaLightCounts.x + 0.5), 0, RENDERER_MAX_RECT_AREA_LIGHTS);
     for (int lightIndex = 0; lightIndex < rectAreaCount; ++lightIndex) {
         directLight += EvaluateRectAreaLight(lighting.rectAreaLights[lightIndex], normal, viewDir, albedo, metallic, roughness, worldPosition,
@@ -507,6 +519,7 @@ inline float3 EvaluateLights(constant RendererLightingConstants& lighting,
         directLight += EvaluateDiscAreaLight(lighting.discAreaLights[lightIndex], normal, viewDir, albedo, metallic, roughness, worldPosition,
             ltcMatrixTexture,ltcAmplitudeTexture,materialSampler);
     }
+#endif
 
     return directLight;
 }
@@ -557,11 +570,9 @@ inline float4 RunFragmentShader(
 #if RENDERER_ENABLE_SHADOWS
     sampler shadowSampler,
 #endif
-    sampler materialSampler
-#if !RENDERER_BINDLESS
-    ,texture2d<float> screenAOTexture,texture2d<float> environmentSpecularTexture,texture2d<float> environmentDiffuseTexture,
+    sampler materialSampler,
+    texture2d<float> screenAOTexture,texture2d<float> environmentSpecularTexture,texture2d<float> environmentDiffuseTexture,
     constant EnvironmentConstants& environment,sampler screenSampler
-#endif
     )
 {
     const uint textureFlags = drawConstants.textureFlags;
@@ -603,6 +614,8 @@ inline float4 RunFragmentShader(
     float roughness =
         clamp(drawConstants.materialParams.y, minRoughness, 1.0f);
     float occlusion = 1.0f;
+    // Opaque environment buffers already include authored AO and screen AO.
+    bool usesEnvironmentBuffers=environment.settings.x>0.5f && alphaMode!=2u;
 
     if ((textureFlags & kTextureFlagMetallicRoughness) != 0u)
     {
@@ -617,7 +630,7 @@ inline float4 RunFragmentShader(
             0.0f,
             1.0f);
     }
-    if ((textureFlags & kTextureFlagOcclusion) != 0u)
+    if ((textureFlags & kTextureFlagOcclusion) != 0u && !usesEnvironmentBuffers)
     {
         occlusion = mix(1.0f, occlusionTexture.sample(materialSampler, input.uv).r,
             clamp(drawConstants.materialParams.w, 0.0f, 1.0f));
@@ -662,9 +675,8 @@ inline float4 RunFragmentShader(
         ambientSpecularStrength;
     float3 ambient =
         (ambientDiffuse + ambientSpecular) * occlusion;
-#if !RENDERER_BINDLESS
     const float2 screenUV=input.position.xy*environment.screen.xy;
-    const float screenAO=environment.screen.z>0.5 ? screenAOTexture.sample(screenSampler,screenUV,level(0)).r : 1.0f;
+    const float screenAO=!usesEnvironmentBuffers && environment.screen.z>0.5 ? screenAOTexture.sample(screenSampler,screenUV,level(0)).r : 1.0f;
     ambient*=screenAO;
     if(environment.settings.x>0.5)
     {
@@ -680,7 +692,6 @@ inline float4 RunFragmentShader(
             ambient+=environmentSpecularTexture.sample(screenSampler,screenUV,level(0)).rgb;
         }
     }
-#endif
 
     float3 emissive = drawConstants.emissiveColor.rgb;
     if ((textureFlags & kTextureFlagEmissive) != 0u)
@@ -700,16 +711,23 @@ inline float4 RunFragmentShader(
     return float4(color, alphaMode==2u ? base.a : 1.0f);
 }
 
+#if RENDERER_DEPTH_PREPASS
+[[early_fragment_tests]]
+#endif
 fragment float4 RENDERER_FRAGMENT_ENTRY(
     RasterData input [[stage_in]],
     bool frontFace [[front_facing]],
-#if !RENDERER_BINDLESS
+#if RENDERER_BINDLESS
+    texture2d<float> screenAOTexture [[texture(22)]],
+    texture2d<float> environmentSpecularTexture [[texture(23)]],
+    texture2d<float> environmentDiffuseTexture [[texture(24)]],
+#else
     texture2d<float> screenAOTexture [[texture(16)]],
     texture2d<float> environmentSpecularTexture [[texture(13)]],
     texture2d<float> environmentDiffuseTexture [[texture(17)]],
+#endif
     constant EnvironmentConstants& environment [[buffer(14)]],
     sampler screenSampler [[sampler(15)]],
-#endif
 #if RENDERER_BINDLESS
     array<texture2d<float>,19> materialTextures [[texture(0)]],
     const device uint4* materialTextureIndices [[buffer(29)]],
@@ -773,9 +791,7 @@ fragment float4 RENDERER_FRAGMENT_ENTRY(
 #if RENDERER_ENABLE_SHADOWS
         shadowSampler,
 #endif
-        materialSampler
-#if !RENDERER_BINDLESS
-        ,screenAOTexture,environmentSpecularTexture,environmentDiffuseTexture,environment,screenSampler
-#endif
+        materialSampler,
+        screenAOTexture,environmentSpecularTexture,environmentDiffuseTexture,environment,screenSampler
         );
 }

@@ -17,13 +17,18 @@ std::unique_ptr<RenderExtension> CreateAdvancedRenderingModule(AdvancedRenderMod
     return nullptr;
 }
 
-AdvancedRendering::AdvancedRendering():m_modules{
-    CreateAdvancedRenderingModule(AdvancedRenderModule::EnvironmentLighting),
-    CreateAdvancedRenderingModule(AdvancedRenderModule::ClusteredLighting),
-    CreateAdvancedRenderingModule(AdvancedRenderModule::SurfaceLighting),
-    CreateAdvancedRenderingModule(AdvancedRenderModule::VolumetricFog),
-    CreateAdvancedRenderingModule(AdvancedRenderModule::Transparency),
-    CreateAdvancedRenderingModule(AdvancedRenderModule::PostProcess)} {}
+namespace
+{
+std::array<std::unique_ptr<RenderExtension>,6> CreatePresetModules()
+{
+    auto proof=std::make_shared<Detail::EnvironmentFilteringProof>();
+    return {Detail::CreateEnvironmentLightingModule(proof),Detail::CreateClusteredLightingModule(),
+        Detail::CreateSurfaceLightingModule(),Detail::CreateFogModule(),Detail::CreateTransparencyModule(proof),
+        Detail::CreatePostProcessModule()};
+}
+}
+
+AdvancedRendering::AdvancedRendering():m_modules(CreatePresetModules()) {}
 
 AdvancedRendering::~AdvancedRendering()=default;
 

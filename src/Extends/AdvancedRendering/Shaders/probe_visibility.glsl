@@ -1,5 +1,14 @@
 #ifndef DY_PROBE_VISIBILITY_INCLUDED
 #define DY_PROBE_VISIBILITY_INCLUDED
+ivec2 DyWrapBilinearX(int low,int high,int width)
+{
+    if(width>0 && (width&(width-1))==0)
+    {
+        int mask=width-1;
+        return ivec2(low&mask,high&mask);
+    }
+    return ivec2((low%width+width)%width,(high%width+width)%width);
+}
 float SpatialProbeVisibility(vec3 position,vec3 probePosition,float valid,float scale,uint layer,
     texture2DArray image,sampler imageSampler)
 {
@@ -11,7 +20,8 @@ float SpatialProbeVisibility(vec3 position,vec3 probePosition,float valid,float 
         acos(clamp(direction.z,-1,1))*.3183098861837907);
     ivec2 dimensions=textureSize(sampler2DArray(image,imageSampler),0).xy;
     vec2 pixel=coordinate*vec2(dimensions)-.5,w=fract(pixel);ivec2 a=ivec2(floor(pixel)),b=a+1;
-    a.x=(a.x%dimensions.x+dimensions.x)%dimensions.x;b.x=(b.x%dimensions.x+dimensions.x)%dimensions.x;
+    ivec2 wrappedX=DyWrapBilinearX(a.x,b.x,dimensions.x);
+    a.x=wrappedX.x;b.x=wrappedX.y;
     a.y=clamp(a.y,0,dimensions.y-1);b.y=clamp(b.y,0,dimensions.y-1);
     vec2 moments=mix(mix(texelFetch(sampler2DArray(image,imageSampler),ivec3(a,int(layer)),0),
         texelFetch(sampler2DArray(image,imageSampler),ivec3(b.x,a.y,int(layer)),0),w.x),

@@ -1,9 +1,11 @@
 #include "RendererInternal.h"
 #include "DrawCommands.h"
+#include "BasicEnvironmentResources.h"
 #include "dyf/Scene.h"
 #include "dyf/RHI/Buffer.h"
 #include "../RHI/ResourceSet.h"
 #include <algorithm>
+#include <array>
 #include <functional>
 #include <vector>
 
@@ -65,6 +67,18 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
 	if(UsesBindlessMaterials())
 	{
 		if(materialStates.empty()) {materialIndexBuffer=nullptr;materialIndexReady=false;return true;}
+        const RenderEnvironmentResources* environment=&frameLighting.environment;
+        RenderEnvironmentResources neutralEnvironment;
+        const bool advanced=UsesAdvancedRendering();
+        if(!advanced)
+        {
+            // Legacy basic paging did not consume environment/AO resources.
+            // Neutral inputs preserve that result, including custom providers.
+            if(!basicEnvironment)return false;
+            neutralEnvironment=basicEnvironment->GetResources(defaultMaterialTextures[2]);
+            environment=&neutralEnvironment;
+        }
+        if(!environment->constantBuffer)return false;
 		// 클러스터 조명 슬롯 앞의 19개 텍스처 단위로 재질을 묶는다.
         if(materialPages.empty())materialPages.emplace_back();
         for(auto& page:materialPages) {page.textures.clear();page.materials.clear();}
@@ -128,6 +142,10 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
             bindings.push_back({21,0,frameLighting.clusterConstants.buffer,nullptr,0,sizeof(RendererClusterConstants),{}});
             bindings.push_back({26,0,nullptr,frameLighting.areaMatrix.texture ? frameLighting.areaMatrix.texture : defaultMaterialTextures[2],0,0,{}});
             bindings.push_back({27,0,nullptr,frameLighting.areaAmplitude.texture ? frameLighting.areaAmplitude.texture : defaultMaterialTextures[2],0,0,{}});
+            bindings.push_back({22,0,nullptr,advanced && frameAmbientOcclusion ? frameAmbientOcclusion : defaultMaterialTextures[0],0,0,{}});
+            bindings.push_back({23,0,nullptr,environment->specular.texture,0,0,{}});
+            bindings.push_back({24,0,nullptr,environment->diffuse.texture,0,0,{}});
+            bindings.push_back({14,0,environment->constantBuffer,nullptr,0,sizeof(RenderEnvironmentConstants),{}});
 			if(shadowsEnabled)
 			{
 				bindings.push_back({28, 0, nullptr, shadowDepthTarget, 0, 0, {}});
@@ -153,10 +171,27 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
 			}
 			else
 			{
+				std::array<RHI::PipelineHandle,4> pagePipelines={};
+				std::array<RHI::ResourceSetHandle,4> pageSets={};
+				uint32_t pageSetCount=0;
 				for(auto index : page.materials)
 				{
-					sets[index] = CachedResourceSet(MaterialPipeline(scene.Materials()[index]),bindings,mainSets);
-					if(!sets[index]) return false;
+					const auto selectedPipeline=MaterialPipeline(scene.Materials()[index]);
+					RHI::ResourceSetHandle selectedSet=nullptr;
+					if(config.enableResourceSetCache)
+						for(uint32_t slot=0;slot<pageSetCount;++slot)
+							if(pagePipelines[slot]==selectedPipeline) {selectedSet=pageSets[slot];break;}
+					if(!selectedSet)
+					{
+						selectedSet=CachedResourceSet(selectedPipeline,bindings,mainSets);
+						if(!selectedSet) return false;
+						if(config.enableResourceSetCache && pageSetCount<pagePipelines.size())
+						{
+							pagePipelines[pageSetCount]=selectedPipeline;
+							pageSets[pageSetCount++]=selectedSet;
+						}
+					}
+					sets[index]=selectedSet;
 				}
 			}
 		}

@@ -280,6 +280,9 @@ void Renderer::Impl::SwapResources(Impl& other)
     swap(materialStates,other.materialStates);
     swap(vertexShader,other.vertexShader);
     swap(fragmentShader,other.fragmentShader);
+    swap(depthPrepassFragmentShader,other.depthPrepassFragmentShader);
+    swap(noAreaFragmentShader,other.noAreaFragmentShader);
+    swap(noAreaDepthPrepassFragmentShader,other.noAreaDepthPrepassFragmentShader);
     swap(shadowVertexShader,other.shadowVertexShader);
     swap(shadowFragmentShader,other.shadowFragmentShader);
     swap(canvasVertexShader,other.canvasVertexShader);
@@ -288,10 +291,14 @@ void Renderer::Impl::SwapResources(Impl& other)
     swap(toneFragmentShader,other.toneFragmentShader);
     swap(pipeline,other.pipeline);
     swap(materialPipelines,other.materialPipelines);
+    swap(depthPrepassPipelines,other.depthPrepassPipelines);
+    swap(noAreaMaterialPipelines,other.noAreaMaterialPipelines);
+    swap(noAreaDepthPrepassPipelines,other.noAreaDepthPrepassPipelines);
     swap(wireframePipelines,other.wireframePipelines);
     swap(mainEntityOrder,other.mainEntityOrder);
     swap(shadowPipeline,other.shadowPipeline);
     swap(shadowMaterialPipelines,other.shadowMaterialPipelines);
+    swap(compactShadowPipelines,other.compactShadowPipelines);
     swap(canvasPipeline,other.canvasPipeline);
     swap(canvasWhite,other.canvasWhite);
     swap(canvasImages,other.canvasImages);
@@ -337,12 +344,19 @@ void Renderer::Impl::SwapResources(Impl& other)
     swap(gpuVisibility,other.gpuVisibility);swap(visibilityDraws,other.visibilityDraws);
     swap(visibilityKeys,other.visibilityKeys);swap(visibilityScene,other.visibilityScene);
     swap(visibilityActive,other.visibilityActive);
+    swap(cpuDrawInputs,other.cpuDrawInputs);swap(cpuDraws,other.cpuDraws);
+    swap(cpuBatchIndices,other.cpuBatchIndices);swap(cpuInstanceEntities,other.cpuInstanceEntities);
+    swap(cpuMeshCounts,other.cpuMeshCounts);
+    swap(cpuInstanceScratch,other.cpuInstanceScratch);swap(cpuInstanceBytes,other.cpuInstanceBytes);
+    swap(cpuInstanceBuffer,other.cpuInstanceBuffer);swap(cpuInstanceReady,other.cpuInstanceReady);
+    swap(cpuBatchesActive,other.cpuBatchesActive);swap(cpuCulledEntities,other.cpuCulledEntities);
     swap(mainSetScratch,other.mainSetScratch);
     swap(shadowSetScratch,other.shadowSetScratch);
     swap(mainBindingScratch,other.mainBindingScratch);
     swap(mainCombinedBindingScratch,other.mainCombinedBindingScratch);
     swap(shadowBindingScratch,other.shadowBindingScratch);
-    swap(shadowBoundsScratch,other.shadowBoundsScratch);
+    swap(shadowCasterScratch,other.shadowCasterScratch);
+    swap(shadowViewScratch,other.shadowViewScratch);
 
     // Scene uploads use the same device and fixed vertex/image formats across
     // settings and shader changes. Keep their ownership and committed states;
@@ -538,6 +552,14 @@ RHI::PipelineHandle Renderer::Impl::MaterialPipeline(const MaterialDesc& materia
         return wireframePipelines[(material.doubleSided ? 1u : 0u) | (mirrored ? 2u : 0u)];
     const uint32_t variant=(material.alphaMode==MaterialAlphaMode::Blend ? 2u : 0u) |
         (material.doubleSided ? 1u : 0u) | (mirrored ? 4u : 0u);
+    if(frameNoAreaLights && stockDrawInputs && UsesStockGeometry() && !wireframeActive)
+    {
+        const auto selected=frameOpaqueDepthComplete && material.alphaMode!=MaterialAlphaMode::Blend
+            ? noAreaDepthPrepassPipelines[variant] : noAreaMaterialPipelines[variant];
+        if(selected)return selected;
+    }
+    if(frameOpaqueDepthComplete && material.alphaMode!=MaterialAlphaMode::Blend)
+        return depthPrepassPipelines[variant];
     return variant ? materialPipelines[variant-1] : pipeline;
 }
 bool Renderer::Impl::UsesBindlessMaterials() const
@@ -545,7 +567,7 @@ bool Renderer::Impl::UsesBindlessMaterials() const
 bool Renderer::Impl::SupportsBindlessMaterials() const
 {
     // 사용자 Fragment는 기본 레이아웃 계약을 유지한다. 기본 셰이더의 최적화 가능 여부는 RHI에 묻는다.
-    if(!shaderSources.bytes[MeshFragment].empty() || UsesAdvancedRendering()) return false;
+    if(!shaderSources.bytes[MeshFragment].empty()) return false;
     std::vector<RHI::ResourceBindingLayout> bindings;
     return device->Supports(MeshLayout(true, bindings));
 }
@@ -563,20 +585,40 @@ bool Renderer::Impl::InitializeMesh(RHI::TextureHandle output,bool compositeAlph
 
 	if(!vertexShader) vertexShader = nativeDevice->CreateShader(ShaderDescription(MeshVertex,stockShaders.meshVertex));
 	if(!fragmentShader) fragmentShader = nativeDevice->CreateShader(ShaderDescription(MeshFragment,stockShaders.meshFragment));
+    const bool depthPrepass=UsesStockGeometry() && UsesAdvancedRendering();
+    if(depthPrepass && !depthPrepassFragmentShader)
+        depthPrepassFragmentShader=nativeDevice->CreateShader(DefaultDepthPrepassFragment(shadows,UsesBindlessMaterials()));
+    if(UsesStockGeometry())
+    {
+        if(!noAreaFragmentShader)
+        {
+            const auto desc=DefaultNoAreaFragment(shadows,UsesBindlessMaterials(),false);
+            if(desc.binary && desc.binarySize)noAreaFragmentShader=nativeDevice->CreateShader(desc);
+        }
+        if(depthPrepass && !noAreaDepthPrepassFragmentShader)
+        {
+            const auto desc=DefaultNoAreaFragment(shadows,UsesBindlessMaterials(),true);
+            if(desc.binary && desc.binarySize)noAreaDepthPrepassFragmentShader=nativeDevice->CreateShader(desc);
+        }
+    }
 	if(shadows && !shadowVertexShader)
 	{
 		shadowVertexShader = nativeDevice->CreateShader(ShaderDescription(ShadowVertex,stockShaders.shadowVertex));
 	}
 	if(shadows && shaderSources.bytes[ShadowVertex].empty() && !shadowFragmentShader)
 		shadowFragmentShader = nativeDevice->CreateShader(DefaultShadowFragment());
-	if(vertexShader == nullptr || fragmentShader == nullptr ||
+	if(vertexShader == nullptr || fragmentShader == nullptr || (depthPrepass && !depthPrepassFragmentShader) ||
 		(shadows && shadowVertexShader == nullptr) ||
 		(shadows && shaderSources.bytes[ShadowVertex].empty() && !shadowFragmentShader)) return false;
     nativeDevice->DestroyPipeline(pipeline);pipeline=nullptr;
     for(auto& value:materialPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
+    for(auto& value:depthPrepassPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
+    for(auto& value:noAreaMaterialPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
+    for(auto& value:noAreaDepthPrepassPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
     for(auto& value:wireframePipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
     nativeDevice->DestroyPipeline(shadowPipeline);shadowPipeline=nullptr;
     for(auto& value:shadowMaterialPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
+    for(auto& value:compactShadowPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
 	if(!BuildPipelineStates(nativeDevice,colorFormat,compositeAlpha)) return false;
     meshColorFormat=colorFormat;
     meshCompositeAlpha=compositeAlpha;
@@ -601,12 +643,16 @@ void Renderer::Impl::Shutdown()
     m_profiler.ResetGpuQueries();
     for(auto* texture:{depthStencilTarget,shadowDepthTarget,hdrTarget})if(texture)device->DestroyTexture(texture);
     for(auto* texture:defaultMaterialTextures)if(texture)device->DestroyTexture(texture);
-    for(auto* buffer:{lightingBuffer,shadowMatrixBuffer,instanceBuffer,materialIndexBuffer})if(buffer)device->DestroyBuffer(buffer);
+    for(auto* buffer:{lightingBuffer,shadowMatrixBuffer,instanceBuffer,materialIndexBuffer,cpuInstanceBuffer})if(buffer)device->DestroyBuffer(buffer);
     for(auto* value:{pipeline,shadowPipeline,canvasPipeline,tonePipeline})if(value)device->DestroyPipeline(value);
     for(auto* value:materialPipelines)if(value)device->DestroyPipeline(value);
+    for(auto* value:depthPrepassPipelines)if(value)device->DestroyPipeline(value);
+    for(auto* value:noAreaMaterialPipelines)if(value)device->DestroyPipeline(value);
+    for(auto* value:noAreaDepthPrepassPipelines)if(value)device->DestroyPipeline(value);
     for(auto* value:wireframePipelines)if(value)device->DestroyPipeline(value);
     for(auto* value:shadowMaterialPipelines)if(value)device->DestroyPipeline(value);
-    for(auto* shader:{vertexShader,fragmentShader,shadowVertexShader,shadowFragmentShader,canvasVertexShader,canvasFragmentShader,toneVertexShader,toneFragmentShader})
+    for(auto* value:compactShadowPipelines)if(value)device->DestroyPipeline(value);
+    for(auto* shader:{vertexShader,fragmentShader,depthPrepassFragmentShader,noAreaFragmentShader,noAreaDepthPrepassFragmentShader,shadowVertexShader,shadowFragmentShader,canvasVertexShader,canvasFragmentShader,toneVertexShader,toneFragmentShader})
         if(shader)device->DestroyShader(shader);
 }
 

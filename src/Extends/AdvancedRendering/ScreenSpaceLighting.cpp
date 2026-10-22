@@ -21,6 +21,7 @@
 #include "ScreenSpaceVertex.h"
 #include "ScreenSpaceFragment.h"
 #include "ScreenSpaceLightingFragment.h"
+#include "ScreenDepthCopyFragment.h"
 #include "SurfaceDebugFragment.h"
 #endif
 
@@ -185,6 +186,7 @@ void ScreenSpaceLighting::DestroySets()
     for(const auto& cached:m_surfaceSets) m_device->DestroyResourceSet(cached.second);
     for(const auto& cached:m_screenSets) m_device->DestroyResourceSet(cached.set);
     for(const auto& cached:m_denoiseSets) m_device->DestroyResourceSet(cached.set);
+    m_device->DestroyResourceSet(m_depthCopySet);m_depthCopySet=nullptr;
     m_denoiseSets.clear();
     m_surfaceSets.clear();m_screenSets.clear();m_drawSets.clear();
 }
@@ -197,6 +199,9 @@ void ScreenSpaceLighting::Reset()
         for(uint32_t effect=0;effect<2;++effect) ReleaseDenoise(effect);
         for(auto* image:m_textures) m_device->DestroyTexture(image);
         m_device->DestroyTexture(m_whiteAO);
+        m_device->DestroyTexture(m_depthPlane);
+        m_device->DestroyPipeline(m_depthCopyPipeline);
+        m_device->DestroyShader(m_depthCopyShader);
         for(auto* pipeline:m_surfacePipelines) m_device->DestroyPipeline(pipeline);
         m_device->DestroyPipeline(m_screenPipeline);m_device->DestroyPipeline(m_lightingPipeline);
         m_device->DestroyPipeline(m_debugPipeline);
@@ -209,6 +214,9 @@ void ScreenSpaceLighting::Reset()
     m_screenPipeline=m_lightingPipeline=nullptr;m_frameBuffer=m_drawBuffer=nullptr;
     m_debugPipeline=nullptr;m_debugFormat=Format::Unknown;
     m_depth=m_whiteAO=m_colorOutput=nullptr;m_device=nullptr;m_width=m_height=0;
+    m_depthPlane=nullptr;m_depthPlaneState=ResourceState::Undefined;m_depthPlaneHandle={};
+    m_depthCopyPipeline=nullptr;m_depthCopyShader=nullptr;
+    m_depthPlaneAttempted=m_depthPlaneActive=false;
     m_frameReady=m_drawReady=m_historyValid=m_prepared=false;m_draws.clear();m_graph={};
     m_gpuDraws.clear();m_gpuScratch.clear();
     m_effectHistory={};m_denoiseShaders={};m_denoisePipelines={};
@@ -285,6 +293,7 @@ bool ScreenSpaceLighting::CreatePipelines()
     for(uint32_t i=0;i<7;++i)
         screenBindings.push_back({i,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Fragment,{}});
     screenBindings.push_back({7,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Fragment,sampler});
+    screenBindings.push_back({9,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Fragment,{}});
     screenBindings.push_back({12,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Fragment,{}});
     desc={};desc.vertexShader=m_shaders[2];desc.fragmentShader=m_shaders[3];
     desc.topology=PrimitiveTopology::TriangleList;
@@ -295,6 +304,63 @@ bool ScreenSpaceLighting::CreatePipelines()
     desc.fragmentShader=m_shaders[4];
     if(!m_lightingPipeline && !(m_lightingPipeline=m_device->CreateGraphicsPipeline(desc))) return false;
     return true;
+}
+
+void ScreenSpaceLighting::PrepareDepthPlane(bool enabled)
+{
+    m_depthPlaneActive=false;
+    if(!enabled) return;
+    if(!m_depthPlaneAttempted)
+    {
+        m_depthPlaneAttempted=true;
+        // Optional cache-dense copy of Motion.z. R32 retains every finite value
+        // loaded from the original RGBA16F attachment without another half conversion.
+        if(!m_depthCopyShader)
+        {
+#if defined(ENABLE_METAL)
+            const ShaderDesc shader{ShaderStage::Fragment,"screenSpaceDepthCopyFragment",
+                kScreenSpaceMetalLibrary,kScreenSpaceMetalLibrarySize};
+#elif defined(ENABLE_VULKAN) || defined(ENABLE_D3D12)
+            const ShaderDesc shader{ShaderStage::Fragment,"main",kScreenDepthCopyFragment,kScreenDepthCopyFragmentSize};
+#else
+            return;
+#endif
+#if defined(ENABLE_METAL) || defined(ENABLE_VULKAN) || defined(ENABLE_D3D12)
+            m_depthCopyShader=m_device->CreateShader(shader);
+#endif
+        }
+        if(!m_depthCopyShader) return;
+        if(!m_depthCopyPipeline)
+        {
+            SamplerDesc sampler;
+            sampler.minFilter=sampler.magFilter=sampler.mipFilter=SamplerFilter::Nearest;
+            sampler.addressU=sampler.addressV=sampler.addressW=SamplerAddressMode::ClampToEdge;
+            sampler.mipLodBias=sampler.minLod=sampler.maxLod=0;sampler.maxAnisotropy=1;
+            const ResourceBindingLayout bindings[]={{1,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Fragment,{}},
+                {7,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Fragment,sampler}};
+            const ColorAttachmentDesc color{Format::R32_FLOAT,{},ColorWriteMask::All};
+            GraphicsPipelineDesc desc;desc.vertexShader=m_shaders[2];desc.fragmentShader=m_depthCopyShader;
+            desc.topology=PrimitiveTopology::TriangleList;
+            desc.raster={FillMode::Solid,CullMode::None,FrontFace::CounterClockwise,0,0,0};
+            desc.colorAttachments=&color;desc.colorAttachmentCount=1;
+            // The copy never binds slot 9, which is its render destination.
+            desc.layout={bindings,2,0,ShaderStageFlags::None,0};
+            if(!m_device->Supports(desc)) return;
+            m_depthCopyPipeline=m_device->CreateGraphicsPipeline(desc);
+        }
+        if(!m_depthCopyPipeline) return;
+        TextureDesc desc;desc.width=m_width;desc.height=m_height;desc.format=Format::R32_FLOAT;
+        desc.usage=TextureUsage::RenderTarget|TextureUsage::ShaderResource;
+        m_depthPlane=m_device->CreateTexture(desc);m_depthPlaneState=ResourceState::Undefined;
+    }
+    if(!m_depthCopyPipeline || !m_depthPlane) return;
+    if(!m_depthCopySet)
+    {
+        const ResourceBinding motion{1,0,nullptr,m_textures[Motion],0,0,{}};
+        m_depthCopySet=m_device->CreateResourceSet({m_depthCopyPipeline,&motion,1});
+    }
+    // Allocation/pipeline/set failure uses the original Motion.z path.
+    m_depthPlaneActive=m_depthCopySet!=nullptr;
 }
 
 bool ScreenSpaceLighting::Upload(ICommandList& commands,BufferHandle& buffer,bool& ready,
@@ -325,6 +391,7 @@ bool ScreenSpaceLighting::Prepare(IDevice& device,ICommandList& uploads,TextureH
     m_prepared=false;
     if(m_device && m_device!=&device) Reset();
     m_device=&device;
+    m_depthPlaneActive=false;m_depthPlaneHandle={};
     if(!depth || depth->GetDesc().format!=Format::D32_FLOAT) return fail();
     const uint32_t width=depth->GetDesc().width,height=depth->GetDesc().height;
     if(!width || !height || !std::isfinite(settings.aoRadius+settings.rayDistance+settings.thickness) ||
@@ -344,6 +411,8 @@ bool ScreenSpaceLighting::Prepare(IDevice& device,ICommandList& uploads,TextureH
     if(width!=m_width || height!=m_height)
     {
         DestroySets();
+        device.DestroyTexture(m_depthPlane);m_depthPlane=nullptr;
+        m_depthPlaneState=ResourceState::Undefined;m_depthPlaneAttempted=false;
         for(uint32_t i=0;i<ImageCount;++i)
         {
             device.DestroyTexture(m_textures[i]);m_textures[i]=nullptr;m_states[i]=ResourceState::Undefined;
@@ -390,12 +459,14 @@ bool ScreenSpaceLighting::Prepare(IDevice& device,ICommandList& uploads,TextureH
     m_depth=depth;m_settings=settings;m_draws.clear();
     m_gpuScratch.clear();m_gpuScratch.reserve(draws.size());
     m_draws.reserve(draws.size());m_drawSets.reserve(draws.size());
+    const CameraFrustum frustum(camera);
     for(const auto& draw:draws)
     {
         if(!draw.material) return fail();
         const auto& material=*draw.material;
         if(material.alphaMode==MaterialAlphaMode::Blend || !draw.indexCount) continue;
-        if(settings.frustumCulling && !draw.indirectArguments && OutsideCamera(draw.localBounds,draw.model,camera)) continue;
+        // Instance providers already cull each row; representative bounds cannot reject the whole batch.
+        if(settings.frustumCulling && !draw.instanceBuffer && !draw.indirectArguments && frustum.Outside(draw.localBounds,draw.model)) continue;
         if(!draw.vertexBuffer || !draw.indexBuffer) return fail();
         for(auto* texture:draw.textures) if(!texture) return fail();
         DrawGPU gpu;
@@ -445,6 +516,8 @@ bool ScreenSpaceLighting::Prepare(IDevice& device,ICommandList& uploads,TextureH
         if(!set) return fail();
         m_drawSets.push_back(set);
     }
+    // Upload can invalidate descriptor caches, so prepare this optional set last.
+    PrepareDepthPlane(settings.ambientOcclusion || settings.diffuseGI || settings.reflections);
     m_prepared=true;return true;
 }
 
@@ -470,14 +543,17 @@ ResourceSetHandle ScreenSpaceLighting::ScreenResources(PipelineHandle pipeline,T
     TextureHandle hdr,TextureHandle environment,TextureHandle reflection)
 {
     const auto fallback=m_textures[Albedo];
-    const std::array<TextureHandle,7> images={m_textures[Normal],m_textures[Motion],m_textures[Albedo],
-        hdr?hdr:fallback,environment?environment:fallback,source?source:fallback,reflection?reflection:fallback};
+    const bool depthAware=pipeline==m_screenPipeline || pipeline==m_lightingPipeline;
+    const std::array<TextureHandle,8> images={m_textures[Normal],m_textures[Motion],m_textures[Albedo],
+        hdr?hdr:fallback,environment?environment:fallback,source?source:fallback,reflection?reflection:fallback,
+        depthAware && m_depthPlaneActive?m_depthPlane:m_textures[Motion]};
     for(auto& cached:m_screenSets)
         if(cached.pipeline==pipeline && cached.textures==images)
         {cached.unusedFrames=0;return cached.set;}
     std::vector<ResourceBinding> bindings;
     for(uint32_t i=0;i<7;++i) bindings.push_back({i,0,nullptr,images[i],0,0,{}});
     bindings.push_back({12,0,m_frameBuffer,nullptr,0,sizeof(FrameGPU),{}});
+    if(depthAware) bindings.push_back({9,0,nullptr,images[7],0,0,{}});
     auto* set=m_device->CreateResourceSet({pipeline,bindings.data(),static_cast<uint32_t>(bindings.size())});
     if(set) m_screenSets.push_back({images,pipeline,set,0});
     return set;
@@ -486,7 +562,7 @@ ResourceSetHandle ScreenSpaceLighting::ScreenResources(PipelineHandle pipeline,T
 bool ScreenSpaceLighting::Import(RenderGraph& graph)
 {
     if(!m_prepared) return false;
-    m_handles={};m_imported={};
+    m_handles={};m_imported={};m_depthPlaneHandle={};
     const char* names[]={"Surface normal roughness AO","Surface albedo metal","Surface motion depth",
         "AO raw","AO horizontal","AO filtered","Screen diffuse GI","Screen reflection","Screen lit HDR"};
     for(uint32_t i=0;i<ImageCount;++i)
@@ -505,6 +581,12 @@ bool ScreenSpaceLighting::Import(RenderGraph& graph)
         m_handles[AO]=graph.ImportTexture("AO disabled white",m_whiteAO,
             ResourceState::ShaderResource,ResourceState::ShaderResource);
         if(!m_handles[AO].IsValid()) return false;
+    }
+    if(m_depthPlaneActive)
+    {
+        m_depthPlaneHandle=graph.ImportTexture("Screen R32 depth plane",m_depthPlane,
+            m_depthPlaneState,ResourceState::ShaderResource);
+        if(!m_depthPlaneHandle.IsValid()) return false;
     }
     m_frameHandle=graph.ImportBuffer("Screen camera",m_frameBuffer,ResourceState::ConstantBuffer,ResourceState::ConstantBuffer);
     m_drawHandle=graph.ImportBuffer("Surface draws",m_drawBuffer,ResourceState::ShaderResource,ResourceState::ShaderResource);
@@ -577,10 +659,25 @@ bool ScreenSpaceLighting::AddSurface(RenderGraph& graph,RGResourceHandle depth,
             const uint32_t index[4]={i,draw.instanceBuffer?1u:0u,draw.deformationHistoryValid?1u:0u,0};
             commands->SetInlineConstants(0,sizeof(index),index);
             if(draw.indirectArguments) commands->DrawIndexedIndirect(draw.indirectArguments,draw.indirectOffset);
-            else commands->DrawIndexedInstanced(draw.indexCount,1,0,0,0);
+            else commands->DrawIndexedInstanced(draw.indexCount,draw.instanceCount,0,0,0);
         }
         commands->EndRendering();
     });
+    if(m_depthPlaneActive)
+    {
+        auto& copy=graph.AddPass("Screen R32 depth plane exact copy",RHI::RGRecordingMode::Independent);
+        copy.Read(m_handles[Motion],ResourceState::ShaderResource)
+            .Write(m_depthPlaneHandle,ResourceState::RenderTarget)
+            .SetExecute([this](ICommandList* commands) {
+                ColorAttachment color; color.texture=m_depthPlane;
+                color.loadOp=LoadOp::Discard;color.storeOp=StoreOp::Store;
+                commands->BeginRendering({&color,1,nullptr});
+                commands->BindGraphicsPipeline(m_depthCopyPipeline);commands->BindResourceSet(m_depthCopySet);
+                commands->SetViewport({0,0,float(m_width),float(m_height),0,1});
+                commands->SetScissor({0,0,m_width,m_height});
+                commands->DrawInstanced(3,1,0,0);commands->EndRendering();
+            });
+    }
     return true;
 }
 
@@ -608,8 +705,11 @@ bool ScreenSpaceLighting::AddAO(RenderGraph& graph)
         if(!set) return false;
         const std::array<float,4> constants={stage?1.f:0.f,
             stage==1?1.f/m_textures[AO]->GetDesc().width:0.f,
-            stage==2?1.f/m_textures[AO]->GetDesc().height:0.f,float(m_settings.aoFrameIndex%1024)};
-        auto& pass=graph.AddPass(names[stage], RHI::RGRecordingMode::Independent);
+            stage==2?1.f/m_textures[AO]->GetDesc().height:(!stage && m_depthPlaneActive?1.f:0.f),
+            float(m_settings.aoFrameIndex%1024)};
+        const auto name=std::string(names[stage])+(!stage && m_depthPlaneActive?" R32 depth":"");
+        auto& pass=graph.AddPass(name, RHI::RGRecordingMode::Independent);
+        if(m_depthPlaneActive) pass.Read(m_depthPlaneHandle,ResourceState::ShaderResource);
         pass.Read(m_handles[Normal],ResourceState::ShaderResource).Read(m_handles[Motion],ResourceState::ShaderResource)
             .Read(m_handles[Albedo],ResourceState::ShaderResource).Read(m_handles[sources[stage]],ResourceState::ShaderResource)
             .Read(m_frameHandle,ResourceState::ConstantBuffer).Write(m_handles[outputs[stage]],ResourceState::RenderTarget)
@@ -635,6 +735,13 @@ bool ScreenSpaceLighting::AddLighting(RenderGraph& graph,RGResourceHandle hdr,Te
     const bool enabled[]={m_settings.diffuseGI,m_settings.reflections};
     const ImageIndex targets[]={GI,Reflection};
     const char* names[]={"Screen diffuse GI ray march","Screen specular reflection ray march"};
+    const auto& projection=m_uploadedFrame.projection.m;
+    const bool boundedProjection=std::all_of(std::begin(projection),std::end(projection),
+        [](float value){return std::isfinite(value) && std::abs(value)<=1e10f;});
+    // Canonical perspective XY/W rows, including off-center/jitter terms in m[8/9].
+    const bool sparseProjection=boundedProjection && projection[1]==0 && projection[3]==0 &&
+        projection[4]==0 && projection[7]==0 && projection[11]==-1 && projection[12]==0 &&
+        projection[13]==0 && projection[15]==0;
     std::array<TextureHandle,2> filtered={};
     std::array<RGResourceHandle,2> filteredGraph;
     for(uint32_t effect=0;effect<2;++effect)
@@ -642,21 +749,23 @@ bool ScreenSpaceLighting::AddLighting(RenderGraph& graph,RGResourceHandle hdr,Te
         if(!enabled[effect]) continue;
         auto* rays=ScreenResources(m_lightingPipeline,GetAO(),hdrTexture,envTexture,nullptr);
         if(!rays) return fail();
-        auto& pass=graph.AddPass(names[effect], RHI::RGRecordingMode::Independent);
+        auto& pass=graph.AddPass(std::string(names[effect])+(m_depthPlaneActive?" R32 depth":""), RHI::RGRecordingMode::Independent);
+        if(m_depthPlaneActive) pass.Read(m_depthPlaneHandle,ResourceState::ShaderResource);
         pass.Read(hdr,ResourceState::ShaderResource).Read(m_handles[Normal],ResourceState::ShaderResource)
             .Read(m_handles[Motion],ResourceState::ShaderResource).Read(m_handles[Albedo],ResourceState::ShaderResource)
             .Read(m_handles[AO],ResourceState::ShaderResource).Read(m_frameHandle,ResourceState::ConstantBuffer)
             .Write(m_handles[targets[effect]],ResourceState::RenderTarget);
         if(envTexture) pass.Read(environment,ResourceState::ShaderResource);
-        pass.SetExecute([this,rays,target=m_textures[targets[effect]],effect](ICommandList* commands) {
-            DrawScreen(*commands,m_lightingPipeline,rays,target,{2,0,0,float(effect)});
+        pass.SetExecute([this,rays,target=m_textures[targets[effect]],effect,sparseProjection](ICommandList* commands) {
+            DrawScreen(*commands,m_lightingPipeline,rays,target,{2,sparseProjection?1.f:0.f,m_depthPlaneActive?1.f:0.f,float(effect)});
         });
         if(!AddDenoise(graph,effect,m_textures[targets[effect]],m_handles[targets[effect]],filtered[effect],filteredGraph[effect]))
             return fail();
     }
     auto* composite=ScreenResources(m_screenPipeline,filtered[0],hdrTexture,envTexture,filtered[1]);
     if(!composite) return fail();
-    auto& resolve=graph.AddPass("Screen lighting resolve", RHI::RGRecordingMode::Independent);
+    auto& resolve=graph.AddPass(m_depthPlaneActive?"Screen lighting resolve R32 depth":"Screen lighting resolve", RHI::RGRecordingMode::Independent);
+    if(m_depthPlaneActive) resolve.Read(m_depthPlaneHandle,ResourceState::ShaderResource);
     resolve.Read(hdr,ResourceState::ShaderResource).Read(m_handles[Normal],ResourceState::ShaderResource)
         .Read(m_handles[Motion],ResourceState::ShaderResource).Read(m_handles[Albedo],ResourceState::ShaderResource)
         .Read(m_frameHandle,ResourceState::ConstantBuffer).Write(m_handles[Color],ResourceState::RenderTarget);
@@ -664,7 +773,7 @@ bool ScreenSpaceLighting::AddLighting(RenderGraph& graph,RGResourceHandle hdr,Te
     if(m_settings.reflections) resolve.Read(filteredGraph[1],ResourceState::ShaderResource)
         .Read(environment,ResourceState::ShaderResource);
     resolve.SetExecute([this,composite](ICommandList* commands) {
-        DrawScreen(*commands,m_screenPipeline,composite,m_textures[Color],{3,0,0,0});
+        DrawScreen(*commands,m_screenPipeline,composite,m_textures[Color],{3,0,m_depthPlaneActive?1.f:0.f,0});
     });
     m_colorOutput=m_textures[Color];m_graph.color=m_handles[Color];
     return true;
@@ -728,6 +837,7 @@ void ScreenSpaceLighting::CommitFrame()
     m_draws.clear();
     for(uint32_t i=0;i<ImageCount;++i)
         if(m_imported[i]) m_states[i]=ResourceState::ShaderResource;
+    if(m_depthPlaneHandle.IsValid()) m_depthPlaneState=ResourceState::ShaderResource;
     m_historyValid=true;
     for(auto& effect:m_effectHistory)
     {
