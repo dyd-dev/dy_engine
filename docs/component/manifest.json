@@ -41,7 +41,7 @@
     "dyf/Platform/Profiler.h": "9f499b20cf1020a8d244da31818666aed428d5ab9049452c9db7abe78e2bde87",
     "dyf/Platform/Time.h": "4987cf65ea1eb22ef5ca45145ac98684e03729f2803cbdf4b589e7cdf4d080e9",
     "dyf/Platform/Window.h": "e51a70bb9544bdf1715d2e9863e842e387adb38259e2846eba0644c7b9cf62a3",
-    "dyf/Renderer.h": "8c86cd1aa5c0de33b40159ab054b0e628795b1f6d6ba2e358513e8599c3c263c",
+    "dyf/Renderer.h": "328c18e7ebb9e5cf3cc40d81385ed97d71674e0fb41dee06f09ea19b3afaff6c",
     "dyf/RenderExtension.h": "b4b4e696a82a683c1cf9a50974f137fbed2710aa6fa91cd549c36dbf191765eb",
     "dyf/RHI/Barrier.h": "9eb631bd5cc98638ffcf98c5a1081f81ff7b85d33f51d7a7e7690b40e3d08d44",
     "dyf/RHI/Binding.h": "d72073aac5a248933215937b6f79b3af65eeab9aed5cec7c655a4b4315dc9fe2",
