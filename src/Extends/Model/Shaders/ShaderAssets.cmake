@@ -16,10 +16,17 @@ function(dy_embed_model_shader source stage name)
     set(binary "${DY_MODEL_SHADER_GENERATED_DIR}/${name}.bin")
     set(shader_defines ${ARGN})
     if(DY_BACKEND_NORMALIZED STREQUAL "D3D12")
+        if(stage STREQUAL "vert")
+            set(profile vs_6_0)
+        elseif(stage STREQUAL "comp")
+            set(profile cs_6_0)
+        else()
+            message(FATAL_ERROR "Unsupported Model shader stage: ${stage}")
+        endif()
         add_custom_command(
             OUTPUT "${binary}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_MODEL_SHADER_GENERATED_DIR}"
-            COMMAND "${DY_DXC}" -T vs_6_0 -E main ${shader_defines}
+            COMMAND "${DY_DXC}" -T "${profile}" -E main ${shader_defines}
                 -I "${DY_MODEL_SHADER_SOURCE_DIR}" -Fo "${binary}" "${source}"
             DEPENDS "${source}" ${DY_MODEL_SHADER_HELPERS}
             VERBATIM)
@@ -74,6 +81,16 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
         DEPENDS "${source}" ${DY_MODEL_SHADER_HELPERS}
         VERBATIM)
     list(APPEND model_air_files "${air}")
+    set(source "${DY_MODEL_SHADER_SOURCE_DIR}/mesh_skinning_cs.metal")
+    set(air "${DY_MODEL_SHADER_GENERATED_DIR}/modelSkinningCompute.air")
+    add_custom_command(
+        OUTPUT "${air}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_MODEL_SHADER_GENERATED_DIR}"
+        COMMAND "${DY_XCRUN}" ${DY_METAL_XCRUN_ARGS} metal ${DY_METAL_COMPILE_ARGS} -I "${DY_MODEL_SHADER_SOURCE_DIR}"
+            -c "${source}" -o "${air}"
+        DEPENDS "${source}" ${DY_MODEL_SHADER_HELPERS}
+        VERBATIM)
+    list(APPEND model_air_files "${air}")
     set(library "${DY_MODEL_SHADER_GENERATED_DIR}/Model.metallib")
     set(header "${DY_MODEL_SHADER_GENERATED_DIR}/ModelMetalLibrary.h")
     add_custom_command(
@@ -101,10 +118,8 @@ else()
     dy_embed_model_shader("${DY_MODEL_SHADER_SOURCE_DIR}/mesh_shadow_vs.${model_shader_extension}"
         vert ModelShadowShader)
     target_compile_definitions(dy_extend_model PRIVATE DY_MODEL_SHADERS_NATIVE=1)
-    if(DY_BACKEND_NORMALIZED STREQUAL "VULKAN")
-        dy_embed_model_shader("${DY_MODEL_SHADER_SOURCE_DIR}/mesh_skinning_cs.glsl" comp ModelComputeShader)
-        target_compile_definitions(dy_extend_model PRIVATE DY_MODEL_SHADERS_COMPUTE=1)
-    endif()
+    dy_embed_model_shader("${DY_MODEL_SHADER_SOURCE_DIR}/mesh_skinning_cs.${model_shader_extension}" comp ModelComputeShader)
+    target_compile_definitions(dy_extend_model PRIVATE DY_MODEL_SHADERS_COMPUTE=1)
 endif()
 
 add_custom_target(dy_model_shaders DEPENDS ${DY_MODEL_SHADER_HEADERS})

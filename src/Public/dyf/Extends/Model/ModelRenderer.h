@@ -116,7 +116,8 @@ private:
     RHI::PipelineHandle m_computePipeline = nullptr;
     bool m_computeShaderChanged = true;
     std::vector<MeshBuffer> m_meshBuffers;
-    // Lazily grows to maxFramesInFlight; only a completed slot is modified.
+    // Advanced motion history needs one slot beyond maxFramesInFlight.
+    // Only a completed slot which is not the history source is modified.
     std::vector<FrameResources> m_frames;
     uint32_t m_frameIndex = 0;
     RHI::BufferHandle m_influenceBuffer = nullptr;
@@ -133,6 +134,7 @@ private:
     std::vector<size_t> m_historyVertexCounts;
     std::vector<uint64_t> m_geometrySignatures, m_geometryRevisions;
     uint64_t m_nextGeometryRevision = 1;
+    uint64_t m_influenceRevision = 1;
     double m_gpuMilliseconds = -1;
 };
 }

@@ -1,5 +1,6 @@
 #include <dyf/Extends/Model/Model.h>
 #include "ModelLoader.h"
+#include "ModelSkinning.h"
 
 #include <algorithm>
 #include <atomic>
@@ -314,11 +315,11 @@ namespace dyf
 		return true;
 	}
 
-	bool SkinVertex(
+	static bool SkinVertexImpl(
 		const Vertex& source,
 		const SkinInfluence& influence,
 		const std::vector<SkinJointMatrices>& palette,
-		Vertex& outVertex)
+		Vertex& outVertex, bool positionOnly)
 	{
 		if(!std::isfinite(influence.dqBlendWeight)
 			|| influence.dqBlendWeight < 0.0f
@@ -354,7 +355,7 @@ namespace dyf
 			for(size_t matrixIndex = 0u; matrixIndex < 16u; ++matrixIndex)
 			{
 				linearMatrix.m[matrixIndex] += joint.positionMatrix.m[matrixIndex] * weight;
-				fallbackNormalMatrix.m[matrixIndex] += joint.normalMatrix.m[matrixIndex] * weight;
+				if(!positionOnly) fallbackNormalMatrix.m[matrixIndex] += joint.normalMatrix.m[matrixIndex] * weight;
 			}
 
 			if(useDualQuaternion)
@@ -405,12 +406,14 @@ namespace dyf
 					+ (dqMatrix.m[matrixIndex] - linearMatrix.m[matrixIndex]) * influence.dqBlendWeight;
 			}
 		}
+		outVertex = source;
+		outVertex.position = Math::TransformPoint(finalMatrix, source.position);
+		if(positionOnly)
+			return std::isfinite(outVertex.position.x) && std::isfinite(outVertex.position.y)
+				&& std::isfinite(outVertex.position.z);
 		Math::float4x4 finalNormalMatrix = {};
 		if(!Math::InverseTranspose(finalMatrix, finalNormalMatrix))
 			finalNormalMatrix = fallbackNormalMatrix;
-
-		outVertex = source;
-		outVertex.position = Math::TransformPoint(finalMatrix, source.position);
 		outVertex.normal = NormalizeOr(
 			Math::TransformVector(finalNormalMatrix, source.normal),
 			Math::float3(0.0f, 0.0f, 1.0f));
@@ -428,6 +431,21 @@ namespace dyf
 		return std::isfinite(outVertex.position.x) && std::isfinite(outVertex.position.y)
 			&& std::isfinite(outVertex.position.z) && std::isfinite(outVertex.normal.x)
 			&& std::isfinite(outVertex.normal.y) && std::isfinite(outVertex.normal.z);
+	}
+
+	bool SkinVertex(const Vertex& source, const SkinInfluence& influence,
+		const std::vector<SkinJointMatrices>& palette, Vertex& outVertex)
+	{
+		return SkinVertexImpl(source, influence, palette, outVertex, false);
+	}
+
+	bool Detail::SkinPosition(const Vertex& source, const SkinInfluence& influence,
+		const std::vector<SkinJointMatrices>& palette, Math::float3& outPosition)
+	{
+		Vertex output;
+		if(!SkinVertexImpl(source, influence, palette, output, true)) return false;
+		outPosition = output.position;
+		return true;
 	}
 
 	bool LoadModelAsset(
