@@ -675,7 +675,10 @@ class GenerateTests(unittest.TestCase):
             with self.subTest(api=expected):
                 self.assertIn(expected, declared)
         self.assertFalse(any("Backends" in header or "Private" in header for header, _, _ in declared))
-        self.assertEqual(list(reference.by_module), ["dyf", "RHI", "Math", "Platform", "확장: Model"])
+        self.assertEqual(list(reference.by_module), [
+            "dyf", "RHI", "Math", "Platform",
+            "확장: Model", "확장: AdvancedRendering", "확장: ImGui", "확장: RenderDoc", "확장: Tracy",
+        ])
         for module, name in (("dyf", "Renderer"), ("RHI", "RenderGraph"), ("Math", "float3"),
                              ("Platform", "DY_PROFILE_FRAME_MARK"), ("확장: Model", "ModelAsset")):
             self.assertIn(name, [decl.name for _, decl in reference.by_module[module]])
@@ -859,6 +862,49 @@ class GenerateTests(unittest.TestCase):
                                           for group in links.nav_subgroups if "open" in group], [(module, category)])
                         self.assertCountEqual(links.nav_urls, [posixpath.basename(url) for url in reference.symbol_urls.values()])
         self.assert_local_links_resolve(pages)
+
+    def test_dyf_and_rhi_layouts_coexist_and_scoped_updates_preserve_rhi(self):
+        project, groups = self.write_group_fixture()
+        output = project / "docs"
+        component = output / "component"
+        component.mkdir(parents=True)
+        self.write_catalog(component, "api_groups.json", groups)
+        frontend = {key: {"summary": key, "example": "// dyf example"}
+                    for keys in groups["dyf"].values() for key in keys}
+        self.write_catalog(component, "frontend_reference.json", frontend)
+        self.write_catalog(component, "rhi_reference.json", {
+            "dyf::RHI::Device": {"summary": "RHI device", "example": "// RHI example"},
+        })
+        self.write_catalog(component, "guides.json", [{
+            "slug": "renderer-inputs", "title": "Inputs", "summary": "Inputs",
+            "sections": [{"id": "use", "title": "Use", "paragraphs": [
+                "[Clear](api:dyf::Canvas#member-clear) [Ready](api:dyf::RHI::Device#member-ready)",
+            ]}],
+        }])
+        with patch.object(generate, "ROOT", project), patch.object(generate, "HERE", component), patch.object(generate, "OUTPUT", output):
+            reference = generate.Reference()
+            pages = reference.build()
+            index = pages["component/api-index.html"]
+            self.assertIn('class="index-section dyf-reference" id="module-dyf"', index)
+            self.assertIn('<section class="index-section" id="module-rhi"><h2>RHI</h2>', index)
+            self.assertEqual(index.count('class="rhi-class-card"'), 3)
+            self.assertIn("// dyf example", pages[reference.url("dyf::Canvas")])
+            rhi_url = reference.url("dyf::RHI::Device")
+            self.assertIn("// RHI example", pages[rhi_url])
+            self.assert_local_links_resolve(pages)
+            for name, source in pages.items():
+                path = output / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(source, encoding="utf-8", newline="\n")
+            frontend["dyf::Canvas"]["summary"] = "Updated Canvas"
+            self.write_catalog(component, "frontend_reference.json", frontend)
+            scoped = generate.Reference().build(scope="dyf")
+            self.assertNotIn(rhi_url, scoped)
+            self.assertEqual((output / rhi_url).read_text(encoding="utf-8"), pages[rhi_url])
+            old_rhi = index[index.index('<section class="index-section" id="module-rhi"'):].split('</section>', 1)[0]
+            self.assertIn(old_rhi, scoped["component/api-index.html"])
+            self.assertIn("Updated Canvas", scoped[reference.url("dyf::Canvas")])
+            self.assert_local_links_resolve(pages | scoped)
 
     def test_authored_api_groups_reject_missing_duplicate_and_misclassified_symbols(self):
         project, catalog = self.write_group_fixture()

@@ -106,7 +106,8 @@
   const input = $("#search-input");
   const results = $("#search-results");
   const status = $("#search-status");
-  const documentRoot = new URL(`${document.body.dataset.docRoot || "."}/`, document.baseURI);
+  const rootPrefix = `${document.body.dataset.docRoot || "."}/`;
+  const documentRoot = document.baseURI.startsWith("http") || document.baseURI.startsWith("file:") ? new URL(rootPrefix, document.baseURI) : null;
   const index = (window.RHI_SEARCH || []).map(entry => ({
     ...entry,
     titleLower: entry.title.toLocaleLowerCase(),
@@ -146,7 +147,7 @@
     for (const entry of matches.slice(0, 60)) {
       const link = document.createElement("a");
       link.className = "search-result";
-      link.href = new URL(entry.url, documentRoot).href;
+      link.href = documentRoot ? new URL(entry.url, documentRoot).href : (rootPrefix === './' ? entry.url : rootPrefix + entry.url);
       const title = document.createElement("div");
       title.className = "result-title";
       const name = document.createElement("code");

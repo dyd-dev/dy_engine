@@ -9,12 +9,12 @@
     "dyf::Platform",
     "dyf::RHI"
   ],
-  "authored_api_count": 106,
+  "authored_api_count": 166,
   "authored_files": {
     "api_owners.json": "57d827a5c171252e444a0425d230c9de410eddd77961438880fe9db7e9d5e92b",
     "api_groups.json": "b7c40e588c10eb7152f0cbfe20d9e6d06c38aebb16e49f1e3d560155a85ccb5b",
     "frontend_reference.json": "d59d1f01050ea61a11ab81b01f516c49ec6dff8cded7f2160a3bf656a09bb424",
-    "rhi_reference.json": "ecef7a3d0527f9f00c3befad7bfbefe812f9185b042d9b01980156b4bfa3aa0c",
+    "rhi_reference.json": "9a2600553c7bab8980024beeb63bb8959b7973817d6c308f908c5bbdd377c73a",
     "guides.json": "4d42cf01a43325cf593816076cc7f5bcba76743fc105893e7d3f92d6a6362cf4"
   },
   "diagnostics": [],
