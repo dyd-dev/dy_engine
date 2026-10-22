@@ -138,7 +138,8 @@ namespace dyf::RHI
         [[nodiscard]] bool Wait(FenceHandle,uint64_t timeoutNanoseconds);
         // 제출 후 backbuffer가 Present 상태일 때 표시를 요청하고 프레임을 끝낸다.
         // resize로 표시를 생략하고 swapchain 재생성을 예약한 경우도 정상 프레임 종료로 true를 반환한다.
-        // 상태 오류는 프레임을 유지한다. 네이티브 표시 요청의 실제 실패는 프레임을 마감하고 false와 stderr로 알린다.
+        // 상태 오류는 프레임을 유지한다. 표시 요청 실패는 false와 stderr로 알린다.
+        // 비동기 표시에서는 true가 요청 접수를 뜻하며, 이후 네이티브 실패는 다음 BeginFrame/Present/WaitIdle에서 보고한다.
         [[nodiscard]] bool Present();
 
 		// Swapchain 소유 handle이다. DestroyTexture에 전달하지 않는다.

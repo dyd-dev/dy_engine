@@ -462,6 +462,8 @@ namespace dyf::RHI
             static_cast<uint32_t>(recording.lists.size()), effectiveThreads)) return false;
         if(live)for(const auto& dependency:m_dependencies)
             passes[dependency.after]->RecordLiveResourceLink(passEvents[dependency.before],passEvents[dependency.after]);
+        if(live)for(auto* list:recording.lists)
+            list->FlushLiveDeferred(list->m_liveDeferred->m_liveContext);
         commandLists.swap(recording.lists);
         liveFrame.SetOutcome(Platform::LiveOutcome::Observed);
         return true;

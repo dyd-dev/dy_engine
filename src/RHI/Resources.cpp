@@ -8,10 +8,40 @@
 #include "Query.h"
 #include "../Platform/Profiler/RhiProfiler.h"
 #include <chrono>
+#include <deque>
+#include <stdexcept>
 #include <thread>
 
 namespace dyf::RHI
 {
+ResourceSet::ResourceSet(const ResourceSetDesc& desc) : m_pipeline(desc.pipeline)
+{
+    if(!m_pipeline || (desc.bindingCount && !desc.bindings))
+        throw std::runtime_error("Resource-set bindings or pipeline are missing.");
+    if(desc.bindingCount)m_bindings.assign(desc.bindings,desc.bindings+desc.bindingCount);
+    m_stateRequirements.reserve(m_bindings.size());
+    // Layouts, bindings and texture dimensions are immutable. Resolve their
+    // requirements once; recording still checks the current state after barriers.
+    for(const auto& binding:m_bindings)
+    {
+        const auto* layout=FindLayoutBinding(m_pipeline->GetLayout(),binding.binding);
+        if(!layout)throw std::runtime_error("Resource-set binding is absent from the pipeline layout.");
+        StateRequirement requirement;
+        requirement.buffer=binding.buffer;requirement.texture=binding.texture;
+        if(binding.buffer)
+            requirement.state=layout->type==ResourceBindingType::ConstantBuffer?ResourceState::ConstantBuffer:
+                layout->type==ResourceBindingType::ReadWriteStorageBuffer?ResourceState::UnorderedAccess:ResourceState::ShaderResource;
+        else
+        {
+            requirement.state=layout->type==ResourceBindingType::StorageTexture?ResourceState::UnorderedAccess:ResourceState::ShaderResource;
+            if(!ResolveBindingSubresources(binding.texture,binding,layout->type,requirement.firstMip,
+                requirement.mipCount,requirement.firstLayer,requirement.layerCount))
+                throw std::runtime_error("Resource-set texture subresources are invalid.");
+        }
+        m_stateRequirements.push_back(requirement);
+    }
+}
+
 Texture::~Texture()
 {
     Platform::RetireLiveObject(Platform::FindLiveObject(this));
@@ -36,9 +66,25 @@ const char* LiveTopology(PrimitiveTopology topology) noexcept
 }
 struct IDevice::RecordingState
 {
-    explicit RecordingState(uint32_t count) : threadCount(count), pool(count) {}
-    uint32_t threadCount;
-    ThreadPool pool;
+    static constexpr size_t CommandLimit=256;
+    static constexpr uint64_t PayloadLimit=64u*1024u*1024u;
+    struct DeleteCommand
+    {
+        void operator()(ICommandList* commands) const {delete commands;}
+    };
+    using CommandOwner=std::unique_ptr<ICommandList,DeleteCommand>;
+    struct CachedCommand
+    {
+        CommandOwner commands;
+        uint64_t bytes=0;
+    };
+    uint32_t threadCount=0;
+    std::shared_ptr<ThreadPool> pool;
+    // FIFO keeps large geometry payloads near their previous pass positions.
+    // Entries may still be in flight; Acquire checks completion before reset.
+    std::deque<CachedCommand> commands;
+    uint64_t commandBytes=0;
+    bool reportedReuse=false;
 };
 
 IDevice::IDevice()
@@ -69,14 +115,18 @@ void IDevice::RecordParallel(uint32_t count, uint32_t threadCount,
         for(uint32_t i = 0; i < count; ++i) record(i);
         return;
     }
-    std::shared_ptr<RecordingState> recording;
+    std::shared_ptr<ThreadPool> recording;
     {
         std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
-        if(!m_recording || m_recording->threadCount != threadCount)
-            m_recording = std::make_shared<RecordingState>(threadCount);
-        recording = m_recording;
+        if(!m_recording) m_recording=std::make_shared<RecordingState>();
+        if(!m_recording->pool || m_recording->threadCount!=threadCount)
+        {
+            auto pool=std::make_shared<ThreadPool>(threadCount);
+            m_recording->pool=std::move(pool);m_recording->threadCount=threadCount;
+        }
+        recording=m_recording->pool;
     }
-    auto& pool = recording->pool;
+    auto& pool = *recording;
     if(pool.GetThreadCount() <= 1 || pool.IsWorkerThread())
     {
         for(uint32_t i = 0; i < count; ++i) record(i);
@@ -345,8 +395,12 @@ void IDevice::Track(void* handle, void (*destroy)(IDevice&, void*),
         {
             std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
             const uintptr_t key=reinterpret_cast<uintptr_t>(object);
-            for(auto it=m_resourceStates.begin();it!=m_resourceStates.end();)
-                if(std::get<0>(it->first)==key)it=m_resourceStates.erase(it);else ++it;
+            // All subresources for one object form a contiguous key range. Most
+            // releases (sets, pipelines, shaders) have no state entries at all.
+            const auto first=m_resourceStates.lower_bound({key,0,0});
+            auto last=first;
+            while(last!=m_resourceStates.end() && std::get<0>(last->first)==key)++last;
+            m_resourceStates.erase(first,last);
             if(m_nativeResourcesAlive) {destroy(*this, object);Platform::RetireLiveObject(liveId);}
             else
             {
@@ -376,6 +430,9 @@ void IDevice::ReleaseResources()
 {
     StopLiveProfiling();
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+    // Cached wrappers are not user handles. Destroy them while this device is
+    // alive, before walking the set their destructors remove themselves from.
+    if(m_recording) {m_recording->commands.clear();m_recording->commandBytes=0;}
     std::vector<std::shared_ptr<void>> references;
     std::vector<std::shared_ptr<const ICommandList::ReferenceSnapshot>> snapshots;
     for(auto* commands : m_recordedCommands)
@@ -397,21 +454,53 @@ void IDevice::ReleaseResources()
 ICommandList* IDevice::AcquireCommandList()
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+    if(!m_recording) m_recording=std::make_shared<RecordingState>();
     const auto rollback = [this](ICommandList* value) {
         m_userCommands.erase(value);
         delete value;
     };
-    std::unique_ptr<ICommandList, decltype(rollback)> owner(ICommandList::CreateRecorded(), rollback);
+    ICommandList* cached=nullptr;
+    if(!m_recording->commands.empty())
+    {
+        const uint64_t completed=GetCompletedSubmissionNative();
+        for(auto entry=m_recording->commands.begin();entry!=m_recording->commands.end();++entry)
+        {
+            if(entry->commands->m_completion>completed) continue;
+            cached=entry->commands.release();
+            m_recording->commandBytes-=entry->bytes;
+            m_recording->commands.erase(entry);
+            break;
+        }
+    }
+    std::unique_ptr<ICommandList, decltype(rollback)> owner(cached?cached:ICommandList::CreateRecorded(), rollback);
     auto* commands = owner.get();
     commands->m_owner = this;
     if(auto* live=GetLiveState())
     {
         commands->m_liveDeferred->m_livePosition={Platform::RegisterLiveObject(commands,
-            {Platform::LiveObjectKind::CommandList,live->device,Platform::GetLiveContext().owner,0,0,"Command list"}),1,0};
+            {Platform::LiveObjectKind::CommandList,live->device,Platform::GetLiveContext().owner,0,0,"Command list"}),cached?0u:1u,0};
     }
     m_userCommands.insert(commands);
     m_recordedCommands.insert(commands);
-    BeginLiveRecording(*commands);
+    if(cached)
+    {
+        // Reset is still the single initialization path, including state maps,
+        // references, frame generation and profiling contexts. Native lists are
+        // never put in this cache and retain their existing fence-owned pools.
+        commands->m_uploadPageReuse=commands->m_uploadSuballocation=true;
+        commands->m_liveDeferred->m_liveReplayQuery=nullptr;commands->m_liveDeferred->m_liveFirstQuery=0;
+        // Completion was checked under this same device lock above; do not poll
+        // the native fence a second time inside ResetCommandList.
+        commands->m_completion=0;
+        if(!ResetCommandList(commands)) return nullptr;
+        if(!m_recording->reportedReuse)
+        {
+            std::fprintf(stderr,"[RHI] Reusing completed recorded command-list storage (FIFO; limit=%zu, payload=%llu bytes).\n",
+                RecordingState::CommandLimit,static_cast<unsigned long long>(RecordingState::PayloadLimit));
+            m_recording->reportedReuse=true;
+        }
+    }
+    else BeginLiveRecording(*commands);
     return owner.release();
 }
 
@@ -486,9 +575,14 @@ bool IDevice::ResetCommandList(ICommandList* commands)
     }
     DiscardLivePrepared(commands,Platform::LiveOutcome::Discarded);
     commands->m_commands.clear();
+    commands->m_commandBytes.clear();
     commands->m_stateOperations.clear();
     commands->m_recordedStates.clear();
     commands->m_requiredResourceSets.clear();
+    commands->m_liveDeferred->ClearRecentStates();
+#ifdef DY_LIVE_PROFILING_ENABLED
+    commands->m_liveDeferred->objectIds.clear();
+#endif
     commands->m_references.clear();
     commands->m_referenceHandles.clear();
     commands->m_sharedReferences.reset();
@@ -513,7 +607,55 @@ bool IDevice::ResetCommandList(ICommandList* commands)
 void IDevice::DestroyCommandList(ICommandList* commands)
 {
     std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
-    if(commands && m_userCommands.erase(commands)) delete commands;
+    if(!commands || !m_userCommands.count(commands)) return;
+    // A failed, open, unsubmitted or prepared-but-unsubmitted list follows the
+    // original destruction path. Only successful recorded storage is cached.
+    if(m_recording && commands->m_recordingClosed && !commands->m_recordingFailed &&
+        commands->m_completion && !commands->m_preparedNative &&
+        m_recording->commands.size()<RecordingState::CommandLimit)
+    {
+        uint64_t bytes=0;
+        const auto account=[&](size_t count,size_t stride) {
+            if(count>(RecordingState::PayloadLimit-bytes)/stride) return false;
+            bytes+=count*stride;return true;
+        };
+        if(account(commands->m_commandBytes.capacity(),sizeof(uint8_t)) &&
+            account(commands->m_commands.capacity(),sizeof(decltype(commands->m_commands)::value_type)) &&
+            account(commands->m_stateOperations.capacity(),sizeof(ICommandList::StateOperation)) &&
+            account(commands->m_references.capacity(),sizeof(std::shared_ptr<void>)) &&
+            account(commands->m_colorFormats.capacity(),sizeof(Format)) &&
+            bytes<=RecordingState::PayloadLimit-m_recording->commandBytes)
+        {
+            // Release the same CPU owners/closures as deletion, without freeing
+            // their payload capacity. Native submissions already own GPU leases.
+            commands->FinishLiveRecording(Platform::LiveOutcome::Discarded,true);
+            DiscardLivePrepared(commands,Platform::LiveOutcome::Discarded);
+            commands->DiscardLiveDeferred();
+            Platform::RetireLiveObject(commands->m_liveDeferred->m_livePosition.commandList);
+            commands->m_liveDeferred->m_livePosition={};
+            commands->m_commands.clear();commands->m_commandBytes.clear();
+            commands->m_stateOperations.clear();commands->m_recordedStates.clear();commands->m_requiredResourceSets.clear();
+            commands->m_liveDeferred->ClearRecentStates();
+            commands->m_references.clear();commands->m_referenceHandles.clear();commands->m_sharedReferences.reset();
+            commands->m_vertexBuffers.clear();commands->m_colorFormats.clear();
+#ifdef DY_LIVE_PROFILING_ENABLED
+            commands->m_liveDeferred->objectIds.clear();
+#endif
+            m_userCommands.erase(commands);
+            try
+            {
+                m_recording->commands.push_back({RecordingState::CommandOwner(commands),bytes});
+                m_recording->commandBytes+=bytes;
+                return;
+            }
+            catch(...)
+            {
+                // The temporary unique_ptr has destroyed the uncached wrapper.
+                return;
+            }
+        }
+    }
+    m_userCommands.erase(commands);delete commands;
 }
 
 bool IDevice::PrepareCommandLists(ICommandList* const* commands, uint32_t count, uint32_t threadCount)
@@ -552,7 +694,8 @@ bool IDevice::PrepareCommandLists(ICommandList* const* commands, uint32_t count,
                 native->m_owner = this;
                 m_recordedCommands.insert(native);
                 native->m_references = commands[i]->m_references;
-                native->m_referenceHandles = commands[i]->m_referenceHandles;
+                // Native replay calls *Native directly; only the shared owners
+                // are needed here, not the logical recorder's Track lookup index.
                 native->m_sharedReferences = commands[i]->m_sharedReferences;
                 const auto slot=ReserveLiveQuery(commands[i]);
                 if(slot!=UINT32_MAX&&m_live)
@@ -618,6 +761,10 @@ bool IDevice::Submit(ICommandList** commands, uint32_t count)
     }
     // 제출이 성공할 때까지 전역 상태를 유지하고 배리어로 바뀐 상태만 따로 보관한다.
     ICommandList::StateMap states;
+    // Texture requirements commonly visit consecutive mip levels. Reuse the
+    // previous map node or its successor before searching the full state map.
+    // This cursor lives only in this validation loop; barriers remain in states.
+    auto lastOriginal=m_resourceStates.cend();
     for(uint32_t i=0;i<count;++i)for(const auto& operation:commands[i]->m_stateOperations)
     {
         const auto key=std::make_tuple(operation.resource,operation.mip,operation.layer);
@@ -626,8 +773,15 @@ bool IDevice::Submit(ICommandList** commands, uint32_t count)
         if(changed!=states.end()) current=&changed->second;
         else
         {
-            const auto original=m_resourceStates.find(key);
-            if(original!=m_resourceStates.end()) current=&original->second;
+            auto original=lastOriginal;
+            if(original==m_resourceStates.cend() || original->first!=key)
+            {
+                if(original!=m_resourceStates.cend())++original;
+                if(original==m_resourceStates.cend() || original->first!=key)
+                    original=m_resourceStates.find(key);
+                lastOriginal=original;
+            }
+            if(original!=m_resourceStates.cend()) current=&original->second;
         }
         if(!current || *current!=operation.before)
         {

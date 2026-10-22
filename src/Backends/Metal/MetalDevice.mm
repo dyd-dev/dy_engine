@@ -484,6 +484,20 @@ bool MetalDevice::SupportsSamplerNative(const RHI::SamplerDesc& desc) const
     return m_impl && m_impl->device != nil && MetalPipeline::SupportsSampler(desc);
 }
 
+bool MetalDevice::SupportsLinearFiltering(RHI::Format format) const noexcept
+{
+    if(!m_impl || m_impl->device==nil || format!=RHI::Format::R32G32B32A32_FLOAT)return false;
+    // Older SDKs cannot name this optional query; older runtimes retain manual filtering.
+    // https://developer.apple.com/documentation/metal/mtldevice/supports32bitfloatfiltering
+#if (TARGET_OS_OSX && defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 110000) || \
+    ((TARGET_OS_IOS || TARGET_OS_MACCATALYST) && defined(__IPHONE_OS_VERSION_MAX_ALLOWED) && __IPHONE_OS_VERSION_MAX_ALLOWED >= 140000)
+    if(@available(macOS 11.0, iOS 14.0, macCatalyst 14.0, *))
+        if([m_impl->device respondsToSelector:@selector(supports32BitFloatFiltering)])
+            return [m_impl->device supports32BitFloatFiltering];
+#endif
+    return false;
+}
+
 bool MetalDevice::SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc& desc) const
 {
     return m_impl && MetalPipeline::SupportsGraphics(desc, (__bridge void*)m_impl->device);

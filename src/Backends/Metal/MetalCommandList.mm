@@ -216,18 +216,15 @@ namespace dyf::Backends
 			RHI::ResourceState second = RHI::ResourceState::Undefined)
 		{
 			const auto found = impl->bufferStates.find(buffer);
-			if(found != impl->bufferStates.end() &&
-				found->second != first &&
-				(second == RHI::ResourceState::Undefined || found->second != second))
-			{
-				return false;
-			}
+			if(found != impl->bufferStates.end())
+				return found->second == first || (second != RHI::ResourceState::Undefined && found->second == second);
 			MetalOperation operation = {};
 			operation.kind = OperationKind::BufferRequirement;
 			operation.buffer = buffer;
 			operation.before = first;
 			operation.after = second;
 			impl->operations.push_back(operation);
+			if(second == RHI::ResourceState::Undefined) impl->bufferStates.emplace(buffer, first);
 			return true;
 		}
 
@@ -242,12 +239,8 @@ namespace dyf::Backends
 		{
 			const auto key = TextureKey(texture, mipLevel, arrayLayer);
 			const auto found = impl->textureStates.find(key);
-			if(found != impl->textureStates.end() &&
-				found->second != first &&
-				(second == RHI::ResourceState::Undefined || found->second != second))
-			{
-				return false;
-			}
+			if(found != impl->textureStates.end())
+				return found->second == first || (second != RHI::ResourceState::Undefined && found->second == second);
 			MetalOperation operation = {};
 			operation.kind = OperationKind::TextureRequirement;
 			operation.texture = texture;
@@ -256,6 +249,7 @@ namespace dyf::Backends
 			operation.before = first;
 			operation.after = second;
 			impl->operations.push_back(operation);
+			if(second == RHI::ResourceState::Undefined) impl->textureStates.emplace(key, first);
 			return true;
 		}
 
@@ -284,6 +278,17 @@ namespace dyf::Backends
 		void RetainResource(ImplType* impl, id<MTLResource> resource)
 		{
 			if(resource != nil) [impl->retainedResources addObject:resource];
+		}
+
+		template<typename ImplType>
+		MetalUploadArena::Allocation UploadConstants(ImplType* impl, const void* data, size_t size)
+		{
+			if(!impl->uploadArena || !size) return {};
+			// 256 covers the constant-buffer alignment of both Apple and Mac GPU families.
+			// The command's completion lease keeps every page alive through GPU execution.
+			const auto upload = impl->uploadArena->Allocate(size, 256);
+			if(upload) std::memcpy(upload.data, data, size);
+			return upload;
 		}
 
 		template<typename ImplType>
@@ -803,16 +808,12 @@ namespace dyf::Backends
 			}
 		if(!m_impl->inlineConstants.empty())
 		{
-			id<MTLBuffer> constants = [m_impl->commandQueue.device newBufferWithBytes:m_impl->inlineConstants.data()
-				length:m_impl->inlineConstants.size() options:MTLResourceStorageModeShared];
-			if(constants == nil) Invalidate(m_impl);
+			const auto constants = UploadConstants(m_impl, m_impl->inlineConstants.data(), m_impl->inlineConstants.size());
+			if(!constants) Invalidate(m_impl);
 			else
 			{
-				RetainResource(m_impl, constants);
-				[encoder setBuffer:constants offset:0 atIndex:layout.inlineConstantBinding];
-#if !__has_feature(objc_arc)
-				[constants release];
-#endif
+				[encoder setBuffer:constants.page->buffer offset:static_cast<NSUInteger>(constants.offset)
+					atIndex:layout.inlineConstantBinding];
 			}
 		}
 		const auto* size = pipeline->GetThreadGroupSize();
@@ -1071,31 +1072,25 @@ namespace dyf::Backends
 			m_impl->inlineConstantCoverage.begin() + offset + size,
 			1);
 		if(m_impl->pipeline->IsCompute()) return;
-		id<MTLDevice> device = m_impl->commandQueue.device;
-		id<MTLBuffer> constants = [device newBufferWithBytes:m_impl->inlineConstants.data()
-			length:m_impl->inlineConstants.size()
-			options:MTLResourceStorageModeShared];
-		if(constants == nil)
+		const auto constants = UploadConstants(m_impl, m_impl->inlineConstants.data(), m_impl->inlineConstants.size());
+		if(!constants)
 		{
 			Invalidate(m_impl);
 			return;
 		}
-		RetainResource(m_impl, constants);
 		const RHI::PipelineLayoutDesc& layout = m_impl->pipeline->GetLayout();
 		if(HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Vertex) ||
 			HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Domain))
-			[m_impl->renderEncoder setVertexBuffer:constants
-				offset:0 atIndex:layout.inlineConstantBinding];
+			[m_impl->renderEncoder setVertexBuffer:constants.page->buffer
+				offset:static_cast<NSUInteger>(constants.offset) atIndex:layout.inlineConstantBinding];
 		if(HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Mesh))
 			if(@available(macOS 13.0, iOS 16.0, *))
-				[m_impl->renderEncoder setMeshBuffer:constants offset:0 atIndex:layout.inlineConstantBinding];
+				[m_impl->renderEncoder setMeshBuffer:constants.page->buffer
+					offset:static_cast<NSUInteger>(constants.offset) atIndex:layout.inlineConstantBinding];
 		if(HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Fragment))
-			[m_impl->renderEncoder setFragmentBuffer:constants
-				offset:0 atIndex:layout.inlineConstantBinding];
-		[m_impl->renderEncoder useResource:constants usage:MTLResourceUsageRead];
-#if !__has_feature(objc_arc)
-		[constants release];
-#endif
+			[m_impl->renderEncoder setFragmentBuffer:constants.page->buffer
+				offset:static_cast<NSUInteger>(constants.offset) atIndex:layout.inlineConstantBinding];
+		[m_impl->renderEncoder useResource:constants.page->buffer usage:MTLResourceUsageRead];
 	}
 
 	void MetalCommandList::SetViewportNative(const RHI::Viewport& viewport)
@@ -1297,10 +1292,8 @@ namespace dyf::Backends
 				(HasStage(pipeline->GetLayout().inlineConstantStages, RHI::ShaderStageFlags::Vertex) ||
 				 HasStage(pipeline->GetLayout().inlineConstantStages, RHI::ShaderStageFlags::Hull)))
 			{
-				id<MTLBuffer> constants = [m_impl->commandQueue.device
-					newBufferWithBytes:inlineConstants.data() length:inlineConstants.size()
-					options:MTLResourceStorageModeShared];
-				if(constants == nil)
+				const auto constants = UploadConstants(m_impl, inlineConstants.data(), inlineConstants.size());
+				if(!constants)
 				{
 					[compute endEncoding];
 					Invalidate(m_impl);
@@ -1309,11 +1302,8 @@ namespace dyf::Backends
 #endif
 					return;
 				}
-				RetainResource(m_impl, constants);
-				[compute setBuffer:constants offset:0 atIndex:pipeline->GetLayout().inlineConstantBinding];
-#if !__has_feature(objc_arc)
-				[constants release];
-#endif
+				[compute setBuffer:constants.page->buffer offset:static_cast<NSUInteger>(constants.offset)
+					atIndex:pipeline->GetLayout().inlineConstantBinding];
 			}
 			[compute setBuffer:factorBuffer offset:static_cast<NSUInteger>(factorRange.writeOffset)
 				atIndex:MetalPipeline::TessellationFactorBufferIndex];

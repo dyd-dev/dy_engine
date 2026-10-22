@@ -124,6 +124,10 @@ namespace dyf::Platform
 				for(size_t i = 0; i < sample.passes.size(); ++i)
 					passes.push_back({ sample.passes[i], milliseconds(ticks[2 + 2 * i], ticks[3 + 2 * i]), 1 });
 
+#ifdef DY_PROFILER_TRACING_ENABLED
+				PublishValue("GPU graph span ms",milliseconds(ticks[0],ticks[1]),true);
+				if(hasStart) PublishValue("GPU upload to graph ms",milliseconds(start,ticks[0]),true);
+#endif
 				profiler.AddGpuSample(hasStart ? milliseconds(start, ticks[1]) : -1.0, passes);
 			}
 

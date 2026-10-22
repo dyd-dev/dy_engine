@@ -259,13 +259,6 @@ namespace dyf::Backends
 				arrayLayerCount <= texture.GetDesc().depthOrArraySize - range.firstArrayLayer;
 		}
 
-		bool RequiresResourceSet(const RHI::PipelineLayoutDesc& layout)
-		{
-			return layout.bindingCount != 0 &&
-				std::any_of(layout.bindings, layout.bindings + layout.bindingCount,
-					[](const RHI::ResourceBindingLayout& binding)
-					{ return binding.type != RHI::ResourceBindingType::StaticSampler; });
-		}
 	}
 
 	std::shared_ptr<VulkanUploadPool> CreateVulkanUploadPool(const VulkanContext& context)
@@ -317,6 +310,7 @@ namespace dyf::Backends
         std::copy_n(properties.limits.maxViewportDimensions,2,m_maxViewportDimensions);
         std::copy_n(properties.limits.viewportBoundsRange,2,m_viewportBounds);
         m_supportsCompute=(context.physicalInfo->graphicsQueue.queueFlags&VK_QUEUE_COMPUTE_BIT)!=0;
+        // Native pool reuse always starts with a fresh wrapper and empty state caches.
         m_commandStorage=m_commandPools->Acquire();m_commandBuffer=m_commandStorage->buffer;
 	}
 
@@ -330,6 +324,8 @@ namespace dyf::Backends
 
     void VulkanCommandList::GlobalBarrierNative()
     {
+        m_validatedResourceSets.clear();
+        ClearRecentBufferStates();
         VkMemoryBarrier barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -346,6 +342,8 @@ namespace dyf::Backends
 			return;
 		}
 		if (count == 0) return;
+        m_validatedResourceSets.clear();
+        ClearRecentBufferStates();
 
 		std::vector<VkBufferMemoryBarrier2> bufferBarriers;
 		std::vector<VkImageMemoryBarrier2> imageBarriers;
@@ -506,6 +504,8 @@ namespace dyf::Backends
 
 		m_boundPipeline = nullptr;
 		m_boundResourceSet = nullptr;
+        m_validatedResourceSets.clear();
+        ClearRecentBufferStates();
 		m_vertexBindings.clear();
 		m_indexBuffer = nullptr;
 		m_indexFormat = dyf::RHI::Format::Unknown;
@@ -697,7 +697,7 @@ void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 {
     if(m_closed || m_rendering || !m_boundPipeline || !m_boundPipeline->IsCompute() ||
         !x || !y || !z || x>m_maxComputeGroups[0] || y>m_maxComputeGroups[1] || z>m_maxComputeGroups[2] ||
-        (RequiresResourceSet(m_boundPipeline->GetLayout()) && !m_boundResourceSet) ||
+        (m_boundPipeline->RequiresResourceSet() && !m_boundResourceSet) ||
         std::any_of(m_inlineConstantCoverage.begin(),m_inlineConstantCoverage.end(),[](uint8_t byte){return !byte;}))
     {Fail();return;}
     vkCmdDispatch(m_commandBuffer,x,y,z);
@@ -707,7 +707,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 {
     auto* buffer = dynamic_cast<VulkanBuffer*>(arguments);
     if (m_closed || m_failed || m_rendering || !m_boundPipeline || !m_boundPipeline->IsCompute() ||
-        (RequiresResourceSet(m_boundPipeline->GetLayout()) && !m_boundResourceSet) ||
+        (m_boundPipeline->RequiresResourceSet() && !m_boundResourceSet) ||
         std::any_of(m_inlineConstantCoverage.begin(), m_inlineConstantCoverage.end(), [](uint8_t byte) { return !byte; }) ||
         !RequireBufferState(buffer, RHI::ResourceState::IndirectArgument))
     {
@@ -751,56 +751,33 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 			Fail();
 			return;
 		}
-		const dyf::RHI::PipelineLayoutDesc& layout = m_boundPipeline->GetLayout();
-		for (uint32_t index = 0; index < set->GetBindingCount(); ++index)
-		{
-			const dyf::RHI::ResourceBinding& binding = set->GetBindings()[index];
-			const dyf::RHI::ResourceBindingLayout* declaration =
-				VulkanValidation::FindLayoutBinding(layout, binding.binding);
-			if (declaration == nullptr)
-			{
-				Fail();
-				return;
-			}
-			if (declaration->type == dyf::RHI::ResourceBindingType::ConstantBuffer ||
-				declaration->type == dyf::RHI::ResourceBindingType::ReadOnlyStorageBuffer ||
-				declaration->type == dyf::RHI::ResourceBindingType::ReadWriteStorageBuffer)
-			{
-				VulkanBuffer* buffer = dynamic_cast<VulkanBuffer*>(binding.buffer);
-				const dyf::RHI::ResourceState requiredState =
-					declaration->type == dyf::RHI::ResourceBindingType::ConstantBuffer
-					? dyf::RHI::ResourceState::ConstantBuffer
-					: declaration->type == dyf::RHI::ResourceBindingType::ReadOnlyStorageBuffer
-						? dyf::RHI::ResourceState::ShaderResource
-						: dyf::RHI::ResourceState::UnorderedAccess;
-				if (buffer == nullptr || !RequireBufferState(buffer, requiredState))
-				{
-					Fail();
-					return;
-				}
-			}
-			else if (declaration->type == dyf::RHI::ResourceBindingType::SampledTexture ||
-				declaration->type == dyf::RHI::ResourceBindingType::StorageTexture)
-			{
-				VulkanTexture* texture = dynamic_cast<VulkanTexture*>(binding.texture);
-				const dyf::RHI::ResourceState requiredState =
-					declaration->type == dyf::RHI::ResourceBindingType::SampledTexture
-					? dyf::RHI::ResourceState::ShaderResource
-					: dyf::RHI::ResourceState::UnorderedAccess;
-				if (texture == nullptr ||
-					!RequireTextureSubresourcesInState(texture, binding.subresources, requiredState))
-				{
-					Fail();
-					return;
-				}
-				TrackSwapchainImage(texture);
-			}
-			else
-			{
-				Fail();
-				return;
-			}
-		}
+        if(!m_validatedResourceSets.count(set))
+        {
+            // Sets are immutable. Only a barrier can change an already required state.
+            for(const auto& requirement:set->GetNativeStateRequirements())
+            {
+                if(requirement.buffer)
+                {
+                    if(!RequireBufferState(requirement.buffer,requirement.state))
+                    {
+                        Fail();
+                        return;
+                    }
+                }
+                else
+                {
+                    for(uint32_t layer=requirement.firstLayer;layer<requirement.firstLayer+requirement.layerCount;++layer)
+                        for(uint32_t mip=requirement.firstMip;mip<requirement.firstMip+requirement.mipCount;++mip)
+                            if(!RequireTextureState(requirement.texture,mip,layer,requirement.state))
+                            {
+                                Fail();
+                                return;
+                            }
+                    TrackSwapchainImage(requirement.texture);
+                }
+            }
+            m_validatedResourceSets.insert(set);
+        }
 		const VkDescriptorSet descriptorSet = set->GetSet();
 		if (descriptorSet != VK_NULL_HANDLE)
 		{
@@ -1128,15 +1105,30 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 
 	bool VulkanCommandList::RequireBufferState(VulkanBuffer* buffer, dyf::RHI::ResourceState state)
 	{
-		if (buffer == nullptr || !buffer->IsStateAllowed(state)) return false;
+		if (buffer == nullptr) return false;
+        // Only successful exact requirements are cached. Barriers invalidate
+        // them before changing the command list's authoritative local states.
+        for(uint32_t i=0;i<m_recentBufferStateCount;++i)
+            if(m_recentBufferStates[i].buffer==buffer && m_recentBufferStates[i].state==state)
+                return true;
+        if(!buffer->IsStateAllowed(state)) return false;
 		const auto found = m_bufferStates.find(buffer);
-		if (found != m_bufferStates.end()) return found->second == state;
-		Operation operation{};
-		operation.kind = OperationKind::BufferRequirement;
-		operation.buffer = buffer;
-		operation.before = state;
-		m_operations.push_back(operation);
-		m_bufferStates.emplace(buffer, state);
+        if(found!=m_bufferStates.end())
+        {
+            if(found->second!=state) return false;
+        }
+        else
+        {
+		    Operation operation{};
+		    operation.kind = OperationKind::BufferRequirement;
+		    operation.buffer = buffer;
+		    operation.before = state;
+		    m_operations.push_back(operation);
+		    m_bufferStates.emplace(buffer, state);
+        }
+        m_recentBufferStates[m_recentBufferStateNext]={buffer,state};
+        m_recentBufferStateNext=(m_recentBufferStateNext+1)%m_recentBufferStates.size();
+        if(m_recentBufferStateCount<m_recentBufferStates.size()) ++m_recentBufferStateCount;
 		return true;
 	}
 
@@ -1239,8 +1231,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 			const uint64_t available = found->second.buffer->GetDesc().size - found->second.offset;
 			if (first + count > available / layout.stride) return false;
 		}
-		const dyf::RHI::PipelineLayoutDesc& layout = m_boundPipeline->GetLayout();
-		if (RequiresResourceSet(layout) && m_boundResourceSet == nullptr) return false;
+		if (m_boundPipeline->RequiresResourceSet() && m_boundResourceSet == nullptr) return false;
 		return std::find(m_inlineConstantCoverage.begin(), m_inlineConstantCoverage.end(), 0) ==
 			m_inlineConstantCoverage.end();
 	}

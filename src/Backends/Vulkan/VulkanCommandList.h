@@ -5,9 +5,11 @@
 #include "VulkanUpload.h"
 
 #include <map>
+#include <array>
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -174,7 +176,16 @@ namespace dyf::Backends
 		VulkanUploadArena m_uploadArena;
 		std::vector<Operation> m_operations;
 		std::unordered_map<VulkanBuffer*, dyf::RHI::ResourceState> m_bufferStates;
+        struct RecentBufferState
+        {
+            VulkanBuffer* buffer=nullptr;
+            RHI::ResourceState state=RHI::ResourceState::Undefined;
+        };
+        std::array<RecentBufferState,8> m_recentBufferStates{};
+        uint32_t m_recentBufferStateCount=0,m_recentBufferStateNext=0;
+        void ClearRecentBufferStates() noexcept {m_recentBufferStateCount=m_recentBufferStateNext=0;}
 		std::map<std::pair<VulkanTexture*, uint32_t>, dyf::RHI::ResourceState> m_textureStates;
+        std::unordered_set<const VulkanResourceSet*> m_validatedResourceSets;
 		std::unordered_map<uint32_t, VertexBinding> m_vertexBindings;
 		std::vector<VulkanTexture*> m_referencedSwapchainImages;
 		std::vector<dyf::RHI::Format> m_colorFormats;

@@ -4,15 +4,29 @@
 #include "dyf/RHI/ICommandList.h"
 #include "../../RHI/Query.h"
 #include "../../RHI/UploadMemory.h"
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <thread>
+#include <unordered_map>
 
 namespace dyf::RHI
 {
     struct ICommandList::LiveDeferred
     {
+        // Always present opaque command-list storage, independent of profiling.
+        // A small exact cache avoids tree searches for the VB/IB states that
+        // Bind and Draw repeatedly require between barriers.
+        struct RecentState
+        {
+            uintptr_t resource=0;
+            uint32_t mip=0,layer=0;
+            ResourceState state=ResourceState::Undefined;
+        };
+        std::array<RecentState,8> recentStates={};
+        uint32_t recentStateCount=0,recentStateNext=0;
+        void ClearRecentStates() noexcept {recentStateCount=recentStateNext=0;}
         Platform::LiveCommandRef m_livePosition;
         Platform::LiveContext m_liveContext;
         Platform::LiveContext m_liveExecutionContext;
@@ -26,6 +40,16 @@ namespace dyf::RHI
         std::vector<Platform::LiveEvent> events;
         std::vector<Platform::LiveFlowLink> links;
         Platform::LiveEventSummary summary;
+        std::unordered_map<const void*, Platform::LiveId> objectIds;
+        Platform::LiveId FindObject(const void* object) noexcept
+        {
+            if(!object || !Platform::IsLiveCollectorEnabled()) return 0;
+            const auto found = objectIds.find(object);
+            if(found != objectIds.end()) return found->second;
+            const auto id = Platform::FindLiveObject(object);
+            if(id) try { objectIds.emplace(object, id); } catch(...) {}
+            return id;
+        }
 #endif
     };
 
@@ -36,6 +60,8 @@ namespace dyf::RHI
         static void Prepare(IDevice& device,Platform::LiveFrameKey frame) noexcept { device.PrepareLiveControls(frame); }
         static void Release(IDevice& device,std::uint64_t source) noexcept { device.ReleaseLiveControls(source); }
         static std::uint64_t Source(const dyf::Renderer&) noexcept;
+        // Reuse the existing private Renderer friendship without a public API.
+        static bool GetCurrentNoAreaProof(const dyf::Renderer&,BufferHandle lights) noexcept;
     };
 
 	// Process-local 63-bit hash/token; not an OS TID and not guaranteed collision-free.

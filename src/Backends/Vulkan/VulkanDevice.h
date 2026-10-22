@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dyf/RHI/IDevice.h"
+#include "dyf/RHI/Format.h"
 
 #include <memory>
 
@@ -13,6 +14,7 @@ namespace dyf::Backends
 
 		VulkanDevice();
 		~VulkanDevice() override;
+        bool SupportsLinearFiltering(RHI::Format) const noexcept;
 
 		void DestroySwapchainNative() override;
         bool WaitIdleNative() override;

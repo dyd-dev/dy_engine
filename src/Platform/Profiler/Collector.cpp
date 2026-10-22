@@ -82,7 +82,7 @@ namespace dyf::Platform
 			std::mutex mutex;
 			LiveFrameSummary summary;
 			LiveFlowSnapshot flow;
-			std::shared_ptr<const LiveFlowSnapshot> publishedFlow;
+			std::shared_ptr<LiveFlowSnapshot> publishedFlow;
 			std::shared_ptr<SourceRun> run;
 			std::weak_ptr<EvidenceRecord> evidence;
 			bool ended = false, retry = false, acquireSkipped = false, settingsNotified = false, coverage = false, coverageLost = false;
@@ -188,42 +188,38 @@ namespace dyf::Platform
 			return true;
 		}
 
+		// Call with frame.mutex held. Readers pin a const shared_ptr under the same
+		// lock, so uniquely owned detail can grow without copying a whole frame.
+		LiveFlowSnapshot* MutablePublishedFlow(FrameRecord& frame)
+		{
+			auto& flow = frame.publishedFlow;
+			if(!flow) return nullptr;
+			if(flow.use_count() == 1) return flow.get();
+			auto copy = std::make_shared<LiveFlowSnapshot>(*flow);
+			const auto oldBytes = flow->events.capacity() * sizeof(LiveEvent) + flow->links.capacity() * sizeof(LiveFlowLink);
+			const auto newBytes = copy->events.capacity() * sizeof(LiveEvent) + copy->links.capacity() * sizeof(LiveFlowLink);
+			if(newBytes > oldBytes && !ReserveDetail(newBytes - oldBytes, OptionalDetailBudget)) return nullptr;
+			if(newBytes < oldBytes)
+			{
+				detailBytes -= oldBytes - newBytes;
+				frame.retainedBytes -= oldBytes - newBytes;
+			}
+			else frame.retainedBytes += newBytes - oldBytes;
+			flow = std::move(copy);
+			return flow.get();
+		}
+
 		bool AppendLateDetail(const std::shared_ptr<FrameRecord> & frame, const LiveEvent * event, const LiveFlowLink * link)
 		{
-			for(unsigned attempt = 0; attempt < 4; ++attempt)
+			std::lock_guard<std::mutex> lock(frame->mutex);
+			auto* flow = MutablePublishedFlow(*frame);
+			const bool retained = flow && (event ? PushDetail(*frame, flow->events, *event, 8192)
+				: link ? PushDetail(*frame, flow->links, *link, 16384) : true);
+			if(retained)
 			{
-				std::shared_ptr<const LiveFlowSnapshot> base;
-				{ std::lock_guard<std::mutex> lock(frame->mutex);
-				base = frame->publishedFlow;
-				}
-				if(!base) break;
-				auto copy = std::make_shared<LiveFlowSnapshot>(* base);
-				if(event)
-				{
-					if(copy->events.size() >= 8192) break;
-					copy->events.push_back(* event);
-				}
-				if(link)
-				{
-					if(copy->links.size() >= 16384) break;
-					copy->links.push_back(* link);
-				}
-				++copy->revision;
-				const auto oldBytes = base->events.capacity() * sizeof(LiveEvent) + base->links.capacity() * sizeof(LiveFlowLink);
-				const auto newBytes = copy->events.capacity() * sizeof(LiveEvent) + copy->links.capacity() * sizeof(LiveFlowLink);
-				std::lock_guard<std::mutex> lock(frame->mutex);
-				if(frame->publishedFlow != base) continue;
-				if(newBytes > oldBytes && !ReserveDetail(newBytes - oldBytes, OptionalDetailBudget)) break;
-				if(newBytes < oldBytes)
-				{
-					detailBytes -= oldBytes - newBytes;
-					frame->retainedBytes -= oldBytes - newBytes;
-				}
-				else frame->retainedBytes += newBytes - oldBytes;
-				frame->publishedFlow = std::move(copy);
+				++flow->revision;
 				return true;
 			}
-			std::lock_guard<std::mutex> lock(frame->mutex);
 			if(event) ++frame->flow.omittedEvents;
 			if(link) ++frame->flow.omittedLinks;
 			frame->summary.incomplete = true;
@@ -1040,17 +1036,28 @@ namespace dyf::Platform
 			std::vector<std::pair<std::uint64_t, std::uint64_t>> intervals;
 			LiveId domain = 0;
 			bool pending = false, unavailable = f.coverageLost, unsupported = false;
+			double shadowMilliseconds = 0;
+			bool hasShadow = false, shadowPending = false, shadowUnsupported = false, shadowUnavailable = f.coverageLost;
 			f.summary.gpuMain = { };
 			f.summary.gpuShadow = { };
 			for(const auto & span : f.flow.gpuSpans)
 			{
+				if(span.scope == LiveGpuScope::RendererShadow)
+				{
+					hasShadow = true;
+					if(span.appliedRevision != f.summary.appliedRevision) shadowUnavailable = true;
+					else if(span.duration.state == LiveValueState::Pending) shadowPending = true;
+					else if(span.duration.state == LiveValueState::Unsupported) shadowUnsupported = true;
+					else if(span.duration.state != LiveValueState::Ready ||
+						!std::isfinite(span.duration.milliseconds) || span.duration.milliseconds < 0) shadowUnavailable = true;
+					else shadowMilliseconds += span.duration.milliseconds;
+				}
 				if(span.appliedRevision != f.summary.appliedRevision)
 				{
 					if(span.aggregation == LiveGpuAggregation::FrameCoverage) unavailable = true;
 					continue;
 				}
 				if(span.scope == LiveGpuScope::RendererMainForward) f.summary.gpuMain = span.duration;
-				if(span.scope == LiveGpuScope::RendererShadow) f.summary.gpuShadow = span.duration;
 				if(span.aggregation != LiveGpuAggregation::FrameCoverage) continue;
 				pending |= span.duration.state == LiveValueState::Pending;
 				unsupported |= span.duration.state == LiveValueState::Unsupported;
@@ -1065,6 +1072,15 @@ namespace dyf::Platform
 						intervals.emplace_back(span.beginGpuNs, span.endGpuNs);
 					}
 				}
+			}
+			if(hasShadow)
+			{
+				// Semantic scopes can have valid durations without clock calibration.
+				// A missing or invalid view must never expose a partial sum as Ready.
+				if(shadowUnavailable || !std::isfinite(shadowMilliseconds)) f.summary.gpuShadow = { };
+				else if(shadowUnsupported) f.summary.gpuShadow = { LiveValueState::Unsupported, 0 };
+				else if(shadowPending) f.summary.gpuShadow = { LiveValueState::Pending, 0 };
+				else f.summary.gpuShadow = { LiveValueState::Ready, shadowMilliseconds };
 			}
 			f.summary.gpuCoverageComplete = f.coverage && !pending && !unavailable && !unsupported && !intervals.empty();
 			f.summary.gpuMeasured = { pending ? LiveValueState::Pending : unsupported ? LiveValueState::Unsupported : LiveValueState::Unavailable, 0 };
@@ -1698,26 +1714,16 @@ namespace dyf::Platform
 		detailBytes -= bytes;
 	}
 
-	void RecordLiveEventSummary(LiveCommandRef command, const LiveEventSummary & summary) noexcept
+	namespace
 	{
-		if(!IsLiveCollectorEnabled()) return;
-		try
+		// The caller owns the frame lock; fixed counters do not depend on retained detail.
+		void MergeCommandSummary(State& state, FrameRecord& frame, LiveCommandRef command, const LiveEventSummary& summary)
 		{
-			auto & s = S();
-			auto f = Frame(context.frame);
-			if(!f)
-			{
-				s.omittedEvents += summary.omittedEvents;
-				s.omittedLinks += summary.omittedLinks;
-				return;
-			}
-			std::lock_guard<std::mutex> lock(f->mutex);
-			LateSecondUpdate update(* f);
-			Add(f->summary.recorded, summary.recorded);
+			Add(frame.summary.recorded, summary.recorded);
 			for(std::size_t i = 0; i < LiveStageCount; ++i)
 			{
-				auto & to = f->summary.stages [i];
-				const auto & from = summary.stages [i];
+				auto& to = frame.summary.stages[i];
+				const auto& from = summary.stages[i];
 				to.elements += from.elements;
 				to.bytes += from.bytes;
 				to.operations += from.operations;
@@ -1727,29 +1733,105 @@ namespace dyf::Platform
 					to.cpu.milliseconds += from.cpu.milliseconds;
 				}
 			}
-			f->flow.omittedEvents += summary.omittedEvents;
-			f->flow.omittedLinks += summary.omittedLinks;
-			s.omittedEvents += summary.omittedEvents;
-			s.omittedLinks += summary.omittedLinks;
-			f->summary.incomplete |= summary.omittedEvents || summary.omittedLinks;
+			frame.flow.omittedEvents += summary.omittedEvents;
+			frame.flow.omittedLinks += summary.omittedLinks;
+			state.omittedEvents += summary.omittedEvents;
+			state.omittedLinks += summary.omittedLinks;
+			frame.summary.incomplete |= summary.omittedEvents || summary.omittedLinks;
 			if(command.commandList)
 			{
 				auto logical = summary.recorded;
 				ClearNativeUploadCounts(logical);
-				std::lock_guard<std::mutex> commands(s.commandMutex);
+				std::lock_guard<std::mutex> commands(state.commandMutex);
 				const auto key = std::make_pair(command.commandList, command.generation);
-				for(auto it = s.commandCounts.lower_bound({ command.commandList, 0 }); it != s.commandCounts.end() &&
-					it->first.first == command.commandList;) if(it->first != key) it = s.commandCounts.erase(it);
-				else ++it;
-				if(s.commandCounts.size() < 4096 || s.commandCounts.count(key)) Add(s.commandCounts [key], logical);
-				else f->summary.incomplete = true;
+				for(auto it = state.commandCounts.lower_bound({command.commandList, 0}); it != state.commandCounts.end() &&
+					it->first.first == command.commandList;)
+					if(it->first != key) it = state.commandCounts.erase(it);
+					else ++it;
+				if(state.commandCounts.size() < 4096 || state.commandCounts.count(key)) Add(state.commandCounts[key], logical);
+				else frame.summary.incomplete = true;
+			}
+		}
+	}
+
+	void RecordLiveCommandBatch(LiveCommandRef command, const LiveEventSummary& summary,
+		const std::vector<LiveEvent>& events, const std::vector<LiveFlowLink>& links) noexcept
+	{
+		if(!IsLiveCollectorEnabled()) return;
+		auto& state = S();
+		try
+		{
+			auto frame = Frame(context.frame);
+			if(!frame)
+			{
+				state.omittedEvents += summary.omittedEvents + events.size();
+				state.omittedLinks += summary.omittedLinks + links.size();
+				return;
+			}
+			std::lock_guard<std::mutex> lock(frame->mutex);
+			LateSecondUpdate update(*frame);
+			try { MergeCommandSummary(state, *frame, command, summary); }
+			catch(...) { ++state.omittedEvents; frame->summary.incomplete = true; }
+
+			LiveFlowSnapshot* published = nullptr;
+			if(frame->ended && (!events.empty() || !links.empty()))
+				try { published = MutablePublishedFlow(*frame); }
+				catch(...) { frame->summary.incomplete = true; }
+			auto* flow = frame->ended ? published : &frame->flow;
+			for(auto event : events)
+			{
+				if(!event.context.frame.frame) event.context = context;
+				if(!event.id) event.id = AllocateLiveId();
+				if(static_cast<std::size_t>(event.stage) >= LiveStageCount)
+				{
+					++state.omittedEvents;
+					frame->summary.incomplete = true;
+					continue;
+				}
+				bool retained = false;
+				try
+				{
+					if(frame->ended) AppendEvidenceDetail(*frame, &event, nullptr);
+					retained = flow && PushDetail(*frame, flow->events, event, 8192);
+				}
+				catch(...) {}
+				if(retained)
+				{
+					if(frame->ended) ++flow->revision;
+				}
+				else
+				{
+					++frame->flow.omittedEvents;
+					++state.omittedEvents;
+					frame->summary.incomplete = true;
+				}
+			}
+			for(const auto& link : links)
+			{
+				bool retained = false;
+				try
+				{
+					if(frame->ended) AppendEvidenceDetail(*frame, nullptr, &link);
+					retained = flow && PushDetail(*frame, flow->links, link, 16384);
+				}
+				catch(...) {}
+				if(retained)
+				{
+					if(frame->ended) ++flow->revision;
+				}
+				else
+				{
+					++frame->flow.omittedLinks;
+					++state.omittedLinks;
+					frame->summary.incomplete = true;
+				}
 			}
 		}
 		catch(...)
 		{
-			++S().omittedEvents;
+			state.omittedEvents += summary.omittedEvents + events.size();
+			state.omittedLinks += summary.omittedLinks + links.size();
 		}
-
 	}
 
 	void RecordLiveEvent(const LiveEvent & input, bool includeSummary) noexcept

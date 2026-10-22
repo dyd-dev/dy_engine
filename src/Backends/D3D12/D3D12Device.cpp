@@ -78,6 +78,7 @@ namespace dyf::Backends
         std::vector<uint64_t> frames;
         std::vector<D3D12SubmissionRecord> submissions;
         std::vector<std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>> activeCommandLists;
+        std::shared_ptr<D3D12CommandPoolCache> commandPool;
         // Keep diagnostic work alive if native submission succeeds but its
         // completion signal fails. Device teardown drains the queue.
         std::vector<ComPtr<ID3D12Object>> readbackResources;
@@ -159,7 +160,9 @@ namespace dyf::Backends
                     submissions.end(),
                     [completedValue](const D3D12SubmissionRecord& submission)
                     {
-                        return submission.completionValue <= completedValue;
+                        if(submission.completionValue>completedValue)return false;
+                        for(const auto& commands:submission.commandLists)commands->AllowPoolReuse();
+                        return true;
                     }),
                 submissions.end());
             return true;
@@ -1026,11 +1029,13 @@ void D3D12Device::DestroySwapchainNative()
         if (!m_internal->uploadPool)
             m_internal->uploadPool = MakeD3D12UploadPool(m_internal->device.Get());
         if (!m_internal->InitializeIndirectSignatures()) return nullptr;
+        if (!m_internal->commandPool)
+            m_internal->commandPool=std::make_shared<D3D12CommandPoolCache>(m_internal->device.Get());
 
         auto commandList = std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>(
             new D3D12CommandList(m_internal->device.Get(), m_internal->uploadPool,
                 m_internal->drawSignature.Get(), m_internal->drawIndexedSignature.Get(),
-                m_internal->dispatchSignature.Get(),{reusePages,suballocate}));
+                m_internal->dispatchSignature.Get(),{reusePages,suballocate},m_internal->commandPool));
         if (commandList->GetNativeList() == nullptr) return nullptr;
         return m_internal->activeCommandLists.emplace_back(std::move(commandList)).get();
     }
@@ -1468,6 +1473,19 @@ void D3D12Device::DestroySwapchainNative()
         // 지원 조회와 실제 sampler 변환에 같은 범위 검사를 적용한다. 범위 밖 값은 보정하지 않는다.
         D3D12_FILTER filter;
         return ToSamplerFilter(desc, filter);
+    }
+
+    bool D3D12Device::SupportsLinearFiltering(RHI::Format format) const noexcept
+    {
+        if(!m_internal || !m_internal->device || format!=RHI::Format::R32G32B32A32_FLOAT)return false;
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT support={};
+        support.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
+        // SHADER_SAMPLE permits filtering; without it only point sampling is legal.
+        // https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_format_support1
+        const auto required=static_cast<D3D12_FORMAT_SUPPORT1>(D3D12_FORMAT_SUPPORT1_TEXTURE2D |
+            D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE | D3D12_FORMAT_SUPPORT1_MIP);
+        return SUCCEEDED(m_internal->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+            &support,sizeof(support))) && (support.Support1&required)==required;
     }
 
     bool D3D12Device::SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc& desc) const
