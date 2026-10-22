@@ -30,6 +30,7 @@ struct ModelOptimizationConfig
     bool skipUnchangedUploads=true;
     bool cacheStaticMeshes=true;
     bool cacheInfluences=true;
+    bool cacheSkinTransforms=true;
 };
 
 // 모델 변형과 그 GPU 자원은 선택 확장이 소유한다. renderer는 이 객체보다 오래 살아 있어야 한다.
@@ -64,6 +65,14 @@ private:
     {
         std::weak_ptr<const MeshData> source;
         RHI::BufferHandle buffer = nullptr;
+    };
+    struct SkinTransformGroups
+    {
+        uint64_t influenceRevision = 0;
+        uint32_t influenceOffset = UINT32_MAX;
+        uint32_t influenceCount = 0;
+        std::vector<uint32_t> representatives;
+        std::vector<uint32_t> vertexGroups;
     };
     struct FrameBuffer
     {
@@ -111,6 +120,7 @@ private:
     std::array<std::string, 2> m_originalVertexEntries;
     std::vector<RHI::ResourceBindingLayout> m_originalVertexBindings;
     uint32_t m_originalConstantBytes = 0;
+    bool m_originalStockShadowCoverage = false;
     bool m_configured = false;
     RHI::ShaderHandle m_computeShader = nullptr;
     RHI::PipelineHandle m_computePipeline = nullptr;
@@ -126,6 +136,7 @@ private:
     std::vector<uint32_t> m_influenceCounts;
     std::vector<uint64_t> m_requiredInfluenceJoints;
     std::vector<bool> m_validInfluences;
+    std::vector<SkinTransformGroups> m_skinTransformGroups;
     std::vector<RendererDrawDesc> m_draws;
     const ModelScene* m_historyScene = nullptr;
     uint32_t m_historyFrame = UINT32_MAX;

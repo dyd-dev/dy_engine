@@ -27,7 +27,8 @@ std::vector<MeshLod> BuildMeshLods(const MeshData& mesh,uint32_t maxLevels)
     if(original.size()<768 || original.size()%3 || original.size()>UINT32_MAX/sizeof(uint32_t)) return result;
     for(uint32_t index:original) if(index>=vertexCount) return result;
     for(const auto& v:mesh.vertices)
-        for(float value:{v.position.x,v.position.y,v.position.z,v.normal.x,v.normal.y,v.normal.z,v.uv.x,v.uv.y})
+        for(float value:{v.position.x,v.position.y,v.position.z,v.normal.x,v.normal.y,v.normal.z,v.uv.x,v.uv.y,
+            v.color.x,v.color.y,v.color.z,v.color.w})
             if(!std::isfinite(value)) return result;
     // FBX triangle corners may be separate indices even when their attributes
     // are identical. Restore that connectivity only for simplification. Compare
@@ -46,7 +47,7 @@ std::vector<MeshLod> BuildMeshLods(const MeshData& mesh,uint32_t maxLevels)
     if(compactCount<3) return result;
     std::vector<uint32_t> representatives(compactCount,UINT32_MAX);
     std::vector<std::array<float,3>> positions(compactCount);
-    std::vector<std::array<float,5>> attributes(compactCount);
+    std::vector<std::array<float,9>> attributes(compactCount);
     for(uint32_t index:original)
     {
         const auto compact=remap[index];
@@ -54,16 +55,17 @@ std::vector<MeshLod> BuildMeshLods(const MeshData& mesh,uint32_t maxLevels)
         representatives[compact]=index;
         const auto& v=mesh.vertices[index];
         positions[compact]={v.position.x,v.position.y,v.position.z};
-        attributes[compact]={v.normal.x,v.normal.y,v.normal.z,v.uv.x,v.uv.y};
+        attributes[compact]={v.normal.x,v.normal.y,v.normal.z,v.uv.x,v.uv.y,
+            v.color.x,v.color.y,v.color.z,v.color.w};
     }
     std::vector<uint32_t> current(original.size());
     meshopt_remapIndexBuffer(current.data(),original.data(),original.size(),remap.data());
     std::vector<uint32_t>().swap(remap);
     const float scale=meshopt_simplifyScale(positions.front().data(),compactCount,sizeof(positions.front()));
     if(!std::isfinite(scale) || scale<=0) return result;
-    // Preserve both shading and UV seams. Strict topology plus locked open
+    // Preserve shading, UV and vertex-color seams. Strict topology plus locked open
     // borders prevents separate material parts from opening cracks.
-    const float weights[]={0.5f,0.5f,0.5f,0.5f,0.5f};
+    const float weights[]={0.5f,0.5f,0.5f,0.5f,0.5f,0.5f,0.5f,0.5f,0.5f};
     result.reserve(std::min(maxLevels,3u));
     float cumulativeError=0;
     for(uint32_t level=0;level<std::min(maxLevels,3u);++level)
@@ -73,11 +75,11 @@ std::vector<MeshLod> BuildMeshLods(const MeshData& mesh,uint32_t maxLevels)
         std::vector<uint32_t> reduced(current.size());
         float error=0;
         const size_t count=meshopt_simplifyWithAttributes(reduced.data(),current.data(),current.size(),
-            positions.front().data(),compactCount,sizeof(positions.front()),attributes.front().data(),sizeof(attributes.front()),weights,5,nullptr,
+            positions.front().data(),compactCount,sizeof(positions.front()),attributes.front().data(),sizeof(attributes.front()),weights,9,nullptr,
             target,0.04f,meshopt_SimplifyLockBorder,&error);
         if(!count || count%3 || count>=current.size()-current.size()/10 || !std::isfinite(error)) break;
         reduced.resize(count);
-        // meshopt includes weighted normal/UV error in this metric. Scaling it
+        // meshopt includes weighted normal/UV/color error in this metric. Scaling it
         // to object units supports the existing pixel-selection heuristic; it
         // is not a strict geometric-distance bound.
         cumulativeError+=error*scale;
@@ -129,7 +131,7 @@ void Renderer::Impl::SelectLods(const Scene& scene,const Camera& camera,uint32_t
         const auto entity=static_cast<EntityID>(i);
         const auto material=scene.GetEntityMaterial(entity);
         if(gpu && IsValid(material) && ToIndex(material)<scene.Materials().size() &&
-            scene.Materials()[ToIndex(material)].alphaMode!=MaterialAlphaMode::Blend)
+            !UsesBlendedRendering(scene.Materials()[ToIndex(material)]))
         {
             // 불투명 객체의 단계 선택은 GPU가 수행하므로 CPU에서 반복하지 않는다.
             entityLods[i]=0;continue;

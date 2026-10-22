@@ -1,14 +1,15 @@
 #include "ModelShaderLayout.inc"
 #include "Skinning.hlsl"
 
-// The RHI storage views use ModelVertex's 48-byte stride. Keep the same twelve
-// floats as the vertex and GLSL compute paths: position, normal, UV, tangent.
+// The RHI storage views use ModelVertex's 64-byte stride. Keep the same sixteen
+// floats as the vertex and GLSL compute paths: position, normal, UV, tangent, color.
 struct ModelVertex
 {
     float3 position;
     float3 normal;
     float2 uv;
     float4 tangent;
+    float4 color;
 };
 
 StructuredBuffer<ModelVertex> sourceVertices : register(t14, space0);

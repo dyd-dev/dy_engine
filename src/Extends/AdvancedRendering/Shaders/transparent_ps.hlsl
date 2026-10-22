@@ -1,3 +1,29 @@
+#ifndef TRANSPARENT_DEPTH_ONLY
+#define TRANSPARENT_DEPTH_ONLY 0
+#endif
+float TransparentCoverage(float alpha,uint mode,float cutoff)
+{
+    // Alpha describes whether a surface exists; optical transmission is independent.
+    if(mode==1u)return alpha<cutoff?0.0:1.0;
+    return mode==2u?saturate(alpha):1.0;
+}
+#if TRANSPARENT_DEPTH_ONLY
+struct Draw {column_major float4x4 model;column_major float4x4 normalMatrix;float4 baseColor;float4 emissive;float4 material;float4 optics;float4 attenuation;uint4 flags;};
+StructuredBuffer<Draw> draws:register(t11);
+cbuffer Index:register(b15) {uint4 drawIndex;};
+Texture2D<float4> baseTexture:register(t0);
+Texture2D<float> depthTexture:register(t6);
+SamplerState materialSampler:register(s8);
+struct Input {float4 position:SV_Position;float2 uv:TEXCOORD0;float4 vertexColor:TEXCOORD4;};
+void main(Input input)
+{
+    float2 uvDx=ddx(input.uv),uvDy=ddy(input.uv);
+    Draw draw=draws[drawIndex.x];float alpha=draw.baseColor.a*input.vertexColor.a;
+    if((draw.flags.x&1u)!=0u)alpha*=baseTexture.SampleGrad(materialSampler,input.uv,uvDx,uvDy).a;
+    if(input.position.z>depthTexture.Load(int3(int2(input.position.xy),0)) ||
+        TransparentCoverage(alpha,draw.flags.w,draw.attenuation.w)<=0.0)discard;
+}
+#else
 #ifndef RENDERER_ENABLE_AREA_LIGHTS
 #define RENDERER_ENABLE_AREA_LIGHTS 1
 #endif
@@ -15,6 +41,7 @@ Texture2D<float4> opaqueTexture:register(t5);
 Texture2D<float> depthTexture:register(t6);
 Texture2D<float4> prefilterTexture:register(t7);
 Texture2D<float> shadowTexture:register(t14);
+Texture2D<float4> brdfTexture:register(t17);
 Texture2D<float4> ltcMatrixTexture:register(t26);
 Texture2D<float4> ltcAmplitudeTexture:register(t27);
 Texture2D<float> nearestDepthTexture:register(t28);
@@ -148,6 +175,20 @@ float3 Fresnel(float cosine,float3 f0)
     float base=saturate(1-cosine),base2=base*base,base5=(base2*base2)*base;
     return f0+(1-f0)*base5;
 }
+float3 FresnelRoughness(float cosine,float3 f0,float roughness)
+{
+    float base=saturate(1-cosine),base2=base*base,base5=(base2*base2)*base;
+    return f0+(max(1-roughness,f0)-f0)*base5;
+}
+float2 TransparentIntegratedBRDF(float nv,float roughness)
+{
+    uint width,height;brdfTexture.GetDimensions(width,height);int2 size=int2(width,height);
+    float2 pixel=float2(nv,roughness)*float2(size)-.5,w=frac(pixel);
+    int2 a=int2(floor(pixel)),b=a+1;
+    a=clamp(a,int2(0,0),size-1);b=clamp(b,int2(0,0),size-1);
+    return lerp(lerp(brdfTexture.Load(int3(a,0)).rg,brdfTexture.Load(int3(b.x,a.y,0)).rg,w.x),
+        lerp(brdfTexture.Load(int3(a.x,b.y,0)).rg,brdfTexture.Load(int3(b,0)).rg,w.x),w.y);
+}
 float2 EnvUV(float3 d)
 {
     float c=cos(settings.z),s=sin(settings.z);d.xy=float2(c*d.x+s*d.y,-s*d.x+c*d.y);
@@ -200,8 +241,7 @@ bool NativeEnvironmentSample(float2 coordinate,float mip,float maximumMip,uint e
 float ProbeVisibility(float3 position,SpatialProbe probe,uint index)
 {
     return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,
-        probeParameters.x+index,probePrefilterTexture,pointSampler,environmentLinearSampler,
-        probeParameters.w==1u && drawIndex.z==1u?1u:0u);
+        probeParameters.x+index,probePrefilterTexture);
 }
 struct ProbeBlendCache
 {
@@ -312,7 +352,7 @@ float Falloff(float distance,float range)
     if(range<=0 || distance>=range)return 0;float x=distance/range;
     return pow(max(1-x*x*x*x,0),2)/max(distance*distance,.0001);
 }
-struct Input {float4 position:SV_Position;float2 uv:TEXCOORD0;float3 worldPosition:TEXCOORD1;float3 worldNormal:TEXCOORD2;float4 worldTangent:TEXCOORD3;};
+struct Input {float4 position:SV_Position;float2 uv:TEXCOORD0;float3 worldPosition:TEXCOORD1;float3 worldNormal:TEXCOORD2;float4 worldTangent:TEXCOORD3;float4 vertexColor:TEXCOORD4;};
 struct Output {float4 color:SV_Target0;float4 reactive:SV_Target1;};
 #if RENDERER_ENABLE_AREA_LIGHTS
 // LTC 적분과 표 배치는 Heitz 외 SIGGRAPH 2016 및 Assets/ltc/LICENSE를 따른다.
@@ -406,13 +446,13 @@ inline float3 LtcCorner(float3 center,float3 axisX,float3 axisY,int corner,int c
     float2 direction=LtcDiscDirections[corner];
     return center+(axisX*direction.x+axisY*direction.y);
 }
-inline void LtcAppendPoint(float3 point,inout float3 first,inout float3 last,inout bool haveVertex,inout float sum)
+inline void LtcAppendPoint(float3 vertex,inout float3 first,inout float3 last,inout bool haveVertex,inout float sum)
 {
-    float squared=dot(point,point);
+    float squared=dot(vertex,vertex);
     if(squared<=1e-20)return;
-    point*=rsqrt(squared);
-    if(haveVertex)sum+=LtcEdgeIntegral(last,point);else {first=point;haveVertex=true;}
-    last=point;
+    vertex*=rsqrt(squared);
+    if(haveVertex)sum+=LtcEdgeIntegral(last,vertex);else {first=vertex;haveVertex=true;}
+    last=vertex;
 }
 inline float LtcUnclippedIntegral(float3 center,float3 axisX,float3 axisY,int count)
 {
@@ -451,9 +491,9 @@ inline float LtcPolygonIntegral(float4 inverseMatrix,float3 center,float3 axisX,
         // z=0 반구로 다각형을 자르되 정점 배열 대신 경계 순서대로 적분한다.
         if(previousInside!=currentInside)
         {
-            float3 point=lerp(previous,current,clamp(previous.z/(previous.z-current.z),0.0,1.0));
-            point.z=0;
-            LtcAppendPoint(point,first,last,haveVertex,sum);
+            float3 intersection=lerp(previous,current,clamp(previous.z/(previous.z-current.z),0.0,1.0));
+            intersection.z=0;
+            LtcAppendPoint(intersection,first,last,haveVertex,sum);
         }
         if(currentInside)LtcAppendPoint(current,first,last,haveVertex,sum);
         previous=current;
@@ -563,18 +603,18 @@ Output main(Input input,bool frontFacing:SV_IsFrontFace)
         normalVariance=0.25*(dot(normalDx,normalDx)+dot(normalDy,normalDy));
     }
     if(input.position.z>opaqueDepth || excludedLayer)discard;
-    float4 base=draw.baseColor;
+    float4 base=draw.baseColor*input.vertexColor;
     if((flags&1u)!=0u)base*=baseTexture.SampleGrad(materialSampler,input.uv,uvDx,uvDy);
+    float coverage=TransparentCoverage(base.a,draw.flags.w,draw.attenuation.w);
+    if(coverage<=0.0)discard;
     float2 mr=draw.material.xy;if((flags&2u)!=0u)mr*=materialTexture.SampleGrad(materialSampler,input.uv,uvDx,uvDy).bg;
     float metal=saturate(mr.x),rough=clamp(mr.y,.04,1),transmission=saturate(draw.optics.x)*(1-metal);
     if((flags&64u)!=0u)
     {
-        float coverage=lerp(saturate(base.a),1,transmission);
         Output output;output.color=float4(draw.baseColor.rgb*coverage,coverage);output.reactive=coverage;return output;
     }
     if((flags&128u)!=0u)
     {
-        float coverage=saturate(base.a);
         Output output;output.color=float4(clamp(base.rgb,0,65504)*coverage,coverage);output.reactive=coverage;return output;
     }
     float filteredAlphaSquared=min(1.0,rough*rough*rough*rough+min(2.0*normalVariance,0.18));
@@ -592,13 +632,17 @@ Output main(Input input,bool frontFacing:SV_IsFrontFace)
     bool totalInternalReflection=transmission>0 && dot(transmissionRay,transmissionRay)<1e-6;
     float3 f0=totalInternalReflection?float3(1,1,1):lerp(float3(dielectric,dielectric,dielectric),base.rgb,metal),f=Fresnel(nv,f0);
     float ao=1;if((flags&8u)!=0u)ao=lerp(1,aoTexture.Sample(materialSampler,input.uv).r,draw.material.w);
-    float3 diffuseWeight=(1-f)*base.rgb*(1-metal)*(1-transmission);
+    float3 diffuseWeight=(1-FresnelRoughness(nv,f0,specularRoughness))*base.rgb*(1-metal)*(1-transmission);
     ProbeBlendCache probeCache=PrepareProbeBlendCache(input.worldPosition,
         any(diffuseWeight!=0.0) || (uint(screen.w+.5)&2u)!=0u ||
         (transmission>0 && !totalInternalReflection));
     float3 lit=float3(0,0,0);
     if(any(diffuseWeight!=0.0))lit=diffuseWeight*Irradiance(input.worldPosition,n,probeCache)*ao;
-    if((uint(screen.w+.5)&2u)!=0u)lit+=Radiance(input.worldPosition,reflect(-v,n),specularRoughness,probeCache)*f*specularColor.rgb;
+    if((uint(screen.w+.5)&2u)!=0u)
+    {
+        float2 brdf=TransparentIntegratedBRDF(nv,specularRoughness);
+        lit+=Radiance(input.worldPosition,reflect(-v,n),specularRoughness,probeCache)*(f0*brdf.x+brdf.y)*ao*specularColor.rgb;
+    }
     float3 refracted=0;
     if(transmission>0 && !totalInternalReflection)
     {
@@ -656,7 +700,7 @@ Output main(Input input,bool frontFacing:SV_IsFrontFace)
     }
 #endif
     float3 emissive=draw.emissive.rgb;if((flags&16u)!=0u)emissive*=emissiveTexture.Sample(materialSampler,input.uv).rgb;
-    float coverage=lerp(saturate(base.a),1,transmission);
     float3 color=counts.w>.5?lit+refracted+emissive:base.rgb+emissive;
     Output output;output.color=float4(clamp(color,0,65504)*coverage,coverage);output.reactive=coverage;return output;
 }
+#endif

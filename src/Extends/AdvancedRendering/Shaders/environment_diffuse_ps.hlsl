@@ -4,7 +4,6 @@ Texture2D<float4> normalTexture : register(t1);
 Texture2D<float4> aoTexture : register(t3);
 SamplerState clampSampler : register(s8);
 SamplerState aoSampler : register(s10);
-SamplerState environmentLinearSampler : register(s15);
 cbuffer FrameConstants : register(b9)
 {
     column_major float4x4 inverseViewProjection;
@@ -24,7 +23,7 @@ cbuffer ProbeParameters:register(b24) {uint4 probeParameters;};
 float ProbeVisibility(float3 position,SpatialProbe probe,uint index)
 {
     return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,
-        probeParameters.x+index,probePrefilterTexture,clampSampler,environmentLinearSampler,probeParameters.w);
+        probeParameters.x+index,probePrefilterTexture);
 }
 float ProbeWeight(float3 position,SpatialProbe probe,out float coverage)
 {

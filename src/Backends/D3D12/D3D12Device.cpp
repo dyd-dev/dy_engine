@@ -1477,9 +1477,10 @@ void D3D12Device::DestroySwapchainNative()
 
     bool D3D12Device::SupportsLinearFiltering(RHI::Format format) const noexcept
     {
-        if(!m_internal || !m_internal->device || format!=RHI::Format::R32G32B32A32_FLOAT)return false;
+        if(!m_internal || !m_internal->device ||
+            (format!=RHI::Format::R32G32B32A32_FLOAT && format!=RHI::Format::R16_FLOAT))return false;
         D3D12_FEATURE_DATA_FORMAT_SUPPORT support={};
-        support.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
+        support.Format=format==RHI::Format::R16_FLOAT?DXGI_FORMAT_R16_FLOAT:DXGI_FORMAT_R32G32B32A32_FLOAT;
         // SHADER_SAMPLE permits filtering; without it only point sampling is legal.
         // https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_format_support1
         const auto required=static_cast<D3D12_FORMAT_SUPPORT1>(D3D12_FORMAT_SUPPORT1_TEXTURE2D |

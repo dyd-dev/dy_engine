@@ -32,6 +32,7 @@ struct RenderEnvironmentResources
 {
     RenderEnvironmentConstants constants = {};
     RHI::TextureHandle prefilter = nullptr, probePrefilter = nullptr;
+    RHI::TextureHandle brdf = nullptr;
     RHI::BufferHandle probeData = nullptr, probeParameters = nullptr;
     RHI::BufferHandle constantBuffer = nullptr;
     RenderTexture diffuse = {}, specular = {};

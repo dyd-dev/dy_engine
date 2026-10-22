@@ -1,14 +1,44 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
+#ifndef TRANSPARENT_DEPTH_ONLY
+#define TRANSPARENT_DEPTH_ONLY 0
+#endif
+float TransparentCoverage(float alpha,uint mode,float cutoff)
+{
+    // Alpha describes whether a surface exists; optical transmission is independent.
+    if(mode==1u)return alpha<cutoff?0.0:1.0;
+    return mode==2u?clamp(alpha,0.0,1.0):1.0;
+}
+#if TRANSPARENT_DEPTH_ONLY
+layout(location=0) in vec2 uv;
+layout(location=4) in vec4 vertexColor;
+struct Draw {mat4 model;mat4 normalMatrix;vec4 baseColor;vec4 emissive;vec4 material;vec4 optics;vec4 attenuation;uvec4 flags;};
+layout(std430,set=0,binding=11) readonly buffer Draws {Draw draws[];};
+layout(push_constant) uniform Index {uvec4 index;};
+layout(set=0,binding=0) uniform texture2D baseTexture;
+layout(set=0,binding=6) uniform texture2D depthTexture;
+layout(set=0,binding=8) uniform sampler materialSampler;
+layout(set=0,binding=10) uniform sampler pointSampler;
+void main()
+{
+    vec2 uvDx=dFdx(uv),uvDy=dFdy(uv);
+    Draw draw=draws[index.x];float alpha=draw.baseColor.a*vertexColor.a;
+    if((draw.flags.x&1u)!=0u)
+        alpha*=textureGrad(sampler2D(baseTexture,materialSampler),uv,uvDx,uvDy).a;
+    if(gl_FragCoord.z>texelFetch(sampler2D(depthTexture,pointSampler),ivec2(gl_FragCoord.xy),0).r ||
+        TransparentCoverage(alpha,draw.flags.w,draw.attenuation.w)<=0.0)discard;
+}
+#else
 #ifndef RENDERER_ENABLE_AREA_LIGHTS
 #define RENDERER_ENABLE_AREA_LIGHTS 1
 #endif
-#extension GL_GOOGLE_include_directive : require
 #include "probe_visibility.glsl"
 layout(early_fragment_tests) in;
 layout(location=0) in vec2 uv;
 layout(location=1) in vec3 worldPosition;
 layout(location=2) in vec3 worldNormal;
 layout(location=3) in vec4 worldTangent;
+layout(location=4) in vec4 vertexColor;
 layout(location=0) out vec4 outputColor;
 layout(location=1) out vec4 reactive;
 struct Draw {mat4 model;mat4 normalMatrix;vec4 baseColor;vec4 emissive;vec4 material;vec4 optics;vec4 attenuation;uvec4 flags;};
@@ -46,6 +76,7 @@ layout(set=0,binding=16) uniform ShadowMatrix {
     vec4 directionalSplits[4];mat4 cameraView;vec4 filterParams;
     vec4 viewProjectionParams[128];vec4 softShadowParams;
 } shadowMatrix;
+layout(set=0,binding=17) uniform texture2D brdfTexture;
 const float PI=3.14159265359;
 vec3 TransparentPixelNormalizeOr(vec3 value,vec3 fallback)
 {
@@ -152,6 +183,22 @@ vec3 Fresnel(float cosine,vec3 f0)
     float base=clamp(1-cosine,0,1),base2=base*base,base5=(base2*base2)*base;
     return f0+(1-f0)*base5;
 }
+vec3 FresnelRoughness(float cosine,vec3 f0,float roughness)
+{
+    float base=clamp(1-cosine,0,1),base2=base*base,base5=(base2*base2)*base;
+    return f0+(max(vec3(1-roughness),f0)-f0)*base5;
+}
+vec2 TransparentIntegratedBRDF(float nv,float roughness)
+{
+    ivec2 size=textureSize(sampler2D(brdfTexture,pointSampler),0);
+    vec2 pixel=vec2(nv,roughness)*vec2(size)-.5,w=fract(pixel);
+    ivec2 a=ivec2(floor(pixel)),b=a+1;
+    a=clamp(a,ivec2(0),size-1);b=clamp(b,ivec2(0),size-1);
+    return mix(mix(texelFetch(sampler2D(brdfTexture,pointSampler),a,0).rg,
+        texelFetch(sampler2D(brdfTexture,pointSampler),ivec2(b.x,a.y),0).rg,w.x),
+        mix(texelFetch(sampler2D(brdfTexture,pointSampler),ivec2(a.x,b.y),0).rg,
+        texelFetch(sampler2D(brdfTexture,pointSampler),b,0).rg,w.x),w.y);
+}
 vec2 EnvUV(vec3 d)
 {
     float c=cos(frame.settings.z),s=sin(frame.settings.z);d.xy=mat2(c,-s,s,c)*d.xy;
@@ -204,8 +251,7 @@ bool NativeEnvironmentSample(vec2 coordinate,float mip,float maximumMip,uint ena
 float ProbeVisibility(vec3 position,SpatialProbe probe,uint probeIndex)
 {
     return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,
-        probeParameters.x+probeIndex,probePrefilterTexture,pointSampler,environmentLinearSampler,
-        probeParameters.w==1u && index.z==1u?1u:0u);
+        probeParameters.x+probeIndex,probePrefilterTexture,pointSampler);
 }
 struct ProbeBlendCache
 {
@@ -565,18 +611,18 @@ void main()
         normalVariance=0.25*(dot(normalDx,normalDx)+dot(normalDy,normalDy));
     }
     if(gl_FragCoord.z>opaqueDepth || excludedLayer)discard;
-    vec4 base=draw.baseColor;
+    vec4 base=draw.baseColor*vertexColor;
     if((flags&1u)!=0u)base*=textureGrad(sampler2D(baseTexture,materialSampler),uv,uvDx,uvDy);
+    float coverage=TransparentCoverage(base.a,draw.flags.w,draw.attenuation.w);
+    if(coverage<=0.0)discard;
     vec2 mr=draw.material.xy;if((flags&2u)!=0u)mr*=textureGrad(sampler2D(materialTexture,materialSampler),uv,uvDx,uvDy).bg;
     float metal=clamp(mr.x,0,1),rough=clamp(mr.y,.04,1),transmission=clamp(draw.optics.x,0,1)*(1-metal);
     if((flags&64u)!=0u)
     {
-        float coverage=mix(clamp(base.a,0,1),1,transmission);
         outputColor=vec4(draw.baseColor.rgb*coverage,coverage);reactive=vec4(coverage);return;
     }
     if((flags&128u)!=0u)
     {
-        float coverage=clamp(base.a,0,1);
         outputColor=vec4(clamp(base.rgb,vec3(0),vec3(65504))*coverage,coverage);reactive=vec4(coverage);return;
     }
     float filteredAlphaSquared=min(1.0,rough*rough*rough*rough+min(2.0*normalVariance,0.18));
@@ -595,13 +641,17 @@ void main()
     bool totalInternalReflection=transmission>0 && dot(transmissionRay,transmissionRay)<1e-6;
     vec3 f0=totalInternalReflection?vec3(1):mix(vec3(dielectric),base.rgb,metal),f=Fresnel(nv,f0);
     float ao=1;if((flags&8u)!=0u)ao=mix(1,texture(sampler2D(aoTexture,materialSampler),uv).r,draw.material.w);
-    vec3 diffuseWeight=(1-f)*base.rgb*(1-metal)*(1-transmission);
+    vec3 diffuseWeight=(1-FresnelRoughness(nv,f0,specularRoughness))*base.rgb*(1-metal)*(1-transmission);
     ProbeBlendCache probeCache=PrepareProbeBlendCache(worldPosition,
         any(notEqual(diffuseWeight,vec3(0))) || (uint(frame.screen.w+.5)&2u)!=0u ||
         (transmission>0 && !totalInternalReflection));
     vec3 lit=vec3(0);
     if(any(notEqual(diffuseWeight,vec3(0))))lit=diffuseWeight*Irradiance(worldPosition,n,probeCache)*ao;
-    if((uint(frame.screen.w+.5)&2u)!=0u)lit+=Radiance(worldPosition,reflect(-v,n),specularRoughness,probeCache)*f*frame.specularColor.rgb;
+    if((uint(frame.screen.w+.5)&2u)!=0u)
+    {
+        vec2 brdf=TransparentIntegratedBRDF(nv,specularRoughness);
+        lit+=Radiance(worldPosition,reflect(-v,n),specularRoughness,probeCache)*(f0*brdf.x+brdf.y)*ao*frame.specularColor.rgb;
+    }
     vec3 refracted=vec3(0);
     if(transmission>0 && !totalInternalReflection)
     {
@@ -660,8 +710,8 @@ void main()
     }
 #endif
     vec3 emissive=draw.emissive.rgb;if((flags&16u)!=0u)emissive*=texture(sampler2D(emissiveTexture,materialSampler),uv).rgb;
-    float coverage=mix(clamp(base.a,0,1),1,transmission);
     vec3 color=lights.counts.w>.5?lit+refracted+emissive:base.rgb+emissive;
     outputColor=vec4(clamp(color,vec3(0),vec3(65504))*coverage,coverage);
     reactive=vec4(coverage);
 }
+#endif

@@ -18,6 +18,7 @@ layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec2 inUv;
 layout(location = 3) in vec4 inTangent;
+layout(location = 8) in vec4 inColor;
 #if RENDERER_INSTANCING
 layout(location = 4) in mat4 instanceModel;
 #endif
@@ -26,6 +27,7 @@ layout(location = 0) out vec2 fragUv;
 layout(location = 1) out vec3 fragWorldPosition;
 layout(location = 2) out vec3 fragNormal;
 layout(location = 3) out vec4 fragTangent;
+layout(location = 5) out vec4 fragColor;
 #if RENDERER_ENABLE_SHADOWS
 layout(location = 4) out vec4 fragLightSpacePosition;
 #endif
@@ -102,6 +104,7 @@ void main()
     precise vec4 clipPosition = drawConstants.viewProjectionMatrix * worldPosition;
     gl_Position = clipPosition;
     fragUv = inUv;
+    fragColor = inColor;
     fragWorldPosition = worldPosition.xyz;
     fragNormal = MeshNormalizeOr(mat3(normalMatrix) * inNormal, vec3(0,0,1));
     vec3 tangent = mat3(world) * inTangent.xyz;

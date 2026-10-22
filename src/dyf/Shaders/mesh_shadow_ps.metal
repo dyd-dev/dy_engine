@@ -12,7 +12,7 @@ struct DrawConstants
     float4 baseColor;
     float4 materialParams;
 };
-struct ShadowOutput {float4 position [[position]]; float2 uv;};
+struct ShadowOutput {float4 position [[position]]; float2 uv; float alpha;};
 fragment void shadowFragmentShader(
     ShadowOutput input [[stage_in]],
     bool frontFace [[front_facing]],
@@ -20,10 +20,11 @@ fragment void shadowFragmentShader(
     texture2d<float> baseColorTexture [[texture(0)]],
     sampler materialSampler [[sampler(8)]])
 {
-    if((constants.padding1 & 4u)==0u && !frontFace) discard_fragment();
+    bool front=frontFace!=((constants.padding1 & 32u)!=0u);
+    if((constants.padding1 & 4u)==0u && !front) discard_fragment();
     if((constants.padding1 & 3u)==1u)
     {
-        float alpha=constants.baseColor.a;
+        float alpha=constants.baseColor.a*input.alpha;
         if((constants.textureFlags & 1u)!=0u) alpha*=baseColorTexture.sample(materialSampler,input.uv).a;
         if(alpha<as_type<float>(constants.padding0)) discard_fragment();
     }

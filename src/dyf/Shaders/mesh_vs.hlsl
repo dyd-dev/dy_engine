@@ -46,6 +46,7 @@ struct VSInput
     float3 normal : TEXCOORD1;
     float2 uv : TEXCOORD2;
     float4 tangent : TEXCOORD3;
+    float4 color : TEXCOORD8;
 #if RENDERER_INSTANCING
     float4 model0 : TEXCOORD4;
     float4 model1 : TEXCOORD5;
@@ -61,6 +62,7 @@ struct VSOutput
     float3 worldPosition : TEXCOORD1;
     float3 worldNormal : TEXCOORD2;
     float4 worldTangent : TEXCOORD3;
+    float4 color : TEXCOORD5;
 #if RENDERER_ENABLE_SHADOWS
     float4 lightSpacePosition : TEXCOORD4;
 #endif
@@ -111,6 +113,7 @@ VSOutput main(VSInput input)
     VSOutput output;
     output.position = clipPosition;
     output.uv = input.uv;
+    output.color = input.color;
     output.worldPosition = worldPosition.xyz;
     output.worldNormal = MeshNormalizeOr(mul(normalMatrix, input.normal), float3(0,0,1));
     float3 tangent = mul((float3x3)world, input.tangent.xyz);

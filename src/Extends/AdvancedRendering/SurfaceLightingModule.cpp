@@ -1,6 +1,7 @@
 #include "AdvancedRenderingInternal.h"
 #include "ScreenSpaceLighting.h"
 #include "DepthPrepassValidation.h"
+#include "GpuVisibility.h"
 #include "dyf/Camera.h"
 #include <cmath>
 
@@ -28,7 +29,7 @@ public:
         {
             const auto& device=renderer.GetDevice();
             const bool occlusion=config.enableGpuCulling && config.enableInstancing && config.enableOcclusionCulling &&
-                device.Supports(RHI::Feature::Compute) && device.Supports(RHI::Feature::IndirectDraw);
+                GpuVisibility::SupportsOcclusion(device);
             requirements.needsSurface|=occlusion || (config.lighting.enabled &&
                 (quality.ambientOcclusion || quality.diffuseGI || quality.reflections));
         }

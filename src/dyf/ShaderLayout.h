@@ -23,7 +23,12 @@ namespace dyf
 		float ty = 0.0f;
 		float tz = 0.0f;
 		float tw = 1.0f;
+		float cr = 1.0f;
+		float cg = 1.0f;
+		float cb = 1.0f;
+		float ca = 1.0f;
 	};
+	static_assert(sizeof(RendererVertex) == 64 && offsetof(RendererVertex, cr) == 48);
 
 	struct RendererLightingConstants
 	{

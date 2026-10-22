@@ -12,12 +12,13 @@ cbuffer DrawConstants : register(b10,space0)
     float4 baseColor;
     float4 materialParams;
 };
-void main(float2 uv : TEXCOORD0, bool frontFace : SV_IsFrontFace)
+void main(float2 uv : TEXCOORD0, float vertexAlpha : TEXCOORD1, bool frontFace : SV_IsFrontFace)
 {
-    if((padding1 & 4u)==0u && !frontFace) discard;
+    bool front=frontFace!=((padding1 & 32u)!=0u);
+    if((padding1 & 4u)==0u && !front) discard;
     if((padding1 & 3u)==1u)
     {
-        float alpha=baseColor.a;
+        float alpha=baseColor.a*vertexAlpha;
         if((textureFlags & 1u)!=0u) alpha*=baseColorTexture.Sample(materialSampler,uv).a;
         clip(alpha-asfloat(padding0));
     }

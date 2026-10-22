@@ -4,7 +4,7 @@ cbuffer Frame:register(b12) {float4x4 view;float4x4 projection;float4x4 inverseP
 cbuffer Index:register(b15) {uint4 drawIndex;};
 Texture2D<float4> baseTexture:register(t0),materialTexture:register(t1),normalTexture:register(t2),aoTexture:register(t3),emissiveTexture:register(t4);
 SamplerState materialSampler:register(s8);
-struct Input {float4 position:SV_Position;float2 uv:TEXCOORD0;float3 worldNormal:TEXCOORD1;float4 worldTangent:TEXCOORD2;float4 currentClip:TEXCOORD3;float4 previousClip:TEXCOORD4;float viewDepth:TEXCOORD5;};
+struct Input {float4 position:SV_Position;float2 uv:TEXCOORD0;float3 worldNormal:TEXCOORD1;float4 worldTangent:TEXCOORD2;float4 currentClip:TEXCOORD3;float4 previousClip:TEXCOORD4;float viewDepth:TEXCOORD5;float4 vertexColor:TEXCOORD6;};
 struct Output {float4 normalRoughAO:SV_Target0;float4 albedoMetal:SV_Target1;float4 motionDepth:SV_Target2;};
 float2 octEncode(float3 n)
 {
@@ -15,7 +15,7 @@ float2 octEncode(float3 n)
 Output main(Input input,bool front:SV_IsFrontFace)
 {
     Draw draw=draws[drawIndex.x];uint flags=draw.flags.x;Output output;
-    float4 base=draw.baseColor;
+    float4 base=draw.baseColor*input.vertexColor;
     if((flags&1)!=0)base*=baseTexture.Sample(materialSampler,input.uv);
     if((flags&64u)!=0u)base.rgb=draw.baseColor.rgb;
     float3 n=normalize(input.worldNormal);

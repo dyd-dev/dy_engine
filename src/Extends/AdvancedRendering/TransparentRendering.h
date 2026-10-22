@@ -39,7 +39,7 @@ private:
     {
         Math::float4x4 model,normalMatrix;
         Math::float4 baseColor,emissive,material,optics,attenuation;
-        uint32_t flags=0,doubleSided=0,pipelineIndex=0,pad1=0;
+        uint32_t flags=0,doubleSided=0,pipelineIndex=0,alphaMode=0;
     };
     struct FrameGPU
     {
@@ -64,11 +64,13 @@ private:
     std::array<RHI::PipelineHandle,4> m_pipelines={};
     std::array<RHI::PipelineHandle,4> m_noAreaPipelines={};
     RHI::ShaderHandle m_noAreaShader=nullptr;
+    RHI::ShaderHandle m_depthShader=nullptr;
     bool m_noAreaAttempted=false;
     std::atomic<bool> m_noAreaReported{false};
     std::array<RHI::PipelineHandle,4> m_depthPipelines={};
     RHI::PipelineHandle m_copyPipeline=nullptr,m_depthCopyPipeline=nullptr;
     RHI::TextureHandle m_color=nullptr,m_reactive=nullptr,m_prefilter=nullptr;
+    RHI::TextureHandle m_brdf=nullptr;
     RHI::TextureHandle m_rearColor=nullptr,m_nearestDepth=nullptr;
     RHI::TextureHandle m_opaqueDepth=nullptr,m_fallbackDepth=nullptr;
     RHI::TextureHandle m_probePrefilter=nullptr;
@@ -77,6 +79,7 @@ private:
     bool m_frameReady=false,m_drawReady=false,m_recorded=false;
     bool m_layeredRecorded=false;
     bool m_nativeFiltering=false;
+    RHI::Format m_reactiveFormat=RHI::Format::Unknown;
     bool m_noShadowReady=false,m_noShadowPending=false;
     bool m_fallbackDepthReady=false,m_fallbackDepthPending=false;
     RHI::ResourceState m_state=RHI::ResourceState::Undefined;

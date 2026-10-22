@@ -162,6 +162,7 @@ bool Renderer::Impl::AddExtension(std::unique_ptr<RenderExtension> extension)
 bool Renderer::Impl::ShaderSources::operator==(const ShaderSources& other) const
 {
     if(bytes!=other.bytes || entries!=other.entries || additionalConstantBytes!=other.additionalConstantBytes ||
+        stockShadowCoverage!=other.stockShadowCoverage ||
         vertexBindings.size()!=other.vertexBindings.size()) return false;
     // Compare float representations so copied default NaNs also match.
     const auto sameFloat=[](float left,float right) {return std::memcmp(&left,&right,sizeof(float))==0;};
@@ -191,6 +192,7 @@ bool Renderer::Impl::SetShaders(const RendererShaderDesc& desc)
         ShaderSources next;
         next.vertexBindings = desc.vertexBindings;
         next.additionalConstantBytes = desc.additionalConstantBytes;
+        next.stockShadowCoverage = desc.stockShadowCoverage;
         for(size_t i=0;i<inputs.size();++i)
         {
             const auto& shader=inputs[i];
@@ -509,6 +511,7 @@ RendererShaderDesc Renderer::Impl::GetShaders() const
         if(!source.bytes[i].empty()) *output[i] = {stages[i], source.entries[i].c_str(), source.bytes[i].data(), source.bytes[i].size()};
     desc.vertexBindings = source.vertexBindings;
     desc.additionalConstantBytes = source.additionalConstantBytes;
+    desc.stockShadowCoverage = source.stockShadowCoverage;
     return desc;
 }
 
@@ -548,17 +551,17 @@ bool Renderer::Impl::UsesInstanceStream() const { return config.enableInstancing
 RHI::PipelineHandle Renderer::Impl::MaterialPipeline(const MaterialDesc& material,bool mirrored) const
 {
     if(!shaderSources.bytes[MeshFragment].empty()) return pipeline;
-    if(wireframeActive && material.alphaMode!=MaterialAlphaMode::Blend)
+    if(wireframeActive && !UsesBlendedRendering(material))
         return wireframePipelines[(material.doubleSided ? 1u : 0u) | (mirrored ? 2u : 0u)];
-    const uint32_t variant=(material.alphaMode==MaterialAlphaMode::Blend ? 2u : 0u) |
+    const uint32_t variant=(UsesBlendedRendering(material) ? 2u : 0u) |
         (material.doubleSided ? 1u : 0u) | (mirrored ? 4u : 0u);
     if(frameNoAreaLights && stockDrawInputs && UsesStockGeometry() && !wireframeActive)
     {
-        const auto selected=frameOpaqueDepthComplete && material.alphaMode!=MaterialAlphaMode::Blend
+        const auto selected=frameOpaqueDepthComplete && !UsesBlendedRendering(material)
             ? noAreaDepthPrepassPipelines[variant] : noAreaMaterialPipelines[variant];
         if(selected)return selected;
     }
-    if(frameOpaqueDepthComplete && material.alphaMode!=MaterialAlphaMode::Blend)
+    if(frameOpaqueDepthComplete && !UsesBlendedRendering(material))
         return depthPrepassPipelines[variant];
     return variant ? materialPipelines[variant-1] : pipeline;
 }
@@ -605,11 +608,12 @@ bool Renderer::Impl::InitializeMesh(RHI::TextureHandle output,bool compositeAlph
 	{
 		shadowVertexShader = nativeDevice->CreateShader(ShaderDescription(ShadowVertex,stockShaders.shadowVertex));
 	}
-	if(shadows && shaderSources.bytes[ShadowVertex].empty() && !shadowFragmentShader)
+	const bool stockCoverage=shaderSources.bytes[ShadowVertex].empty() || shaderSources.stockShadowCoverage;
+	if(shadows && stockCoverage && !shadowFragmentShader)
 		shadowFragmentShader = nativeDevice->CreateShader(DefaultShadowFragment());
 	if(vertexShader == nullptr || fragmentShader == nullptr || (depthPrepass && !depthPrepassFragmentShader) ||
 		(shadows && shadowVertexShader == nullptr) ||
-		(shadows && shaderSources.bytes[ShadowVertex].empty() && !shadowFragmentShader)) return false;
+		(shadows && stockCoverage && !shadowFragmentShader)) return false;
     nativeDevice->DestroyPipeline(pipeline);pipeline=nullptr;
     for(auto& value:materialPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
     for(auto& value:depthPrepassPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}

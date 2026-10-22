@@ -97,11 +97,12 @@ bool Renderer::Impl::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorF
 		static_cast<uint32_t>(sizeof(RendererVertex)),
 		RHI::VertexStepMode::Vertex
 	};
-	const std::array<RHI::VertexAttribute, 4> vertexAttributes = {{
+	const std::array<RHI::VertexAttribute, 5> vertexAttributes = {{
 		{ 0, 0, RHI::Format::R32G32B32_FLOAT, static_cast<uint32_t>(offsetof(RendererVertex, px)) },
 		{ 1, 0, RHI::Format::R32G32B32_FLOAT, static_cast<uint32_t>(offsetof(RendererVertex, nx)) },
 		{ 2, 0, RHI::Format::R32G32_FLOAT, static_cast<uint32_t>(offsetof(RendererVertex, u)) },
-		{ 3, 0, RHI::Format::R32G32B32A32_FLOAT, static_cast<uint32_t>(offsetof(RendererVertex, tx)) }
+		{ 3, 0, RHI::Format::R32G32B32A32_FLOAT, static_cast<uint32_t>(offsetof(RendererVertex, tx)) },
+		{ 8, 0, RHI::Format::R32G32B32A32_FLOAT, static_cast<uint32_t>(offsetof(RendererVertex, cr)) }
 	}};
 
     std::vector<RHI::VertexBufferLayout> vertexBuffers={vertexBuffer};
@@ -247,6 +248,12 @@ bool Renderer::Impl::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorF
 		shadowBindings.push_back({8u,RHI::ResourceBindingType::StaticSampler,1,RHI::ShaderStageFlags::Fragment,sampler});
 	}
 	RHI::GraphicsPipelineDesc shadowDesc = {};
+	auto shadowAttributes=attributes;
+	for(auto& attribute:shadowAttributes)if(attribute.location==8 && shaderSources.bytes[ShadowVertex].empty())
+	{
+		attribute.format=RHI::Format::R32_FLOAT;
+		attribute.offset=static_cast<uint32_t>(offsetof(RendererVertex,ca));
+	}
 	shadowDesc.vertexShader = shadowVertexShader;
 	shadowDesc.topology = RHI::PrimitiveTopology::TriangleList;
 	shadowDesc.vertexBuffers = vertexBuffers.data();
@@ -269,15 +276,16 @@ bool Renderer::Impl::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorF
     compactVertexBuffers[0].stride=sizeof(CompactShadowVertex);
     std::vector<RHI::VertexAttribute> compactAttributes={
         {0,0,RHI::Format::R32G32B32_FLOAT,static_cast<uint32_t>(offsetof(CompactShadowVertex,px))},
-        {2,0,RHI::Format::R32G32_FLOAT,static_cast<uint32_t>(offsetof(CompactShadowVertex,u))}};
+        {2,0,RHI::Format::R32G32_FLOAT,static_cast<uint32_t>(offsetof(CompactShadowVertex,u))},
+        {8,0,RHI::Format::R32_FLOAT,static_cast<uint32_t>(offsetof(CompactShadowVertex,alpha))}};
     for(const auto& attribute:attributes)if(attribute.binding==1)compactAttributes.push_back(attribute);
     for(uint32_t compact=0;compact<(stockShadow?2u:1u);++compact)
     for(uint32_t variant=0;variant<(stockShadow?8u:1u);++variant)
     {
         shadowDesc.vertexBuffers=compact ? compactVertexBuffers.data() : vertexBuffers.data();
         shadowDesc.vertexBufferCount=static_cast<uint32_t>(vertexBuffers.size());
-        shadowDesc.vertexAttributes=compact ? compactAttributes.data() : attributes.data();
-        shadowDesc.vertexAttributeCount=static_cast<uint32_t>(compact ? compactAttributes.size() : attributes.size());
+        shadowDesc.vertexAttributes=compact ? compactAttributes.data() : shadowAttributes.data();
+        shadowDesc.vertexAttributeCount=static_cast<uint32_t>(compact ? compactAttributes.size() : shadowAttributes.size());
         // 불투명 그림자는 깊이만 기록하고 알파 마스크만 기존 fragment 판정을 유지한다.
         const bool coverage=stockShadow ? (variant&2u)!=0 : shadowFragmentShader!=nullptr;
         shadowDesc.fragmentShader=coverage ? shadowFragmentShader : nullptr;

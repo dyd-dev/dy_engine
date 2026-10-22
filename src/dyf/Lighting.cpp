@@ -313,7 +313,7 @@ bool Renderer::Impl::ReuseShadowAtlas(const Scene& scene,const ShadowData& shado
         if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount)continue;
         const auto& material=scene.Materials()[ToIndex(materialId)];
         append(material.alphaMode);
-        if(material.alphaMode==MaterialAlphaMode::Blend)continue;
+        if(UsesBlendedRendering(material))continue;
         cache.pendingMeshes.push_back(mesh.source);
         append(reinterpret_cast<uintptr_t>(mesh.vertexBuffer));
         if(draws)

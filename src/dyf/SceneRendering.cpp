@@ -242,6 +242,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         recordingStatistics.outputWidth=overlayTarget->GetDesc().width;
         recordingStatistics.outputHeight=overlayTarget->GetDesc().height;
         recordingStatistics.surfacePrepass=surfaceNeeded;
+        recordingStatistics.gpuOcclusion=false;
         recordingStatistics.clusteredLighting=renderFrame.lighting.clustered;
         recordingStatistics.shadowViewCount=hasShadows ? shadows.viewCount : 0;
         recordingStatistics.shadowViewResolution=hasShadows ? shadows.resolution : 0;
@@ -290,7 +291,9 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         {
             if(!renderFrame.normal.resource.IsValid() || !renderFrame.albedo.resource.IsValid() || !renderFrame.ao.resource.IsValid())
                 return RendererFailure("The surface extension did not provide normal, albedo and AO resources.");
-            if(visibilityActive && config.enableOcclusionCulling)
+            const bool effectiveOcclusion=visibilityActive && config.enableOcclusionCulling &&
+                GpuVisibility::SupportsOcclusion(*nativeDevice);
+            if(effectiveOcclusion)
             {
                 if(!gpuVisibility->AddOcclusionPasses(graph,depthStencilTarget,depth,camera))
                     return RendererFailure("GPU occlusion pass creation failed.");

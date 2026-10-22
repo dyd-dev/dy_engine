@@ -69,9 +69,9 @@ void main(uint3 dispatch:SV_DispatchThreadID)
     {
         float2 xy=float2((corner&1)!=0?upper.x:lower.x,(corner&2)!=0?upper.y:lower.y);
         float4 projected=mul(clusterInverseProjection,float4(xy,0,1));
-        float3 point=projected.xyz/projected.w;float distance=(corner&4)!=0?farDepth:nearDepth;
-        if(clusterCounts.z!=0)point*=distance/max(-point.z,1e-20);else point.z=-distance;
-        minimum=min(minimum,point);maximum=max(maximum,point);
+        float3 viewPoint=projected.xyz/projected.w;float distance=(corner&4)!=0?farDepth:nearDepth;
+        if(clusterCounts.z!=0)viewPoint*=distance/max(-viewPoint.z,1e-20);else viewPoint.z=-distance;
+        minimum=min(minimum,viewPoint);maximum=max(maximum,viewPoint);
     }
     float3 cellCenter=(minimum+maximum)*.5,cellExtent=(maximum-minimum)*.5;
     uint base=cell*(clusterDimensions.w+1),count=0;

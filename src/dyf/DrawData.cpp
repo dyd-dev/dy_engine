@@ -16,7 +16,7 @@ bool Renderer::Impl::UpdateInstanceBuffer(const Scene& scene,RHI::ICommandList& 
     const bool separateTransparency=m_environmentCapture || wireframeActive || UsesSeparateTransparency();
     const bool legacyDraws=(!visibilityActive && !cpuBatchesActive) || (!separateTransparency &&
         std::any_of(scene.Materials().begin(),scene.Materials().end(),[](const MaterialDesc& material) {
-            return material.alphaMode==MaterialAlphaMode::Blend;
+            return UsesBlendedRendering(material);
         }));
     const bool shadows=config.lighting.enabled && config.lighting.direct && config.lighting.shadows;
     if(!UsesInstanceStream() || !pendingInstanceCount || (!legacyDraws && !shadows)) {

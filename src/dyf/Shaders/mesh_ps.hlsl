@@ -177,6 +177,7 @@ struct PSInput
     float3 worldPosition      : TEXCOORD1;
     float3 worldNormal        : TEXCOORD2;
     float4 worldTangent       : TEXCOORD3;
+    float4 color              : TEXCOORD5;
 #if RENDERER_ENABLE_SHADOWS
     float4 lightSpacePosition : TEXCOORD4;
 #endif
@@ -670,7 +671,7 @@ inline float3 EvaluateLights(RendererLightingConstants lighting, float3 worldPos
 float4 main(PSInput input, bool frontFace : SV_IsFrontFace) : SV_TARGET
 {
     uint textureFlags = drawTextureFlags;
-    float4 base = baseColor;
+    float4 base = baseColor * input.color;
     if ((textureFlags & RENDERER_TEXTURE_FLAG_BASE_COLOR) != 0u)
     {
         base *= SampleMaterial(0u,input.uv);

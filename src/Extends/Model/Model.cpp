@@ -12,6 +12,7 @@
 #include <fstream>
 #include <future>
 #include <limits>
+#include <map>
 
 #include <dyf/Extends/Model/ModelScene.h>
 
@@ -225,7 +226,11 @@ namespace dyf
 			key += "|fbxBakeRate=" + floatIdentity(options.fbxBakeRate);
 			key += "|fbxConstantTrackTolerance=" + floatIdentity(options.fbxConstantTrackTolerance);
 			key += "|fbxSpecularTextureIsOrm=" + std::to_string(options.fbxSpecularTextureIsOrm);
+			key += "|fbxSpecularTextureHasOcclusion=" + std::to_string(options.fbxSpecularTextureHasOcclusion);
+			key += "|fbxBumpTextureIsNormalMap=" + std::to_string(options.fbxBumpTextureIsNormalMap);
+			key += "|allowMaterialFallbacks=" + std::to_string(options.allowMaterialFallbacks);
 			key += "|fbxBaseColorTextureHasOpacity=" + std::to_string(options.fbxBaseColorTextureHasOpacity);
+			key += "|fbxBaseColorAlphaMode=" + std::to_string(options.fbxBaseColorAlphaMode ? int(*options.fbxBaseColorAlphaMode) : -1);
 			key += "|normalMapYSign=" + floatIdentity(options.normalMapYSign);
 			key += "|importLights=" + std::to_string(options.importLights);
 			key += "|materialOverrides=" + std::to_string(options.materialOverrides.size());
@@ -240,6 +245,10 @@ namespace dyf
 				key += "|distance=" + floatIdentity(value.attenuationDistance);
 				key += "|roughness=" + floatIdentity(value.roughnessFactor);
 				key += "|metallic=" + floatIdentity(value.metallicFactor);
+				key += "|alphaMode=" + std::to_string(value.alphaMode ? int(*value.alphaMode) : -1);
+				key += "|doubleSided=" + std::to_string(value.doubleSided ? int(*value.doubleSided) : -1);
+				key += "|fbxFallbackTextureUvSet=" + (value.fbxFallbackTextureUvSet
+					? std::to_string(value.fbxFallbackTextureUvSet->size()) + ":" + *value.fbxFallbackTextureUvSet : "unset");
 				key += "|baseColor=" + floatIdentity(value.baseColor.x) + "," + floatIdentity(value.baseColor.y)
 					+ "," + floatIdentity(value.baseColor.z) + "," + floatIdentity(value.baseColor.w);
 				for(size_t slot = 0; slot < value.texturePaths.size(); ++slot)
@@ -315,11 +324,10 @@ namespace dyf
 		return true;
 	}
 
-	static bool SkinVertexImpl(
-		const Vertex& source,
+	bool Detail::BuildSkinTransform(
 		const SkinInfluence& influence,
 		const std::vector<SkinJointMatrices>& palette,
-		Vertex& outVertex, bool positionOnly)
+		SkinTransform& outTransform, Math::float4x4* fallbackNormalMatrix)
 	{
 		if(!std::isfinite(influence.dqBlendWeight)
 			|| influence.dqBlendWeight < 0.0f
@@ -334,12 +342,12 @@ namespace dyf
 		}
 		if(totalWeight <= 1.0e-6f)
 		{
-			outVertex = source;
+			outTransform.copySource = true;
 			return true;
 		}
 
 		Math::float4x4 linearMatrix = {};
-		Math::float4x4 fallbackNormalMatrix = {};
+		if(fallbackNormalMatrix) *fallbackNormalMatrix = {};
 		const bool useDualQuaternion = influence.dqBlendWeight > 0.0f;
 		Math::quat referenceReal = Math::quat::Identity();
 		bool hasReference = false;
@@ -355,7 +363,7 @@ namespace dyf
 			for(size_t matrixIndex = 0u; matrixIndex < 16u; ++matrixIndex)
 			{
 				linearMatrix.m[matrixIndex] += joint.positionMatrix.m[matrixIndex] * weight;
-				if(!positionOnly) fallbackNormalMatrix.m[matrixIndex] += joint.normalMatrix.m[matrixIndex] * weight;
+				if(fallbackNormalMatrix) fallbackNormalMatrix->m[matrixIndex] += joint.normalMatrix.m[matrixIndex] * weight;
 			}
 
 			if(useDualQuaternion)
@@ -406,8 +414,44 @@ namespace dyf
 					+ (dqMatrix.m[matrixIndex] - linearMatrix.m[matrixIndex]) * influence.dqBlendWeight;
 			}
 		}
+		outTransform.matrix = finalMatrix;
+		outTransform.copySource = false;
+		return true;
+	}
+
+	bool Detail::BuildSkinTransformGroups(const std::vector<SkinInfluence>& influences,
+		std::vector<uint32_t>& representatives, std::vector<uint32_t>& vertexGroups)
+	{
+		representatives.clear();
+		vertexGroups.clear();
+		if(influences.size() > UINT32_MAX) return false;
+		std::map<std::array<uint8_t, sizeof(SkinInfluence)>, uint32_t> groups;
+		vertexGroups.reserve(influences.size());
+		for(size_t vertex = 0; vertex < influences.size(); ++vertex)
+		{
+			std::array<uint8_t, sizeof(SkinInfluence)> key;
+			std::memcpy(key.data(), &influences[vertex], key.size());
+			const auto [entry, inserted] = groups.emplace(key, static_cast<uint32_t>(representatives.size()));
+			if(inserted) representatives.push_back(static_cast<uint32_t>(vertex));
+			vertexGroups.push_back(entry->second);
+		}
+		return true;
+	}
+
+	static bool SkinVertexImpl(
+		const Vertex& source,
+		const SkinInfluence& influence,
+		const std::vector<SkinJointMatrices>& palette,
+		Vertex& outVertex, bool positionOnly)
+	{
+		Detail::SkinTransform transform;
+		Math::float4x4 fallbackNormalMatrix = {};
+		if(!Detail::BuildSkinTransform(influence, palette, transform,
+			positionOnly ? nullptr : &fallbackNormalMatrix)) return false;
 		outVertex = source;
-		outVertex.position = Math::TransformPoint(finalMatrix, source.position);
+		if(transform.copySource) return true;
+		const auto& finalMatrix = transform.matrix;
+		outVertex.position = Detail::ApplySkinTransform(transform, source.position);
 		if(positionOnly)
 			return std::isfinite(outVertex.position.x) && std::isfinite(outVertex.position.y)
 				&& std::isfinite(outVertex.position.z);
@@ -604,10 +648,13 @@ namespace dyf
 		asset.nodes = std::move(model.nodes);
 		asset.skins = std::move(model.skins);
 		asset.animations = std::move(model.animations);
+		asset.cameras = std::move(model.cameras);
 		asset.directionalLights = std::move(model.directionalLights);
 		asset.pointLights = std::move(model.pointLights);
 		asset.spotLights = std::move(model.spotLights);
 		asset.assetTransform = model.assetTransform;
+		asset.sourceToYUp = model.sourceToYUp;
+		asset.sourceUnitMeters = model.sourceUnitMeters;
 		asset.hasBounds = bounds.valid;
 		if(bounds.valid)
 		{

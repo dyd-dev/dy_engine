@@ -7,7 +7,11 @@ namespace dyf
 {
 BasicEnvironmentResources::~BasicEnvironmentResources()
 {
-    if(m_device) for(auto buffer:m_buffers) m_device->DestroyBuffer(buffer);
+    if(m_device)
+    {
+        for(auto buffer:m_buffers) m_device->DestroyBuffer(buffer);
+        m_device->DestroyTexture(m_emptyProbeArray);
+    }
 }
 
 bool BasicEnvironmentResources::Prepare(RHI::IDevice& device,RHI::ICommandList& uploads)
@@ -29,6 +33,23 @@ bool BasicEnvironmentResources::Prepare(RHI::IDevice& device,RHI::ICommandList& 
         const RHI::ResourceBarrierDesc ready={m_buffers[i],nullptr,RHI::ResourceState::CopyDestination,state,{}};
         uploads.ResourceBarrier(&ready,1);
     }
+    // Array shaders require an array view even when the probe count is zero.
+    // A two-layer neutral texture has the matching dimensional contract on all backends.
+    device.DestroyTexture(m_emptyProbeArray);
+    RHI::TextureDesc texture;
+    texture.width=texture.height=1;texture.depthOrArraySize=2;
+    texture.format=RHI::Format::R8G8B8A8_UNORM;texture.usage=RHI::TextureUsage::ShaderResource;
+    m_emptyProbeArray=device.CreateTexture(texture);
+    if(!m_emptyProbeArray) return false;
+    const RHI::ResourceBarrierDesc writable={nullptr,m_emptyProbeArray,
+        RHI::ResourceState::Undefined,RHI::ResourceState::CopyDestination,{}};
+    uploads.ResourceBarrier(&writable,1);
+    const uint8_t black[4]={0,0,0,0};
+    for(uint32_t layer=0;layer<2;++layer)
+        if(!device.UpdateTexture(uploads,m_emptyProbeArray,0,layer,black,sizeof(black),4,4)) return false;
+    const RHI::ResourceBarrierDesc readable={nullptr,m_emptyProbeArray,
+        RHI::ResourceState::CopyDestination,RHI::ResourceState::ShaderResource,{}};
+    uploads.ResourceBarrier(&readable,1);
     return true;
 }
 
@@ -37,7 +58,7 @@ RenderEnvironmentResources BasicEnvironmentResources::GetResources(RHI::TextureH
     RenderEnvironmentResources resources;
     resources.constantBuffer=m_buffers[0];
     resources.probeData=m_buffers[1];resources.probeParameters=m_buffers[2];
-    resources.prefilter=resources.probePrefilter=black;
+    resources.prefilter=black;resources.probePrefilter=m_emptyProbeArray;
     resources.diffuse.texture=resources.specular.texture=black;
     return resources;
 }

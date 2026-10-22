@@ -249,6 +249,8 @@ int main(int argc, char** argv)
         double initialTourTime=0;
         bool initiallyPaused=false;
         bool night=false;
+        std::string scenePreset="exterior";
+        bool presetSpecified=false;
         uint32_t benchmarkFrames = 0, benchmarkWarmup = 120;
         double benchmarkStep = 0;
         bool benchmarkRequested = false;
@@ -292,7 +294,8 @@ int main(int argc, char** argv)
         uint32_t directionalShadowLights = 4, pointShadowLights = 16, spotShadowLights = 16;
         uint32_t glassLayers = 2;
         const auto usage = [] {
-            std::fputs("Usage: showcase [exterior|night|interior|emerald|comparison|scene.gltf|scene.glb|scene.fbx|scene.obj] [options]\n"
+            std::fputs("Usage: showcase [exterior|night|interior|emerald|sponza|comparison|scene.gltf|scene.glb|scene.fbx|scene.obj] [options]\n"
+                "  --scene-preset NAME     none, exterior, interior, emerald, sponza; explicit source conventions/camera/lighting\n"
                 "  night / --night          Bistro exterior with dark sky and showcase-authored practical lights\n"
                 "  comparison               Same Sponza asset and 60 s CSV as the legacy-renderer branch\n"
                 "  --actor FILE|knight      Original animated glTF/GLB/FBX, Y-up; knight uses Intel's original FBX\n"
@@ -329,6 +332,8 @@ int main(int argc, char** argv)
             const std::string argument = argv[i];
             if(argument == "--help") { usage(); return 0; }
             if(argument == "--no-probes") bakeSpatialProbes = false;
+            else if(argument == "--scene-preset" && i + 1 < argc)
+            { scenePreset=argv[++i];presetSpecified=true; }
             else if(argument == "--night") night=true;
             else if(argument == "--cpu-culling") cpuCulling = true;
             else if(argument == "--benchmark-frames" && i + 1 < argc)
@@ -407,7 +412,7 @@ int main(int argc, char** argv)
                 actorClip = static_cast<uint32_t>(clip);
             }
             else if(!argument.empty() && argument.front() != '-' && !sceneSpecified)
-            { model.path = argument; sceneSpecified = true; }
+            { model.path = argument; sceneSpecified = true;if(!presetSpecified)scenePreset="none"; }
             else { usage(); return 1; }
         }
         if(benchmarkRequested && (!benchmarkFrames || benchmarkOutput.empty() || !exportCameraPath.empty()))
@@ -418,19 +423,26 @@ int main(int argc, char** argv)
         if(benchmarkCpuZones) throw std::runtime_error("--benchmark-cpu-zones requires a build with profiler tracing enabled.");
 #endif
         if(model.path=="night") {night=true;model.path="exterior";}
+        if(!presetSpecified && (model.path=="exterior" || model.path=="interior" ||
+            model.path=="emerald" || model.path=="sponza")) scenePreset=model.path;
         if(model.path == "exterior" || model.path == "interior")
             model.path = (std::filesystem::path(DY_SHOWCASE_DEFAULT_SCENE).parent_path() /
                 (model.path == "exterior" ? "BistroExterior.fbx" : "BistroInterior_Wine.fbx")).string();
         if(model.path == "emerald") model.path = DY_SHOWCASE_EMERALD_SCENE;
+        if((model.path == "sponza" || model.path == "comparison") && std::string(DY_SHOWCASE_COMPARISON_SCENE).empty())
+            throw std::runtime_error("Sponza scene path is not configured. Set DY_SHOWCASE_COMPARISON_SCENE when configuring CMake, or pass a model file path directly with --scene-preset sponza.");
+        if(model.path == "sponza") model.path = DY_SHOWCASE_COMPARISON_SCENE;
         if(model.path=="comparison")
         {
             legacyComparison=true;
+            scenePreset="sponza";
             model.path=DY_SHOWCASE_COMPARISON_SCENE;
             if(cameraPath.empty()) cameraPath=DY_SHOWCASE_COMPARISON_CAMERA;
             if(model.path.empty() || cameraPath.empty())
                 throw std::runtime_error("Sponza comparison asset or camera path is not configured");
         }
-        if(actorDescription.path=="knight")
+        const bool knightPreset=actorDescription.path=="knight";
+        if(knightPreset)
         {
             actorDescription.path=DY_SHOWCASE_KNIGHT_ACTOR;
             if(actorDescription.path.empty())
@@ -439,7 +451,7 @@ int main(int argc, char** argv)
                 return 1;
             }
         }
-        if(std::filesystem::path(actorDescription.path).filename()=="Knight_USD_002.fbx")
+        if(knightPreset)
         {
             showcase::ApplyIntelKnightMaterials(actorDescription);
             std::fputs("Intel Knight: original Maya PBR values and 4K PNGs explicitly bound; animation remains in the original FBX.\n",stderr);
@@ -456,10 +468,14 @@ int main(int argc, char** argv)
             !std::isfinite(lightRadius) || lightRadius < 0 || !std::isfinite(initialTourTime) || initialTourTime<0)
         { usage(); return 1; }
         const auto filename = std::filesystem::path(model.path).filename().string();
-        const bool bistro = filename.rfind("Bistro", 0) == 0;
-        const bool wine = filename == "BistroInterior_Wine.fbx";
-        const bool bistroInterior = wine || filename == "BistroInterior.fbx";
-        const bool emerald = filename == "EmeraldSquare_Day.fbx";
+        if(scenePreset!="none" && scenePreset!="exterior" && scenePreset!="interior" &&
+            scenePreset!="emerald" && scenePreset!="sponza")
+            throw std::runtime_error("Unknown scene preset: "+scenePreset);
+        const bool bistro = scenePreset=="exterior" || scenePreset=="interior";
+        const bool wine = scenePreset=="interior";
+        const bool bistroInterior = scenePreset=="interior";
+        const bool emerald = scenePreset=="emerald";
+        std::fprintf(stderr,"Scene preset: %s (material interpretation never depends on the filename).\n",scenePreset.c_str());
         if(night && (!bistro || bistroInterior))
             throw std::runtime_error("Night lighting is a Bistro exterior preset.");
         model.normalizedSize = 80;
@@ -470,21 +486,21 @@ int main(int argc, char** argv)
         model.loadOptions.maxParserBytes = model.loadOptions.maxSourceBytes;
         model.loadOptions.maxDecodedBytes = model.loadOptions.maxSourceBytes;
         model.loadOptions.textureDecodeThreadCount = 4;
-        if(emerald)
+        if(emerald || bistro)
         {
-            // EmeraldSquare README: BaseColor alpha = opacity, Specular RGB =
-            // AO/roughness/metalness and tangent-space normals use DirectX Y.
+            // ORCA's Falcor convention: G/B = roughness/metalness, R unused;
+            // texture alpha uses the reference renderer's 0.5 coverage test.
+            // https://github.com/NVIDIAGameWorks/Falcor/blob/master/docs/usage/scene-formats.md
             model.loadOptions.importLights = true;
             model.loadOptions.fbxSpecularTextureIsOrm = true;
+            model.loadOptions.fbxSpecularTextureHasOcclusion = false;
             model.loadOptions.fbxBaseColorTextureHasOpacity = true;
+            model.loadOptions.fbxBumpTextureIsNormalMap = true;
+            model.loadOptions.fbxBaseColorAlphaMode = MaterialAlphaMode::Mask;
             model.loadOptions.normalMapYSign = -1;
         }
         if(bistro)
         {
-            model.loadOptions.fbxSpecularTextureIsOrm = true;
-            model.loadOptions.fbxBaseColorTextureHasOpacity = true;
-            model.loadOptions.normalMapYSign = -1;
-            model.loadOptions.importLights = true;
             // Thickness is an explicit raster approximation, in meters here.
             // Colors are exp(-absorptionCoefficient * 0.01m) from the bundle .pyscene.
             model.loadOptions.materialOverrides = {
@@ -504,12 +520,20 @@ int main(int argc, char** argv)
             {
                 optics.roughnessFactor = optics.name == "Ice" ? .1f : 0;
                 optics.metallicFactor = 0;
+                optics.alphaMode = MaterialAlphaMode::Opaque;
+                optics.doubleSided = true;
+                // Repair dangling "map1" references on TextureUV meshes only;
+                // other meshes with an authored map1 UV0 keep their source mapping.
+                if(optics.name == "TransparentGlass") optics.fbxFallbackTextureUvSet = "TextureUV";
             }
         }
         ModelScene scene;
         ModelInstanceID modelInstance = ModelInstanceID::Invalid;
         std::fprintf(stderr, "Loading environment: %s\n", model.path.c_str());
-        if(!AddModelToScene(scene, model, &modelInstance)) return 1;
+        ModelAssetID environmentAsset=ModelAssetID::Invalid;
+        if(!LoadModelAsset(scene,model.path,model.loadOptions,&environmentAsset)) return 1;
+        model.transform=model.transform*scene.GetModelAsset(environmentAsset).sourceToYUp;
+        if(!InstantiateModel(scene,environmentAsset,model,&modelInstance)) return 1;
         const auto* instance = scene.TryGetModelInstance(modelInstance);
         const auto& asset = scene.GetModelAsset(instance ? instance->assetId : static_cast<ModelAssetID>(0));
         auto sourceToWorld = Math::Translation(model.position) * model.transform;
@@ -574,9 +598,6 @@ int main(int argc, char** argv)
                 if(materialIndex >= updated.size() || updated[materialIndex]) continue;
                 auto handle = scene.GetEntity(entity);
                 auto material = handle.GetMaterial();
-                // All 201 Bistro Specular maps leave R at zero: no authored AO.
-                // Keep G/B roughness/metalness; screen-space AO remains independent.
-                material.occlusionStrength = 0;
                 // The Wine bundle explicitly supplies this emitter calibration.
                 // Analytic lights below provide illumination; emission alone does not.
                 if(wine) material.emissiveColor = material.emissiveColor * 1000.0f;
@@ -624,6 +645,7 @@ int main(int argc, char** argv)
         std::vector<NodeTransform> cameraBindPose, cameraLocalPose;
         const double authoredCameraSeconds = tourSeconds;
         float authoredCameraFov = 50;
+        float3 authoredCameraForward={1,0,0},authoredCameraUp={0,1,0};
         float cameraFarPlane = 160;
         const auto sampleAuthoredCamera = [&](double seconds, Shot& result) {
             std::copy(cameraBindPose.begin(), cameraBindPose.end(), cameraLocalPose.begin());
@@ -632,14 +654,12 @@ int main(int argc, char** argv)
             auto transform = sourceToWorld;
             for(const auto& local : cameraLocalPose) transform = transform * ComposeTransform(local);
             const auto eye = Math::TransformPoint(transform, {0, 0, 0});
-            result = {seconds, eye, eye + Math::Normalize(Math::TransformVector(transform, {1, 0, 0})),
-                authoredCameraFov, Math::Normalize(Math::TransformVector(transform, {0, 1, 0}))};
+            result = {seconds, eye, eye + Math::Normalize(Math::TransformVector(transform, authoredCameraForward)),
+                authoredCameraFov, Math::Normalize(Math::TransformVector(transform, authoredCameraUp))};
             return true;
         };
         if(bistro || emerald)
         {
-            if(emerald)
-                std::fputs("Emerald Day: original Camera node path and Y-up meter coordinates; vertical FOV 50 degrees is a viewer approximation. The imported model does not expose the source focal-length/film-gate settings.\n",stderr);
             const auto cameraNode = std::find_if(asset.nodes.begin(), asset.nodes.end(), [](const ModelNode& node) {
                 return node.name == "Camera";
             });
@@ -649,6 +669,15 @@ int main(int argc, char** argv)
                 return 1;
             }
             const uint32_t cameraIndex = static_cast<uint32_t>(cameraNode - asset.nodes.begin());
+            const auto sourceCamera=std::find_if(asset.cameras.begin(),asset.cameras.end(),[&](const ModelCamera& camera) {
+                return camera.nodeIndex==cameraIndex;
+            });
+            if(sourceCamera==asset.cameras.end() || !sourceCamera->perspective)
+                throw std::runtime_error("The selected showcase preset requires an authored perspective Camera.");
+            authoredCameraFov=sourceCamera->verticalFovRadians*180/pi;
+            authoredCameraForward=sourceCamera->localForward;authoredCameraUp=sourceCamera->localUp;
+            std::fprintf(stderr,"Source camera: vertical FOV %.6f degrees; source clipping %.9g..%.9g (viewer clipping .03..%.3f after normalization).\n",
+                authoredCameraFov,sourceCamera->nearPlane,sourceCamera->farPlane,cameraFarPlane);
             std::vector<uint32_t> cameraChain;
             for(int32_t node = static_cast<int32_t>(cameraIndex); node >= 0; node = asset.nodes[node].parentIndex)
             {
@@ -699,7 +728,7 @@ int main(int argc, char** argv)
                 opening.eye.x, opening.eye.y, opening.eye.z, opening.target.x, opening.target.y, opening.target.z,
                 sceneCenter.x, sceneCenter.y, sceneCenter.z, model.normalize ? model.normalizedSize : asset.boundsLargestAxis);
         }
-        else if(filename.find("Sponza") == std::string::npos)
+        else if(scenePreset!="sponza")
         {
             shots.clear();
             for(int i = 0; i <= 12; ++i)
@@ -1614,7 +1643,7 @@ int main(int argc, char** argv)
                 const auto& current = config;
                 std::ostringstream text;
                 text.precision(17);
-                text << model.path << " cameraPath=" << cameraPath << " " << size.width << 'x' << size.height << " mode=" << comparisonMode
+                text << model.path << " preset=" << scenePreset << " cameraPath=" << cameraPath << " " << size.width << 'x' << size.height << " mode=" << comparisonMode
                     << " render=" << current.renderWidth << 'x' << current.renderHeight
                     << " sceneTime=" << sceneTime << " wind=" << windEnabled
                     << " actor=" << actorDescription.path << " actorClip=" << actorClip

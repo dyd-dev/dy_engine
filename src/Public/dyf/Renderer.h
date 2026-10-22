@@ -221,16 +221,20 @@ struct RendererShaderDesc
     // 선택적 정점 셰이더 입력이다. 기본 바인딩과 기본 상수 뒤에 추가한다.
     std::vector<RHI::ResourceBindingLayout> vertexBindings;
     uint32_t additionalConstantBytes = 0;
+    // Custom shadow vertices may opt into the stock material coverage fragment.
+    // They must preserve DrawConstants and output UV at location/TEXCOORD 0
+    // and vertex alpha at 1 (Metal: position, float2 uv, float alpha).
+    bool stockShadowCoverage = false;
 };
 // 직접 준비한 RHI 입력이다. Scene에는 GPU 자원을 넣지 않는다.
 struct RendererDrawDesc
 {
-    // 생략하면 Scene의 Mesh를 사용한다. 형식: float3 위치·float3 법선·float2 UV·float4 탄젠트(48바이트).
+    // 생략하면 Scene의 Mesh를 사용한다. 위치 float3·법선 float3·UV float2·탄젠트 float4·선형 RGBA float4(64바이트).
     RHI::BufferHandle vertexBuffer = nullptr;
     std::vector<RHI::ResourceBinding> vertexResources;
     // 기본 draw 상수 192바이트 뒤에 전달하며 additionalConstantBytes와 크기를 맞춘다.
     std::vector<uint8_t> inlineConstants;
-    // 표준 48바이트 정점 형식의 변형 결과는 고급 렌더 패스에서도 공유한다.
+    // 표준 64바이트 정점 형식의 변형 결과는 고급 렌더 패스에서도 공유한다.
     bool stockGeometry = false;
     RHI::BufferHandle previousVertexBuffer = nullptr;
     Math::Bounds3 localBounds;

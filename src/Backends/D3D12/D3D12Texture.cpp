@@ -61,6 +61,7 @@ namespace dyf::Backends
         case RHI::Format::R8G8B8A8_UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
         case RHI::Format::B8G8R8A8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
         case RHI::Format::R16G16B16A16_FLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
+        case RHI::Format::R16_FLOAT: return DXGI_FORMAT_R16_FLOAT;
         case RHI::Format::R32G32_FLOAT: return DXGI_FORMAT_R32G32_FLOAT;
         case RHI::Format::R32_FLOAT: return DXGI_FORMAT_R32_FLOAT;
         case RHI::Format::R32G32B32_FLOAT: return DXGI_FORMAT_R32G32B32_FLOAT;

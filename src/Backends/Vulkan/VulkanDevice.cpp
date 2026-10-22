@@ -1195,7 +1195,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
                 // the old generation instead of reusing a still-signaled semaphore.
                 m_prefetchedImage=false;m_imageAcquired=false;
             }
-			if (!m_submissions.empty() || m_imageAcquired || !RecreateSwapchain())
+			if (m_imageAcquired || !RecreateSwapchain())
 				return unavailable("swapchain-recreate");
 		}
 		if (m_swapchain.GetHandle() == VK_NULL_HANDLE || m_currentFrameSlot >= m_frameSlots.size() ||
@@ -2462,7 +2462,12 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         m_prefetchedImage=false;
 		if (!m_hasSwapchainDesc || m_context.device == VK_NULL_HANDLE || m_submissionFaulted) return false;
 		CollectCompletedSubmissions();
-		if (m_submissionFaulted || !m_submissions.empty() || m_frameReady || m_imageAcquired || m_presentPending) return false;
+		if (m_submissionFaulted || m_frameReady || m_imageAcquired || m_presentPending) return false;
+        // Uploads or deformation may submit before every BeginFrame. Merely
+        // retrying while those submissions are pending can starve recreation.
+        // Drain only this exceptional path; WaitIdle first joins host Present
+        // calls before waiting for queues and retiring their command lists.
+        if(!m_submissions.empty() && !WaitIdle())return false;
 		if (m_swapchain.GetHandle() != VK_NULL_HANDLE)
 		{
             if(!m_owner.TryBeginSwapchainRetirement())return false;

@@ -21,6 +21,37 @@ namespace dyf
 {
 namespace
 {
+struct OcclusionLayouts
+{
+    std::array<RHI::ResourceBindingLayout,4> hiz;
+    std::array<RHI::ResourceBindingLayout,9> occlusion;
+    OcclusionLayouts()
+    {
+        using namespace RHI;
+        SamplerDesc sampler;
+        sampler.minFilter=sampler.magFilter=sampler.mipFilter=SamplerFilter::Nearest;
+        sampler.addressU=sampler.addressV=sampler.addressW=SamplerAddressMode::ClampToEdge;
+        sampler.mipLodBias=sampler.minLod=0;sampler.maxLod=32;
+        hiz={{{0,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Compute,{}},
+            {1,ResourceBindingType::StorageTexture,1,ShaderStageFlags::Compute,{}},
+            {2,ResourceBindingType::StorageTexture,1,ShaderStageFlags::Compute,{}},
+            {8,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Compute,sampler}}};
+        occlusion={{{0,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Compute,{}},
+            {1,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Compute,{}},
+            {2,ResourceBindingType::ReadWriteStorageBuffer,1,ShaderStageFlags::Compute,{}},
+            {3,ResourceBindingType::ReadWriteStorageBuffer,1,ShaderStageFlags::Compute,{}},
+            {4,ResourceBindingType::ReadWriteStorageBuffer,1,ShaderStageFlags::Compute,{}},
+            {5,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Compute,{}},
+            {6,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Compute,{}},
+            {7,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Compute,{}},
+            {8,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Compute,sampler}}};
+    }
+    RHI::PipelineLayoutDesc HiZ() const
+    {return {hiz.data(),static_cast<uint32_t>(hiz.size()),16,RHI::ShaderStageFlags::Compute,15};}
+    RHI::PipelineLayoutDesc Occlusion() const
+    {return {occlusion.data(),static_cast<uint32_t>(occlusion.size()),16,RHI::ShaderStageFlags::Compute,15};}
+};
+
 bool DefinitelyOutside(const GpuVisibility::Instance& instance,const std::array<Math::float4,6>& planes)
 {
     const auto& sphere=instance.centerRadius;
@@ -249,31 +280,31 @@ void GpuVisibility::ReleaseOcclusion()
     m_hizReady=false;m_occlusionReady=false;m_pendingOcclusion=false;
 }
 
+bool GpuVisibility::SupportsOcclusion(const RHI::IDevice& device)
+{
+    const OcclusionLayouts layouts;
+    return device.Supports(RHI::Feature::Compute) && device.Supports(RHI::Feature::IndirectDraw) &&
+        device.Supports(layouts.HiZ()) && device.Supports(layouts.Occlusion());
+}
+
 bool GpuVisibility::PrepareOcclusion(RHI::TextureHandle depth)
 {
     using namespace RHI;
-    if(!depth || !m_resources) return false;
+    if(!depth || !m_resources || !SupportsOcclusion(m_device)) return false;
+    const OcclusionLayouts layouts;
 #if defined(ENABLE_METAL)
     constexpr const char* entry="kernelMain";
 #else
     constexpr const char* entry="main";
 #endif
-    SamplerDesc sampler;
-    sampler.minFilter=sampler.magFilter=sampler.mipFilter=SamplerFilter::Nearest;
-    sampler.addressU=sampler.addressV=sampler.addressW=SamplerAddressMode::ClampToEdge;
-    sampler.mipLodBias=sampler.minLod=0;sampler.maxLod=32;
     if(!m_hizPipeline)
     {
 #if defined(ENABLE_METAL) || defined(ENABLE_D3D12) || defined(ENABLE_VULKAN)
         if(!m_hizShader) m_hizShader=m_device.CreateShader({ShaderStage::Compute,entry,kGpuHiZCompute,kGpuHiZComputeSize});
 #endif
         if(!m_hizShader) return false;
-        const ResourceBindingLayout bindings[]={{0,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Compute,{}},
-            {1,ResourceBindingType::StorageTexture,1,ShaderStageFlags::Compute,{}},
-            {2,ResourceBindingType::StorageTexture,1,ShaderStageFlags::Compute,{}},
-            {8,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Compute,sampler}};
         ComputePipelineDesc desc;desc.computeShader=m_hizShader;
-        desc.layout={bindings,4,16,ShaderStageFlags::Compute,15};desc.threadGroupSize[0]=desc.threadGroupSize[1]=8;
+        desc.layout=layouts.HiZ();desc.threadGroupSize[0]=desc.threadGroupSize[1]=8;
         m_hizPipeline=m_device.CreateComputePipeline(desc);
         if(!m_hizPipeline) return false;
     }
@@ -283,17 +314,8 @@ bool GpuVisibility::PrepareOcclusion(RHI::TextureHandle depth)
         if(!m_occlusionShader) m_occlusionShader=m_device.CreateShader({ShaderStage::Compute,entry,kGpuOcclusionCompute,kGpuOcclusionComputeSize});
 #endif
         if(!m_occlusionShader) return false;
-        const ResourceBindingLayout bindings[]={{0,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Compute,{}},
-            {1,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Compute,{}},
-            {2,ResourceBindingType::ReadWriteStorageBuffer,1,ShaderStageFlags::Compute,{}},
-            {3,ResourceBindingType::ReadWriteStorageBuffer,1,ShaderStageFlags::Compute,{}},
-            {4,ResourceBindingType::ReadWriteStorageBuffer,1,ShaderStageFlags::Compute,{}},
-            {5,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Compute,{}},
-            {6,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Compute,{}},
-            {7,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Compute,{}},
-            {8,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Compute,sampler}};
         ComputePipelineDesc desc;desc.computeShader=m_occlusionShader;
-        desc.layout={bindings,9,16,ShaderStageFlags::Compute,15};desc.threadGroupSize[0]=64;
+        desc.layout=layouts.Occlusion();desc.threadGroupSize[0]=64;
         m_occlusionPipeline=m_device.CreateComputePipeline(desc);
         if(!m_occlusionPipeline) return false;
     }

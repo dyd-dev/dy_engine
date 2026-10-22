@@ -10,7 +10,9 @@
 
 layout(location = 0) in vec3 inPosition;
 layout(location = 2) in vec2 inUv;
+layout(location = 8) in float inAlpha;
 layout(location = 0) out vec2 shadowUv;
+layout(location = 1) out float shadowAlpha;
 #if RENDERER_INSTANCING
 layout(location = 4) in mat4 instanceModel;
 #endif
@@ -45,6 +47,7 @@ layout(set = RENDERER_DESCRIPTOR_SET, binding = RENDERER_BINDING_SHADOW_MATRIX) 
 void main()
 {
     shadowUv=inUv;
+    shadowAlpha=inAlpha;
 #if RENDERER_INSTANCING
     gl_Position = shadowMatrix.lightViewProjectionMatrix[drawConstants.padding2] * instanceModel * vec4(inPosition, 1.0);
 #else

@@ -15,6 +15,7 @@ public:
 private:
     RHI::IDevice* m_device=nullptr;
     std::array<RHI::BufferHandle,3> m_buffers={};
+    RHI::TextureHandle m_emptyProbeArray=nullptr;
     bool m_ready=false;
 };
 }

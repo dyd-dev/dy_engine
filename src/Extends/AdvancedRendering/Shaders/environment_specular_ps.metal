@@ -70,10 +70,10 @@ inline bool NativeEnvironmentSample(float2 coordinate,float mip,float maximumMip
         && mip>=0 && mip<=maximumMip && maximumMip<=32;
 }
 inline float ProbeVisibility(float3 position,device const SpatialProbe& probe,uint index,
-    texture2d_array<float> image,uint count,sampler pointSampler,sampler linearSampler,uint enabled)
+    texture2d_array<float> image,uint count)
 {
     return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,
-        count+index,image,pointSampler,linearSampler,enabled);
+        count+index,image);
 }
 inline float3 BlendProbeRadiance(float3 position,float3 direction,float roughness,
     constant FrameConstants& frame,texture2d<float> prefilterTexture,
@@ -105,7 +105,7 @@ inline float3 BlendProbeRadiance(float3 position,float3 direction,float roughnes
             sampledRadiance=image.sample(environmentLinearSampler,coordinate,i,level(mip)).rgb;
         else sampledRadiance=mix(SpatialMip(image,coordinate,lo,i),SpatialMip(image,coordinate,hi,i),fract(mip));
         sum+=sampledRadiance*
-            probe.positionIntensity.w*(weight*ProbeVisibility(position,probe,i,image,count,pointSampler,environmentLinearSampler,parameters.w));
+            probe.positionIntensity.w*(weight*ProbeVisibility(position,probe,i,image,count));
         weights+=weight;coverage+=edge;
     }
     if(parameters.y!=0u && weights>0 && coverage>=1 && all(isfinite(envUV)) && isfinite(mip))

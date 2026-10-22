@@ -83,6 +83,7 @@ namespace dyf::Backends
         case dyf::RHI::Format::BC3_UNORM: return VK_FORMAT_BC3_UNORM_BLOCK;
         case dyf::RHI::Format::BC3_UNORM_SRGB: return VK_FORMAT_BC3_SRGB_BLOCK;
 		case dyf::RHI::Format::R16G16B16A16_FLOAT: return VK_FORMAT_R16G16B16A16_SFLOAT;
+        case dyf::RHI::Format::R16_FLOAT: return VK_FORMAT_R16_SFLOAT;
 		case dyf::RHI::Format::R32G32_FLOAT: return VK_FORMAT_R32G32_SFLOAT;
 		case dyf::RHI::Format::R32_FLOAT: return VK_FORMAT_R32_SFLOAT;
 		case dyf::RHI::Format::R32G32B32_FLOAT: return VK_FORMAT_R32G32B32_SFLOAT;
@@ -104,6 +105,7 @@ namespace dyf::Backends
 		case VK_FORMAT_R8G8B8A8_SRGB: return dyf::RHI::Format::R8G8B8A8_UNORM_SRGB;
 		case VK_FORMAT_B8G8R8A8_SRGB: return dyf::RHI::Format::B8G8R8A8_UNORM_SRGB;
 		case VK_FORMAT_R16G16B16A16_SFLOAT: return dyf::RHI::Format::R16G16B16A16_FLOAT;
+        case VK_FORMAT_R16_SFLOAT: return dyf::RHI::Format::R16_FLOAT;
 		case VK_FORMAT_R32_SFLOAT: return dyf::RHI::Format::R32_FLOAT;
 		case VK_FORMAT_R32G32B32A32_SFLOAT: return dyf::RHI::Format::R32G32B32A32_FLOAT;
 		default: return dyf::RHI::Format::Unknown;

@@ -24,6 +24,7 @@ option(DY_ENABLE_SIMD "Enable dy::Math SIMD code paths when supported by the tar
 option(DY_ENABLE_TRACY "Embed Tracy profiling instrumentation in engine applications." ON)
 option(DY_ENABLE_LIVE_PROFILING "Collect live execution diagnostics in engine applications." OFF)
 option(DY_ENABLE_RENDERDOC "Enable RenderDoc capture controls and D3D12 debug events and markers." OFF)
+option(DY_BUILD_CONFORMANCE_TESTS "Build model and rendering contract checks." OFF)
 
 # Examples and the independently selectable Showcase.
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)

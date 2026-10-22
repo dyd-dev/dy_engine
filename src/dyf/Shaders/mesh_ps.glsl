@@ -51,6 +51,7 @@ layout(location = 0) in vec2 fragUv;
 layout(location = 1) in vec3 fragWorldPosition;
 layout(location = 2) in vec3 fragNormal;
 layout(location = 3) in vec4 fragTangent;
+layout(location = 5) in vec4 fragColor;
 #if RENDERER_ENABLE_SHADOWS
 layout(location = 4) in vec4 fragLightSpacePosition;
 #endif
@@ -669,7 +670,7 @@ vec3 EvaluateLights(RendererLightingConstants lighting, vec3 worldPosition, vec3
 
 void main() {
     int textureFlags = int(pushConstants.textureFlags);
-    vec4 base = pushConstants.baseColor;
+    vec4 base = pushConstants.baseColor * fragColor;
     if ((textureFlags & RENDERER_TEXTURE_FLAG_BASE_COLOR) != 0) {
         base *= SampleMaterial(0u,fragUv);
     }

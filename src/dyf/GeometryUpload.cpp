@@ -61,11 +61,12 @@ bool Renderer::Impl::BuildCompactShadowGeometry(const std::vector<RendererVertex
     for(uint32_t index:indices)if(index>=vertices.size())return false;
     const meshopt_Stream streams[]={
         {&vertices.front().px,3*sizeof(float),sizeof(RendererVertex)},
-        {&vertices.front().u,2*sizeof(float),sizeof(RendererVertex)}
+        {&vertices.front().u,2*sizeof(float),sizeof(RendererVertex)},
+        {&vertices.front().ca,sizeof(float),sizeof(RendererVertex)}
     };
     shadowIndices.resize(indices.size());
     meshopt_generateShadowIndexBufferMulti(shadowIndices.data(),indices.data(),indices.size(),
-        vertices.size(),streams,2);
+        vertices.size(),streams,std::size(streams));
     std::vector<uint32_t> dense(vertices.size(),UINT32_MAX);
     for(auto& index:shadowIndices)
     {
@@ -77,6 +78,7 @@ bool Renderer::Impl::BuildCompactShadowGeometry(const std::vector<RendererVertex
             // Preserve the existing compact vertex bits, triangle and corner order.
             std::memcpy(&shadowVertices.back().px,&vertices[index].px,3*sizeof(float));
             std::memcpy(&shadowVertices.back().u,&vertices[index].u,2*sizeof(float));
+            shadowVertices.back().alpha=vertices[index].ca;
         }
         index=mapped;
     }
@@ -90,7 +92,7 @@ RHI::BufferHandle Renderer::Impl::MainIndexBuffer(const SceneMeshState& mesh,uin
     const bool originalVertices=!input ||
         ((!input->vertexBuffer || input->vertexBuffer==mesh.vertexBuffer) &&
          (!input->previousVertexBuffer || input->previousVertexBuffer==mesh.vertexBuffer));
-    return stockDrawInputs && material.alphaMode!=MaterialAlphaMode::Blend && originalVertices &&
+    return stockDrawInputs && !UsesBlendedRendering(material) && originalVertices &&
         mesh.mainIndexBuffer && mesh.mainIndexReady ? mesh.mainIndexBuffer : mesh.indexBuffer;
 }
 
@@ -159,7 +161,8 @@ bool Renderer::Impl::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 		{
 			vertices.push_back({vertex.position.x, vertex.position.y, vertex.position.z,
 				vertex.normal.x, vertex.normal.y, vertex.normal.z, vertex.uv.x, vertex.uv.y,
-				vertex.tangent.x, vertex.tangent.y, vertex.tangent.z, vertex.tangent.w});
+				vertex.tangent.x, vertex.tangent.y, vertex.tangent.z, vertex.tangent.w,
+				vertex.color.x, vertex.color.y, vertex.color.z, vertex.color.w});
 		}
 		std::vector<uint32_t> sequentialIndices;
 		if(source.indices.empty())
@@ -220,11 +223,12 @@ bool Renderer::Impl::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
                     {&vertices.front().px,3*sizeof(float),sizeof(RendererVertex)},
                     {&vertices.front().nx,3*sizeof(float),sizeof(RendererVertex)},
                     {&vertices.front().u,2*sizeof(float),sizeof(RendererVertex)},
-                    {&vertices.front().tx,4*sizeof(float),sizeof(RendererVertex)}
+                    {&vertices.front().tx,4*sizeof(float),sizeof(RendererVertex)},
+                    {&vertices.front().cr,4*sizeof(float),sizeof(RendererVertex)}
                 };
                 mainIndices.resize(indices.size());
                 meshopt_generateShadowIndexBufferMulti(mainIndices.data(),indices.data(),indices.size(),
-                    vertices.size(),streams,4);
+                    vertices.size(),streams,std::size(streams));
                 if(mainIndices==indices)mainIndices.clear();
                 else
                 {
@@ -444,7 +448,8 @@ bool Renderer::Impl::PrepareShadowArena(const Scene& scene,RHI::IDevice* device)
             for(const auto& vertex:source.vertices)
                 sourceVertices.push_back({vertex.position.x,vertex.position.y,vertex.position.z,
                     vertex.normal.x,vertex.normal.y,vertex.normal.z,vertex.uv.x,vertex.uv.y,
-                    vertex.tangent.x,vertex.tangent.y,vertex.tangent.z,vertex.tangent.w});
+                    vertex.tangent.x,vertex.tangent.y,vertex.tangent.z,vertex.tangent.w,
+                    vertex.color.x,vertex.color.y,vertex.color.z,vertex.color.w});
             sourceIndices.clear();
             if(source.indices.empty())
             {

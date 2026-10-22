@@ -46,4 +46,11 @@ namespace dyf
 		// 조명·발광 대신 기본색과 알파를 표시한다. 공통 출력 색변환은 그대로 적용한다.
 		bool unlit = false;
 	};
+
+	// Optical transmission and geometric alpha coverage are independent. Both
+	// need the transparent lighting path, while retaining their authored alpha mode.
+	inline bool UsesBlendedRendering(const MaterialDesc& material)
+	{
+		return material.alphaMode == MaterialAlphaMode::Blend || material.transmissionFactor > 0.0f;
+	}
 }

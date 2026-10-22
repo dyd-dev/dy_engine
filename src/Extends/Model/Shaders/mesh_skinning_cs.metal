@@ -24,9 +24,9 @@ kernel void modelSkinningCompute(
     const uint vertex = threadId.x;
     if(vertex >= dispatchData.vertexCount) return;
 
-    // The public vertex is exactly 12 floats (48 bytes). Raw scalar access
+    // The renderer vertex is exactly 16 floats (64 bytes). Raw scalar access
     // avoids Metal float3's 16-byte alignment changing its storage layout.
-    const uint base = vertex * 12u;
+    const uint base = vertex * 16u;
     float4x4 skin, normalSkin;
     LoadSkinning(skinInfluences, skinPalette, vertex, dispatchData.influenceOffset,
         dispatchData.paletteOffset, skin, normalSkin);
@@ -50,4 +50,6 @@ kernel void modelSkinningCompute(
     const float3x3 linear(skin[0].xyz, skin[1].xyz, skin[2].xyz);
     skinnedVertices[base + 11u] = sourceVertices[base + 11u] *
         (determinant(linear) < 0.0f ? -1.0f : 1.0f);
+    for(uint component=12u;component<16u;++component)
+        skinnedVertices[base+component]=sourceVertices[base+component];
 }

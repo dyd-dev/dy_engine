@@ -99,7 +99,7 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 	const auto blended=[&](uint32_t index) {
 		const auto material=scene.GetEntityMaterial(static_cast<EntityID>(index));
 		return IsValid(material) && ToIndex(material)<scene.Materials().size() &&
-			scene.Materials()[ToIndex(material)].alphaMode==MaterialAlphaMode::Blend;
+			UsesBlendedRendering(scene.Materials()[ToIndex(material)]);
 	};
 	mainEntityOrder.clear();
 	mainEntityOrder.reserve(scene.GetEntityCount());
@@ -281,7 +281,7 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
         }
         const bool mirrored=Math::Determinant3x3(scene.GetTransform(entity))<0;
         uint32_t count=1;
-        if(stock && instanced && (!batchBindings || scene.Materials()[materialIndex].alphaMode!=MaterialAlphaMode::Blend)) {
+        if(stock && instanced && (!batchBindings || !UsesBlendedRendering(scene.Materials()[materialIndex]))) {
             while(orderIndex+count<mainEntityOrder.size() && mainEntityOrder[orderIndex+count]==entityIndex+count) {
                 const auto next=static_cast<EntityID>(entityIndex+count);
                 if((Math::Determinant3x3(scene.GetTransform(next))<0)!=mirrored) break;

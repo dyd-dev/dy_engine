@@ -260,7 +260,7 @@ bool ScreenSpaceLighting::CreatePipelines()
         ShaderStageFlags::Vertex|ShaderStageFlags::Fragment,{}});
     surfaceBindings.push_back({12,ResourceBindingType::ConstantBuffer,1,
         ShaderStageFlags::Vertex|ShaderStageFlags::Fragment,{}});
-    const VertexBufferLayout vertices[]={{0,48,VertexStepMode::Vertex},{1,48,VertexStepMode::Vertex},
+    const VertexBufferLayout vertices[]={{0,64,VertexStepMode::Vertex},{1,64,VertexStepMode::Vertex},
         {2,128,VertexStepMode::Instance}};
     const VertexAttribute attributes[]={{0,0,Format::R32G32B32_FLOAT,0},
         {1,0,Format::R32G32B32_FLOAT,12},{2,0,Format::R32G32_FLOAT,24},
@@ -268,14 +268,15 @@ bool ScreenSpaceLighting::CreatePipelines()
         {5,2,Format::R32G32B32A32_FLOAT,0},{6,2,Format::R32G32B32A32_FLOAT,16},
         {7,2,Format::R32G32B32A32_FLOAT,32},{8,2,Format::R32G32B32A32_FLOAT,48},
         {9,2,Format::R32G32B32A32_FLOAT,64},{10,2,Format::R32G32B32A32_FLOAT,80},
-        {11,2,Format::R32G32B32A32_FLOAT,96},{12,2,Format::R32G32B32A32_FLOAT,112}};
+        {11,2,Format::R32G32B32A32_FLOAT,96},{12,2,Format::R32G32B32A32_FLOAT,112},
+        {13,0,Format::R32G32B32A32_FLOAT,48}};
     const ColorAttachmentDesc colors[]={{Format::R16G16B16A16_FLOAT,{},ColorWriteMask::All},
         {Format::R16G16B16A16_FLOAT,{},ColorWriteMask::All},
         {Format::R16G16B16A16_FLOAT,{},ColorWriteMask::All}};
     GraphicsPipelineDesc desc;
     desc.vertexShader=m_shaders[0];desc.fragmentShader=m_shaders[1];
     desc.topology=PrimitiveTopology::TriangleList;desc.vertexBuffers=vertices;desc.vertexBufferCount=3;
-    desc.vertexAttributes=attributes;desc.vertexAttributeCount=13;
+    desc.vertexAttributes=attributes;desc.vertexAttributeCount=14;
     desc.raster={FillMode::Solid,CullMode::Back,FrontFace::CounterClockwise,0,0,0};
     desc.depthStencil.format=Format::D32_FLOAT;desc.depthStencil.depthTestEnabled=true;
     desc.depthStencil.depthWriteEnabled=true;desc.depthStencil.depthCompareOp=CompareOp::Less;
@@ -465,7 +466,7 @@ bool ScreenSpaceLighting::Prepare(IDevice& device,ICommandList& uploads,TextureH
     {
         if(!draw.material) return fail();
         const auto& material=*draw.material;
-        if(material.alphaMode==MaterialAlphaMode::Blend || !draw.indexCount) continue;
+        if(UsesBlendedRendering(material) || !draw.indexCount) continue;
         // Instance providers already cull each row; representative bounds cannot reject the whole batch.
         if(settings.frustumCulling && !draw.instanceBuffer && !draw.indirectArguments && frustum.Outside(draw.localBounds,draw.model)) continue;
         if(!draw.vertexBuffer || !draw.indexBuffer) return fail();

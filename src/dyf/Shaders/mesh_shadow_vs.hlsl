@@ -38,6 +38,7 @@ struct ShadowOutput
 {
     float4 position : SV_POSITION;
     float2 uv : TEXCOORD0;
+    float alpha : TEXCOORD1;
 };
 
 #if RENDERER_INSTANCING
@@ -45,6 +46,7 @@ struct ShadowVertex
 {
     float3 position : TEXCOORD0;
     float2 uv : TEXCOORD2;
+    float alpha : TEXCOORD8;
     float4 model0 : TEXCOORD4;
     float4 model1 : TEXCOORD5;
     float4 model2 : TEXCOORD6;
@@ -57,14 +59,16 @@ ShadowOutput main(ShadowVertex input)
     ShadowOutput output;
     output.position=mul(lightViewProjectionMatrix[padding2], mul(world, float4(input.position, 1.0)));
     output.uv=input.uv;
+    output.alpha=input.alpha;
     return output;
 }
 #else
-ShadowOutput main(float3 position : TEXCOORD0, float2 uv : TEXCOORD2)
+ShadowOutput main(float3 position : TEXCOORD0, float2 uv : TEXCOORD2, float alpha : TEXCOORD8)
 {
     ShadowOutput output;
     output.position=mul(lightViewProjectionMatrix[padding2], mul(modelMatrix, float4(position, 1.0)));
     output.uv=uv;
+    output.alpha=alpha;
     return output;
 }
 #endif

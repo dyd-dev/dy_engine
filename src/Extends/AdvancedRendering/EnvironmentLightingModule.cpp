@@ -46,6 +46,7 @@ public:
         resources.constants=m_environment->GetCPUConstants();
         resources.constantBuffer=m_environment->GetConstants();
         resources.prefilter=m_environment->GetPrefilter();
+        resources.brdf=m_environment->GetBRDF();
         resources.probeData=m_environment->GetProbeData();
         resources.probePrefilter=m_environment->GetProbePrefilter();
         resources.probeParameters=m_environment->GetProbeParameters();

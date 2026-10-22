@@ -157,7 +157,7 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene, const Camera& camera, 
         if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount)continue;
         const auto& material=scene.Materials()[materialIndex];
         // A binary shadow map cannot represent translucent coverage.
-        if(shadowFragmentShader && material.alphaMode==MaterialAlphaMode::Blend)continue;
+        if(shadowFragmentShader && UsesBlendedRendering(material))continue;
         ShadowCaster caster;
         caster.entity=i;caster.mesh=meshIndex;caster.material=materialIndex;
         const auto vertexBuffer=draws && (*draws)[i].vertexBuffer ? (*draws)[i].vertexBuffer : mesh.vertexBuffer;
@@ -189,7 +189,7 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene, const Camera& camera, 
             bool same=previous.entity+1==i && previous.mesh==meshIndex && previous.compact==caster.compact &&
                 previous.arena==caster.arena &&
                 (!draws || (*draws)[previous.entity].vertexBuffer==(*draws)[i].vertexBuffer) &&
-                material.alphaMode!=MaterialAlphaMode::Blend &&
+                !UsesBlendedRendering(material) &&
                 previousMaterial.doubleSided==material.doubleSided && previous.mirrored==caster.mirrored &&
                 (previousMaterial.alphaMode==MaterialAlphaMode::Mask)==(material.alphaMode==MaterialAlphaMode::Mask);
             if(same && material.alphaMode==MaterialAlphaMode::Mask)
@@ -211,7 +211,7 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene, const Camera& camera, 
 			const auto materialIndex=perEntity ? ToIndex(scene.GetEntityMaterial(static_cast<EntityID>(i))) : i;
 			if(materialIndex>=materialStates.size()) continue;
 			const auto& material=scene.Materials()[materialIndex];
-			if(shadowFragmentShader && material.alphaMode==MaterialAlphaMode::Blend) continue;
+			if(shadowFragmentShader && UsesBlendedRendering(material)) continue;
 			auto& bindings=shadowBindingScratch;bindings = {{3u,
 				0, shadowMatrixBuffer, nullptr, 0, static_cast<uint32_t>(sizeof(RendererShadowConstants)), {}}};
 			if(shadowFragmentShader && (!stock || material.alphaMode==MaterialAlphaMode::Mask))
@@ -391,6 +391,9 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene, const Camera& camera, 
                     const uint32_t flags=materialStates[materialIndex].textureFlags | (lighting.receiveShadow ? 32u : 0u);
                     auto constants=MakeDrawConstants(viewProjection,material,scene.GetTransform(entity),flags);
                     constants.padding2=view;
+                    // Non-stock vertex paths use the common unculled pipeline;
+                    // keep its coverage fragment's visible side consistent with mirroring.
+                    if(!stock && shadowFragmentShader && caster.mirrored)constants.padding1|=32u;
                     commands.SetInlineConstants(0,sizeof(constants),&constants);
                     if(input && !input->inlineConstants.empty())
                         commands.SetInlineConstants(sizeof(constants),static_cast<uint32_t>(input->inlineConstants.size()),input->inlineConstants.data());

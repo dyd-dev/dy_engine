@@ -44,6 +44,7 @@ struct ShadowVertex
 {
     float3 position [[attribute(0)]];
     float2 uv [[attribute(2)]];
+    float alpha [[attribute(8)]];
 #if RENDERER_INSTANCING
     float4 model0 [[attribute(4)]];
     float4 model1 [[attribute(5)]];
@@ -56,6 +57,7 @@ struct ShadowOutput
 {
     float4 position [[position]];
     float2 uv;
+    float alpha;
 };
 
 vertex ShadowOutput RENDERER_SHADOW_VERTEX_ENTRY(
@@ -65,6 +67,7 @@ vertex ShadowOutput RENDERER_SHADOW_VERTEX_ENTRY(
 {
     ShadowOutput output;
     output.uv=input.uv;
+    output.alpha=input.alpha;
 #if RENDERER_INSTANCING
     const float4x4 world(input.model0, input.model1, input.model2, input.model3);
     output.position=shadowMatrix.lightViewProjectionMatrix[drawConstants.padding2] * world * float4(input.position, 1.0f);

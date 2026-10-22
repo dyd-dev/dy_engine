@@ -486,7 +486,12 @@ bool MetalDevice::SupportsSamplerNative(const RHI::SamplerDesc& desc) const
 
 bool MetalDevice::SupportsLinearFiltering(RHI::Format format) const noexcept
 {
-    if(!m_impl || m_impl->device==nil || format!=RHI::Format::R32G32B32A32_FLOAT)return false;
+    if(!m_impl || m_impl->device==nil)return false;
+    // R16Float supports sampling/filtering on all Metal GPU families; unlike RGBA32Float,
+    // it does not require the optional 32-bit filtering feature.
+    // https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf
+    if(format==RHI::Format::R16_FLOAT)return true;
+    if(format!=RHI::Format::R32G32B32A32_FLOAT)return false;
     // Older SDKs cannot name this optional query; older runtimes retain manual filtering.
     // https://developer.apple.com/documentation/metal/mtldevice/supports32bitfloatfiltering
 #if (TARGET_OS_OSX && defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 110000) || \

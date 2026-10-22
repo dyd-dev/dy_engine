@@ -79,7 +79,7 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
         const uint32_t materialIndex=canonicalMaterial(sourceMaterialIndex);
         const auto& mesh=m_meshes[meshIndex];
         if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount ||
-            scene.Materials()[materialIndex].alphaMode==MaterialAlphaMode::Blend) continue;
+            UsesBlendedRendering(scene.Materials()[materialIndex])) continue;
         const auto* input=draws ? &(*draws)[i] : nullptr;
         const auto vertex=input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer;
         const auto previous=input && input->previousVertexBuffer ? input->previousVertexBuffer : vertex;
@@ -122,7 +122,9 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
             columnMax=std::max(columnMax,column);rowMax=std::max(rowMax,row);
         }
         const float scale=std::sqrt(columnMax*rowMax);
-        if(bounds.valid && std::isfinite(scale))
+        // A sphere in world xyz cannot bound a varying homogeneous w. Unknown
+        // projective transforms stay visible and use level zero in the shader.
+        if(bounds.valid && std::isfinite(scale) && IsAffineTransform(value.model))
         {
             const auto center=Math::TransformPoint(value.model,(bounds.min+bounds.max)*.5f);
             const float radius=Math::Length((bounds.max-bounds.min)*.5f)*scale;
@@ -178,7 +180,7 @@ bool Renderer::Impl::PrepareCpuBatches(const Scene& scene,const Camera& camera,R
         const auto mesh=scene.GetEntityMesh(entity);
         const auto material=scene.GetEntityMaterial(entity);
         if(IsValid(mesh) && ToIndex(mesh)<cpuMeshCounts.size() && IsValid(material) &&
-            ToIndex(material)<scene.Materials().size() && scene.Materials()[ToIndex(material)].alphaMode!=MaterialAlphaMode::Blend &&
+            ToIndex(material)<scene.Materials().size() && !UsesBlendedRendering(scene.Materials()[ToIndex(material)]) &&
             ++cpuMeshCounts[ToIndex(mesh)]>1) {repeated=true;break;}
     }
     if(!repeated) {cpuBatchesActive=false;return true;}
@@ -194,7 +196,7 @@ bool Renderer::Impl::PrepareCpuBatches(const Scene& scene,const Camera& camera,R
         if(!IsValid(meshId) || !IsValid(materialId))continue;
         const auto meshIndex=ToIndex(meshId),materialIndex=ToIndex(materialId);
         if(meshIndex>=m_meshes.size() || materialIndex>=materialStates.size() ||
-            scene.Materials()[materialIndex].alphaMode==MaterialAlphaMode::Blend)continue;
+            UsesBlendedRendering(scene.Materials()[materialIndex]))continue;
         const auto& mesh=m_meshes[meshIndex];
         if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount)continue;
         const auto* input=draws ? &(*draws)[i] : nullptr;

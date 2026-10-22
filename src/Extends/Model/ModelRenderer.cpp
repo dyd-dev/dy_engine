@@ -32,15 +32,15 @@ struct ModelRenderer::ProfilingState
     };
     Platform::LiveId id=0;
     Platform::ControlRegistration skinningControl;
-    std::array<Platform::ControlRegistration,4> optimizationControls;
-    std::array<Platform::LiveId,4> optimizationRequests{};
+    std::array<Platform::ControlRegistration,5> optimizationControls;
+    std::array<Platform::LiveId,5> optimizationRequests{};
     std::array<Platform::ControlRegistration,4> catalog;
     std::deque<GpuSample> gpuSamples;
 };
 
 namespace
 {
-constexpr bool ModelOptimizationConfig::* ModelPolicies[]={&ModelOptimizationConfig::reuseFrameBuffers,&ModelOptimizationConfig::skipUnchangedUploads,&ModelOptimizationConfig::cacheStaticMeshes,&ModelOptimizationConfig::cacheInfluences};
+constexpr bool ModelOptimizationConfig::* ModelPolicies[]={&ModelOptimizationConfig::reuseFrameBuffers,&ModelOptimizationConfig::skipUnchangedUploads,&ModelOptimizationConfig::cacheStaticMeshes,&ModelOptimizationConfig::cacheInfluences,&ModelOptimizationConfig::cacheSkinTransforms};
 bool SameOptimizations(const ModelOptimizationConfig& a,const ModelOptimizationConfig& b) noexcept
 {for(const auto flag:ModelPolicies)if(a.*flag!=b.*flag)return false;return true;}
 template<class Cleanup>
@@ -54,14 +54,15 @@ template<class Cleanup> ScopeExit(Cleanup) -> ScopeExit<Cleanup>;
 // 기본 Renderer의 정점 입력에 맞춰 변형 결과를 전달한다. Model 자료형은 기본 API로 전달하지 않는다.
 struct ModelVertex
 {
-    float px, py, pz, nx, ny, nz, u, v, tx, ty, tz, tw;
+    float px, py, pz, nx, ny, nz, u, v, tx, ty, tz, tw, cr, cg, cb, ca;
 };
 
 ModelVertex PackVertex(const Vertex& vertex)
 {
     return {vertex.position.x, vertex.position.y, vertex.position.z,
         vertex.normal.x, vertex.normal.y, vertex.normal.z, vertex.uv.x, vertex.uv.y,
-        vertex.tangent.x, vertex.tangent.y, vertex.tangent.z, vertex.tangent.w};
+        vertex.tangent.x, vertex.tangent.y, vertex.tangent.z, vertex.tangent.w,
+        vertex.color.x, vertex.color.y, vertex.color.z, vertex.color.w};
 }
 
 std::vector<ModelVertex> BuildVertices(const MeshData& mesh)
@@ -118,12 +119,13 @@ void ModelRenderer::InitializeLiveProfiling() noexcept
             const bool applied=SetSkinningExecutionMode(mode);
             return Platform::ControlApplyResult{applied?Platform::ControlState::Applied:Platform::ControlState::Failed,std::int64_t(m_mode),applied?"":"Compute skinning pipeline could not be prepared"};
         });
-        const char* keys[]={"model.frameBufferReuse","model.skipUnchangedUploads","model.staticMeshCache","model.influenceCache"};
-        const char* descriptions[]={"Reuse completed Model frame resources","Skip equal Model upload bytes","Reuse immutable compute input meshes","Reuse packed and validated skin influences"};
-        const char* onPaths[]={"Retain size/stride/usage-compatible buffers and per-frame sets","Compare cached bytes before recording uploads","Keep each immutable source mesh's compute input buffer","Compare influence bytes/counts before reusing packed influences"};
-        const char* offPaths[]={"Wait for a completed frame slot and replace its buffers/sets","Upload every used palette/morph input each frame","Recreate each used compute input mesh once per frame","Pack, validate and upload the complete influences each frame"};
+        const char* keys[]={"model.frameBufferReuse","model.skipUnchangedUploads","model.staticMeshCache","model.influenceCache","model.skinTransformCache"};
+        const char* descriptions[]={"Reuse completed Model frame resources","Skip equal Model upload bytes","Reuse immutable compute input meshes","Reuse packed and validated skin influences","Share identical skin influence transforms"};
+        const char* onPaths[]={"Retain size/stride/usage-compatible buffers and per-frame sets","Compare cached bytes before recording uploads","Keep each immutable source mesh's compute input buffer","Compare influence bytes/counts before reusing packed influences","Blend one transform per byte-identical influence group and palette; evaluate every exact bounds position"};
+        const char* offPaths[]={"Wait for a completed frame slot and replace its buffers/sets","Upload every used palette/morph input each frame","Recreate each used compute input mesh once per frame","Pack, validate and upload the complete influences each frame","Blend the skin transform separately for every bounds vertex"};
         for(std::size_t i=0;i<m_profiling->optimizationControls.size();++i){Platform::ControlDesc d;d.device=device;d.source=m_renderer.GetLiveSourceId();d.owner=m_profiling->id;d.key=keys[i];d.label=descriptions[i];d.description=descriptions[i];d.category=Platform::ControlCategory::Optimization;d.appliedValue=m_optimizationConfig.*ModelPolicies[i];d.onPath=onPaths[i];d.offPath=offPaths[i];d.conditions=i==2?"Model ComputePreSkin path; immutable source meshes only, morphed inputs remain dynamic":"Model preparation after the frame boundary; per-entity palette checks and completion waits remain enabled";d.tradeoffs="CPU comparisons and retained buffers versus upload/allocation/command work; failed submissions still roll back";
             if(i==2&&m_mode!=SkinningExecutionMode::ComputePreSkin){d.writable=false;d.unavailableReason="Static mesh input cache is used only by ComputePreSkin";}
+            if(i==4){d.conditions="Advanced HDR automatic compute skinning; identical influence bytes and current per-entity palette only";d.tradeoffs="Retain influence group indices and temporary transforms to avoid repeated matrix blending; exact vertex bounds, morph positions and deformation history stay unchanged";}
             m_profiling->optimizationControls[i]=Platform::RegisterControl(std::move(d),[this,i](const Platform::ControlRequest& request,Platform::LiveFrameKey){auto next=GetOptimizationConfig();next.*ModelPolicies[i]=std::get<bool>(request.value);SetOptimizationConfig(next);m_profiling->optimizationRequests[i]=request.request;return Platform::ControlApplyResult{Platform::ControlState::PendingApply,m_optimizationConfig.*ModelPolicies[i],{}};});
         }
         const char* catalogKeys[]={"model.frameDescriptorCache","model.lazyUploadCommands","model.sharedAnimationPalettes","model.zeroMorphSkip"};
@@ -243,9 +245,12 @@ bool ModelRenderer::ConfigureShaders()
     m_originalVertexEntries = std::move(originalEntries);
     m_originalVertexBindings = std::move(originalBindings);
     m_originalConstantBytes = shaders.additionalConstantBytes;
+    m_originalStockShadowCoverage = shaders.stockShadowCoverage;
     m_configured = true;
     const auto vertex = ShaderDescription(0, GetModelVertexShader(m_renderer.GetLighting().enabled && m_renderer.GetLighting().shadows));
     const auto shadow = ShaderDescription(1, GetModelShadowShader());
+    // Only the built-in Model shadow shader guarantees stock UV/alpha varyings.
+    const bool stockShadowCoverage=m_shaderBytes[1].empty();
     const std::vector<RHI::ResourceBindingLayout> bindings = {
         {11, RHI::ResourceBindingType::ReadOnlyStorageBuffer, 1, RHI::ShaderStageFlags::Vertex, {}},
         {12, RHI::ResourceBindingType::ReadOnlyStorageBuffer, 1, RHI::ShaderStageFlags::Vertex, {}}};
@@ -258,6 +263,7 @@ bool ModelRenderer::ConfigureShaders()
             actual.count == expected.count && actual.stages == expected.stages;
     }
     if(matchingBindings && shaders.additionalConstantBytes == 16 &&
+        shaders.stockShadowCoverage==stockShadowCoverage &&
         SameShader(shaders.meshVertex, vertex) && SameShader(shaders.shadowVertex, shadow)) return true;
 
     // 모델 단계만 갱신한다. 사용자가 선택한 Fragment, Canvas, ToneMap 단계는 유지한다.
@@ -265,6 +271,7 @@ bool ModelRenderer::ConfigureShaders()
     shaders.shadowVertex = shadow;
     shaders.vertexBindings = bindings;
     shaders.additionalConstantBytes = 16;
+    shaders.stockShadowCoverage = stockShadowCoverage;
     return m_renderer.SetShaders(shaders);
 }
 
@@ -285,6 +292,7 @@ bool ModelRenderer::RestoreShaders()
         shaders.shadowVertex = original(1);
         shaders.vertexBindings = m_originalVertexBindings;
         shaders.additionalConstantBytes = m_originalConstantBytes;
+        shaders.stockShadowCoverage = m_originalStockShadowCoverage;
         if(!m_renderer.SetShaders(shaders)) return false;
         m_configured = false;
         return true;
@@ -331,6 +339,7 @@ void ModelRenderer::ReleaseFrameBuffers()
     m_influences.clear();
     m_influenceOffsets.clear();
     m_influenceCounts.clear(); m_requiredInfluenceJoints.clear(); m_validInfluences.clear();
+    m_skinTransformGroups.clear();
 }
 
 void ModelRenderer::InvalidateHistory()
@@ -384,7 +393,7 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
 #if defined(DY_LIVE_PROFILING_ENABLED) || defined(DY_PROFILER_TRACING_ENABLED)
     Platform::CpuScope prepareTiming(Platform::LiveStage::CpuPrepare,"Model preparation");
 #endif
-    static_assert(sizeof(ModelVertex) == 48);
+    static_assert(sizeof(ModelVertex) == 64 && offsetof(ModelVertex, cr) == 48);
     static_assert(sizeof(SkinInfluence) == 48 && offsetof(SkinInfluence, dqBlendWeight) == 32);
     static_assert(sizeof(SkinJointMatrices) == 176);
     auto& device = m_renderer.GetDevice();
@@ -508,6 +517,7 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
             if(m_influenceBuffer) device.DestroyBuffer(m_influenceBuffer);
             m_influenceBuffer = nullptr;
             m_influences.clear(); m_influenceOffsets.clear(); m_influenceCounts.clear(); m_requiredInfluenceJoints.clear(); m_validInfluences.clear();
+            m_skinTransformGroups.clear();
         }
     }};
     RHI::ICommandList* commands = nullptr;
@@ -617,6 +627,8 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
     std::vector<bool> meshUsed(m_meshBuffers.size(), false);
     m_geometrySignatures.resize(scene.GetEntityCount());
     m_geometryRevisions.resize(scene.GetEntityCount());
+    if(m_optimizationConfig.cacheSkinTransforms) m_skinTransformGroups.resize(scene.Meshes().size());
+    std::vector<Detail::SkinTransform> skinTransforms;
     for(uint32_t index = 0; prepared && index < scene.GetEntityCount(); ++index)
     {
         const auto entity = static_cast<EntityID>(index);
@@ -665,14 +677,44 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
                 hashBytes(&m_influenceOffsets[meshIndex], sizeof(m_influenceOffsets[meshIndex]));
                 hashBytes(entityPalette.data(), entityPalette.size() * sizeof(SkinJointMatrices));
             }
+            const SkinTransformGroups* transformGroups = nullptr;
+            if(positionsOnly && m_optimizationConfig.cacheSkinTransforms)
+            {
+                auto& groups = m_skinTransformGroups[meshIndex];
+                // Group indices depend only on the published influence bytes and
+                // their mesh range, never on source/morph positions or a palette.
+                if(groups.influenceRevision != m_influenceRevision ||
+                    groups.influenceOffset != m_influenceOffsets[meshIndex] ||
+                    groups.influenceCount != influences.size())
+                {
+                    if(!Detail::BuildSkinTransformGroups(influences, groups.representatives, groups.vertexGroups))
+                        return Failure("Skin transform groups exceed the supported index range.");
+                    groups.influenceRevision = m_influenceRevision;
+                    groups.influenceOffset = m_influenceOffsets[meshIndex];
+                    groups.influenceCount = static_cast<uint32_t>(influences.size());
+                }
+                // No benefit when every vertex has a different influence.
+                if(groups.representatives.size() < influences.size())
+                {
+                    skinTransforms.resize(groups.representatives.size());
+                    for(size_t group = 0; group < groups.representatives.size(); ++group)
+                        if(!Detail::BuildSkinTransform(influences[groups.representatives[group]], entityPalette, skinTransforms[group]))
+                            return Failure("Deformed bounds evaluation failed.");
+                    transformGroups = &groups;
+                }
+            }
             for(size_t vertexIndex = 0; vertexIndex < input.vertices.size(); ++vertexIndex)
             {
                 Vertex output = input.vertices[vertexIndex];
                 if(paletteOffset != UINT32_MAX)
                 {
-                    const bool valid = positionsOnly ?
-                        Detail::SkinPosition(input.vertices[vertexIndex], influences[vertexIndex], entityPalette, output.position) :
-                        SkinVertex(input.vertices[vertexIndex], influences[vertexIndex], entityPalette, output);
+                    bool valid = true;
+                    if(transformGroups)
+                        output.position = Detail::ApplySkinTransform(skinTransforms[transformGroups->vertexGroups[vertexIndex]], output.position);
+                    else
+                        valid = positionsOnly ?
+                            Detail::SkinPosition(input.vertices[vertexIndex], influences[vertexIndex], entityPalette, output.position) :
+                            SkinVertex(input.vertices[vertexIndex], influences[vertexIndex], entityPalette, output);
                     if(!valid) return Failure("Deformed bounds evaluation failed.");
                 }
                 if(!std::isfinite(output.position.x) || !std::isfinite(output.position.y) || !std::isfinite(output.position.z))

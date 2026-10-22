@@ -149,7 +149,7 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
         if(meshIndex>=m_meshes.size() || materialIndex>=materialStates.size()) continue;
         const auto& mesh=m_meshes[meshIndex];
         if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount) continue;
-        const bool cpuBatch=cpuBatchesActive && scene.Materials()[materialIndex].alphaMode!=MaterialAlphaMode::Blend;
+        const bool cpuBatch=cpuBatchesActive && !UsesBlendedRendering(scene.Materials()[materialIndex]);
         if(cpuBatch && cpuBatchIndices[i]==UINT32_MAX)continue;
         RenderGeometryDraw draw;
         const auto* input=frame.draws ? &(*frame.draws)[i] : nullptr;
@@ -181,7 +181,7 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
             draw.instanceCount=batch.instanceCount;
             frame.geometry.push_back(std::move(draw));
         }
-        else if(visibilityActive && draw.material->alphaMode!=MaterialAlphaMode::Blend)
+        else if(visibilityActive && !UsesBlendedRendering(*draw.material))
         {
             while(visibilityIndex<visibilityDraws.size() && visibilityDraws[visibilityIndex].entity==i)
             {

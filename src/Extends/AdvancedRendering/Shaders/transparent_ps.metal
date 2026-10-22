@@ -1,3 +1,24 @@
+#ifndef TRANSPARENT_DEPTH_ONLY
+#define TRANSPARENT_DEPTH_ONLY 0
+#endif
+#if TRANSPARENT_DEPTH_ONLY
+#include <metal_stdlib>
+using namespace metal;
+struct TransparentDraw {float4x4 model;float4x4 normalMatrix;float4 baseColor;float4 emissive;float4 material;float4 optics;float4 attenuation;uint4 flags;};
+struct TransparentVertex {float4 position [[position,invariant]];float2 uv;float3 worldPosition;float3 worldNormal;float4 worldTangent;float4 vertexColor;};
+fragment void transparentDepthFragment(TransparentVertex input [[stage_in]],
+    texture2d<float> baseTexture [[texture(0)]],texture2d<float> depthTexture [[texture(6)]],
+    sampler materialSampler [[sampler(8)]],device const TransparentDraw* draws [[buffer(11)]],
+    constant uint4& index [[buffer(15)]])
+{
+    float2 uvDx=dfdx(input.uv),uvDy=dfdy(input.uv);
+    TransparentDraw draw=draws[index.x];float alpha=draw.baseColor.a*input.vertexColor.a;
+    if((draw.flags.x&1u)!=0u)alpha*=baseTexture.sample(materialSampler,input.uv,gradient2d(uvDx,uvDy)).a;
+    float coverage=draw.flags.w==1u?(alpha<draw.attenuation.w?0.0f:1.0f):
+        (draw.flags.w==2u?clamp(alpha,0.0f,1.0f):1.0f);
+    if(input.position.z>depthTexture.read(uint2(input.position.xy)).r || coverage<=0.0f)discard_fragment();
+}
+#else
 #ifndef RENDERER_ENABLE_AREA_LIGHTS
 #define RENDERER_ENABLE_AREA_LIGHTS 1
 #endif
@@ -9,7 +30,7 @@ using namespace metal;
 #include "probe_visibility.metal"
 struct TransparentDraw {float4x4 model;float4x4 normalMatrix;float4 baseColor;float4 emissive;float4 material;float4 optics;float4 attenuation;uint4 flags;};
 struct TransparentFrame {float4x4 viewProjection;float4x4 view;float4x4 inverseViewProjection;float4 camera;float4 sh[9];float4 settings;float4 screen;float4 probePosition;float4 probeBoxMin;float4 probeBoxMax;float4 specularColor;};
-struct TransparentVertex {float4 position [[position,invariant]];float2 uv;float3 worldPosition;float3 worldNormal;float4 worldTangent;};
+struct TransparentVertex {float4 position [[position,invariant]];float2 uv;float3 worldPosition;float3 worldNormal;float4 worldTangent;float4 vertexColor;};
 struct TransparentOutput {float4 color [[color(0)]];float4 reactive [[color(1)]];};
 struct TransparentDirectional {float4 directionIntensity;float4 color;};
 struct TransparentPoint {float4 positionRange;float4 colorIntensity;};
@@ -132,6 +153,20 @@ float3 TransparentFresnel(float cosine,float3 f0)
     float base=clamp(1-cosine,0.0f,1.0f),base2=base*base,base5=(base2*base2)*base;
     return f0+(1-f0)*base5;
 }
+float3 TransparentFresnelRoughness(float cosine,float3 f0,float roughness)
+{
+    float base=clamp(1-cosine,0.0f,1.0f),base2=base*base,base5=(base2*base2)*base;
+    return f0+(max(float3(1-roughness),f0)-f0)*base5;
+}
+float2 TransparentIntegratedBRDF(float nv,float roughness,texture2d<float> image)
+{
+    int2 size=int2(image.get_width(),image.get_height());
+    float2 pixel=float2(nv,roughness)*float2(size)-.5f,w=fract(pixel);
+    int2 a=int2(floor(pixel)),b=a+1;
+    a=clamp(a,int2(0),size-1);b=clamp(b,int2(0),size-1);
+    return mix(mix(image.read(uint2(a)).rg,image.read(uint2(b.x,a.y)).rg,w.x),
+        mix(image.read(uint2(a.x,b.y)).rg,image.read(uint2(b)).rg,w.x),w.y);
+}
 float2 TransparentEnvUV(float3 d,constant TransparentFrame& frame)
 {
     float c=cos(frame.settings.z),s=sin(frame.settings.z);d.xy=float2(c*d.x+s*d.y,-s*d.x+c*d.y);
@@ -179,37 +214,34 @@ inline bool NativeEnvironmentSample(float2 coordinate,float mip,float maximumMip
         && mip>=0 && mip<=maximumMip && maximumMip<=32;
 }
 float TransparentProbeVisibility(float3 position,const device TransparentSpatialProbe& probe,uint index,
-    texture2d_array<float> image,uint count,sampler pointSampler,sampler linearSampler,uint enabled)
+    texture2d_array<float> image,uint count)
 {
     return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,
-        count+index,image,pointSampler,linearSampler,enabled);
+        count+index,image);
 }
 struct ProbeBlendCache
 {
     float4 weights,edges,weightedVisibility;
 };
 float3 TransparentProbeFactorsUncached(float3 position,uint probeIndex,
-    const device TransparentSpatialProbe* probes,constant uint4& probeParameters,texture2d_array<float> probeImage,
-    sampler pointSampler,sampler environmentLinearSampler,uint nativeAllowed)
+    const device TransparentSpatialProbe* probes,constant uint4& probeParameters,texture2d_array<float> probeImage)
 {
     const device TransparentSpatialProbe& probe=probes[probeIndex];
     float edge;float weight=TransparentProbeWeight(position,probe,edge);
     float weightedVisibility=0;
-    if(!(weight<=0))weightedVisibility=weight*TransparentProbeVisibility(position,probe,probeIndex,probeImage,probeParameters.x,
-        pointSampler,environmentLinearSampler,probeParameters.w==1u && nativeAllowed==1u?1u:0u);
+    if(!(weight<=0))weightedVisibility=weight*TransparentProbeVisibility(position,probe,probeIndex,probeImage,probeParameters.x);
     return float3(weight,edge,weightedVisibility);
 }
 ProbeBlendCache PrepareProbeBlendCache(float3 position,bool needed,const device TransparentSpatialProbe* probes,
-    constant uint4& probeParameters,texture2d_array<float> probeImage,
-    sampler pointSampler,sampler environmentLinearSampler,uint nativeAllowed)
+    constant uint4& probeParameters,texture2d_array<float> probeImage)
 {
     float3 p0=0,p1=0,p2=0,p3=0;
     if(needed)
     {
-        if(probeParameters.x>0u)p0=TransparentProbeFactorsUncached(position,0u,probes,probeParameters,probeImage,pointSampler,environmentLinearSampler,nativeAllowed);
-        if(probeParameters.x>1u)p1=TransparentProbeFactorsUncached(position,1u,probes,probeParameters,probeImage,pointSampler,environmentLinearSampler,nativeAllowed);
-        if(probeParameters.x>2u)p2=TransparentProbeFactorsUncached(position,2u,probes,probeParameters,probeImage,pointSampler,environmentLinearSampler,nativeAllowed);
-        if(probeParameters.x>3u)p3=TransparentProbeFactorsUncached(position,3u,probes,probeParameters,probeImage,pointSampler,environmentLinearSampler,nativeAllowed);
+        if(probeParameters.x>0u)p0=TransparentProbeFactorsUncached(position,0u,probes,probeParameters,probeImage);
+        if(probeParameters.x>1u)p1=TransparentProbeFactorsUncached(position,1u,probes,probeParameters,probeImage);
+        if(probeParameters.x>2u)p2=TransparentProbeFactorsUncached(position,2u,probes,probeParameters,probeImage);
+        if(probeParameters.x>3u)p3=TransparentProbeFactorsUncached(position,3u,probes,probeParameters,probeImage);
     }
     ProbeBlendCache cache;
     cache.weights=float4(p0.x,p1.x,p2.x,p3.x);
@@ -218,12 +250,11 @@ ProbeBlendCache PrepareProbeBlendCache(float3 position,bool needed,const device 
     return cache;
 }
 float3 TransparentProbeFactors(float3 position,uint probeIndex,ProbeBlendCache cache,
-    const device TransparentSpatialProbe* probes,constant uint4& probeParameters,texture2d_array<float> probeImage,
-    sampler pointSampler,sampler environmentLinearSampler,uint nativeAllowed)
+    const device TransparentSpatialProbe* probes,constant uint4& probeParameters,texture2d_array<float> probeImage)
 {
     if(probeIndex<4u)
         return float3(cache.weights[probeIndex],cache.edges[probeIndex],cache.weightedVisibility[probeIndex]);
-    return TransparentProbeFactorsUncached(position,probeIndex,probes,probeParameters,probeImage,pointSampler,environmentLinearSampler,nativeAllowed);
+    return TransparentProbeFactorsUncached(position,probeIndex,probes,probeParameters,probeImage);
 }
 float3 TransparentRadiance(texture2d<float> image,float3 position,float3 d,float roughness,constant TransparentFrame& frame,
     texture2d_array<float> probeImage,const device TransparentSpatialProbe* probes,constant uint4& probeParameters,
@@ -235,7 +266,7 @@ float3 TransparentRadiance(texture2d<float> image,float3 position,float3 d,float
     for(uint i=0;i<probeParameters.x;++i)
     {
         const device TransparentSpatialProbe& probe=probes[i];
-        float3 factors=TransparentProbeFactors(position,i,cache,probes,probeParameters,probeImage,pointSampler,environmentLinearSampler,nativeAllowed);
+        float3 factors=TransparentProbeFactors(position,i,cache,probes,probeParameters,probeImage);
         float weight=factors.x,edge=factors.y;if(weight<=0)continue;
         float3 direction=TransparentBoxDirection(position,d,probe.positionIntensity.xyz,probe.boxMinFade.xyz,probe.boxMaxMip.xyz);
         float2 localUV=float2(atan2(direction.y,direction.x)*.15915494309189535f+.5f,
@@ -263,7 +294,7 @@ float3 TransparentRadiance(texture2d<float> image,float3 position,float3 d,float
 }
 float3 TransparentIrradiance(float3 position,float3 n,constant TransparentFrame& frame,
     const device TransparentSpatialProbe* probes,constant uint4& probeParameters,texture2d_array<float> probeImage,
-    sampler pointSampler,sampler environmentLinearSampler,uint nativeAllowed,ProbeBlendCache cache)
+    ProbeBlendCache cache)
 {
     float3 worldNormal=n;
     float c=cos(frame.settings.z),s=sin(frame.settings.z);n.xy=float2(c*n.x+s*n.y,-s*n.x+c*n.y);
@@ -274,7 +305,7 @@ float3 TransparentIrradiance(float3 position,float3 n,constant TransparentFrame&
     float3 sum=0;float weights=0,coverage=0;
     for(uint i=0;i<probeParameters.x;++i)
     {
-        float3 factors=TransparentProbeFactors(position,i,cache,probes,probeParameters,probeImage,pointSampler,environmentLinearSampler,nativeAllowed);
+        float3 factors=TransparentProbeFactors(position,i,cache,probes,probeParameters,probeImage);
         float weight=factors.x,edge=factors.y;if(weight<=0)continue;
         sum+=TransparentProbeIrradiance(probes[i],worldNormal)*
             factors.z;
@@ -530,6 +561,7 @@ fragment TransparentOutput TRANSPARENT_FRAGMENT_ENTRY(TransparentVertex input [[
     texture2d<float> emissiveTexture [[texture(4)]],texture2d<float> opaqueTexture [[texture(5)]],
     texture2d<float> depthTexture [[texture(6)]],texture2d<float> prefilterTexture [[texture(7)]],
     depth2d<float> shadowTexture [[texture(14)]],
+    texture2d<float> brdfTexture [[texture(17)]],
     sampler materialSampler [[sampler(8)]],sampler screenSampler [[sampler(9)]],sampler pointSampler [[sampler(10)]],
     sampler environmentLinearSampler [[sampler(15)]],
     device const TransparentDraw* draws [[buffer(11)]],constant TransparentFrame& frame [[buffer(12)]],
@@ -578,18 +610,20 @@ fragment TransparentOutput TRANSPARENT_FRAGMENT_ENTRY(TransparentVertex input [[
         normalVariance=0.25f*(dot(normalDx,normalDx)+dot(normalDy,normalDy));
     }
     if(input.position.z>opaqueDepth || excludedLayer)discard_fragment();
-    float4 base=draw.baseColor;
+    float4 base=draw.baseColor*input.vertexColor;
     if((flags&1u)!=0u)base*=baseTexture.sample(materialSampler,input.uv,gradient2d(uvDx,uvDy));
+    // Alpha describes whether a surface exists; optical transmission is independent.
+    float coverage=draw.flags.w==1u?(base.a<draw.attenuation.w?0.0f:1.0f):
+        (draw.flags.w==2u?clamp(base.a,0.0f,1.0f):1.0f);
+    if(coverage<=0.0f)discard_fragment();
     float2 mr=draw.material.xy;if((flags&2u)!=0u)mr*=materialTexture.sample(materialSampler,input.uv,gradient2d(uvDx,uvDy)).bg;
     float metal=clamp(mr.x,0.0f,1.0f),rough=clamp(mr.y,.04f,1.0f),transmission=clamp(draw.optics.x,0.0f,1.0f)*(1-metal);
     if((flags&64u)!=0u)
     {
-        float coverage=mix(clamp(base.a,0.0f,1.0f),1.0f,transmission);
         TransparentOutput output;output.color=float4(draw.baseColor.rgb*coverage,coverage);output.reactive=float4(coverage);return output;
     }
     if((flags&128u)!=0u)
     {
-        float coverage=clamp(base.a,0.0f,1.0f);
         TransparentOutput output;output.color=float4(clamp(base.rgb,0.0f,65504.0f)*coverage,coverage);output.reactive=float4(coverage);return output;
     }
     float filteredAlphaSquared=min(1.0f,rough*rough*rough*rough+min(2.0f*normalVariance,0.18f));
@@ -607,15 +641,19 @@ fragment TransparentOutput TRANSPARENT_FRAGMENT_ENTRY(TransparentVertex input [[
     bool totalInternalReflection=transmission>0 && dot(transmissionRay,transmissionRay)<1e-6f;
     float3 f0=totalInternalReflection?float3(1):mix(float3(dielectric),base.rgb,metal),f=TransparentFresnel(nv,f0);
     float ao=1;if((flags&8u)!=0u)ao=mix(1.0f,aoTexture.sample(materialSampler,input.uv).r,draw.material.w);
-    float3 diffuseWeight=(1-f)*base.rgb*(1-metal)*(1-transmission);
+    float3 diffuseWeight=(1-TransparentFresnelRoughness(nv,f0,specularRoughness))*base.rgb*(1-metal)*(1-transmission);
     ProbeBlendCache probeCache=PrepareProbeBlendCache(input.worldPosition,
         any(diffuseWeight!=0.0f) || (uint(frame.screen.w+.5f)&2u)!=0u ||
-        (transmission>0 && !totalInternalReflection),probes,probeParameters,probePrefilterTexture,pointSampler,environmentLinearSampler,index.z);
+        (transmission>0 && !totalInternalReflection),probes,probeParameters,probePrefilterTexture);
     float3 lit=0;
-    if(any(diffuseWeight!=0.0f))lit=diffuseWeight*TransparentIrradiance(input.worldPosition,n,frame,probes,probeParameters,probePrefilterTexture,
-        pointSampler,environmentLinearSampler,index.z,probeCache)*ao;
-    if((uint(frame.screen.w+.5f)&2u)!=0u)lit+=TransparentRadiance(prefilterTexture,input.worldPosition,reflect(-v,n),specularRoughness,frame,
-        probePrefilterTexture,probes,probeParameters,pointSampler,environmentLinearSampler,index.z,probeCache)*f*frame.specularColor.rgb;
+    if(any(diffuseWeight!=0.0f))lit=diffuseWeight*TransparentIrradiance(input.worldPosition,n,frame,probes,probeParameters,probePrefilterTexture,probeCache)*ao;
+    if((uint(frame.screen.w+.5f)&2u)!=0u)
+    {
+        float2 brdf=TransparentIntegratedBRDF(nv,specularRoughness,brdfTexture);
+        lit+=TransparentRadiance(prefilterTexture,input.worldPosition,reflect(-v,n),specularRoughness,frame,
+            probePrefilterTexture,probes,probeParameters,pointSampler,environmentLinearSampler,index.z,probeCache)*
+            (f0*brdf.x+brdf.y)*ao*frame.specularColor.rgb;
+    }
     float3 refracted=0;
     if(transmission>0 && !totalInternalReflection)
     {
@@ -675,7 +713,7 @@ fragment TransparentOutput TRANSPARENT_FRAGMENT_ENTRY(TransparentVertex input [[
     }
 #endif
     float3 emissive=draw.emissive.rgb;if((flags&16u)!=0u)emissive*=emissiveTexture.sample(materialSampler,input.uv).rgb;
-    float coverage=mix(clamp(base.a,0.0f,1.0f),1.0f,transmission);
     float3 color=lights.counts.w>.5f?lit+refracted+emissive:base.rgb+emissive;
     TransparentOutput output;output.color=float4(clamp(color,0.0f,65504.0f)*coverage,coverage);output.reactive=float4(coverage);return output;
 }
+#endif

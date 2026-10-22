@@ -94,9 +94,9 @@ struct Renderer::Impl
     };
     struct CompactShadowVertex
     {
-        float px,py,pz,u,v;
+        float px,py,pz,u,v,alpha;
     };
-    static_assert(sizeof(CompactShadowVertex)==20);
+    static_assert(sizeof(CompactShadowVertex)==24);
     struct ShadowArenaRange
     {
         uint64_t generation=0;
@@ -184,6 +184,7 @@ struct Renderer::Impl
         std::array<std::string,ShaderCount> entries;
         std::vector<RHI::ResourceBindingLayout> vertexBindings;
         uint32_t additionalConstantBytes = 0;
+        bool stockShadowCoverage = false;
         bool operator==(const ShaderSources&) const;
     };
 

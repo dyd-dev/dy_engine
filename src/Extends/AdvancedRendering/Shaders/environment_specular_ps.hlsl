@@ -91,7 +91,7 @@ bool NativeEnvironmentSample(float2 coordinate,float mip,float maximumMip,uint e
 float ProbeVisibility(float3 position,SpatialProbe probe,uint index)
 {
     return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,
-        probeParameters.x+index,probePrefilterTexture,clampSampler,environmentLinearSampler,probeParameters.w);
+        probeParameters.x+index,probePrefilterTexture);
 }
 float3 BlendProbeRadiance(float3 position,float3 direction,float roughness)
 {

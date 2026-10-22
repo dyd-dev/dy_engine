@@ -54,6 +54,7 @@ namespace dyf::RHI
     	case RHI::Format::R32G32B32A32_FLOAT:
     		return 16;
     	case RHI::Format::R16_UINT:
+        case RHI::Format::R16_FLOAT:
     		return 2;
     	default:
     		return 0;

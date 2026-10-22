@@ -11,6 +11,13 @@
 
 namespace dyf
 {
+    inline bool IsAffineTransform(const Math::float4x4& matrix)
+    {
+        if(matrix.m[3]!=0 || matrix.m[7]!=0 || matrix.m[11]!=0 || matrix.m[15]!=1)return false;
+        for(float value:matrix.m)if(!std::isfinite(value))return false;
+        return true;
+    }
+
     // 재질 ID와 이미지 저장소를 제외한 실제 셰이더·파이프라인 상수의 동등성이다.
     inline bool EqualMaterial(const MaterialDesc& a,const MaterialDesc& b)
     {
@@ -42,8 +49,6 @@ namespace dyf
 
     class CameraFrustum
     {
-        static bool Affine(const Math::float4x4& m)
-        {return m.m[3]==0 && m.m[7]==0 && m.m[11]==0 && m.m[15]==1;}
         Math::float4x4 m_viewProjection={};
         std::array<std::array<double,4>,6> m_planes={};
         bool m_valid=false;
@@ -52,7 +57,7 @@ namespace dyf
         {
             // Unknown projection contracts fail open, including oblique/projective views.
             const auto& p=camera.projection;
-            if(!Affine(camera.view) ||
+            if(!IsAffineTransform(camera.view) ||
                 !((p.m[11]==-1 && p.m[15]==0) || (p.m[11]==0 && p.m[15]==1)) ||
                 p.m[1]!=0 || p.m[2]!=0 || p.m[3]!=0 || p.m[4]!=0 || p.m[6]!=0 || p.m[7]!=0 ||
                 p.m[0]==0 || p.m[5]==0 || p.m[10]==0)return;
@@ -69,8 +74,7 @@ namespace dyf
         }
         bool Outside(const Math::Bounds3& bounds,const Math::float4x4& world) const
         {
-            if(!m_valid || !bounds.valid || !Affine(world))return false;
-            for(float value:world.m)if(!std::isfinite(value))return false;
+            if(!m_valid || !bounds.valid || !IsAffineTransform(world))return false;
             const double minimum[]={bounds.min.x,bounds.min.y,bounds.min.z};
             const double maximum[]={bounds.max.x,bounds.max.y,bounds.max.z};
             double magnitude[4]={};

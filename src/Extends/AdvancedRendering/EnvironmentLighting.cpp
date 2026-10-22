@@ -479,14 +479,6 @@ bool EnvironmentLighting::BuildProbes(RHI::ICommandList& commands,const std::vec
                 }
             cache.moments=VisibilityMoments(probe.visibility,width,height,cache.distanceScale);
             if(cache.moments.empty()) return false;
-            // Validate the uploaded visibility mip once, separately from radiance.
-            cache.momentsFilterable=true;
-            for(size_t pixel=0;pixel<cache.moments[0].size() && cache.momentsFilterable;pixel+=4)
-                for(size_t channel=0;channel<2;++channel)
-                {
-                    const float value=cache.moments[0][pixel+channel];
-                    if(!std::isfinite(value) || std::abs(value)>268435456.f) cache.momentsFilterable=false;
-                }
             pending.push_back(m_probeCache.size());m_probeCache.push_back(std::move(cache));
         }
     }
@@ -652,13 +644,9 @@ bool EnvironmentLighting::Prepare(RHI::IDevice& device,RHI::ICommandList& upload
         hardwareFiltering=cache.prefilterFinite && cache.prefilterMaxMagnitude<=hardwareMagnitude &&
             cache.prefilterMaxMagnitude*double(environment.probes[i].intensity)<=safeMagnitude;
     }
-    // Native array sampling converts the moments layer (count+index) to float.
-    bool momentsFiltering=m_linearFiltering && environment.probes.size()<=8388608u;
-    for(size_t i=0;i<environment.probes.size() && momentsFiltering;++i)
-        momentsFiltering=m_probeCache[m_probeIndices[i]].momentsFilterable;
-    // x=count, y=finite fallback skip, z=native HDR, w=native visibility moments.
+    // x=count, y=finite fallback skip, z=native HDR, w=reserved.
     const std::array<uint32_t,4> probeParameters={m_active?static_cast<uint32_t>(environment.probes.size()):0u,
-        finiteFallback?1u:0u,hardwareFiltering?1u:0u,momentsFiltering?1u:0u};
+        finiteFallback?1u:0u,hardwareFiltering?1u:0u,0u};
     if(!UploadConstants(uploads,m_probeData,m_probeReady,m_probeBytes,probeData.data(),
         static_cast<uint32_t>(probeData.size()*sizeof(ProbeGPU)),BufferUsage::Storage) ||
         !UploadConstants(uploads,m_probeParameters,m_probeParametersReady,m_probeParameterBytes,
@@ -742,7 +730,6 @@ bool EnvironmentLighting::CreatePipelines()
         {3,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Fragment,{}},
         {8,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Fragment,nearest},
         {10,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Fragment,aoSampler},
-        {15,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Fragment,environmentLinear},
         {9,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Fragment,{}},
         {22,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Fragment,{}},
         {23,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Fragment,{}},

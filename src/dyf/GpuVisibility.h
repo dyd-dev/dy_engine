@@ -52,6 +52,8 @@ public:
     bool RecordUploads(RHI::ICommandList&);
     void CommitUploads() {m_uploadReady=true;m_uploadDirty.fill(false);}
     bool AddPasses(RHI::RenderGraph&);
+    // Texture/sampler compute layouts are optional even when buffer Compute is supported.
+    static bool SupportsOcclusion(const RHI::IDevice&);
     bool AddOcclusionPasses(RHI::RenderGraph&,RHI::TextureHandle depth,
         RHI::RGResourceHandle depthHandle,const Camera& jitteredCamera);
     void CommitFrame();

@@ -147,6 +147,7 @@ struct RasterData
     float3 worldPosition [[user(locn1)]];
     float3 worldNormal [[user(locn2)]];
     float4 worldTangent [[user(locn3)]];
+    float4 color [[user(locn5)]];
 #if RENDERER_ENABLE_SHADOWS
     float4 lightSpacePosition [[user(locn4)]];
 #endif
@@ -691,7 +692,7 @@ inline float4 RunFragmentShader(
     )
 {
     const uint textureFlags = drawConstants.textureFlags;
-    float4 base = drawConstants.baseColor;
+    float4 base = drawConstants.baseColor * input.color;
     if ((textureFlags & kTextureFlagBaseColor) != 0u)
     {
         base *= baseColorTexture.sample(materialSampler, input.uv);

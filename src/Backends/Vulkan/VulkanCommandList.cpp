@@ -210,6 +210,7 @@ namespace dyf::Backends
 			case dyf::RHI::Format::R32G32B32A32_FLOAT:
 				return 16;
 			case dyf::RHI::Format::R16_UINT:
+            case dyf::RHI::Format::R16_FLOAT:
 				return 2;
 			default:
 				return 0;

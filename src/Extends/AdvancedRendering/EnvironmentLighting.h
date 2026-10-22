@@ -45,6 +45,7 @@ public:
     RHI::RGResourceHandle GetSpecularHandle() const { return m_specularHandle; }
     RHI::BufferHandle GetConstants() const { return m_constants; }
     RHI::TextureHandle GetPrefilter() const { return m_prefilter; }
+    RHI::TextureHandle GetBRDF() const { return m_brdf; }
     const Constants& GetCPUConstants() const { return m_data; }
     RHI::BufferHandle GetProbeData() const { return m_probeData; }
     RHI::TextureHandle GetProbePrefilter() const { return m_probePrefilter; }
@@ -69,7 +70,6 @@ private:
         float distanceScale=0;
         double prefilterMaxMagnitude=0;
         bool prefilterFinite=false;
-        bool momentsFilterable=false;
     };
     struct FrameConstants
     {

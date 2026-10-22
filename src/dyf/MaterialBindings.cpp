@@ -205,7 +205,7 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
 		const auto materialIndex = draws
 			? ToIndex(scene.GetEntityMaterial(static_cast<EntityID>(setIndex))) : setIndex;
 		if(materialIndex >= materialStates.size()) continue;
-		if(separateTransparency && scene.Materials()[materialIndex].alphaMode==MaterialAlphaMode::Blend)
+		if(separateTransparency && UsesBlendedRendering(scene.Materials()[materialIndex]))
 		{
 			sets[setIndex]=nullptr;
 			continue;

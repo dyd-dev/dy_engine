@@ -20,6 +20,7 @@
 #endif
 #if defined(ENABLE_METAL) || defined(ENABLE_VULKAN) || defined(ENABLE_D3D12)
 #include "TransparentNoAreaFragment.h"
+#include "TransparentDepthFragment.h"
 #endif
 
 namespace dyf
@@ -36,6 +37,7 @@ TransparentRendering::~TransparentRendering()
     m_device->DestroyPipeline(m_depthCopyPipeline);
     for(auto* shader:m_shaders) m_device->DestroyShader(shader);
     m_device->DestroyShader(m_noAreaShader);
+    m_device->DestroyShader(m_depthShader);
     m_device->DestroyBuffer(m_frameBuffer);m_device->DestroyBuffer(m_drawBuffer);
     m_device->DestroyBuffer(m_noShadowBuffer);
     m_device->DestroyTexture(m_color);
@@ -91,6 +93,7 @@ bool TransparentRendering::CreatePipelines()
     bindings.push_back({13,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Fragment,{}});
     bindings.push_back({14,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Fragment,{}});
     bindings.push_back({16,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Fragment,{}});
+    bindings.push_back({17,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Fragment,{}});
     bindings.push_back({19,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Fragment,{}});
     bindings.push_back({20,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Fragment,{}});
     bindings.push_back({21,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Fragment,{}});
@@ -100,16 +103,17 @@ bool TransparentRendering::CreatePipelines()
     bindings.push_back({22,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Fragment,{}});
     bindings.push_back({23,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Fragment,{}});
     bindings.push_back({24,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Fragment,{}});
-    const VertexBufferLayout vertex{0,48,VertexStepMode::Vertex};
+    const VertexBufferLayout vertex{0,64,VertexStepMode::Vertex};
     const VertexAttribute attributes[]={{0,0,Format::R32G32B32_FLOAT,0},{1,0,Format::R32G32B32_FLOAT,12},
-        {2,0,Format::R32G32_FLOAT,24},{3,0,Format::R32G32B32A32_FLOAT,32}};
+        {2,0,Format::R32G32_FLOAT,24},{3,0,Format::R32G32B32A32_FLOAT,32},
+        {8,0,Format::R32G32B32A32_FLOAT,48}};
     ColorAttachmentDesc color{Format::R16G16B16A16_FLOAT,
         {true,BlendFactor::One,BlendFactor::OneMinusSourceAlpha,BlendOp::Add,
             BlendFactor::One,BlendFactor::OneMinusSourceAlpha,BlendOp::Add},ColorWriteMask::All};
-    const ColorAttachmentDesc transparentColors[]={color,color};
+    ColorAttachmentDesc transparentColors[]={color,color};
     GraphicsPipelineDesc desc;
     desc.vertexShader=m_shaders[0];desc.fragmentShader=m_shaders[1];desc.topology=PrimitiveTopology::TriangleList;
-    desc.vertexBuffers=&vertex;desc.vertexBufferCount=1;desc.vertexAttributes=attributes;desc.vertexAttributeCount=4;
+    desc.vertexBuffers=&vertex;desc.vertexBufferCount=1;desc.vertexAttributes=attributes;desc.vertexAttributeCount=5;
     desc.raster={FillMode::Solid,CullMode::Back,FrontFace::CounterClockwise,0,0,0};
     // Sample a separate R32 copy while testing the original opaque D32 attachment.
     desc.depthStencil.format=Format::D32_FLOAT;
@@ -117,6 +121,18 @@ bool TransparentRendering::CreatePipelines()
     desc.depthStencil.depthCompareOp=CompareOp::LessEqual;
     desc.colorAttachments=transparentColors;desc.colorAttachmentCount=2;
     desc.layout={bindings.data(),static_cast<uint32_t>(bindings.size()),16,ShaderStageFlags::Vertex|ShaderStageFlags::Fragment,15};
+    if(m_reactiveFormat==Format::Unknown)
+    {
+        transparentColors[1].format=Format::R16_FLOAT;
+        transparentColors[1].writeMask=ColorWriteMask::Red;
+        // This query also proves sampled-image support; unknown backends keep RGBA16F.
+        // Supports(desc) checks attachment blending and independent write masks together.
+        m_reactiveFormat=RHI::Detail::SupportsLinearFiltering(*m_device,Format::R16_FLOAT) && m_device->Supports(desc)
+            ?Format::R16_FLOAT:Format::R16G16B16A16_FLOAT;
+    }
+    transparentColors[1].format=m_reactiveFormat;
+    transparentColors[1].writeMask=m_reactiveFormat==Format::R16_FLOAT?ColorWriteMask::Red:ColorWriteMask::All;
+    // OneMinusSourceAlpha uses the fragment output alpha, including for a red-only target.
     for(uint32_t i=0;i<m_pipelines.size();++i)
     {
         desc.raster.cullMode=(i&1u)?CullMode::None:CullMode::Back;
@@ -157,16 +173,32 @@ bool TransparentRendering::CreatePipelines()
     }
     if(m_layers==2)
     {
+        if(!m_depthShader)
+        {
+#if defined(ENABLE_METAL)
+            const ShaderDesc depthShader{ShaderStage::Fragment,"transparentDepthFragment",kTransparentDepthFragment,kTransparentDepthFragmentSize};
+#elif defined(ENABLE_VULKAN) || defined(ENABLE_D3D12)
+            const ShaderDesc depthShader{ShaderStage::Fragment,"main",kTransparentDepthFragment,kTransparentDepthFragmentSize};
+#endif
+#if defined(ENABLE_METAL) || defined(ENABLE_VULKAN) || defined(ENABLE_D3D12)
+            m_depthShader=m_device->CreateShader(depthShader);
+#endif
+            if(!m_depthShader) return false;
+        }
         const ResourceBindingLayout depthBindings[]={
-            {11,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Vertex,{}},
+            {0,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Fragment,{}},
+            {6,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Fragment,{}},
+            {8,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Fragment,material},
+            {10,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Fragment,nearest},
+            {11,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Vertex|ShaderStageFlags::Fragment,{}},
             {12,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Vertex,{}}};
         auto depthDesc=desc;
-        depthDesc.fragmentShader=nullptr;
+        depthDesc.fragmentShader=m_depthShader;
         depthDesc.colorAttachments=nullptr;depthDesc.colorAttachmentCount=0;
         depthDesc.depthStencil.format=Format::D32_FLOAT;
         depthDesc.depthStencil.depthTestEnabled=true;depthDesc.depthStencil.depthWriteEnabled=true;
         depthDesc.depthStencil.depthCompareOp=CompareOp::Less;
-        depthDesc.layout={depthBindings,2,16,ShaderStageFlags::Vertex,15};
+        depthDesc.layout={depthBindings,6,16,ShaderStageFlags::Vertex|ShaderStageFlags::Fragment,15};
         for(uint32_t i=0;i<m_depthPipelines.size();++i)
         {
             depthDesc.raster.cullMode=(i&1u)?CullMode::None:CullMode::Back;
@@ -223,7 +255,7 @@ bool TransparentRendering::Prepare(IDevice& device,ICommandList& uploads,const C
     for(const auto& draw:draws)
     {
         if(!draw.material) return false;
-        if(draw.material->alphaMode==MaterialAlphaMode::Blend && draw.indexCount &&
+        if(UsesBlendedRendering(*draw.material) && draw.indexCount &&
             (!frustumCulling || !frustum.Outside(draw.localBounds,draw.model))) m_draws.push_back(draw);
     }
     if(m_draws.empty()) return true;
@@ -254,7 +286,8 @@ bool TransparentRendering::Prepare(IDevice& device,ICommandList& uploads,const C
         gpu.baseColor=draw.baseColor;gpu.emissive={material.emissiveColor.x,material.emissiveColor.y,material.emissiveColor.z,material.normalYSign};
         gpu.material={material.metallicFactor,material.roughnessFactor,material.normalScale,material.occlusionStrength};
         gpu.optics={material.transmissionFactor,material.indexOfRefraction,material.thickness,material.attenuationDistance};
-        gpu.attenuation={material.attenuationColor.x,material.attenuationColor.y,material.attenuationColor.z,0};
+        gpu.attenuation={material.attenuationColor.x,material.attenuationColor.y,material.attenuationColor.z,material.alphaCutoff};
+        gpu.alphaMode=static_cast<uint32_t>(material.alphaMode);
         gpu.flags=draw.textureFlags|(material.unlit?128u:0u);gpu.doubleSided=material.doubleSided?1:0;
         gpu.pipelineIndex=gpu.doubleSided|(Math::Determinant3x3(draw.model)<0?2u:0u);
         m_data.push_back(gpu);
@@ -270,8 +303,11 @@ bool TransparentRendering::Prepare(IDevice& device,ICommandList& uploads,const C
     frame.specularColor={environment.specularColor.x*environment.specularIntensity,
         environment.specularColor.y*environment.specularIntensity,environment.specularColor.z*environment.specularIntensity,0};
     m_prefilter=lighting.prefilter;
+    const bool specularIbl=(static_cast<uint32_t>(frame.environment.screen.w+.5f)&2u)!=0u;
+    if(specularIbl && !lighting.brdf) return false;
+    m_brdf=lighting.brdf?lighting.brdf:lighting.prefilter;
     m_probeData=lighting.probeData;m_probePrefilter=lighting.probePrefilter;m_probeParameters=lighting.probeParameters;
-    return m_prefilter && m_probeData && m_probePrefilter && m_probeParameters &&
+    return m_prefilter && m_brdf && m_probeData && m_probePrefilter && m_probeParameters &&
         Upload(uploads,m_frameBuffer,m_frameReady,&frame,sizeof(frame),0,BufferUsage::Constant);
 }
 
@@ -334,7 +370,11 @@ bool TransparentRendering::AddPasses(RenderGraph& graph,TextureHandle opaque,RGR
         desc.usage=TextureUsage::RenderTarget|TextureUsage::ShaderResource;
         if(!(m_color=m_device->CreateTexture(desc))) return false;
     }
-    if(!m_reactive && !(m_reactive=m_device->CreateTexture(m_color->GetDesc()))) return false;
+    if(!m_reactive)
+    {
+        auto desc=m_color->GetDesc();desc.format=m_reactiveFormat;
+        if(!(m_reactive=m_device->CreateTexture(desc))) return false;
+    }
     if(!m_opaqueDepth)
     {
         auto desc=m_color->GetDesc();desc.format=Format::R32_FLOAT;
@@ -393,6 +433,8 @@ bool TransparentRendering::AddPasses(RenderGraph& graph,TextureHandle opaque,RGR
         ResourceState::ConstantBuffer,ResourceState::ConstantBuffer);
     const auto prefilterHandle=graph.ImportTexture("Transparent environment",m_prefilter,
         ResourceState::ShaderResource,ResourceState::ShaderResource);
+    const auto brdfHandle=graph.ImportTexture("Transparent GGX split-sum BRDF",m_brdf,
+        ResourceState::ShaderResource,ResourceState::ShaderResource);
     const auto probeDataHandle=graph.ImportBuffer("Spatial probe SH and bounds",m_probeData,
         ResourceState::ShaderResource,ResourceState::ShaderResource);
     const auto probeParametersHandle=graph.ImportBuffer("Spatial probe count",m_probeParameters,
@@ -427,7 +469,7 @@ bool TransparentRendering::AddPasses(RenderGraph& graph,TextureHandle opaque,RGR
                 commands->BindGraphicsPipeline(pipeline);
                 boundPipeline=pipeline;boundSet=nullptr;
             }
-            const auto set=sets[depthOnly?variant:i];
+            const auto set=sets[i];
             if(set!=boundSet) {commands->BindResourceSet(set);boundSet=set;}
             commands->BindVertexBuffer(0,draw.vertexBuffer,0);
             commands->BindIndexBuffer(draw.indexBuffer,Format::R32_UINT,0);
@@ -469,7 +511,8 @@ bool TransparentRendering::AddPasses(RenderGraph& graph,TextureHandle opaque,RGR
             .Read(lighting.clusterList.resource,ResourceState::ShaderResource)
             .Read(lighting.clusterConstants.resource,ResourceState::ConstantBuffer)
             .Read(lightsHandle,ResourceState::ConstantBuffer).Read(shadowConstantsHandle,ResourceState::ConstantBuffer)
-            .Read(prefilterHandle,ResourceState::ShaderResource).Read(probeDataHandle,ResourceState::ShaderResource)
+            .Read(prefilterHandle,ResourceState::ShaderResource).Read(brdfHandle,ResourceState::ShaderResource)
+            .Read(probeDataHandle,ResourceState::ShaderResource)
             .Read(probeParametersHandle,ResourceState::ConstantBuffer).Read(probePrefilterHandle,ResourceState::ShaderResource);
         geometryReads(pass);
         std::vector<ResourceSetHandle> sets;sets.reserve(m_draws.size());
@@ -496,6 +539,7 @@ bool TransparentRendering::AddPasses(RenderGraph& graph,TextureHandle opaque,RGR
             bindings.push_back({13,0,lights,nullptr,0,sizeof(RendererLightingConstants),{}});
             bindings.push_back({14,0,nullptr,shadowTexture,0,0,{}});
             bindings.push_back({16,0,shadowBuffer,nullptr,0,sizeof(RendererShadowConstants),{}});
+            bindings.push_back({17,0,nullptr,m_brdf,0,0,{}});
             bindings.push_back({19,0,lighting.clusterLights.buffer,nullptr,0,lighting.clusterLights.buffer->GetDesc().size,{}});
             bindings.push_back({20,0,lighting.clusterList.buffer,nullptr,0,lighting.clusterList.buffer->GetDesc().size,{}});
             bindings.push_back({21,0,lighting.clusterConstants.buffer,nullptr,0,sizeof(RendererClusterConstants),{}});
@@ -545,16 +589,27 @@ bool TransparentRendering::AddPasses(RenderGraph& graph,TextureHandle opaque,RGR
         const auto rearHandle=graph.ImportTexture("Transparent rear HDR",m_rearColor,m_rearState,ResourceState::ShaderResource);
         const auto nearestHandle=graph.ImportTexture("Transparent nearest depth",m_nearestDepth,m_nearestState,ResourceState::ShaderResource);
         if(!rearHandle.IsValid() || !nearestHandle.IsValid()) return false;
-        const std::vector<ResourceBinding> bindings={{11,0,m_drawBuffer,nullptr,0,m_drawBuffer->GetDesc().size,{}},
-            {12,0,m_frameBuffer,nullptr,0,sizeof(FrameGPU),{}}};
+        auto& nearest=graph.AddPass("Transparency nearest depth",RGRecordingMode::Independent);
+        nearest.Write(nearestHandle,ResourceState::DepthWrite)
+            .Read(opaqueDepthHandle,ResourceState::ShaderResource);
+        geometryReads(nearest);
         std::vector<ResourceSetHandle> sets;
-        for(auto* pipeline:m_depthPipelines)
+        sets.reserve(m_draws.size());
+        std::unordered_set<TextureHandle> textures;
+        for(uint32_t i=0;i<m_draws.size();++i)
         {
+            const auto texture=m_draws[i].textures[0];
+            if(textures.insert(texture).second)
+                nearest.Read(graph.ImportTexture("Transparent depth alpha "+std::to_string(i),texture,
+                    ResourceState::ShaderResource,ResourceState::ShaderResource),ResourceState::ShaderResource);
+            const std::vector<ResourceBinding> bindings={{0,0,nullptr,texture,0,0,{}},
+                {6,0,nullptr,m_opaqueDepth,0,0,{}},
+                {11,0,m_drawBuffer,nullptr,0,m_drawBuffer->GetDesc().size,{}},
+                {12,0,m_frameBuffer,nullptr,0,sizeof(FrameGPU),{}}};
+            const auto pipeline=m_depthPipelines[m_data[i].pipelineIndex];
             auto* set=Resources(pipeline,bindings);if(!set) return false;
             sets.push_back(set);
         }
-        auto& nearest=graph.AddPass("Transparency nearest depth",RGRecordingMode::Independent);
-        nearest.Write(nearestHandle,ResourceState::DepthWrite);geometryReads(nearest);
         nearest.SetExecute([this,drawGeometry,sets=std::move(sets)](ICommandList* commands) {
             DepthStencilAttachment depth;depth.texture=m_nearestDepth;
             depth.state=ResourceState::DepthWrite;

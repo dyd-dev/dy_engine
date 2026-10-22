@@ -24,7 +24,8 @@ namespace dyf::RHI
         BC1_UNORM,
         BC1_UNORM_SRGB,
         BC3_UNORM,
-        BC3_UNORM_SRGB
+        BC3_UNORM_SRGB,
+        R16_FLOAT
 	};
 
 	[[nodiscard]] inline constexpr bool HasStencil(Format format)

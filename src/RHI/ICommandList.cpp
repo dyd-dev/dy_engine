@@ -413,7 +413,7 @@ try
         if(color.loadOp==LoadOp::Clear)
         {
             const auto format=color.texture->GetDesc().format;
-            const uint32_t channels=(format==Format::R16_UINT || format==Format::R32_UINT || format==Format::R32_FLOAT) ? 1u :
+            const uint32_t channels=(format==Format::R16_UINT || format==Format::R16_FLOAT || format==Format::R32_UINT || format==Format::R32_FLOAT) ? 1u :
                 format==Format::R32G32_FLOAT ? 2u : format==Format::R32G32B32_FLOAT ? 3u : 4u;
             for(uint32_t channel=0;channel<channels;++channel)
                 if(!std::isfinite(color.clearColor[channel])){m_recordingFailed=true;return;}
