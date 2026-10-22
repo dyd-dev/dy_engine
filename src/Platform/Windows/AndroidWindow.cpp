@@ -1,5 +1,6 @@
 #include "WindowBackend.h"
 #include "AndroidApplication.h"
+#include <android/configuration.h>
 #include <android/native_window.h>
 #include <android_native_app_glue.h>
 #include <algorithm>
@@ -98,7 +99,15 @@ namespace dyf::Platform
 			}
 
 			WindowSize GetFramebufferSize() const override { return GetSize(); }
-			ContentScale GetContentScale() const override { return {}; }
+			ContentScale GetContentScale() const override
+			{
+				if(!app || !app->config) return {};
+				const int density = AConfiguration_getDensity(app->config);
+				if(density <= 0 || density == ACONFIGURATION_DENSITY_ANY || density == ACONFIGURATION_DENSITY_NONE)
+					return {};
+				const float scale = float(density) / float(ACONFIGURATION_DENSITY_MEDIUM);
+				return {scale, scale};
+			}
 			bool HasFocus() const override { return app ? app->activityState == APP_CMD_RESUME : GetNativeHandle().value != nullptr; }
 			bool IsMinimized() const override { return !GetNativeHandle().value; }
 			void SetCursorMode(CursorMode) override {}
@@ -145,8 +154,11 @@ namespace dyf::Platform
 		android_poll_source* source = nullptr;
 		while(ALooper_pollOnce(0, nullptr, &events, reinterpret_cast<void**>(&source)) >= 0)
 		{
+			auto* previousWindow = application->window;
 			if(source) source->process(application, source);
-			if(application->destroyRequested) break;
+			// Expose TERM_WINDOW before draining a following INIT_WINDOW, even
+			// when Android reuses the same ANativeWindow address for the new surface.
+			if(application->destroyRequested || application->window != previousWindow) break;
 		}
 	}
 

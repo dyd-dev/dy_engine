@@ -18,6 +18,79 @@ namespace
 {
 using Asset = std::unique_ptr<AAsset, decltype(&AAsset_close)>;
 
+// NativeActivity runs this entry on a native thread. Attach only while reading
+// its launch intent; the no-extra launch still opens the example browser.
+class IntentEnvironment
+{
+public:
+    explicit IntentEnvironment(JavaVM& vm) : vm(vm)
+    {
+        const auto result = vm.GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+        if(result == JNI_EDETACHED)
+        {
+            if(vm.AttachCurrentThread(&env, nullptr) != JNI_OK)
+                throw std::runtime_error("Cannot attach Android launch thread to Java.");
+            attached = true;
+        }
+        else if(result != JNI_OK)
+            throw std::runtime_error("Cannot access Android launch intent.");
+        if(env->PushLocalFrame(8) < 0)
+        {
+            env->ExceptionClear();
+            if(attached) vm.DetachCurrentThread();
+            throw std::runtime_error("Cannot allocate Android launch intent references.");
+        }
+    }
+    ~IntentEnvironment()
+    {
+        env->PopLocalFrame(nullptr);
+        if(attached) vm.DetachCurrentThread();
+    }
+    JNIEnv* operator->() const { return env; }
+
+private:
+    JavaVM& vm;
+    JNIEnv* env = nullptr;
+    bool attached = false;
+};
+
+std::string LaunchExample(ANativeActivity& activity)
+{
+    IntentEnvironment env(*activity.vm);
+    const auto activityClass = env->GetObjectClass(activity.clazz);
+    const auto getIntent = env->GetMethodID(activityClass, "getIntent", "()Landroid/content/Intent;");
+    const auto intent = env->CallObjectMethod(activity.clazz, getIntent);
+    if(!intent) return {};
+    const auto intentClass = env->GetObjectClass(intent);
+    const auto getStringExtra = env->GetMethodID(intentClass, "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;");
+    const auto key = env->NewStringUTF("dy_example");
+    const auto value = static_cast<jstring>(env->CallObjectMethod(intent, getStringExtra, key));
+    if(env->ExceptionCheck())
+    {
+        env->ExceptionClear();
+        throw std::runtime_error("dy_example must be a string naming an example target.");
+    }
+    if(!value) return {};
+    const auto text = env->GetStringUTFChars(value, nullptr);
+    if(!text)
+    {
+        env->ExceptionClear();
+        throw std::runtime_error("Cannot read dy_example launch selection.");
+    }
+    std::string selection(text);
+    env->ReleaseStringUTFChars(value, text);
+    return selection;
+}
+
+thread_local const char* launchSelection = nullptr;
+
+void ReportExampleState(bool running)
+{
+    if(launchSelection)
+        __android_log_print(ANDROID_LOG_INFO, "dy_engine", "dy_example=%s state=%s",
+            launchSelection, running ? "started" : "stopped");
+}
+
 std::string PrepareAssets(android_app& app)
 {
     const auto root = std::filesystem::path(app.activity->internalDataPath) / "examples";
@@ -71,9 +144,15 @@ void android_main(android_app* state)
         dyf::TracyAdapter tracy;
 #endif
         const auto assets = PrepareAssets(*state);
+        auto selection = LaunchExample(*state->activity);
         char name[] = "dy_engine examples";
-        char* arguments[] = {name, nullptr};
-        DyfRunExamples(1, arguments, assets.c_str(), "/system/fonts/Roboto-Regular.ttf", nullptr);
+        char* arguments[] = {name, selection.empty() ? nullptr : selection.data(), nullptr};
+        launchSelection = selection.empty() ? nullptr : selection.c_str();
+        const auto result = DyfRunExamples(selection.empty() ? 1 : 2, arguments,
+            assets.c_str(), "/system/fonts/Roboto-Regular.ttf", ReportExampleState);
+        __android_log_print(result == 0 ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
+            "dy_engine", "Examples exited with code %d", result);
+        launchSelection = nullptr;
     }
     catch(const std::exception& error)
     {

@@ -14,7 +14,9 @@ cmake -S "$script_dir" -B "$build_dir" -G Ninja \
     -DCMAKE_OSX_SYSROOT="$SDKROOT" \
     -DCMAKE_OSX_ARCHITECTURES="$arch" \
     -DCMAKE_OSX_DEPLOYMENT_TARGET="$IPHONEOS_DEPLOYMENT_TARGET" \
-    -DCMAKE_BUILD_TYPE="$CONFIGURATION"
+    -DCMAKE_BUILD_TYPE="$CONFIGURATION" \
+    -DDY_BUILD_SHOWCASE="${DY_BUILD_SHOWCASE:-OFF}" \
+    -DDY_SHOWCASE_ARENA_ONLY="${DY_SHOWCASE_ARENA_ONLY:-OFF}"
 cmake --build "$build_dir" --target dyf_examples --parallel 4
 
 set --

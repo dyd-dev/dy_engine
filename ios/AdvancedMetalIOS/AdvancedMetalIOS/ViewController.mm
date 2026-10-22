@@ -226,6 +226,7 @@ static std::string SystemFontPath() {
                     std::vector<char*> argv;
                     for(auto& value:arguments) argv.push_back(value.data());
                     argv.push_back(nullptr);
+                    if(arguments.size()>1) NSLog(@"dy_example=%s",arguments[1].c_str());
                     return DyfRunExamples(int(arguments.size()),argv.data(),assetRoot.c_str(),font.c_str(),ExampleChanged);
                 });
             } catch(const std::exception& exception) { error=exception.what(); }
