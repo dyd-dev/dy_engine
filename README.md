@@ -156,7 +156,7 @@ X11을 선택할 때는 대신 `xorg-dev`를 설치합니다.
 | `DY_ENABLE_LIVE_PROFILING` | `OFF` | 내부 Live 실행 진단 수집 |
 | `DY_ENABLE_RENDERDOC` | `OFF` | 이미 주입된 RenderDoc API로 캡처 요청 및 D3D12 디버그 이벤트·마커 포함 |
 
-Apple에서는 Metal, Linux·Android에서는 Vulkan을 자동 선택합니다. Windows에서만 `USE_D3D12` 또는 `USE_VULKAN` 중 하나를 켜며, 둘 다 끄면 Null을 사용합니다. Windows의 백엔드를 바꿀 때는 빌드 폴더를 분리하면 CMake cache 충돌을 피할 수 있습니다.
+Apple에서는 Metal, Linux·Android에서는 Vulkan을 자동 선택합니다. Windows에서만 `USE_D3D12` 또는 `USE_VULKAN` 중 하나를 켜며, 둘 다 끄면 Null을 사용합니다.
 
 D3D12에서 `DY_ENABLE_RENDERDOC=ON`이면 WinPixEventRuntime 이벤트·마커 지원도 포함하며, 이 구성은 MSVC가 필요합니다. `OFF`이면 해당 런타임을 다운로드하거나 링크하지 않습니다.
 
@@ -164,53 +164,55 @@ D3D12에서 `DY_ENABLE_RENDERDOC=ON`이면 WinPixEventRuntime 이벤트·마커 
 
 아래 예시는 generator를 지정하지 않습니다. CMake가 환경에 맞는 기본 generator를 고르게 두는 쪽이 보편적입니다. Visual Studio, Xcode, Ninja처럼 특정 generator가 필요하면 `-G` 옵션을, 특정 아키텍처를 지정하려면 `-A` 옵션을 사용하십시오.
 
+빌드 디렉터리는 `build/` 하나를 사용합니다. 데스크톱 예제와 visualizer는 `build/examples/`, Showcase 실행 파일은 `build/showcase/`에 생성합니다. generator나 백엔드를 바꿀 때는 기존 `build/` 내용을 비우고 다시 구성합니다.
+
 ### Vulkan
 
 ```bash
-cmake -S . -B build/vulkan -DUSE_VULKAN=ON
-cmake --build build/vulkan --config Release
+cmake -S . -B build -DUSE_VULKAN=ON
+cmake --build build --config Release
 ```
 
 Linux에서 Wayland 전용 빌드는 다음과 같이 구성합니다. X11을 선택하려면 `WAYLAND`를 `X11`로 바꿉니다.
 
 ```bash
-cmake -S . -B build/wayland -DDY_LINUX_WINDOW_SYSTEM=WAYLAND -DCMAKE_BUILD_TYPE=Release
-cmake --build build/wayland
+cmake -S . -B build -DDY_LINUX_WINDOW_SYSTEM=WAYLAND -DCMAKE_BUILD_TYPE=Release
+cmake --build build
 ```
 
 ### DirectX 12
 
 ```powershell
-cmake -S . -B build/d3d12 -DUSE_D3D12=ON
-cmake --build build/d3d12 --config Release
+cmake -S . -B build -DUSE_D3D12=ON
+cmake --build build --config Release
 ```
 
 ### Metal
 
 ```bash
-cmake -S . -B build/metal -DUSE_METAL=ON
-cmake --build build/metal --config Release
+cmake -S . -B build -DUSE_METAL=ON
+cmake --build build --config Release
 ```
 
 ### Null
 
 ```bash
-cmake -S . -B build/null
-cmake --build build/null --config Release
+cmake -S . -B build
+cmake --build build --config Release
 ```
 
-SIMD 비교가 필요하면 같은 백엔드 설정에 `-DDY_ENABLE_SIMD=OFF`를 추가하고 별도 빌드 폴더를 사용합니다.
+SIMD 비교가 필요하면 같은 백엔드 설정에 `-DDY_ENABLE_SIMD=OFF`를 추가해 다시 구성합니다.
 
 ```bash
-cmake -S . -B build/vulkan-nosimd -DUSE_VULKAN=ON -DDY_ENABLE_SIMD=OFF -DCMAKE_BUILD_TYPE=Release
-cmake --build build/vulkan-nosimd --config Release
+cmake -S . -B build -DUSE_VULKAN=ON -DDY_ENABLE_SIMD=OFF -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
 ```
 
 아래는 generator 지정 예시입니다.
 
 ```bash
-cmake -S . -B build/directx -DUSE_D3D12=ON -G "Visual Studio <your_version>" -A "<x64|Win32>"
-cmake --build build/directx --config Release
+cmake -S . -B build -DUSE_D3D12=ON -G "Visual Studio <your_version>" -A "<x64|Win32>"
+cmake --build build --config Release
 ```
 
 ## 프레임워크 개발자 CI
@@ -235,8 +237,8 @@ python -B .github/ci/ci.py run --phase runtime --api vulkan
 저장소 루트에서 예제와 통합 실행기를 빌드합니다. 아래 구성은 Model·ImGui·고급 렌더링을 포함합니다.
 
 ```bash
-cmake -S . -B build/examples -DDY_BUILD_EXAMPLES=ON -DDY_EXTEND_MODEL=ON -DDY_EXTEND_IMGUI=ON -DDY_EXTEND_ADVANCED_RENDERING=ON
-cmake --build build/examples --config Release --target dyf_examples
+cmake -S . -B build -DDY_BUILD_EXAMPLES=ON -DDY_EXTEND_MODEL=ON -DDY_EXTEND_IMGUI=ON -DDY_EXTEND_ADVANCED_RENDERING=ON
+cmake --build build --config Release --target dyf_examples
 ./build/examples/visualizer
 ```
 
@@ -247,6 +249,7 @@ Windows에서는 구성 명령에 `-DUSE_D3D12=ON` 또는 `-DUSE_VULKAN=ON`을 �
 실행기가 각 예제의 작업 폴더를 맞추므로 저장소 루트에서 바로 실행할 수 있습니다.
 showcase의 에셋 경로는 `showcase/CMakeLists.txt`에서 설정합니다. 기본 에셋 루트는 저장소 옆 `../assets`이며,
 `-DDY_ASSET_ROOT=/경로/assets`로 바꿀 수 있습니다. Cinematic은 Model·AdvancedRendering, Culling은 AdvancedRendering 확장이 필요합니다.
+`DY_BUILD_SHOWCASE=ON`이면 누락된 기본 에셋도 구성 단계에서 자동으로 다운로드하며, 준비된 파일은 재사용합니다.
 Android 프로젝트는 하나의 Examples APK를, iOS Xcode 프로젝트는 같은 선택 화면을 가진 앱을 만듭니다.
 모바일 에셋도 예제별로 묶어 배포하며, Android Back과 iOS 돌아가기 버튼은 실행 중인 예제를 닫고 목록으로 돌아옵니다.
 모바일에서 지원하지 않는 ImGui 편집기는 목록에 `N/A`로 표시됩니다. 각 예제의 GPU 기능 지원 여부는 별도로 적용됩니다.

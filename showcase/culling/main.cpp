@@ -6,6 +6,7 @@
 #include "dyf/Platform/Window.h"
 #include "dyf/Renderer.h"
 #include "dyf/Scene.h"
+#include "../ShowcaseHud.h"
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -88,7 +89,7 @@ int main(int argc,char** argv) try
     config.advanced.ambientOcclusion=config.advanced.diffuseGI=config.advanced.reflections=false;
     config.advanced.temporalAA=config.advanced.bloom=false;
     config.lighting.shadows=false;config.lighting.ambientIntensity=.12f;
-    config.clearColor={.025f,.035f,.06f,1};config.enableProfilerHud=true;config.profilerStartsExpanded=true;
+    config.clearColor={.025f,.035f,.06f,1};config.enableProfilerHud=false;
     auto renderer=Renderer::Create(*device,window.GetHandle(),config);
     if(!renderer) throw std::runtime_error("Renderer creation failed.");
     if(!renderer->AddExtension(std::make_unique<dyf::AdvancedRendering>()))
@@ -118,38 +119,45 @@ int main(int argc,char** argv) try
     std::fprintf(stderr,"%u shared-mesh objects | 4 frustum, U GPU/CPU, L LOD, O HiZ, Space pause, F11 profiler.\n"
         "GPU visible counts are N/A. The profiler lists the actual GPU graph passes.\n",objectCount);
     Camera camera;Platform::Time clock;
+    showcase::ShowcaseHud hud;
+    using Key=Platform::Key;
+    using Group=showcase::ControlGroup;
     double time=0,reportTime=0;uint32_t submitted=0,reportFrames=0;
     bool paused=false,ready=false;
     while(window.IsRunning() && (!frameLimit || submitted<frameLimit))
     {
         window.PollEvents();
-#ifdef DY_RENDERDOC_ENABLED
-        if(window.GetInput().WasPressed(dyf::Platform::Key::F12))
-            (void)dyf::RenderDocCapture::TriggerNextFrame();
-#endif
-        if(window.GetInput().WasPressed(dyf::Platform::Key::F11))
-        {
-            auto settings = renderer->GetConfig();
-            settings.profilerStartsExpanded = !settings.profilerStartsExpanded;
-            if(!renderer->SetConfig(settings)) return 1;
-        }
-const auto& input=window.GetInput();
-        if(input.WasPressed(Platform::Key::Escape)) window.RequestClose();
         if(!window.IsRunning()) break;
         const auto extent=window.GetFramebufferSize();
         const bool suspended=window.IsMinimized() || extent.width<=0 || extent.height<=0 || (ready && !window.HasFocus());
         const double dt=clock.Tick(suspended);
         if(suspended) {Platform::Window::WaitEvents();continue;}
-        if(input.WasPressed(Platform::Key::Space)) paused=!paused;
+        const auto& applied=renderer->GetAppliedConfig();
+        hud.Update(window, {
+            {Key::Space,paused?"Resume scene":"Pause scene",paused},
+            {Key::Escape,"Back to examples"},
+#ifdef DY_RENDERDOC_ENABLED
+            {Key::F12,"RenderDoc capture"},
+#endif
+            {Key::Num4,"Frustum culling",applied.enableFrustumCulling,true,Group::Render},
+            {Key::U,"GPU culling",applied.enableGpuCulling,gpuAvailable,Group::Render},
+            {Key::L,"Indexed LOD",applied.enableLod,true,Group::Render},
+            {Key::O,"Hi-Z occlusion",applied.enableOcclusionCulling,gpuAvailable,Group::Render}
+        });
+        if(hud.Pressed(Key::Escape)) {window.RequestClose();break;}
+#ifdef DY_RENDERDOC_ENABLED
+        if(hud.Pressed(Key::F12)) (void)dyf::RenderDocCapture::TriggerNextFrame();
+#endif
+        if(hud.Pressed(Key::Space)) paused=!paused;
         config=renderer->GetConfig();bool changed=false;
-        if(input.WasPressed(Platform::Key::Num4)) {config.enableFrustumCulling=!config.enableFrustumCulling;changed=true;}
-        if(input.WasPressed(Platform::Key::L)) {config.enableLod=!config.enableLod;changed=true;}
-        if(input.WasPressed(Platform::Key::U))
+        if(hud.Pressed(Key::Num4)) {config.enableFrustumCulling=!config.enableFrustumCulling;changed=true;}
+        if(hud.Pressed(Key::L)) {config.enableLod=!config.enableLod;changed=true;}
+        if(hud.Pressed(Key::U))
         {
             if(gpuAvailable) {config.enableGpuCulling=!config.enableGpuCulling;changed=true;}
             else std::fputs("GPU culling unavailable; CPU fallback remains active.\n",stderr);
         }
-        if(input.WasPressed(Platform::Key::O))
+        if(hud.Pressed(Key::O))
         {
             if(gpuAvailable) {config.enableOcclusionCulling=!config.enableOcclusionCulling;changed=true;}
             else std::fputs("HiZ requires the GPU visibility path.\n",stderr);
@@ -175,7 +183,9 @@ const auto& input=window.GetInput();
             !camera.SetPerspective(float(extent.width)/extent.height,pi/3,.1f,std::max(160.f,side*3.5f)))
             throw std::runtime_error("Camera setup failed.");
         const auto previous=renderer->GetLastRenderCompletion();
-        if(!renderer->Render(scene,camera)) throw std::runtime_error("Rendering failed.");
+        Canvas overlay(uint32_t(extent.width),uint32_t(extent.height));
+        hud.Draw(overlay,*renderer,"GPU CULLING",paused?"Scene paused":"Shared meshes / indexed indirect draws");
+        if(!renderer->Render(scene,camera,overlay)) throw std::runtime_error("Rendering failed.");
         const auto completion=renderer->GetLastRenderCompletion();
         if(completion && completion!=previous) {++submitted;++reportFrames;}
         if(!ready && completion) {ready=true;clock.Reset();}
