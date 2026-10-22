@@ -10,7 +10,9 @@
 #include "dyf/RHI/IDevice.h"
 #include "dyf/Renderer.h"
 #include "../PerformanceComparison.h"
+#include "../ShowcaseHud.h"
 #include "AnimatedActor.h"
+#include "BistroNight.h"
 #include "KnightMaterials.h"
 #include "../CameraPath.h"
 
@@ -246,6 +248,7 @@ int main(int argc, char** argv)
         std::string cameraPath,exportCameraPath;
         double initialTourTime=0;
         bool initiallyPaused=false;
+        bool night=false;
         uint32_t benchmarkFrames = 0, benchmarkWarmup = 120;
         double benchmarkStep = 0;
         bool benchmarkRequested = false;
@@ -289,7 +292,8 @@ int main(int argc, char** argv)
         uint32_t directionalShadowLights = 4, pointShadowLights = 16, spotShadowLights = 16;
         uint32_t glassLayers = 2;
         const auto usage = [] {
-            std::fputs("Usage: showcase [exterior|interior|emerald|comparison|scene.gltf|scene.glb|scene.fbx|scene.obj] [options]\n"
+            std::fputs("Usage: showcase [exterior|night|interior|emerald|comparison|scene.gltf|scene.glb|scene.fbx|scene.obj] [options]\n"
+                "  night / --night          Bistro exterior with dark sky and showcase-authored practical lights\n"
                 "  comparison               Same Sponza asset and 60 s CSV as the legacy-renderer branch\n"
                 "  --actor FILE|knight      Original animated glTF/GLB/FBX, Y-up; knight uses Intel's original FBX\n"
                 "  --actor-position X Y Z   Actor feet in normalized Z-up world; default: opening view\n"
@@ -325,6 +329,7 @@ int main(int argc, char** argv)
             const std::string argument = argv[i];
             if(argument == "--help") { usage(); return 0; }
             if(argument == "--no-probes") bakeSpatialProbes = false;
+            else if(argument == "--night") night=true;
             else if(argument == "--cpu-culling") cpuCulling = true;
             else if(argument == "--benchmark-frames" && i + 1 < argc)
             { benchmarkRequested = true; benchmarkFrames = benchmarkCount(argv[++i]); }
@@ -412,6 +417,7 @@ int main(int argc, char** argv)
 #ifndef DY_PROFILER_TRACING_ENABLED
         if(benchmarkCpuZones) throw std::runtime_error("--benchmark-cpu-zones requires a build with profiler tracing enabled.");
 #endif
+        if(model.path=="night") {night=true;model.path="exterior";}
         if(model.path == "exterior" || model.path == "interior")
             model.path = (std::filesystem::path(DY_SHOWCASE_DEFAULT_SCENE).parent_path() /
                 (model.path == "exterior" ? "BistroExterior.fbx" : "BistroInterior_Wine.fbx")).string();
@@ -454,6 +460,8 @@ int main(int argc, char** argv)
         const bool wine = filename == "BistroInterior_Wine.fbx";
         const bool bistroInterior = wine || filename == "BistroInterior.fbx";
         const bool emerald = filename == "EmeraldSquare_Day.fbx";
+        if(night && (!bistro || bistroInterior))
+            throw std::runtime_error("Night lighting is a Bistro exterior preset.");
         model.normalizedSize = 80;
         // ufbx preserves source axes; Bistro, Emerald Day and New Sponza are Y-up.
         model.transform = Math::RotationX(pi * .5f);
@@ -572,6 +580,7 @@ int main(int argc, char** argv)
                 // The Wine bundle explicitly supplies this emitter calibration.
                 // Analytic lights below provide illumination; emission alone does not.
                 if(wine) material.emissiveColor = material.emissiveColor * 1000.0f;
+                if(night) material.emissiveColor = material.emissiveColor * 40.0f;
                 if(material.transmissionFactor > 0)
                 {
                     // Bistro's legacy diffuse tint/factor is not a transmission tint.
@@ -747,6 +756,17 @@ int main(int argc, char** argv)
             std::fprintf(stderr,"Camera export written: %s; no window or GPU device created.\n",exportCameraPath.c_str());
             return 0;
         }
+        if(night)
+        {
+            showcase::AddBistroNightLights(scene,sampleTour(0).eye);
+            for(uint32_t i=0;i<scene.DirectionalLights().size();++i)
+            {
+                auto handle=scene.GetLight<DirectionalLight>(i);
+                auto light=handle.Get();
+                light.color={.40f,.55f,1.f};light.intensity=.45f;
+                if(!handle.Set(light)) return 1;
+            }
+        }
         DirectionalLight sun;
         sun.direction = {-.38f, -.55f, .74f};
         sun.color = {1, .91f, .78f};
@@ -780,7 +800,8 @@ int main(int argc, char** argv)
         }
 
         constexpr uint32_t renderWidth=1920,renderHeight=1080;
-        Platform::Window window(renderWidth, renderHeight, "dy_engine / Cinematic Showcase - Space pause | R restart | Tab free camera");
+        Platform::Window window(renderWidth, renderHeight,night ? "dy_engine / Bistro Night - Space pause | R restart | Tab free camera" :
+            "dy_engine / Cinematic Showcase - Space pause | R restart | Tab free camera");
 #ifdef DY_PROFILER_TRACING_ENABLED
         dyf::TracyAdapter tracy;
 #endif
@@ -799,7 +820,7 @@ int main(int argc, char** argv)
         config.lighting.maxPointShadowLights = pointShadowLights;
         config.lighting.maxSpotShadowLights = spotShadowLights;
         const char* environmentPath = emerald ? DY_SHOWCASE_EMERALD_ENVIRONMENT : DY_SHOWCASE_DEFAULT_ENVIRONMENT;
-        if(!bistroInterior && !LoadHdrImage(environmentPath, config.lighting.environment.radiance))
+        if(!bistroInterior && !night && !LoadHdrImage(environmentPath, config.lighting.environment.radiance))
         {
             std::fprintf(stderr,"Could not load the scene's configured equirectangular HDR sky: %s\n",environmentPath);
             return 1;
@@ -811,6 +832,17 @@ int main(int argc, char** argv)
             config.lighting.environment.intensity = bistroInterior ? 1.0f : 10.0f;
             config.lighting.environment.background = !bistroInterior;
             config.exposure = bistroInterior ? .12f : .04f;
+        }
+        if(night)
+        {
+            config.lighting.environment.radiance=showcase::BistroNightSky();
+            config.lighting.environment.intensity=1;
+            config.lighting.environment.diffuseIntensity=2.5f;
+            config.lighting.environment.background=true;
+            config.exposure=.45f;
+            config.clearColor={.006f,.012f,.032f,1};
+            config.advanced.bloomStrength=.075f;
+            std::fputs("Bistro night: daylight HDRI replaced by a dark procedural sky; weak blue moonlight, practical emitters and fixed exposure 0.45.\n",stderr);
         }
         config.enableHdrRendering = true;
         config.hdrRenderScale = 1.0f;
@@ -937,6 +969,8 @@ int main(int argc, char** argv)
         bool paused=initiallyPaused,freeCamera=false,metrics=false,ready=false;
         bool windEnabled = !windObjects.empty();
         showcase::PerformanceComparison comparison;
+        showcase::ShowcaseHud hud;
+        using Group=showcase::ControlGroup;
         Shot baselinePose = pose;
         double baselineTourTime = 0, baselineSceneTime = 0;
         bool baselineFreeCamera = false;
@@ -1236,19 +1270,7 @@ int main(int argc, char** argv)
         while(window.IsRunning())
         {
             window.PollEvents();
-#ifdef DY_RENDERDOC_ENABLED
-            if(window.GetInput().WasPressed(dyf::Platform::Key::F12))
-                (void)dyf::RenderDocCapture::TriggerNextFrame();
-#endif
-            if(window.GetInput().WasPressed(dyf::Platform::Key::F11))
-            {
-                auto settings = renderer->GetConfig();
-                settings.profilerStartsExpanded = !settings.profilerStartsExpanded;
-                if(!renderer->SetConfig(settings)) return 1;
-            }
-
             const auto& input = window.GetInput();
-            if(input.WasPressed(Key::Escape)) window.RequestClose();
             if(!window.IsRunning()) break;
             const auto size = window.GetFramebufferSize();
             const bool focused = window.HasFocus();
@@ -1262,18 +1284,84 @@ int main(int argc, char** argv)
                 Platform::Window::WaitEvents();
                 continue;
             }
+            const auto& applied=renderer->GetAppliedConfig();
+            const bool hadProfiler=hud.IsProfilerVisible(),hadPanel=hud.IsPanelOpen();
+            const bool gpuAvailable=renderer->GetDevice().Supports(RHI::Feature::Compute) &&
+                renderer->GetDevice().Supports(RHI::Feature::IndirectDraw);
+            hud.Update(window, {
+                {Key::Space,paused?"Resume scene":"Pause scene",paused},
+                {Key::R,"Restart tour"},
+                {Key::Tab,"Free camera",freeCamera,true,Group::Camera},
+                {Key::Left,"Tour: back 5 seconds"},{Key::Right,"Tour: forward 5 seconds"},
+                {Key::Home,"Tour: first pose"},{Key::End,"Tour: last pose"},
+                {Key::N,"Wind animation",windEnabled,!windObjects.empty()},
+                {Key::F5,"Freeze and capture A"},{Key::F6,"Capture same-state B",false,comparison.HasBaseline()},
+                {Key::F7,"Clear comparison"},{Key::F8,"Change comparison mode"},
+                {Key::M,"Console frame statistics",metrics},
+                {Key::Escape,"Back to examples"},
+#ifdef DY_RENDERDOC_ENABLED
+                {Key::F12,"RenderDoc capture"},
+#endif
+                {Key::Num1,"Lighting",applied.lighting.enabled,true,Group::Render},
+                {Key::Num2,"Shadows",applied.lighting.shadows,true,Group::Render},
+                {Key::Num3,"HDR rendering",applied.enableHdrRendering,true,Group::Render},
+                {Key::Num4,"Frustum culling",applied.enableFrustumCulling,true,Group::Render},
+                {Key::Num5,"Instancing",applied.enableInstancing,true,Group::Render},
+                {Key::Num6,"Parallel recording",applied.enableParallelRenderGraph,true,Group::Render},
+                {Key::U,"GPU culling",applied.enableGpuCulling,gpuAvailable,Group::Render},
+                {Key::O,"Hi-Z occlusion",applied.enableOcclusionCulling,gpuAvailable,Group::Render},
+                {Key::Num7,"Ambient occlusion",applied.advanced.ambientOcclusion,true,Group::Render},
+                {Key::Num8,"Screen-space GI",applied.advanced.diffuseGI,true,Group::Render},
+                {Key::Num9,"Reflections",applied.advanced.reflections,true,Group::Render},
+                {Key::Num0,"Temporal AA",applied.advanced.temporalAA,true,Group::Render},
+                {Key::B,"Bloom",applied.advanced.bloom,true,Group::Render},
+                {Key::F,"Fog",applied.advanced.fog.enabled,true,Group::Render},
+                {Key::K,"Sharpening",applied.postProcess.sharpening,true,Group::Render},
+                {Key::J,"Clustered lighting",applied.lighting.clusteredLighting,true,Group::Render},
+                {Key::P,"Soft shadows",applied.lighting.shadowMaxFilterRadius>0,true,Group::Render},
+                {Key::F10,"Two-layer transparency",applied.advanced.transparencyLayers==2,true,Group::Render},
+                {Key::I,"Spatial probes",!applied.lighting.environment.probes.empty(),bakeSpatialProbes&&!cachedProbes.empty(),Group::Render},
+                {Key::T,"Transparency",applied.advanced.transparency,true,Group::Render},
+                {Key::V,"Cycle surface view",applied.advanced.surfaceDebugView!=SurfaceDebugView::None,true,Group::Render},
+                {Key::G,"Advanced rendering",applied.advanced.enabled,true,Group::Render},
+                {Key::F1,"Direct lighting",applied.lighting.direct,true,Group::Render},
+                {Key::F2,"Diffuse environment",applied.lighting.environment.diffuse,true,Group::Render},
+                {Key::F3,"Specular environment",applied.lighting.environment.specular,true,Group::Render},
+                {Key::F4,"Environment background",applied.lighting.environment.background,true,Group::Render},
+                {Key::L,"Indexed LOD",applied.enableLod,true,Group::Render},
+                {Key::C,"LOD colors",applied.debugLodColor,true,Group::Render},
+                {Key::F9,"Wireframe",applied.debugWireframe,renderer->GetDevice().Supports(RHI::Feature::Wireframe),Group::Render},
+                {Key::LeftBracket,"LOD: finer",false,true,Group::Render},
+                {Key::RightBracket,"LOD: coarser",false,true,Group::Render},
+                {Key::Minus,"Exposure down",false,true,Group::Render},
+                {Key::Equal,"Exposure up",false,true,Group::Render},
+                {Key::W,"Move forward",false,freeCamera,Group::Camera,true},
+                {Key::S,"Move back",false,freeCamera,Group::Camera,true},
+                {Key::A,"Move left",false,freeCamera,Group::Camera,true},
+                {Key::D,"Move right",false,freeCamera,Group::Camera,true},
+                {Key::Q,"Move down",false,freeCamera,Group::Camera,true},
+                {Key::E,"Move up",false,freeCamera,Group::Camera,true},
+                {Key::LeftShift,"Move faster",false,freeCamera,Group::Camera,true}
+            });
+            if(hud.Pressed(Key::Escape)) {window.RequestClose();break;}
+            if(hadProfiler!=hud.IsProfilerVisible() || hadPanel!=hud.IsPanelOpen()) comparison.Cancel("HUD changed");
+#ifdef DY_RENDERDOC_ENABLED
+            if(hud.Pressed(Key::F12)) (void)dyf::RenderDocCapture::TriggerNextFrame();
+#endif
+            const auto sceneDrag=hud.SceneDragDelta();
+            const bool pointerLook=!hud.CapturesPointer() && input.IsDown(MouseButton::Right);
             const auto previousPose = pose;
             bool historyDiscontinuity = false;
-            if(input.WasPressed(Key::F7)) comparison.Clear();
-            if(input.WasPressed(Key::F8))
+            if(hud.Pressed(Key::F7)) comparison.Clear();
+            if(hud.Pressed(Key::F8))
             {
                 comparison.Clear();
                 comparisonMode = (comparisonMode + 1) % 4;
                 std::fprintf(stderr, "Comparison mode: %s\n", comparisonLabels[comparisonMode]);
             }
-            const bool captureA = input.WasPressed(Key::F5);
-            const bool captureB = input.WasPressed(Key::F6);
-            if(input.WasPressed(Key::N))
+            const bool captureA = hud.Pressed(Key::F5);
+            const bool captureB = hud.Pressed(Key::F6);
+            if(hud.Pressed(Key::N))
             {
                 comparison.Clear();
                 windEnabled = !windEnabled && !windObjects.empty();
@@ -1299,19 +1387,19 @@ int main(int argc, char** argv)
                 historyDiscontinuity = true;
             }
             if(captureA || (captureB && comparison.HasBaseline())) paused = true;
-            if(input.WasPressed(Key::Space) || input.WasPressed(Key::R) || input.WasPressed(Key::Tab) ||
-                input.IsDown(MouseButton::Right) || input.IsDown(Key::W) || input.IsDown(Key::A) ||
-                input.IsDown(Key::S) || input.IsDown(Key::D) || input.IsDown(Key::Q) || input.IsDown(Key::E) ||
-                input.WasPressed(Key::Left) || input.WasPressed(Key::Right) ||
-                input.WasPressed(Key::Home) || input.WasPressed(Key::End))
+            if(hud.Pressed(Key::Space) || hud.Pressed(Key::R) || hud.Pressed(Key::Tab) ||
+                pointerLook || sceneDrag.x!=0 || sceneDrag.y!=0 || hud.Down(Key::W) || hud.Down(Key::A) ||
+                hud.Down(Key::S) || hud.Down(Key::D) || hud.Down(Key::Q) || hud.Down(Key::E) ||
+                hud.Pressed(Key::Left) || hud.Pressed(Key::Right) ||
+                hud.Pressed(Key::Home) || hud.Pressed(Key::End))
                 comparison.Cancel("camera or tour input");
-            if(input.WasPressed(Key::Space))
+            if(hud.Pressed(Key::Space))
             {
                 paused = !paused;
                 std::fprintf(stderr, "Tour %s at %.1f s%s\n", paused ? "paused" : "enabled", tourTime,
                     freeCamera ? " | free camera active; Tab returns to tour" : "");
             }
-            const bool restart = input.WasPressed(Key::R);
+            const bool restart = hud.Pressed(Key::R);
             if(restart)
             {
                 tourTime = 0;
@@ -1320,19 +1408,19 @@ int main(int argc, char** argv)
                 historyDiscontinuity = true;
                 std::fputs("Tour restarted (playing).\n", stderr);
             }
-            const bool seek = input.WasPressed(Key::Left) || input.WasPressed(Key::Right) ||
-                input.WasPressed(Key::Home) || input.WasPressed(Key::End);
+            const bool seek = hud.Pressed(Key::Left) || hud.Pressed(Key::Right) ||
+                hud.Pressed(Key::Home) || hud.Pressed(Key::End);
             if(seek)
             {
-                if(input.WasPressed(Key::Home)) tourTime = 0;
-                else if(input.WasPressed(Key::End)) tourTime = tourSeconds;
-                else tourTime = std::clamp(tourTime + (input.WasPressed(Key::Right) ? 5.0 : -5.0), 0.0, tourSeconds);
+                if(hud.Pressed(Key::Home)) tourTime = 0;
+                else if(hud.Pressed(Key::End)) tourTime = tourSeconds;
+                else tourTime = std::clamp(tourTime + (hud.Pressed(Key::Right) ? 5.0 : -5.0), 0.0, tourSeconds);
                 sceneTime = tourTime;
                 freeCamera = false;
                 historyDiscontinuity = true;
                 std::fprintf(stderr,"Tour seek: %.1f/%.0f s.\n",tourTime,tourSeconds);
             }
-            if(input.WasPressed(Key::Tab))
+            if(hud.Pressed(Key::Tab))
             {
                 freeCamera = !freeCamera;
                 historyDiscontinuity = true;
@@ -1365,7 +1453,7 @@ int main(int argc, char** argv)
                     if(!entity.SetTransform(windEnabled ? sway * part.second : part.second)) return 1;
                 }
             }
-            window.SetCursorMode(freeCamera && input.IsDown(MouseButton::Right) ?
+            window.SetCursorMode(freeCamera && pointerLook ?
                 Platform::CursorMode::Locked : Platform::CursorMode::Normal);
             if(comparison.IsRunning() || captureA || (captureB && comparison.HasBaseline()))
             {
@@ -1374,18 +1462,18 @@ int main(int argc, char** argv)
             }
             else if(freeCamera)
             {
-                if(input.IsDown(MouseButton::Right))
+                if(pointerLook || sceneDrag.x!=0 || sceneDrag.y!=0)
                 {
-                    const auto mouse = input.GetCursorDelta();
+                    const auto mouse = pointerLook ? input.GetCursorDelta() : sceneDrag;
                     yaw -= float(mouse.x) * .0025f;
                     pitch = std::clamp(pitch - float(mouse.y) * .0025f, -1.5f, 1.5f);
                 }
                 const float3 forward{std::cos(pitch) * std::cos(yaw), std::cos(pitch) * std::sin(yaw), std::sin(pitch)};
                 const auto right = Math::Normalize(Math::Cross(forward, {0, 0, 1}));
-                const auto movement = forward * (float(input.IsDown(Key::W)) - float(input.IsDown(Key::S))) +
-                    right * (float(input.IsDown(Key::D)) - float(input.IsDown(Key::A))) +
-                    float3(0, 0, float(input.IsDown(Key::E)) - float(input.IsDown(Key::Q)));
-                const float speed = input.IsDown(Key::LeftShift) || input.IsDown(Key::RightShift) ? 32.0f : 8.0f;
+                const auto movement = forward * (float(hud.Down(Key::W)) - float(hud.Down(Key::S))) +
+                    right * (float(hud.Down(Key::D)) - float(hud.Down(Key::A))) +
+                    float3(0, 0, float(hud.Down(Key::E)) - float(hud.Down(Key::Q)));
+                const float speed = hud.Down(Key::LeftShift) || hud.Down(Key::RightShift) ? 32.0f : 8.0f;
                 pose.eye = pose.eye + Math::Normalize(movement) * (speed * float(std::min(elapsed, .1)));
                 pose.target = pose.eye + forward;
                 pose.up = {0, 0, 1};
@@ -1410,10 +1498,16 @@ int main(int argc, char** argv)
 
             config = renderer->GetConfig();
             bool changed = false;
-            for(const auto& event : input.GetEvents())
+            static constexpr Key settingKeys[] = {
+                Key::Num1,Key::Num2,Key::Num3,Key::Num4,Key::Num5,Key::Num6,Key::U,Key::O,
+                Key::Num7,Key::Num8,Key::Num9,Key::Num0,Key::B,Key::F,Key::K,Key::J,Key::P,
+                Key::F10,Key::I,Key::T,Key::V,Key::G,Key::F1,Key::F2,Key::F3,Key::F4,
+                Key::L,Key::C,Key::F9,Key::LeftBracket,Key::RightBracket
+            };
+            for(const auto key : settingKeys)
             {
-                if(event.type != Platform::InputEventType::Key || event.action != Platform::InputAction::Press) continue;
-                switch(static_cast<Key>(event.code))
+                if(!hud.Pressed(key)) continue;
+                switch(key)
                 {
                 case Key::Num1: config.lighting.enabled = !config.lighting.enabled; break;
                 case Key::Num2: config.lighting.shadows = !config.lighting.shadows; break;
@@ -1455,7 +1549,6 @@ int main(int argc, char** argv)
                 case Key::F2: config.lighting.environment.diffuse = !config.lighting.environment.diffuse; break;
                 case Key::F3: config.lighting.environment.specular = !config.lighting.environment.specular; break;
                 case Key::F4: config.lighting.environment.background = !config.lighting.environment.background; break;
-                case Key::F11: config.enableProfilerHud = !config.enableProfilerHud; break;
                 case Key::L: config.enableLod = !config.enableLod; break;
                 case Key::C: config.debugLodColor = !config.debugLodColor; break;
                 case Key::F9:
@@ -1477,9 +1570,9 @@ int main(int argc, char** argv)
                 }
                 changed = true;
             }
-            if(input.WasPressed(Key::Minus) || input.WasPressed(Key::Equal))
+            if(hud.Pressed(Key::Minus) || hud.Pressed(Key::Equal))
             {
-                config.exposure = std::clamp(config.exposure * (input.WasPressed(Key::Equal) ? 1.15f : 1 / 1.15f), .001f, 20.0f);
+                config.exposure = std::clamp(config.exposure * (hud.Pressed(Key::Equal) ? 1.15f : 1 / 1.15f), .001f, 20.0f);
                 changed = true;
             }
             if(changed)
@@ -1509,7 +1602,7 @@ int main(int argc, char** argv)
                 std::fprintf(stderr,"GPU frustum/LOD %d | Hi-Z occlusion %d | GPU-selected visible object/triangle counts: N/A (no count readback).\n",
                     config.enableGpuCulling,config.enableOcclusionCulling);
             }
-            if(input.WasPressed(Key::M))
+            if(hud.Pressed(Key::M))
             {
                 metrics = !metrics;
                 metricsTime = 0;
@@ -1539,7 +1632,7 @@ int main(int argc, char** argv)
                     << ',' << current.advanced.fog.resolutionScale << ',' << current.advanced.fog.steps
                     << " sharpening=" << current.postProcess.sharpening << ',' << current.postProcess.sharpness
                     << " clustered=" << current.lighting.clusteredLighting
-                    << " hud=" << current.enableProfilerHud << " lighting=" << current.lighting.enabled
+                    << " hud=" << hud.IsProfilerVisible() << " panel=" << hud.IsPanelOpen() << " lighting=" << current.lighting.enabled
                     << current.lighting.direct << current.lighting.shadows << int(current.lighting.shadowQuality)
                     << " shadowDistance=" << current.lighting.shadowDistance
                     << " shadowSplit=" << current.lighting.cascadeSplitLambda
@@ -1578,6 +1671,8 @@ int main(int argc, char** argv)
                 // Keep profiler drawing out of both benchmark runs. Timing
                 // collection remains active; F11 opens the breakdown afterwards.
                 config.enableProfilerHud = false;
+                hud.SetProfilerVisible(false);
+                hud.ClosePanels();
                 if(config.debugLodColor || config.debugWireframe)
                     std::fputs("Disable C LOD colors and F9 wireframe before collecting normal-rendering performance.\n", stderr);
                 else if(comparisonMode == 0 && (!bistroInterior || !config.lighting.enabled ||
@@ -1594,17 +1689,15 @@ int main(int argc, char** argv)
             }
             comparison.CheckConditions(conditions());
             const auto previous = renderer->GetLastRenderCompletion();
-            if(comparison.IsRunning() || comparison.HasBaseline())
-            {
-                Canvas overlay(uint32_t(size.width), uint32_t(size.height));
-                comparison.Draw(overlay, uint32_t(size.width), uint32_t(size.height));
-                if(actor.Loaded())
-                { if(!modelRenderer.Render(scene,camera,overlay)) return 1; }
-                else if(!renderer->Render(scene, camera, overlay)) return 1;
-            }
-            else if(actor.Loaded())
-            { if(!modelRenderer.Render(scene,camera)) return 1; }
-            else if(!renderer->Render(scene, camera)) return 1;
+            Canvas overlay(uint32_t(size.width),uint32_t(size.height));
+            comparison.Draw(overlay,uint32_t(size.width),uint32_t(std::max(0.f,float(size.height)-hud.BottomInset())));
+            char status[120];
+            std::snprintf(status,sizeof(status),"Tour %.0f / %.0f s / %s",tourTime,tourSeconds,
+                freeCamera?"Free camera":paused?"Paused":"Playing");
+            hud.Draw(overlay,*renderer,emerald?"EMERALD SQUARE":bistro?"BISTRO":"CINEMATIC",status);
+            if(actor.Loaded())
+            { if(!modelRenderer.Render(scene,camera,overlay)) return 1; }
+            else if(!renderer->Render(scene,camera,overlay)) return 1;
             const auto completion = renderer->GetLastRenderCompletion();
             comparison.Update(elapsed, bool(completion && completion != previous),
                 renderer->GetProfilerTimingSnapshot(), renderer->GetLastRenderStatistics());
