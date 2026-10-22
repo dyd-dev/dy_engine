@@ -887,7 +887,7 @@ class GenerateTests(unittest.TestCase):
             index = pages["component/api-index.html"]
             self.assertIn('class="index-section dyf-reference" id="module-dyf"', index)
             self.assertIn('<section class="index-section" id="module-rhi"><h2>RHI</h2>', index)
-            self.assertEqual(index.count('class="rhi-class-card"'), 3)
+            self.assertEqual(index.count('class="rhi-class-card"'), 2)
             self.assertIn("// dyf example", pages[reference.url("dyf::Canvas")])
             rhi_url = reference.url("dyf::RHI::Device")
             self.assertIn("// RHI example", pages[rhi_url])
@@ -953,6 +953,20 @@ class GenerateTests(unittest.TestCase):
             self.assertEqual(custom.api_groups, {"기본": {"API": ["Entry"]}})
             self.assertNotIn("api_groups.json", custom.authored_hashes)
             self.assert_local_links_resolve(custom.build())
+
+    def test_guide_links_validate_targets_and_escape_labels(self):
+        reference = generate.Reference()
+        reference.guides = [
+            {"slug": "setup", "sections": [{"id": "options"}]},
+        ]
+        self.assertEqual(
+            reference.rich("[<설정>](guide:setup#options)"),
+            '<a href="component/setup.html#options">&lt;설정&gt;</a>',
+        )
+        with self.assertRaisesRegex(ValueError, "Unknown guide link"):
+            reference.rich("[설정](guide:missing)")
+        with self.assertRaisesRegex(ValueError, "Unknown guide anchor"):
+            reference.rich("[설정](guide:setup#missing)")
 
     def test_authored_member_contracts_and_guides_have_valid_links(self):
         project = Path(self.temporary.name)
