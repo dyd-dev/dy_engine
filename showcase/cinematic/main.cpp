@@ -7,6 +7,7 @@
 #include "dyf/Extends/Model/ModelRenderer.h"
 #include "dyf/Platform/Time.h"
 #include "dyf/Platform/Window.h"
+#include "dyf/RHI/IDevice.h"
 #include "dyf/Renderer.h"
 #include "../PerformanceComparison.h"
 #include "AnimatedActor.h"
@@ -14,13 +15,21 @@
 #include "../CameraPath.h"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
+#include <charconv>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <exception>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <filesystem>
 #include <memory>
+#include <mutex>
+#include <locale>
+#include <numeric>
 #include <string>
 #include <sstream>
 #include <stdexcept>
@@ -49,6 +58,179 @@
 #define DY_SHOWCASE_COMPARISON_CAMERA ""
 #endif
 
+namespace
+{
+// The public snapshot contains publication windows, not individual GPU frames.
+// Keep those windows separate from exact per-submission wall times/statistics.
+struct BenchmarkFrame
+{
+    double wall = 0, renderWall = 0, submissionInterval = 0, sceneTime = 0;
+    dyf::Platform::ProfilerTimingSample cpu;
+    bool hasCpu = false;
+    dyf::RendererStatistics statistics;
+};
+
+struct BenchmarkTrace
+{
+    struct Diagnostic { uint32_t submission; const char* name; double milliseconds; };
+    std::vector<Diagnostic> diagnostics;
+    std::atomic<uint32_t> diagnosticSubmission{0};
+    std::atomic<bool> diagnosticsFailed{false};
+    std::mutex diagnosticsMutex;
+    const bool cpuZones;
+    dyf::Platform::ProfilerTimingSample sample;
+    bool received = false;
+    void AddDiagnostic(uint32_t submission,const char* name,double milliseconds) noexcept
+    {
+        try
+        {
+            if(cpuZones)
+            {
+                std::lock_guard<std::mutex> lock(diagnosticsMutex);
+                diagnostics.push_back({submission,name,milliseconds});
+            }
+            else diagnostics.push_back({submission,name,milliseconds});
+        }
+        catch(...) { diagnosticsFailed.store(true,std::memory_order_relaxed); }
+    }
+    std::vector<Diagnostic> TakeDiagnostics()
+    {
+        std::lock_guard<std::mutex> lock(diagnosticsMutex);
+        return std::move(diagnostics);
+    }
+#ifdef DY_PROFILER_TRACING_ENABLED
+    inline static std::atomic<BenchmarkTrace*> active{nullptr};
+    dyf::Platform::TraceSink sink = {};
+    const dyf::Platform::TraceSink* previous = nullptr;
+    struct ZoneEntry
+    {
+        uint64_t token,previousToken,beginNs;
+        uint32_t submission;
+        const char* name;
+        BenchmarkTrace* trace;
+        void (*previousEnd)(uint64_t) noexcept;
+    };
+    struct ZoneState { std::vector<ZoneEntry> entries; uint64_t nextToken=1; };
+    static ZoneState& ThreadZones() noexcept
+    {
+        thread_local ZoneState state;
+        return state;
+    }
+    static uint64_t CaptureBegin(const dyf::Platform::SourceLocation& location) noexcept
+    {
+        auto* trace=active.load(std::memory_order_acquire);
+        if(!trace) return 0;
+        auto& state=ThreadZones();
+        if(!state.nextToken)
+        {
+            trace->diagnosticsFailed.store(true,std::memory_order_relaxed);
+            return 0;
+        }
+        const uint64_t token=state.nextToken++;
+        const char* name=nullptr;
+        if(location.name && std::strcmp(location.name,"RendererShadow")==0) name="CPU zone RendererShadow";
+        else if(location.name && std::strcmp(location.name,"RendererMainForward")==0) name="CPU zone RendererMainForward";
+        else if(location.name && std::strcmp(location.name,"Native replay")==0) name="CPU zone Native replay";
+        else if(location.name && std::strcmp(location.name,"Validate + native submit")==0) name="CPU zone Validate + native submit";
+        const uint32_t submission=trace->diagnosticSubmission.load(std::memory_order_acquire);
+        try
+        {
+            // Reserve our token before opening the previous adapter's zone: failed
+            // bookkeeping must not leave an unmatched zone in that adapter.
+            state.entries.push_back({token,0,0,submission,name,trace,trace->previous?trace->previous->endZone:nullptr});
+        }
+        catch(...)
+        {
+            trace->diagnosticsFailed.store(true,std::memory_order_relaxed);
+            return 0;
+        }
+        const uint64_t previousToken=trace->previous && trace->previous->beginZone?
+            trace->previous->beginZone(location):0;
+        // A previous adapter may emit nested zones and reallocate this thread's vector.
+        const auto found=std::find_if(state.entries.begin(),state.entries.end(),
+            [token](const ZoneEntry& entry) { return entry.token==token; });
+        if(found!=state.entries.end())
+        {
+            found->previousToken=previousToken;
+            if(name && submission) found->beginNs=dyf::Platform::NowNs();
+        }
+        return token;
+    }
+    static void CaptureEnd(uint64_t token) noexcept
+    {
+        auto& entries=ThreadZones().entries;
+        const auto found=std::find_if(entries.begin(),entries.end(),
+            [token](const ZoneEntry& entry) { return entry.token==token; });
+        if(found==entries.end()) return; // Includes allocation-failed begin token 0.
+        const ZoneEntry entry=*found;
+        const uint64_t endNs=entry.name && entry.submission?dyf::Platform::NowNs():0;
+        // Erase by token, rather than assuming zones finish in stack order.
+        entries.erase(found);
+        if(entry.previousEnd) entry.previousEnd(entry.previousToken);
+        if(entry.name && entry.submission)
+            entry.trace->AddDiagnostic(entry.submission,entry.name,dyf::Platform::Milliseconds(entry.beginNs,endNs));
+    }
+    static void Capture(const dyf::Platform::ProfilerTimingSample& value) noexcept
+    {
+        auto* trace=active.load(std::memory_order_acquire);
+        if(!trace) return;
+        trace->sample = value;
+        trace->received = true;
+        if(trace->previous && trace->previous->frameSample) trace->previous->frameSample(value);
+    }
+    static void CaptureValue(const char* name, double value, bool raw) noexcept
+    {
+        auto* trace=active.load(std::memory_order_acquire);
+        if(!trace) return;
+        const uint32_t submission=trace->diagnosticSubmission.load(std::memory_order_acquire);
+        if(submission && name &&
+            (std::strcmp(name,"Vulkan queue submit ms")==0 ||
+             std::strcmp(name,"Vulkan present submit ms")==0 ||
+             std::strcmp(name,"Vulkan queue present ms")==0 ||
+             std::strcmp(name,"Vulkan queue present CPU ms")==0 ||
+             std::strcmp(name,"GPU graph span ms")==0 ||
+             std::strcmp(name,"GPU upload to graph ms")==0))
+        {
+            trace->AddDiagnostic(submission,name,value);
+        }
+        if(trace->previous && trace->previous->value) trace->previous->value(name,value,raw);
+    }
+#endif
+    explicit BenchmarkTrace(bool captureCpuZones) : cpuZones(captureCpuZones)
+    {
+#ifdef DY_PROFILER_TRACING_ENABLED
+        previous = dyf::Platform::SetTraceSink(nullptr);
+        if(previous) sink = *previous;
+        sink.frameSample = Capture;
+        sink.value = CaptureValue;
+        if(cpuZones) { sink.beginZone=CaptureBegin; sink.endZone=CaptureEnd; }
+        active.store(this,std::memory_order_release);
+        (void)dyf::Platform::SetTraceSink(&sink);
+#endif
+    }
+    ~BenchmarkTrace()
+    {
+#ifdef DY_PROFILER_TRACING_ENABLED
+        (void)dyf::Platform::SetTraceSink(previous);
+        active.store(nullptr,std::memory_order_release);
+#endif
+    }
+};
+
+void BenchmarkSummary(std::ostream& output, const char* name, std::vector<double> values)
+{
+    if(values.empty()) { output << "# summary " << name << " samples=0 unavailable\n"; return; }
+    std::sort(values.begin(), values.end());
+    const auto percentile = [&](double fraction) {
+        return values[static_cast<size_t>(std::ceil(fraction * values.size())) - 1];
+    };
+    output << "# summary " << name << " samples=" << values.size()
+        << " mean_ms=" << std::accumulate(values.begin(), values.end(), 0.0) / values.size()
+        << " p50_ms=" << percentile(.5) << " p95_ms=" << percentile(.95)
+        << " p99_ms=" << percentile(.99) << '\n';
+}
+}
+
 int main(int argc, char** argv)
 {
     try
@@ -64,6 +246,22 @@ int main(int argc, char** argv)
         std::string cameraPath,exportCameraPath;
         double initialTourTime=0;
         bool initiallyPaused=false;
+        uint32_t benchmarkFrames = 0, benchmarkWarmup = 120;
+        double benchmarkStep = 0;
+        bool benchmarkRequested = false;
+        bool benchmarkCpuZones = false;
+        bool cpuCulling = false;
+        uint32_t recordingWorkers = 4;
+        uint32_t framesInFlight = 2;
+        std::string benchmarkOutput;
+        const auto benchmarkCount = [](const char* value) {
+            uint32_t count = 0;
+            const auto end = value + std::char_traits<char>::length(value);
+            const auto parsed = std::from_chars(value, end, count);
+            if(parsed.ec != std::errc{} || parsed.ptr != end)
+                throw std::runtime_error("Benchmark counts must be unsigned 32-bit integers.");
+            return count;
+        };
         const char* const surfaceViews[] = {"off", "base color", "normal", "roughness", "metallic", "depth", "motion"};
         // Intel New Sponza, centered and normalized to 80 units in Z-up world.
         std::vector<Shot> shots{
@@ -100,6 +298,16 @@ int main(int argc, char** argv)
                 "  --path FILE              Shared comparison CSV, seconds/eye/target/FOV/up (11 columns)\n"
                 "  --export-camera FILE     Write a 60 Hz camera CSV without creating a window or GPU device\n"
                 "  --start N --paused       Hold an identical comparison timestamp in both renderers\n"
+                "  --benchmark-frames N     Submit N measured frames starting at --start, then exit\n"
+                "  --benchmark-warmup N     Submit N warm-up frames and drain GPU work first (default 120)\n"
+                "  --benchmark-step N       Scene seconds per measured submission (default 0 = frozen); warm-up stays at --start\n"
+                "                          Pose k uses min(tour duration, start + k*step), independent of render speed/retries\n"
+                "  --benchmark-output FILE  New CSV: wall/statistics per frame, CPU/GPU profiler windows separately\n"
+                "                          Benchmark disables VSync/HUD; render quality defaults are preserved\n"
+                "  --benchmark-cpu-zones    Optional CPU Shadow/MainForward/native replay/submit diagnostics (requires tracing)\n"
+                "  --recording-workers N    CPU recording workers, 1..64 (default 4)\n"
+                "  --frames-in-flight N     Maximum GPU frames in flight, 1..4 (default 2)\n"
+                "  --cpu-culling            Use CPU frustum culling/instancing; disable GPU culling and Hi-Z occlusion\n"
                 "  --no-probes              Skip 3 spatial probe bakes; interior keeps its single room fallback\n"
                 "  --shadow-quality MODE    low, medium, high (default high)\n"
                 "  --shadow-distance N      Directional shadow view distance in world units; 0 keeps scene/camera fit\n"
@@ -117,6 +325,35 @@ int main(int argc, char** argv)
             const std::string argument = argv[i];
             if(argument == "--help") { usage(); return 0; }
             if(argument == "--no-probes") bakeSpatialProbes = false;
+            else if(argument == "--cpu-culling") cpuCulling = true;
+            else if(argument == "--benchmark-frames" && i + 1 < argc)
+            { benchmarkRequested = true; benchmarkFrames = benchmarkCount(argv[++i]); }
+            else if(argument == "--benchmark-warmup" && i + 1 < argc)
+            { benchmarkRequested = true; benchmarkWarmup = benchmarkCount(argv[++i]); }
+            else if(argument == "--benchmark-step" && i + 1 < argc)
+            {
+                benchmarkRequested = true;
+                const std::string value = argv[++i]; size_t consumed = 0;
+                benchmarkStep = std::stod(value,&consumed);
+                if(consumed != value.size() || !std::isfinite(benchmarkStep) || benchmarkStep < 0)
+                    throw std::runtime_error("Benchmark step must be a finite, nonnegative number of seconds.");
+            }
+            else if(argument == "--benchmark-output" && i + 1 < argc)
+            { benchmarkRequested = true; benchmarkOutput = argv[++i]; }
+            else if(argument == "--benchmark-cpu-zones")
+            { benchmarkRequested = true; benchmarkCpuZones = true; }
+            else if(argument == "--recording-workers" && i + 1 < argc)
+            {
+                recordingWorkers = benchmarkCount(argv[++i]);
+                if(!recordingWorkers || recordingWorkers > 64)
+                    throw std::runtime_error("Recording workers must be an integer from 1 to 64.");
+            }
+            else if(argument == "--frames-in-flight" && i + 1 < argc)
+            {
+                framesInFlight = benchmarkCount(argv[++i]);
+                if(!framesInFlight || framesInFlight > 4)
+                    throw std::runtime_error("Frames in flight must be an integer from 1 to 4.");
+            }
             else if(argument == "--paused") initiallyPaused=true;
             else if(argument == "--start" && i + 1 < argc) initialTourTime=std::stod(argv[++i]);
             else if(argument == "--path" && i + 1 < argc) cameraPath=argv[++i];
@@ -168,6 +405,13 @@ int main(int argc, char** argv)
             { model.path = argument; sceneSpecified = true; }
             else { usage(); return 1; }
         }
+        if(benchmarkRequested && (!benchmarkFrames || benchmarkOutput.empty() || !exportCameraPath.empty()))
+            throw std::runtime_error("Benchmark requires positive --benchmark-frames and --benchmark-output; camera export is a separate mode.");
+        if(benchmarkRequested && std::filesystem::exists(benchmarkOutput))
+            throw std::runtime_error("Benchmark output already exists: " + benchmarkOutput);
+#ifndef DY_PROFILER_TRACING_ENABLED
+        if(benchmarkCpuZones) throw std::runtime_error("--benchmark-cpu-zones requires a build with profiler tracing enabled.");
+#endif
         if(model.path == "exterior" || model.path == "interior")
             model.path = (std::filesystem::path(DY_SHOWCASE_DEFAULT_SCENE).parent_path() /
                 (model.path == "exterior" ? "BistroExterior.fbx" : "BistroInterior_Wine.fbx")).string();
@@ -587,9 +831,24 @@ int main(int argc, char** argv)
         config.enableParallelRenderGraph = true;
         config.enableGpuCulling = true;
         config.enableOcclusionCulling = true;
-        config.recordingThreadCount = 4;
+        if(cpuCulling) config.enableGpuCulling = config.enableOcclusionCulling = false;
+        config.recordingThreadCount = recordingWorkers;
         config.texturePreparationThreadCount = 4;
-        auto renderer = Renderer::Create(window.GetHandle(), config);
+        if(benchmarkRequested) config.vsync = config.enableProfilerHud = false;
+        // The sink and its callback context outlive renderer/device worker shutdown,
+        // including exception paths. Tracy above also outlives this temporary adapter.
+        std::unique_ptr<BenchmarkTrace> benchmarkTrace;
+        std::unique_ptr<RHI::IDevice> diagnosticDevice;
+        if(framesInFlight != 2)
+        {
+            RHI::DeviceDesc desc;
+            desc.maxFramesInFlight = framesInFlight;
+            diagnosticDevice.reset(RHI::IDevice::Create(desc));
+            if(!diagnosticDevice) return 1;
+        }
+        auto renderer = diagnosticDevice
+            ? Renderer::Create(*diagnosticDevice, window.GetHandle(), config)
+            : Renderer::Create(window.GetHandle(), config);
         if(!renderer) return 1;
         if(!renderer->AddExtension(std::make_unique<dyf::AdvancedRendering>())) return 1;
         std::vector<EnvironmentProbeDesc> cachedProbes;
@@ -698,6 +957,281 @@ int main(int argc, char** argv)
             "F8 comparison: static shadows / parallel recording / instancing / LOD\n"
             "F5 baseline OFF | F6 candidate ON at saved view | F7 clear comparison\n"
             "Preparing first frame: uploading scene textures and meshes...\n", stderr);
+
+        if(benchmarkRequested)
+        {
+            const double benchmarkStartTime = tourTime;
+            pose = sampleTour(tourTime);
+            if(!camera.LookAt(pose.eye, pose.target, pose.up) ||
+                !camera.SetPerspective(float(renderWidth) / renderHeight, pose.fov * pi / 180, .03f, cameraFarPlane)) return 1;
+            benchmarkTrace=std::make_unique<BenchmarkTrace>(benchmarkCpuZones);
+            auto& trace=*benchmarkTrace;
+            trace.diagnostics.reserve(size_t(benchmarkFrames)*(benchmarkCpuZones?128:7));
+            std::vector<BenchmarkFrame> measured;
+            measured.reserve(benchmarkFrames);
+            std::vector<std::pair<uint32_t,Platform::ProfilerTimingSnapshot>> windows;
+            uint64_t submitted = 0, lastSequence = renderer->GetProfilerTimingSnapshot().sequence;
+            bool discardBoundaryWindow = true;
+            int measuredWidth = 0, measuredHeight = 0;
+            if(!renderer->GetDevice().WaitIdle()) throw std::runtime_error("Benchmark startup GPU drain failed.");
+            if(benchmarkStep == 0)
+                std::fprintf(stderr,"Benchmark: %u warm-up + %u measured submissions, fixed scene/camera/actor/wind at %.6f s; VSync/HUD off.\n",
+                    benchmarkWarmup,benchmarkFrames,tourTime);
+            else
+                std::fprintf(stderr,"Benchmark: %u warm-up submissions at %.6f s, then %u measured submissions at %.9f scene s/submission; tour clamps at %.6f s; VSync/HUD off.\n",
+                    benchmarkWarmup,benchmarkStartTime,benchmarkFrames,benchmarkStep,tourSeconds);
+            Platform::CpuTimer submissionIntervalTimer, measurementTimer;
+            while(measured.size() < benchmarkFrames)
+            {
+                window.PollEvents();
+                if(!window.IsRunning() || window.GetInput().WasPressed(Key::Escape))
+                    throw std::runtime_error("Benchmark interrupted before all measured submissions completed.");
+                const auto size = window.GetFramebufferSize();
+                if(window.IsMinimized() || size.width <= 0 || size.height <= 0)
+                    throw std::runtime_error("Benchmark requires a visible, non-minimized window.");
+                if(submitted >= benchmarkWarmup && measured.empty())
+                { measuredWidth = size.width; measuredHeight = size.height; }
+                if(!measured.empty() && (size.width != measuredWidth || size.height != measuredHeight))
+                    throw std::runtime_error("Benchmark output dimensions changed during measurement.");
+                Platform::CpuTimer frameTimer;
+                if(benchmarkStep > 0 && submitted >= benchmarkWarmup)
+                {
+                    // Advance only after a successful measured submission. Acquire retries
+                    // therefore resample exactly the same authored camera/actor/wind pose.
+                    tourTime = sceneTime = std::min(tourSeconds,benchmarkStartTime + double(measured.size())*benchmarkStep);
+                    pose = sampleTour(tourTime);
+                    if(!camera.LookAt(pose.eye,pose.target,pose.up) ||
+                        !camera.SetPerspective(float(renderWidth)/renderHeight,pose.fov*pi/180,.03f,cameraFarPlane)) return 1;
+                }
+                if(!actor.Update(scene,sceneTime)) return 1;
+                for(const auto& object : windObjects)
+                {
+                    const auto center = object.bounds.Center();
+                    const float3 pivot{center.x, center.y, object.bounds.min.z};
+                    const float phase = pivot.x * .61f + pivot.y * .43f, t = float(sceneTime);
+                    const float breeze = .65f * std::sin(t * .9f + phase) +
+                        .25f * std::sin(t * 1.7f + phase * .61f) + .1f * std::sin(t * 2.6f + phase * .37f);
+                    const auto sway = Math::Translation(pivot) *
+                        Math::RotationAxis({-.42f, .9f, 0}, windEnabled ? object.amplitude * breeze : 0) *
+                        Math::RotationAxis({.9f, .42f, 0}, windEnabled ? object.amplitude * .25f * std::sin(t * 1.13f + phase * .83f) : 0) *
+                        Math::Translation(pivot * -1.0f);
+                    for(const auto& part : object.parts)
+                    { auto entity = part.first; if(!entity.SetTransform(windEnabled ? sway * part.second : part.second)) return 1; }
+                }
+                const auto previous = renderer->GetLastRenderCompletion();
+                trace.received = false;
+                trace.diagnosticSubmission = submitted >= benchmarkWarmup ? static_cast<uint32_t>(measured.size()+1) : 0;
+                Platform::CpuTimer renderTimer;
+                if(actor.Loaded()) { if(!modelRenderer.Render(scene,camera)) return 1; }
+                else if(!renderer->Render(scene,camera)) return 1;
+                BenchmarkFrame frame;
+                frame.renderWall = renderTimer.ElapsedMilliseconds();
+                frame.wall = frameTimer.ElapsedMilliseconds();
+                frame.sceneTime = sceneTime;
+                const auto completion = renderer->GetLastRenderCompletion();
+                if(!completion || completion == previous) { Platform::Window::WaitEvents(.001); continue; }
+                ++submitted;
+                if(submitted <= benchmarkWarmup)
+                {
+                    if(submitted == benchmarkWarmup)
+                    {
+                        // Complete every warm-up query before the first measured render polls it.
+                        if(!renderer->GetDevice().WaitIdle()) throw std::runtime_error("Benchmark warm-up GPU drain failed.");
+                        lastSequence = renderer->GetProfilerTimingSnapshot().sequence;
+                        std::fputs("Benchmark warm-up completed; recording measured submissions.\n",stderr);
+                        submissionIntervalTimer.Reset();
+                        measurementTimer.Reset();
+                    }
+                    continue;
+                }
+                // Unlike work-only timers, this includes all skipped acquire attempts,
+                // event polling, host sleeps and result collection between submissions.
+                frame.submissionInterval = submissionIntervalTimer.ElapsedMilliseconds();
+                submissionIntervalTimer.Reset();
+                frame.cpu = trace.sample;
+                frame.hasCpu = trace.received;
+                frame.statistics = renderer->GetLastRenderStatistics();
+                measured.push_back(frame);
+                const auto& timing = renderer->GetProfilerTimingSnapshot();
+                if(timing.sequence != lastSequence)
+                {
+                    lastSequence = timing.sequence;
+                    // This publication can contain warm-up CPU samples and the just-drained
+                    // warm-up GPU samples. Later publications contain measured work only.
+                    if(discardBoundaryWindow) discardBoundaryWindow = false;
+                    else windows.emplace_back(static_cast<uint32_t>(measured.size()),timing);
+                }
+            }
+            const double submissionSpanMilliseconds = measurementTimer.ElapsedMilliseconds();
+            Platform::CpuTimer drainTimer;
+            if(!renderer->GetDevice().WaitIdle()) throw std::runtime_error("Benchmark final GPU drain failed.");
+            // A native Present worker can publish its final timings during the drain.
+            trace.diagnosticSubmission = 0;
+            const double finalDrainMilliseconds = drainTimer.ElapsedMilliseconds();
+            const double completedSpanMilliseconds = measurementTimer.ElapsedMilliseconds();
+            auto diagnostics=trace.TakeDiagnostics();
+            if(trace.diagnosticsFailed.load(std::memory_order_relaxed)) throw std::runtime_error("Benchmark diagnostic collection failed.");
+            std::ofstream output(benchmarkOutput);
+            output.imbue(std::locale::classic());
+            output << std::setprecision(10);
+            if(!output) throw std::runtime_error("Cannot write benchmark output: " + benchmarkOutput);
+            const auto& applied = renderer->GetAppliedConfig();
+            output << "# cinematic benchmark v2\n# " << (benchmarkStep == 0 ? "fixed_time_seconds=" : "start_time_seconds=")
+                << benchmarkStartTime << " camera_actor_wind_frozen=" << (benchmarkStep == 0) << " vsync=0 hud=0\n"
+                << "# benchmark_step_seconds=" << std::setprecision(17) << benchmarkStep
+                << " measured_start_time_seconds=" << benchmarkStartTime << " measured_end_time_seconds=" << sceneTime
+                << " tour_duration_seconds=" << tourSeconds << " warmup_time_seconds=" << benchmarkStartTime << '\n'
+                << std::setprecision(10) << "# scene=" << std::quoted(model.path)
+                << " camera_path=" << std::quoted(cameraPath) << " actor=" << std::quoted(actorDescription.path)
+                << " actor_clip=" << actorClip << " actor_size=" << actorDescription.normalizedSize
+                << " wind=" << windEnabled << " probes=" << applied.lighting.environment.probes.size()
+                << " environment=" << std::quoted(environmentPath) << '\n'
+                << "# warmup_submissions=" << benchmarkWarmup << " measured_submissions=" << measured.size()
+                << " render=" << renderWidth << 'x' << renderHeight << " output=" << measuredWidth << 'x' << measuredHeight << '\n'
+                << "# measured_submission_wall_ms=" << submissionSpanMilliseconds
+                << " final_gpu_drain_ms=" << finalDrainMilliseconds
+                << " measured_through_gpu_drain_ms=" << completedSpanMilliseconds
+                << " gpu_completed_submissions_per_second=" << measured.size()*1000.0/completedSpanMilliseconds << '\n'
+                << "# quality hdr=" << applied.enableHdrRendering << " scale=" << applied.hdrRenderScale
+                << " exposure=" << applied.exposure << " shadows=" << applied.lighting.shadows
+                << " shadow_quality=" << int(applied.lighting.shadowQuality) << " shadow_distance=" << applied.lighting.shadowDistance
+                << " shadow_split=" << applied.lighting.cascadeSplitLambda << " glass_layers=" << applied.advanced.transparencyLayers
+                << " advanced=" << applied.advanced.enabled << " ao=" << applied.advanced.ambientOcclusion
+                << " gi=" << applied.advanced.diffuseGI << " ssr=" << applied.advanced.reflections
+                << " taa=" << applied.advanced.temporalAA << " bloom=" << applied.advanced.bloom
+                << " transparency=" << applied.advanced.transparency << " auto_exposure=" << applied.advanced.autoExposure << '\n'
+                << "# paths gpu_culling=" << applied.enableGpuCulling << " occlusion=" << applied.enableOcclusionCulling
+                << " cpu_culling=" << applied.enableFrustumCulling << " instancing=" << applied.enableInstancing
+                << " lod=" << applied.enableLod << " lod_error=" << applied.lodPixelError
+                << " parallel=" << applied.enableParallelRenderGraph << " workers=" << applied.recordingThreadCount
+                << " live_profiling=";
+#ifdef DY_LIVE_PROFILING_ENABLED
+            output << 1;
+#else
+            output << 0;
+#endif
+            output << " frame_cpu_trace=";
+#ifdef DY_PROFILER_TRACING_ENABLED
+            output << 1;
+#else
+            output << 0;
+#endif
+            output << " benchmark_cpu_zones=" << benchmarkCpuZones << "\n# arguments=";
+            for(int i=1;i<argc;++i) output << std::quoted(argv[i]) << ' ';
+            const auto& deviceDescription = renderer->GetDevice().GetDesc();
+            output << "\n# device adapter=" << deviceDescription.adapterIndex
+                << " frames_in_flight=" << deviceDescription.maxFramesInFlight
+                << " validation=" << deviceDescription.enableValidation
+                << " timestamp_supported=" << renderer->GetDevice().Supports(RHI::Feature::TimestampQuery)
+                << " timestamp_bits=" << renderer->GetDevice().GetTimestampValidBits()
+                << " timestamp_period_ns=" << renderer->GetDevice().GetTimestampPeriodNanoseconds();
+            output << '\n' << "# camera_view=";
+            for(float value : camera.view.m) output << value << ' ';
+            output << "\n# camera_projection=";
+            for(float value : camera.projection.m) output << value << ' ';
+            output << "\n# submission_interval_ms includes retries, event polling, host waits and result collection; first interval starts after warm-up drain.\n"
+                << "# Work-only wall fields include only the successful actor/wind update and Render/Present attempt; skipped attempts are excluded.\n"
+                << "# Completed-submission throughput includes the final GPU drain, excludes warm-up, and does not measure display presentation completion.\n"
+                << "# cpu/gpu window rows are native profiler publication averages, not current-frame timings.\n"
+                << "# First boundary publication excluded after warm-up GPU drain; unpublished trailing samples omitted.\n"
+                << "# GPU samples are completed timestamp spans, exclude presentation; GPU percentiles unavailable from aggregate API.\n"
+                << "# Empty frame CPU fields require a build with tracing enabled; empty GPU-selected counts are unknown.\n";
+            output << "# diagnostic rows use gpu_pass_name/gpu_pass_ms for raw native-call, completed-GPU-sample, or explicitly labeled CPU-zone durations.\n"
+                << "# Their index is the host submission attempt observing the value, not the measured GPU/present frame; GPU and asynchronous present diagnostics can be delayed.\n"
+                << "# GPU diagnostic samples may include warm-up boundary samples; final present-worker timings are included during the drain.\n";
+            if(benchmarkCpuZones)
+                output << "# CPU zone diagnostics measure existing RendererShadow/RendererMainForward callbacks, Native replay, and Validate + native submit scopes.\n"
+                    << "# Their index is captured at zone begin, including acquire retries; all replay samples are separate rows without per-pass attribution.\n"
+                    << "# Surface/Transparent callback scopes are uninstrumented; their work can be included in anonymous native replay rows.\n"
+                    << "# CPU zones may overlap on workers: do not sum them as frame time or interpret them as GPU timings/FPS.\n"
+                    << "# Optional zone token bookkeeping/timing adds CPU profiling overhead; ordinary benchmark runs keep the previous zone callbacks.\n";
+            enum Column { Kind, Index, SceneTime, Interval, Wall, RenderWall, Cpu, Acquire, Prepare, Record, Submit, Present,
+                Sequence, CpuSamples, Gpu, GpuSamples, Draws, ShadowDraws, Instances, Triangles,
+                ShadowTriangles, Culled, Batches, GpuVisibility, GpuOcclusion, ShadowReuse,
+                RenderWidth, RenderHeight, OutputWidth, OutputHeight, Pass, PassMs, PassSamples, ColumnCount };
+            output << "record_type,index,scene_time_seconds,submission_interval_ms,frame_work_wall_ms,render_work_wall_ms,cpu_render_ms,cpu_acquire_ms,cpu_prepare_ms,cpu_record_ms,cpu_submit_ms,cpu_present_ms,profiler_sequence,cpu_samples,gpu_frame_ms,gpu_samples,main_draws,shadow_draws,main_instances,main_triangles,shadow_triangles,culled_entities,indirect_batches,gpu_visibility,gpu_occlusion,shadow_reused,render_width,render_height,output_width,output_height,gpu_pass_name,gpu_pass_ms,gpu_pass_samples\n";
+            using Row = std::array<std::string,ColumnCount>;
+            const auto set = [](Row& row,Column column,const auto& value) {
+                std::ostringstream text; text.imbue(std::locale::classic()); text << std::setprecision(10) << value;
+                row[column] = text.str();
+            };
+            const auto write = [&](const Row& row) {
+                for(size_t i=0;i<row.size();++i)
+                {
+                    if(i) output << ',';
+                    if(row[i].find_first_of(",\"\r\n") == std::string::npos) output << row[i];
+                    else { output << '"'; for(char c : row[i]) { if(c=='"') output << '"'; output << c; } output << '"'; }
+                }
+                output << '\n';
+            };
+            std::vector<double> intervals, walls, renders, cpus;
+            intervals.reserve(measured.size()); walls.reserve(measured.size()); renders.reserve(measured.size()); cpus.reserve(measured.size());
+            for(size_t i=0;i<measured.size();++i)
+            {
+                const auto& frame = measured[i]; const auto& s = frame.statistics;
+                Row row = {}; row[Kind] = "frame"; set(row,Index,i+1);
+                { std::ostringstream time; time.imbue(std::locale::classic()); time << std::setprecision(17) << frame.sceneTime; row[SceneTime] = time.str(); }
+                set(row,Interval,frame.submissionInterval); set(row,Wall,frame.wall); set(row,RenderWall,frame.renderWall);
+                intervals.push_back(frame.submissionInterval); walls.push_back(frame.wall); renders.push_back(frame.renderWall);
+                if(frame.hasCpu)
+                {
+                    set(row,Cpu,frame.cpu.cpuRenderMilliseconds); set(row,Acquire,frame.cpu.cpuAcquireMilliseconds);
+                    set(row,Prepare,frame.cpu.cpuPrepareMilliseconds); set(row,Record,frame.cpu.cpuRecordMilliseconds);
+                    set(row,Submit,frame.cpu.cpuSubmitMilliseconds); set(row,Present,frame.cpu.cpuPresentMilliseconds);
+                    set(row,CpuSamples,1); cpus.push_back(frame.cpu.cpuRenderMilliseconds);
+                }
+                set(row,Draws,s.mainDrawCount); set(row,ShadowDraws,s.shadowDrawCount); set(row,ShadowTriangles,s.shadowTriangleCount);
+                if(!s.gpuVisibility) { set(row,Instances,s.mainInstanceCount); set(row,Triangles,s.mainTriangleCount); set(row,Culled,s.culledEntityCount); }
+                set(row,Batches,s.indirectBatchCount); set(row,GpuVisibility,s.gpuVisibility); set(row,GpuOcclusion,s.gpuOcclusion);
+                set(row,ShadowReuse,s.reusedShadowAtlas); set(row,RenderWidth,s.renderWidth); set(row,RenderHeight,s.renderHeight);
+                set(row,OutputWidth,s.outputWidth); set(row,OutputHeight,s.outputHeight); write(row);
+            }
+            for(const auto& diagnostic : diagnostics)
+            {
+                Row row={};row[Kind]="diagnostic";set(row,Index,diagnostic.submission);
+                row[Pass]=diagnostic.name;set(row,PassMs,diagnostic.milliseconds);write(row);
+            }
+            double gpuTotal = 0, cpuTotal = 0; uint64_t gpuCount = 0, cpuCount = 0;
+            for(const auto& windowSample : windows)
+            {
+                const auto& s = windowSample.second;
+                Row row = {}; row[Kind] = "profiler_window"; set(row,Index,windowSample.first); set(row,Sequence,s.sequence);
+                set(row,CpuSamples,s.frameCount); set(row,Cpu,s.cpuRenderAverageMilliseconds);
+                set(row,Acquire,s.cpuAcquireAverageMilliseconds); set(row,Prepare,s.cpuPrepareAverageMilliseconds);
+                set(row,Record,s.cpuRecordAverageMilliseconds); set(row,Submit,s.cpuSubmitAverageMilliseconds);
+                set(row,Present,s.cpuPresentAverageMilliseconds);
+                cpuTotal += s.cpuRenderAverageMilliseconds*s.frameCount; cpuCount += s.frameCount;
+                if(s.hasGpuFrame && s.gpuFrameSampleCount)
+                {
+                    set(row,Gpu,s.gpuFrameAverageMilliseconds); set(row,GpuSamples,s.gpuFrameSampleCount);
+                    gpuTotal += s.gpuFrameAverageMilliseconds*s.gpuFrameSampleCount; gpuCount += s.gpuFrameSampleCount;
+                }
+                write(row);
+                for(const auto& pass : s.gpuPasses)
+                {
+                    Row passRow = {}; passRow[Kind] = "gpu_pass"; set(passRow,Index,windowSample.first);
+                    set(passRow,Sequence,s.sequence); passRow[Pass] = pass.name;
+                    set(passRow,PassMs,pass.averageMilliseconds); set(passRow,PassSamples,pass.sampleCount); write(passRow);
+                }
+            }
+            BenchmarkSummary(output,"submission_interval",intervals);
+            BenchmarkSummary(output,"frame_work_wall",walls); BenchmarkSummary(output,"render_work_wall",renders);
+            BenchmarkSummary(output,"per_frame_cpu_render",cpus);
+            output << "# summary profiler_cpu samples=" << cpuCount;
+            if(cpuCount) output << " mean_ms=" << cpuTotal/cpuCount;
+            else output << " unavailable";
+            output << "\n# summary profiler_gpu samples=" << gpuCount;
+            if(gpuCount) output << " mean_ms=" << gpuTotal/gpuCount;
+            else output << " unavailable";
+            output << '\n';
+            output.close();
+            if(!output) throw std::runtime_error("Benchmark output write failed: " + benchmarkOutput);
+            BenchmarkSummary(std::cout,"submission_interval",intervals);
+            BenchmarkSummary(std::cout,"frame_work_wall",walls); BenchmarkSummary(std::cout,"render_work_wall",renders);
+            std::fprintf(stderr,"Benchmark CSV written: %s (%zu measured submissions, %zu interior profiler windows, %llu GPU samples).\n",
+                benchmarkOutput.c_str(),measured.size(),windows.size(),static_cast<unsigned long long>(gpuCount));
+            return 0;
+        }
 
         while(window.IsRunning())
         {
