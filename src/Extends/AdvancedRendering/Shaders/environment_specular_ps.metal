@@ -70,13 +70,15 @@ inline bool NativeEnvironmentSample(float2 coordinate,float mip,float maximumMip
         && mip>=0 && mip<=maximumMip && maximumMip<=32;
 }
 inline float ProbeVisibility(float3 position,device const SpatialProbe& probe,uint index,
-    texture2d_array<float> image,uint count)
+    texture2d_array<float> image,uint count,sampler pointSampler,sampler linearSampler,uint enabled)
 {
-    return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,count+index,image);
+    return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,
+        count+index,image,pointSampler,linearSampler,enabled);
 }
 inline float3 BlendProbeRadiance(float3 position,float3 direction,float roughness,
     constant FrameConstants& frame,texture2d<float> prefilterTexture,
-    device const SpatialProbe* probes,texture2d_array<float> image,constant uint4& parameters,sampler environmentLinearSampler)
+    device const SpatialProbe* probes,texture2d_array<float> image,constant uint4& parameters,
+    sampler pointSampler,sampler environmentLinearSampler)
 {
     const float3 projected=ProbeDirection(position,direction,frame);
     const float c=cos(frame.settings.z),s=sin(frame.settings.z);
@@ -103,7 +105,7 @@ inline float3 BlendProbeRadiance(float3 position,float3 direction,float roughnes
             sampledRadiance=image.sample(environmentLinearSampler,coordinate,i,level(mip)).rgb;
         else sampledRadiance=mix(SpatialMip(image,coordinate,lo,i),SpatialMip(image,coordinate,hi,i),fract(mip));
         sum+=sampledRadiance*
-            probe.positionIntensity.w*(weight*ProbeVisibility(position,probe,i,image,count));
+            probe.positionIntensity.w*(weight*ProbeVisibility(position,probe,i,image,count,pointSampler,environmentLinearSampler,parameters.w));
         weights+=weight;coverage+=edge;
     }
     if(parameters.y!=0u && weights>0 && coverage>=1 && all(isfinite(envUV)) && isfinite(mip))
@@ -138,7 +140,7 @@ fragment float4 environmentSpecular(EnvironmentVertex input [[stage_in]],
     const float3 normal=DecodeEnvironmentNormal(surface.xy),view=normalize(frame.cameraPosition.xyz-position);
     const float roughness=clamp(surface.z,0.01f,1.0f),nDotV=max(dot(normal,view),0.0f);
     const float3 worldReflection=reflect(-view,normal);
-    float3 radiance=BlendProbeRadiance(position,worldReflection,roughness,frame,prefilterTexture,probes,probePrefilterTexture,probeParameters,environmentLinearSampler);
+    float3 radiance=BlendProbeRadiance(position,worldReflection,roughness,frame,prefilterTexture,probes,probePrefilterTexture,probeParameters,clampSampler,environmentLinearSampler);
     const float2 brdf=LinearFloatTexture(brdfTexture,float2(nDotV,roughness),0,false).rg;
     const float3 f0=mix(float3(0.04f),albedo.rgb,saturate(albedo.a));
     float ao=saturate(surface.w);

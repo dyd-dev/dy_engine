@@ -8,6 +8,7 @@ layout(set=0,binding=1) uniform texture2D normalTexture;
 layout(set=0,binding=3) uniform texture2D aoTexture;
 layout(set=0,binding=8) uniform sampler clampSampler;
 layout(set=0,binding=10) uniform sampler aoSampler;
+layout(set=0,binding=15) uniform sampler environmentLinearSampler;
 layout(set=0,binding=9) uniform FrameConstants
 {
     mat4 inverseViewProjection;
@@ -27,7 +28,7 @@ layout(set=0,binding=24) uniform ProbeParameters {uvec4 probeParameters;};
 float ProbeVisibility(vec3 position,SpatialProbe probe,uint index)
 {
     return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,
-        probeParameters.x+index,probePrefilterTexture,clampSampler);
+        probeParameters.x+index,probePrefilterTexture,clampSampler,environmentLinearSampler,probeParameters.w);
 }
 float ProbeWeight(vec3 position,SpatialProbe probe,out float coverage)
 {

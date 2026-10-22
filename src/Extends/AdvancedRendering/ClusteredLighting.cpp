@@ -117,6 +117,15 @@ bool ClusteredLighting::Prepare(IDevice& device,ICommandList& uploads,const Scen
     // 일반 카메라는 단위 회전이며, 직접 편집한 비직교 뷰는 Frobenius 상계로 반경을 넓힌다.
     const float radiusScale=rigid?1.001f:std::sqrt(squaredScale);
     volume=volume && camera.view.m[3]==0 && camera.view.m[7]==0 && camera.view.m[11]==0 && camera.view.m[15]==1;
+    if(volume && lights.size()>32)
+    {
+        constexpr std::array<uint32_t,4> fineDimensions={32,18,48,64};
+        constexpr uint64_t fineListBytes=uint64_t{fineDimensions[0]}*fineDimensions[1]*fineDimensions[2]*
+            (fineDimensions[3]+1)*sizeof(uint32_t);
+        // Smaller cells avoid evaluating distant local lights at every covered
+        // pixel. Keep the original grid when the finer list exceeds the limit.
+        if(fineListBytes<=maximumBytes) m_data.dimensions=fineDimensions;
+    }
     m_data.depth={volume?nearDepth:.1f,volume?farDepth:100.f,volume?std::log(farDepth/nearDepth):std::log(1000.f),radiusScale};
     m_data.counts={static_cast<uint32_t>(lights.size()),volume?1u:0u,perspective?1u:0u,0};
     if(lights.empty()) lights.emplace_back();

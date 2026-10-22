@@ -164,10 +164,8 @@ constant uint kTextureFlagEmissive =
     uint(RENDERER_TEXTURE_FLAG_EMISSIVE);
 constant float kPi = 3.14159265359f;
 
-inline float DistributionGGX(float3 normal, float3 halfway, float roughness)
+inline float DistributionGGX(float3 normal, float3 halfway, float a2)
 {
-    const float a = roughness * roughness;
-    const float a2 = a * a;
     const float ndoth = clamp(dot(normal, halfway), 0.0f, 1.0f);
     const float3 crossNH = cross(normal, halfway);
     // Avoid cancellation in 1 - (N.H)^2 near a narrow specular peak.
@@ -175,17 +173,21 @@ inline float DistributionGGX(float3 normal, float3 halfway, float roughness)
     return a2 / (kPi * denominator * denominator);
 }
 
-inline float GeometrySchlickGGX(float ndotv, float roughness)
+inline float GeometrySchlickGGX(float ndotv, float k)
 {
-    const float r = roughness + 1.0f;
-    const float k = (r * r) / 8.0f;
     return ndotv / max(ndotv * (1.0f - k) + k, 0.0001f);
+}
+
+inline float SchlickPow5(float base)
+{
+    float base2=base*base;
+    return (base2*base2)*base;
 }
 
 inline float3 FresnelSchlick(float cosTheta, float3 f0)
 {
     return f0 + (1.0f - f0) *
-        pow(saturate(1.0f - cosTheta), 5.0f);
+        SchlickPow5(saturate(1.0f - cosTheta));
 }
 
 inline float3 FresnelSchlickRoughness(
@@ -195,7 +197,7 @@ inline float3 FresnelSchlickRoughness(
 {
     const float3 roughnessF0 = max(float3(1.0f - roughness), f0);
     return f0 + (roughnessF0 - f0) *
-        pow(saturate(1.0f - cosTheta), 5.0f);
+        SchlickPow5(saturate(1.0f - cosTheta));
 }
 
 #if RENDERER_ENABLE_SHADOWS
@@ -311,17 +313,33 @@ inline float SpotConeAttenuation(float cosTheta, float innerCos, float outerCos)
     return t * t * (3.0 - 2.0 * t);
 }
 
+struct DirectSurface
+{
+    float3 f0;
+    float ndotv,alphaSquared,k,viewGeometry,diffuseFactor;
+};
+inline DirectSurface PrepareDirectSurface(float3 normal,float3 viewDir,float3 albedo,float metallic,float roughness)
+{
+    DirectSurface surface;
+    surface.f0=mix(float3(.04f),albedo,metallic);
+    surface.ndotv=max(dot(normal,viewDir),0.0f);
+    float a=roughness*roughness,r=roughness+1.0f;
+    surface.alphaSquared=a*a;
+    surface.k=(r*r)/8.0f;
+    surface.viewGeometry=GeometrySchlickGGX(surface.ndotv,surface.k);
+    surface.diffuseFactor=1.0f-metallic;
+    return surface;
+}
 inline float3 EvaluateDirectLight(
     float3 normal,
     float3 viewDir,
     float3 lightDir,
     float3 incidentIlluminance,
     float3 albedo,
-    float metallic,
-    float roughness,
+    DirectSurface surface,
     float visibility) {
     float ndotl = max(dot(normal, lightDir), 0.0);
-    float ndotv = max(dot(normal, viewDir), 0.0);
+    float ndotv = surface.ndotv;
     if (ndotl <= 0.0 || ndotv <= 0.0 || visibility <= 0.0) {
         return float3(0.0,0.0,0.0);
     }
@@ -331,12 +349,11 @@ inline float3 EvaluateDirectLight(
         return float3(0.0,0.0,0.0);
     }
     float3 halfway = halfwayVector * rsqrt(halfwayLengthSquared);
-    float3 f0 = mix(float3(0.04,0.04,0.04), albedo, metallic);
-    float ndf = DistributionGGX(normal, halfway, roughness);
-    float geometry = GeometrySchlickGGX(ndotv, roughness) * GeometrySchlickGGX(ndotl, roughness);
-    float3 fresnel = FresnelSchlick(max(dot(halfway, viewDir), 0.0), f0);
+    float ndf = DistributionGGX(normal, halfway, surface.alphaSquared);
+    float geometry = surface.viewGeometry * GeometrySchlickGGX(ndotl, surface.k);
+    float3 fresnel = FresnelSchlick(max(dot(halfway, viewDir), 0.0), surface.f0);
     float3 specular = (ndf * geometry * fresnel) / max(4.0 * ndotv * ndotl, 0.0001);
-    float3 diffuseWeight = (float3(1.0,1.0,1.0) - fresnel) * (1.0 - metallic);
+    float3 diffuseWeight = (float3(1.0,1.0,1.0) - fresnel) * surface.diffuseFactor;
     return (diffuseWeight * albedo / kPi + specular) * incidentIlluminance * ndotl * visibility;
 }
 
@@ -345,73 +362,173 @@ inline float3 EvaluateDirectLight(
 inline float LtcEdgeIntegral(float3 a,float3 b)
 {
     float3 edge=cross(a,b);
-    float sine=length(edge),cosine=clamp(dot(a,b),-1.0,1.0);
+    float sineSquared=dot(edge,edge),cosine=clamp(dot(a,b),-1.0,1.0);
+    float limit=.25f*cosine;
+    if(cosine>=.5f && sineSquared<=limit*limit)
+    {
+        // The polynomial uses squared sine; avoid taking its square root just to square it again.
+        float invCos=1.f/cosine,z=(sineSquared*invCos)*invCos;
+        // atan(r)/r, 0<=r<=1/4: the omitted term is <=r^12/13<4.59e-9.
+        float p=1.f+z*(-1.f/3.f+z*(1.f/5.f+z*(-1.f/7.f+z*(1.f/9.f-z/11.f))));
+        float angleOverSine=p*invCos;
+        if(sineSquared<=1e-24f)
+        {
+            float sine=length(edge);
+            if(sine<1e-12f)angleOverSine*=sine/1e-12f;
+        }
+        return edge.z*angleOverSine*0.15915494309189535;
+    }
+    float sine=length(edge);
     return edge.z*(atan2(sine,cosine)/max(sine,1e-12))*0.15915494309189535;
 }
-inline float3 LtcTransform(float3 offset,float3 tangent,float3 bitangent,float3 normal,float4 inverseMatrix)
+inline float3 LtcProject(float3 offset,float3 tangent,float3 bitangent,float3 normal)
 {
-    float3 local=float3(dot(offset,tangent),dot(offset,bitangent),dot(offset,normal));
+    return float3(dot(offset,tangent),dot(offset,bitangent),dot(offset,normal));
+}
+inline float3 LtcTransform(float3 local,float4 inverseMatrix)
+{
     return float3(inverseMatrix.x*local.x+inverseMatrix.z*local.z,local.y,
         inverseMatrix.y*local.x+inverseMatrix.w*local.z);
 }
-inline float LtcPolygonIntegral(float3 normal,float3 viewDir,float3 position,
-    float4 inverseMatrix,thread const float3* points,int count)
+struct LtcSurface
 {
-    float3 tangent=viewDir-normal*dot(normal,viewDir);
-    if(dot(tangent,tangent)<1e-8)
-        tangent=cross(abs(normal.z)<.999?float3(0,0,1):float3(0,1,0),normal);
-    tangent=normalize(tangent);
-    float3 bitangent=cross(normal,tangent);
-    float3 previous=LtcTransform(points[count-1]-position,tangent,bitangent,normal,inverseMatrix);
+    float3 normal,tangent,bitangent;
+    float4 inverseMatrix;
+    float3 specularWeight,diffuseWeight;
+};
+inline LtcSurface PrepareLtcSurface(float3 normal,float3 viewDir,DirectSurface directSurface,float roughness,
+    texture2d<float> ltcMatrixTexture,texture2d<float> ltcAmplitudeTexture,sampler materialSampler)
+{
+    LtcSurface surface;
+    surface.normal=normal;
+    surface.tangent=viewDir-normal*dot(normal,viewDir);
+    if(dot(surface.tangent,surface.tangent)<1e-8)
+        surface.tangent=cross(abs(normal.z)<.999?float3(0,0,1):float3(0,1,0),normal);
+    surface.tangent=normalize(surface.tangent);
+    surface.bitangent=cross(normal,surface.tangent);
+    float ndotv=clamp(directSurface.ndotv,0.0,1.0);
+    float2 coordinate=(float2(clamp(roughness,0.0,1.0),sqrt(1-ndotv))*63.0+.5)/64.0;
+    surface.inverseMatrix=ltcMatrixTexture.sample(materialSampler,coordinate,level(0));
+    float4 amplitude=ltcAmplitudeTexture.sample(materialSampler,coordinate,level(0));
+    float3 f0=directSurface.f0;
+    surface.specularWeight=f0*max(amplitude.x,0.0)+(float3(1)-f0)*max(amplitude.y,0.0);
+    surface.diffuseWeight=(float3(1)-FresnelSchlickRoughness(ndotv,f0,roughness))*directSurface.diffuseFactor;
+    return surface;
+}
+// Original float(corner)*float(pi/8) angles; retain their small axis asymmetries.
+constant float2 LtcDiscDirections[16]={
+    float2(1.f,0.f),float2(.9238795042f,.3826834559f),
+    float2(.7071067691f,.7071067691f),float2(.3826834261f,.9238795042f),
+    float2(-4.371138829e-8f,1.f),float2(-.3826835155f,.9238795042f),
+    float2(-.7071067691f,.7071067691f),float2(-.9238796234f,.3826832771f),
+    float2(-1.f,-8.742277657e-8f),float2(-.9238795042f,-.3826834261f),
+    float2(-.7071066499f,-.7071068883f),float2(-.3826831281f,-.9238796830f),
+    float2(1.192488064e-8f,-1.f),float2(.3826836050f,-.9238794446f),
+    float2(.7071070075f,-.7071065307f),float2(.9238795638f,-.3826834261f)};
+inline float3 LtcPolygonPoint(float3 center,float3 axisX,float3 axisY,int corner,bool disc)
+{
+    float2 coordinate=disc?LtcDiscDirections[corner]:
+        float2(corner==0 || corner==3?-1.f:1.f,corner<2?-1.f:1.f);
+    return center+axisX*coordinate.x+axisY*coordinate.y;
+}
+inline void LtcAppendPoint(float3 clippedPoint,thread float3& first,thread float3& last,
+    thread bool& haveVertex,thread float& sum)
+{
+    float squared=dot(clippedPoint,clippedPoint);
+    if(squared<=1e-20)return;
+    clippedPoint*=rsqrt(squared);
+    if(haveVertex)sum+=LtcEdgeIntegral(last,clippedPoint);else {first=clippedPoint;haveVertex=true;}
+    last=clippedPoint;
+}
+inline bool LtcPolygonAboveHorizon(float3 center,float3 axisX,float3 axisY,bool disc)
+{
+    float3 magnitude=abs(center)+abs(axisX)+abs(axisY);
+    // Bound reconstructed corner lengths away from floating-point overflow.
+    if(!all(isfinite(magnitude)) || any(magnitude>1e18f))return false;
+    float radius=disc?length(float2(axisX.z,axisY.z)):abs(axisX.z)+abs(axisY.z);
+    float lower=center.z-radius;
+    float margin=1e-5f*max(1.f,abs(center.z)+abs(axisX.z)+abs(axisY.z));
+    return isfinite(lower) && isfinite(margin) && lower>margin+1e-10f;
+}
+inline float LtcPolygonIntegral(float4 inverseMatrix,float3 center,float3 axisX,float3 axisY,bool disc)
+{
+    float3 transformedCenter=LtcTransform(center,inverseMatrix);
+    float3 transformedX=LtcTransform(axisX,inverseMatrix);
+    float3 transformedY=LtcTransform(axisY,inverseMatrix);
+    int count=disc?16:4;
+    if(LtcPolygonAboveHorizon(transformedCenter,transformedX,transformedY,disc))
+    {
+        float3 firstFull=LtcPolygonPoint(transformedCenter,transformedX,transformedY,0,disc);
+        firstFull*=rsqrt(dot(firstFull,firstFull));
+        float3 previousFull=firstFull;float fullSum=0;
+        for(int edge=1;edge<count;++edge)
+        {
+            float3 currentFull=LtcPolygonPoint(transformedCenter,transformedX,transformedY,edge,disc);
+            currentFull*=rsqrt(dot(currentFull,currentFull));
+            fullSum+=LtcEdgeIntegral(previousFull,currentFull);
+            previousFull=currentFull;
+        }
+        fullSum+=LtcEdgeIntegral(previousFull,firstFull);
+        return clamp(abs(fullSum),0.0,1.0);
+    }
+    float3 previous=LtcPolygonPoint(transformedCenter,transformedX,transformedY,count-1,disc);
     float3 first=float3(0),last=float3(0);bool haveVertex=false;float sum=0;
     for(int edge=0;edge<count;++edge)
     {
-        float3 current=LtcTransform(points[edge]-position,tangent,bitangent,normal,inverseMatrix);
+        float3 current=LtcPolygonPoint(transformedCenter,transformedX,transformedY,edge,disc);
         bool previousInside=previous.z>=0,currentInside=current.z>=0;
         // z=0 반구로 다각형을 자르되 정점 배열 대신 경계 순서대로 적분한다.
-        for(int candidate=0;candidate<2;++candidate)
+        if(previousInside!=currentInside)
         {
-            float3 point;
-            if(candidate==0)
-            {
-                if(previousInside==currentInside)continue;
-                point=mix(previous,current,clamp(previous.z/(previous.z-current.z),0.0,1.0));
-                point.z=0;
-            }
-            else
-            {
-                if(!currentInside)continue;
-                point=current;
-            }
-            float squared=dot(point,point);
-            if(squared<=1e-20)continue;
-            point*=rsqrt(squared);
-            if(haveVertex)sum+=LtcEdgeIntegral(last,point);else {first=point;haveVertex=true;}
-            last=point;
+            float3 clippedPoint=mix(previous,current,clamp(previous.z/(previous.z-current.z),0.0,1.0));
+            clippedPoint.z=0;
+            LtcAppendPoint(clippedPoint,first,last,haveVertex,sum);
         }
+        if(currentInside)LtcAppendPoint(current,first,last,haveVertex,sum);
         previous=current;
     }
     if(haveVertex)sum+=LtcEdgeIntegral(last,first);
     return clamp(abs(sum),0.0,1.0);
 }
-inline float3 EvaluateLtcPolygon(float3 normal,float3 viewDir,float3 position,thread const float3* points,int count,
-    float3 albedo,float metallic,float roughness,float3 radiance,texture2d<float> ltcMatrixTexture,texture2d<float> ltcAmplitudeTexture,sampler materialSampler)
+inline bool LtcBelowHorizon(LtcSurface surface,float3 position,float3 center,float3 axisX,float3 axisY,
+    float tangentCoefficient,float normalCoefficient,bool disc)
 {
-    float ndotv=clamp(dot(normal,viewDir),0.0,1.0);
-    if(ndotv<=0)return float3(0);
-    float2 coordinate=(float2(clamp(roughness,0.0,1.0),sqrt(1-ndotv))*63.0+.5)/64.0;
-    float4 inverseMatrix=ltcMatrixTexture.sample(materialSampler,coordinate,level(0));
-    float4 amplitude=ltcAmplitudeTexture.sample(materialSampler,coordinate,level(0));
-    float specular=LtcPolygonIntegral(normal,viewDir,position,inverseMatrix,points,count);
-    float diffuse=LtcPolygonIntegral(normal,viewDir,position,float4(1,0,0,1),points,count);
-    float3 f0=mix(float3(.04),albedo,metallic);
-    float3 specularWeight=f0*max(amplitude.x,0.0)+(float3(1)-f0)*max(amplitude.y,0.0);
-    float3 diffuseWeight=(float3(1)-FresnelSchlickRoughness(ndotv,f0,roughness))*(1-metallic);
-    // 정규화된 cosine 적분이므로 diffuse에 1/pi나 거리 감쇠를 다시 곱하지 않는다.
-    return radiance*(specularWeight*specular+diffuseWeight*albedo*diffuse);
+    float3 row=tangentCoefficient*surface.tangent+normalCoefficient*surface.normal;
+    float centerZ=dot(center-position,row),x=dot(axisX,row),y=dot(axisY,row);
+    float radius=disc?sqrt(x*x+y*y):abs(x)+abs(y);
+    // Include uncancelled world coordinates and both basis terms in the rounding allowance.
+    float3 magnitude=abs(center)+abs(position)+abs(axisX)+abs(axisY);
+    float scale=abs(tangentCoefficient)*dot(magnitude,abs(surface.tangent))+
+        abs(normalCoefficient)*dot(magnitude,abs(surface.normal));
+    float bound=centerZ+radius,margin=1e-5*max(1.0,scale);
+    return isfinite(bound) && isfinite(margin) && bound < -margin;
 }
-inline float3 EvaluateRectAreaLight(RendererRectAreaLight light,float3 normal,float3 viewDir,
-    float3 albedo,float metallic,float roughness,float3 worldPosition,texture2d<float> ltcMatrixTexture,texture2d<float> ltcAmplitudeTexture,sampler materialSampler)
+inline uint LtcIntegralMask(LtcSurface surface,float3 albedo,float3 position,float3 center,
+    float3 axisX,float3 axisY,bool disc)
+{
+    uint mask=0u;
+    if(any(surface.specularWeight!=0.0) &&
+        !LtcBelowHorizon(surface,position,center,axisX,axisY,surface.inverseMatrix.y,surface.inverseMatrix.w,disc))
+        mask|=1u;
+    if(any(surface.diffuseWeight*albedo!=0.0) &&
+        !LtcBelowHorizon(surface,position,center,axisX,axisY,0.0,1.0,disc))
+        mask|=2u;
+    return mask;
+}
+inline float3 EvaluateLtcPolygon(LtcSurface surface,float3 position,float3 center,float3 axisX,float3 axisY,
+    bool disc,uint integralMask,float3 albedo,float3 radiance)
+{
+    // Both integrals share the surface-basis projection and retain their own inverse map.
+    float3 localCenter=LtcProject(center-position,surface.tangent,surface.bitangent,surface.normal);
+    float3 localX=LtcProject(axisX,surface.tangent,surface.bitangent,surface.normal);
+    float3 localY=LtcProject(axisY,surface.tangent,surface.bitangent,surface.normal);
+    float specular=0,diffuse=0;
+    if((integralMask&1u)!=0u)specular=LtcPolygonIntegral(surface.inverseMatrix,localCenter,localX,localY,disc);
+    if((integralMask&2u)!=0u)diffuse=LtcPolygonIntegral(float4(1,0,0,1),localCenter,localX,localY,disc);
+    // 정규화된 cosine 적분이므로 diffuse에 1/pi나 거리 감쇠를 다시 곱하지 않는다.
+    return radiance*(surface.specularWeight*specular+surface.diffuseWeight*albedo*diffuse);
+}
+inline float3 EvaluateRectAreaLight(RendererRectAreaLight light,LtcSurface surface,float3 albedo,float3 worldPosition)
 {
     float3 direction=normalize(light.directionWidth.xyz);
     if(light.directionWidth.w<=0 || light.upHeight.w<=0 || dot(direction,worldPosition-light.positionIntensity.xyz)<=0)
@@ -419,27 +536,23 @@ inline float3 EvaluateRectAreaLight(RendererRectAreaLight light,float3 normal,fl
     float3 right=normalize(cross(direction,light.upHeight.xyz));
     float3 up=normalize(cross(right,direction));
     float3 x=right*(light.directionWidth.w*.5),y=up*(light.upHeight.w*.5),center=light.positionIntensity.xyz;
-    float3 points[16];
-    points[0]=center-x-y;points[1]=center+x-y;points[2]=center+x+y;points[3]=center-x+y;
-    return EvaluateLtcPolygon(normal,viewDir,worldPosition,points,4,albedo,metallic,roughness,
-        light.color.rgb*max(light.positionIntensity.w,0.0),ltcMatrixTexture,ltcAmplitudeTexture,materialSampler);
+    uint integralMask=LtcIntegralMask(surface,albedo,worldPosition,center,x,y,false);
+    if(integralMask==0u)return float3(0);
+    return EvaluateLtcPolygon(surface,worldPosition,center,x,y,false,integralMask,albedo,
+        light.color.rgb*max(light.positionIntensity.w,0.0));
 }
-inline float3 EvaluateDiscAreaLight(RendererDiscAreaLight light,float3 normal,float3 viewDir,
-    float3 albedo,float metallic,float roughness,float3 worldPosition,texture2d<float> ltcMatrixTexture,texture2d<float> ltcAmplitudeTexture,sampler materialSampler)
+inline float3 EvaluateDiscAreaLight(RendererDiscAreaLight light,LtcSurface surface,float3 albedo,float3 worldPosition)
 {
     float3 direction=normalize(light.directionRadius.xyz);
     if(light.directionRadius.w<=0 || dot(direction,worldPosition-light.positionIntensity.xyz)<=0)return float3(0);
     float3 right=normalize(cross(direction,light.up.xyz));
     float3 up=normalize(cross(right,direction));
-    float3 points[16];
-    // 원판 경계를 16각형으로 근사한 뒤 면 전체를 LTC로 적분한다.
-    for(int corner=0;corner<16;++corner)
-    {
-        float angle=float(corner)*0.39269908169872415;
-        points[corner]=light.positionIntensity.xyz+(right*cos(angle)+up*sin(angle))*light.directionRadius.w;
-    }
-    return EvaluateLtcPolygon(normal,viewDir,worldPosition,points,16,albedo,metallic,roughness,
-        light.color.rgb*max(light.positionIntensity.w,0.0),ltcMatrixTexture,ltcAmplitudeTexture,materialSampler);
+    float3 x=right*light.directionRadius.w,y=up*light.directionRadius.w;
+    uint integralMask=LtcIntegralMask(surface,albedo,worldPosition,light.positionIntensity.xyz,x,y,true);
+    if(integralMask==0u)return float3(0);
+    // Keep the original 16-sided disc boundary and stream it in LTC space.
+    return EvaluateLtcPolygon(surface,worldPosition,light.positionIntensity.xyz,x,y,true,integralMask,albedo,
+        light.color.rgb*max(light.positionIntensity.w,0.0));
 }
 #endif
 
@@ -466,9 +579,9 @@ inline float3 EvaluateLights(constant RendererLightingConstants& lighting,
     constant ShadowMatrix& shadowMatrix, depth2d<float> shadowMap, sampler shadowSampler, uint drawFlags,
 #endif
     float3 worldPosition, float3 normal, float3 viewDir,
-    float3 albedo, float metallic, float roughness) {
+    float3 albedo, float roughness,DirectSurface directSurface) {
     float3 directLight = float3(0.0,0.0,0.0);
-    float ndotv=max(dot(normal,viewDir),0.0f);
+    float ndotv=directSurface.ndotv;
     int directionalCount = clamp(int(lighting.lightCounts.x + 0.5), 0, RENDERER_MAX_DIRECTIONAL_LIGHTS);
     for (int lightIndex = 0; lightIndex < directionalCount; ++lightIndex) {
         RendererDirectionalLight light = lighting.directionalLights[lightIndex];
@@ -481,7 +594,7 @@ inline float3 EvaluateLights(constant RendererLightingConstants& lighting,
         float visibility = 1.0;
 #endif
         directLight += EvaluateDirectLight(normal, viewDir, lightDir,
-            light.color.rgb * max(light.directionIntensity.w, 0.0), albedo, metallic, roughness, visibility);
+            light.color.rgb * max(light.directionIntensity.w, 0.0), albedo, directSurface, visibility);
     }
     uint base=ClusterBase(worldPosition,clusters);
     uint listed=0xffffffffu;
@@ -500,24 +613,26 @@ inline float3 EvaluateLights(constant RendererLightingConstants& lighting,
         int type=int(light.coneShadow.y+0.5),shadowIndex=int(light.coneShadow.z);
         if(type==3)attenuation*=SpotConeAttenuation(dot(-lightDir,light.directionOuterCos.xyz),
             light.coneShadow.x,light.directionOuterCos.w);
+        if(attenuation<=0.0f)continue;
+        float3 incidentIlluminance=light.colorIntensity.rgb*max(light.colorIntensity.w,0.0)*attenuation;
 #if RENDERER_ENABLE_SHADOWS
         float visibility=shadowIndex>=0?SampleShadow(type,shadowIndex,worldPosition,normal,lightDir,lighting,shadowMatrix,shadowMap,shadowSampler,drawFlags):1.0;
 #else
         float visibility=1.0;
 #endif
-        float3 incidentIlluminance=light.colorIntensity.rgb*max(light.colorIntensity.w,0.0)*attenuation;
-        directLight+=EvaluateDirectLight(normal,viewDir,lightDir,incidentIlluminance,albedo,metallic,roughness,visibility);
+        directLight+=EvaluateDirectLight(normal,viewDir,lightDir,incidentIlluminance,albedo,directSurface,visibility);
     }
 #if RENDERER_ENABLE_AREA_LIGHTS
     int rectAreaCount = clamp(int(lighting.areaLightCounts.x + 0.5), 0, RENDERER_MAX_RECT_AREA_LIGHTS);
-    for (int lightIndex = 0; lightIndex < rectAreaCount; ++lightIndex) {
-        directLight += EvaluateRectAreaLight(lighting.rectAreaLights[lightIndex], normal, viewDir, albedo, metallic, roughness, worldPosition,
-            ltcMatrixTexture,ltcAmplitudeTexture,materialSampler);
-    }
     int discAreaCount = clamp(int(lighting.areaLightCounts.y + 0.5), 0, RENDERER_MAX_DISC_AREA_LIGHTS);
-    for (int lightIndex = 0; lightIndex < discAreaCount; ++lightIndex) {
-        directLight += EvaluateDiscAreaLight(lighting.discAreaLights[lightIndex], normal, viewDir, albedo, metallic, roughness, worldPosition,
+    if(ndotv>0.0f && rectAreaCount+discAreaCount>0) {
+        // Prepare once; both area-light loops consume the same read-only surface.
+        LtcSurface surface=PrepareLtcSurface(normal,viewDir,directSurface,roughness,
             ltcMatrixTexture,ltcAmplitudeTexture,materialSampler);
+        for (int lightIndex = 0; lightIndex < rectAreaCount; ++lightIndex)
+            directLight += EvaluateRectAreaLight(lighting.rectAreaLights[lightIndex],surface,albedo,worldPosition);
+        for (int lightIndex = 0; lightIndex < discAreaCount; ++lightIndex)
+            directLight += EvaluateDiscAreaLight(lighting.discAreaLights[lightIndex],surface,albedo,worldPosition);
     }
 #endif
 
@@ -648,18 +763,17 @@ inline float4 RunFragmentShader(
     const float3 viewDirection =
         normalize(lighting.cameraPosition.xyz - input.worldPosition);
 
-    const float3 f0 =
-        mix(float3(0.04f), albedo, metallic);
+    const DirectSurface directSurface=PrepareDirectSurface(normal,viewDirection,albedo,metallic,roughness);
+    const float3 f0=directSurface.f0;
     const float3 directLight = EvaluateLights(lighting,
         clusterLights,clusterList,clusters,
         ltcMatrixTexture,ltcAmplitudeTexture,materialSampler,
 #if RENDERER_ENABLE_SHADOWS
         shadowMatrix,shadowMap,shadowSampler,drawConstants.textureFlags,
 #endif
-        input.worldPosition, normal, viewDirection, albedo, metallic, roughness);
-
+        input.worldPosition, normal, viewDirection, albedo, roughness,directSurface);
     const float3 ambientFresnel = FresnelSchlickRoughness(
-        max(dot(normal, viewDirection), 0.0f),
+        directSurface.ndotv,
         f0,
         roughness);
     const float3 kD = (float3(1.0f) - ambientFresnel) * (1.0f - metallic);

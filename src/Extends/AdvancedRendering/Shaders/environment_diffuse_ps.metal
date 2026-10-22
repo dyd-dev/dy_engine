@@ -16,9 +16,10 @@ struct FrameConstants
 };
 struct SpatialProbe {float4 positionIntensity,boxMinFade,boxMaxMip;float4 sh[9];};
 inline float ProbeVisibility(float3 position,device const SpatialProbe& probe,uint index,
-    texture2d_array<float> image,uint count)
+    texture2d_array<float> image,uint count,sampler pointSampler,sampler linearSampler,uint enabled)
 {
-    return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,count+index,image);
+    return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,
+        count+index,image,pointSampler,linearSampler,enabled);
 }
 inline float ProbeWeight(float3 position,device const SpatialProbe& probe,thread float& coverage)
 {
@@ -46,6 +47,7 @@ fragment float4 environmentDiffuse(EnvironmentVertex input [[stage_in]],
     depth2d<float> depthTexture [[texture(0)]],texture2d<float> normalTexture [[texture(1)]],
     texture2d<float> aoTexture [[texture(3)]],sampler clampSampler [[sampler(8)]],
     sampler aoSampler [[sampler(10)]],
+    sampler environmentLinearSampler [[sampler(15)]],
     constant FrameConstants& frame [[buffer(9)]],device const SpatialProbe* probes [[buffer(22)]],
     texture2d_array<float> probePrefilterTexture [[texture(23)]],
     constant uint4& probeParameters [[buffer(24)]])
@@ -73,7 +75,8 @@ fragment float4 environmentDiffuse(EnvironmentVertex input [[stage_in]],
             float edge;const float weight=ProbeWeight(position,probes[i],edge);
             if(weight<=0) continue;
             sum+=ProbeIrradiance(probes[i],worldNormal)*
-                (weight*ProbeVisibility(position,probes[i],i,probePrefilterTexture,probeParameters.x));
+                (weight*ProbeVisibility(position,probes[i],i,probePrefilterTexture,probeParameters.x,
+                    clampSampler,environmentLinearSampler,probeParameters.w));
             weights+=weight;coverage+=edge;
         }
         if(weights>0) irradiance=mix(irradiance,sum/weights,clamp(coverage,0.f,1.f));

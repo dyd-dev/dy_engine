@@ -4,6 +4,59 @@ layout(std430,set=0,binding=19) readonly buffer Lights {ClusterLight clusterLigh
 layout(std430,set=0,binding=20) writeonly buffer Lists {uint clusterList[];};
 layout(set=0,binding=21) uniform Parameters {mat4 view;mat4 projection;mat4 inverseProjection;vec4 depth;uvec4 dimensions;uvec4 counts;} clusters;
 layout(local_size_x=64) in;
+bool ClusterFinite(vec3 value) {return !any(isnan(value)) && !any(isinf(value));}
+bool ClusterSpotOutside(ClusterLight light,vec3 cellCenter,vec3 cellExtent,vec3 lightCenter)
+{
+    vec3 source=light.positionRange.xyz,direction=light.directionOuterCos.xyz;
+    float range=light.positionRange.w,outerCos=light.directionOuterCos.w;
+    mat3 viewLinear=mat3(clusters.view);
+    if(!ClusterFinite(source) || !ClusterFinite(direction) || !ClusterFinite(cellCenter) ||
+        !ClusterFinite(cellExtent) || !ClusterFinite(lightCenter) ||
+        !ClusterFinite(viewLinear[0]) || !ClusterFinite(viewLinear[1]) || !ClusterFinite(viewLinear[2]) ||
+        !ClusterFinite(clusters.view[3].xyz) || isnan(range) || isinf(range) ||
+        isnan(outerCos) || isinf(outerCos) || range<=0 || outerCos<=0 || any(lessThan(cellExtent,vec3(0))))return false;
+    float directionSquared=dot(direction,direction);
+    if(isnan(directionSquared) || isinf(directionSquared) || directionSquared<=1e-12)return false;
+    float directionLength=sqrt(directionSquared);
+    direction/=directionLength;
+    // Fragment lighting uses the original, slightly non-unit direction.
+    // Widen its effective cone to retain floating-point boundary cases.
+    float effectiveCos=outerCos/directionLength;
+    if(isnan(effectiveCos) || isinf(effectiveCos))return false;
+    float cosine=clamp(effectiveCos-1e-5,0.0,1.0);
+    float sine=sqrt(max(1.0-cosine*cosine,0.0));
+    vec3 axis=viewLinear*direction,offset=cellCenter-lightCenter;
+    float axisSquared=dot(axis,axis);
+    if(!ClusterFinite(offset) || isnan(axisSquared) || isinf(axisSquared) || axisSquared<=1e-12)return false;
+    axis/=sqrt(axisSquared);
+    vec3 radial=offset-axis*dot(offset,axis);
+    float radialSquared=dot(radial,radial);
+    if(isnan(radialSquared) || isinf(radialSquared) || radialSquared<=1e-12)return false;
+    // This only chooses a useful separating plane; correctness does not
+    // assume that the view preserves angles or lengths.
+    vec3 plane=cosine*(radial/sqrt(radialSquared))-sine*axis;
+    vec3 worldPlane=transpose(viewLinear)*plane;
+    float planeSquared=dot(worldPlane,worldPlane);
+    if(!ClusterFinite(plane) || !ClusterFinite(worldPlane) ||
+        isnan(planeSquared) || isinf(planeSquared) || planeSquared<=1e-12)return false;
+    float planeLength=sqrt(planeSquared),along=dot(worldPlane,direction);
+    // Form the perpendicular explicitly instead of subtracting squared lengths.
+    vec3 perpendicular=worldPlane-along*direction;
+    float across=length(perpendicular);
+    float support=along>=cosine*planeLength ? planeLength : cosine*along+sine*across;
+    float maximum=range*max(support,0.0);
+    float minimum=dot(plane,offset)-dot(abs(plane),cellExtent);
+    float sourceMagnitude=max(max(abs(source.x),abs(source.y)),abs(source.z))+range;
+    float linearMagnitude=dot(abs(plane),abs(viewLinear[0])+abs(viewLinear[1])+abs(viewLinear[2]));
+    float errorScale=dot(abs(plane),abs(cellCenter)+cellExtent+abs(clusters.view[3].xyz))+
+        sourceMagnitude*linearMagnitude;
+    if(isnan(along) || isinf(along) || isnan(across) || isinf(across) ||
+        isnan(support) || isinf(support) || isnan(errorScale) || isinf(errorScale))return false;
+    float margin=1e-4*max(1.0,errorScale);
+    if(isnan(maximum) || isinf(maximum) || isnan(minimum) || isinf(minimum) ||
+        isnan(margin) || isinf(margin))return false;
+    return minimum>maximum+margin;
+}
 void main()
 {
     uint cell=gl_GlobalInvocationID.x,total=clusters.dimensions.x*clusters.dimensions.y*clusters.dimensions.z;
@@ -24,6 +77,7 @@ void main()
         if(clusters.counts.z!=0u)point*=distance/max(-point.z,1e-20);else point.z=-distance;
         minimum=min(minimum,point);maximum=max(maximum,point);
     }
+    vec3 cellCenter=(minimum+maximum)*.5,cellExtent=(maximum-minimum)*.5;
     uint base=cell*(clusters.dimensions.w+1u),count=0u;
     for(uint lightIndex=0u;lightIndex<clusters.counts.x;++lightIndex)
     {
@@ -33,6 +87,7 @@ void main()
         vec3 delta=center-clamp(center,minimum,maximum);
         if(dot(delta,delta)<=radius*radius)
         {
+            if(light.coneShadow.y==3.0 && ClusterSpotOutside(light,cellCenter,cellExtent,center))continue;
             // 셀 용량을 넘으면 픽셀 셰이더가 전체 광원을 순회하므로 광원을 누락하지 않는다.
             if(count==clusters.dimensions.w){clusterList[base]=0xffffffffu;return;}
             clusterList[base+1u+count++]=lightIndex;

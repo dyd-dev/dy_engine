@@ -69,6 +69,7 @@ private:
         float distanceScale=0;
         double prefilterMaxMagnitude=0;
         bool prefilterFinite=false;
+        bool momentsFilterable=false;
     };
     struct FrameConstants
     {
