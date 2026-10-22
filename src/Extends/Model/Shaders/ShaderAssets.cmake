@@ -34,7 +34,7 @@ function(dy_embed_model_shader source stage name)
         add_custom_command(
             OUTPUT "${binary}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_MODEL_SHADER_GENERATED_DIR}"
-            COMMAND "${DY_GLSLC}" "-fshader-stage=${stage}" ${shader_defines}
+            COMMAND "${DY_GLSLC}" "$<IF:$<CONFIG:Debug>,-O0,-O>" "-fshader-stage=${stage}" ${shader_defines}
                 -I "${DY_MODEL_SHADER_SOURCE_DIR}" "${source}" -o "${binary}"
             DEPENDS "${source}" ${DY_MODEL_SHADER_HELPERS}
             VERBATIM)

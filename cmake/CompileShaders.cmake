@@ -129,7 +129,7 @@ function(dy_compile_shader target name stage)
         endif()
         add_custom_command(OUTPUT "${binary}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${directory}"
-            COMMAND "${DY_GLSLC}" "-fshader-stage=${glsl_stage}" ${glslc_extra_args} ${includes} "${SHADER_GLSL}" -o "${binary}"
+            COMMAND "${DY_GLSLC}" "$<IF:$<CONFIG:Debug>,-O0,-O>" "-fshader-stage=${glsl_stage}" ${glslc_extra_args} ${includes} "${SHADER_GLSL}" -o "${binary}"
             DEPENDS ${dependencies} VERBATIM)
     elseif(USE_D3D12)
         if(stage STREQUAL "vert")
@@ -238,7 +238,7 @@ macro(dy_build_stock_shaders)
                 add_custom_command(
                     OUTPUT "${binary}"
                     COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-                    COMMAND "${DY_GLSLC}" "-fshader-stage=${stage}" "-I${DY_STOCK_SHADER_SHARED_DIR}" ${shader_defines} "${source}" -o "${binary}"
+                    COMMAND "${DY_GLSLC}" "$<IF:$<CONFIG:Debug>,-O0,-O>" "-fshader-stage=${stage}" "-I${DY_STOCK_SHADER_SHARED_DIR}" ${shader_defines} "${source}" -o "${binary}"
                     DEPENDS "${source}" ${DY_STOCK_SHADER_SHARED_SOURCES}
                     VERBATIM)
             else()
