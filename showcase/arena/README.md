@@ -31,6 +31,7 @@ cmake --build build --target ShowcaseArena -j
 
 ```text
 arena [--assets PATH] [--actors 72] [--paused] [--font PATH] [--frames N] [--profiler] [--validation] [--touch]
+arena --benchmark-frames N --benchmark-output NEW.csv [--benchmark-warmup 120] [--benchmark-step 0.016666666666666666] [--actors 72]
 ```
 
 에셋 기본 경로는 저장소와 나란한 `../assets/KayKit_Arena/`다.
@@ -44,12 +45,45 @@ Arena를 구성하면 누락된 공식 KayKit 파일과 라이선스를 지정�
 `--objects`는 `--actors`와 같은 인자이며 범위도 12~512개다.
 `--frames`는 성공한 제출 횟수로 종료하며 0이면 계속 표시한다.
 글자는 기존 시스템 글꼴을 사용하고, 지원 글꼴이 없으면 내장 비트맵으로 표시한다.
-`--profiler`는 처음부터 펼친 Profiler를 표시한다. 공통 Profiler의 공개 측정
+기본 발표 모드는 Profiler를 표시하며 `--profiler`도 같은 시작 상태를 선택한다. 공통 Profiler의 공개 측정
 스냅샷을 Arena의 글꼴·레이아웃으로 표시하며 엔진의 측정 코드는 변경하지 않는다.
 `--validation`은 해당 실행에 Vulkan 검증을 켜며 기본값은 OFF다.
-`--touch`는 데스크톱에서도 포인터·터치 버튼을 표시한다. Android·iOS 빌드는
-기본으로 버튼을 표시한다. 모바일 빌드 선택은 [상위 안내](../README.md)를 따른다.
+포인터·터치 버튼은 항상 사용할 수 있으며 `--touch`는 기존 실행 명령과의 호환 인자다.
+모바일 빌드 선택은 [상위 안내](../README.md)를 따른다.
 데스크톱 실행 파일만 다른 머신으로 옮겼다면 `--assets`로 해당 머신의 에셋 폴더를 지정한다.
+
+## 유한 프레임 벤치마크
+
+기본 발표 동작을 유지하고 별도 CLI 모드에서 VSync·HUD를 끈다. 렌더 품질과
+기본 해골 72개 + 기사 1개와 투명 1층은 유지한다. 격리한 headless Wayland 환경에서 출력 크기를
+1920×1080으로 고정한 뒤 다음과 같이 실행한다.
+
+```sh
+./build/showcase/arena --benchmark-frames 3600 --benchmark-warmup 120 --benchmark-output build/showcase/arena.csv
+```
+
+- warm-up 120회는 시각 0에 고정하고 GPU 작업을 완료한 뒤 측정을 시작한다.
+- 기본 시각 간격은 성공 제출당 1/60초이며, `--benchmark-step 0`이면 정지 장면이다.
+  acquire 재시도에서는 같은 애니메이션 상태를 유지한다.
+- `GetLastRenderCompletion()`이 바뀐 정상 제출만 N회 집계하고 마지막 GPU drain 후 종료한다.
+  처리량 wall time은 acquire 재시도·이벤트 대기·최종 drain을 포함하며 warm-up은 제외한다.
+- `--benchmark-output`은 새 파일이어야 하며 기존 CSV는 덮어쓰지 않는다.
+  `--frames`·`--paused`는 이 모드와 함께 사용하지 않는다.
+- `--benchmark-skin-cache on|off`는 같은 influence의 CPU 변형 행렬 재사용만 바꾼다.
+  기본값은 ON이며 CSV의 `skin_transform_cache`에 실제 적용값을 기록한다.
+  정점 위치·정확한 bounds·모델 수·렌더 품질을 유지하는 비교다.
+- CSV는 실제 내부·출력 크기, actor 수와 렌더 설정, 프레임 간격·P95/P99,
+  draw·triangle 통계와 별도의 CPU/GPU profiler 집계 구간을 기록한다.
+  renderer의 profiler 시간은 앞서 실행된 ModelRenderer 변형 작업을 제외하므로
+  전체 처리량은 GPU drain 포함 wall time을 기준으로 읽는다.
+- 측정 도중 출력 크기가 바뀌거나 창이 닫히면 오류로 종료한다.
+
+완료 제출/s는 실제 Sway 화면의 표시 FPS와 구분한다. 과거 HUD의 28 FPS는
+VSync·Profiler ON 상태의 표시값이며 이 벤치마크 결과와 비교하지 않는다.
+RTX 3060·Vulkan·내부/출력 1920×1080, warm-up 120 + 측정 3,600회·60초 경로에서
+행렬 캐시 OFF **29.9786**, ON **45.6353** 완료 제출/s였다. ON의 제출 간격 P95는 22.5996ms다.
+GPU 회귀의 캐시 OFF/ON 전체 RGBA·bounds·geometryRevision은 같았다.
+전체 조건·원시 CSV·남은 병목은 [감사 기록](../RenderingAudit.md#arena의-cpu-중복-계산)을 따른다.
 
 ## 장면 조작
 
@@ -74,7 +108,7 @@ CPU 장면·시각·사용자 설정은 유지한다. F11은 펼친 Profiler를 
 터치 버튼은 Pause/Play·Restart·Tour·Overview·Profiler·Menu다. Menu에서
 컬링·인스턴싱·기록 worker·GPU 컬링·LOD·VSync와 A/B 비교를 조작한다.
 버튼 입력은 창 좌표를 framebuffer 좌표로 변환하며 Android 화면 밀도와 iOS의 Retina 배율을 반영한다.
-모바일에서도 같은 렌더 기능과 기본 72개 캐릭터를 사용하므로 장치별 성능은 별도 확인이 필요하다.
+모바일에서도 같은 렌더 기능과 기본 해골 72개 + 기사 1개를 사용하므로 장치별 성능은 별도 확인이 필요하다.
 
 창 크기가 바뀌면 화면을 먼저 확보한 뒤 모델을 준비한다. 모델 준비의 GPU
 스키닝 제출이 스왑체인 재생성에 필요한 기존 제출 완료를 계속 밀어내지 않게 한다.
@@ -104,10 +138,11 @@ Linux 실행에서 사용하지 않는 vertex attribute 경고는 있었으며 v
 가상 화면에는 포인터 장치가 없어 터치 버튼의 실제 누름은 확인하지 못했다.
 검증용 가상 화면은 종료하며 실제 데스크톱 설정을 바꾸지 않는다.
 
-## 다른 브랜치로 옮길 변경
+## 과거 Compute 지원의 분리 기록
 
-엔진의 Compute 스키닝 지원 변경은 다음 네 파일로 독립되어 있다.
-기존 공통 스키닝 수학·RHI 바인딩을 사용하며 `src/Public/` 변경은 없다.
+아래 네 파일은 과거 HLSL·Metal Compute 스키닝 지원 추가를 분리해 설명한 목록이다.
+현재 정확성 수정에는 64-byte 정점 RGBA·stock shadow coverage API·RHI 수정과 회귀 테스트도
+포함된다. 현재 이식 범위와 검증 근거는 [렌더링 감사](../RenderingAudit.md)에서 함께 확인한다.
 
 - `src/Extends/Model/ModelShaderAssets.cpp`
 - `src/Extends/Model/Shaders/ShaderAssets.cmake`
@@ -130,4 +165,4 @@ Android 창 전환을 한 번에 합치지 않고 화면 밀도를 제공하는 
 
 사용자가 확인할 항목은 모델과 텍스처 표시, 바닥·발 위치, 이동·공격 애니메이션,
 조명과 그림자, 정지·재시작·카메라 전환, 동일 상태의 A/B 동작이다.
-장치별 화질·성능과 60 FPS 달성 여부는 측정하지 않았다.
+장치별 화질·성능은 실제 실행 범위로 구분한다. Android/iOS 실기의 FPS와 메모리는 미측정이다.

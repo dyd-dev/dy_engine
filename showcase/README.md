@@ -9,7 +9,8 @@ Linux·Wayland에서 Bistro를 실행하는 예:
 ./build/showcase/showcase emerald
 ```
 
-발표의 장면별 역할·구도·조작과 탐색 기록은 [발표 초안](Presentation.md)에 정리한다.
+발표의 장면별 역할·구도·조작과 측정 기록은 [발표 초안](Presentation.md),
+수정 근거·실제 검증 결과·미확인 범위는 [렌더링 감사](RenderingAudit.md)에 정리한다.
 현재 RTX 3060·Sway 환경에서는 Wayland 경로를 사용하며, 화면을 방해하지 않는 탐색에는
 실제 데스크톱과 분리된 임시 headless Wayland 환경을 사용했다.
 headless 완료 처리량은 실제 작업 공간의 화면 표시 FPS와 구분한다.
@@ -21,6 +22,20 @@ __NV_PRIME_RENDER_OFFLOAD=1 __VK_LAYER_NV_optimus=NVIDIA_only ./build/showcase/s
 ```
 
 `exterior`는 기존 낮 장면, `night` 또는 `exterior --night`는 별도 야간 프리셋이다.
+파일 경로를 직접 전달하면 기본 프리셋은 `none`이다. 파일 이름으로 ORCA 재질 규약이나
+조명 프리셋을 추측하지 않는다. 해당 규약을 적용하려면 명시적으로 선택한다.
+
+```sh
+./build/showcase/showcase /path/to/EmeraldSquare_Day.fbx --scene-preset emerald
+```
+
+`--scene-preset`은 `none`, `exterior`, `interior`, `emerald`, `sponza`를 받는다.
+`ModelLoadOptions.allowMaterialFallbacks`의 기본값은 `false`이며, 지원하지 않는 재질 의미는
+원인을 명시한 오류로 거부한다. 근사를 허용하는 loader 옵션은 호출자가 명시적으로 선택한다.
+Emerald·Bistro의 ORCA 프리셋은 Specular G/B를 roughness/metalness로 읽고,
+Falcor에서 unsupported인 R을 AO로 적용하지 않으며 BaseColor alpha에 명시적인 Mask 규약을 사용한다.
+원본 FBX의 카메라 FOV와 노드 `CullingOff`도 보존한다.
+
 야간은 어두운 하늘·달빛과 전등 위치의 점/스폿·LTC 면광원을 사용하며,
 낮 장면과 FPS를 같은 조건으로 비교하지 않는다. 과거 RTX 4050·NVIDIA 550 환경에서는
 Wayland swapchain 생성이 실패했고 `DY_LINUX_WINDOW_SYSTEM=X11` 빌드의
@@ -79,6 +94,7 @@ cmake --build build --target ShowcaseArena ShowcaseCulling ShowcaseCinematic -j
   `Intel_Animated_Knight/`를 사용한다.
 - Sponza는 자동 다운로드 대상에 포함하지 않는다. 비교용 장면이 필요하면
   `DY_SHOWCASE_COMPARISON_SCENE`에 준비된 로컬 파일을 지정한다.
+  이 CMake 값이 비어 있으면 `sponza`·`comparison` 별칭은 미준비 상태이며 명시적인 오류를 낸다.
 - 기존에 준비된 파일이 있으면 네트워크에 접속하지 않는다. 원본 ZIP이 있으면
   다시 받지 않고 추출한다. 불완전한 폴더에는 없는 파일만 추가한다.
 - KayKit은 공식 저장소의 고정 commit에서 모델·텍스처·라이선스를 받는다.
@@ -95,3 +111,40 @@ GLFW·stb·meshoptimizer 등 라이브러리의 FetchContent 설정은 에셋 �
 
 장면 출처와 이용 조건은 [Cinematic](cinematic/ASSET_CREDITS.md)과
 [Arena](arena/ASSET_CREDITS.md)에 기록한다.
+
+## 유한 프레임 측정
+
+격리된 headless Wayland 환경에서 내부 렌더와 실제 출력 크기를 함께 고정하여 측정한다.
+완료 제출/s는 마지막 GPU drain을 포함하며, 실제 화면의 표시 FPS와 구분한다.
+현재 측정 표와 장면별 카메라 조건은 [발표 초안](Presentation.md#현재-측정-기록과-발표에서의-사용)에 있다.
+
+```sh
+./build/showcase/showcase night --benchmark-frames 3600 --benchmark-warmup 120 --benchmark-step 0.016666666666666666 --benchmark-output build/showcase/night.csv
+./build/showcase/arena --benchmark-frames 3600 --benchmark-warmup 120 --benchmark-output build/showcase/arena.csv
+```
+
+두 모드 모두 VSync·HUD를 끄고 정상 제출된 프레임만 센다. CSV 경로는 새 파일이어야 한다.
+Arena는 기본 해골 72개와 기사 1개를 사용하며, 측정 시각 간격은 기본 1/60초다.
+상세 옵션과 기본 발표 동작은 [Arena 안내](arena/README.md#유한-프레임-벤치마크)를 따른다.
+
+## 선택적 회귀 테스트
+
+`DY_BUILD_CONFORMANCE_TESTS`는 기본 OFF다. 켜면 저장소의 영구 fixture를 사용하는
+Model·CPU 가시성·GPU 픽셀 회귀 타깃을 만들며, 일반 예제 선택과 독립적이다.
+
+```sh
+cmake -S . -B build -DDY_EXTEND_MODEL=ON -DDY_EXTEND_ADVANCED_RENDERING=ON -DDY_BUILD_CONFORMANCE_TESTS=ON
+cmake --build build --target ModelConformanceTests RenderingConformanceTests -j
+ctest --test-dir build -R '^(ModelConformance|RenderingCPUConformance)$' --output-on-failure
+```
+
+GPU 검사는 별도로 준비한 private headless Wayland 세션 안에서 실행한다.
+스키닝 모드 간 비교에는 창 크기를 동일하게 유지한다. PNG 저장은 선택 옵션이다.
+
+```sh
+./build/examples/RenderingConformanceTests --validation --model src/Extends/Model/tests/fixtures/VertexColor.gltf --skinned-model src/Extends/Model/tests/fixtures/MissingNormals.gltf --capture-dir build/showcase/conformance-images
+```
+
+검사는 정점 RGBA, Opaque/Mask/Blend·transmission, 투명 1/2층·alpha-aware nearest,
+법선·instancing·projective visibility와 Vertex/Compute 스키닝을 다룬다.
+실제 실행 통과 범위와 R16 half 직접 readback 등 API 한계는 [감사 기록](RenderingAudit.md)을 따른다.

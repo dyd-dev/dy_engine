@@ -20,10 +20,16 @@
 #include <cstdio>
 #include <exception>
 #include <filesystem>
+#include <iomanip>
+#include <locale>
 #include <memory>
+#include <numeric>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #ifndef DY_ARENA_GAME_ASSETS
 #define DY_ARENA_GAME_ASSETS ""
@@ -39,6 +45,11 @@ int main(int argc, char** argv)
         std::filesystem::path assets = DY_ARENA_GAME_ASSETS;
         std::string fontPath;
         uint32_t actorCount = 72, frameLimit = 0;
+        uint32_t benchmarkFrames = 0, benchmarkWarmup = 120;
+        double benchmarkStep = 1.0/60.0;
+        bool benchmarkRequested = false;
+        bool benchmarkSkinCache = true;
+        std::string benchmarkOutput;
         bool paused = false, profiler = true, validation = false;
         const auto number = [](std::string_view value) {
             uint32_t result = 0;
@@ -59,6 +70,28 @@ int main(int argc, char** argv)
                     throw std::runtime_error("--actors requires a count from 12 to 512.");
             }
             else if(argument == "--frames" && i+1<argc) frameLimit = number(argv[++i]);
+            else if(argument == "--benchmark-frames" && i+1<argc)
+            { benchmarkRequested = true; benchmarkFrames = number(argv[++i]); }
+            else if(argument == "--benchmark-warmup" && i+1<argc)
+            { benchmarkRequested = true; benchmarkWarmup = number(argv[++i]); }
+            else if(argument == "--benchmark-output" && i+1<argc)
+            { benchmarkRequested = true; benchmarkOutput = argv[++i]; }
+            else if(argument == "--benchmark-skin-cache" && i+1<argc)
+            {
+                benchmarkRequested = true;
+                const std::string_view value=argv[++i];
+                if(value!="on" && value!="off")
+                    throw std::runtime_error("--benchmark-skin-cache requires on or off.");
+                benchmarkSkinCache=value=="on";
+            }
+            else if(argument == "--benchmark-step" && i+1<argc)
+            {
+                benchmarkRequested = true;
+                const std::string value = argv[++i]; size_t consumed = 0;
+                benchmarkStep = std::stod(value, &consumed);
+                if(consumed != value.size() || !std::isfinite(benchmarkStep) || benchmarkStep < 0 || benchmarkStep > .1)
+                    throw std::runtime_error("--benchmark-step requires seconds from 0 to 0.1.");
+            }
             else if(argument == "--paused") paused = true;
             else if(argument == "--profiler") profiler = true;
             else if(argument == "--validation") validation = true;
@@ -73,11 +106,19 @@ int main(int argc, char** argv)
                     "F5 freeze and capture A | F6 same-state B | F7 clear\n"
                     "Pointer/touch controls, render settings and GPU pass timings are available on screen.\n"
                     "A/B freezes the scene/camera, disables GPU culling/VSync/profiler, and changes only CPU instancing.");
+                std::puts("Benchmark: --benchmark-frames N --benchmark-output NEW.csv [--benchmark-warmup 120] [--benchmark-step 0.016666666666666666]\n"
+                    "--benchmark-skin-cache on|off compares shared skin transforms with per-vertex evaluation (default on).\n"
+                    "Warm-up freezes at t=0; measurement advances only after successful submissions.\n"
+                    "Benchmark disables VSync/HUD, preserves render quality, drains GPU work and refuses existing CSV files.");
                 return 0;
             }
             else throw std::runtime_error("Unknown or incomplete option; use --help.");
         }
         if(assets.empty()) throw std::runtime_error("The arena's KayKit asset directory is not configured.");
+        if(benchmarkRequested && (!benchmarkFrames || benchmarkOutput.empty() || frameLimit || paused))
+            throw std::runtime_error("Benchmark requires positive --benchmark-frames and --benchmark-output; omit --frames/--paused (use --benchmark-step 0 to freeze).");
+        if(benchmarkRequested && std::filesystem::exists(benchmarkOutput))
+            throw std::runtime_error("Benchmark output already exists: " + benchmarkOutput);
 
         ModelScene scene;
         auto dungeon = BuildDungeon(scene);
@@ -126,6 +167,7 @@ int main(int argc, char** argv)
         config.recordingThreadCount = 4;
         config.enableInstancing = true;
         config.enableGpuCulling = false;
+        if(benchmarkRequested) { config.vsync = false; profiler = false; }
         RHI::DeviceDesc deviceDescription;
         deviceDescription.enableValidation = validation;
         std::unique_ptr<RHI::IDevice> device;
@@ -143,6 +185,27 @@ int main(int argc, char** argv)
         uint32_t submitted = 0;
         int renderedWidth = 0, renderedHeight = 0;
         bool nativeWindowChanged = false;
+        const auto createRenderer = [&](const void* nativeWindow) {
+            // ModelRenderer references Renderer, which in turn references device.
+            // Replacements must destroy those owners in the reverse order first.
+            if(modelRenderer || renderer || device) throw std::logic_error("Arena GPU owners must be released before recreation.");
+            device.reset(RHI::IDevice::Create(deviceDescription));
+            if(!device) throw std::runtime_error("Arena device creation failed.");
+            renderer = Renderer::Create(*device, nativeWindow, config);
+            if(!renderer || !renderer->AddExtension(std::make_unique<AdvancedRendering>()))
+                throw std::runtime_error("Arena renderer creation failed.");
+            modelRenderer = std::make_unique<ModelRenderer>(*renderer);
+            if(benchmarkRequested)
+            {
+                auto optimization=modelRenderer->GetOptimizationConfig();
+                optimization.cacheSkinTransforms=benchmarkSkinCache;
+                if(!modelRenderer->SetOptimizationConfig(optimization))
+                    throw std::runtime_error("Arena model optimization configuration failed.");
+            }
+            rendererWindow = nativeWindow;
+            nativeWindowChanged = false;
+            clock.Reset();
+        };
         const auto waitForEvents = [&](double seconds) {
             Platform::Window::WaitEvents(seconds);
             // TERM_WINDOW and INIT_WINDOW may reuse the same native address.
@@ -164,6 +227,205 @@ int main(int argc, char** argv)
             "Animated presentation scene. KayKit CC0 assets: %s\n"
             "%u skeleton actors plus one Knight. Space pauses; F1 shows scene controls.\n",
             assets.string().c_str(), actorCount);
+
+        if(benchmarkRequested) createRenderer(window.GetHandle());
+        if(benchmarkRequested)
+        {
+            const auto benchmarkWindow = window.GetHandle();
+            struct Frame
+            {
+                double sceneTime, interval, wall, renderWall;
+                RendererStatistics statistics;
+            };
+            std::vector<Frame> measured;
+            measured.reserve(benchmarkFrames);
+            std::vector<std::pair<uint32_t, Platform::ProfilerTimingSnapshot>> windows;
+            uint64_t lastSequence = renderer->GetProfilerTimingSnapshot().sequence;
+            uint64_t successful = 0, animatedIndex = 0;
+            bool discardBoundaryWindow = true;
+            int measuredWidth = 0, measuredHeight = 0;
+            if(!device->WaitIdle()) throw std::runtime_error("Arena benchmark startup GPU drain failed.");
+            std::fprintf(stderr, "Arena benchmark: %u frozen warm-up + %u measured submissions at %.17g scene s/submission; VSync/HUD off.\n",
+                benchmarkWarmup, benchmarkFrames, benchmarkStep);
+            Platform::CpuTimer intervalTimer, measurementTimer;
+            while(measured.size() < benchmarkFrames)
+            {
+                window.PollEvents();
+                if(!window.IsRunning() || window.GetInput().WasPressed(Key::Escape))
+                    throw std::runtime_error("Arena benchmark interrupted before all submissions completed.");
+                const auto size = window.GetFramebufferSize();
+                if(window.GetHandle() != benchmarkWindow || window.IsMinimized() || size.width <= 0 || size.height <= 0)
+                    throw std::runtime_error("Arena benchmark lost its drawable surface.");
+                if(successful >= benchmarkWarmup && measured.empty())
+                { measuredWidth = size.width; measuredHeight = size.height; }
+                if(!measured.empty() && (size.width != measuredWidth || size.height != measuredHeight))
+                    throw std::runtime_error("Arena benchmark output dimensions changed during measurement.");
+                Platform::CpuTimer frameTimer;
+                const uint64_t poseIndex = successful < benchmarkWarmup ? 0 : measured.size();
+                sceneTime = double(poseIndex)*benchmarkStep;
+                // Do not advance animation again when WSI skips an acquisition.
+                if(poseIndex != animatedIndex)
+                {
+                    actors.SetTime(sceneTime);
+                    characters.Update(actors, float(benchmarkStep));
+                    animatedIndex = poseIndex;
+                }
+                cameraAngle = -.18f*std::sin(float(sceneTime)*.065f);
+                if(!camera.LookAt({23*std::sin(cameraAngle), -23*std::cos(cameraAngle), 26}, {0, 0, .6f}) ||
+                    !camera.SetOrthographic(27.f*float(size.width)/float(size.height), 27, .1f, 130))
+                    throw std::runtime_error("Arena benchmark camera setup failed.");
+                const auto previous = renderer->GetLastRenderCompletion();
+                Platform::CpuTimer renderTimer;
+                if(!modelRenderer->Render(scene, camera)) throw std::runtime_error("Arena benchmark rendering failed.");
+                Frame frame{sceneTime, 0, frameTimer.ElapsedMilliseconds(), renderTimer.ElapsedMilliseconds(), {}};
+                const auto completion = renderer->GetLastRenderCompletion();
+                if(!completion || completion == previous)
+                { Platform::Window::WaitEvents(.001); continue; }
+                ++successful;
+                if(successful <= benchmarkWarmup)
+                {
+                    if(successful == benchmarkWarmup)
+                    {
+                        if(!device->WaitIdle()) throw std::runtime_error("Arena benchmark warm-up GPU drain failed.");
+                        lastSequence = renderer->GetProfilerTimingSnapshot().sequence;
+                        intervalTimer.Reset(); measurementTimer.Reset();
+                        std::fputs("Arena benchmark warm-up complete; recording measured submissions.\n", stderr);
+                    }
+                    continue;
+                }
+                frame.interval = intervalTimer.ElapsedMilliseconds(); intervalTimer.Reset();
+                frame.statistics = renderer->GetLastRenderStatistics();
+                measured.push_back(frame);
+                const auto& timing = renderer->GetProfilerTimingSnapshot();
+                if(timing.sequence != lastSequence)
+                {
+                    lastSequence = timing.sequence;
+                    if(discardBoundaryWindow) discardBoundaryWindow = false;
+                    else windows.emplace_back(uint32_t(measured.size()), timing);
+                }
+            }
+            const double submissionWall = measurementTimer.ElapsedMilliseconds();
+            Platform::CpuTimer drainTimer;
+            if(!device->WaitIdle()) throw std::runtime_error("Arena benchmark final GPU drain failed.");
+            const double finalDrain = drainTimer.ElapsedMilliseconds();
+            const double completedWall = measurementTimer.ElapsedMilliseconds();
+            const auto& applied = renderer->GetAppliedConfig();
+            const auto& stats = measured.front().statistics;
+            std::ostringstream output; output.imbue(std::locale::classic()); output << std::setprecision(17);
+            output << "# arena benchmark v1\n# assets=" << std::quoted(assets.string())
+                << " skeleton_actor_capacity=" << actorCount << " knight_actors=1 entities_end=" << scene.GetEntityCount() << '\n'
+                << "# warmup_submissions=" << benchmarkWarmup << " warmup_time_seconds=0 measured_submissions=" << measured.size()
+                << " benchmark_step_seconds=" << benchmarkStep << " measured_start_time_seconds=0 measured_end_time_seconds=" << sceneTime
+                << " vsync=0 hud=0\n# render=" << stats.renderWidth << 'x' << stats.renderHeight
+                << " output=" << measuredWidth << 'x' << measuredHeight << '\n'
+                << "# measured_submission_wall_ms=" << submissionWall << " final_gpu_drain_ms=" << finalDrain
+                << " measured_through_gpu_drain_ms=" << completedWall
+                << " gpu_completed_submissions_per_second=" << measured.size()*1000.0/completedWall << '\n'
+                << "# quality hdr=" << applied.enableHdrRendering << " scale=" << applied.hdrRenderScale
+                << " exposure=" << applied.exposure << " shadows=" << applied.lighting.shadows
+                << " shadow_quality=" << int(applied.lighting.shadowQuality) << " shadow_distance=" << applied.lighting.shadowDistance
+                << " advanced=" << applied.advanced.enabled << " ao=" << applied.advanced.ambientOcclusion
+                << " gi=" << applied.advanced.diffuseGI << " ssr=" << applied.advanced.reflections
+                << " taa=" << applied.advanced.temporalAA << " bloom=" << applied.advanced.bloom
+                << " transparency=" << applied.advanced.transparency << " auto_exposure=" << applied.advanced.autoExposure
+                << " fog=" << applied.advanced.fog.enabled << " fog_steps=" << applied.advanced.fog.steps
+                << " fog_density=" << applied.advanced.fog.density << '\n'
+                << "# paths cpu_culling=" << applied.enableFrustumCulling << " gpu_culling=" << applied.enableGpuCulling
+                << " occlusion=" << applied.enableOcclusionCulling << " instancing=" << applied.enableInstancing
+                << " lod=" << applied.enableLod << " lod_error=" << applied.lodPixelError
+                << " parallel=" << applied.enableParallelRenderGraph << " workers=" << applied.recordingThreadCount
+                << " skin_transform_cache=" << modelRenderer->GetAppliedOptimizationConfig().cacheSkinTransforms << '\n'
+                << "# device adapter=" << deviceDescription.adapterIndex << " frames_in_flight=" << deviceDescription.maxFramesInFlight
+                << " validation=" << deviceDescription.enableValidation << " timestamp_supported=" << device->Supports(RHI::Feature::TimestampQuery)
+                << " timestamp_bits=" << device->GetTimestampValidBits() << " timestamp_period_ns=" << device->GetTimestampPeriodNanoseconds()
+                << " gpu_name=see_native_device_startup_log\n# arguments=";
+            for(int i=1; i<argc; ++i) output << std::quoted(argv[i]) << ' ';
+            output << "\n# submission_interval_ms includes skipped attempts, event polling and host waits; measurement starts after warm-up drain.\n"
+                << "# Completed-submission throughput includes final GPU drain and excludes warm-up; it is not display presentation FPS.\n"
+                << "# CPU/GPU publication windows are averages, separate from frame rows; the first warm-up boundary window and unpublished trailing samples are omitted.\n"
+                << "# Work-only wall times cover only successful attempts and include ModelRenderer preparation; renderer CPU/GPU windows exclude its preceding deformation work.\n";
+            enum Column { Kind, Index, SceneTime, Interval, Wall, RenderWall, Cpu, Acquire, Prepare, Record, Submit, Present,
+                Sequence, CpuSamples, Gpu, GpuSamples, Draws, ShadowDraws, Instances, Triangles, ShadowTriangles, Culled,
+                Batches, GpuVisibility, GpuOcclusion, ShadowReuse, RenderWidth, RenderHeight, OutputWidth, OutputHeight,
+                Pass, PassMs, PassSamples, ColumnCount };
+            using Row = std::array<std::string, ColumnCount>;
+            const auto set = [](Row& row, Column column, const auto& value) {
+                std::ostringstream text; text.imbue(std::locale::classic()); text << std::setprecision(17) << value;
+                row[column] = text.str();
+            };
+            const auto write = [&](const Row& row) {
+                for(size_t i=0; i<row.size(); ++i)
+                {
+                    if(i) output << ',';
+                    if(row[i].find_first_of(",\"\r\n") == std::string::npos) output << row[i];
+                    else { output << '"'; for(char c : row[i]) { if(c=='"') output << '"'; output << c; } output << '"'; }
+                }
+                output << '\n';
+            };
+            output << "record_type,index,scene_time_seconds,submission_interval_ms,frame_work_wall_ms,render_work_wall_ms,cpu_render_ms,cpu_acquire_ms,cpu_prepare_ms,cpu_record_ms,cpu_submit_ms,cpu_present_ms,profiler_sequence,cpu_samples,gpu_frame_ms,gpu_samples,main_draws,shadow_draws,main_instances,main_triangles,shadow_triangles,culled_entities,indirect_batches,gpu_visibility,gpu_occlusion,shadow_reused,render_width,render_height,output_width,output_height,gpu_pass_name,gpu_pass_ms,gpu_pass_samples\n";
+            std::vector<double> intervals;
+            intervals.reserve(measured.size());
+            for(size_t i=0; i<measured.size(); ++i)
+            {
+                const auto& frame = measured[i]; const auto& s = frame.statistics;
+                Row row{}; row[Kind] = "frame"; set(row, Index, i+1); set(row, SceneTime, frame.sceneTime);
+                set(row, Interval, frame.interval); set(row, Wall, frame.wall); set(row, RenderWall, frame.renderWall);
+                set(row, Draws, s.mainDrawCount); set(row, ShadowDraws, s.shadowDrawCount); set(row, ShadowTriangles, s.shadowTriangleCount);
+                if(!s.gpuVisibility)
+                { set(row, Instances, s.mainInstanceCount); set(row, Triangles, s.mainTriangleCount); set(row, Culled, s.culledEntityCount); }
+                set(row, Batches, s.indirectBatchCount); set(row, GpuVisibility, s.gpuVisibility); set(row, GpuOcclusion, s.gpuOcclusion);
+                set(row, ShadowReuse, s.reusedShadowAtlas); set(row, RenderWidth, s.renderWidth); set(row, RenderHeight, s.renderHeight);
+                set(row, OutputWidth, s.outputWidth); set(row, OutputHeight, s.outputHeight); write(row);
+                intervals.push_back(frame.interval);
+            }
+            double cpuTotal = 0, gpuTotal = 0; uint64_t cpuCount = 0, gpuCount = 0;
+            for(const auto& sample : windows)
+            {
+                const auto& s = sample.second;
+                Row row{}; row[Kind] = "profiler_window"; set(row, Index, sample.first); set(row, Sequence, s.sequence);
+                set(row, Cpu, s.cpuRenderAverageMilliseconds); set(row, CpuSamples, s.frameCount);
+                set(row, Acquire, s.cpuAcquireAverageMilliseconds); set(row, Prepare, s.cpuPrepareAverageMilliseconds);
+                set(row, Record, s.cpuRecordAverageMilliseconds); set(row, Submit, s.cpuSubmitAverageMilliseconds);
+                set(row, Present, s.cpuPresentAverageMilliseconds);
+                cpuTotal += s.cpuRenderAverageMilliseconds*s.frameCount; cpuCount += s.frameCount;
+                if(s.hasGpuFrame && s.gpuFrameSampleCount)
+                {
+                    set(row, Gpu, s.gpuFrameAverageMilliseconds); set(row, GpuSamples, s.gpuFrameSampleCount);
+                    gpuTotal += s.gpuFrameAverageMilliseconds*s.gpuFrameSampleCount; gpuCount += s.gpuFrameSampleCount;
+                }
+                write(row);
+                for(const auto& pass : s.gpuPasses)
+                {
+                    Row passRow{}; passRow[Kind] = "gpu_pass"; set(passRow, Index, sample.first); set(passRow, Sequence, s.sequence);
+                    passRow[Pass] = pass.name; set(passRow, PassMs, pass.averageMilliseconds); set(passRow, PassSamples, pass.sampleCount); write(passRow);
+                }
+            }
+            std::sort(intervals.begin(), intervals.end());
+            const auto percentile = [&](double fraction) { return intervals[size_t(std::ceil(fraction*intervals.size()))-1]; };
+            output << "# summary submission_interval samples=" << intervals.size()
+                << " mean_ms=" << std::accumulate(intervals.begin(), intervals.end(), 0.0)/intervals.size()
+                << " p50_ms=" << percentile(.5) << " p95_ms=" << percentile(.95) << " p99_ms=" << percentile(.99) << '\n'
+                << "# summary profiler_cpu samples=" << cpuCount;
+            if(cpuCount) output << " mean_ms=" << cpuTotal/cpuCount;
+            else output << " unavailable";
+            output << "\n# summary profiler_gpu samples=" << gpuCount;
+            if(gpuCount) output << " mean_ms=" << gpuTotal/gpuCount;
+            else output << " unavailable";
+            output << '\n';
+            // C11 exclusive creation also protects against another run creating
+            // the requested path after the initial argument validation.
+            const auto closeFile = [](std::FILE* value) { (void)std::fclose(value); };
+            std::unique_ptr<std::FILE, decltype(closeFile)> file(std::fopen(benchmarkOutput.c_str(), "wx"), closeFile);
+            if(!file) throw std::runtime_error("Cannot create new arena benchmark output: " + benchmarkOutput);
+            const auto csv = output.str();
+            if(std::fwrite(csv.data(), 1, csv.size(), file.get()) != csv.size())
+                throw std::runtime_error("Arena benchmark output write failed: " + benchmarkOutput);
+            if(std::fclose(file.release()) != 0) throw std::runtime_error("Arena benchmark output close failed: " + benchmarkOutput);
+            std::fprintf(stderr, "Arena benchmark: %.8f GPU-completed submissions/s, mean interval %.6f ms, p95 %.6f ms, p99 %.6f ms; CSV %s.\n",
+                measured.size()*1000.0/completedWall, std::accumulate(intervals.begin(), intervals.end(), 0.0)/intervals.size(),
+                percentile(.95), percentile(.99), benchmarkOutput.c_str());
+            return 0;
+        }
 
         while(window.IsRunning() && (!frameLimit || submitted < frameLimit))
         {
@@ -202,15 +464,7 @@ int main(int argc, char** argv)
             }
             if(!renderer)
             {
-                device.reset(RHI::IDevice::Create(deviceDescription));
-                if(!device) throw std::runtime_error("Arena device creation failed.");
-                renderer = Renderer::Create(*device, nativeWindow, config);
-                if(!renderer || !renderer->AddExtension(std::make_unique<AdvancedRendering>()))
-                    throw std::runtime_error("Arena renderer creation failed.");
-                modelRenderer = std::make_unique<ModelRenderer>(*renderer);
-                rendererWindow = nativeWindow;
-                nativeWindowChanged = false;
-                clock.Reset();
+                createRenderer(nativeWindow);
             }
             const auto& applied = renderer->GetAppliedConfig();
             using Group=showcase::ControlGroup;
