@@ -10,7 +10,7 @@
 - 장면: `BistroExterior.fbx`, `BistroInterior.fbx`, `BistroInterior_Wine.fbx`.
 - 포함 하늘: `san_giuseppe_bridge_4k.hdr`. 배포본 README의 원출처는 HDRI Haven으로 표기되어 있다.
 
-원본 FBX·DDS·HDR·pyscene·README·라이선스는 수정하지 않는다. 실행 중 장면 중심·크기·Y-up을 Z-up으로 맞추며, 원본 FBX 카메라의 시작 구도와 노드 애니메이션을 사용한다. 카메라 클립은 300초로 재생 시간을 조정한다.
+원본 FBX·DDS·HDR·pyscene·README·라이선스는 수정하지 않는다. 실행 중 장면 중심·크기·Y-up을 Z-up으로 맞추며, 원본 FBX 카메라의 시작 구도와 노드 애니메이션을 사용한다. 기본 카메라 투어는 60초로 재생 시간을 조정하며, 별도 카메라 CSV를 지정하면 해당 경로의 재생 시간을 따른다.
 
 DDS는 원래 해상도의 CPU RGBA8로 디코딩한다. Vulkan에서 지원을 확인한 BC1·BC3의 완전한 원본 mip chain은 압축 상태로 GPU에 업로드한다. BC5 노멀의 재구성·스위즐 입력, 불완전 mip 및 다른 백엔드는 기존 RGBA8·CPU mip 생성 경로를 유지한다. 배포본의 Specular 텍스처는 R=AO, G=roughness, B=metallic이며 BaseColor alpha는 opacity다. DirectX 노멀 방향과 BC5의 저장 규약을 반영한다. 원본 mip 사용 결과가 기존 재생성 mip과 RGB까지 같다고 주장하지 않는다.
 

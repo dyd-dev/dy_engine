@@ -1,6 +1,20 @@
 # Showcase 구성과 에셋
 
-Linux 하이브리드 노트북에서 NVIDIA를 지정해 Bistro를 실행하는 예:
+Linux·Wayland에서 Bistro를 실행하는 예:
+
+```sh
+./build/showcase/showcase exterior
+./build/showcase/showcase interior
+./build/showcase/showcase night
+./build/showcase/showcase emerald
+```
+
+발표의 장면별 역할·구도·조작과 탐색 기록은 [발표 초안](Presentation.md)에 정리한다.
+현재 RTX 3060·Sway 환경에서는 Wayland 경로를 사용하며, 화면을 방해하지 않는 탐색에는
+실제 데스크톱과 분리된 임시 headless Wayland 환경을 사용했다.
+headless 완료 처리량은 실제 작업 공간의 화면 표시 FPS와 구분한다.
+
+Linux 하이브리드 노트북에서 NVIDIA를 별도로 지정해야 할 때의 실행 예:
 
 ```sh
 __NV_PRIME_RENDER_OFFLOAD=1 __VK_LAYER_NV_optimus=NVIDIA_only ./build/showcase/showcase night
@@ -8,9 +22,9 @@ __NV_PRIME_RENDER_OFFLOAD=1 __VK_LAYER_NV_optimus=NVIDIA_only ./build/showcase/s
 
 `exterior`는 기존 낮 장면, `night` 또는 `exterior --night`는 별도 야간 프리셋이다.
 야간은 어두운 하늘·달빛과 전등 위치의 점/스폿·LTC 면광원을 사용하며,
-낮 장면과 FPS를 같은 조건으로 비교하지 않는다. RTX 4050·NVIDIA 550의 이 환경에서는
-Wayland swapchain 생성이 실패했으나 `DY_LINUX_WINDOW_SYSTEM=X11` 빌드의
-XWayland 출력은 동작했다. 드라이버·compositor 조합에 따른 실측 결과다.
+낮 장면과 FPS를 같은 조건으로 비교하지 않는다. 과거 RTX 4050·NVIDIA 550 환경에서는
+Wayland swapchain 생성이 실패했고 `DY_LINUX_WINDOW_SYSTEM=X11` 빌드의
+XWayland 출력은 동작했다. 이 기록은 현재 RTX 3060 환경과 다른 드라이버·compositor 조합의 결과다.
 
 `DY_BUILD_SHOWCASE=ON`으로 Arena·Culling·Cinematic을 선택한다.
 필요한 Model·AdvancedRendering도 함께 활성화한다.

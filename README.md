@@ -34,9 +34,8 @@ DirectX 12, Vulkan, Metal은 드라이버가 감추던 리소스 상태, 동기�
 
 | 자료 | 링크 |
 | --- | --- |
-| 프로젝트 계획서 PPT | [docs/dy_engine_plan.pptx](docs/dy_engine_plan.pptx) |
-| 프로젝트 발표 자료 | [docs/dy_engine_presentation.pdf](docs/dy_engine_presentation.pdf) |
-| 프로젝트 보고서 | [docs/dy_engine_보고서_DyD팀.docx](docs/dy_engine_보고서_DyD팀.docx) |
+| 발표 범위·시연 계획 | [showcase/Presentation.md](showcase/Presentation.md) |
+| Showcase 실행·에셋 안내 | [showcase/README.md](showcase/README.md) |
 
 ## 팀원소개
 
