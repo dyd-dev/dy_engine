@@ -887,10 +887,12 @@ class GenerateTests(unittest.TestCase):
             index = pages["component/api-index.html"]
             self.assertIn('class="index-section dyf-reference" id="module-dyf"', index)
             self.assertIn('<section class="index-section" id="module-rhi"><h2>RHI</h2>', index)
-            self.assertEqual(index.count('class="rhi-class-card"'), 2)
+            self.assertEqual(index.count('class="rhi-class-card"'), 3)
             self.assertIn("// dyf example", pages[reference.url("dyf::Canvas")])
             rhi_url = reference.url("dyf::RHI::Device")
             self.assertIn("// RHI example", pages[rhi_url])
+            self.assertIn('<section id="description"><h2>역할 및 설명</h2>', pages[rhi_url])
+            self.assertIn('<section id="methods"><h2>함수 목록</h2>', pages[rhi_url])
             self.assert_local_links_resolve(pages)
             for name, source in pages.items():
                 path = output / name
