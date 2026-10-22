@@ -48,11 +48,19 @@ float4 main(Input input):SV_Target
     float3 n=Normal(guide.gb);float4 sum=0;float total=0;int step=int(operation.w+.5);
     for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x)
     {
-        int2 q=pixel+int2(x,y)*step;float4 g=Load(guideImage,q);if(g.r<=0)continue;
-        float4 color=FiniteColor(Load(sourceImage,q));float weight=float((x==0?2:1)*(y==0?2:1));
+        bool centerTap=x==0 && y==0;
+        int2 q=pixel+int2(x,y)*step;float4 g=guide;
+        if(!centerTap)g=Load(guideImage,q);
+        if(g.r<=0)continue;
+        float4 color=center;float3 sampleNormal=n;float sampleLog=centerLog;
+        if(!centerTap)
+        {
+            color=FiniteColor(Load(sourceImage,q));sampleNormal=Normal(g.gb);sampleLog=LogLuminance(color.rgb);
+        }
+        float weight=float((x==0?2:1)*(y==0?2:1));
         weight*=exp(-abs(g.r-guide.r)/max(.01,guide.r*.01*float(step)));
-        weight*=pow(max(dot(n,Normal(g.gb)),0),32)*exp(-abs(g.a-guide.a)*16);
-        weight*=exp(-abs(LogLuminance(color.rgb)-centerLog)/max(4*sigma,.001));
+        weight*=pow(max(dot(n,sampleNormal),0),32)*exp(-abs(g.a-guide.a)*16);
+        weight*=exp(-abs(sampleLog-centerLog)/max(4*sigma,.001));
         if(operation.y>.5)weight*=exp(-abs(color.a-center.a)*4);
         sum+=color*weight;total+=weight;
     }
@@ -66,12 +74,14 @@ Output main(Input input)
     float4 motion=Load(motionImage,fullPixel),surface=Load(normalImage,fullPixel),current=FiniteColor(Load(sourceImage,pixel));
     output.guide=float4(max(motion.z,0),surface.xy,saturate(surface.z));
     if(motion.z<=0) {output.color=0;output.moments=0;output.guide=0;return output;}
-    float mean=0,second=0;
+    float currentLog=LogLuminance(current.rgb),mean=0,second=0;
     for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x)
     {
-        float l=LogLuminance(FiniteColor(Load(sourceImage,pixel+int2(x,y))).rgb);mean+=l/9;second+=l*l/9;
+        float l=currentLog;
+        if(x!=0 || y!=0)l=LogLuminance(FiniteColor(Load(sourceImage,pixel+int2(x,y))).rgb);
+        mean+=l/9;second+=l*l/9;
     }
-    float variance=max(second-mean*mean,0),currentLog=LogLuminance(current.rgb);
+    float variance=max(second-mean*mean,0);
     float4 oldColor=0,oldMoments=0;float accepted=0;
     float2 currentUV=(float2(fullPixel)+.5)*size.zw,previousUV=currentUV-motion.xy;
     uint w,h;sourceImage.GetDimensions(w,h);int2 dimensions=int2(w,h);

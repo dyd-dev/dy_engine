@@ -231,10 +231,27 @@ vec4 composite(vec2 p)
     for(int y=0;y<2;++y)for(int x=0;x<2;++x)
     {
         vec2 q=clamp((base+vec2(x,y)+0.5)/dimensions,vec2(0),vec2(1));
-        vec2 surfaceUV=halfSurfaceUV(q);
-        float sampleDepth=depthAt(surfaceUV);if(sampleDepth<=0.0)continue;
+        float sampleDepth=0.0;vec3 sampleNormal=vec3(0);
+        bool guided=false;
+        if(operation.w>0.5)
+        {
+            // The current denoise guide stores the same representative depth and packed normal.
+            vec4 guide=geometry(albedoImage,q);
+            if(guide.r>0.0)
+            {
+                sampleDepth=guide.r;
+                sampleNormal=normalize(mat3(frame.view)*decodeWorldNormal(guide.gb));
+                guided=true;
+            }
+        }
+        if(!guided)
+        {
+            vec2 surfaceUV=halfSurfaceUV(q);
+            sampleDepth=depthAt(surfaceUV);if(sampleDepth<=0.0)continue;
+            sampleNormal=normalView(surfaceUV);
+        }
         float weight=(x==0?1.0-fraction.x:fraction.x)*(y==0?1.0-fraction.y:fraction.y)
-            *exp(-abs(depth-sampleDepth)/max(0.05,depth*0.02))*pow(max(dot(n,normalView(surfaceUV)),0.0),16.0);
+            *exp(-abs(depth-sampleDepth)/max(0.05,depth*0.02))*pow(max(dot(n,sampleNormal),0.0),16.0);
         if(frame.options.y>0.5)gi+=texture(sampler2D(sourceImage,linearSampler),q).rgb*weight;
         if(frame.options.z>0.5)reflection+=texture(sampler2D(reflectionImage,linearSampler),q)*weight;
         total+=weight;

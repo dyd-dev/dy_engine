@@ -218,6 +218,9 @@ bool GpuVisibility::AddPasses(RHI::RenderGraph& graph)
     if(!inputs.IsValid() || !batches.IsValid() || !frame.IsValid() || !history.IsValid() ||
         !m_instancesGraph.IsValid() || !m_argumentsGraph.IsValid()) return false;
     const auto pipeline=m_pipeline;const auto resources=m_resources;
+    // Preparation is restricted to stock instance streams. Unsupported devices
+    // retain zero firstInstance and select each batch through its VB offset.
+    const uint32_t baseInstance=m_device.Supports(Feature::IndirectFirstInstance)?1u:0u;
     for(uint32_t operation=0;operation<2;++operation)
     {
         auto& pass=graph.AddPass(operation?"GPU frustum and LOD selection":"GPU indirect reset", RHI::RGRecordingMode::Independent);
@@ -227,7 +230,7 @@ bool GpuVisibility::AddPasses(RHI::RenderGraph& graph)
         if(operation) pass.Read(m_argumentsGraph,ResourceState::UnorderedAccess);
         const auto count=operation?m_frameData.counts[0]:std::max(m_frameData.counts[0],m_frameData.counts[1]);
         const uint32_t groups=count/64+(count%64!=0),groupsX=std::min(groups,65535u),groupsY=groups/groupsX+(groups%groupsX!=0);
-        const std::array<uint32_t,4> push={operation,groupsX*64,m_resetHistory?1u:0u,0};
+        const std::array<uint32_t,4> push={operation,groupsX*64,m_resetHistory?1u:0u,baseInstance};
         pass.SetExecute([pipeline,resources,push,groupsX,groupsY](ICommandList* commands) {
             commands->BindComputePipeline(pipeline);commands->BindResourceSet(resources);
             commands->SetInlineConstants(0,sizeof(push),push.data());commands->Dispatch(groupsX,groupsY,1);
@@ -367,6 +370,7 @@ bool GpuVisibility::AddOcclusionPasses(RHI::RenderGraph& graph,RHI::TextureHandl
             commands->SetInlineConstants(0,sizeof(operation),operation.data());commands->Dispatch(width/8+(width%8!=0),height/8+(height%8!=0),1);
         });
     }
+    const uint32_t baseInstance=m_device.Supports(Feature::IndirectFirstInstance)?1u:0u;
     for(uint32_t operation=0;operation<2;++operation)
     {
         auto& pass=graph.AddPass(operation?"GPU HiZ occlusion selection":"GPU occlusion indirect reset", RHI::RGRecordingMode::Independent);
@@ -377,7 +381,7 @@ bool GpuVisibility::AddOcclusionPasses(RHI::RenderGraph& graph,RHI::TextureHandl
         if(operation) pass.Read(m_argumentsGraph,ResourceState::UnorderedAccess);
         const auto count=operation?m_frameData.counts[0]:std::max(m_frameData.counts[0],m_frameData.counts[1]);
         const uint32_t groups=count/64+(count%64!=0),groupsX=std::min(groups,65535u),groupsY=groups/groupsX+(groups%groupsX!=0);
-        const std::array<uint32_t,4> push={operation,groupsX*64,0,0};
+        const std::array<uint32_t,4> push={operation,groupsX*64,0,baseInstance};
         const auto pipeline=m_occlusionPipeline;const auto resources=m_occlusionResources;
         pass.SetExecute([pipeline,resources,push,groupsX,groupsY](ICommandList* commands) {
             commands->BindComputePipeline(pipeline);commands->BindResourceSet(resources);

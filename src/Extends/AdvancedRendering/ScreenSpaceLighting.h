@@ -135,12 +135,14 @@ private:
     void ReleaseDenoise(uint32_t effect);
     RHI::ResourceSetHandle DenoiseResources(RHI::PipelineHandle,const std::array<RHI::TextureHandle,6>&);
     bool AddDenoise(RHI::RenderGraph&,uint32_t effect,RHI::TextureHandle raw,RHI::RGResourceHandle rawGraph,
-        RHI::TextureHandle& filtered,RHI::RGResourceHandle& filteredGraph);
+        RHI::TextureHandle& filtered,RHI::RGResourceHandle& filteredGraph,
+        RHI::TextureHandle& guide,RHI::RGResourceHandle& guideGraph);
     bool Upload(RHI::ICommandList&,RHI::BufferHandle&,bool& ready,
         const void*,uint32_t,uint32_t,RHI::BufferUsage,RHI::ResourceState,uint32_t capacityBytes=0);
     RHI::ResourceSetHandle SurfaceResources(const SurfaceDraw&,RHI::PipelineHandle);
     RHI::ResourceSetHandle ScreenResources(RHI::PipelineHandle,RHI::TextureHandle source,
-        RHI::TextureHandle hdr,RHI::TextureHandle environment,RHI::TextureHandle reflection);
+        RHI::TextureHandle hdr,RHI::TextureHandle environment,RHI::TextureHandle reflection,
+        RHI::TextureHandle guide=nullptr);
     void DrawScreen(RHI::ICommandList&,RHI::PipelineHandle,RHI::ResourceSetHandle,
         RHI::TextureHandle output,const std::array<float,4>&);
     void DestroySets();
@@ -172,6 +174,8 @@ private:
     FrameGPU m_uploadedFrame={};
     std::vector<DrawGPU> m_gpuDraws,m_gpuScratch;
     std::vector<SurfaceDraw> m_draws;
+    std::vector<uint32_t> m_drawOrder;
+    std::vector<double> m_drawDepths;
     std::vector<RHI::ResourceSetHandle> m_drawSets;
     std::vector<ScreenSet> m_screenSets;
     std::unordered_map<SurfaceSetKey,RHI::ResourceSetHandle,SurfaceSetHash> m_surfaceSets;

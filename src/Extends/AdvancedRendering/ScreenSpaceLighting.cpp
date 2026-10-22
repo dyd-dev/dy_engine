@@ -33,7 +33,7 @@ ScreenSpaceLighting::~ScreenSpaceLighting() { Reset(); }
 
 void ScreenSpaceLighting::Invalidate()
 {
-    m_historyValid=false;m_draws.clear();
+    m_historyValid=false;m_draws.clear();m_drawOrder.clear();
     for(auto& effect:m_effectHistory) {effect.valid=false;effect.pending=false;}
 }
 
@@ -119,7 +119,7 @@ ResourceSetHandle ScreenSpaceLighting::DenoiseResources(PipelineHandle pipeline,
 }
 
 bool ScreenSpaceLighting::AddDenoise(RenderGraph& graph,uint32_t effect,TextureHandle raw,RGResourceHandle rawGraph,
-    TextureHandle& filtered,RGResourceHandle& filteredGraph)
+    TextureHandle& filtered,RGResourceHandle& filteredGraph,TextureHandle& guide,RGResourceHandle& guideGraph)
 {
     auto& history=m_effectHistory[effect];
     const std::string name=effect?"SSR":"SSGI";
@@ -176,7 +176,8 @@ bool ScreenSpaceLighting::AddDenoise(RenderGraph& graph,uint32_t effect,TextureH
         });
         source=target.image;sourceGraph=destination;
     }
-    filtered=source;filteredGraph=sourceGraph;history.pending=true;
+    filtered=source;filteredGraph=sourceGraph;
+    guide=current[2].image;guideGraph=output[2];history.pending=true;
     return true;
 }
 
@@ -218,7 +219,7 @@ void ScreenSpaceLighting::Reset()
     m_depthCopyPipeline=nullptr;m_depthCopyShader=nullptr;
     m_depthPlaneAttempted=m_depthPlaneActive=false;
     m_frameReady=m_drawReady=m_historyValid=m_prepared=false;m_draws.clear();m_graph={};
-    m_gpuDraws.clear();m_gpuScratch.clear();
+    m_gpuDraws.clear();m_gpuScratch.clear();m_drawOrder.clear();m_drawDepths.clear();
     m_effectHistory={};m_denoiseShaders={};m_denoisePipelines={};
 }
 
@@ -488,6 +489,39 @@ bool ScreenSpaceLighting::Prepare(IDevice& device,ICommandList& uploads,TextureH
     }
     if(m_gpuScratch.empty()) m_gpuScratch.push_back({});
     if(m_gpuScratch.size()>UINT32_MAX/sizeof(DrawGPU)) return fail();
+    m_drawOrder.resize(m_draws.size());m_drawDepths.resize(m_draws.size());
+    bool sortDraws=camera.view.m[3]==0 && camera.view.m[7]==0 &&
+        camera.view.m[11]==0 && camera.view.m[15]==1;
+    for(float value:camera.view.m) sortDraws=sortDraws && std::isfinite(value);
+    for(uint32_t i=0;i<m_draws.size();++i)
+    {
+        m_drawOrder[i]=i;
+        if(!sortDraws) continue;
+        const auto& draw=m_draws[i];const auto& bounds=draw.localBounds;
+        if(!bounds.valid || draw.model.m[3]!=0 || draw.model.m[7]!=0 ||
+            draw.model.m[11]!=0 || draw.model.m[15]!=1)
+        {sortDraws=false;continue;}
+        const auto viewModel=camera.view*draw.model;
+        const double minimum[]={bounds.min.x,bounds.min.y,bounds.min.z};
+        const double maximum[]={bounds.max.x,bounds.max.y,bounds.max.z};
+        double depth=-double(viewModel.m[14]);
+        for(uint32_t axis=0;axis<3;++axis)
+        {
+            if(!std::isfinite(minimum[axis]) || !std::isfinite(maximum[axis]) || minimum[axis]>maximum[axis])
+            {sortDraws=false;break;}
+            const double coefficient=-double(viewModel.m[axis*4+2]);
+            depth+=coefficient*(coefficient>=0?minimum[axis]:maximum[axis]);
+        }
+        if(!std::isfinite(depth) || std::abs(depth)>1e32) sortDraws=false;
+        m_drawDepths[i]=depth;
+    }
+    if(sortDraws)
+        std::sort(m_drawOrder.begin(),m_drawOrder.end(),[&](uint32_t a,uint32_t b) {
+            const double first=m_drawDepths[a],second=m_drawDepths[b];
+            return first<second || (first==second && a<b);
+        });
+    // Sort whole draw invocations only. Instance runs, indirect offsets and the
+    // original DrawGPU indices stay intact; batch bounds remain representative.
     FrameGPU frame;
     frame.view=camera.view;frame.projection=camera.projection;
     frame.viewProjection=camera.projection*camera.view;
@@ -540,11 +574,11 @@ ResourceSetHandle ScreenSpaceLighting::SurfaceResources(const SurfaceDraw& draw,
 }
 
 ResourceSetHandle ScreenSpaceLighting::ScreenResources(PipelineHandle pipeline,TextureHandle source,
-    TextureHandle hdr,TextureHandle environment,TextureHandle reflection)
+    TextureHandle hdr,TextureHandle environment,TextureHandle reflection,TextureHandle guide)
 {
     const auto fallback=m_textures[Albedo];
     const bool depthAware=pipeline==m_screenPipeline || pipeline==m_lightingPipeline;
-    const std::array<TextureHandle,8> images={m_textures[Normal],m_textures[Motion],m_textures[Albedo],
+    const std::array<TextureHandle,8> images={m_textures[Normal],m_textures[Motion],guide?guide:m_textures[Albedo],
         hdr?hdr:fallback,environment?environment:fallback,source?source:fallback,reflection?reflection:fallback,
         depthAware && m_depthPlaneActive?m_depthPlane:m_textures[Motion]};
     for(auto& cached:m_screenSets)
@@ -644,22 +678,44 @@ bool ScreenSpaceLighting::AddSurface(RenderGraph& graph,RGResourceHandle depth,
         commands->SetScissor({0,0,m_width,m_height});
         PipelineHandle boundPipeline=nullptr;
         ResourceSetHandle boundSet=nullptr;
-        for(uint32_t i=0;i<m_draws.size();++i)
+        BufferHandle boundInstances=nullptr;
+        uint32_t boundInstanceOffset=0;
+        bool instanceBindingValid=false;
+        const bool baseInstance=m_device->Supports(Feature::IndirectFirstInstance);
+        for(uint32_t i:m_drawOrder)
         {
             const auto& draw=m_draws[i];
             auto* pipeline=m_surfacePipelines[m_gpuDraws[i].pipelineIndex];
             if(pipeline!=boundPipeline)
-            {commands->BindGraphicsPipeline(pipeline);boundPipeline=pipeline;boundSet=nullptr;}
+            {
+                commands->BindGraphicsPipeline(pipeline);boundPipeline=pipeline;boundSet=nullptr;
+                instanceBindingValid=false;
+            }
             if(m_drawSets[i]!=boundSet)
             {commands->BindResourceSet(m_drawSets[i]);boundSet=m_drawSets[i];}
             commands->BindVertexBuffer(0,draw.vertexBuffer,0);
             commands->BindVertexBuffer(1,draw.previousVertexBuffer?draw.previousVertexBuffer:draw.vertexBuffer,0);
-            commands->BindVertexBuffer(2,draw.instanceBuffer?draw.instanceBuffer:draw.vertexBuffer,draw.instanceOffset);
+            constexpr uint32_t instanceStride=128;
+            const bool directBaseInstance=baseInstance && draw.instanceBuffer && !draw.indirectArguments &&
+                draw.instanceOffset%instanceStride==0 &&
+                uint64_t(draw.instanceOffset)+uint64_t(draw.instanceCount)*instanceStride<=draw.instanceBuffer->GetDesc().size;
+            const uint32_t instanceOffset=directBaseInstance?0:draw.instanceOffset;
+            if(!draw.instanceBuffer)
+            {
+                commands->BindVertexBuffer(2,draw.vertexBuffer,draw.instanceOffset);
+                instanceBindingValid=false;
+            }
+            else if(!instanceBindingValid || draw.instanceBuffer!=boundInstances || instanceOffset!=boundInstanceOffset)
+            {
+                commands->BindVertexBuffer(2,draw.instanceBuffer,instanceOffset);
+                boundInstances=draw.instanceBuffer;boundInstanceOffset=instanceOffset;instanceBindingValid=true;
+            }
             commands->BindIndexBuffer(draw.indexBuffer,Format::R32_UINT,0);
             const uint32_t index[4]={i,draw.instanceBuffer?1u:0u,draw.deformationHistoryValid?1u:0u,0};
             commands->SetInlineConstants(0,sizeof(index),index);
             if(draw.indirectArguments) commands->DrawIndexedIndirect(draw.indirectArguments,draw.indirectOffset);
-            else commands->DrawIndexedInstanced(draw.indexCount,draw.instanceCount,0,0,0);
+            else commands->DrawIndexedInstanced(draw.indexCount,draw.instanceCount,0,0,
+                directBaseInstance?draw.instanceOffset/instanceStride:0);
         }
         commands->EndRendering();
     });
@@ -744,6 +800,8 @@ bool ScreenSpaceLighting::AddLighting(RenderGraph& graph,RGResourceHandle hdr,Te
         projection[13]==0 && projection[15]==0;
     std::array<TextureHandle,2> filtered={};
     std::array<RGResourceHandle,2> filteredGraph;
+    std::array<TextureHandle,2> guides={};
+    std::array<RGResourceHandle,2> guideGraphs;
     for(uint32_t effect=0;effect<2;++effect)
     {
         if(!enabled[effect]) continue;
@@ -759,21 +817,27 @@ bool ScreenSpaceLighting::AddLighting(RenderGraph& graph,RGResourceHandle hdr,Te
         pass.SetExecute([this,rays,target=m_textures[targets[effect]],effect,sparseProjection](ICommandList* commands) {
             DrawScreen(*commands,m_lightingPipeline,rays,target,{2,sparseProjection?1.f:0.f,m_depthPlaneActive?1.f:0.f,float(effect)});
         });
-        if(!AddDenoise(graph,effect,m_textures[targets[effect]],m_handles[targets[effect]],filtered[effect],filteredGraph[effect]))
+        if(!AddDenoise(graph,effect,m_textures[targets[effect]],m_handles[targets[effect]],
+            filtered[effect],filteredGraph[effect],guides[effect],guideGraphs[effect]))
             return fail();
     }
-    auto* composite=ScreenResources(m_screenPipeline,filtered[0],hdrTexture,envTexture,filtered[1]);
+    // Both effects write the same current-frame representative surface guide.
+    const uint32_t guideEffect=m_settings.diffuseGI?0u:1u;
+    const auto guide=guides[guideEffect];const auto guideGraph=guideGraphs[guideEffect];
+    const bool useGuide=guide && guideGraph.IsValid();
+    auto* composite=ScreenResources(m_screenPipeline,filtered[0],hdrTexture,envTexture,filtered[1],useGuide?guide:nullptr);
     if(!composite) return fail();
     auto& resolve=graph.AddPass(m_depthPlaneActive?"Screen lighting resolve R32 depth":"Screen lighting resolve", RHI::RGRecordingMode::Independent);
     if(m_depthPlaneActive) resolve.Read(m_depthPlaneHandle,ResourceState::ShaderResource);
+    if(useGuide) resolve.Read(guideGraph,ResourceState::ShaderResource);
     resolve.Read(hdr,ResourceState::ShaderResource).Read(m_handles[Normal],ResourceState::ShaderResource)
         .Read(m_handles[Motion],ResourceState::ShaderResource).Read(m_handles[Albedo],ResourceState::ShaderResource)
         .Read(m_frameHandle,ResourceState::ConstantBuffer).Write(m_handles[Color],ResourceState::RenderTarget);
     if(m_settings.diffuseGI) resolve.Read(filteredGraph[0],ResourceState::ShaderResource);
     if(m_settings.reflections) resolve.Read(filteredGraph[1],ResourceState::ShaderResource)
         .Read(environment,ResourceState::ShaderResource);
-    resolve.SetExecute([this,composite](ICommandList* commands) {
-        DrawScreen(*commands,m_screenPipeline,composite,m_textures[Color],{3,0,m_depthPlaneActive?1.f:0.f,0});
+    resolve.SetExecute([this,composite,useGuide](ICommandList* commands) {
+        DrawScreen(*commands,m_screenPipeline,composite,m_textures[Color],{3,0,m_depthPlaneActive?1.f:0.f,useGuide?1.f:0.f});
     });
     m_colorOutput=m_textures[Color];m_graph.color=m_handles[Color];
     return true;
@@ -834,7 +898,7 @@ bool ScreenSpaceLighting::AddDebugView(RenderGraph& graph,TextureHandle output,R
 
 void ScreenSpaceLighting::CommitFrame()
 {
-    m_draws.clear();
+    m_draws.clear();m_drawOrder.clear();
     for(uint32_t i=0;i<ImageCount;++i)
         if(m_imported[i]) m_states[i]=ResourceState::ShaderResource;
     if(m_depthPlaneHandle.IsValid()) m_depthPlaneState=ResourceState::ShaderResource;

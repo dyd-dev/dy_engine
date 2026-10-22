@@ -9,7 +9,9 @@
 #include "dyf/RHI/Texture.h"
 #include "../RHI/ResourceSet.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 
 namespace dyf
@@ -91,6 +93,7 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 	commands.SetScissor({0, 0, target->GetDesc().width, target->GetDesc().height});
     const bool stock=stockDrawInputs;
     const bool instanced=UsesInstanceStream();
+    const bool baseInstance=stock && instanced && device->Supports(RHI::Feature::IndirectFirstInstance);
 	const bool batchBindings = shaderSources.bytes[MeshFragment].empty();
 	const bool separateTransparency=m_environmentCapture || wireframeActive || UsesSeparateTransparency();
 	const auto blended=[&](uint32_t index) {
@@ -122,6 +125,42 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 	}
 	RHI::ResourceSetHandle boundMaterial = nullptr;
 	RHI::PipelineHandle boundPipeline=pipeline;
+    const bool reuseInlineConstants=stock && instanced && shaderSources.bytes[MeshFragment].empty();
+    constexpr uint32_t inlineTailOffset=offsetof(DrawConstants,textureFlags);
+    constexpr uint32_t inlineTailSize=sizeof(DrawConstants)-inlineTailOffset;
+    std::array<std::byte,inlineTailSize> inlineTail={};
+    bool inlineConstantsValid=false;
+    const auto writeConstants=[&](const DrawConstants& constants) {
+        if(!reuseInlineConstants)
+        {
+            commands.SetInlineConstants(0,sizeof(constants),&constants);
+            return;
+        }
+        const auto* tail=reinterpret_cast<const std::byte*>(&constants)+inlineTailOffset;
+        // VP is fixed for this pass; stock instanced shaders ignore modelMatrix.
+        // A pipeline selection still requires a complete first write for coverage.
+        if(!inlineConstantsValid)
+        {
+            commands.SetInlineConstants(0,sizeof(constants),&constants);
+            inlineConstantsValid=true;
+        }
+        else
+        {
+            if(std::memcmp(inlineTail.data(),tail,inlineTailSize)==0)return;
+            commands.SetInlineConstants(inlineTailOffset,inlineTailSize,tail);
+        }
+        std::memcpy(inlineTail.data(),tail,inlineTailSize);
+    };
+    RHI::BufferHandle boundInstances=nullptr;
+    uint32_t boundInstanceOffset=0;
+    bool instanceBindingValid=false;
+    const auto bindInstances=[&](RHI::BufferHandle buffer,uint32_t offset) {
+        if(!instanced || !instanceBindingValid || buffer!=boundInstances || offset!=boundInstanceOffset)
+        {
+            commands.BindVertexBuffer(1,buffer,offset);
+            boundInstances=buffer;boundInstanceOffset=offset;instanceBindingValid=true;
+        }
+    };
 	if(visibilityActive || cpuBatchesActive)
 	{
 		recordingStatistics.gpuVisibility=visibilityActive;
@@ -171,6 +210,8 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 			if(selectedPipeline!=boundPipeline)
 			{
 				commands.BindGraphicsPipeline(selectedPipeline);boundPipeline=selectedPipeline;boundMaterial=nullptr;
+                instanceBindingValid=false;
+                inlineConstantsValid=false;
 			}
 			auto selectedSet=materialSets[draw.material];
 			if(selectedSet && selectedSet->GetPipeline()!=selectedPipeline)
@@ -184,8 +225,9 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 				boundMaterial=selectedSet;commands.BindResourceSet(boundMaterial);
 			}
 			commands.BindVertexBuffer(0,input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer,0);
-			commands.BindVertexBuffer(1,visibilityActive ? gpuVisibility->GetInstanceBuffer() : cpuInstanceBuffer,
-				(visibilityActive ? gpuVisibility->GetBatch(batchIndex).instanceOffset : draw.instanceOffset)*sizeof(GpuVisibility::VisibleInstance));
+            const uint32_t firstInstance=visibilityActive ? gpuVisibility->GetBatch(batchIndex).instanceOffset : draw.instanceOffset;
+			bindInstances(visibilityActive ? gpuVisibility->GetInstanceBuffer() : cpuInstanceBuffer,
+				baseInstance ? 0 : firstInstance*sizeof(GpuVisibility::VisibleInstance));
 			commands.BindIndexBuffer(MainIndexBuffer(mesh,draw.level,material,input),RHI::Format::R32_UINT,0);
 			const uint32_t flags=materialStates[draw.material].textureFlags |
 				(scene.GetEntityLighting(entity).receiveShadow ? 32u : 0u);
@@ -197,7 +239,7 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 			}
 			if(m_environmentCapture && !m_environmentCaptureEmitters)constants.emissiveColor={};
 			constants.padding2=draw.material;
-			commands.SetInlineConstants(0,sizeof(constants),&constants);
+			writeConstants(constants);
             if(visibilityActive)
             {
                 commands.DrawIndexedIndirect(gpuVisibility->GetArgumentsBuffer(),batchIndex*sizeof(RHI::DrawIndexedIndirectArguments));
@@ -206,7 +248,7 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
             else
             {
                 const auto indexCount=draw.level ? mesh.lods[draw.level-1].count : mesh.indexCount;
-                commands.DrawIndexedInstanced(indexCount,draw.instanceCount,0,0,0);
+                commands.DrawIndexedInstanced(indexCount,draw.instanceCount,0,0,baseInstance?firstInstance:0);
                 recordingStatistics.mainInstanceCount+=draw.instanceCount;
                 recordingStatistics.mainTriangleCount+=uint64_t(indexCount/3)*draw.instanceCount;
                 recordingStatistics.mainOriginalTriangleCount+=uint64_t(mesh.indexCount/3)*draw.instanceCount;
@@ -215,6 +257,8 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 			++recordingStatistics.mainDrawCount;
 		}
 	}
+    // The legacy draw chunk starts with its own instance binding.
+    instanceBindingValid=false;
 	for(uint32_t orderIndex = 0; orderIndex < mainEntityOrder.size(); ++orderIndex)
 	{
 		const uint32_t entityIndex=mainEntityOrder[orderIndex];
@@ -284,8 +328,10 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 			commands.BindGraphicsPipeline(selectedPipeline);
 			boundPipeline=selectedPipeline;
 			boundMaterial=nullptr;
+            instanceBindingValid=false;
+            inlineConstantsValid=false;
 		}
-        if(instanced)commands.BindVertexBuffer(1,instanceBuffer,entityIndex*2*sizeof(Math::float4x4));
+        if(instanced)bindInstances(instanceBuffer,baseInstance?0:entityIndex*2*sizeof(Math::float4x4));
 		auto selectedSet=materialSets[setIndex];
 		if(selectedSet && selectedSet->GetPipeline()!=selectedPipeline)
 		{
@@ -312,10 +358,10 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 		}
 		if(m_environmentCapture && !m_environmentCaptureEmitters) constants.emissiveColor={};
 		constants.padding2 = materialIndex;
-		commands.SetInlineConstants(0, sizeof(constants), &constants);
+		writeConstants(constants);
 		if(input && !input->inlineConstants.empty())
 			commands.SetInlineConstants(sizeof(constants), static_cast<uint32_t>(input->inlineConstants.size()), input->inlineConstants.data());
-        commands.DrawIndexedInstanced(indexCount,count,0,0,0);
+        commands.DrawIndexedInstanced(indexCount,count,0,0,baseInstance?entityIndex:0);
         ++recordingStatistics.mainDrawCount;recordingStatistics.mainInstanceCount+=count;
         recordingStatistics.mainTriangleCount+=uint64_t(indexCount/3)*count;
         recordingStatistics.mainOriginalTriangleCount+=uint64_t(mesh.indexCount/3)*count;

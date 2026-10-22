@@ -66,7 +66,8 @@ void main()
         {
             Batch batch=batches[id];uint offset=id*5;
             arguments[offset]=batch.indexCount;arguments[offset+1]=0;
-            arguments[offset+2]=batch.firstIndex;arguments[offset+3]=uint(batch.vertexOffset);arguments[offset+4]=0;
+            arguments[offset+2]=batch.firstIndex;arguments[offset+3]=uint(batch.vertexOffset);
+            arguments[offset+4]=operation.values.w!=0?batch.instanceOffset:0;
         }
         if(operation.values.z!=0 && id<frame.counts.x) history[id]=0;
         return;

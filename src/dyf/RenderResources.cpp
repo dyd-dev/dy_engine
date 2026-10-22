@@ -137,6 +137,7 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
     if(!frame.requirements.needsGeometry && !frame.requirements.needsSurface) return;
     frame.geometry.reserve(scene.GetEntityCount());
     const auto viewProjection=camera.projection*camera.view;
+    const bool baseInstance=stockDrawInputs && UsesInstanceStream() && device->Supports(RHI::Feature::IndirectFirstInstance);
     uint32_t visibilityIndex=0;
     for(uint32_t i=0;i<scene.GetEntityCount();++i)
     {
@@ -156,7 +157,7 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
         draw.vertexBuffer=input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer;
         draw.previousVertexBuffer=input ? input->previousVertexBuffer : nullptr;
         draw.deformationHistoryValid=!input || input->deformationHistoryValid;
-        draw.indexBuffer=level ? mesh.lods[level-1].buffer : mesh.indexBuffer;
+        draw.indexBuffer=MainIndexBuffer(mesh,level,scene.Materials()[materialIndex],input);
         draw.indexCount=level ? mesh.lods[level-1].count : mesh.indexCount;
         draw.localBounds=input && input->hasLocalBounds ? input->localBounds : mesh.bounds;
         draw.model=scene.GetTransform(entity);
@@ -189,11 +190,12 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
                 const auto& selected=visibilityDraws[batchIndex];
                 const auto& batch=gpuVisibility->GetBatch(batchIndex);
                 auto indirect=draw;
-                indirect.indexBuffer=selected.level ? mesh.lods[selected.level-1].buffer : mesh.indexBuffer;
+                indirect.indexBuffer=MainIndexBuffer(mesh,selected.level,scene.Materials()[materialIndex],input);
                 indirect.indexCount=batch.indexCount;
                 indirect.instanceBuffer=gpuVisibility->GetInstanceBuffer();
                 indirect.indirectArguments=gpuVisibility->GetArgumentsBuffer();
-                indirect.instanceOffset=batch.instanceOffset*sizeof(GpuVisibility::VisibleInstance);
+                // The shared indirect arguments already select the first row.
+                indirect.instanceOffset=baseInstance?0:batch.instanceOffset*sizeof(GpuVisibility::VisibleInstance);
                 indirect.indirectOffset=batchIndex*sizeof(RHI::DrawIndexedIndirectArguments);
                 if(lodDebugActive)
                 {

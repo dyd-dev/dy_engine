@@ -29,7 +29,8 @@ public:
     {
         uint32_t indexCount=0,firstIndex=0;
         int32_t vertexOffset=0;
-        // firstInstance는 0이다. 이 시작점에 맞춰 인스턴스 VB를 바인딩한다.
+        // IndirectFirstInstance 지원 시 시작 행을 인수에 넣고 VB는 offset 0에 바인딩한다.
+        // 미지원 시 firstInstance 0과 이 시작점의 VB 바이트 오프셋을 사용한다.
         uint32_t instanceOffset=0,capacity=0;
         std::array<uint32_t,3> padding={};
     };

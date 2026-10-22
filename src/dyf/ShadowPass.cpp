@@ -78,23 +78,41 @@ struct ShadowFrustum
     }
 };
 
-bool ShadowSortProjection(const Math::float4x4& matrix)
+bool ShadowSortProjection(const Math::float4x4& matrix,const Math::float4& parameters,bool& perspective)
 {
+    perspective=false;
+    for(float value:matrix.m)if(!std::isfinite(value) || std::abs(value)>1e10f)return false;
     // Canonical orthographic light views keep clip w exactly one in either
     // light*(world*position) or (light*world)*position evaluation order.
-    if(matrix.m[3]!=0 || matrix.m[7]!=0 || matrix.m[11]!=0 || matrix.m[15]!=1)return false;
-    for(float value:matrix.m)if(!std::isfinite(value) || std::abs(value)>1e10f)return false;
+    if(matrix.m[3]==0 && matrix.m[7]==0 && matrix.m[11]==0 && matrix.m[15]==1)return true;
+    // Engine-generated point/spot projections have z = -A*w + B, A <= -1,
+    // B < 0. Verify that relation before using clip w as increasing view depth.
+    const double a=parameters.z,b=parameters.w;
+    if(!std::isfinite(a) || !std::isfinite(b) || a>-1 || b>=0)return false;
+    double directionSquared=0;
+    for(uint32_t column=0;column<4;++column)
+    {
+        const double z=matrix.m[column*4+2],w=matrix.m[column*4+3];
+        const double constant=column==3?b:0;
+        const double expected=-a*w+constant;
+        const double scale=std::max({1.0,std::abs(z),std::abs(a*w),std::abs(constant)});
+        if(std::abs(z-expected)>1e-5*scale)return false;
+        if(column<3)directionSquared+=w*w;
+    }
+    if(std::abs(directionSquared-1.0)>1e-4)return false;
+    perspective=true;
     return true;
 }
 
-bool ShadowBatchNearDepth(const Math::Bounds3& bounds,const Math::float4x4& matrix,double& depth)
+bool ShadowBatchNearDepth(const Math::Bounds3& bounds,const Math::float4x4& matrix,bool perspective,double& depth)
 {
     const double minimum[]={bounds.min.x,bounds.min.y,bounds.min.z};
     const double maximum[]={bounds.max.x,bounds.max.y,bounds.max.z};
-    depth=matrix.m[14];
+    const uint32_t row=perspective?3u:2u;
+    depth=matrix.m[12+row];
     for(uint32_t axis=0;axis<3;++axis)
     {
-        const double coefficient=matrix.m[axis*4+2];
+        const double coefficient=matrix.m[axis*4+row];
         depth+=coefficient*(coefficient>=0?minimum[axis]:maximum[axis]);
     }
     return std::isfinite(depth) && std::abs(depth)<=1e32;
@@ -256,8 +274,10 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene, const Camera& camera, 
                 return casters[cull ? visible[index] : index];
             };
             const auto visibleCount=cull ? visible.size() : casters.size();
+            bool perspectiveSort=false;
             if(stock && cull && visibleCount>1 && UsesStockGeometry() &&
-                ShadowSortProjection(shadows.constants.lightViewProjectionMatrix[view]))
+                ShadowSortProjection(shadows.constants.lightViewProjectionMatrix[view],
+                    shadows.constants.viewProjectionParams[view],perspectiveSort))
             {
                 auto& depths=shadowBatchDepthScratch;
                 depths.assign(casters.size(),std::numeric_limits<double>::infinity());
@@ -266,7 +286,7 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene, const Camera& camera, 
                 {
                     const auto& caster=casters[index];double depth=0;
                     if(!caster.sortSafe || !ShadowBatchNearDepth(caster.worldBounds.bounds,
-                        shadows.constants.lightViewProjectionMatrix[view],depth))
+                        shadows.constants.lightViewProjectionMatrix[view],perspectiveSort,depth))
                     {
                         safe=false;break;
                     }
@@ -283,8 +303,8 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene, const Camera& camera, 
                     });
                     if(!shadowBatchSortReported && !std::is_sorted(visible.begin(),visible.end()))
                     {
-                        std::fprintf(stderr,"[Renderer] Shadow batch depth ordering selected: orthographic view=%u casters=%zu; finite bounded inputs, unchanged instance runs.\n",
-                            view,visible.size());
+                        std::fprintf(stderr,"[Renderer] Shadow batch depth ordering selected: %s view=%u casters=%zu; finite bounded inputs, unchanged instance runs.\n",
+                            perspectiveSort?"perspective":"orthographic",view,visible.size());
                         shadowBatchSortReported=true;
                     }
                 }

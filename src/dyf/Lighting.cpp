@@ -272,6 +272,14 @@ bool Renderer::Impl::ReuseShadowAtlas(const Scene& scene,const ShadowData& shado
         const auto& rect=shadows.constants.atlasRect[i];
         append(rect.x);append(rect.y);append(rect.z);append(rect.w);
     }
+    if(cache.bytes.size()<bytes.size() || !std::equal(bytes.begin(),bytes.end(),cache.bytes.begin()))
+    {
+        // An invalid cache may hold only the last observed view/config header.
+        // Defer caster proof until that header repeats; this frame draws shadows.
+        cache.valid=false;cache.pending=false;cache.reused=false;
+        cache.bytes=bytes;cache.meshes.clear();
+        return false;
+    }
     // 비활성 광원까지 선택 상태를 기록한다. 색과 양수 강도의 크기는 깊이를 바꾸지 않는다.
     const auto appendLight=[&](const auto& light) {
         append(light.enabled);append(light.priority);append(light.castShadow);
