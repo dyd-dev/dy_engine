@@ -283,3 +283,62 @@ dialog::backdrop { background: #11182788; backdrop-filter: blur(3px); }
   pre code, .source-line { white-space: pre-wrap; overflow-wrap: anywhere; }
   .breadcrumbs { margin-bottom: 15px; }
 }
+
+/* RHI structured index cards */
+.rhi-section-intro { color: var(--muted); font-size: 13px; margin: 6px 0 20px; }
+.rhi-category-block { margin-top: 28px; }
+.rhi-category-block > h3 { font-size: 18px; margin: 0 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--line); display: flex; align-items: baseline; gap: 8px; }
+.rhi-category-block > h3 span { font-size: 12px; color: var(--muted); font-weight: 400; }
+.rhi-class-card { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); padding: 18px 20px; margin-bottom: 18px; }
+.rhi-class-head { margin-bottom: 12px; }
+.rhi-class-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; font-size: 16px; font-weight: 600; }
+.rhi-class-title > a:first-of-type code { font-size: 16px; font-weight: 700; color: var(--link); }
+.rhi-kind-badge { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 4px; background: var(--subtle); color: var(--muted); }
+.rhi-header-link { margin-left: auto; font-size: 12px; color: var(--muted); }
+.rhi-class-desc { margin: 8px 0 4px; font-size: 13.5px; color: var(--text); font-weight: 500; }
+.rhi-class-Subdesc { margin: 4px 0 0; font-size: 12.5px; color: var(--muted); line-height: 1.7; }
+.rhi-subblock { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.rhi-subblock > h4 { font-size: 13px; font-weight: 700; margin: 0 0 8px; color: var(--text); display: flex; align-items: center; gap: 6px; }
+.rhi-subblock > h4 span { font-size: 11px; color: var(--muted); font-weight: 400; }
+.rhi-subblock .table-scroll { margin: 0; background: var(--bg); border-radius: 4px; }
+.rhi-subblock td p { margin: 0 0 4px; font-size: 12.5px; line-height: 1.65; }
+.rhi-subblock td p:last-child { margin-bottom: 0; }
+.rhi-param-list { margin: 4px 0 4px 16px; padding: 0; font-size: 12px; color: var(--muted); }
+.rhi-param-list li { margin: 2px 0; line-height: 1.55; }
+.rhi-return-note { font-size: 12px !important; color: var(--muted); }
+.rhi-fn-badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 6px; border-radius: 3px; background: var(--subtle); color: var(--text); white-space: nowrap; }
+.rhi-fn-sig { margin-top: 4px; font-size: 11.5px; color: var(--muted); line-height: 1.5; word-break: break-word; }
+
+.rhi-cell-main { margin: 0; font-weight: 500; color: var(--text); }
+.rhi-cell-sub { margin: 4px 0 0 !important; font-size: 12px; color: var(--muted); }
+.rhi-subdetails { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+.rhi-subdetails > summary { cursor: pointer; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 2px; font-size: 12.5px; user-select: none; }
+.rhi-subdetails > summary:hover .rhi-subsummary-title { color: var(--link); }
+.rhi-subsummary-title { font-weight: 600; color: var(--text); }
+.rhi-subsummary-title strong { color: var(--muted); font-weight: 500; }
+.rhi-subsummary-preview { font-size: 11.5px; color: var(--muted); }
+.rhi-subdetails[open] .rhi-subsummary-preview { display: none; }
+.rhi-subdetails .table-scroll { margin: 8px 0 2px; background: var(--bg); border-radius: 4px; }
+tr[id^="member-"]:target { background: var(--selected); }
+
+/* RHI structured layout, scoped to dyf pages and index cards. */
+.dyf-reference .rhi-section-intro { color: var(--muted); font-size: 13px; margin: 6px 0 20px; }
+.dyf-reference .rhi-category-block { margin-top: 28px; }
+.dyf-reference .rhi-category-block > h3 { font-size: 18px; margin: 0 0 14px; padding-bottom: 8px; border-bottom: 1px solid var(--line); display: flex; align-items: baseline; gap: 8px; }
+.dyf-reference .rhi-category-block > h3 span { font-size: 12px; color: var(--muted); font-weight: 400; }
+.dyf-reference .rhi-class-card { border: 1px solid var(--line); border-radius: 6px; background: var(--surface); padding: 18px 20px; margin-bottom: 18px; }
+.dyf-reference .rhi-class-head { margin-bottom: 12px; }
+.dyf-reference .rhi-class-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; font-size: 16px; font-weight: 600; }
+.dyf-reference .rhi-class-title > a:first-of-type code { font-size: 16px; font-weight: 700; color: var(--link); }
+.dyf-reference .rhi-kind-badge { font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 4px; background: var(--subtle); color: var(--muted); }
+.dyf-reference .rhi-header-link { margin-left: auto; font-size: 12px; color: var(--muted); }
+.dyf-reference .rhi-class-desc { margin: 8px 0 4px; font-size: 13.5px; color: var(--text); font-weight: 500; }
+.dyf-reference .rhi-fn-badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 2px 6px; border-radius: 3px; background: var(--subtle); color: var(--text); white-space: nowrap; }
+.dyf-reference .rhi-subdetails { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+.dyf-reference .rhi-subdetails > summary { cursor: pointer; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 2px; font-size: 12.5px; user-select: none; }
+.dyf-reference .rhi-subdetails > summary:hover .rhi-subsummary-title { color: var(--link); }
+.dyf-reference .rhi-subsummary-title { font-weight: 600; color: var(--text); }
+.dyf-reference .rhi-subsummary-title strong { color: var(--muted); font-weight: 500; }
+.dyf-reference .rhi-subsummary-preview { font-size: 11.5px; color: var(--muted); }
+.dyf-reference .rhi-subdetails[open] .rhi-subsummary-preview { display: none; }
+.dyf-reference .rhi-subdetails .table-scroll { margin: 8px 0 2px; background: var(--bg); border-radius: 4px; }
