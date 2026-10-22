@@ -134,12 +134,15 @@ sudo apt-get install -y build-essential cmake git pkg-config
 sudo apt-get install -y libvulkan-dev vulkan-tools vulkan-validationlayers-dev glslc
 ```
 
-GLFW 창 시스템은 `DY_LINUX_WINDOW_SYSTEM`으로 고를 수 있습니다. X11을 사용할 때는 `xorg-dev`, Wayland를 사용할 때는 Wayland 개발 패키지가 필요합니다.
+GLFW 창 시스템은 `DY_LINUX_WINDOW_SYSTEM`으로 고를 수 있습니다. `AUTO`는 Wayland 세션에서 Wayland를 선택하며, 그 밖의 환경에서는 X11 개발 패키지를 찾은 뒤 없으면 Wayland를 선택합니다. Wayland에서는 ImGui를 포함해도 X11 개발 패키지가 필요하지 않습니다.
+
+Wayland 개발 패키지:
 
 ```bash
-sudo apt-get install -y xorg-dev
 sudo apt-get install -y libwayland-dev wayland-protocols libxkbcommon-dev
 ```
+
+X11을 선택할 때는 대신 `xorg-dev`를 설치합니다.
 
 ## CMake 옵션
 
@@ -166,6 +169,13 @@ D3D12에서 `DY_ENABLE_RENDERDOC=ON`이면 WinPixEventRuntime 이벤트·마커 
 ```bash
 cmake -S . -B build/vulkan -DUSE_VULKAN=ON
 cmake --build build/vulkan --config Release
+```
+
+Linux에서 Wayland 전용 빌드는 다음과 같이 구성합니다. X11을 선택하려면 `WAYLAND`를 `X11`로 바꿉니다.
+
+```bash
+cmake -S . -B build/wayland -DDY_LINUX_WINDOW_SYSTEM=WAYLAND -DCMAKE_BUILD_TYPE=Release
+cmake --build build/wayland
 ```
 
 ### DirectX 12
