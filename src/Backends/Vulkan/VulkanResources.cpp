@@ -78,6 +78,10 @@ namespace dyf::Backends
 		case dyf::RHI::Format::B8G8R8A8_UNORM: return VK_FORMAT_B8G8R8A8_UNORM;
 		case dyf::RHI::Format::R8G8B8A8_UNORM_SRGB: return VK_FORMAT_R8G8B8A8_SRGB;
 		case dyf::RHI::Format::B8G8R8A8_UNORM_SRGB: return VK_FORMAT_B8G8R8A8_SRGB;
+        case dyf::RHI::Format::BC1_UNORM: return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+        case dyf::RHI::Format::BC1_UNORM_SRGB: return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+        case dyf::RHI::Format::BC3_UNORM: return VK_FORMAT_BC3_UNORM_BLOCK;
+        case dyf::RHI::Format::BC3_UNORM_SRGB: return VK_FORMAT_BC3_SRGB_BLOCK;
 		case dyf::RHI::Format::R16G16B16A16_FLOAT: return VK_FORMAT_R16G16B16A16_SFLOAT;
 		case dyf::RHI::Format::R32G32_FLOAT: return VK_FORMAT_R32G32_SFLOAT;
 		case dyf::RHI::Format::R32_FLOAT: return VK_FORMAT_R32_SFLOAT;

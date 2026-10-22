@@ -847,7 +847,8 @@ TextureHandle IDevice::CreateTexture(const TextureDesc& desc)
         || desc.width > GetLimit(Limit::Texture2DDimension) || desc.height > GetLimit(Limit::Texture2DDimension)
         || desc.depthOrArraySize > GetLimit(Limit::TextureArrayLayers)
         || desc.mipLevels > MaximumMipCount(desc.width, desc.height)
-        || !FormatSize(desc.format) || desc.usage == TextureUsage::None) return nullptr;
+        || (!FormatSize(desc.format) && !IsBlockCompressed(desc.format)) || desc.usage == TextureUsage::None
+        || (IsBlockCompressed(desc.format) && desc.usage != TextureUsage::ShaderResource)) return nullptr;
     auto* texture = CreateTextureNative(desc);
     if(!texture) ReportDiagnostic(DiagnosticSeverity::Error,"CreateTexture: native format, extent or usage constraints (or allocation failure) prevented creation; no format was substituted.");
     if(texture) { ++m_allocationCounters.textures.live; ++m_allocationCounters.textures.created; }
@@ -1053,8 +1054,12 @@ try
     if(commands.m_owner != this || !commands.Track(texture) || !data || !size
         || mip >= texture->GetDesc().mipLevels || layer >= texture->GetDesc().depthOrArraySize)
     { commands.m_recordingFailed = true; return false; }
-    const uint64_t row = uint64_t(std::max(1u, texture->GetDesc().width >> mip)) * FormatSize(texture->GetDesc().format);
-    const uint64_t height = std::max(1u, texture->GetDesc().height >> mip);
+    const auto format=texture->GetDesc().format;
+    const bool compressed=IsBlockCompressed(format);
+    const uint64_t width=std::max(1u, texture->GetDesc().width >> mip);
+    const uint64_t texelHeight=std::max(1u, texture->GetDesc().height >> mip);
+    const uint64_t row=compressed ? ((width+3)/4)*CompressedBlockBytes(format) : width*FormatSize(format);
+    const uint64_t height=compressed ? (texelHeight+3)/4 : texelHeight;
     if(rowPitch < row || slicePitch < uint64_t(rowPitch) * height || size < uint64_t(rowPitch) * (height - 1) + row)
     {
         ReportDiagnostic(DiagnosticSeverity::Error,"UpdateTexture: rowPitch must cover one row, slicePitch must cover rowPitch*height, and dataSize must cover the last row's pixels. Trailing row padding is not required.");

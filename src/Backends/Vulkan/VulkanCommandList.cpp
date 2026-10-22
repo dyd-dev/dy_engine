@@ -1042,7 +1042,9 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		uint32_t rowPitch,
 		uint32_t slicePitch)
 	{
-		const uint32_t bytesPerPixel = BytesPerPixel(texture.GetDesc().format);
+		const auto format=texture.GetDesc().format;
+        const bool compressed=dyf::RHI::IsBlockCompressed(format);
+        const uint32_t bytesPerPixel=compressed ? dyf::RHI::CompressedBlockBytes(format) : BytesPerPixel(format);
 		if (m_closed || m_failed || m_rendering || texture.IsSwapchainImage() || data == nullptr || bytesPerPixel == 0 ||
 			mipLevel >= texture.GetDesc().mipLevels || arrayLayer >= texture.GetDesc().depthOrArraySize)
 		{
@@ -1050,16 +1052,18 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		}
 		const uint32_t width = std::max(1u, mipLevel < 32 ? texture.GetDesc().width >> mipLevel : 0u);
 		const uint32_t height = std::max(1u, mipLevel < 32 ? texture.GetDesc().height >> mipLevel : 0u);
-		const uint64_t minimumRowPitch = static_cast<uint64_t>(width) * bytesPerPixel;
-		const uint64_t requiredSlicePitch = static_cast<uint64_t>(rowPitch) * height;
-		const uint64_t requiredBytes = static_cast<uint64_t>(rowPitch) * (height - 1) + minimumRowPitch;
+        const uint32_t rows=compressed ? (height+3u)/4u : height;
+        const uint32_t columns=compressed ? (width+3u)/4u : width;
+		const uint64_t minimumRowPitch = static_cast<uint64_t>(columns) * bytesPerPixel;
+		const uint64_t requiredSlicePitch = static_cast<uint64_t>(rowPitch) * rows;
+		const uint64_t requiredBytes = static_cast<uint64_t>(rowPitch) * (rows - 1) + minimumRowPitch;
 		if (rowPitch < minimumRowPitch || slicePitch < requiredSlicePitch || dataSize < requiredBytes)
 		{
 			return false;
 		}
 
 		const bool packed = rowPitch % bytesPerPixel != 0;
-		const uint64_t uploadBytes = packed ? minimumRowPitch * height : requiredBytes;
+		const uint64_t uploadBytes = packed ? minimumRowPitch * rows : requiredBytes;
 		// RGB32 texels have a 12-byte block. Reserve up to two 4-byte padding units
 		// because the shared arena accepts power-of-two alignment only.
 		const uint64_t extraPadding = bytesPerPixel == 12 ? 8 : 0;
@@ -1072,7 +1076,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		if (packed)
 		{
 			// Vulkan row length is in texels. Remove byte padding directly into the page.
-			for (uint32_t row = 0; row < height; ++row)
+			for (uint32_t row = 0; row < rows; ++row)
 				std::memcpy(destination + static_cast<size_t>(row * minimumRowPitch),
 					static_cast<const uint8_t*>(data) + static_cast<size_t>(row) * rowPitch,
 					static_cast<size_t>(minimumRowPitch));
@@ -1086,8 +1090,8 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		m_operations.push_back(operation);
 		VkBufferImageCopy region{};
 		region.bufferOffset = staging.offset + padding;
-		region.bufferRowLength = packed ? 0 : rowPitch / bytesPerPixel;
-		region.bufferImageHeight = height;
+		region.bufferRowLength = packed ? 0 : (rowPitch / bytesPerPixel)*(compressed ? 4u : 1u);
+		region.bufferImageHeight = 0;
 		region.imageSubresource.aspectMask = texture.GetAspectMask();
 		region.imageSubresource.mipLevel = mipLevel;
 		region.imageSubresource.baseArrayLayer = arrayLayer;

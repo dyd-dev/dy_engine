@@ -588,6 +588,13 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
         return (properties.optimalTilingFeatures&required)==required;
     }
 
+    bool VulkanDevice::SupportsDdsCompression(RHI::Format format) const noexcept
+    {
+        const auto& context=m_impl->Context();
+        return RHI::IsBlockCompressed(format) && context.physicalInfo &&
+            context.physicalInfo->features.textureCompressionBC && SupportsLinearFiltering(format);
+    }
+
     bool VulkanDevice::SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc& desc) const
     {
         const auto& context=m_impl->Context();
@@ -2108,6 +2115,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		const auto& supported=m_context.physicalInfo->features;
 		VkPhysicalDeviceFeatures enabled{};
 		enabled.samplerAnisotropy = supported.samplerAnisotropy;
+        enabled.textureCompressionBC = supported.textureCompressionBC;
 		enabled.fillModeNonSolid = supported.fillModeNonSolid;
 		enabled.depthBiasClamp = supported.depthBiasClamp;
 		enabled.tessellationShader = supported.tessellationShader;

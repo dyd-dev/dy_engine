@@ -15,6 +15,7 @@ namespace dyf::Backends
 		VulkanDevice();
 		~VulkanDevice() override;
         bool SupportsLinearFiltering(RHI::Format) const noexcept;
+        bool SupportsDdsCompression(RHI::Format) const noexcept;
 
 		void DestroySwapchainNative() override;
         bool WaitIdleNative() override;

@@ -176,6 +176,8 @@ namespace dyf::RHI
 		// rowPitch는 행 간 바이트 간격, slicePitch는 rowPitch*mipHeight 이상이다.
 		// dataSize는 rowPitch*(mipHeight-1)+마지막 행 픽셀 바이트 수 이상이면 된다.
 		// 마지막 행 뒤 패딩은 필요 없다. 네이티브 정렬을 위한 내부 재포장은 픽셀 값을 보존한다.
+        // BC1/BC3에서는 행이 4x4 블록 행이며 mipHeight 대신 ceil(mipHeight/4)를 사용한다.
+        // 한 행은 ceil(mipWidth/4)*블록 바이트 이상이다. 지원하는 백엔드의 sampled texture에 한한다.
 		bool UpdateTexture(
 			ICommandList& commandList,
 			TextureHandle texture,

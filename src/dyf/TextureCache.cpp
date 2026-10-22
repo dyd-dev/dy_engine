@@ -1,4 +1,6 @@
 #include "dyf/Image.h"
+#include "ImageDds.h"
+#include "RHI/FormatCapabilities.h"
 #include "RendererInternal.h"
 #include "dyf/Scene.h"
 #include "dyf/RHI/ICommandList.h"
@@ -79,14 +81,28 @@ namespace dyf
 		struct PreparedMips
 		{
 			std::vector<std::vector<uint8_t>> levels;
+            const Detail::ImageDdsData* dds = nullptr;
+            RHI::Format format = RHI::Format::Unknown;
 			bool valid = true;
 		};
-		const auto prepareMips = [&](uint32_t textureIndex) {
+		const auto prepareMips = [&](uint32_t textureIndex,bool allowCompressed) {
 			const Image& image = m_textures[textureIndex].source;
 			PreparedMips result;
 			uint32_t width = image.GetWidth(), height = image.GetHeight();
 			const uint8_t* source = image.GetPixels().data();
 			const bool srgb = image.GetColorSpace() == ColorSpace::Srgb;
+            result.format=srgb ? RHI::Format::R8G8B8A8_UNORM_SRGB : RHI::Format::R8G8B8A8_UNORM;
+            if(allowCompressed)
+                if(const auto* dds=Detail::ImageDdsAccess::Get(image))
+                {
+                    auto format=dds->format;
+                    if(srgb) format=format==RHI::Format::BC1_UNORM ? RHI::Format::BC1_UNORM_SRGB : RHI::Format::BC3_UNORM_SRGB;
+                    if(RHI::Detail::SupportsDdsCompression(*device,format))
+                    {
+                        result.dds=dds;result.format=format;
+                        return result;
+                    }
+                }
 			while(width > 1 || height > 1)
 			{
 				const uint32_t nextWidth = std::max(1u, width / 2);
@@ -113,9 +129,11 @@ namespace dyf
 		std::deque<std::future<PreparedMips>> prepared;
 		size_t nextPreparation = 0;
 		for(; nextPreparation < preparationCount; ++nextPreparation)
-			prepared.emplace_back(std::async(launch, prepareMips, pending[nextPreparation]));
+			prepared.emplace_back(std::async(launch, prepareMips, pending[nextPreparation],true));
 
 		constexpr uint64_t uploadTimeoutNanoseconds = 5000000000ull;
+        uint64_t uploadedBytes=0,rgbaBytes=0;
+        uint32_t compressedTextures=0;
 		for(uint32_t textureIndex : pending)
 		{
 			const Image& image = m_textures[textureIndex].source;
@@ -125,26 +143,35 @@ namespace dyf
 				return false;
 			};
 			TextureSlot& slot = m_textures[textureIndex];
+            PreparedMips mips=prepared.front().get();
+            prepared.pop_front();
+            if(!mips.valid) return fail("mipmap generation failed.");
 
 			RHI::TextureDesc textureDesc;
 			textureDesc.width = image.GetWidth();
 			textureDesc.height = image.GetHeight();
 			for(uint32_t dimension = std::max(textureDesc.width, textureDesc.height); dimension > 1; dimension >>= 1)
 				++textureDesc.mipLevels;
-			const bool srgb = image.GetColorSpace() == ColorSpace::Srgb;
-			textureDesc.format = srgb
-				? RHI::Format::R8G8B8A8_UNORM_SRGB : RHI::Format::R8G8B8A8_UNORM;
+			textureDesc.format = mips.format;
 			textureDesc.usage = RHI::TextureUsage::ShaderResource;
+            if(mips.dds && mips.dds->mips.size()!=textureDesc.mipLevels)
+                return fail("preserved DDS mip count mismatch.");
 
 			if(slot.texture == nullptr) slot.texture = device->CreateTexture(textureDesc);
+            if(slot.texture==nullptr && mips.dds)
+            {
+                // Optional native compression can fail independently of decoding.
+                // Keep the original RGBA upload available on unsupported devices.
+                mips=prepareMips(textureIndex,false);
+                if(!mips.valid) return fail("fallback mipmap generation failed.");
+                textureDesc.format=mips.format;
+                slot.texture=device->CreateTexture(textureDesc);
+            }
 			if(slot.texture == nullptr)
 				return fail("GPU texture allocation failed.");
 
 			RHI::FenceHandle completion;
 			{
-				PreparedMips mips = prepared.front().get();
-				prepared.pop_front();
-				if(!mips.valid) return fail("mipmap generation failed.");
 				// Keep only one image's recorded bytes and native staging allocation
 				// alive at once, rather than duplicating the entire decoded scene.
 				RHI::ResourceScope resources(*device);
@@ -159,12 +186,19 @@ namespace dyf
 				uint32_t width = textureDesc.width, height = textureDesc.height;
 				for(uint32_t mip = 0; mip < textureDesc.mipLevels; ++mip)
 				{
-					const uint8_t* mipData = mip == 0 ? image.GetPixels().data() : mips.levels[mip - 1].data();
-					const uint32_t rowPitch = width * 4;
-					const uint32_t uploadSize = rowPitch * height;
+                    const bool compressed=mips.dds!=nullptr;
+                    const uint8_t* mipData=compressed ? mips.dds->mips[mip].data() :
+                        mip==0 ? image.GetPixels().data() : mips.levels[mip-1].data();
+                    const uint32_t rowPitch=compressed ? ((width+3)/4)*RHI::CompressedBlockBytes(textureDesc.format) : width*4;
+                    const uint32_t rows=compressed ? (height+3)/4 : height;
+					const uint32_t uploadSize = rowPitch * rows;
+                    if(compressed && mips.dds->mips[mip].size()!=uploadSize)
+                        return fail("preserved DDS mip byte count mismatch.");
 					if(!device->UpdateTexture(*commandList, slot.texture, mip, 0,
 						mipData, uploadSize, rowPitch, uploadSize))
 						return fail("pixel upload recording failed.");
+                    uploadedBytes+=uploadSize;
+                    rgbaBytes+=uint64_t(width)*height*4;
 					width = std::max(1u, width / 2);
 					height = std::max(1u, height / 2);
 				}
@@ -183,9 +217,12 @@ namespace dyf
 			if(!device->Wait(completion, uploadTimeoutNanoseconds))
 				return fail(device->IsLost() ? "device became unavailable while waiting for the upload."
 					: "GPU upload did not complete within five seconds.");
+            if(mips.dds) ++compressedTextures;
 			if(nextPreparation < pending.size())
-				prepared.emplace_back(std::async(launch, prepareMips, pending[nextPreparation++]));
+				prepared.emplace_back(std::async(launch, prepareMips, pending[nextPreparation++],true));
 		}
+        std::fprintf(stderr,"[Renderer] Material texture uploads: %zu images, %u preserved DDS BC1/BC3; payload=%llu bytes, RGBA equivalent=%llu bytes.\n",
+            pending.size(),compressedTextures,static_cast<unsigned long long>(uploadedBytes),static_cast<unsigned long long>(rgbaBytes));
 		return true;
 	}
 

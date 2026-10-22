@@ -1,4 +1,5 @@
 #include "dyf/Image.h"
+#include "ImageDds.h"
 
 #include <limits>
 #include <cstdio>
@@ -34,7 +35,7 @@ namespace
     struct DdsInfo
     {
         uint32_t width=0,height=0,mipCount=1,blockBytes=0;
-        size_t offset=128,topBytes=0,rowPitch=0;
+        size_t offset=128,topBytes=0,rowPitch=0,mipBytes=0;
         DdsFormat format=DdsFormat::BC1;
         bool normalMap=false,swapRedGreen=false,swapRedAlpha=false;
     };
@@ -146,6 +147,8 @@ namespace
             required+=size;width=std::max(1u,width/2);height=std::max(1u,height/2);
         }
         if(required>fileBytes) return DdsFailure("file is truncated within its declared mip chain.");
+        if(required-info.offset>SIZE_MAX) return DdsFailure("complete mip chain exceeds the addressable size.");
+        info.mipBytes=static_cast<size_t>(required-info.offset);
         return true;
     }
 
@@ -160,6 +163,38 @@ namespace
         prefixSize=static_cast<size_t>(std::min<uint64_t>(prefix.size(),fileBytes));
         file.seekg(0);
         return bool(file.read(reinterpret_cast<char*>(prefix.data()),static_cast<std::streamsize>(prefixSize)));
+    }
+
+    RHI::Format PreservedDdsFormat(const DdsInfo& info)
+    {
+        // Normal-map reconstruction and legacy swizzles change decoded pixels.
+        // Keep those inputs on the existing RGBA path.
+        if(info.normalMap || info.swapRedGreen || info.swapRedAlpha) return RHI::Format::Unknown;
+        uint32_t fullMips=1;
+        for(uint32_t size=std::max(info.width,info.height);size>1;size>>=1) ++fullMips;
+        if(info.mipCount!=fullMips) return RHI::Format::Unknown;
+        if(info.format==DdsFormat::BC1) return RHI::Format::BC1_UNORM;
+        if(info.format==DdsFormat::BC3) return RHI::Format::BC3_UNORM;
+        return RHI::Format::Unknown;
+    }
+
+    void PreserveDdsBlocks(const DdsInfo& info,const uint8_t* source,Image& image)
+    {
+        const auto format=PreservedDdsFormat(info);
+        if(format==RHI::Format::Unknown) return;
+        auto data=std::make_shared<Detail::ImageDdsData>();
+        data->format=format;
+        data->mips.reserve(info.mipCount);
+        uint32_t width=info.width,height=info.height;
+        // ParseDds has checked every level and the complete source byte range.
+        for(uint32_t mip=0;mip<info.mipCount;++mip)
+        {
+            const size_t bytes=size_t((uint64_t(width)+3)/4)*((uint64_t(height)+3)/4)*info.blockBytes;
+            data->mips.emplace_back(source,source+bytes);
+            source+=bytes;
+            width=std::max(1u,width/2);height=std::max(1u,height/2);
+        }
+        Detail::ImageDdsAccess::Set(image,std::move(data));
     }
 
     bool DecodeDdsPixels(const DdsInfo& info,const uint8_t* source,uint64_t limit,Image& result,bool* exceeded)
@@ -248,12 +283,16 @@ static bool DecodeImage(const std::string& path, Image& result)
         if(!ParseDds(prefix.data(),prefixSize,fileBytes,info)) return false;
         if(info.topBytes>static_cast<uint64_t>(std::numeric_limits<std::streamsize>::max()))
             return DdsFailure("encoded mip exceeds the stream size limit.");
-        std::vector<uint8_t> encoded(info.topBytes);
+        const uint64_t readBytes=PreservedDdsFormat(info)!=RHI::Format::Unknown ? info.mipBytes : info.topBytes;
+        if(readBytes>SIZE_MAX || readBytes>uint64_t(std::numeric_limits<std::streamsize>::max()))
+            return DdsFailure("encoded mip chain exceeds the stream size limit.");
+        std::vector<uint8_t> encoded(static_cast<size_t>(readBytes));
         file.seekg(static_cast<std::streamoff>(info.offset));
         if(!file.read(reinterpret_cast<char*>(encoded.data()),static_cast<std::streamsize>(encoded.size())))
             return DdsFailure("failed to read the complete top mip.");
         Image image;
         if(!DecodeDdsPixels(info,encoded.data(),UINT64_MAX,image,nullptr)) return false;
+        PreserveDdsBlocks(info,encoded.data(),image);
         image.SetSourcePath(path);result=std::move(image);return true;
     }
     int width = 0, height = 0;
@@ -277,7 +316,9 @@ static bool DecodeImage(const uint8_t* encodedBytes, size_t encodedSize, Image& 
     {
         DdsInfo info;
         if(!ParseDds(encodedBytes,encodedSize,encodedSize,info)) return false;
-        return DecodeDdsPixels(info,encodedBytes+info.offset,maxDecodedBytes,result,outLimitExceeded);
+        if(!DecodeDdsPixels(info,encodedBytes+info.offset,maxDecodedBytes,result,outLimitExceeded)) return false;
+        PreserveDdsBlocks(info,encodedBytes+info.offset,result);
+        return true;
     }
     if(encodedSize > static_cast<size_t>(std::numeric_limits<int>::max())) return false;
 

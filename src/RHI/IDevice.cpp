@@ -12,6 +12,17 @@ using namespace dyf::RHI;
 
 bool IDevice::Supports(Feature feature) const {return SupportsNative(feature);}
 
+bool dyf::RHI::Detail::SupportsDdsCompression(const IDevice& device,Format format) noexcept
+{
+#if defined(ENABLE_VULKAN)
+    if(const auto* native=dynamic_cast<const dyf::Backends::VulkanDevice*>(&device))
+        return native->SupportsDdsCompression(format);
+#else
+    (void)device;(void)format;
+#endif
+    return false;
+}
+
 bool dyf::RHI::Detail::SupportsLinearFiltering(const IDevice& device,Format format) noexcept
 {
 #if defined(ENABLE_VULKAN)
