@@ -8,6 +8,57 @@
 
 Emerald의 원본 식생 texture는 녹색이다. 기존의 흰 식생·검은 그늘을 원본의 특징으로 설명한 것은 잘못이었다. 같은 카메라·노출·조명에서 ORCA 재질 해석을 수정한 화면을 비교했고, 잎의 색과 그늘의 정보가 회복됨을 확인했다. 개별 수정의 기여도를 모두 분리한 실험이나 원저자의 전체 조명 재현을 뜻하지 않는다.
 
+## 최신 브리핑·다음 환경 인계
+
+인계 기준은 `performance`의 엔진 수정 `9ecaa8b`, 시연·측정 정리 `8c35ea0`이다. 이번 임시 인계 커밋은 이 문서만 보완하며 구현·설정 변경이나 추가 빌드·성능 검사를 하지 않는다.
+
+### 마지막 보고
+
+Emerald의 흰 식생·검은 그늘을 원본 특징이라고 한 설명은 잘못됐다. ORCA SpecR의 AO 해석과 자동 Blend 분류를 명시적 source profile로 수정했다. 공통 경로에서도 정점 색·alpha coverage와 transmission·법선·투명 깊이/IBL·원본 카메라·Vulkan resize 문제를 고쳤다. 원본 asset 파일은 수정하지 않았다.
+
+RTX 3060 12GB·NVIDIA 615.71.10·Debian 13·Vulkan·격리 headless Sway에서 내부/출력 1920×1080, VSync/HUD OFF로 측정한 **완료 처리량**이다. 표시 FPS와 구분한다.
+
+| 장면 | 평균 완료 제출/s | 제출 간격 P95 ms |
+|---|---:|---:|
+| Night | 60.7348 | 18.8371 |
+| Exterior | 77.8292 | 14.7896 |
+| Interior / Wine | 160.7127 | 8.8833 |
+| Emerald | 46.1598 | 28.4281 |
+| Sponza | 86.6228 | 12.8502 |
+| Arena: cache OFF → ON | 29.9786 → **45.6353** | 34.1388 → 22.5996 |
+
+Arena는 해골 72개+기사 1개와 품질을 유지하고 동일 influence의 CPU skin matrix만 재사용하여 처리량이 52.23% 개선됐다. CPU CTest 2개와 GPU 35-frame 회귀가 통과했다. cache OFF/ON의 고급 HDR Blend·Mask+그림자 비교는 전체 RGBA 차이 0, 정확한 bounds·geometryRevision 동일, history 유지를 확인했다. HLSL 49개 변형은 DXC 컴파일에 성공했다. Blender와 같은 glTF를 렌더한 정점 색상 fixture는 내부 14,196픽셀에서 최대 1 byte 차이였다.
+
+**모든 DCC·backend·모바일의 동등성은 입증되지 않았다.** D3D12 GPU·Metal 컴파일/실기·Android/iOS 빌드/실기는 미확인이다. 독립 참조 비교는 unlit fixture이고 전체 PBR 조명 인증이 아니다. Night 평균은 60–70 목표에 도달했지만 일정한 60 FPS에는 미달한다.
+
+### 이어서 할 작업
+
+1. **Night의 프레임 간격과 Emerald의 그림자 병목부터 조사한다.** GPU Shadow 평균은 각각 5.0880/10.1327ms다. 같은 source camera·구간·출력·조명·품질에서 비교하고, 이전 FOV 50°·출력 636×1024·재질 수정 전 기록과 개선율을 섞지 않는다. 현재 FBX 원본 FOVy는 약 33.9666°다.
+2. **원본 형상과 정확한 bounds를 보존한다.** Emerald의 제거 가능한 동일 shadow triangle은 약 .4974%, Bistro는 .0761%, Sponza는 0%로 작아 제거 최적화를 넣지 않았다. `localBounds`는 컬링뿐 아니라 그림자 fitting·투명 정렬 등에 사용된다. 느슨한 joint AABB로 전체 경계를 대체하는 안은 폐기했다.
+3. **모바일은 texture/target 예산과 실제 기기를 별도로 다룬다.** Emerald material texture payload는 BC 보존 시 약 2.99GB, RGBA equivalent 약 6.19GiB다. BC 미지원 장치에서 그대로 사용 가능하다고 판단하지 않는다. RGBA 복원으로 stock vertex stride도 48→64 byte가 됐으므로 무색 mesh의 기본 흰색 stream/layout 분리가 후속 후보다. 정점 색 양자화·누락으로 비용을 숨기지 않는다.
+4. **일반성을 미지원 기능의 조용한 근사로 대체하지 않는다.** `allowMaterialFallbacks=false`를 유지한다. UV1·미지원 sampler·비항등 texture transform·일부 재질 확장 등을 명시적으로 거부한다. ORCA profile을 모든 FBX에 강제하거나 filename별 shader 분기를 만들지 않는다. MikkTSpace·KHR_lights_punctual 등 남은 지원 한계도 아래 표를 따른다.
+5. **이미 고친 경계를 회귀시키지 않는다.** Wine `fbxFallbackTextureUvSet`은 누락된 UV 참조에만 적용하며 유효한 `map1` UV0는 그대로 둔다. FBX CullingOff는 metadata-only 제한 파싱 후 해제하는 구조다. NativeMoments의 hardware 보간은 정밀도 반례 때문에 제거했으므로 근거 없이 복원하지 않는다. `R16_FLOAT` reactive는 capability gate와 RGBA16F fallback을 유지한다.
+
+### 다른 환경의 준비
+
+소스·영구 fixture·수치와 이 문서는 Git으로 전달된다. **`build/`의 실행 파일·PNG·원시 CSV·로그·해시는 Git 제외 대상이며 이 기기에만 남아 있다.** 본문의 `../build/` 링크도 새 checkout에서는 자료가 없을 수 있다. 임시 Blender 설치본·DXIL 분석 폴더·분석 도구·private Wayland runtime은 삭제했고 모든 테스트 프로세스는 종료했다. 새 기기의 미실행 상태와 이 기기의 통과 결과를 구분한다.
+
+Linux Wayland에서 같은 target을 준비하는 구성 예시는 다음과 같다. 실행 예시를 기록하는 것이며 이번 인계 요청에서 재실행하지 않았다.
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DDY_BUILD_EXAMPLES=OFF -DDY_BUILD_SHOWCASE=ON -DDY_BUILD_CONFORMANCE_TESTS=ON -DDY_LINUX_WINDOW_SYSTEM=WAYLAND -DDY_ENABLE_LIVE_PROFILING=OFF -DDY_ENABLE_RENDERDOC=OFF
+cmake --build build --target ShowcaseCinematic ShowcaseArena ModelConformanceTests RenderingConformanceTests -j4
+```
+
+- Build tree는 `build/` 하나를 사용하고 실행 파일은 `build/showcase/{showcase,arena}`와 `build/examples/`에 둔다. `build/desktop` 같은 추가 구분을 만들지 않는다.
+- 에셋 기본 root는 저장소 옆 `../assets`다. 선택한 Showcase 에셋은 구성 시 준비되며 기존 파일·ZIP을 재사용한다. 원본 파일을 Git에 넣지 않는다. [빌드·다운로드 안내](README.md)를 따른다.
+- Sponza는 자동 다운로드 대상이 아니다. 이 기기에서는 `DY_SHOWCASE_COMPARISON_SCENE`이 비어 있어 raw glTF 경로에 `--scene-preset sponza`를 붙여 측정했다. 별칭을 쓰려면 새 환경의 실제 파일 경로를 CMake에 지정한다. 원본은 `main_sponza/NewSponza_Main_glTF_003.gltf`였다.
+- Cinematic은 `--benchmark-step` 기본값이 **0(정지)**이다. moving-camera 비교에는 `0.016666666666666666`을 명시한다. Arena의 기본값은 1/60초다. 두 benchmark 모두 새 CSV 경로를 요구한다. 전체 구간/횟수·warm-up·설정은 아래 성능 절과 [시연 안내](README.md#유한-프레임-측정)에 있다.
+- 후속 검사가 요청된 범위에서는 CPU CTest와 GPU 영구 fixture를 사용한다. GPU 테스트는 **실제 Sway·foot에 창을 띄우지 않고**, 실제 출력과 분리한 유한 headless 세션에서 순차 실행한다. 큰 asset 로드·빌드·다른 GPU 작업을 FPS 측정과 겹치지 않는다.
+- 사용자 승인·권한이 이미 주어진 작업을 반복해서 확인하지 않는다. 임시 파일/폴더 생성과 프로그램 설정 변경은 즉시 보고하고, 상주 helper process를 해결책으로 삼지 않는다. 커밋은 무엇을 했는지 분명한 짧은 한글 제목과 1–2줄 본문을 사용한다.
+
+이번 `performance`는 앞서 reset으로 정리한 이력이다. 원격의 기존 `a96cfbf`를 기대값으로 한 `--force-with-lease` 반영 대상이며, 기존 checkout에서 단순 pull로 옛 이력을 다시 merge하지 않는다. 다른 브랜치의 rebase·push는 이번 인계 범위에 포함하지 않는다.
+
 ## 검증 상태
 
 | 구분 | 증거 | 한계 |
