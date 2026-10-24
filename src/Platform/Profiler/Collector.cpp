@@ -45,7 +45,7 @@ namespace dyf::Platform
 		std::atomic<std::uint64_t> testHistoryFrameVisits { 0 }, testLinkFrameLocks { 0 };
 		std::atomic<std::uint64_t> testCommandPruneEntries { 0 };
 		std::atomic<std::uint64_t> testLateFlowCopies { 0 }, testBoundedSnapshotCopies { 0 };
-		std::atomic<std::uint64_t> testMetricChanges { 0 };
+		std::atomic<std::uint64_t> testMetricChanges { 0 }, testWireWriteChecks { 0 };
 		std::atomic<std::int64_t> testAllocationFailure { - 1 };
 #endif
 		void AggregationAllocationPoint()
@@ -1221,9 +1221,10 @@ namespace dyf::Platform
 #ifdef DY_LIVE_TEST_CLOCK
 	Detail::TestLiveWork Detail::TakeTestLiveWork() noexcept
 	{
-		return { testHistoryFrameVisits.exchange(0), testLinkFrameLocks.exchange(0), testCommandPruneEntries.exchange(0), testLateFlowCopies.exchange(0), testBoundedSnapshotCopies.exchange(0), testMetricChanges.exchange(0) };
+		return { testHistoryFrameVisits.exchange(0), testLinkFrameLocks.exchange(0), testCommandPruneEntries.exchange(0), testLateFlowCopies.exchange(0), testBoundedSnapshotCopies.exchange(0), testMetricChanges.exchange(0), testWireWriteChecks.exchange(0) };
 	}
 	void Detail::RecordTestBoundedSnapshotCopy() noexcept { ++testBoundedSnapshotCopies; }
+	void Detail::RecordTestWireWrite() noexcept { ++testWireWriteChecks; }
 
 	void Detail::SetTestLiveNowNs(std::uint64_t now) noexcept
 	{

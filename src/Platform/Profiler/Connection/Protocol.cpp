@@ -89,11 +89,17 @@ namespace dyf::Platform::Detail
 			{
 				(Value(values), ...);
 			}
-			void Byte(std::uint8_t value)
+			std::uint8_t* Append(std::size_t bytes)
 			{
-				if(data.size() == LiveTransferLimit - sizeof(PacketHeader)) throw std::length_error("Live payload exceeds 64 MiB");
-				data.push_back(value);
+#if defined(DY_LIVE_TEST_CLOCK) && !defined(DY_LIVE_COST_TIMING)
+				RecordTestWireWrite();
+#endif
+				if(bytes > LiveTransferLimit - sizeof(PacketHeader) - data.size()) throw std::length_error("Live payload exceeds 64 MiB");
+				const auto offset = data.size();
+				data.resize(offset + bytes);
+				return data.data() + offset;
 			}
+			void Byte(std::uint8_t value) { *Append(1) = value; }
 			template<class T> void Value(const T & v)
 			{
 				if constexpr(std::is_same_v<T, bool>) Byte(v ? 1 : 0);
@@ -102,7 +108,8 @@ namespace dyf::Platform::Detail
 				{
 					using U = std::make_unsigned_t<T>;
 					auto bits = static_cast<U>(v);
-					for(std::size_t i = 0; i < sizeof(T); ++i) Byte(std::uint8_t(bits >>(i * 8)));
+					auto* output = Append(sizeof(T));
+					for(std::size_t i = 0; i < sizeof(T); ++i) output[i] = std::uint8_t(bits >>(i * 8));
 				}
 				else if constexpr(std::is_floating_point_v<T>)
 				{
@@ -117,7 +124,7 @@ namespace dyf::Platform::Detail
 			{
 				Allocate(v.size());
 				Value(std::uint32_t(v.size()));
-				for(unsigned char c : v) Byte(c);
+				if(!v.empty()) std::memcpy(Append(v.size()), v.data(), v.size());
 			}
 			template<class T> void Value(const std::vector<T> & v)
 			{
@@ -132,7 +139,7 @@ namespace dyf::Platform::Detail
 			}
 			template<std::size_t N> void Value(const char(& v) [N])
 			{
-				for(char x : v) Byte(std::uint8_t(x));
+				std::memcpy(Append(N), v, N);
 			}
 			void Value(const ControlValue & v)
 			{
