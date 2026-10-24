@@ -42,6 +42,8 @@ namespace dyf::Platform
 		std::atomic<std::uint64_t> detailBytes { 0 };
 #ifdef DY_LIVE_TEST_CLOCK
 		std::atomic<std::uint64_t> testNowNs { 0 };
+		std::atomic<std::uint64_t> testHistoryFrameVisits { 0 }, testLinkFrameLocks { 0 };
+		std::atomic<std::uint64_t> testCommandPruneEntries { 0 };
 		std::atomic<std::int64_t> testAllocationFailure { - 1 };
 #endif
 		void AggregationAllocationPoint()
@@ -919,41 +921,50 @@ namespace dyf::Platform
 			}
 		}
 
-		LiveAggregate Aggregate(const SourceRecord & source, LiveId id, LiveId revision, std::uint64_t begin, std::uint64_t end)
+		bool AddCommandCounts(State & state, LiveCommandRef command, const LiveCounters<std::uint64_t> & counts)
 		{
-			LiveAggregate a;
-			a.device = source.device;
-			a.source = id;
-			a.appliedRevision = revision;
-			a.beginNs = begin;
-			a.endNs = end;
-			for(const auto & record : source.frames)
+			std::lock_guard<std::mutex> lock(state.commandMutex);
+			const auto key = std::make_pair(command.commandList, command.generation);
+			auto found = state.commandCounts.find(key);
+			if(found == state.commandCounts.end())
 			{
-				std::lock_guard<std::mutex> lock(record->mutex);
-				const auto & f = record->summary;
-				if(!record->ended || f.appliedRevision != revision || f.endNs < begin || f.endNs >= end) continue;
-				++a.frameCount;
-				Accumulate(a.frame, f.frame, f.key);
-				Accumulate(a.cpuRender, f.cpuRender, f.key);
-				Accumulate(a.gpuMain, f.gpuMain, f.key);
-				Accumulate(a.gpuShadow, f.gpuShadow, f.key);
-				Accumulate(a.gpuMeasured, f.gpuMeasured, f.key);
-				Accumulate(a.objects, { f.objects.state, double(f.objects.count) }, f.key);
-				Add(a.recordedTotal, f.recorded);
-				Add(a.submittedTotal, f.submitted);
-				Add(a.completedTotal, f.completed);
-				for(std::size_t i = 0; i < LiveStageCount; ++i)
+				for(auto it = state.commandCounts.lower_bound({ command.commandList, 0 }); it != state.commandCounts.end() &&
+					it->first.first == command.commandList;)
 				{
-					auto & s = a.stages [i];
-					const auto & v = f.stages [i];
-					s.totalElements += v.elements;
-					s.totalBytes += v.bytes;
-					s.totalOperations += v.operations;
-					Accumulate(s.cpu, v.cpu, f.key);
-					Accumulate(s.gpu, v.gpu, f.key);
+#ifdef DY_LIVE_TEST_CLOCK
+					++testCommandPruneEntries;
+#endif
+					it = state.commandCounts.erase(it);
 				}
+				if(state.commandCounts.size() >= 4096) return false;
+				found = state.commandCounts.emplace(key, LiveCounters<std::uint64_t>{}).first;
 			}
-			return Finish(std::move(a));
+			Add(found->second, counts);
+			return true;
+		}
+
+		void Accumulate(LiveAggregate & a, const LiveFrameSummary & f)
+		{
+			++a.frameCount;
+			Accumulate(a.frame, f.frame, f.key);
+			Accumulate(a.cpuRender, f.cpuRender, f.key);
+			Accumulate(a.gpuMain, f.gpuMain, f.key);
+			Accumulate(a.gpuShadow, f.gpuShadow, f.key);
+			Accumulate(a.gpuMeasured, f.gpuMeasured, f.key);
+			Accumulate(a.objects, { f.objects.state, double(f.objects.count) }, f.key);
+			Add(a.recordedTotal, f.recorded);
+			Add(a.submittedTotal, f.submitted);
+			Add(a.completedTotal, f.completed);
+			for(std::size_t i = 0; i < LiveStageCount; ++i)
+			{
+				auto & s = a.stages [i];
+				const auto & v = f.stages [i];
+				s.totalElements += v.elements;
+				s.totalBytes += v.bytes;
+				s.totalOperations += v.operations;
+				Accumulate(s.cpu, v.cpu, f.key);
+				Accumulate(s.gpu, v.gpu, f.key);
+			}
 		}
 
 		FrameRecord * FindFrame(State & s, LiveFrameKey key)
@@ -1118,6 +1129,11 @@ namespace dyf::Platform
 	}
 
 #ifdef DY_LIVE_TEST_CLOCK
+	Detail::TestLiveWork Detail::TakeTestLiveWork() noexcept
+	{
+		return { testHistoryFrameVisits.exchange(0), testLinkFrameLocks.exchange(0), testCommandPruneEntries.exchange(0) };
+	}
+
 	void Detail::SetTestLiveNowNs(std::uint64_t now) noexcept
 	{
 		testNowNs = now;
@@ -1736,13 +1752,7 @@ namespace dyf::Platform
 			{
 				auto logical = summary.recorded;
 				ClearNativeUploadCounts(logical);
-				std::lock_guard<std::mutex> commands(s.commandMutex);
-				const auto key = std::make_pair(command.commandList, command.generation);
-				for(auto it = s.commandCounts.lower_bound({ command.commandList, 0 }); it != s.commandCounts.end() &&
-					it->first.first == command.commandList;) if(it->first != key) it = s.commandCounts.erase(it);
-				else ++it;
-				if(s.commandCounts.size() < 4096 || s.commandCounts.count(key)) Add(s.commandCounts [key], logical);
-				else f->summary.incomplete = true;
+				if(!AddCommandCounts(s, command, logical)) f->summary.incomplete = true;
 			}
 		}
 		catch(...)
@@ -1849,13 +1859,7 @@ namespace dyf::Platform
 					Add(summary.recorded, counts);
 					if(e.command.commandList && e.kind != LiveEventKind::UploadMemory)
 					{
-						std::lock_guard<std::mutex> commands(s.commandMutex);
-						auto key = std::make_pair(e.command.commandList, e.command.generation);
-						for(auto it = s.commandCounts.lower_bound({ e.command.commandList, 0 }); it != s.commandCounts.end() &&
-							it->first.first == e.command.commandList;) if(it->first != key) it = s.commandCounts.erase(it);
-						else ++it;
-						if(s.commandCounts.size() < 4096 || s.commandCounts.count(key)) Add(s.commandCounts [key], counts);
-						else summary.incomplete = true;
+						if(!AddCommandCounts(s, e.command, counts)) summary.incomplete = true;
 					}
 				}
 			}
@@ -1910,29 +1914,54 @@ namespace dyf::Platform
 
 	void RecordLiveLink(const LiveFlowLink & link) noexcept
 	{
-		if(!IsLiveCollectorEnabled()) return;
+		RecordLiveLinks(&link, 1);
+	}
+
+	void RecordLiveLinks(const LiveFlowLink * links, std::size_t count) noexcept
+	{
+		if(!IsLiveCollectorEnabled() || !links || !count) return;
 		try
 		{
 			if(auto f = Frame(context.frame))
 			{
+#ifdef DY_LIVE_TEST_CLOCK
+				++testLinkFrameLocks;
+#endif
 				std::unique_lock < std::mutex > lock(f->mutex);
 				if(f->ended)
 				{
-					AppendEvidenceDetail(* f, nullptr, & link);
 					lock.unlock();
-					if(!AppendLateDetail(f, nullptr, & link)) ++S().omittedLinks;
+					for(std::size_t i = 0; i < count; ++i) try
+					{
+						{ std::lock_guard<std::mutex> guard(f->mutex);
+						AppendEvidenceDetail(* f, nullptr, & links[i]);
+						}
+						if(!AppendLateDetail(f, nullptr, & links[i])) ++S().omittedLinks;
+					}
+					catch(...) { ++S().omittedLinks; }
 				}
-				else if(!PushDetail(* f, f->flow.links, link, 16384))
+				else for(std::size_t i = 0; i < count; ++i) try
 				{
-					++f->flow.omittedLinks;
-					++S().omittedLinks;
-					f->summary.incomplete = true;
+					if(f->flow.links.size() >= 16384)
+					{
+						f->flow.omittedLinks += count - i;
+						S().omittedLinks += count - i;
+						f->summary.incomplete = true;
+						break;
+					}
+					if(!PushDetail(* f, f->flow.links, links[i], 16384))
+					{
+						++f->flow.omittedLinks;
+						++S().omittedLinks;
+						f->summary.incomplete = true;
+					}
 				}
+				catch(...) { ++S().omittedLinks; }
 			}
 		}
 		catch(...)
 		{
-			++S().omittedLinks;
+			S().omittedLinks += count;
 		}
 
 	}
@@ -2023,6 +2052,13 @@ namespace dyf::Platform
 	std::shared_ptr<const LiveSnapshot> ReadLiveSnapshot()
 	{
 		if(!IsLiveCollectorEnabled()) return { };
+		struct SnapshotFrame
+		{
+			LiveFrameSummary summary;
+			std::vector<LiveGpuSpan> gpuSpans;
+			std::uint64_t omittedEvents = 0, omittedLinks = 0;
+			bool ended = false;
+		};
 		struct SnapshotSource
 		{
 			SourceRecord record;
@@ -2115,43 +2151,59 @@ namespace dyf::Platform
 			}
 			auto detail = std::move(pair.second.detail);
 			std::vector<LiveGpuSpan> recent;
-			for(auto & ptr : source.frames)
+			std::vector<SnapshotFrame> frames;
+			frames.reserve(source.frames.size());
+			for(const auto & ptr : source.frames)
 			{
-				auto copy = std::make_shared<FrameRecord>();
+				auto & copy = frames.emplace_back();
 				{ std::lock_guard<std::mutex> lock(ptr->mutex);
-				copy->summary = ptr->summary;
-				copy->ended = ptr->ended;
-				copy->flow.gpuSpans = ptr->flow.gpuSpans;
-				copy->flow.omittedEvents = ptr->flow.omittedEvents;
-				copy->flow.omittedLinks = ptr->flow.omittedLinks;
-				} ptr = std::move(copy);
+				copy.summary = ptr->summary;
+				copy.ended = ptr->ended;
+				copy.gpuSpans = ptr->flow.gpuSpans;
+				copy.omittedEvents = ptr->flow.omittedEvents;
+				copy.omittedLinks = ptr->flow.omittedLinks;
+				}
 			}
-			auto latest = std::find_if(source.frames.rbegin(), source.frames.rend(), [&](const auto & f)
+			auto latest = std::find_if(frames.rbegin(), frames.rend(), [&](const auto & f)
 			{
-				return f->ended && f->summary.key == source.lastEndedKey;
+				return f.ended && f.summary.key == source.lastEndedKey;
 			});
-			if(latest != source.frames.rend())
+			if(latest != frames.rend())
 			{
-				out.latest =(* latest)->summary;
+				out.latest = latest->summary;
 				if(detail) out.flow = * detail;
-				out.flow.gpuSpans =(* latest)->flow.gpuSpans;
-				out.flow.omittedEvents =(* latest)->flow.omittedEvents;
-				out.flow.omittedLinks =(* latest)->flow.omittedLinks;
+				out.flow.gpuSpans = latest->gpuSpans;
+				out.flow.omittedEvents = latest->omittedEvents;
+				out.flow.omittedLinks = latest->omittedLinks;
 			}
 			out.latest.sampleAgeNs = now >= out.latest.endNs ? now - out.latest.endNs : 0;
-			for(auto it = source.frames.rbegin(); it != source.frames.rend() &&
-				recent.size() < 1024; ++it) for(const auto & span :(* it)->flow.gpuSpans) if(span.duration.state != LiveValueState::Pending && recent.size() < 1024) recent.push_back(span);
+			for(auto it = frames.rbegin(); it != frames.rend() &&
+				recent.size() < 1024; ++it) for(const auto & span : it->gpuSpans) if(span.duration.state != LiveValueState::Pending && recent.size() < 1024) recent.push_back(span);
 			out.recentGpuSpans = std::move(recent);
-			std::set<std::pair<std::uint64_t, LiveId>> buckets;
-			for(const auto & frame : source.frames) if(frame->ended)
+			std::map<std::pair<std::uint64_t, LiveId>, LiveAggregate> buckets;
+			for(const auto & frame : frames)
 			{
-				buckets.emplace(frame->summary.endNs / LivePublishIntervalNs, frame->summary.appliedRevision);
-				if(frame->summary.cpuRender.milliseconds >= 1000 ||
-					frame->summary.endNs - frame->summary.beginNs >= 1000000000ull ||(frame->summary.frame.state == LiveValueState::Ready &&
-					frame->summary.frame.milliseconds >= 1000)) out.longFrames.push_back(frame->summary);
+#ifdef DY_LIVE_TEST_CLOCK
+				++testHistoryFrameVisits;
+#endif
+				if(!frame.ended) continue;
+				const auto & summary = frame.summary;
+				auto & bucket = buckets[{ summary.endNs / LivePublishIntervalNs, summary.appliedRevision }];
+				if(!bucket.frameCount)
+				{
+					bucket.device = source.device;
+					bucket.source = pair.first;
+					bucket.appliedRevision = summary.appliedRevision;
+					bucket.beginNs = summary.endNs / LivePublishIntervalNs * LivePublishIntervalNs;
+					bucket.endNs = bucket.beginNs + LivePublishIntervalNs;
+				}
+				Accumulate(bucket, summary);
+				if(summary.cpuRender.milliseconds >= 1000 ||
+					summary.endNs - summary.beginNs >= 1000000000ull ||(summary.frame.state == LiveValueState::Ready &&
+					summary.frame.milliseconds >= 1000)) out.longFrames.push_back(summary);
 			}
-			for(const auto & bucket : buckets) out.history.push_back(Aggregate(source, pair.first, bucket.second,
-				bucket.first * LivePublishIntervalNs,(bucket.first + 1) * LivePublishIntervalNs));
+			out.history.reserve(buckets.size());
+			for(auto & bucket : buckets) out.history.push_back(Finish(std::move(bucket.second)));
 			result->sources.push_back(std::move(out));
 		}
 

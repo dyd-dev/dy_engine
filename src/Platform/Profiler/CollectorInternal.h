@@ -475,6 +475,7 @@ namespace dyf::Platform
 
 	void RecordLiveEvent(const LiveEvent&, bool includeSummary = true) noexcept;
 	void RecordLiveLink(const LiveFlowLink&) noexcept;
+	void RecordLiveLinks(const LiveFlowLink*, std::size_t count) noexcept;
 	void RecordLiveGpuSpan(const LiveGpuSpan&) noexcept;
 	// Coverage is complete after every submitted command-list span is registered.
 	void SetLiveGpuCoverage(LiveFrameKey, bool complete) noexcept;
@@ -548,6 +549,8 @@ namespace dyf::Platform
 namespace dyf::Platform::Detail
 {
 #ifdef DY_LIVE_TEST_CLOCK
+	struct TestLiveWork { std::uint64_t historyFrameVisits = 0, linkFrameLocks = 0, commandPruneEntries = 0; };
+	TestLiveWork TakeTestLiveWork() noexcept;
 	void SetTestLiveNowNs(std::uint64_t) noexcept;
 	void FailTestLiveAggregationAllocationAfter(std::int64_t) noexcept;
 #endif

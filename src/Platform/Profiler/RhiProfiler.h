@@ -23,6 +23,9 @@ namespace dyf::RHI
         TimestampQueryHandle m_liveReplayQuery=nullptr;
         uint32_t m_liveFirstQuery=0;
 #ifdef DY_LIVE_PROFILING_ENABLED
+        bool groupingLinks=false;
+        std::unordered_map<const void*,Platform::LiveId> resourceIds;
+        std::vector<Platform::LiveFlowLink> commandLinks;
         std::vector<Platform::LiveEvent> events;
         std::vector<Platform::LiveFlowLink> links;
         Platform::LiveEventSummary summary;
