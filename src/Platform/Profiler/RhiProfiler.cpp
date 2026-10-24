@@ -627,6 +627,8 @@ namespace dyf::RHI
 			const auto completed = GetCompletedSubmissionNative();
 			const bool lost = IsLostNative();
 			const auto observedNs = D::LiveNowNs();
+			const auto bits = GetTimestampValidBits();
+			const auto period = GetTimestampPeriodNanoseconds();
 			for(auto & entry : live.submissions)
 			if(!entry.second.completedNs &&(lost || entry.first <= completed)) entry.second.completedNs = observedNs;
 			for(uint32_t slot = 0; slot < LiveState::QuerySlots; ++slot)
@@ -659,8 +661,6 @@ namespace dyf::RHI
 						uint64_t ticks [2]
 						{
 						};
-						const auto bits = GetTimestampValidBits();
-						const auto period = GetTimestampPeriodNanoseconds();
 						if(!lost && bits && bits <= 64 && period > 0 && ReadTimestampsInternal(live.query, sample.slot * 2, 2, ticks, false))
 						{
 							const uint64_t mask = bits == 64 ? UINT64_MAX :(uint64_t { 1 } << bits) - 1;

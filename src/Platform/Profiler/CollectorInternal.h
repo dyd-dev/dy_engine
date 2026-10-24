@@ -549,7 +549,7 @@ namespace dyf::Platform
 namespace dyf::Platform::Detail
 {
 #ifdef DY_LIVE_TEST_CLOCK
-	struct TestLiveWork { std::uint64_t historyFrameVisits = 0, linkFrameLocks = 0, commandPruneEntries = 0, lateFlowCopies = 0, boundedSnapshotCopies = 0; };
+	struct TestLiveWork { std::uint64_t historyFrameVisits = 0, linkFrameLocks = 0, commandPruneEntries = 0, lateFlowCopies = 0, boundedSnapshotCopies = 0, metricChanges = 0; };
 	TestLiveWork TakeTestLiveWork() noexcept;
 	void RecordTestBoundedSnapshotCopy() noexcept;
 	void SetTestLiveNowNs(std::uint64_t) noexcept;

@@ -45,6 +45,7 @@ namespace dyf::Platform
 		std::atomic<std::uint64_t> testHistoryFrameVisits { 0 }, testLinkFrameLocks { 0 };
 		std::atomic<std::uint64_t> testCommandPruneEntries { 0 };
 		std::atomic<std::uint64_t> testLateFlowCopies { 0 }, testBoundedSnapshotCopies { 0 };
+		std::atomic<std::uint64_t> testMetricChanges { 0 };
 		std::atomic<std::int64_t> testAllocationFailure { - 1 };
 #endif
 		void AggregationAllocationPoint()
@@ -691,10 +692,19 @@ namespace dyf::Platform
 			}
 		}
 
-		void Change(LiveMetricAggregate & aggregate, MetricValues & values, LiveSample sample, LiveFrameKey key, bool adding)
+		LiveSample Normalize(LiveSample sample)
 		{
 			if(sample.state == LiveValueState::Ready &&(!std::isfinite(sample.milliseconds) ||
 				sample.milliseconds < 0)) sample.state = LiveValueState::Unavailable;
+			return sample;
+		}
+
+		void Change(LiveMetricAggregate & aggregate, MetricValues & values, LiveSample sample, LiveFrameKey key, bool adding)
+		{
+#ifdef DY_LIVE_TEST_CLOCK
+			++testMetricChanges;
+#endif
+			sample = Normalize(sample);
 			auto & count = sample.state == LiveValueState::Ready ? aggregate.ready : sample.state == LiveValueState::Pending ? aggregate.pending : sample.state == LiveValueState::Unsupported ? aggregate.unsupported : aggregate.unavailable;
 			if(adding) ++count;
 			else --count;
@@ -757,6 +767,41 @@ namespace dyf::Platform
 			}
 		}
 
+		void Change(SecondRecord & second, const LiveFrameSummary & before, const LiveFrameSummary & after)
+		{
+			auto & total = second.total;
+			const auto oldSamples = Samples(before), samples = Samples(after);
+			const auto metrics = Metrics(total);
+			for(std::size_t i = 0; i < MetricCount; ++i)
+			{
+				const auto old = Normalize(oldSamples [i]), sample = Normalize(samples [i]);
+				if(old.state == sample.state &&(sample.state != LiveValueState::Ready ||
+					(old.milliseconds == sample.milliseconds && std::signbit(old.milliseconds) == std::signbit(sample.milliseconds))))
+				{
+					if(sample.state == LiveValueState::Ready)
+					{
+						// Preserve the original subtract/add rounding without rebuilding unchanged metric trees.
+						metrics [i]->average += -old.milliseconds;
+						if(metrics [i]->ready == 1) metrics [i]->average = 0;
+						metrics [i]->average += sample.milliseconds;
+					}
+					continue;
+				}
+				Change(* metrics [i], second.values [i], old, before.key, false);
+				Change(* metrics [i], second.values [i], sample, after.key, true);
+			}
+#define CHANGE_DELTA(n) total.recordedTotal.n += after.recorded.n - before.recorded.n; total.submittedTotal.n += after.submitted.n - before.submitted.n; total.completedTotal.n += after.completed.n - before.completed.n;
+			LIVE_COUNTER_FIELDS(CHANGE_DELTA)
+#undef CHANGE_DELTA
+			for(std::size_t i = 0; i < LiveStageCount; ++i)
+			{
+				auto & stage = total.stages [i];
+				stage.totalElements += after.stages [i].elements - before.stages [i].elements;
+				stage.totalBytes += after.stages [i].bytes - before.stages [i].bytes;
+				stage.totalOperations += after.stages [i].operations - before.stages [i].operations;
+			}
+		}
+
 		// Call with only the frame mutex held (or state -> frame); never acquire state from run.
 		void UpdateSecond(FrameRecord & frame, const LiveFrameSummary * before = nullptr)
 		{
@@ -782,13 +827,13 @@ namespace dyf::Platform
 					total.endNs = total.beginNs + LiveAverageWindowNs;
 				}
 				auto & second = it->second;
-				if(before) Change(second, * before, false);
 				if(second.total.appliedRevision != frame.summary.appliedRevision)
 				{
 					second.total.appliedRevision = 0;
 					second.total.mixedRevision = true;
 				}
-				Change(second, frame.summary, true);
+				if(before) Change(second, * before, frame.summary);
+				else Change(second, frame.summary, true);
 				Advance(run, LiveNowNs());
 			}
 			catch(...)
@@ -1176,7 +1221,7 @@ namespace dyf::Platform
 #ifdef DY_LIVE_TEST_CLOCK
 	Detail::TestLiveWork Detail::TakeTestLiveWork() noexcept
 	{
-		return { testHistoryFrameVisits.exchange(0), testLinkFrameLocks.exchange(0), testCommandPruneEntries.exchange(0), testLateFlowCopies.exchange(0), testBoundedSnapshotCopies.exchange(0) };
+		return { testHistoryFrameVisits.exchange(0), testLinkFrameLocks.exchange(0), testCommandPruneEntries.exchange(0), testLateFlowCopies.exchange(0), testBoundedSnapshotCopies.exchange(0), testMetricChanges.exchange(0) };
 	}
 	void Detail::RecordTestBoundedSnapshotCopy() noexcept { ++testBoundedSnapshotCopies; }
 
@@ -1576,6 +1621,7 @@ namespace dyf::Platform
 			return;
 		}
 
+		std::shared_ptr<const LiveFlowSnapshot> retiredDetail;
 		try
 		{
 			auto & s = S();
@@ -1623,7 +1669,7 @@ namespace dyf::Platform
 							previous->retainedBytes -= bytes;
 							detailBytes -= bytes;
 						}
-						previous->publishedFlow.reset();
+						retiredDetail = std::move(previous->publishedFlow);
 					}
 					if(currentFrame && currentFrame.get() == f) source.lastEnded = currentFrame;
 					else for(auto frame = frames.rbegin(); frame != frames.rend(); ++frame) if(frame->get() == f)
@@ -1657,6 +1703,7 @@ namespace dyf::Platform
 		{
 			++S().omittedFrames;
 		}
+		retiredDetail.reset();
 
 		if(token.previous.frame.frame)
 		{
