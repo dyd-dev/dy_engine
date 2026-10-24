@@ -107,8 +107,7 @@ namespace dyf::Platform
 			{
 				const auto snapshot = ReadLiveSnapshot();
 				if(!snapshot) return false;
-				auto bounded = *snapshot;
-				const auto payload = Detail::EncodeBoundedSnapshot(bounded);
+				const auto payload = Detail::EncodeBoundedSnapshot(*snapshot);
 				return Detail::SendPacket(handle, Detail::PacketKind::Snapshot, payload, stop);
 			}
 

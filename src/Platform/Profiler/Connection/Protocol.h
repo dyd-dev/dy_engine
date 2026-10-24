@@ -89,6 +89,7 @@ namespace dyf::Platform::Detail
 
 	std::vector<std::uint8_t> EncodeSnapshot(const LiveSnapshot&);
 	std::vector<std::uint8_t> EncodeBoundedSnapshot(LiveSnapshot&);
+	std::vector<std::uint8_t> EncodeBoundedSnapshot(const LiveSnapshot&);
 	bool DecodeSnapshot(const std::vector<std::uint8_t>&, LiveSnapshot&, std::string& error);
 	std::vector<std::uint8_t> EncodeControl(const ControlRequest&);
 	bool DecodeControl(const std::vector<std::uint8_t>&, ControlRequest&, std::string& error);

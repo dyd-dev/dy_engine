@@ -44,6 +44,7 @@ namespace dyf::Platform
 		std::atomic<std::uint64_t> testNowNs { 0 };
 		std::atomic<std::uint64_t> testHistoryFrameVisits { 0 }, testLinkFrameLocks { 0 };
 		std::atomic<std::uint64_t> testCommandPruneEntries { 0 };
+		std::atomic<std::uint64_t> testLateFlowCopies { 0 }, testBoundedSnapshotCopies { 0 };
 		std::atomic<std::int64_t> testAllocationFailure { - 1 };
 #endif
 		void AggregationAllocationPoint()
@@ -199,15 +200,17 @@ namespace dyf::Platform
 				base = frame->publishedFlow;
 				}
 				if(!base) break;
+				if((event && base->events.size() >= 8192) || (link && base->links.size() >= 16384)) break;
+#ifdef DY_LIVE_TEST_CLOCK
+				++testLateFlowCopies;
+#endif
 				auto copy = std::make_shared<LiveFlowSnapshot>(* base);
 				if(event)
 				{
-					if(copy->events.size() >= 8192) break;
 					copy->events.push_back(* event);
 				}
 				if(link)
 				{
-					if(copy->links.size() >= 16384) break;
 					copy->links.push_back(* link);
 				}
 				++copy->revision;
@@ -229,6 +232,48 @@ namespace dyf::Platform
 			if(event) ++frame->flow.omittedEvents;
 			if(link) ++frame->flow.omittedLinks;
 			frame->summary.incomplete = true;
+			return false;
+		}
+
+		bool AppendLateLinks(const std::shared_ptr<FrameRecord> & frame, const LiveFlowLink * links, std::size_t count,
+			std::atomic<std::uint64_t> & omittedLinks) noexcept
+		{
+			try
+			{
+				for(unsigned attempt = 0; attempt < 4; ++attempt)
+				{
+					std::shared_ptr<const LiveFlowSnapshot> base;
+					{ std::lock_guard<std::mutex> lock(frame->mutex);
+					if(!frame->ended || !frame->evidence.expired()) return false;
+					base = frame->publishedFlow;
+					}
+					if(!base || base->links.size() >= 16384) return false;
+					const auto accepted = (std::min)(count, std::size_t(16384) - base->links.size());
+#ifdef DY_LIVE_TEST_CLOCK
+					++testLateFlowCopies;
+#endif
+					auto copy = std::make_shared<LiveFlowSnapshot>(*base);
+					copy->links.insert(copy->links.end(), links, links + accepted);
+					copy->revision += accepted;
+					const auto oldBytes = base->events.capacity() * sizeof(LiveEvent) + base->links.capacity() * sizeof(LiveFlowLink);
+					const auto newBytes = copy->events.capacity() * sizeof(LiveEvent) + copy->links.capacity() * sizeof(LiveFlowLink);
+					std::lock_guard<std::mutex> lock(frame->mutex);
+					if(frame->publishedFlow != base) continue;
+					if(newBytes > oldBytes && !ReserveDetail(newBytes - oldBytes, OptionalDetailBudget)) return false;
+					if(newBytes < oldBytes)
+					{
+						detailBytes -= oldBytes - newBytes;
+						frame->retainedBytes -= oldBytes - newBytes;
+					}
+					else frame->retainedBytes += newBytes - oldBytes;
+					frame->publishedFlow = std::move(copy);
+					frame->flow.omittedLinks += count - accepted;
+					if(accepted != count) omittedLinks += count - accepted;
+					frame->summary.incomplete |= accepted != count;
+					return true;
+				}
+			}
+			catch(...) {}
 			return false;
 		}
 
@@ -1131,8 +1176,9 @@ namespace dyf::Platform
 #ifdef DY_LIVE_TEST_CLOCK
 	Detail::TestLiveWork Detail::TakeTestLiveWork() noexcept
 	{
-		return { testHistoryFrameVisits.exchange(0), testLinkFrameLocks.exchange(0), testCommandPruneEntries.exchange(0) };
+		return { testHistoryFrameVisits.exchange(0), testLinkFrameLocks.exchange(0), testCommandPruneEntries.exchange(0), testLateFlowCopies.exchange(0), testBoundedSnapshotCopies.exchange(0) };
 	}
+	void Detail::RecordTestBoundedSnapshotCopy() noexcept { ++testBoundedSnapshotCopies; }
 
 	void Detail::SetTestLiveNowNs(std::uint64_t now) noexcept
 	{
@@ -1931,6 +1977,7 @@ namespace dyf::Platform
 				if(f->ended)
 				{
 					lock.unlock();
+					if(count > 1 && AppendLateLinks(f, links, count, S().omittedLinks)) return;
 					for(std::size_t i = 0; i < count; ++i) try
 					{
 						{ std::lock_guard<std::mutex> guard(f->mutex);

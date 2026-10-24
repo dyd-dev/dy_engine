@@ -271,18 +271,32 @@ namespace dyf::Platform::Detail
 		return std::move(writer.data);
 	}
 
-	std::vector<std::uint8_t> EncodeBoundedSnapshot(LiveSnapshot & snapshot)
+	namespace
 	{
+	std::vector<std::uint8_t> EncodeBoundedSnapshotImpl(const LiveSnapshot & input, LiveSnapshot * writable)
+	{
+		std::optional<LiveSnapshot> copy;
+		const LiveSnapshot * value = &input;
 		for(unsigned step = 0; step < 10; ++step)
 		{
 			try
 			{
-				return EncodeSnapshot(snapshot);
+				return EncodeSnapshot(*value);
 			}
 			catch(const std::length_error &)
 			{
-				snapshot.loss.transferTruncated = true;
+				if(!writable)
+				{
+#ifdef DY_LIVE_TEST_CLOCK
+					RecordTestBoundedSnapshotCopy();
+#endif
+					copy.emplace(input);
+					writable = &*copy;
+					value = writable;
+				}
+				writable->loss.transferTruncated = true;
 			}
+			auto & snapshot = *writable;
 			if(step == 0) for(auto & source : snapshot.sources)
 			{
 				snapshot.loss.events += source.flow.events.size();
@@ -407,7 +421,18 @@ namespace dyf::Platform::Detail
 			}
 		}
 
-		return EncodeSnapshot(snapshot);
+		return EncodeSnapshot(*value);
+	}
+	}
+
+	std::vector<std::uint8_t> EncodeBoundedSnapshot(LiveSnapshot & snapshot)
+	{
+		return EncodeBoundedSnapshotImpl(snapshot, &snapshot);
+	}
+
+	std::vector<std::uint8_t> EncodeBoundedSnapshot(const LiveSnapshot & snapshot)
+	{
+		return EncodeBoundedSnapshotImpl(snapshot, nullptr);
 	}
 
 	bool DecodeSnapshot(const std::vector<std::uint8_t> & data, LiveSnapshot & s, std::string & error)
