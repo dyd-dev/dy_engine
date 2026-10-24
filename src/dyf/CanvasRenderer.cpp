@@ -208,7 +208,7 @@ bool Renderer::Impl::RecordCanvas(const Canvas& canvas, RHI::ICommandList& comma
                 // Canvas와 배치·정점 버퍼의 관계를 관측 이벤트에 연결한다. 이 메타데이터가 그리기 결과를 대신하지 않는다.
                 auto batchContext=Platform::GetLiveContext();batchContext.object=canvas.liveId;
                 if(Platform::IsLiveCollectorEnabled()){ // 수집이 켜져 있을 때만 배치와 자원 관계를 기록한다.
-                    const auto canvasBatch=Platform::GetLiveBatchId(liveId,canvas.liveId);batchContext.batch=Platform::GetLiveBatchId(canvasBatch,(std::uint64_t(draw.first)<<32)|count);
+                    batchContext.batch=Platform::GetLiveBatchPath(liveId,{canvas.liveId,(std::uint64_t(draw.first)<<32)|count});
                     Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Data;batch.first=draw.first;batch.elements=count;batch.bytes=std::uint64_t(count)*sizeof(Canvas::Vertex);batch.stride=sizeof(Canvas::Vertex);batch.resource=Platform::FindLiveObject(vertexBuffer);batch.reason=splitReason;Platform::RecordLiveEvent(batch);Platform::RecordLiveLink({canvas.liveId,batch.id});
                 }
                 Platform::LiveContextScope linkedBatch(batchContext);

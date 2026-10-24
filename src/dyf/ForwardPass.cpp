@@ -146,9 +146,7 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
             auto batchContext=Platform::GetLiveContext();
             if(Platform::IsLiveCollectorEnabled()) // 수집기가 켜진 경우에만 간접 배치 출처/인수 버퍼 링크를 남긴다.
             {
-                const auto sceneBatch=Platform::GetLiveBatchId(liveId,scene.m_liveId);
-                const auto passBatch=Platform::GetLiveBatchId(sceneBatch,1);
-                batchContext.batch=Platform::GetLiveBatchId(passBatch,(uint64_t(1)<<63)|batchIndex);
+                batchContext.batch=Platform::GetLiveBatchPath(liveId,{scene.m_liveId,1,(uint64_t(1)<<63)|batchIndex});
                 Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;
                 batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Record;
                 batch.first=batchIndex;batch.stride=sizeof(RHI::DrawIndexedIndirectArguments);
@@ -241,9 +239,7 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
         auto batchContext=Platform::GetLiveContext();
         if(Platform::IsLiveCollectorEnabled()) // 수집 중이면 직접 배치의 범위·바이트·제한된 이유 분류와 객체 링크를 남긴다.
         {
-            const auto sceneBatch=Platform::GetLiveBatchId(liveId,scene.m_liveId);
-            const auto passBatch=Platform::GetLiveBatchId(sceneBatch,1);
-            batchContext.batch=Platform::GetLiveBatchId(passBatch,(uint64_t(entityIndex)<<32)|count);
+            batchContext.batch=Platform::GetLiveBatchPath(liveId,{scene.m_liveId,1,(uint64_t(entityIndex)<<32)|count});
             batchContext.object=entityIndex<scene.m_liveEntities.size()?scene.m_liveEntities[entityIndex]:scene.m_liveId;
             Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;
             batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Data;

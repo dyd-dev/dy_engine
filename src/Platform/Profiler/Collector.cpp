@@ -45,7 +45,7 @@ namespace dyf::Platform
 		std::atomic<std::uint64_t> testHistoryFrameVisits { 0 }, testLinkFrameLocks { 0 };
 		std::atomic<std::uint64_t> testCommandPruneEntries { 0 };
 		std::atomic<std::uint64_t> testLateFlowCopies { 0 }, testBoundedSnapshotCopies { 0 };
-		std::atomic<std::uint64_t> testMetricChanges { 0 }, testWireWriteChecks { 0 };
+		std::atomic<std::uint64_t> testMetricChanges { 0 }, testWireWriteChecks { 0 }, testBatchLocks { 0 };
 		std::atomic<std::int64_t> testAllocationFailure { - 1 };
 #endif
 		void AggregationAllocationPoint()
@@ -1221,7 +1221,7 @@ namespace dyf::Platform
 #ifdef DY_LIVE_TEST_CLOCK
 	Detail::TestLiveWork Detail::TakeTestLiveWork() noexcept
 	{
-		return { testHistoryFrameVisits.exchange(0), testLinkFrameLocks.exchange(0), testCommandPruneEntries.exchange(0), testLateFlowCopies.exchange(0), testBoundedSnapshotCopies.exchange(0), testMetricChanges.exchange(0), testWireWriteChecks.exchange(0) };
+		return { testHistoryFrameVisits.exchange(0), testLinkFrameLocks.exchange(0), testCommandPruneEntries.exchange(0), testLateFlowCopies.exchange(0), testBoundedSnapshotCopies.exchange(0), testMetricChanges.exchange(0), testWireWriteChecks.exchange(0), testBatchLocks.exchange(0) };
 	}
 	void Detail::RecordTestBoundedSnapshotCopy() noexcept { ++testBoundedSnapshotCopies; }
 	void Detail::RecordTestWireWrite() noexcept { ++testWireWriteChecks; }
@@ -1409,12 +1409,15 @@ namespace dyf::Platform
 
 	}
 
-	LiveId GetLiveBatchId(LiveId owner, std::uint64_t discriminator) noexcept
+	LiveId GetLiveBatchPath(LiveId owner, std::initializer_list<std::uint64_t> discriminators) noexcept
 	{
-		if(!IsLiveCollectorEnabled() || !owner) return 0;
+		if(!IsLiveCollectorEnabled() || !owner || discriminators.size() == 0) return 0;
 		try
 		{
 			auto & s = S();
+#if defined(DY_LIVE_TEST_CLOCK) && !defined(DY_LIVE_COST_TIMING)
+			++testBatchLocks;
+#endif
 			std::lock_guard<std::mutex> lock(s.mutex);
 			const auto now = LiveNowNs();
 			if(now >= s.nextBatchSweepNs)
@@ -1424,27 +1427,40 @@ namespace dyf::Platform
 				else ++it;
 				s.nextBatchSweepNs = now + 1000000000;
 			}
-			const auto key = std::make_pair(owner, discriminator);
-			auto it = s.batches.find(key);
-			if(it != s.batches.end())
+			// Refresh every prefix so active children keep their parent IDs alive.
+			for(const auto discriminator : discriminators)
 			{
-				it->second.lastNs = now;
-				return it->second.id;
+				const auto key = std::make_pair(owner, discriminator);
+				auto it = s.batches.find(key);
+				if(it != s.batches.end())
+				{
+					it->second.lastNs = now;
+					owner = it->second.id;
+				}
+				else
+				{
+					if(s.batches.size() >= 65536)
+					{
+						++s.loss.inventory;
+						return 0;
+					}
+					const auto id = AllocateLiveId();
+					s.batches.emplace(key, BatchRecord { id, now });
+					owner = id;
+				}
 			}
-			if(s.batches.size() >= 65536)
-			{
-				++s.loss.inventory;
-				return 0;
-			}
-			const auto id = AllocateLiveId();
-			s.batches.emplace(key, BatchRecord { id, now });
-			return id;
+			return owner;
 		}
 		catch(...)
 		{
 			return 0;
 		}
 
+	}
+
+	LiveId GetLiveBatchId(LiveId owner, std::uint64_t discriminator) noexcept
+	{
+		return GetLiveBatchPath(owner, { discriminator });
 	}
 
 	void PublishLiveDevice(const LiveDeviceSnapshot & value) noexcept

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <string>
@@ -465,6 +466,7 @@ namespace dyf::Platform
 	void RebindLiveObject(LiveId, const void* object) noexcept;
 	void RetireLiveObject(LiveId) noexcept;
 	LiveId GetLiveBatchId(LiveId owner, std::uint64_t discriminator) noexcept;
+	LiveId GetLiveBatchPath(LiveId owner, std::initializer_list<std::uint64_t> discriminators) noexcept;
 	void PublishLiveDevice(const LiveDeviceSnapshot&) noexcept;
 
 	LiveContext GetLiveContext() noexcept;
@@ -549,7 +551,7 @@ namespace dyf::Platform
 namespace dyf::Platform::Detail
 {
 #ifdef DY_LIVE_TEST_CLOCK
-	struct TestLiveWork { std::uint64_t historyFrameVisits = 0, linkFrameLocks = 0, commandPruneEntries = 0, lateFlowCopies = 0, boundedSnapshotCopies = 0, metricChanges = 0, wireWriteChecks = 0; };
+	struct TestLiveWork { std::uint64_t historyFrameVisits = 0, linkFrameLocks = 0, commandPruneEntries = 0, lateFlowCopies = 0, boundedSnapshotCopies = 0, metricChanges = 0, wireWriteChecks = 0, batchLocks = 0; };
 	TestLiveWork TakeTestLiveWork() noexcept;
 	void RecordTestBoundedSnapshotCopy() noexcept;
 	void RecordTestWireWrite() noexcept;
