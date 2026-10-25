@@ -25,7 +25,12 @@ namespace dyf
 		float ty = 0.0f;
 		float tz = 0.0f;
 		float tw = 1.0f;
+		float cr = 1.0f;
+		float cg = 1.0f;
+		float cb = 1.0f;
+		float ca = 1.0f;
 	};
+	static_assert(sizeof(RendererVertex) == 64 && offsetof(RendererVertex, cr) == 48);
 
 	// 카메라·환경·기본 조명과 고정 용량 광원 배열을 float4 단위로 전달한다. 실제 선택한 광원 수는 같은 구조체의 lightCounts와 areaLightCounts에 담는다.
 	struct RendererLightingConstants

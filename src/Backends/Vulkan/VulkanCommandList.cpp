@@ -68,9 +68,29 @@ namespace dyf::Backends
         }
     };
 
+    struct VulkanCommandPoolCache::CacheBlock
+    {
+        struct Slot {std::atomic<VulkanCommandStorage*> storage{nullptr};};
+        std::array<Slot,32> slots;
+        CacheBlock* next=nullptr;
+        ~CacheBlock()
+        {for(auto& slot:slots)delete slot.storage.load(std::memory_order_relaxed);}
+    };
+
     VulkanCommandPoolCache::VulkanCommandPoolCache(const VulkanContext& context)
         :m_device(context.device),m_queueFamily(context.queueIndices.graphicsFamily) {}
-    VulkanCommandPoolCache::~VulkanCommandPoolCache()=default;
+    VulkanCommandPoolCache::~VulkanCommandPoolCache()
+    {
+        // Each command retains its cache. Stable blocks are reclaimed only
+        // after the final command/owner has stopped accessing their slots.
+        auto* block=m_available.load(std::memory_order_relaxed);
+        while(block)
+        {
+            auto* next=block->next;
+            delete block;
+            block=next;
+        }
+    }
 
     void VulkanCommandPoolCache::RequireSuccess(VkResult result,const char* operation)
     {
@@ -83,10 +103,15 @@ namespace dyf::Backends
     {
         if(!m_reuseEnabled || m_device==VK_NULL_HANDLE)throw std::runtime_error("Vulkan command pool cache is unavailable");
         std::unique_ptr<VulkanCommandStorage> storage;
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if(!m_available.empty()) {storage=std::move(m_available.back());m_available.pop_back();}
-        }
+        for(auto* block=m_available.load(std::memory_order_acquire);block && !storage;block=block->next)
+            for(auto& slot:block->slots)
+            {
+                if(!slot.storage.load(std::memory_order_relaxed))continue;
+                // Transfer ownership before inspecting/resetting native state.
+                // Slots stay alive and never expose an unowned node to readers.
+                storage.reset(slot.storage.exchange(nullptr,std::memory_order_acquire));
+                if(storage)break;
+            }
         if(storage)
             RequireSuccess(vkResetCommandPool(m_device,storage->pool,0),"vkResetCommandPool");
         else
@@ -108,12 +133,28 @@ namespace dyf::Backends
     void VulkanCommandPoolCache::Return(std::unique_ptr<VulkanCommandStorage> storage) noexcept
     {
         if(!storage || !m_reuseEnabled)return;
+        auto* owned=storage.release();
+        for(auto* block=m_available.load(std::memory_order_acquire);block;block=block->next)
+            for(auto& slot:block->slots)
+            {
+                VulkanCommandStorage* empty=nullptr;
+                if(slot.storage.compare_exchange_strong(empty,owned,std::memory_order_release,
+                    std::memory_order_relaxed))return;
+            }
         try
         {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_available.push_back(std::move(storage));
+            // Preserve the existing growable cache without a reclaimable
+            // Treiber stack: published blocks are immutable until destruction.
+            auto block=std::make_unique<CacheBlock>();
+            block->slots.front().storage.store(owned,std::memory_order_relaxed);
+            owned=nullptr;
+            auto* first=m_available.load(std::memory_order_acquire);
+            do {block->next=first;}
+            while(!m_available.compare_exchange_weak(first,block.get(),std::memory_order_acq_rel,
+                std::memory_order_acquire));
+            block.release();
         }
-        catch(...) {}
+        catch(...) {delete owned;} // Optional cache growth may fail without losing ownership.
     }
 
     void VulkanCommandList::BeginDebugEventNative(const char* name,const RHI::DebugLabelColor& color)
@@ -182,7 +223,10 @@ namespace dyf::Backends
 
 		StateInfo GetStateInfo(dyf::RHI::ResourceState state, bool supportsCompute)
 		{
-			const VkPipelineStageFlags2 shaderStages = VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |
+			// Include every supported shader stage without also waiting for vertex
+			// input, attachment output or depth/stencil tests on unrelated resources.
+			const VkPipelineStageFlags2 shaderStages = VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT |
+				VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
 				(supportsCompute ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE);
 			switch (state)
 			{
@@ -265,6 +309,7 @@ namespace dyf::Backends
 			case dyf::RHI::Format::R32G32B32A32_FLOAT:
 				return 16;
 			case dyf::RHI::Format::R16_UINT:
+            case dyf::RHI::Format::R16_FLOAT:
 				return 2;
 			default:
 				return 0;
@@ -317,13 +362,6 @@ namespace dyf::Backends
 				arrayLayerCount <= texture.GetDesc().depthOrArraySize - range.firstArrayLayer;
 		}
 
-		bool RequiresResourceSet(const RHI::PipelineLayoutDesc& layout)
-		{
-			return layout.bindingCount != 0 &&
-				std::any_of(layout.bindings, layout.bindings + layout.bindingCount,
-					[](const RHI::ResourceBindingLayout& binding)
-					{ return binding.type != RHI::ResourceBindingType::StaticSampler; });
-		}
 	}
 
 	std::shared_ptr<VulkanUploadPool> CreateVulkanUploadPool(const VulkanContext& context)
@@ -375,6 +413,7 @@ namespace dyf::Backends
         std::copy_n(properties.limits.maxViewportDimensions,2,m_maxViewportDimensions);
         std::copy_n(properties.limits.viewportBoundsRange,2,m_viewportBounds);
         m_supportsCompute=(context.physicalInfo->graphicsQueue.queueFlags&VK_QUEUE_COMPUTE_BIT)!=0;
+        // Native pool reuse always starts with a fresh wrapper and empty state caches.
         m_commandStorage=m_commandPools->Acquire();m_commandBuffer=m_commandStorage->buffer;
 	}
 
@@ -390,6 +429,8 @@ namespace dyf::Backends
 
     void VulkanCommandList::GlobalBarrierNative()
     {
+        m_validatedResourceSets.clear();
+        ClearRecentBufferStates();
         VkMemoryBarrier barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         barrier.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -406,6 +447,8 @@ namespace dyf::Backends
 			return;
 		}
 		if (count == 0) return;
+        m_validatedResourceSets.clear();
+        ClearRecentBufferStates();
 
         // Native recording is synchronous on each worker. Keep translation
         // scratch local to that thread, including the Vulkan 1.1 conversion.
@@ -554,8 +597,11 @@ namespace dyf::Backends
 				}
 				VkImageMemoryBarrier2 barrier{};
 				barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-				barrier.srcStageMask = before.stages;
-				barrier.srcAccessMask = before.access;
+                const bool acquireColor=texture->IsSwapchainImage() &&
+                    source.before==RHI::ResourceState::Present && source.after==RHI::ResourceState::RenderTarget;
+                // Chain the layout transition to a color-output acquire wait.
+				barrier.srcStageMask = acquireColor?VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT:before.stages;
+				barrier.srcAccessMask = acquireColor?VK_ACCESS_2_NONE:before.access;
 				barrier.dstStageMask = after.stages;
 				barrier.dstAccessMask = after.access;
 				barrier.oldLayout = texture->GetBarrierOldLayout(source.before);
@@ -613,11 +659,13 @@ namespace dyf::Backends
 
 		m_boundPipeline = nullptr;
 		m_boundResourceSet = nullptr;
+        m_validatedResourceSets.clear();
+        ClearRecentBufferStates();
 		m_vertexBindings.clear();
 		m_indexBuffer = nullptr;
 		m_indexFormat = dyf::RHI::Format::Unknown;
 		m_indexOffset = 0;
-		m_inlineConstantCoverage.clear();
+		m_inlineConstantCoverage.Reset(0);
 		m_hasViewport = false;
 		m_hasScissor = false;
 		m_hasStencilReference = false;
@@ -839,14 +887,14 @@ void VulkanCommandList::BindComputePipelineNative(RHI::PipelineHandle value)
     if(m_closed || m_rendering || !pipeline || !pipeline->IsCompute()){Fail();return;}
     vkCmdBindPipeline(m_commandBuffer,VK_PIPELINE_BIND_POINT_COMPUTE,pipeline->GetHandle());
     m_boundPipeline=pipeline;m_boundResourceSet=nullptr;
-    m_inlineConstantCoverage.assign(pipeline->GetLayout().inlineConstantSize,0);
+    m_inlineConstantCoverage.Reset(pipeline->GetLayout().inlineConstantSize);
 }
 void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 {
     if(m_closed || m_rendering || !m_boundPipeline || !m_boundPipeline->IsCompute() ||
         !x || !y || !z || x>m_maxComputeGroups[0] || y>m_maxComputeGroups[1] || z>m_maxComputeGroups[2] ||
-        (RequiresResourceSet(m_boundPipeline->GetLayout()) && !m_boundResourceSet) ||
-        std::any_of(m_inlineConstantCoverage.begin(),m_inlineConstantCoverage.end(),[](uint8_t byte){return !byte;}))
+        (m_boundPipeline->RequiresResourceSet() && !m_boundResourceSet) ||
+        !m_inlineConstantCoverage.IsComplete())
     {Fail();return;}
     vkCmdDispatch(m_commandBuffer,x,y,z);
 }
@@ -855,8 +903,8 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 {
     auto* buffer = dynamic_cast<VulkanBuffer*>(arguments);
     if (m_closed || m_failed || m_rendering || !m_boundPipeline || !m_boundPipeline->IsCompute() ||
-        (RequiresResourceSet(m_boundPipeline->GetLayout()) && !m_boundResourceSet) ||
-        std::any_of(m_inlineConstantCoverage.begin(), m_inlineConstantCoverage.end(), [](uint8_t byte) { return !byte; }) ||
+        (m_boundPipeline->RequiresResourceSet() && !m_boundResourceSet) ||
+        !m_inlineConstantCoverage.IsComplete() ||
         !RequireBufferState(buffer, RHI::ResourceState::IndirectArgument))
     {
         Fail();
@@ -884,7 +932,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 			Fail();
 			return;
 		}
-		m_inlineConstantCoverage.assign(pipeline->GetLayout().inlineConstantSize, 0);
+		m_inlineConstantCoverage.Reset(pipeline->GetLayout().inlineConstantSize);
 		vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetHandle());
 		m_boundPipeline = pipeline;
 		m_boundResourceSet = nullptr;
@@ -899,56 +947,33 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 			Fail();
 			return;
 		}
-		const dyf::RHI::PipelineLayoutDesc& layout = m_boundPipeline->GetLayout();
-		for (uint32_t index = 0; index < set->GetBindingCount(); ++index)
-		{
-			const dyf::RHI::ResourceBinding& binding = set->GetBindings()[index];
-			const dyf::RHI::ResourceBindingLayout* declaration =
-				VulkanValidation::FindLayoutBinding(layout, binding.binding);
-			if (declaration == nullptr)
-			{
-				Fail();
-				return;
-			}
-			if (declaration->type == dyf::RHI::ResourceBindingType::ConstantBuffer ||
-				declaration->type == dyf::RHI::ResourceBindingType::ReadOnlyStorageBuffer ||
-				declaration->type == dyf::RHI::ResourceBindingType::ReadWriteStorageBuffer)
-			{
-				VulkanBuffer* buffer = dynamic_cast<VulkanBuffer*>(binding.buffer);
-				const dyf::RHI::ResourceState requiredState =
-					declaration->type == dyf::RHI::ResourceBindingType::ConstantBuffer
-					? dyf::RHI::ResourceState::ConstantBuffer
-					: declaration->type == dyf::RHI::ResourceBindingType::ReadOnlyStorageBuffer
-						? dyf::RHI::ResourceState::ShaderResource
-						: dyf::RHI::ResourceState::UnorderedAccess;
-				if (buffer == nullptr || !RequireBufferState(buffer, requiredState))
-				{
-					Fail();
-					return;
-				}
-			}
-			else if (declaration->type == dyf::RHI::ResourceBindingType::SampledTexture ||
-				declaration->type == dyf::RHI::ResourceBindingType::StorageTexture)
-			{
-				VulkanTexture* texture = dynamic_cast<VulkanTexture*>(binding.texture);
-				const dyf::RHI::ResourceState requiredState =
-					declaration->type == dyf::RHI::ResourceBindingType::SampledTexture
-					? dyf::RHI::ResourceState::ShaderResource
-					: dyf::RHI::ResourceState::UnorderedAccess;
-				if (texture == nullptr ||
-					!RequireTextureSubresourcesInState(texture, binding.subresources, requiredState))
-				{
-					Fail();
-					return;
-				}
-				TrackSwapchainImage(texture);
-			}
-			else
-			{
-				Fail();
-				return;
-			}
-		}
+        if(!m_validatedResourceSets.count(set))
+        {
+            // Sets are immutable. Only a barrier can change an already required state.
+            for(const auto& requirement:set->GetNativeStateRequirements())
+            {
+                if(requirement.buffer)
+                {
+                    if(!RequireBufferState(requirement.buffer,requirement.state))
+                    {
+                        Fail();
+                        return;
+                    }
+                }
+                else
+                {
+                    for(uint32_t layer=requirement.firstLayer;layer<requirement.firstLayer+requirement.layerCount;++layer)
+                        for(uint32_t mip=requirement.firstMip;mip<requirement.firstMip+requirement.mipCount;++mip)
+                            if(!RequireTextureState(requirement.texture,mip,layer,requirement.state))
+                            {
+                                Fail();
+                                return;
+                            }
+                    TrackSwapchainImage(requirement.texture);
+                }
+            }
+            m_validatedResourceSets.insert(set);
+        }
 		const VkDescriptorSet descriptorSet = set->GetSet();
 		if (descriptorSet != VK_NULL_HANDLE)
 		{
@@ -1037,10 +1062,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 			return;
 		}
 		vkCmdPushConstants(m_commandBuffer, m_boundPipeline->GetPipelineLayout(), stages, offset, size, data);
-		std::fill(
-			m_inlineConstantCoverage.begin() + static_cast<std::ptrdiff_t>(offset),
-			m_inlineConstantCoverage.begin() + static_cast<std::ptrdiff_t>(offset + size),
-			1);
+		m_inlineConstantCoverage.Write(offset, size);
 	}
 
 	void VulkanCommandList::SetViewportNative(const dyf::RHI::Viewport& viewport)
@@ -1214,7 +1236,9 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		uint32_t rowPitch,
 		uint32_t slicePitch)
 	{
-		const uint32_t bytesPerPixel = BytesPerPixel(texture.GetDesc().format);
+		const auto format=texture.GetDesc().format;
+        const bool compressed=dyf::RHI::IsBlockCompressed(format);
+        const uint32_t bytesPerPixel=compressed ? dyf::RHI::CompressedBlockBytes(format) : BytesPerPixel(format);
 		if (m_closed || m_failed || m_rendering || texture.IsSwapchainImage() || data == nullptr || bytesPerPixel == 0 ||
 			mipLevel >= texture.GetDesc().mipLevels || arrayLayer >= texture.GetDesc().depthOrArraySize)
 		{
@@ -1222,16 +1246,18 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		}
 		const uint32_t width = std::max(1u, mipLevel < 32 ? texture.GetDesc().width >> mipLevel : 0u);
 		const uint32_t height = std::max(1u, mipLevel < 32 ? texture.GetDesc().height >> mipLevel : 0u);
-		const uint64_t minimumRowPitch = static_cast<uint64_t>(width) * bytesPerPixel;
-		const uint64_t requiredSlicePitch = static_cast<uint64_t>(rowPitch) * height;
-		const uint64_t requiredBytes = static_cast<uint64_t>(rowPitch) * (height - 1) + minimumRowPitch;
+        const uint32_t rows=compressed ? (height+3u)/4u : height;
+        const uint32_t columns=compressed ? (width+3u)/4u : width;
+		const uint64_t minimumRowPitch = static_cast<uint64_t>(columns) * bytesPerPixel;
+		const uint64_t requiredSlicePitch = static_cast<uint64_t>(rowPitch) * rows;
+		const uint64_t requiredBytes = static_cast<uint64_t>(rowPitch) * (rows - 1) + minimumRowPitch;
 		if (rowPitch < minimumRowPitch || slicePitch < requiredSlicePitch || dataSize < requiredBytes)
 		{
 			return false;
 		}
 
 		const bool packed = rowPitch % bytesPerPixel != 0;
-		const uint64_t uploadBytes = packed ? minimumRowPitch * height : requiredBytes;
+		const uint64_t uploadBytes = packed ? minimumRowPitch * rows : requiredBytes;
 		// RGB32 texels have a 12-byte block. Reserve up to two 4-byte padding units
 		// because the shared arena accepts power-of-two alignment only.
 		const uint64_t extraPadding = bytesPerPixel == 12 ? 8 : 0;
@@ -1244,7 +1270,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		if (packed)
 		{
 			// Vulkan row length is in texels. Remove byte padding directly into the page.
-			for (uint32_t row = 0; row < height; ++row)
+			for (uint32_t row = 0; row < rows; ++row)
 				std::memcpy(destination + static_cast<size_t>(row * minimumRowPitch),
 					static_cast<const uint8_t*>(data) + static_cast<size_t>(row) * rowPitch,
 					static_cast<size_t>(minimumRowPitch));
@@ -1258,8 +1284,8 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		m_operations.push_back(operation);
 		VkBufferImageCopy region{};
 		region.bufferOffset = staging.offset + padding;
-		region.bufferRowLength = packed ? 0 : rowPitch / bytesPerPixel;
-		region.bufferImageHeight = height;
+		region.bufferRowLength = packed ? 0 : (rowPitch / bytesPerPixel)*(compressed ? 4u : 1u);
+		region.bufferImageHeight = 0;
 		region.imageSubresource.aspectMask = texture.GetAspectMask();
 		region.imageSubresource.mipLevel = mipLevel;
 		region.imageSubresource.baseArrayLayer = arrayLayer;
@@ -1277,15 +1303,30 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 
 	bool VulkanCommandList::RequireBufferState(VulkanBuffer* buffer, dyf::RHI::ResourceState state)
 	{
-		if (buffer == nullptr || !buffer->IsStateAllowed(state)) return false;
+		if (buffer == nullptr) return false;
+        // Only successful exact requirements are cached. Barriers invalidate
+        // them before changing the command list's authoritative local states.
+        for(uint32_t i=0;i<m_recentBufferStateCount;++i)
+            if(m_recentBufferStates[i].buffer==buffer && m_recentBufferStates[i].state==state)
+                return true;
+        if(!buffer->IsStateAllowed(state)) return false;
 		const auto found = m_bufferStates.find(buffer);
-		if (found != m_bufferStates.end()) return found->second == state;
-		Operation operation{};
-		operation.kind = OperationKind::BufferRequirement;
-		operation.buffer = buffer;
-		operation.before = state;
-		m_operations.push_back(operation);
-		m_bufferStates.emplace(buffer, state);
+        if(found!=m_bufferStates.end())
+        {
+            if(found->second!=state) return false;
+        }
+        else
+        {
+		    Operation operation{};
+		    operation.kind = OperationKind::BufferRequirement;
+		    operation.buffer = buffer;
+		    operation.before = state;
+		    m_operations.push_back(operation);
+		    m_bufferStates.emplace(buffer, state);
+        }
+        m_recentBufferStates[m_recentBufferStateNext]={buffer,state};
+        m_recentBufferStateNext=(m_recentBufferStateNext+1)%m_recentBufferStates.size();
+        if(m_recentBufferStateCount<m_recentBufferStates.size()) ++m_recentBufferStateCount;
 		return true;
 	}
 
@@ -1348,6 +1389,31 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		}
 	}
 
+    VkPipelineStageFlags VulkanCommandList::GetSwapchainAcquireWaitStage(
+        VulkanTexture* image,bool firstReference) const
+    {
+        bool found=false;
+        const auto colorState=[](RHI::ResourceState state) {
+            return state==RHI::ResourceState::Present || state==RHI::ResourceState::RenderTarget;
+        };
+        for(const auto& operation:m_operations)
+        {
+            if(operation.texture!=image)continue;
+            if(!found && firstReference && (operation.kind!=OperationKind::TextureBarrier ||
+                operation.before!=RHI::ResourceState::Present || operation.after!=RHI::ResourceState::RenderTarget))
+                return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            found=true;
+            if(operation.kind==OperationKind::TextureBarrier)
+            {
+                if(!colorState(operation.before) || !colorState(operation.after))
+                    return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            }
+            else if(operation.kind!=OperationKind::TextureRequirement || operation.before!=RHI::ResourceState::RenderTarget)
+                return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        }
+        return found?VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT:VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    }
+
 	bool VulkanCommandList::ValidateDraw(
 		bool indexed,
 		uint32_t vertexCount,
@@ -1388,10 +1454,8 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 			const uint64_t available = found->second.buffer->GetDesc().size - found->second.offset;
 			if (first + count > available / layout.stride) return false;
 		}
-		const dyf::RHI::PipelineLayoutDesc& layout = m_boundPipeline->GetLayout();
-		if (RequiresResourceSet(layout) && m_boundResourceSet == nullptr) return false;
-		return std::find(m_inlineConstantCoverage.begin(), m_inlineConstantCoverage.end(), 0) ==
-			m_inlineConstantCoverage.end();
+		if (m_boundPipeline->RequiresResourceSet() && m_boundResourceSet == nullptr) return false;
+		return m_inlineConstantCoverage.IsComplete();
 	}
 
 	bool VulkanCommandList::ValidateForSubmit(VulkanSubmissionState& state) const

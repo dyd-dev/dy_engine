@@ -45,10 +45,12 @@ public:
     RHI::RGResourceHandle GetSpecularHandle() const { return m_specularHandle; }
     RHI::BufferHandle GetConstants() const { return m_constants; }
     RHI::TextureHandle GetPrefilter() const { return m_prefilter; }
+    RHI::TextureHandle GetBRDF() const { return m_brdf; }
     const Constants& GetCPUConstants() const { return m_data; }
     RHI::BufferHandle GetProbeData() const { return m_probeData; }
     RHI::TextureHandle GetProbePrefilter() const { return m_probePrefilter; }
     RHI::BufferHandle GetProbeParameters() const { return m_probeParameters; }
+    bool UsesNativeFiltering() const noexcept;
     void CommitFrame();
     void Reset();
 private:
@@ -66,6 +68,8 @@ private:
         std::vector<std::vector<float>> moments;
         uint32_t width=0,height=0,maxReflectionResolution=0;
         float distanceScale=0;
+        double prefilterMaxMagnitude=0;
+        bool prefilterFinite=false;
     };
     struct FrameConstants
     {
@@ -85,6 +89,9 @@ private:
     void Draw(RHI::ICommandList&,RHI::PipelineHandle,RHI::ResourceSetHandle,RHI::TextureHandle,bool load);
     RHI::IDevice* m_device=nullptr;
     HdrImage m_source,m_diffuseSource;
+    double m_prefilterMaxMagnitude=0;
+    bool m_prefilterFinite=false;
+    bool m_linearFiltering=false;
     EnvironmentDesc m_description;
     Constants m_data={};
     std::array<Math::float4,9> m_irradiance={};

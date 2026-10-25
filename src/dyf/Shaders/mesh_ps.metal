@@ -3,6 +3,12 @@
 #ifndef RENDERER_BINDLESS // 재질 텍스처 배열 방식이 지정되지 않았으면 개별 텍스처 바인딩을 기본으로 사용한다.
 #define RENDERER_BINDLESS 0
 #endif
+#ifndef RENDERER_DEPTH_PREPASS
+#define RENDERER_DEPTH_PREPASS 0
+#endif
+#ifndef RENDERER_ENABLE_AREA_LIGHTS
+#define RENDERER_ENABLE_AREA_LIGHTS 1
+#endif
 #define RENDERER_MAX_DIRECTIONAL_LIGHTS 4
 #define RENDERER_MAX_POINT_LIGHTS 16
 #define RENDERER_MAX_SPOT_LIGHTS 16
@@ -41,10 +47,10 @@
 #endif
 
 using namespace metal;
-#if !RENDERER_BINDLESS // 개별 바인딩 경로에서만 명명된 재질·화면 환경광 자원을 포함한다. bindless 경로는 재질 배열을 사용한다.
-// 개별 바인딩의 환경 상수는 연결 14에 있다. settings.x/y/z는 환경 사용·강도·회전이다.
-// 주변 형상에 가려 주변광이 덜 닿는 정도를 나타내는 값(AO)의 사용 여부를 screen.z로 전달한다.
-// screen.xy는 화면 역크기, w는 환경 기능 비트다. SH 9개와 probe 정보도 CPU와 같은 메모리 배치를 사용한다.
+// 환경 상수는 연결 14이며 bindless 경로도 같은 배치를 사용한다.
+// settings.x/y/z는 환경 사용·강도·회전, screen.xy/z/w는 화면 역크기·AO 사용·환경 기능 비트다.
+// SH 9개와 probe 정보도 CPU와 같은 메모리 배치를 사용한다.
+// Basic bindless rendering supplies neutral settings.x=0 and screen.z=0.
 struct EnvironmentConstants
 {
     float4 sh[9];
@@ -66,10 +72,9 @@ inline float3 EnvironmentIrradiance(float3 n,constant EnvironmentConstants& envi
         environment.sh[7].rgb*(1.0925484305920792f*n.x*n.z)+environment.sh[8].rgb*(0.5462742152960396f*(n.x*n.x-n.y*n.y));
     return max(value,0.0f);
 }
-#endif
 
 // 한 draw의 공통 행렬과 재질 입력이다. 정점 단계와 192바이트 배치를 공유하며 draw 상수는 GLSL push constant, HLSL b10, Metal buffer 10으로 전달된다.
-// padding0은 알파 cutoff의 float 비트, padding1 하위 2비트는 Opaque/Mask/Blend, 4는 양면, 8은 법선 Y 반전, 16은 unlit이다. padding2는 bindless 재질 표 번호다.
+// padding0은 알파 cutoff의 float 비트, padding1 하위 2비트는 Opaque/Mask/Blend, 4는 양면, 8은 법선 Y 반전, 16은 unlit, 32는 반전 변환의 면 방향 보정이다. padding2는 bindless 재질 표 번호다.
 struct DrawConstants
 {
     float4x4 viewProjectionMatrix;
@@ -148,7 +153,7 @@ struct RendererLightingConstants
 };
 
 // 표면을 따라가는 방향(접선)을 정점에서 받는다.
-// UV·월드 위치·법선·접선을 픽셀 위치로 보간하고, front_facing으로 받은 면 앞뒤 정보를 양면 재질에 반영한다.
+// UV·월드 위치·법선·접선·정점 색상을 픽셀 위치로 보간하고, front_facing으로 받은 면 앞뒤 정보를 양면 재질에 반영한다.
 struct RasterData
 {
     float4 position [[position]];
@@ -156,7 +161,8 @@ struct RasterData
     float3 worldPosition [[user(locn1)]];
     float3 worldNormal [[user(locn2)]];
     float4 worldTangent [[user(locn3)]];
-#if RENDERER_ENABLE_SHADOWS // 그림자 빌드에서만 깊이 자원·시점 자료·가시율 계산을 포함한다. 꺼진 직접광 경로의 가시율은 1이다.
+    float4 color [[user(locn5)]];
+#if RENDERER_ENABLE_SHADOWS
     float4 lightSpacePosition [[user(locn4)]];
 #endif
 };
@@ -173,31 +179,32 @@ constant uint kTextureFlagEmissive =
     uint(RENDERER_TEXTURE_FLAG_EMISSIVE);
 constant float kPi = 3.14159265359f;
 
-// 거칠기의 제곱을 미세면 분포 폭으로 쓰는 GGX 분포다. 두 벡터 모두에 수직인 벡터를 구하는 연산(외적)을 법선과 반각 벡터에 적용한다.
-// 날카로운 반사에서 1-(N·H)^2를 직접 빼면 유효 자릿수를 잃기 쉬우므로 같은 값을 외적 결과의 길이 제곱으로 계산한다.
-inline float DistributionGGX(float3 normal, float3 halfway, float roughness)
+// GGX 분포는 미리 계산한 거칠기의 네제곱 a2를 받는다. 외적으로 1-(N·H)^2의 상쇄 오차를 줄인다.
+inline float DistributionGGX(float3 normal, float3 halfway, float a2)
 {
-    const float a = roughness * roughness;
-    const float a2 = a * a;
     const float ndoth = clamp(dot(normal, halfway), 0.0f, 1.0f);
     const float3 crossNH = cross(normal, halfway);
     const float denominator = dot(crossNH, crossNH) + ndoth * ndoth * a2;
     return a2 / (kPi * denominator * denominator);
 }
 
-// 시선이나 광원이 비스듬할 때 미세 표면끼리 가리는 정도를 근사한다. 직접광에서 시선 항과 광원 항을 곱해 사용한다.
-inline float GeometrySchlickGGX(float ndotv, float roughness)
+// 직접광의 미세면 가림을 근사한다. k=(roughness+1)^2/8은 표면마다 한 번 계산해 공유한다.
+inline float GeometrySchlickGGX(float ndotv, float k)
 {
-    const float r = roughness + 1.0f;
-    const float k = (r * r) / 8.0f;
     return ndotv / max(ndotv * (1.0f - k) + k, 0.0001f);
 }
 
-// 정면 반사율 f0에서 시작해 비스듬히 볼수록 반사가 커지는 Fresnel 효과를 5제곱으로 근사한다.
+inline float SchlickPow5(float base)
+{
+    float base2=base*base;
+    return (base2*base2)*base;
+}
+
+// 정면 반사율에서 시작해 비스듬히 볼수록 반사가 커지는 Fresnel 효과를 5제곱으로 근사한다.
 inline float3 FresnelSchlick(float cosTheta, float3 f0)
 {
     return f0 + (1.0f - f0) *
-        pow(saturate(1.0f - cosTheta), 5.0f);
+        SchlickPow5(saturate(1.0f - cosTheta));
 }
 
 // 주변광과 면광원 확산 가중치용 Fresnel 근사다. 거친 표면에서 가장자리 반사가 과해지지 않도록 roughness로 상한을 조절한다.
@@ -208,7 +215,7 @@ inline float3 FresnelSchlickRoughness(
 {
     const float3 roughnessF0 = max(float3(1.0f - roughness), f0);
     return f0 + (roughnessF0 - f0) *
-        pow(saturate(1.0f - cosTheta), 5.0f);
+        SchlickPow5(saturate(1.0f - cosTheta));
 }
 
 #if RENDERER_ENABLE_SHADOWS // 그림자 빌드에서만 깊이 자원·시점 자료·가시율 계산을 포함한다. 꺼진 직접광 경로의 가시율은 1이다.
@@ -266,7 +273,7 @@ float SampleShadowView(int index,float3 worldPosition,float3 normal,float3 light
     for(int y=-extent;y<=extent;++y)for(int x=-extent;x<=extent;++x)
     {
         float2 sampleUv=clamp(uv+float2(x,y)*texel,minUv,maxUv);
-        visible+=receiver<=shadowMap.sample(shadowSampler,sampleUv)?1.0:0.0;
+        visible+=receiver<=shadowMap.sample(shadowSampler,sampleUv,level(0))?1.0:0.0;
         samples+=1.0;
     }
     return 1.0-clamp(strength,0.0,1.0)*(1.0-visible/max(samples,1.0));
@@ -331,19 +338,35 @@ inline float SpotConeAttenuation(float cosTheta, float innerCos, float outerCos)
     return t * t * (3.0 - 2.0 * t);
 }
 
-// 한 광원에 대한 GGX 반사와 에너지 가중 Lambert 확산을 더한다. 입사 조도·ndotl·그림자 가시율을 곱하며, ndotl은 max(dot(normal, lightDir), 0)이다. 금속도가 높을수록 확산 비중은 줄어든다.
+// 같은 픽셀의 모든 직접광에 공통인 Fresnel·거칠기·시선 항을 준비한다.
+struct DirectSurface
+{
+    float3 f0;
+    float ndotv,alphaSquared,k,viewGeometry,diffuseFactor;
+};
+inline DirectSurface PrepareDirectSurface(float3 normal,float3 viewDir,float3 albedo,float metallic,float roughness)
+{
+    DirectSurface surface;
+    surface.f0=mix(float3(.04f),albedo,metallic);
+    surface.ndotv=max(dot(normal,viewDir),0.0f);
+    float a=roughness*roughness,r=roughness+1.0f;
+    surface.alphaSquared=a*a;
+    surface.k=(r*r)/8.0f;
+    surface.viewGeometry=GeometrySchlickGGX(surface.ndotv,surface.k);
+    surface.diffuseFactor=1.0f-metallic;
+    return surface;
+}
 inline float3 EvaluateDirectLight(
     float3 normal,
     float3 viewDir,
     float3 lightDir,
     float3 incidentIlluminance,
     float3 albedo,
-    float metallic,
-    float roughness,
+    DirectSurface surface,
     float visibility) {
     float ndotl = max(dot(normal, lightDir), 0.0);
-    float ndotv = max(dot(normal, viewDir), 0.0);
-    if (ndotl <= 0.0 || ndotv <= 0.0 || visibility <= 0.0) { // 광원 또는 시선이 법선의 반대쪽이나 표면과 나란한 방향에 있거나, 가시율이 0 이하면 이 광원의 기여 RGB를 0으로 반환한다.
+    float ndotv = surface.ndotv;
+    if (ndotl <= 0.0 || ndotv <= 0.0 || visibility <= 0.0) {
         return float3(0.0,0.0,0.0);
     }
     float3 halfwayVector = viewDir + lightDir;
@@ -352,90 +375,189 @@ inline float3 EvaluateDirectLight(
         return float3(0.0,0.0,0.0);
     }
     float3 halfway = halfwayVector * rsqrt(halfwayLengthSquared);
-    float3 f0 = mix(float3(0.04,0.04,0.04), albedo, metallic);
-    float ndf = DistributionGGX(normal, halfway, roughness);
-    float geometry = GeometrySchlickGGX(ndotv, roughness) * GeometrySchlickGGX(ndotl, roughness);
-    float3 fresnel = FresnelSchlick(max(dot(halfway, viewDir), 0.0), f0);
+    float ndf = DistributionGGX(normal, halfway, surface.alphaSquared);
+    float geometry = surface.viewGeometry * GeometrySchlickGGX(ndotl, surface.k);
+    float3 fresnel = FresnelSchlick(max(dot(halfway, viewDir), 0.0), surface.f0);
     float3 specular = (ndf * geometry * fresnel) / max(4.0 * ndotv * ndotl, 0.0001);
-    float3 diffuseWeight = (float3(1.0,1.0,1.0) - fresnel) * (1.0 - metallic);
+    float3 diffuseWeight = (float3(1.0,1.0,1.0) - fresnel) * surface.diffuseFactor;
     return (diffuseWeight * albedo / kPi + specular) * incidentIlluminance * ndotl * visibility;
 }
 
+#if RENDERER_ENABLE_AREA_LIGHTS
 // LTC 적분과 표 배치는 Heitz 외 SIGGRAPH 2016 및 Assets/ltc/LICENSE를 따른다.
 // 정규화된 두 경계 방향 사이의 구면 모서리 적분을 계산한다. 모서리들을 순서대로 더해 면광원이 차지하는 cosine 가중 영역을 얻는다.
 inline float LtcEdgeIntegral(float3 a,float3 b)
 {
     float3 edge=cross(a,b);
-    float sine=length(edge),cosine=clamp(dot(a,b),-1.0,1.0);
+    float sineSquared=dot(edge,edge),cosine=clamp(dot(a,b),-1.0,1.0);
+    float limit=.25f*cosine;
+    if(cosine>=.5f && sineSquared<=limit*limit)
+    {
+        // The polynomial uses squared sine; avoid taking its square root just to square it again.
+        float invCos=1.f/cosine,z=(sineSquared*invCos)*invCos;
+        // atan(r)/r, 0<=r<=1/4: the omitted term is <=r^12/13<4.59e-9.
+        float p=1.f+z*(-1.f/3.f+z*(1.f/5.f+z*(-1.f/7.f+z*(1.f/9.f-z/11.f))));
+        float angleOverSine=p*invCos;
+        if(sineSquared<=1e-24f)
+        {
+            float sine=length(edge);
+            if(sine<1e-12f)angleOverSine*=sine/1e-12f;
+        }
+        return edge.z*angleOverSine*0.15915494309189535;
+    }
+    float sine=length(edge);
     return edge.z*(atan2(sine,cosine)/max(sine,1e-12))*0.15915494309189535;
 }
-// 광원 꼭짓점의 상대 위치를 표면 접선 기준축으로 옮긴 뒤 LTC 역행렬을 적용한다. 표 조회 결과의 4성분만으로 필요한 변환을 구성한다.
-inline float3 LtcTransform(float3 offset,float3 tangent,float3 bitangent,float3 normal,float4 inverseMatrix)
+inline float3 LtcProject(float3 offset,float3 tangent,float3 bitangent,float3 normal)
 {
-    float3 local=float3(dot(offset,tangent),dot(offset,bitangent),dot(offset,normal));
+    return float3(dot(offset,tangent),dot(offset,bitangent),dot(offset,normal));
+}
+inline float3 LtcTransform(float3 local,float4 inverseMatrix)
+{
     return float3(inverseMatrix.x*local.x+inverseMatrix.z*local.z,local.y,
         inverseMatrix.y*local.x+inverseMatrix.w*local.z);
 }
-// 면광원 경계를 LTC 공간으로 옮기고 z>=0인 표면 위쪽 반구에 자른다. 잘린 점을 정규화하며 바로 모서리 적분에 더하므로 별도 잘린 다각형 배열이 필요 없다.
-inline float LtcPolygonIntegral(float3 normal,float3 viewDir,float3 position,
-    float4 inverseMatrix,thread const float3* points,int count)
+// 표면 기준축과 64×64 LTC 변환·진폭 표를 한 번 읽어 사각·원판 광원의 적분에 공유한다.
+struct LtcSurface
 {
-    float3 tangent=viewDir-normal*dot(normal,viewDir);
-    if(dot(tangent,tangent)<1e-8) // 시선의 접선 성분이 너무 작으면 법선과 평행하지 않은 축으로 접선을 만든다.
-        tangent=cross(abs(normal.z)<.999?float3(0,0,1):float3(0,1,0),normal);
-    tangent=normalize(tangent);
-    float3 bitangent=cross(normal,tangent);
-    float3 previous=LtcTransform(points[count-1]-position,tangent,bitangent,normal,inverseMatrix);
+    float3 normal,tangent,bitangent;
+    float4 inverseMatrix;
+    float3 specularWeight,diffuseWeight;
+};
+inline LtcSurface PrepareLtcSurface(float3 normal,float3 viewDir,DirectSurface directSurface,float roughness,
+    texture2d<float> ltcMatrixTexture,texture2d<float> ltcAmplitudeTexture,sampler materialSampler)
+{
+    LtcSurface surface;
+    surface.normal=normal;
+    surface.tangent=viewDir-normal*dot(normal,viewDir);
+    if(dot(surface.tangent,surface.tangent)<1e-8)
+        surface.tangent=cross(abs(normal.z)<.999?float3(0,0,1):float3(0,1,0),normal);
+    surface.tangent=normalize(surface.tangent);
+    surface.bitangent=cross(normal,surface.tangent);
+    float ndotv=clamp(directSurface.ndotv,0.0,1.0);
+    float2 coordinate=(float2(clamp(roughness,0.0,1.0),sqrt(1-ndotv))*63.0+.5)/64.0;
+    surface.inverseMatrix=ltcMatrixTexture.sample(materialSampler,coordinate,level(0));
+    float4 amplitude=ltcAmplitudeTexture.sample(materialSampler,coordinate,level(0));
+    float3 f0=directSurface.f0;
+    surface.specularWeight=f0*max(amplitude.x,0.0)+(float3(1)-f0)*max(amplitude.y,0.0);
+    surface.diffuseWeight=(float3(1)-FresnelSchlickRoughness(ndotv,f0,roughness))*directSurface.diffuseFactor;
+    return surface;
+}
+// Original float(corner)*float(pi/8) angles; retain their small axis asymmetries.
+constant float2 LtcDiscDirections[16]={
+    float2(1.f,0.f),float2(.9238795042f,.3826834559f),
+    float2(.7071067691f,.7071067691f),float2(.3826834261f,.9238795042f),
+    float2(-4.371138829e-8f,1.f),float2(-.3826835155f,.9238795042f),
+    float2(-.7071067691f,.7071067691f),float2(-.9238796234f,.3826832771f),
+    float2(-1.f,-8.742277657e-8f),float2(-.9238795042f,-.3826834261f),
+    float2(-.7071066499f,-.7071068883f),float2(-.3826831281f,-.9238796830f),
+    float2(1.192488064e-8f,-1.f),float2(.3826836050f,-.9238794446f),
+    float2(.7071070075f,-.7071065307f),float2(.9238795638f,-.3826834261f)};
+inline float3 LtcPolygonPoint(float3 center,float3 axisX,float3 axisY,int corner,bool disc)
+{
+    float2 coordinate=disc?LtcDiscDirections[corner]:
+        float2(corner==0 || corner==3?-1.f:1.f,corner<2?-1.f:1.f);
+    return center+axisX*coordinate.x+axisY*coordinate.y;
+}
+inline void LtcAppendPoint(float3 clippedPoint,thread float3& first,thread float3& last,
+    thread bool& haveVertex,thread float& sum)
+{
+    float squared=dot(clippedPoint,clippedPoint);
+    if(squared<=1e-20)return;
+    clippedPoint*=rsqrt(squared);
+    if(haveVertex)sum+=LtcEdgeIntegral(last,clippedPoint);else {first=clippedPoint;haveVertex=true;}
+    last=clippedPoint;
+}
+inline bool LtcPolygonAboveHorizon(float3 center,float3 axisX,float3 axisY,bool disc)
+{
+    float3 magnitude=abs(center)+abs(axisX)+abs(axisY);
+    // Bound reconstructed corner lengths away from floating-point overflow.
+    if(!all(isfinite(magnitude)) || any(magnitude>1e18f))return false;
+    float radius=disc?length(float2(axisX.z,axisY.z)):abs(axisX.z)+abs(axisY.z);
+    float lower=center.z-radius;
+    float margin=1e-5f*max(1.f,abs(center.z)+abs(axisX.z)+abs(axisY.z));
+    return isfinite(lower) && isfinite(margin) && lower>margin+1e-10f;
+}
+inline float LtcPolygonIntegral(float4 inverseMatrix,float3 center,float3 axisX,float3 axisY,bool disc)
+{
+    float3 transformedCenter=LtcTransform(center,inverseMatrix);
+    float3 transformedX=LtcTransform(axisX,inverseMatrix);
+    float3 transformedY=LtcTransform(axisY,inverseMatrix);
+    int count=disc?16:4;
+    if(LtcPolygonAboveHorizon(transformedCenter,transformedX,transformedY,disc))
+    {
+        float3 firstFull=LtcPolygonPoint(transformedCenter,transformedX,transformedY,0,disc);
+        firstFull*=rsqrt(dot(firstFull,firstFull));
+        float3 previousFull=firstFull;float fullSum=0;
+        for(int edge=1;edge<count;++edge)
+        {
+            float3 currentFull=LtcPolygonPoint(transformedCenter,transformedX,transformedY,edge,disc);
+            currentFull*=rsqrt(dot(currentFull,currentFull));
+            fullSum+=LtcEdgeIntegral(previousFull,currentFull);
+            previousFull=currentFull;
+        }
+        fullSum+=LtcEdgeIntegral(previousFull,firstFull);
+        return clamp(abs(fullSum),0.0,1.0);
+    }
+    float3 previous=LtcPolygonPoint(transformedCenter,transformedX,transformedY,count-1,disc);
     float3 first=float3(0),last=float3(0);bool haveVertex=false;float sum=0;
     for(int edge=0;edge<count;++edge)
     {
-        float3 current=LtcTransform(points[edge]-position,tangent,bitangent,normal,inverseMatrix);
+        float3 current=LtcPolygonPoint(transformedCenter,transformedX,transformedY,edge,disc);
         bool previousInside=previous.z>=0,currentInside=current.z>=0;
-        for(int candidate=0;candidate<2;++candidate)
+        // z=0 반구로 다각형을 자르되 정점 배열 대신 경계 순서대로 적분한다.
+        if(previousInside!=currentInside)
         {
-            float3 point;
-            if(candidate==0) // 먼저 모서리와 z=0 경계의 교점을 처리하고 다음 후보에서 원래 끝점을 처리한다.
-            {
-                if(previousInside==currentInside)continue; // 두 끝점이 같은 쪽이면 z=0을 가로지르지 않아 교점 후보가 없다.
-                point=mix(previous,current,clamp(previous.z/(previous.z-current.z),0.0,1.0));
-                point.z=0;
-            }
-            else
-            {
-                if(!currentInside)continue; // 원래 끝점이 표면 아래 반구에 있으면 잘린 다각형에서 제외한다.
-                point=current;
-            }
-            float squared=dot(point,point);
-            if(squared<=1e-20)continue; // 원점에 너무 가까워 방향을 정규화할 수 없는 경계점은 건너뛴다.
-            point*=rsqrt(squared);
-            if(haveVertex)sum+=LtcEdgeIntegral(last,point);else {first=point;haveVertex=true;} // 첫 점은 시작점으로 저장하고 이후 점은 직전 점과의 모서리 적분을 더한다.
-            last=point;
+            float3 clippedPoint=mix(previous,current,clamp(previous.z/(previous.z-current.z),0.0,1.0));
+            clippedPoint.z=0;
+            LtcAppendPoint(clippedPoint,first,last,haveVertex,sum);
         }
+        if(currentInside)LtcAppendPoint(current,first,last,haveVertex,sum);
         previous=current;
     }
     if(haveVertex)sum+=LtcEdgeIntegral(last,first); // 점이 하나라도 있으면 마지막 점에서 첫 점으로 경계를 닫는다.
     return clamp(abs(sum),0.0,1.0);
 }
-// 거칠기와 N·V로 64×64 LTC 표의 변환·진폭을 읽는다. 반사 적분과 단위행렬의 확산 적분을 별도로 구해 금속도·Fresnel 가중치와 발광면 radiance를 곱한다.
-inline float3 EvaluateLtcPolygon(float3 normal,float3 viewDir,float3 position,thread const float3* points,int count,
-    float3 albedo,float metallic,float roughness,float3 radiance,texture2d<float> ltcMatrixTexture,texture2d<float> ltcAmplitudeTexture,sampler materialSampler)
+inline bool LtcBelowHorizon(LtcSurface surface,float3 position,float3 center,float3 axisX,float3 axisY,
+    float tangentCoefficient,float normalCoefficient,bool disc)
 {
-    float ndotv=clamp(dot(normal,viewDir),0.0,1.0);
-    if(ndotv<=0)return float3(0); // 시선이 표면 뒤쪽이면 이 면광원 BRDF 기여는 0이다.
-    float2 coordinate=(float2(clamp(roughness,0.0,1.0),sqrt(1-ndotv))*63.0+.5)/64.0;
-    float4 inverseMatrix=ltcMatrixTexture.sample(materialSampler,coordinate,level(0));
-    float4 amplitude=ltcAmplitudeTexture.sample(materialSampler,coordinate,level(0));
-    float specular=LtcPolygonIntegral(normal,viewDir,position,inverseMatrix,points,count);
-    float diffuse=LtcPolygonIntegral(normal,viewDir,position,float4(1,0,0,1),points,count);
-    float3 f0=mix(float3(.04),albedo,metallic);
-    float3 specularWeight=f0*max(amplitude.x,0.0)+(float3(1)-f0)*max(amplitude.y,0.0);
-    float3 diffuseWeight=(float3(1)-FresnelSchlickRoughness(ndotv,f0,roughness))*(1-metallic);
-    // 정규화된 cosine 적분이므로 diffuse에 1/pi나 거리 감쇠를 다시 곱하지 않는다.
-    return radiance*(specularWeight*specular+diffuseWeight*albedo*diffuse);
+    float3 row=tangentCoefficient*surface.tangent+normalCoefficient*surface.normal;
+    float centerZ=dot(center-position,row),x=dot(axisX,row),y=dot(axisY,row);
+    float radius=disc?sqrt(x*x+y*y):abs(x)+abs(y);
+    // Include uncancelled world coordinates and both basis terms in the rounding allowance.
+    float3 magnitude=abs(center)+abs(position)+abs(axisX)+abs(axisY);
+    float scale=abs(tangentCoefficient)*dot(magnitude,abs(surface.tangent))+
+        abs(normalCoefficient)*dot(magnitude,abs(surface.normal));
+    float bound=centerZ+radius,margin=1e-5*max(1.0,scale);
+    return isfinite(bound) && isfinite(margin) && bound < -margin;
 }
-// 방출 방향과 up으로 사각형 축을 만들고 네 모서리를 적분한다. 폭·높이가 없거나 발광면 뒤에 있는 표면은 빛을 받지 않는다.
-inline float3 EvaluateRectAreaLight(RendererRectAreaLight light,float3 normal,float3 viewDir,
-    float3 albedo,float metallic,float roughness,float3 worldPosition,texture2d<float> ltcMatrixTexture,texture2d<float> ltcAmplitudeTexture,sampler materialSampler)
+inline uint LtcIntegralMask(LtcSurface surface,float3 albedo,float3 position,float3 center,
+    float3 axisX,float3 axisY,bool disc)
+{
+    uint mask=0u;
+    if(any(surface.specularWeight!=0.0) &&
+        !LtcBelowHorizon(surface,position,center,axisX,axisY,surface.inverseMatrix.y,surface.inverseMatrix.w,disc))
+        mask|=1u;
+    if(any(surface.diffuseWeight*albedo!=0.0) &&
+        !LtcBelowHorizon(surface,position,center,axisX,axisY,0.0,1.0,disc))
+        mask|=2u;
+    return mask;
+}
+inline float3 EvaluateLtcPolygon(LtcSurface surface,float3 position,float3 center,float3 axisX,float3 axisY,
+    bool disc,uint integralMask,float3 albedo,float3 radiance)
+{
+    // Both integrals share the surface-basis projection and retain their own inverse map.
+    float3 localCenter=LtcProject(center-position,surface.tangent,surface.bitangent,surface.normal);
+    float3 localX=LtcProject(axisX,surface.tangent,surface.bitangent,surface.normal);
+    float3 localY=LtcProject(axisY,surface.tangent,surface.bitangent,surface.normal);
+    float specular=0,diffuse=0;
+    if((integralMask&1u)!=0u)specular=LtcPolygonIntegral(surface.inverseMatrix,localCenter,localX,localY,disc);
+    if((integralMask&2u)!=0u)diffuse=LtcPolygonIntegral(float4(1,0,0,1),localCenter,localX,localY,disc);
+    // 정규화된 cosine 적분이므로 diffuse에 1/pi나 거리 감쇠를 다시 곱하지 않는다.
+    return radiance*(surface.specularWeight*specular+surface.diffuseWeight*albedo*diffuse);
+}
+// 방출 방향과 up으로 사각형 축을 만들고 네 모서리를 적분한다. 발광면 뒤쪽은 조명하지 않는다.
+inline float3 EvaluateRectAreaLight(RendererRectAreaLight light,LtcSurface surface,float3 albedo,float3 worldPosition)
 {
     float3 direction=normalize(light.directionWidth.xyz);
     if(light.directionWidth.w<=0 || light.upHeight.w<=0 || dot(direction,worldPosition-light.positionIntensity.xyz)<=0) // 면적이 없거나 사각 광원의 뒷면에 있는 수신점은 조명하지 않는다.
@@ -443,28 +565,26 @@ inline float3 EvaluateRectAreaLight(RendererRectAreaLight light,float3 normal,fl
     float3 right=normalize(cross(direction,light.upHeight.xyz));
     float3 up=normalize(cross(right,direction));
     float3 x=right*(light.directionWidth.w*.5),y=up*(light.upHeight.w*.5),center=light.positionIntensity.xyz;
-    float3 points[16];
-    points[0]=center-x-y;points[1]=center+x-y;points[2]=center+x+y;points[3]=center-x+y;
-    return EvaluateLtcPolygon(normal,viewDir,worldPosition,points,4,albedo,metallic,roughness,
-        light.color.rgb*max(light.positionIntensity.w,0.0),ltcMatrixTexture,ltcAmplitudeTexture,materialSampler);
+    uint integralMask=LtcIntegralMask(surface,albedo,worldPosition,center,x,y,false);
+    if(integralMask==0u)return float3(0);
+    return EvaluateLtcPolygon(surface,worldPosition,center,x,y,false,integralMask,albedo,
+        light.color.rgb*max(light.positionIntensity.w,0.0));
 }
-// 원판 경계를 같은 각도 간격의 16각형으로 근사해 LTC로 면 전체를 적분하며, 점광원 16개의 합이나 거리 감쇠 표본 방식으로 계산하지 않는다.
-inline float3 EvaluateDiscAreaLight(RendererDiscAreaLight light,float3 normal,float3 viewDir,
-    float3 albedo,float metallic,float roughness,float3 worldPosition,texture2d<float> ltcMatrixTexture,texture2d<float> ltcAmplitudeTexture,sampler materialSampler)
+// 원판 경계를 16각형으로 근사해 면 전체를 LTC 적분한다. 점광원 16개의 합으로 계산하지 않는다.
+inline float3 EvaluateDiscAreaLight(RendererDiscAreaLight light,LtcSurface surface,float3 albedo,float3 worldPosition)
 {
     float3 direction=normalize(light.directionRadius.xyz);
     if(light.directionRadius.w<=0 || dot(direction,worldPosition-light.positionIntensity.xyz)<=0)return float3(0); // 반지름이 없거나 원판 광원의 뒷면에 있는 수신점은 조명하지 않는다.
     float3 right=normalize(cross(direction,light.up.xyz));
     float3 up=normalize(cross(right,direction));
-    float3 points[16];
-    for(int corner=0;corner<16;++corner)
-    {
-        float angle=float(corner)*0.39269908169872415;
-        points[corner]=light.positionIntensity.xyz+(right*cos(angle)+up*sin(angle))*light.directionRadius.w;
-    }
-    return EvaluateLtcPolygon(normal,viewDir,worldPosition,points,16,albedo,metallic,roughness,
-        light.color.rgb*max(light.positionIntensity.w,0.0),ltcMatrixTexture,ltcAmplitudeTexture,materialSampler);
+    float3 x=right*light.directionRadius.w,y=up*light.directionRadius.w;
+    uint integralMask=LtcIntegralMask(surface,albedo,worldPosition,light.positionIntensity.xyz,x,y,true);
+    if(integralMask==0u)return float3(0);
+    // Keep the original 16-sided disc boundary and stream it in LTC space.
+    return EvaluateLtcPolygon(surface,worldPosition,light.positionIntensity.xyz,x,y,true,integralMask,albedo,
+        light.color.rgb*max(light.positionIntensity.w,0.0));
 }
+#endif
 
 // 국소 광원의 위치/거리, RGB/강도, 스폿 방향/외곽 cos, 내부 cos·광원 종류·그림자 번호를 한 항목으로 묶는다.
 // 연결 19의 광원 배열, 20의 군집 목록, 21의 군집 투영 상수를 함께 사용한다. GLSL은 set 0, HLSL은 t19/t20/b21, Metal은 buffer 19/20/21이다.
@@ -494,19 +614,22 @@ inline float3 EvaluateLights(constant RendererLightingConstants& lighting,
     constant ShadowMatrix& shadowMatrix, depth2d<float> shadowMap, sampler shadowSampler, uint drawFlags,
 #endif
     float3 worldPosition, float3 normal, float3 viewDir,
-    float3 albedo, float metallic, float roughness) {
+    float3 albedo, float roughness,DirectSurface directSurface) {
     float3 directLight = float3(0.0,0.0,0.0);
+    float ndotv=directSurface.ndotv;
     int directionalCount = clamp(int(lighting.lightCounts.x + 0.5), 0, RENDERER_MAX_DIRECTIONAL_LIGHTS);
     for (int lightIndex = 0; lightIndex < directionalCount; ++lightIndex) {
         RendererDirectionalLight light = lighting.directionalLights[lightIndex];
         float3 lightDir = normalize(light.directionIntensity.xyz);
-#if RENDERER_ENABLE_SHADOWS // 그림자 빌드에서만 깊이 자원·시점 자료·가시율 계산을 포함한다. 꺼진 직접광 경로의 가시율은 1이다.
+        // Match EvaluateDirectLight's zero result before sampling its shadow.
+        if(ndotv<=0.0f || max(dot(normal,lightDir),0.0f)<=0.0f)continue;
+#if RENDERER_ENABLE_SHADOWS
         float visibility = SampleShadow(1,lightIndex,worldPosition,normal,lightDir,lighting,shadowMatrix,shadowMap,shadowSampler,drawFlags);
 #else
         float visibility = 1.0;
 #endif
         directLight += EvaluateDirectLight(normal, viewDir, lightDir,
-            light.color.rgb * max(light.directionIntensity.w, 0.0), albedo, metallic, roughness, visibility);
+            light.color.rgb * max(light.directionIntensity.w, 0.0), albedo, directSurface, visibility);
     }
     uint base=ClusterBase(worldPosition,clusters);
     uint listed=0xffffffffu;
@@ -521,28 +644,33 @@ inline float3 EvaluateLights(constant RendererLightingConstants& lighting,
         float distanceToLight=length(toLight);
         if(distanceToLight<=0.0001 || distanceToLight>=light.positionRange.w)continue; // 광원과 거의 같은 위치이거나 거리 범위 밖인 국소 광원은 건너뛴다.
         float3 lightDir=toLight/distanceToLight;
+        if(ndotv<=0.0f || max(dot(normal,lightDir),0.0f)<=0.0f)continue;
         float attenuation=PunctualAttenuation(distanceToLight,light.positionRange.w);
         int type=int(light.coneShadow.y+0.5),shadowIndex=int(light.coneShadow.z);
         if(type==3)attenuation*=SpotConeAttenuation(dot(-lightDir,light.directionOuterCos.xyz), // 스폿 광원은 거리 감쇠에 원뿔 각도 감쇠를 추가한다.
             light.coneShadow.x,light.directionOuterCos.w);
-#if RENDERER_ENABLE_SHADOWS // 그림자 빌드에서만 깊이 자원·시점 자료·가시율 계산을 포함한다. 꺼진 직접광 경로의 가시율은 1이다.
+        if(attenuation<=0.0f)continue;
+        float3 incidentIlluminance=light.colorIntensity.rgb*max(light.colorIntensity.w,0.0)*attenuation;
+#if RENDERER_ENABLE_SHADOWS
         float visibility=shadowIndex>=0?SampleShadow(type,shadowIndex,worldPosition,normal,lightDir,lighting,shadowMatrix,shadowMap,shadowSampler,drawFlags):1.0;
 #else
         float visibility=1.0;
 #endif
-        float3 incidentIlluminance=light.colorIntensity.rgb*max(light.colorIntensity.w,0.0)*attenuation;
-        directLight+=EvaluateDirectLight(normal,viewDir,lightDir,incidentIlluminance,albedo,metallic,roughness,visibility);
+        directLight+=EvaluateDirectLight(normal,viewDir,lightDir,incidentIlluminance,albedo,directSurface,visibility);
     }
+#if RENDERER_ENABLE_AREA_LIGHTS
     int rectAreaCount = clamp(int(lighting.areaLightCounts.x + 0.5), 0, RENDERER_MAX_RECT_AREA_LIGHTS);
-    for (int lightIndex = 0; lightIndex < rectAreaCount; ++lightIndex) {
-        directLight += EvaluateRectAreaLight(lighting.rectAreaLights[lightIndex], normal, viewDir, albedo, metallic, roughness, worldPosition,
-            ltcMatrixTexture,ltcAmplitudeTexture,materialSampler);
-    }
     int discAreaCount = clamp(int(lighting.areaLightCounts.y + 0.5), 0, RENDERER_MAX_DISC_AREA_LIGHTS);
-    for (int lightIndex = 0; lightIndex < discAreaCount; ++lightIndex) {
-        directLight += EvaluateDiscAreaLight(lighting.discAreaLights[lightIndex], normal, viewDir, albedo, metallic, roughness, worldPosition,
+    if(ndotv>0.0f && rectAreaCount+discAreaCount>0) {
+        // Prepare once; both area-light loops consume the same read-only surface.
+        LtcSurface surface=PrepareLtcSurface(normal,viewDir,directSurface,roughness,
             ltcMatrixTexture,ltcAmplitudeTexture,materialSampler);
+        for (int lightIndex = 0; lightIndex < rectAreaCount; ++lightIndex)
+            directLight += EvaluateRectAreaLight(lighting.rectAreaLights[lightIndex],surface,albedo,worldPosition);
+        for (int lightIndex = 0; lightIndex < discAreaCount; ++lightIndex)
+            directLight += EvaluateDiscAreaLight(lighting.discAreaLights[lightIndex],surface,albedo,worldPosition);
     }
+#endif
 
     return directLight;
 }
@@ -596,16 +724,14 @@ inline float4 RunFragmentShader(
 #if RENDERER_ENABLE_SHADOWS // 그림자 빌드에서만 깊이 자원·시점 자료·가시율 계산을 포함한다. 꺼진 직접광 경로의 가시율은 1이다.
     sampler shadowSampler,
 #endif
-    sampler materialSampler
-#if !RENDERER_BINDLESS // 개별 바인딩 경로에서만 명명된 재질·화면 환경광 자원을 포함한다. bindless 경로는 재질 배열을 사용한다.
-    ,texture2d<float> screenAOTexture,texture2d<float> environmentSpecularTexture,texture2d<float> environmentDiffuseTexture,
+    sampler materialSampler,
+    texture2d<float> screenAOTexture,texture2d<float> environmentSpecularTexture,texture2d<float> environmentDiffuseTexture,
     constant EnvironmentConstants& environment,sampler screenSampler
-#endif
     )
 {
     const uint textureFlags = drawConstants.textureFlags;
-    float4 base = drawConstants.baseColor;
-    if ((textureFlags & kTextureFlagBaseColor) != 0u) // 기본색 이미지가 있으면 재질 기본색 RGBA에 이미지 RGBA를 곱한다.
+    float4 base = drawConstants.baseColor * input.color;
+    if ((textureFlags & kTextureFlagBaseColor) != 0u)
     {
         base *= baseColorTexture.sample(materialSampler, input.uv);
     }
@@ -643,6 +769,8 @@ inline float4 RunFragmentShader(
     float roughness =
         clamp(drawConstants.materialParams.y, minRoughness, 1.0f);
     float occlusion = 1.0f;
+    // Opaque environment buffers already include authored AO and screen AO.
+    bool usesEnvironmentBuffers=environment.settings.x>0.5f && alphaMode!=2u;
 
     if ((textureFlags & kTextureFlagMetallicRoughness) != 0u) // 이미지 G로 거칠기, B로 금속도를 곱하고 유효 범위로 제한한다.
     {
@@ -657,7 +785,7 @@ inline float4 RunFragmentShader(
             0.0f,
             1.0f);
     }
-    if ((textureFlags & kTextureFlagOcclusion) != 0u) // 이미지 R의 AO를 재질 강도와 섞어 주변광 차폐량을 만든다.
+    if ((textureFlags & kTextureFlagOcclusion) != 0u && !usesEnvironmentBuffers)
     {
         occlusion = mix(1.0f, occlusionTexture.sample(materialSampler, input.uv).r,
             clamp(drawConstants.materialParams.w, 0.0f, 1.0f));
@@ -676,18 +804,17 @@ inline float4 RunFragmentShader(
     const float3 viewDirection =
         normalize(lighting.cameraPosition.xyz - input.worldPosition);
 
-    const float3 f0 =
-        mix(float3(0.04f), albedo, metallic);
+    const DirectSurface directSurface=PrepareDirectSurface(normal,viewDirection,albedo,metallic,roughness);
+    const float3 f0=directSurface.f0;
     const float3 directLight = EvaluateLights(lighting,
         clusterLights,clusterList,clusters,
         ltcMatrixTexture,ltcAmplitudeTexture,materialSampler,
 #if RENDERER_ENABLE_SHADOWS // 그림자 빌드에서만 깊이 자원·시점 자료·가시율 계산을 포함한다. 꺼진 직접광 경로의 가시율은 1이다.
         shadowMatrix,shadowMap,shadowSampler,drawConstants.textureFlags,
 #endif
-        input.worldPosition, normal, viewDirection, albedo, metallic, roughness);
-
+        input.worldPosition, normal, viewDirection, albedo, roughness,directSurface);
     const float3 ambientFresnel = FresnelSchlickRoughness(
-        max(dot(normal, viewDirection), 0.0f),
+        directSurface.ndotv,
         f0,
         roughness);
     const float3 kD = (float3(1.0f) - ambientFresnel) * (1.0f - metallic);
@@ -703,10 +830,8 @@ inline float4 RunFragmentShader(
         ambientSpecularStrength;
     float3 ambient =
         (ambientDiffuse + ambientSpecular) * occlusion;
-#if !RENDERER_BINDLESS // 개별 바인딩 경로에서만 명명된 재질·화면 환경광 자원을 포함한다. bindless 경로는 재질 배열을 사용한다.
-    // 장면 픽셀 좌표에 화면 역크기를 곱해 화면 AO·환경광 결과를 읽는다. 이 자원들은 개별 텍스처 경로에만 연결된다.
     const float2 screenUV=input.position.xy*environment.screen.xy;
-    const float screenAO=environment.screen.z>0.5 ? screenAOTexture.sample(screenSampler,screenUV,level(0)).r : 1.0f;
+    const float screenAO=!usesEnvironmentBuffers && environment.screen.z>0.5 ? screenAOTexture.sample(screenSampler,screenUV,level(0)).r : 1.0f;
     ambient*=screenAO;
     if(environment.settings.x>0.5) // 환경광 패스가 활성화되면 기존 단색 주변광을 0으로 지우고, 알파 모드에 따라 SH 확산광 또는 화면 환경광 텍스처 결과로 다시 계산한다.
     {
@@ -723,7 +848,6 @@ inline float4 RunFragmentShader(
             ambient+=environmentSpecularTexture.sample(screenSampler,screenUV,level(0)).rgb;
         }
     }
-#endif
 
     float3 emissive = drawConstants.emissiveColor.rgb;
     if ((textureFlags & kTextureFlagEmissive) != 0u) // 발광 이미지가 있으면 발광 상수 RGB에 이미지를 곱한다.
@@ -743,18 +867,24 @@ inline float4 RunFragmentShader(
     return float4(color, alphaMode==2u ? base.a : 1.0f);
 }
 
-// Metal 진입점이 texture·buffer·sampler 슬롯을 실제 인자로 연결한다. bindless면 재질 표의 두 uint4를 풀어 같은 RunFragmentShader에 5개 재질 텍스처를 넘긴다.
+#if RENDERER_DEPTH_PREPASS
+[[early_fragment_tests]]
+#endif
 fragment float4 RENDERER_FRAGMENT_ENTRY(
     RasterData input [[stage_in]],
     bool frontFace [[front_facing]],
-#if !RENDERER_BINDLESS // 개별 바인딩 경로에서만 명명된 재질·화면 환경광 자원을 포함한다. bindless 경로는 재질 배열을 사용한다.
+#if RENDERER_BINDLESS
+    texture2d<float> screenAOTexture [[texture(22)]],
+    texture2d<float> environmentSpecularTexture [[texture(23)]],
+    texture2d<float> environmentDiffuseTexture [[texture(24)]],
+#else
     texture2d<float> screenAOTexture [[texture(16)]],
     texture2d<float> environmentSpecularTexture [[texture(13)]],
     texture2d<float> environmentDiffuseTexture [[texture(17)]],
+#endif
     constant EnvironmentConstants& environment [[buffer(14)]],
     sampler screenSampler [[sampler(15)]],
-#endif
-#if RENDERER_BINDLESS // bindless 빌드이면 재질 배열·인덱스 표와 그에 맞는 그림자 연결 번호를 사용한다.
+#if RENDERER_BINDLESS
     array<texture2d<float>,19> materialTextures [[texture(0)]],
     const device uint4* materialTextureIndices [[buffer(29)]],
 #endif
@@ -766,23 +896,23 @@ fragment float4 RENDERER_FRAGMENT_ENTRY(
     // LTC 변환 표는 텍스처 26, 진폭 표는 27이다. 재질 샘플러 8로 표의 mip 0을 읽으며 64×64 표의 텍셀 중심에 맞춘 UV를 사용한다.
     texture2d<float> ltcMatrixTexture [[texture(26)]],
     texture2d<float> ltcAmplitudeTexture [[texture(27)]],
-#if !RENDERER_BINDLESS // 개별 바인딩 경로에서만 명명된 재질·화면 환경광 자원을 포함한다. bindless 경로는 재질 배열을 사용한다.
+#if !RENDERER_BINDLESS // 개별 바인딩 경로에서만 명명된 재질 텍스처를 포함한다. bindless 경로는 재질 배열을 사용한다.
     texture2d<float> baseColorTexture [[texture(RENDERER_BINDING_BASE_COLOR_TEXTURE)]],
 #endif
 #if RENDERER_ENABLE_SHADOWS // 그림자 빌드에서만 깊이 자원·시점 자료·가시율 계산을 포함한다. 꺼진 직접광 경로의 가시율은 1이다.
     depth2d<float> shadowMap [[texture(RENDERER_BINDING_SHADOW_TEXTURE)]],
     constant ShadowMatrix& shadowMatrix [[buffer(RENDERER_BINDING_SHADOW_MATRIX)]],
 #endif
-#if !RENDERER_BINDLESS // 개별 바인딩 경로에서만 명명된 재질·화면 환경광 자원을 포함한다. bindless 경로는 재질 배열을 사용한다.
+#if !RENDERER_BINDLESS // 개별 바인딩 경로에서만 명명된 재질 텍스처를 포함한다. bindless 경로는 재질 배열을 사용한다.
     texture2d<float> metallicRoughnessTexture [[texture(RENDERER_BINDING_METALLIC_ROUGHNESS_TEXTURE)]],
 #endif
-#if !RENDERER_BINDLESS // 개별 바인딩 경로에서만 명명된 재질·화면 환경광 자원을 포함한다. bindless 경로는 재질 배열을 사용한다.
+#if !RENDERER_BINDLESS // 개별 바인딩 경로에서만 명명된 재질 텍스처를 포함한다. bindless 경로는 재질 배열을 사용한다.
     texture2d<float> normalTexture [[texture(RENDERER_BINDING_NORMAL_TEXTURE)]],
 #endif
-#if !RENDERER_BINDLESS // 개별 바인딩 경로에서만 명명된 재질·화면 환경광 자원을 포함한다. bindless 경로는 재질 배열을 사용한다.
+#if !RENDERER_BINDLESS // 개별 바인딩 경로에서만 명명된 재질 텍스처를 포함한다. bindless 경로는 재질 배열을 사용한다.
     texture2d<float> occlusionTexture [[texture(RENDERER_BINDING_OCCLUSION_TEXTURE)]],
 #endif
-#if !RENDERER_BINDLESS // 개별 바인딩 경로에서만 명명된 재질·화면 환경광 자원을 포함한다. bindless 경로는 재질 배열을 사용한다.
+#if !RENDERER_BINDLESS // 개별 바인딩 경로에서만 명명된 재질 텍스처를 포함한다. bindless 경로는 재질 배열을 사용한다.
     texture2d<float> emissiveTexture [[texture(RENDERER_BINDING_EMISSIVE_TEXTURE)]],
 #endif
 #if RENDERER_ENABLE_SHADOWS // 그림자 빌드에서만 깊이 자원·시점 자료·가시율 계산을 포함한다. 꺼진 직접광 경로의 가시율은 1이다.
@@ -819,9 +949,7 @@ fragment float4 RENDERER_FRAGMENT_ENTRY(
 #if RENDERER_ENABLE_SHADOWS // 그림자 빌드에서만 깊이 자원·시점 자료·가시율 계산을 포함한다. 꺼진 직접광 경로의 가시율은 1이다.
         shadowSampler,
 #endif
-        materialSampler
-#if !RENDERER_BINDLESS // 개별 바인딩 경로에서만 명명된 재질·화면 환경광 자원을 포함한다. bindless 경로는 재질 배열을 사용한다.
-        ,screenAOTexture,environmentSpecularTexture,environmentDiffuseTexture,environment,screenSampler
-#endif
+        materialSampler,
+        screenAOTexture,environmentSpecularTexture,environmentDiffuseTexture,environment,screenSampler
         );
 }

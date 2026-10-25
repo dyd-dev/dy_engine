@@ -291,6 +291,14 @@ bool Renderer::Impl::ReuseShadowAtlas(const Scene& scene,const ShadowData& shado
         const auto& rect=shadows.constants.atlasRect[i];
         append(rect.x);append(rect.y);append(rect.z);append(rect.w);
     }
+    if(cache.bytes.size()<bytes.size() || !std::equal(bytes.begin(),bytes.end(),cache.bytes.begin()))
+    {
+        // An invalid cache may hold only the last observed view/config header.
+        // Defer caster proof until that header repeats; this frame draws shadows.
+        cache.valid=false;cache.pending=false;cache.reused=false;
+        cache.bytes=bytes;cache.meshes.clear();
+        return false;
+    }
     // 비활성 지역 광원까지 선택 상태·위치·범위를 기록하되, 색과 양수 강도의 크기는 깊이를 바꾸지 않으므로 강도는 양수 여부만 비교한다.
     const auto appendLight=[&](const auto& light) {
         append(light.enabled);append(light.priority);append(light.castShadow);
@@ -325,7 +333,7 @@ bool Renderer::Impl::ReuseShadowAtlas(const Scene& scene,const ShadowData& shado
         if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount)continue; // 그릴 수 있는 정점·인덱스와 개수가 없는 메시는 깊이 생성 자료에서 제외한다.
         const auto& material=scene.Materials()[ToIndex(materialId)];
         append(material.alphaMode);
-        if(material.alphaMode==MaterialAlphaMode::Blend)continue; // 블렌드 재질은 이 그림자 깊이 캐스터 경로에 들어가지 않는다.
+        if(UsesBlendedRendering(material))continue; // 블렌드·투과 재질은 이 그림자 깊이 캐스터 경로에 들어가지 않는다.
         // GPU 핸들 주소 외에 원본 메시 소유권도 약한 참조로 기억한다. 파괴된 객체의 주소가 재사용되어도 다른 형상을 같은 캐시로 보지 않는다.
         cache.pendingMeshes.push_back(mesh.source);
         append(reinterpret_cast<uintptr_t>(mesh.vertexBuffer));

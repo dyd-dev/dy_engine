@@ -36,7 +36,7 @@ namespace dyf::RHI
 		if(!D::IsLiveCollectorEnabled()) return nullptr;
 		try
 		{
-			std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+			RequireOwnerThread();
 			if(!m_live)
 			{
 				auto live = std::make_unique<LiveState>();
@@ -90,7 +90,7 @@ namespace dyf::RHI
 #ifdef DY_LIVE_PROFILING_ENABLED
 		try
 		{
-			std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+			RequireOwnerThread();
 			auto * live = GetLiveState();
 			if(!live || live->stopping || !commands) return;
 			scope.frames.reserve(count);
@@ -145,7 +145,7 @@ namespace dyf::RHI
 	void IDevice::EndLiveExecution(LiveExecutionScope & scope) noexcept
 	{
 #ifdef DY_LIVE_PROFILING_ENABLED
-		std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+		RequireOwnerThread();
 		for(auto * list : scope.activated) list->m_liveDeferred->m_liveInExecution = false;
 		for(auto it = scope.frames.rbegin(); it != scope.frames.rend(); ++it) EndLiveRhiFrame(* it, scope.outcome);
 #else
@@ -159,7 +159,7 @@ namespace dyf::RHI
 		if(!D::IsLiveCollectorEnabled() || !key.device || !key.source || !key.frame || D::GetLiveContext().frame != key) return;
 		try
 		{
-			std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+			RequireOwnerThread();
 			auto * live = GetLiveState();
 			if(!live || live->stopping || live->device != key.device) return;
 			if(!live->uploadPolicyInitialized)
@@ -242,7 +242,7 @@ namespace dyf::RHI
 #ifdef DY_LIVE_PROFILING_ENABLED
 		try
 		{
-			std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+			RequireOwnerThread();
 			if(!m_live || m_live->stopping) return true;
 			auto & live = * m_live;
 			const auto context = D::GetLiveContext();
@@ -306,7 +306,7 @@ namespace dyf::RHI
 #ifdef DY_LIVE_PROFILING_ENABLED
 		try
 		{
-			std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+			RequireOwnerThread();
 			if(m_live)
 			{
 				m_live->uploadControls.erase(source);
@@ -374,7 +374,7 @@ namespace dyf::RHI
 #ifdef DY_LIVE_PROFILING_ENABLED
 	try
 	{
-		std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+		RequireOwnerThread();
 		if(!m_live || completion.m_device != this || !completion.m_value) return 0;
 		const auto found = m_live->submissions.find(completion.m_value);
 		if(found == m_live->submissions.end()) return 0;
@@ -562,27 +562,8 @@ namespace dyf::RHI
 				for(const auto & sample : live->pending.back().samples)
 				if(sample.slot != UINT32_MAX) live->untrackedCompletions [sample.slot] = 0;
 			}
-			live->workPending = true;
-#if !defined(ENABLE_METAL)
-			if(!live->worker.joinable()) live->worker = std::thread([this, live]
-			{
-				while(!live->stopping)
-				{
-					std::unique_lock < std::mutex > lock(live->wakeMutex);
-					if(!live->workPending) live->wake.wait(lock, [&]
-					{
-						return live->stopping || live->workPending;
-					});
-					else live->wake.wait_for(lock, std::chrono::milliseconds(10), [&]
-					{
-						return live->stopping.load();
-					});
-					lock.unlock();
-					if(!live->stopping) PumpLiveWork();
-				}
-			});
-			live->wake.notify_one();
-#endif
+			// Completion collection belongs to the device owner; no background
+			// poller may retire native commands concurrently with Submit/BeginFrame.
 			PublishLiveResources();
 		}
 		catch(...)
@@ -621,7 +602,7 @@ namespace dyf::RHI
 			std::vector<D::LiveEvent> events;
 			std::vector<D::LiveGpuSpan> spans;
 			{
-			std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+			RequireOwnerThread();
 			if(!m_live || m_live->stopping) return;
 			auto & live = * m_live;
 			const auto completed = GetCompletedSubmissionNative();
@@ -704,13 +685,8 @@ namespace dyf::RHI
 				live.pendingBytes -= pending.bytes;
 				it = live.pending.erase(it);
 			}
-			live.workPending = !live.pending.empty() || std::any_of(live.submissions.begin(), live.submissions.end(),
-			[](const auto & entry)
-			{
-				return entry.second.completedNs == 0;
-			});
 			}
-			// Collector publication never holds the device lock used by the rendering thread.
+			// Native completion state is fully collected before publishing diagnostics.
 			for(const auto & event : events) D::RecordLiveEvent(event);
 			for(const auto & span : spans) D::RecordLiveGpuSpan(span);
 		}
@@ -726,16 +702,14 @@ namespace dyf::RHI
 #ifdef DY_LIVE_PROFILING_ENABLED
 		if(!m_live || m_live->stopping) return;
 		{
-		std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+		RequireOwnerThread();
 		for(auto * list : m_userCommands) list->FinishLiveRecording(D::LiveOutcome::Discarded, true);
 		}
 		PumpLiveWork();
 		m_live->stopping = true;
-		m_live->wake.notify_all();
-		if(m_live->worker.joinable()) m_live->worker.join();
 		try
 		{
-			std::lock_guard<std::recursive_mutex> lock(m_resourceMutex);
+			RequireOwnerThread();
 			m_live->uploadControls.clear();
 			m_live->graphControls.clear();
 			D::RetireLiveObject(m_live->recordingSource);

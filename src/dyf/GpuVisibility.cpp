@@ -8,6 +8,7 @@
 #include "dyf/RHI/Texture.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #if defined(ENABLE_METAL) || defined(ENABLE_D3D12) || defined(ENABLE_VULKAN) // 컴파일 시 해당 GPU 백엔드용으로 생성된 가시성·가림·HiZ 셰이더 바이트를 포함한다.
@@ -18,6 +19,60 @@
 
 namespace dyf
 {
+namespace
+{
+struct OcclusionLayouts
+{
+    std::array<RHI::ResourceBindingLayout,4> hiz;
+    std::array<RHI::ResourceBindingLayout,9> occlusion;
+    OcclusionLayouts()
+    {
+        using namespace RHI;
+        // HiZ/가림 깊이는 셀 값을 그대로 읽고 주소 범위는 가장자리로 제한한다.
+        SamplerDesc sampler;
+        sampler.minFilter=sampler.magFilter=sampler.mipFilter=SamplerFilter::Nearest;
+        sampler.addressU=sampler.addressV=sampler.addressW=SamplerAddressMode::ClampToEdge;
+        sampler.mipLodBias=sampler.minLod=0;sampler.maxLod=32;
+        hiz={{{0,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Compute,{}},
+            {1,ResourceBindingType::StorageTexture,1,ShaderStageFlags::Compute,{}},
+            {2,ResourceBindingType::StorageTexture,1,ShaderStageFlags::Compute,{}},
+            {8,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Compute,sampler}}};
+        occlusion={{{0,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Compute,{}},
+            {1,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Compute,{}},
+            {2,ResourceBindingType::ReadWriteStorageBuffer,1,ShaderStageFlags::Compute,{}},
+            {3,ResourceBindingType::ReadWriteStorageBuffer,1,ShaderStageFlags::Compute,{}},
+            {4,ResourceBindingType::ReadWriteStorageBuffer,1,ShaderStageFlags::Compute,{}},
+            {5,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Compute,{}},
+            {6,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Compute,{}},
+            {7,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Compute,{}},
+            {8,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Compute,sampler}}};
+    }
+    RHI::PipelineLayoutDesc HiZ() const
+    {return {hiz.data(),static_cast<uint32_t>(hiz.size()),16,RHI::ShaderStageFlags::Compute,15};}
+    RHI::PipelineLayoutDesc Occlusion() const
+    {return {occlusion.data(),static_cast<uint32_t>(occlusion.size()),16,RHI::ShaderStageFlags::Compute,15};}
+};
+
+bool DefinitelyOutside(const GpuVisibility::Instance& instance,const std::array<Math::float4,6>& planes)
+{
+    const auto& sphere=instance.centerRadius;
+    if(!(instance.flags&1u) || sphere.w<0 || !std::isfinite(sphere.x) || !std::isfinite(sphere.y) ||
+        !std::isfinite(sphere.z) || !std::isfinite(sphere.w))return false;
+    for(const auto& plane:planes)
+    {
+        const double x=double(plane.x)*sphere.x,y=double(plane.y)*sphere.y,z=double(plane.z)*sphere.z;
+        const double magnitude=std::abs(x)+std::abs(y)+std::abs(z)+std::abs(double(plane.w))+sphere.w+1;
+        // The shader uses 1e-5 of this magnitude. Double precision and twice
+        // that margin cover f32 dot/add rounding, including fused operations.
+        // Avoid predicting any case whose shader intermediates could overflow.
+        if(!std::isfinite(magnitude) || magnitude>double(std::numeric_limits<float>::max())/16)continue;
+        const double distance=x+y+z+plane.w;
+        if(distance < -double(sphere.w)-2e-5*magnitude)return true;
+    }
+    return false;
+}
+}
+
 // 버퍼와 이를 참조하는 바인딩을 먼저 정리하고, 공유 파이프라인·셰이더를 나중에 파괴한다.
 GpuVisibility::~GpuVisibility()
 {
@@ -35,6 +90,8 @@ void GpuVisibility::ReleaseBuffers()
     for(auto* buffer:{m_inputs,m_batchData,m_frame,m_instances,m_arguments,m_lodHistory}) m_device.DestroyBuffer(buffer);
     m_inputs=m_batchData=m_frame=m_instances=m_arguments=m_lodHistory=nullptr;
     m_uploadReady=false;m_ready=false;m_pending=false;m_resetHistory=true;m_capacity=0;
+    m_uploadDirty.fill(true);
+    m_possibleBatches.clear();
     // 이전 그래프에 연결했던 핸들을 무효화해 새 버퍼가 옛 그래프 자원처럼 쓰이지 않게 한다.
     m_instancesGraph={};m_argumentsGraph={};
 }
@@ -132,8 +189,16 @@ bool GpuVisibility::Prepare(const std::vector<Instance>& inputs,const std::vecto
         if(!m_resources) {ReleaseBuffers();return false;} // 바인딩 생성 실패도 버퍼 일부만 남겨 성공한 것처럼 보이지 않도록 모두 정리한다.
         m_capacity=static_cast<uint32_t>(capacity);
     }
-    // 업로드가 참조할 CPU 사본을 소유하고 이번 프레임의 패스 등록 상태를 초기화한다. 입력 순서 변경은 호출자가 resetHistory로 알려야 한다.
-    m_inputData=inputs;m_batches=batches;m_pending=false;m_pendingOcclusion=false;
+    // 동일한 입력/배치는 CPU 사본과 GPU 업로드를 재사용하며 이번 프레임의 패스 등록 상태만 초기화한다.
+    const bool sameInputs=m_inputData.size()==inputs.size() &&
+        std::memcmp(m_inputData.data(),inputs.data(),inputs.size()*sizeof(Instance))==0;
+    const bool sameBatches=m_batches.size()==batches.size() &&
+        std::memcmp(m_batches.data(),batches.data(),batches.size()*sizeof(Batch))==0;
+    m_uploadDirty[0]=m_uploadDirty[0] || !sameInputs;
+    m_uploadDirty[1]=m_uploadDirty[1] || !sameBatches;
+    if(!sameInputs)m_inputData=inputs;
+    if(!sameBatches)m_batches=batches;
+    m_pending=false;m_pendingOcclusion=false;
     m_resetHistory=m_resetHistory || settings.resetHistory;
     const auto vp=settings.camera.projection*settings.camera.view;
     // 열 우선 행렬 저장에서 각 행을 뽑아 클립 공간 부등식 -w<=x,y<=w와 0<=z<=w를 월드 공간 평면으로 바꾼다.
@@ -149,6 +214,7 @@ bool GpuVisibility::Prepare(const std::vector<Instance>& inputs,const std::vecto
     const auto expand=[&](float amount) {return Math::float4{w.x*amount,w.y*amount,w.z*amount,w.w*amount};};
     // 좌우·상하 클립 경계를 한 픽셀만큼 넓힌다. 비지터 카메라 경계 밖이던 물체가 지터로 화면에 들어올 가능성을 남긴다.
     const auto horizontal=expand(1.f+2.f/settings.width),vertical=expand(1.f+2.f/settings.height);
+    const auto previousFrame=m_frameData;
     // 좌/우/아래/위는 확장 w±x,y, near는 z, far는 w-z다. 정규화된 평면과 월드 구 반지름으로 셰이더가 밖에 있는지 검사한다.
     m_frameData.planes={combine(horizontal,x,1),combine(horizontal,x,-1),combine(vertical,y,1),combine(vertical,y,-1),
         combine(z,{0,0,0,0},1),combine(w,z,-1)};
@@ -159,6 +225,14 @@ bool GpuVisibility::Prepare(const std::vector<Instance>& inputs,const std::vecto
     m_frameData.projection={std::max(std::abs(projection.m[0])*settings.width,std::abs(projection.m[5])*settings.height)*.5f,
         settings.pixelError,settings.hysteresis,std::abs(projection.m[15])<1e-6f ? 1.f : 0.f};
     m_frameData.counts={static_cast<uint32_t>(inputs.size()),static_cast<uint32_t>(batches.size()),settings.frustum?1u:0u,settings.lod?1u:0u};
+    m_uploadDirty[2]=m_uploadDirty[2] || std::memcmp(&previousFrame,&m_frameData,sizeof(Frame))!=0;
+    m_possibleBatches.assign(batches.size(),settings.frustum?0u:1u);
+    if(settings.frustum)
+        for(const auto& input:inputs)
+        {
+            if(DefinitelyOutside(input,m_frameData.planes))continue;
+            for(uint32_t level=0;level<input.lodCount;++level)m_possibleBatches[input.batches[level]]=1;
+        }
     return true;
 }
 
@@ -174,6 +248,7 @@ bool GpuVisibility::RecordUploads(RHI::ICommandList& commands)
         static_cast<uint32_t>(m_batches.size()*sizeof(Batch)),sizeof(Frame)};
     for(uint32_t i=0;i<3;++i)
     {
+        if(m_uploadReady && !m_uploadDirty[i])continue;
         if(m_uploadReady) {const ResourceBarrierDesc barrier={buffers[i],nullptr,states[i],ResourceState::CopyDestination,{}};commands.ResourceBarrier(&barrier,1);} // 이전에 업로드 제출한 버퍼는 읽기 상태에서 CopyDestination으로 되돌린다. 최초 생성은 이미 복사 대상이다.
         if(!m_device.UpdateBuffer(commands,buffers[i],0,data[i],sizes[i])) return false; // 어느 입력 슬롯에서든 복사 기록이 실패하면 호출자에게 중단을 알린다.
         const ResourceBarrierDesc barrier={buffers[i],nullptr,ResourceState::CopyDestination,states[i],{}};
@@ -198,6 +273,9 @@ bool GpuVisibility::AddPasses(RHI::RenderGraph& graph)
     if(!inputs.IsValid() || !batches.IsValid() || !frame.IsValid() || !history.IsValid() || // 필요한 그래프 자원 중 하나라도 등록 실패면 선택 패스를 구성하지 않는다.
         !m_instancesGraph.IsValid() || !m_argumentsGraph.IsValid()) return false;
     const auto pipeline=m_pipeline;const auto resources=m_resources;
+    // Preparation is restricted to stock instance streams. Unsupported devices
+    // retain zero firstInstance and select each batch through its VB offset.
+    const uint32_t baseInstance=m_device.Supports(Feature::IndirectFirstInstance)?1u:0u;
     for(uint32_t operation=0;operation<2;++operation)
     {
         // operation 0은 배치별 간접 인스턴스 수를 0으로 만들고 필요한 LOD 이력을 초기화한다. operation 1은 구 컬링·LOD 선택 후 생존 항목을 배치별로 append한다.
@@ -210,9 +288,9 @@ bool GpuVisibility::AddPasses(RHI::RenderGraph& graph)
         const auto count=operation?m_frameData.counts[0]:std::max(m_frameData.counts[0],m_frameData.counts[1]);
         // 64개 단위로 그룹 수를 올림하고 X축 65,535그룹을 넘는 나머지는 Y축으로 펼친다. 셰이더는 전달된 행 폭으로 전역 항목 번호를 복원한다.
         const uint32_t groups=count/64+(count%64!=0),groupsX=std::min(groups,65535u),groupsY=groups/groupsX+(groups%groupsX!=0);
-        // 초기화 여부는 CPU 플래그로 요청하며 실제 이력 버퍼를 0으로 쓰는 것은 GPU 초기화 패스다.
-        const std::array<uint32_t,4> push={operation,groupsX*64,m_resetHistory?1u:0u,0};
-        // 지연 실행 때 사용할 핸들·상수·그룹 크기를 값으로 캡처한다. 버퍼/파이프라인 실물의 수명은 그래프 실행 동안 유지되어야 한다.
+        // 이력 초기화 요청과 장치가 지원하는 firstInstance 모드를 상수로 전달한다.
+        const std::array<uint32_t,4> push={operation,groupsX*64,m_resetHistory?1u:0u,baseInstance};
+        // 지연 실행에 필요한 핸들·상수·그룹 크기는 값으로 캡처한다. 자원 실물은 그래프 실행 동안 유지되어야 한다.
         pass.SetExecute([pipeline,resources,push,groupsX,groupsY](ICommandList* commands) {
             commands->BindComputePipeline(pipeline);commands->BindResourceSet(resources);
             commands->SetInlineConstants(0,sizeof(push),push.data());commands->Dispatch(groupsX,groupsY,1);
@@ -233,34 +311,32 @@ void GpuVisibility::ReleaseOcclusion()
     m_hizReady=false;m_occlusionReady=false;m_pendingOcclusion=false;
 }
 
-// 현재 깊이 입력에서 만들 HiZ와 가림 선택 파이프라인을 준비한다. 기본 가시성 입력/출력 버퍼를 가림 선택에서도 공유한다.
+bool GpuVisibility::SupportsOcclusion(const RHI::IDevice& device)
+{
+    const OcclusionLayouts layouts;
+    return device.Supports(RHI::Feature::Compute) && device.Supports(RHI::Feature::IndirectDraw) &&
+        device.Supports(layouts.HiZ()) && device.Supports(layouts.Occlusion());
+}
+
+// 현재 깊이의 HiZ와 가림 선택 파이프라인을 준비하고 기본 가시성 버퍼를 공유한다.
 bool GpuVisibility::PrepareOcclusion(RHI::TextureHandle depth)
 {
     using namespace RHI;
-    if(!depth || !m_resources) return false; // 현재 깊이와 기본 가시성 버퍼 바인딩이 모두 있어야 가림 단계를 준비할 수 있다.
+    if(!depth || !m_resources || !SupportsOcclusion(m_device)) return false;
+    const OcclusionLayouts layouts;
 #if defined(ENABLE_METAL) // Metal용 compute 진입점을 선택하는 컴파일 시 분기다.
     constexpr const char* entry="kernelMain";
 #else // 그 외 빌드에서는 main 진입점을 쓴다.
     constexpr const char* entry="main";
 #endif
-    SamplerDesc sampler;
-    // 가림 판단에서는 깊이/HiZ 셀을 선형 혼합하지 않고 정확한 셀 값으로 읽는다. 주소 범위는 가장자리로 제한한다.
-    sampler.minFilter=sampler.magFilter=sampler.mipFilter=SamplerFilter::Nearest;
-    sampler.addressU=sampler.addressV=sampler.addressW=SamplerAddressMode::ClampToEdge;
-    sampler.mipLodBias=sampler.minLod=0;sampler.maxLod=32;
     if(!m_hizPipeline) // HiZ 축소 파이프라인이 없을 때만 생성한다.
     {
 #if defined(ENABLE_METAL) || defined(ENABLE_D3D12) || defined(ENABLE_VULKAN) // 지원 백엔드 빌드에 들어 있는 HiZ 셰이더 바이트를 사용한다.
         if(!m_hizShader) m_hizShader=m_device.CreateShader({ShaderStage::Compute,entry,kGpuHiZCompute,kGpuHiZComputeSize}); // 아직 없는 HiZ 셰이더만 생성한다.
 #endif
         if(!m_hizShader) return false; // HiZ 셰이더를 얻지 못하면 깊이 피라미드를 만들 수 없다.
-        // 원본 깊이, 이전 mip 저장 이미지, 현재 mip 저장 이미지, 정적 샘플러를 연결한다. 한 그룹은 8x8 출력 셀을 처리한다.
-        const ResourceBindingLayout bindings[]={{0,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Compute,{}},
-            {1,ResourceBindingType::StorageTexture,1,ShaderStageFlags::Compute,{}},
-            {2,ResourceBindingType::StorageTexture,1,ShaderStageFlags::Compute,{}},
-            {8,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Compute,sampler}};
         ComputePipelineDesc desc;desc.computeShader=m_hizShader;
-        desc.layout={bindings,4,16,ShaderStageFlags::Compute,15};desc.threadGroupSize[0]=desc.threadGroupSize[1]=8;
+        desc.layout=layouts.HiZ();desc.threadGroupSize[0]=desc.threadGroupSize[1]=8;
         m_hizPipeline=m_device.CreateComputePipeline(desc);
         if(!m_hizPipeline) return false; // HiZ 파이프라인 생성 실패를 가림 준비 실패로 전달한다.
     }
@@ -270,17 +346,8 @@ bool GpuVisibility::PrepareOcclusion(RHI::TextureHandle depth)
         if(!m_occlusionShader) m_occlusionShader=m_device.CreateShader({ShaderStage::Compute,entry,kGpuOcclusionCompute,kGpuOcclusionComputeSize}); // 없는 가림 compute 셰이더만 만든다.
 #endif
         if(!m_occlusionShader) return false; // 가림 셰이더가 없으면 사용할 수 없는 결과를 성공으로 표시하지 않는다.
-        const ResourceBindingLayout bindings[]={{0,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Compute,{}},
-            {1,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Compute,{}},
-            {2,ResourceBindingType::ReadWriteStorageBuffer,1,ShaderStageFlags::Compute,{}},
-            {3,ResourceBindingType::ReadWriteStorageBuffer,1,ShaderStageFlags::Compute,{}},
-            {4,ResourceBindingType::ReadWriteStorageBuffer,1,ShaderStageFlags::Compute,{}},
-            {5,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Compute,{}},
-            {6,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Compute,{}},
-            {7,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Compute,{}},
-            {8,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Compute,sampler}};
         ComputePipelineDesc desc;desc.computeShader=m_occlusionShader;
-        desc.layout={bindings,9,16,ShaderStageFlags::Compute,15};desc.threadGroupSize[0]=64;
+        desc.layout=layouts.Occlusion();desc.threadGroupSize[0]=64;
         m_occlusionPipeline=m_device.CreateComputePipeline(desc);
         if(!m_occlusionPipeline) return false; // 가림 파이프라인 생성 실패 시 자원 구성 단계를 중단한다.
     }
@@ -371,6 +438,7 @@ bool GpuVisibility::AddOcclusionPasses(RHI::RenderGraph& graph,RHI::TextureHandl
             commands->SetInlineConstants(0,sizeof(operation),operation.data());commands->Dispatch(width/8+(width%8!=0),height/8+(height%8!=0),1);
         });
     }
+    const uint32_t baseInstance=m_device.Supports(Feature::IndirectFirstInstance)?1u:0u;
     for(uint32_t operation=0;operation<2;++operation)
     {
         // 이전 기본 선택 결과에 덧붙이지 않도록 간접 인스턴스 수를 다시 0으로 만든 후, 원본 입력에 절두체·LOD·가림 조건을 적용해 출력 목록을 다시 채운다.
@@ -383,8 +451,8 @@ bool GpuVisibility::AddOcclusionPasses(RHI::RenderGraph& graph,RHI::TextureHandl
         const auto count=operation?m_frameData.counts[0]:std::max(m_frameData.counts[0],m_frameData.counts[1]);
         // 기본 선택과 동일하게 64항목 그룹을 2차원으로 펼쳐 입력/배치 초기화 전체를 덮는다.
         const uint32_t groups=count/64+(count%64!=0),groupsX=std::min(groups,65535u),groupsY=groups/groupsX+(groups%groupsX!=0);
-        // 이 단계는 앞 기본 선택에서 갱신한 LOD 이력을 다시 초기화하지 않는다. 세 번째 상수 0이 그 요청을 나타낸다.
-        const std::array<uint32_t,4> push={operation,groupsX*64,0,0};
+        // 앞 기본 선택에서 갱신한 LOD 이력은 유지하고, 장치가 지원하는 firstInstance 모드를 전달한다.
+        const std::array<uint32_t,4> push={operation,groupsX*64,0,baseInstance};
         const auto pipeline=m_occlusionPipeline;const auto resources=m_occlusionResources;
         pass.SetExecute([pipeline,resources,push,groupsX,groupsY](ICommandList* commands) {
             commands->BindComputePipeline(pipeline);commands->BindResourceSet(resources);

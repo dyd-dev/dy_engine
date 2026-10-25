@@ -8,6 +8,8 @@ namespace dyf::Backends
     public:
         MetalDevice();
         ~MetalDevice() override;
+        bool SupportsDdsCompression(RHI::Format) const noexcept;
+        bool SupportsLinearFiltering(RHI::Format) const noexcept;
 
         void DestroySwapchainNative() override;
         bool WaitIdleNative() override;

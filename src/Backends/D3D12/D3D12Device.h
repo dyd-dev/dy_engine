@@ -11,6 +11,8 @@ namespace dyf::Backends
     public:
         D3D12Device();
         ~D3D12Device() override;
+        bool SupportsDdsCompression(RHI::Format) const noexcept;
+        bool SupportsLinearFiltering(RHI::Format) const noexcept;
 
         void DestroySwapchainNative() override;
         bool WaitIdleNative() override;

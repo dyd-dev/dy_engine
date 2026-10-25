@@ -63,7 +63,8 @@ bool VulkanSwapchain::Initialize(
     VkColorSpaceKHR requestedColorSpace,
     VkCompositeAlphaFlagBitsKHR requestedCompositeAlpha,
     VkPresentModeKHR requestedPresentMode,
-    uint32_t requestedMinimumImageCount,
+    uint32_t requiredMinimumImageCount,
+    uint32_t preferredImageCount,
     bool allowReadback,
     uint32_t initialWidth,
     uint32_t initialHeight,
@@ -73,7 +74,8 @@ bool VulkanSwapchain::Initialize(
 {
     oldSwapchainRetired = false;
     status = {};
-    if (context.device == VK_NULL_HANDLE || context.physicalDevice == VK_NULL_HANDLE || context.surface == VK_NULL_HANDLE) {
+    if (context.device == VK_NULL_HANDLE || context.physicalDevice == VK_NULL_HANDLE || context.surface == VK_NULL_HANDLE ||
+        requiredMinimumImageCount == 0) {
         return false;
     }
 
@@ -88,10 +90,12 @@ bool VulkanSwapchain::Initialize(
         return false;
     }
 
-    uint32_t imageCount = std::max(requestedMinimumImageCount, swapchainSupport.capabilities.minImageCount);
-#if defined(__ANDROID__)
-    imageCount = std::max(imageCount, 3u);
-#endif
+    // The caller's minimum is a requirement. Extra images requested by an
+    // internal prefetch path are only a preference and may follow surface limits.
+    const uint32_t requiredImageCount = std::max(requiredMinimumImageCount, swapchainSupport.capabilities.minImageCount);
+    if (swapchainSupport.capabilities.maxImageCount > 0 && requiredImageCount > swapchainSupport.capabilities.maxImageCount)
+        return false;
+    uint32_t imageCount = std::max(requiredImageCount, preferredImageCount);
     if (swapchainSupport.capabilities.maxImageCount > 0 && imageCount > swapchainSupport.capabilities.maxImageCount) {
         imageCount = swapchainSupport.capabilities.maxImageCount;
     }

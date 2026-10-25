@@ -2,7 +2,7 @@
 using namespace metal;
 struct SurfaceDraw {float4x4 model;float4x4 previousMVP;float4x4 normalMatrix;float4 baseColor;float4 materialParams;uint4 flags;float4 alpha;};
 struct SurfaceFrame {float4x4 view;float4x4 projection;float4x4 inverseProjection;float4x4 viewProjection;float4 size;float4 ao;float4 lighting;float4 options;};
-struct SurfaceOutput {float4 position [[position]];float2 uv;float3 worldNormal;float4 worldTangent;float4 currentClip;float4 previousClip;float viewDepth;};
+struct SurfaceOutput {float4 position [[position]];float2 uv;float3 worldNormal;float4 worldTangent;float4 currentClip;float4 previousClip;float viewDepth;float4 vertexColor;};
 struct SurfaceTargets {float4 normalRoughAO [[color(0)]];float4 albedoMetal [[color(1)]];float4 motionDepth [[color(2)]];};
 static float2 surfaceOctEncode(float3 n)
 {
@@ -17,7 +17,7 @@ fragment SurfaceTargets surfaceFragment(SurfaceOutput input [[stage_in]],bool fr
     texture2d<float> aoTexture [[texture(3)]],texture2d<float> emissiveTexture [[texture(4)]],sampler materialSampler [[sampler(8)]])
 {
     SurfaceDraw draw=draws[index.x];uint flags=draw.flags.x;SurfaceTargets output;
-    float4 base=draw.baseColor;
+    float4 base=draw.baseColor*input.vertexColor;
     if((flags&1)!=0)base*=baseTexture.sample(materialSampler,input.uv);
     if((flags&64u)!=0u)base.rgb=draw.baseColor.rgb;
     float3 n=normalize(input.worldNormal);

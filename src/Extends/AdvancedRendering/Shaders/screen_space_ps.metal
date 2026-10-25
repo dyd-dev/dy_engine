@@ -2,8 +2,8 @@
 using namespace metal;
 struct ScreenFrame {float4x4 view;float4x4 projection;float4x4 inverseProjection;float4x4 viewProjection;float4 size;float4 ao;float4 lighting;float4 options;};
 struct ScreenOutput {float4 position [[position]];float2 uv;};
-#define SS_CONTEXT constant ScreenFrame& frame,constant float4& operation,texture2d<float> normalImage,texture2d<float> motionImage,texture2d<float> albedoImage,texture2d<float> hdrImage,texture2d<float> environmentImage,texture2d<float> sourceImage,texture2d<float> reflectionImage,sampler linearSampler
-#define SS_INPUT frame,operation,normalImage,motionImage,albedoImage,hdrImage,environmentImage,sourceImage,reflectionImage,linearSampler
+#define SS_CONTEXT constant ScreenFrame& frame,constant float4& operation,texture2d<float> normalImage,texture2d<float> motionImage,texture2d<float> albedoImage,texture2d<float> hdrImage,texture2d<float> environmentImage,texture2d<float> sourceImage,texture2d<float> reflectionImage,texture2d<float> depthImage,sampler linearSampler
+#define SS_INPUT frame,operation,normalImage,motionImage,albedoImage,hdrImage,environmentImage,sourceImage,reflectionImage,depthImage,linearSampler
 constant float PI=3.14159265359;
 float4 geometry(texture2d<float> image,float2 p,SS_CONTEXT)
 {
@@ -19,7 +19,7 @@ float3 decodeWorldNormal(float2 packed)
 }
 float3 normalWorld(float2 p,SS_CONTEXT) {return decodeWorldNormal(geometry(normalImage,p,SS_INPUT).xy);}
 float3 normalView(float2 p,SS_CONTEXT) {return normalize(float3x3(frame.view[0].xyz,frame.view[1].xyz,frame.view[2].xyz)*normalWorld(p,SS_INPUT));}
-float depthAt(float2 p,SS_CONTEXT) {return geometry(motionImage,p,SS_INPUT).z;}
+float depthAt(float2 p,SS_CONTEXT) {return operation.z>0.5?geometry(depthImage,p,SS_INPUT).r:geometry(motionImage,p,SS_INPUT).z;}
 float2 halfSurfaceUV(float2 p,SS_CONTEXT)
 {
     // Match the surface used by ray generation, filtering, and upsampling.
@@ -29,7 +29,7 @@ float2 halfSurfaceUV(float2 p,SS_CONTEXT)
     for(int y=0;y<2;++y)for(int x=0;x<2;++x)
     {
         int2 pixel=min(base+int2(x,y),dimensions-1);
-        float depth=motionImage.read(uint2(pixel)).z;
+        float depth=operation.z>0.5?depthImage.read(uint2(pixel)).r:motionImage.read(uint2(pixel)).z;
         if(depth>0.0 && depth<nearest) {nearest=depth;selected=pixel;}
     }
     return (float2(selected)+0.5)*frame.size.zw;
@@ -45,6 +45,13 @@ float2 project(float3 p,SS_CONTEXT)
 {
     float4 clip=frame.projection*float4(p,1);
     return clip.xy/max(clip.w,1e-5)*float2(0.5,-0.5)+0.5;
+}
+float2 projectRay(float3 p,bool sparseProjection,SS_CONTEXT)
+{
+    if(!sparseProjection)return project(p,SS_INPUT);
+    float2 clip=float2(frame.projection[0].x*p.x+frame.projection[2].x*p.z,
+        frame.projection[1].y*p.y+frame.projection[2].y*p.z);
+    return clip/max(-p.z,1e-5)*float2(0.5,-0.5)+0.5;
 }
 bool onScreen(float2 p,SS_CONTEXT) {return all(p>float2(0.001)) && all(p<float2(0.999));}
 float randomAngle(float2 p,float frameIndex,SS_CONTEXT)
@@ -99,6 +106,9 @@ float4 bilateralAO(float2 p,SS_CONTEXT)
 }
 bool trace(float3 origin,float3 direction,float distanceLimit,int steps,thread float2& hitUV,thread float& hitDistance,thread float& hitConfidence,SS_CONTEXT)
 {
+    // Bound every origin + direction * distance before removing zero products.
+    bool sparseProjection=operation.y>0.5f && all(abs(origin)<=1e10f) && all(abs(direction)<=2.0f) &&
+        distanceLimit>=0 && distanceLimit<=1e10f;
     float previousDistance=0.08,previousDelta=-1.0;
     hitUV=float2(0);hitDistance=0.0;hitConfidence=0.0;
     for(int i=1;i<=steps;++i)
@@ -106,26 +116,32 @@ bool trace(float3 origin,float3 direction,float distanceLimit,int steps,thread f
         float f=float(i)/float(steps),distance=0.08+distanceLimit*f*f;
         float3 candidate=origin+direction*distance;
         if(candidate.z>=-0.03)break;
-        float2 q=project(candidate,SS_INPUT);if(!onScreen(q,SS_INPUT))break;
+        float2 q=projectRay(candidate,sparseProjection,SS_INPUT);if(!onScreen(q,SS_INPUT))break;
         float depth=depthAt(q,SS_INPUT),delta=-candidate.z-depth;
         if(depth>0.0 && delta>=0.0 && previousDelta<0.0)
         {
             float lo=previousDistance,hi=distance;
+            // Keep the exact depth sample belonging to the current upper endpoint.
+            float2 hiUV=q;float hiDepth=depth;
             for(int refine=0;refine<5;++refine)
             {
-                float mid=(lo+hi)*0.5;float3 test=origin+direction*mid;float2 testUV=project(test,SS_INPUT);
+                float mid=(lo+hi)*0.5;float3 test=origin+direction*mid;float2 testUV=projectRay(test,sparseProjection,SS_INPUT);
                 float testDepth=depthAt(testUV,SS_INPUT);
-                if(testDepth>0.0 && -test.z>testDepth)hi=mid;else lo=mid;
+                if(testDepth>0.0 && -test.z>testDepth) {hi=mid;hiUV=testUV;hiDepth=testDepth;}else lo=mid;
             }
-            float3 hit=origin+direction*hi;hitUV=project(hit,SS_INPUT);hitDistance=hi;
-            float gap=-hit.z-depthAt(hitUV,SS_INPUT);
-            float facing=dot(normalView(hitUV,SS_INPUT),-direction);
-            if(gap>=0.0 && gap<frame.lighting.w && facing>0.05)
+            float3 hit=origin+direction*hi;hitUV=hiUV;hitDistance=hi;
+            float gap=-hit.z-hiDepth;
+            if(gap>=0.0 && gap<frame.lighting.w)
             {
-                float edge=min(min(hitUV.x,1.0-hitUV.x),min(hitUV.y,1.0-hitUV.y));
-                hitConfidence=(1.0-smoothstep(frame.lighting.w*0.5,frame.lighting.w,gap))
-                    *smoothstep(0.05,0.25,facing)*smoothstep(0.0,0.08,edge);
-                return true;
+                // Rejected depth crossings do not need a normal fetch or decode.
+                float facing=dot(normalView(hitUV,SS_INPUT),-direction);
+                if(facing>0.05)
+                {
+                    float edge=min(min(hitUV.x,1.0-hitUV.x),min(hitUV.y,1.0-hitUV.y));
+                    hitConfidence=(1.0-smoothstep(frame.lighting.w*0.5,frame.lighting.w,gap))
+                        *smoothstep(0.05,0.25,facing)*smoothstep(0.0,0.08,edge);
+                    return true;
+                }
             }
         }
         previousDistance=distance;previousDelta=depth>0.0?delta:-1.0;
@@ -136,12 +152,18 @@ void indirectLighting(float2 p,thread float4& gi,thread float4& reflection,SS_CO
 {
     p=halfSurfaceUV(p,SS_INPUT);
     gi=float4(0);reflection=float4(0);float depth=depthAt(p,SS_INPUT);if(depth<=0.0)return;
-    float3 origin=reconstruct(p,depth,SS_INPUT),n=normalView(p,SS_INPUT),v=normalize(-origin);
-    float4 material=geometry(albedoImage,p,SS_INPUT),surface=geometry(normalImage,p,SS_INPUT);
+    float4 surface=geometry(normalImage,p,SS_INPUT);
     if(surface.z<0)return;
-    float3x3 tbn=basis(n,SS_INPUT);float angle=randomAngle(p,frame.ao.w,SS_INPUT);
-    if(frame.options.y>0.5 && operation.w<0.5 && material.a<0.99)
+    float4 material=geometry(albedoImage,p,SS_INPUT);
+    float roughness=surface.z;
+    bool traceGI=frame.options.y>0.5 && operation.w<0.5 && material.a<0.99;
+    bool traceReflection=frame.options.z>0.5 && operation.w>0.5 && roughness<0.85;
+    if(!traceGI && !traceReflection)return;
+    float3x3 worldToView(frame.view[0].xyz,frame.view[1].xyz,frame.view[2].xyz);
+    float3 origin=reconstruct(p,depth,SS_INPUT),n=normalize(worldToView*decodeWorldNormal(surface.xy));
+    if(traceGI)
     {
+        float3x3 tbn=basis(n,SS_INPUT);float angle=randomAngle(p,frame.ao.w,SS_INPUT);
         float3 radiance=float3(0);
         for(int ray=0;ray<4;++ray)
         {
@@ -153,9 +175,9 @@ void indirectLighting(float2 p,thread float4& gi,thread float4& reflection,SS_CO
         }
         gi=float4(clamp(radiance*0.25*material.rgb*(1.0-material.a)*surface.w*frame.lighting.y,0.0f,65504.0f),1);
     }
-    float roughness=surface.z;
-    if(frame.options.z>0.5 && operation.w>0.5 && roughness<0.85)
+    if(traceReflection)
     {
+        float3 v=normalize(-origin);
         float3 direction=reflect(-v,n);float2 hitUV;float distance,hitConfidence;
         if(trace(origin+n*0.06,direction,frame.lighting.x*2.0,32,hitUV,distance,hitConfidence,SS_INPUT))
         {
@@ -185,10 +207,27 @@ float4 composite(float2 p,SS_CONTEXT)
     for(int y=0;y<2;++y)for(int x=0;x<2;++x)
     {
         float2 q=clamp((base+float2(x,y)+0.5)/dimensions,float2(0),float2(1));
-        float2 surfaceUV=halfSurfaceUV(q,SS_INPUT);
-        float sampleDepth=depthAt(surfaceUV,SS_INPUT);if(sampleDepth<=0.0)continue;
+        float sampleDepth=0.0;float3 sampleNormal=float3(0);
+        bool guided=false;
+        if(operation.w>0.5)
+        {
+            // The current denoise guide stores the same representative depth and packed normal.
+            float4 guide=geometry(albedoImage,q,SS_INPUT);
+            if(guide.r>0.0)
+            {
+                sampleDepth=guide.r;
+                sampleNormal=normalize(float3x3(frame.view[0].xyz,frame.view[1].xyz,frame.view[2].xyz)*decodeWorldNormal(guide.gb));
+                guided=true;
+            }
+        }
+        if(!guided)
+        {
+            float2 surfaceUV=halfSurfaceUV(q,SS_INPUT);
+            sampleDepth=depthAt(surfaceUV,SS_INPUT);if(sampleDepth<=0.0)continue;
+            sampleNormal=normalView(surfaceUV,SS_INPUT);
+        }
         float weight=(x==0?1.0-fraction.x:fraction.x)*(y==0?1.0-fraction.y:fraction.y)
-            *exp(-abs(depth-sampleDepth)/max(0.05,depth*0.02))*pow(max(dot(n,normalView(surfaceUV,SS_INPUT)),0.0),16.0);
+            *exp(-abs(depth-sampleDepth)/max(0.05,depth*0.02))*pow(max(dot(n,sampleNormal),0.0),16.0);
         if(frame.options.y>0.5)gi+=sourceImage.sample(linearSampler,q,level(0)).rgb*weight;
         if(frame.options.z>0.5)reflection+=reflectionImage.sample(linearSampler,q,level(0))*weight;
         total+=weight;
@@ -202,7 +241,7 @@ fragment float4 screenSpaceFragment(ScreenOutput input [[stage_in]],
     texture2d<float> normalImage [[texture(0)]],texture2d<float> motionImage [[texture(1)]],
     texture2d<float> albedoImage [[texture(2)]],texture2d<float> hdrImage [[texture(3)]],
     texture2d<float> environmentImage [[texture(4)]],texture2d<float> sourceImage [[texture(5)]],
-    texture2d<float> reflectionImage [[texture(6)]],sampler linearSampler [[sampler(7)]])
+    texture2d<float> reflectionImage [[texture(6)]],texture2d<float> depthImage [[texture(9)]],sampler linearSampler [[sampler(7)]])
 {
     if(operation.x<0.5)return hemisphereAO(input.uv,SS_INPUT);
     if(operation.x<1.5)return bilateralAO(input.uv,SS_INPUT);
@@ -213,8 +252,13 @@ fragment float4 screenSpaceLightingFragment(ScreenOutput input [[stage_in]],
     texture2d<float> normalImage [[texture(0)]],texture2d<float> motionImage [[texture(1)]],
     texture2d<float> albedoImage [[texture(2)]],texture2d<float> hdrImage [[texture(3)]],
     texture2d<float> environmentImage [[texture(4)]],texture2d<float> sourceImage [[texture(5)]],
-    texture2d<float> reflectionImage [[texture(6)]],sampler linearSampler [[sampler(7)]])
+    texture2d<float> reflectionImage [[texture(6)]],texture2d<float> depthImage [[texture(9)]],sampler linearSampler [[sampler(7)]])
 {
     float4 gi,reflection;indirectLighting(input.uv,gi,reflection,SS_INPUT);
     return operation.w>0.5?reflection:gi;
+}
+
+fragment float screenSpaceDepthCopyFragment(ScreenOutput input [[stage_in]],texture2d<float> motionImage [[texture(1)]])
+{
+    return motionImage.read(uint2(input.position.xy)).z;
 }

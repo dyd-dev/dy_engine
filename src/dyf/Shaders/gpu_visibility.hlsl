@@ -74,7 +74,8 @@ void main(uint3 threadId:SV_DispatchThreadID)
             // 간접 인수는 uint 5개씩: indexCount, instanceCount, firstIndex, vertexOffset, firstInstance다. 선택 패스가 두 번째 칸의 개수만 증가시킨다.
             Batch batch=batches[id];uint offset=id*5;
             arguments[offset]=batch.indexCount;arguments[offset+1]=0;
-            arguments[offset+2]=batch.firstIndex;arguments[offset+3]=asuint(batch.vertexOffset);arguments[offset+4]=0;
+            arguments[offset+2]=batch.firstIndex;arguments[offset+3]=asuint(batch.vertexOffset);
+            arguments[offset+4]=operation.w!=0?batch.instanceOffset:0;
         }
         if(operation.z!=0 && id<counts.x) history[id]=0; // 이력 재설정 요청이 있고 물체 인덱스가 유효할 때만 LOD를 0으로 되돌린다.
         return;

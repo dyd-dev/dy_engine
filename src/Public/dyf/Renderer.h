@@ -231,18 +231,22 @@ struct RendererShaderDesc
     // 선택적 정점 셰이더 입력이다. 기본 바인딩과 기본 상수 뒤에 추가한다.
     std::vector<RHI::ResourceBindingLayout> vertexBindings;
     uint32_t additionalConstantBytes = 0;
+    // Custom shadow vertices may opt into the stock material coverage fragment.
+    // They must preserve DrawConstants and output UV at location/TEXCOORD 0
+    // and vertex alpha at 1 (Metal: position, float2 uv, float alpha).
+    bool stockShadowCoverage = false;
 };
 // Scene 객체 ID 순서로 호출자가 준비한 RHI 입력을 전달하며, Scene 자체에는 GPU 자원의 소유권을 넣지 않는다.
 struct RendererDrawDesc
 {
     // 표면에 수직인 방향(법선)과 표면을 따라가는 방향(접선)을 정점 속성으로 사용한다.
-    // 버퍼를 생략하면 Scene의 Mesh를 사용하며, 정점은 위치 float3 → 법선 float3 → UV float2 → 접선 float4 순서의 48바이트다.
-    // 마지막 float4의 xyz에는 접선, w에는 종법선 방향 부호를 저장한다.
+    // 버퍼를 생략하면 Scene의 Mesh를 사용하며, 정점은 위치 float3 → 법선 float3 → UV float2 → 접선 float4 → 선형 RGBA float4 순서의 64바이트다.
+    // 접선 float4의 xyz에는 접선, w에는 종법선 방향 부호를 저장한다.
     RHI::BufferHandle vertexBuffer = nullptr;
     std::vector<RHI::ResourceBinding> vertexResources;
     // 기본 draw 상수 192바이트 뒤에 전달하며 additionalConstantBytes와 크기를 맞춘다.
     std::vector<uint8_t> inlineConstants;
-    // 표준 48바이트 정점 형식과 모션 입력을 유지하는 변형 결과를 고급 패스에서 공유하며, 사용자 vertexResources·추가 상수가 있으면 표준 묶음 최적화는 우회한다.
+    // 표준 64바이트 정점 형식과 모션 입력을 유지하는 변형 결과를 고급 패스에서 공유하며, 사용자 vertexResources·추가 상수가 있으면 표준 묶음 최적화는 우회한다.
     bool stockGeometry = false;
     // 현재·이전 변형 정점과 이력 유효성은 모션 계산에 쓰인다. 유효한 localBounds가 있으면 원본 메시 대신 변형 결과의 경계로 가시성을 판단한다.
     RHI::BufferHandle previousVertexBuffer = nullptr;
@@ -322,8 +326,10 @@ public:
         const Canvas* overlay = nullptr, Image* readback = nullptr);
     [[nodiscard]] RHI::IDevice& GetDevice() const;
 
-    // 창 Scene의 시간 표본을 약 200ms마다 게시하며, 조회는 기다리지 않고 RenderToTexture는 표본을 추가하지 않는다.
+    // 창·텍스처 Scene의 시간 표본을 약 200ms마다 게시하며, 조회는 기다리지 않는다. 시작 시 환경 캡처는 제외한다.
     // CPU 실제 경과 시간과 완료된 비동기 GPU 프레임·패스 시간은 별개이며, 아직 오지 않은 GPU 값은 0으로 해석하지 않는다.
+    // 뷰포트 CPU 구간은 Model 준비·GUI·Present를 제외하고, 프레임 간격에는 Scene 호출 사이의 시간이 포함된다.
+    // GPU 구간은 Model compute를 제외하며 제출 사이의 유휴 시간을 포함할 수 있다.
     [[nodiscard]] const Platform::ProfilerTimingSnapshot& GetProfilerTimingSnapshot() const;
 
     // 최근 Scene의 메인·그림자 제출 수이며 제출 전에는 0이고, 별도 Surface·투명 패스와 Canvas·HUD는 제외한다.

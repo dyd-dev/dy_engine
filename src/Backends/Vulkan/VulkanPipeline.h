@@ -10,6 +10,8 @@
 namespace dyf::Backends
 {
 	struct VulkanObjectDeleter;
+    class VulkanBuffer;
+    class VulkanTexture;
     VkRenderPass CreateVulkanLegacyRenderPass(VkDevice device,
         const VkAttachmentDescription* attachments,uint32_t colorCount,bool hasDepth);
 
@@ -44,6 +46,7 @@ namespace dyf::Backends
 		[[nodiscard]] dyf::RHI::Format GetDepthFormat() const { return m_depthFormat; }
 		[[nodiscard]] bool UsesStencil() const { return m_usesStencil; }
 		[[nodiscard]] bool RequiresDepthWrite() const { return m_requiresDepthWrite; }
+        [[nodiscard]] bool RequiresResourceSet() const { return m_requiresResourceSet; }
 
 	private:
 		friend struct VulkanObjectDeleter;
@@ -66,15 +69,24 @@ namespace dyf::Backends
 		dyf::RHI::Format m_depthFormat = dyf::RHI::Format::Unknown;
 		bool m_usesStencil = false;
 		bool m_requiresDepthWrite = false;
+        bool m_requiresResourceSet = false;
 	};
 
 	class VulkanResourceSet final : public dyf::RHI::ResourceSet
 	{
 	public:
+        struct NativeStateRequirement
+        {
+            VulkanBuffer* buffer=nullptr;
+            VulkanTexture* texture=nullptr;
+            RHI::ResourceState state=RHI::ResourceState::Undefined;
+            uint32_t firstMip=0,mipCount=1,firstLayer=0,layerCount=1;
+        };
 		VulkanResourceSet(const VulkanContext& context, const dyf::RHI::ResourceSetDesc& desc);
 
 		[[nodiscard]] VulkanPipeline* GetVulkanPipeline() const { return m_pipeline; }
 		[[nodiscard]] VkDescriptorSet GetSet() const { return m_set; }
+        [[nodiscard]] const std::vector<NativeStateRequirement>& GetNativeStateRequirements() const { return m_stateRequirements; }
 
 	private:
 		friend struct VulkanObjectDeleter;
@@ -85,5 +97,6 @@ namespace dyf::Backends
 		VulkanPipeline* m_pipeline = nullptr;
 		VkDescriptorPool m_pool = VK_NULL_HANDLE;
 		VkDescriptorSet m_set = VK_NULL_HANDLE;
+        std::vector<NativeStateRequirement> m_stateRequirements;
 	};
 }

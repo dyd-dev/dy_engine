@@ -1,4 +1,5 @@
 #include "../Platform/Profiler/CollectorInternal.h"
+#include "../Platform/Profiler/RhiProfiler.h"
 #include "RendererInternal.h"
 #include "OutputPresentation.h"
 #include "dyf/RHI/ICommandList.h"
@@ -13,7 +14,9 @@
 #include "dyf/RHI/Readback.h"
 #include "dyf/RHI/IDevice.h"
 #include <algorithm>
+#include <cstdio>
 #include <exception>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -21,7 +24,8 @@
 using namespace dyf;
 
 // 외부 소유 2D 출력의 형식·용도·시작 상태를 검증한 후 같은 RenderScene으로 보낸다. 창의 획득/표시와 HUD/overlay 없이 ShaderResource 상태로 남긴다.
-bool Renderer::Impl::RenderToTexture(const Scene& scene,const Camera& camera,RHI::TextureHandle target,RHI::ResourceState before)
+bool Renderer::Impl::RenderToTexture(const Scene& scene,const Camera& camera,RHI::TextureHandle target,RHI::ResourceState before,
+    const std::vector<RendererDrawDesc>* draws)
 {
     lastStatistics={};
     if(!target) return RendererFailure("RenderToTexture requires a target."); // 외부 출력 텍스처가 없으면 거부한다.
@@ -33,13 +37,14 @@ bool Renderer::Impl::RenderToTexture(const Scene& scene,const Camera& camera,RHI
     if(before!=RHI::ResourceState::Undefined && before!=RHI::ResourceState::ShaderResource && // 외부 출력의 시작 상태는 Undefined/ShaderResource/RenderTarget만 받는다.
         before!=RHI::ResourceState::RenderTarget)
         return RendererFailure("RenderToTexture before state must be Undefined, ShaderResource or RenderTarget.");
-    return RenderScene(scene,&camera,nullptr,nullptr,nullptr,target,before);
+    return RenderScene(scene,&camera,nullptr,nullptr,draws,target,before);
 }
 
 // Scene/카메라/overlay/사용자 draw/출력 조합을 하나의 프레임 경로로 처리한다. selectedOutput이 있으면 오프스크린, 없으면 창 출력이다.
 bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamera, const Canvas* overlay, Image* readback,
     const std::vector<RendererDrawDesc>* draws,RHI::TextureHandle selectedOutput,RHI::ResourceState before)
 {
+    frameOpaqueDepthComplete=false;frameNoAreaLights=false;depthGeometryUnchanged=false;depthProtectedInputs.clear();
     // main은 사용자 draw 배열의 존재만으로 라이브 제어 가용성을 먼저 게시한다. 실제 표준 호환 판정은 설정 적용 뒤 아래에서 따로 수행한다.
     InitializeLiveProfiling();PublishLiveGeometryAvailability(draws!=nullptr);
     // 장치 ID와 Renderer source ID에 현재 프레임을 묶는다. 이 문맥이 이후 업로드·패스·제출 이벤트의 출처를 연결한다.
@@ -97,7 +102,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         FrameEnd frameEnd{*nativeDevice,framePending};
         timing.cpuAcquireMilliseconds=selectedOutput?0.0:m_profiler.TakeAcquireWait()+acquireTimer.ElapsedMilliseconds();
         Platform::CpuTimer prepareTimer;
-        if(!selectedOutput)m_profiler.PollGpuSamples(); // 창 Scene 경로에서 이전 제출의 GPU 표본을 polling한다. 이 조회가 모든 GPU 작업을 동기 대기하는 것은 아니다.
+        if(!m_environmentCapture)m_profiler.PollGpuSamples(); // 창·텍스처 Scene 경로에서 이전 제출의 GPU 표본을 polling한다. 이 조회가 모든 GPU 작업을 동기 대기하는 것은 아니다.
         auto* windowOutput=selectedOutput ? nullptr : nativeDevice->GetBackBuffer();
         auto* output=selectedOutput ? selectedOutput : windowOutput;
         // 고정 장면 해상도는 별도 타깃에 그리고 창으로 비율 유지 복사한다. overlay/HUD는 최종 창 크기를 따라 그린다.
@@ -160,16 +165,17 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             Platform::FrameProfiler::GpuSample packet;
             ~GpuSamples() {device.DestroyTimestampQuery(packet.query);device.DestroyTimestampQuery(packet.start);}
         } samples{*nativeDevice,{}};
-        if(!selectedOutput) samples.packet.start=m_profiler.AcquireQuery(1); // 창 시간 측정만 프레임 시작 timestamp query를 획득한다.
+        if(!m_environmentCapture) samples.packet.start=m_profiler.AcquireQuery(1); // 환경 캡처를 제외한 창·텍스처 Scene 시간 측정에 프레임 시작 timestamp query를 획득한다.
 
         {
             // 크기가 바뀐 조명·그림자·인스턴스 버퍼만 교체하며, 업로드·닫기·제출 성공이면 과거 자원을 해제하고 실패·예외면 새 자원을 버려 핸들·ready를 복원한다.
             struct FrameBuffers {
                 Impl& r;
-                RHI::BufferHandle light,shadow,instances;
-                bool lightReady,shadowReady,instancesReady,committed=false;
+                RHI::BufferHandle light,shadow,instances,cpuInstances;
+                bool lightReady,shadowReady,instancesReady,cpuInstancesReady,committed=false;
                 explicit FrameBuffers(Impl& owner):r(owner),light(r.lightingBuffer),shadow(r.shadowMatrixBuffer),instances(r.instanceBuffer),
-                    lightReady(r.lightingReady),shadowReady(r.shadowReady),instancesReady(r.instanceReady) {}
+                    cpuInstances(r.cpuInstanceBuffer),lightReady(r.lightingReady),shadowReady(r.shadowReady),
+                    instancesReady(r.instanceReady),cpuInstancesReady(r.cpuInstanceReady) {}
                 ~FrameBuffers() {
                     const auto finish=[&](RHI::BufferHandle& current,RHI::BufferHandle previous,bool& ready,bool oldReady) {
                         if(committed) {if(current!=previous)r.device->DestroyBuffer(previous);} // 업로드 제출 성공이면 교체된 과거 버퍼를 해제한다.
@@ -178,6 +184,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
                     finish(r.lightingBuffer,light,r.lightingReady,lightReady);
                     finish(r.shadowMatrixBuffer,shadow,r.shadowReady,shadowReady);
                     finish(r.instanceBuffer,instances,r.instanceReady,instancesReady);
+                    finish(r.cpuInstanceBuffer,cpuInstances,r.cpuInstanceReady,cpuInstancesReady);
                 }
             } buffers(*this);
             // 업로드 명령 목록을 범위 소유자에 맡겨 예외나 조기 반환에서도 해제한다.
@@ -208,6 +215,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             if(!submitted) return RendererFailure("Frame upload submission failed."); // 큐가 업로드 제출을 받지 못하면 버퍼 교체/ready를 확정하지 않는다.
             // 업로드 제출 성공에 대해서만 자원 ready와 변경 바이트/revision을 확정한다. draw 제출 성공 여부는 아직 별도다.
             lightingReady=true;shadowReady=shadowMatrixBuffer!=nullptr;instanceReady=instanceBuffer!=nullptr;
+            cpuInstanceReady=cpuInstanceBuffer!=nullptr;
             if(visibilityActive) gpuVisibility->CommitUploads(); // GPU 가시성 업로드가 있었으면 같은 제출 성공 기준으로 확정한다.
             if(basicEnvironment) basicEnvironment->CommitUploads(); // 기본 환경 자원을 사용했다면 그 업로드 준비도 확정한다.
             CommitFrameData();
@@ -238,9 +246,15 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             shadowMatrixBuffer && shadowDepthTarget->GetDesc().width;
         const bool cachedShadows=hasShadows && ReuseShadowAtlas(scene,shadows,draws);
         const bool drawShadows=hasShadows && !cachedShadows;
+        frameNoAreaLights=frameNoAreaLights && stockDrawInputs && UsesStockGeometry() && !wireframeActive &&
+            noAreaMaterialPipelines[0];
         using State = RHI::ResourceState;
         // 타깃을 시작/끝 상태와 함께 그래프로 가져오고 패스의 읽기/쓰기 의존성을 선언한다. 이 선언은 실제 명령 기록보다 먼저 이루어진다.
         RHI::RenderGraph graph;
+        const auto ownedLighting=frameNoAreaLights
+            ? graph.ImportBuffer("Renderer owned lighting constants",lightingBuffer,State::ConstantBuffer,State::ConstantBuffer)
+            : RHI::RGResourceHandle{};
+        if(frameNoAreaLights && !ownedLighting.IsValid())return RendererFailure("Lighting resource import failed.");
         const auto outputHandle = graph.ImportTexture("Output", output, outputBefore, after);
         if(!outputHandle.IsValid()) return RendererFailure("Output resource import failed."); // 출력 자원을 그래프로 가져오지 못하면 실패한다.
         auto* overlayTarget=fixedOutput ? windowOutput : output;
@@ -254,6 +268,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         recordingStatistics.outputWidth=overlayTarget->GetDesc().width;
         recordingStatistics.outputHeight=overlayTarget->GetDesc().height;
         recordingStatistics.surfacePrepass=surfaceNeeded;
+        recordingStatistics.gpuOcclusion=false;
         recordingStatistics.clusteredLighting=renderFrame.lighting.clustered;
         recordingStatistics.shadowViewCount=hasShadows ? shadows.viewCount : 0;
         recordingStatistics.shadowViewResolution=hasShadows ? shadows.resolution : 0;
@@ -278,6 +293,12 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         };
         if(visibilityActive && !gpuVisibility->AddPasses(graph)) // GPU 가시성 패스를 추가하지 못하면 간접 draw를 만들지 않는다.
             return RendererFailure("GPU visibility pass creation failed.");
+        if(cpuBatchesActive && !cpuDraws.empty())
+        {
+            renderFrame.visibleInstances={cpuInstanceBuffer,graph.ImportBuffer("CPU visible instances",cpuInstanceBuffer,
+                State::VertexBuffer,State::VertexBuffer)};
+            if(!renderFrame.visibleInstances.resource.IsValid())return RendererFailure("CPU instance import failed.");
+        }
         if(!requirements.providesLocalLights && basicLighting && !basicLighting->Import(graph,renderFrame.lighting)) // 지역광 공급 확장이 없는 경우 기본 지역광 자원을 그래프에 가져오며 실패는 전파한다.
             return RendererFailure("Basic local light resource import failed.");
         if(drawShadows) // 그림자가 준비되었지만 정적 아틀라스를 재사용할 수 없을 때만 새 그림자 패스를 기록한다.
@@ -299,7 +320,10 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         {
             if(!renderFrame.normal.resource.IsValid() || !renderFrame.albedo.resource.IsValid() || !renderFrame.ao.resource.IsValid()) // 필수 표면 자원 중 하나라도 확장이 공급하지 않았으면 실패한다.
                 return RendererFailure("The surface extension did not provide normal, albedo and AO resources.");
-            if(visibilityActive && config.enableOcclusionCulling) // 실제 GPU 가시성 경로와 차폐 요청이 모두 있을 때 Hi-Z 차폐 패스를 추가한다.
+            // GPU 가시성·차폐 요청과 텍스처/샘플러 Compute 레이아웃 지원이 모두 있을 때만 HiZ 차폐를 구성한다.
+            const bool effectiveOcclusion=visibilityActive && config.enableOcclusionCulling &&
+                GpuVisibility::SupportsOcclusion(*nativeDevice);
+            if(effectiveOcclusion)
             {
                 if(!gpuVisibility->AddOcclusionPasses(graph,depthStencilTarget,depth,camera)) // 차폐 패스 구성 실패면 gpuOcclusion을 성공 사용으로 표시하지 않는다.
                     return RendererFailure("GPU occlusion pass creation failed.");
@@ -307,9 +331,14 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             }
         }
         if(!AddExtensionPasses(RenderStage::OpaqueLighting,renderFrame,graph)) return false; // 불투명 조명 확장 패스 구성 실패를 전달한다.
-        // MainForward의 색/깊이 쓰기와 조명·그림자·AO·GPU 간접 인수 읽기를 선언한다. graph가 실행 순서와 자원 전환을 결정할 근거다.
+        frameOpaqueDepthComplete=renderFrame.opaqueDepthComplete && depthGeometryUnchanged &&
+            stockDrawInputs && UsesStockGeometry() && shaderSources.bytes[MeshFragment].empty() &&
+            advanced && !wireframeActive && requirements.needsSurface && UsesSeparateTransparency() &&
+            renderFrame.depth.texture==depthStencilTarget && renderFrame.depth.resource==depth && depthPrepassPipelines[0];
+        // 색/깊이 쓰기와 조명·그림자·AO·인수 읽기 의존성을 선언해 그래프가 실행 순서와 전환을 정하게 한다.
         auto& mainPass = graph.AddPass("MainForward", RHI::RGRecordingMode::Independent);
         mainPass.Write(color, State::RenderTarget).Write(depth, State::DepthWrite);
+        if(ownedLighting.IsValid())mainPass.Read(ownedLighting,State::ConstantBuffer);
         if(renderFrame.lighting.areaMatrix.resource.IsValid()) // 면적광 행렬 LUT가 그래프 자원이면 메인 패스 읽기 의존성을 추가한다.
             mainPass.Read(renderFrame.lighting.areaMatrix.resource,State::ShaderResource);
         if(renderFrame.lighting.areaAmplitude.resource.IsValid()) // 면적광 진폭 LUT 읽기 의존성을 추가한다.
@@ -321,6 +350,8 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         if(visibilityActive) // GPU 가시성 출력은 정점 스트림과 간접 인수 읽기로 선언한다.
             mainPass.Read(gpuVisibility->GetInstancesHandle(),State::VertexBuffer)
                 .Read(gpuVisibility->GetArgumentsHandle(),State::IndirectArgument);
+        else if(cpuBatchesActive && !cpuDraws.empty())
+            mainPass.Read(renderFrame.visibleInstances.resource,State::VertexBuffer);
         if(shadowDepthTarget) mainPass.Read(shadow, State::ShaderResource); // 그림자 깊이 텍스처가 있으면 메인에서 샘플링하는 의존성을 추가한다.
         if(environment.diffuse.resource.IsValid()) mainPass.Read(environment.diffuse.resource,State::ShaderResource); // 유효한 확산 환경 핸들이 있으면 읽기 의존성을 선언한다.
         if(environment.specular.resource.IsValid()) mainPass.Read(environment.specular.resource,State::ShaderResource); // 유효한 반사 환경 핸들이 있으면 읽기 의존성을 선언한다.
@@ -333,7 +364,8 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         for(auto stage:{RenderStage::Background,RenderStage::AfterOpaque,RenderStage::Atmosphere,
             RenderStage::Transparency,RenderStage::PostProcess})
             if(!AddExtensionPasses(stage,renderFrame,graph)) return false; // 후속 확장 단계 하나라도 추가 실패하면 프레임을 중단한다.
-        if(config.enableHdrRendering && !renderFrame.outputWritten) // HDR인데 확장이 최종 출력을 아직 쓰지 않았으면 기본 ToneMap을 추가한다.
+        const bool toneMap=config.enableHdrRendering && !renderFrame.outputWritten;
+        if(toneMap) // HDR인데 확장이 최종 출력을 아직 쓰지 않았으면 기본 ToneMap을 추가한다.
             graph.AddPass("ToneMap", RHI::RGRecordingMode::Independent).Read(renderFrame.color.resource,State::ShaderResource).Write(outputHandle,State::RenderTarget)
                 .SetExecute([&,source=renderFrame.color.texture](RHI::ICommandList* commands) {
                     require(RecordToneMap(*commands,output,config.exposure,source));
@@ -343,39 +375,81 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         if(overlay) // overlay 입력이 있을 때만 최종 출력 위에 Canvas를 그린다.
             graph.AddPass("Overlay").Write(overlayHandle, State::RenderTarget)
                 .SetExecute([&](RHI::ICommandList* commands) {
-                    require(RecordCanvas(*overlay, *commands, overlayTarget, true, true));
+                    require(RecordCanvas(*overlay,*commands,overlayTarget,true,true,&preparedCanvases[0]));
                 });
-        if(!selectedOutput) // 창 출력에만 프로파일러 HUD용 패스를 추가한다.
+        std::optional<Canvas> profilerOverlay;
+        if(!selectedOutput && config.enableProfilerHud) // 창 출력에서 HUD 표시가 켜진 경우만 패스를 추가한다.
+        {
+            profilerOverlay.emplace(BuildProfilerOverlay(overlayTarget->GetDesc().width,overlayTarget->GetDesc().height,
+                config.profilerStartsExpanded));
             graph.AddPass("Profiler HUD").Write(overlayHandle, State::RenderTarget)
                 .SetExecute([&](RHI::ICommandList* commands) {
-                    if(config.enableProfilerHud) // HUD 표시 설정이 실제 적용된 프레임만 Canvas HUD 명령을 기록한다.
-                    {
 #ifdef DY_RENDERDOC_ENABLED // RenderDoc 빌드에서 HUD 디버그 이벤트 시작을 기록한다.
-                        commands->BeginDebugEvent("Profiler HUD");
+                    commands->BeginDebugEvent("Profiler HUD");
 #endif
-                        auto hud = BuildProfilerOverlay(overlayTarget->GetDesc().width, overlayTarget->GetDesc().height,
-                            config.profilerStartsExpanded);
-                        require(RecordCanvas(hud, *commands, overlayTarget, true, true));
-#ifdef DY_RENDERDOC_ENABLED // RenderDoc 빌드에서 HUD 이벤트를 닫는다.
-                        commands->EndDebugEvent();
+                    require(RecordCanvas(*profilerOverlay,*commands,overlayTarget,true,true,&preparedCanvases[1]));
+#ifdef DY_RENDERDOC_ENABLED // RenderDoc 빌드에서 HUD 디버그 이벤트를 닫는다.
+                    commands->EndDebugEvent();
 #endif
-                    }
                 });
-        // 패스/자원 의존성을 검증하고 실행 순서로 컴파일한다. shader 컴파일이나 GPU 실행을 뜻하는 Compile은 아니다.
+        }
+        frameOpaqueDepthComplete=frameOpaqueDepthComplete && depthGeometryUnchanged &&
+            depthGeometrySnapshot.Matches(renderFrame.geometry) &&
+            SameDepthCamera(depthGeometryView,depthGeometryProjection,renderFrame.camera);
+        if(frameNoAreaLights)
+        {
+            // Any graph writer may replace the uploaded zero counts. Unknown
+            // callbacks with a global barrier may also touch resources outside RG.
+            for(uint32_t index=0;const auto* pass=graph.GetPass(index);++index)
+            {
+                if(pass->HasGlobalBarrier()) {frameNoAreaLights=false;break;}
+                for(const auto& write:pass->GetWrites())if(write.handle==ownedLighting) {frameNoAreaLights=false;break;}
+                if(!frameNoAreaLights)break;
+            }
+            if(frameOpaqueDepthComplete && !noAreaDepthPrepassPipelines[0])frameNoAreaLights=false;
+        }
+        struct FrameCommands
+        {
+            RHI::IDevice& device;
+            std::vector<RHI::ICommandList*> lists;
+            RHI::ICommandList* preparation=nullptr;
+            ~FrameCommands() {
+                if(preparation)device.DestroyCommandList(preparation);
+                for(auto* commands:lists)device.DestroyCommandList(commands);
+            }
+        } frame{*nativeDevice,{}};
+        frame.preparation=nativeDevice->AcquireCommandList();
+        if(!frame.preparation)return RendererFailure("Pass preparation command acquisition failed.");
+        // All registry/cache changes finish on the owner before worker snapshots.
+        // Their upload commands execute before the graph in the same submission.
+        if(!PrepareMainPassResources(scene,*frame.preparation,draws) ||
+            (drawShadows && !PrepareShadowPassResources(scene,draws)) ||
+            (toneMap && !PrepareToneMap(renderFrame.color.texture)) ||
+            (overlay && !PrepareCanvas(*overlay,*frame.preparation,overlayTarget,preparedCanvases[0])) ||
+            (profilerOverlay && !PrepareCanvas(*profilerOverlay,*frame.preparation,overlayTarget,preparedCanvases[1])))
+            return RendererFailure("Pass resource preparation failed.");
+        if(!frame.preparation->Close())
+            return RendererFailure("Pass preparation command recording failed.");
+        if(RHI::ProfilerAccess::HasRecordedWork(*frame.preparation))
+        {
+            if(!nativeDevice->PrepareCommandLists(&frame.preparation,1,1))
+                return RendererFailure("Pass preparation native recording failed.");
+        }
+        else
+        {
+            // Warm frames without uploads need no extra native command buffer.
+            nativeDevice->DestroyCommandList(frame.preparation);
+            frame.preparation=nullptr;
+        }
+        m_profiler.PrepareGpuScopes(drawShadows?2u:1u);
+        // 그래프 Compile은 패스 의존성과 실행 순서를 구성하며 shader 컴파일이나 GPU 실행을 뜻하지 않는다.
         if(!graph.Compile()) return RendererFailure("Scene RenderGraph compilation failed."); // 그래프 의존성/자원 구성 검증 실패면 실행하지 않는다.
-        if(!selectedOutput) // 창 Scene 프레임만 패스별 GPU timestamp 묶음을 준비한다.
+        if(!m_environmentCapture) // 환경 캡처를 제외한 창·텍스처 Scene 프레임에 패스별 GPU timestamp 묶음을 준비한다.
         {
             samples.packet.passes=graph.GetExecutionOrderNames();
             samples.packet.query=m_profiler.AcquireQuery(2+2*static_cast<uint32_t>(samples.packet.passes.size()));
             graph.SetTimestampQuery(samples.packet.query);
         }
-        // 실행 경로가 만든 명령 목록을 한 묶음으로 소유한다. 어떤 반환 경로든 목록을 장치로 돌려준다.
-        struct FrameCommands
-        {
-            RHI::IDevice& device;
-            std::vector<RHI::ICommandList*> lists;
-            ~FrameCommands() { for(auto* commands : lists) device.DestroyCommandList(commands); }
-        } frame{*nativeDevice, {}};
         timing.cpuPrepareMilliseconds=prepareTimer.ElapsedMilliseconds()-timing.cpuSubmitMilliseconds;
         Platform::CpuTimer recordTimer;
         bool drawn;
@@ -391,6 +465,11 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             drawn = drawn && nativeDevice->PrepareCommandLists(frame.lists.data(),1,1);
         }
         timing.cpuRecordMilliseconds=recordTimer.ElapsedMilliseconds();
+        if(drawn && frame.preparation)
+        {
+            frame.lists.insert(frame.lists.begin(),frame.preparation);
+            frame.preparation=nullptr;
+        }
         Platform::CpuTimer submitTimer;
         RHI::FenceHandle completion;
         // 기록/네이티브 준비에 성공한 목록만 제출하고 완료 펜스를 받는다. Submit 성공은 수락된 작업을 뜻하며 펜스가 이미 완료되었음을 뜻하지 않는다.
@@ -398,6 +477,16 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             static_cast<uint32_t>(frame.lists.size()), nullptr, 0}, completion);
         timing.cpuSubmitMilliseconds+=submitTimer.ElapsedMilliseconds();
         if(drawn) { // draw 제출에 성공했을 때만 이력·통계·쿼리 소유권을 확정한다.
+            if(frameNoAreaLights && recordingStatistics.mainDrawCount && !noAreaReported)
+            {
+                std::fputs("[Renderer] Main area-light-free shader active: uploaded Rect/Disc counts are zero; no graph lighting writes or global barriers.\n",stderr);
+                noAreaReported=true;
+            }
+            if(frameOpaqueDepthComplete && !depthPrepassReported)
+            {
+                std::fputs("[Renderer] Main depth prepass active: early fragment tests, depth writes disabled, LessEqual.\n",stderr);
+                depthPrepassReported=true;
+            }
             m_profiler.SubmitGpuScopes(completion,liveFrame.GetKey());
             if(fixedOutput) outputPresentation->CommitFrame(); // 고정 타깃의 최종 자원 상태도 제출 성공 후 확정한다.
             canvasFrame.Commit();
@@ -426,13 +515,16 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         Platform::CpuTimer readbackTimer;
         if(readback && !CaptureFrame(*readback))return false; // 캡처 요청이 실패하면 이미 제출한 펜스는 남기고 Render는 false를 반환한다.
         if(readback) timing.cpuReadbackMilliseconds=readbackTimer.ElapsedMilliseconds(); // 실제로 CPU 캡처를 요청한 경우만 readback 시간을 기록한다.
-        if(!selectedOutput) // 창 경로만 Present와 창 Scene 시간 표본 게시를 수행한다.
+        if(!selectedOutput) // 창 경로만 Present를 수행한다.
         {
             Platform::CpuTimer presentTimer;
             const bool presented=nativeDevice->Present();
             timing.cpuPresentMilliseconds=presentTimer.ElapsedMilliseconds();
             framePending=false;
             if(!presented) return RendererFailure("Scene presentation failed."); // 표시 실패는 draw 제출 성공과 별개로 호출 실패를 반환한다.
+        }
+        if(!m_environmentCapture)
+        {
             // 프레임 준비·기록·제출의 CPU 벽시계 시간 합이다. acquire/readback/Present 대기와 GPU 시간은 별도 항목이며 중첩 구간을 무조건 더하면 안 된다.
             timing.cpuRenderMilliseconds=timing.cpuPrepareMilliseconds+timing.cpuRecordMilliseconds+timing.cpuSubmitMilliseconds;
             RecordProfilerFrame(timing,scene.GetEntityCount());

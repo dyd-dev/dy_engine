@@ -3,11 +3,13 @@
 #include "dyf/RHI/ICommandList.h"
 #include "VulkanContext.h"
 #include "VulkanUpload.h"
+#include "../../RHI/InlineConstantCoverage.h"
 
 #include <map>
+#include <array>
 #include <atomic>
-#include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -32,12 +34,15 @@ namespace dyf::Backends
         void MarkDeviceLost() noexcept {m_deviceLost=true;DisableReuse();}
         bool IsDeviceLost() const noexcept {return m_deviceLost;}
     private:
+        struct CacheBlock;
+        static_assert(std::atomic<CacheBlock*>::is_always_lock_free &&
+            std::atomic<VulkanCommandStorage*>::is_always_lock_free,
+            "Vulkan command storage requires lock-free ownership atomics.");
         void RequireSuccess(VkResult,const char*);
         VkDevice m_device=VK_NULL_HANDLE;
         uint32_t m_queueFamily=UINT32_MAX;
         std::atomic<bool> m_reuseEnabled{true},m_deviceLost{false};
-        std::mutex m_mutex;
-        std::vector<std::unique_ptr<VulkanCommandStorage>> m_available;
+        std::atomic<CacheBlock*> m_available{nullptr};
     };
 
 	struct VulkanSubmissionState
@@ -97,6 +102,8 @@ namespace dyf::Backends
 		{
 			return m_referencedSwapchainImages;
 		}
+        [[nodiscard]] VkPipelineStageFlags GetSwapchainAcquireWaitStage(
+            VulkanTexture* image,bool firstReference) const;
 		[[nodiscard]] bool ValidateForSubmit(VulkanSubmissionState& state) const;
 		void CommitResourceStates();
         void CompleteTimestampResets();
@@ -174,11 +181,20 @@ namespace dyf::Backends
 		VulkanUploadArena m_uploadArena;
 		std::vector<Operation> m_operations;
 		std::unordered_map<VulkanBuffer*, dyf::RHI::ResourceState> m_bufferStates;
+        struct RecentBufferState
+        {
+            VulkanBuffer* buffer=nullptr;
+            RHI::ResourceState state=RHI::ResourceState::Undefined;
+        };
+        std::array<RecentBufferState,8> m_recentBufferStates{};
+        uint32_t m_recentBufferStateCount=0,m_recentBufferStateNext=0;
+        void ClearRecentBufferStates() noexcept {m_recentBufferStateCount=m_recentBufferStateNext=0;}
 		std::map<std::pair<VulkanTexture*, uint32_t>, dyf::RHI::ResourceState> m_textureStates;
+        std::unordered_set<const VulkanResourceSet*> m_validatedResourceSets;
 		std::unordered_map<uint32_t, VertexBinding> m_vertexBindings;
 		std::vector<VulkanTexture*> m_referencedSwapchainImages;
 		std::vector<dyf::RHI::Format> m_colorFormats;
-		std::vector<uint8_t> m_inlineConstantCoverage;
+		RHI::Detail::InlineConstantCoverage m_inlineConstantCoverage;
 		dyf::RHI::Format m_indexFormat = dyf::RHI::Format::Unknown;
 		dyf::RHI::Format m_depthFormat = dyf::RHI::Format::Unknown;
 		dyf::RHI::ResourceState m_depthState = dyf::RHI::ResourceState::Undefined;

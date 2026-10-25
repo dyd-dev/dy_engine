@@ -10,14 +10,14 @@ namespace dyf
 		dyf::Math::float3 position;
 		dyf::Math::float3 normal;
 		dyf::Math::float2 uv;
-		// CPU 정점 데이터다. 기본 Renderer의 메시 업로드에는 색상이 포함되지 않는다.
+		// 선형 RGBA 색상이며 기본색 계수·텍스처에 곱한다. 생략하면 흰색이다.
 		dyf::Math::float4 color = dyf::Math::float4(1.0f, 1.0f, 1.0f, 1.0f);
 		dyf::Math::float4 tangent = dyf::Math::float4(1.0f, 0.0f, 0.0f, 1.0f);
 	};
 
 	// Additional index levels share MeshData::vertices. Error is a cumulative
 	// object-space-scaled metric, not a ratio. Generated levels include weighted
-	// normal/UV error; this is not a strict geometric-distance bound.
+	// normal/UV/color error; this is not a strict geometric-distance bound.
 	struct MeshLod
 	{
 		std::vector<uint32_t> indices;

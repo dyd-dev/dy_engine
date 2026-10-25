@@ -22,6 +22,26 @@ namespace dyf::Backends
     // RHI Format → MTLPixelFormat 변환
     static MTLPixelFormat ToMTLFormat(RHI::Format format)
     {
+        if(RHI::IsBlockCompressed(format))
+        {
+            // BC format constants require iOS SDK 16.4; older SDKs keep RGBA fallback.
+            // https://developer.apple.com/documentation/metal/mtlpixelformat/bc1_rgba
+#if TARGET_OS_OSX || TARGET_OS_MACCATALYST || \
+    (TARGET_OS_IOS && defined(__IPHONE_OS_VERSION_MAX_ALLOWED) && __IPHONE_OS_VERSION_MAX_ALLOWED >= 160400)
+            if(@available(macOS 10.11, iOS 16.4, macCatalyst 13.0, *))
+            {
+                switch(format)
+                {
+                case RHI::Format::BC1_UNORM: return MTLPixelFormatBC1_RGBA;
+                case RHI::Format::BC1_UNORM_SRGB: return MTLPixelFormatBC1_RGBA_sRGB;
+                case RHI::Format::BC3_UNORM: return MTLPixelFormatBC3_RGBA;
+                case RHI::Format::BC3_UNORM_SRGB: return MTLPixelFormatBC3_RGBA_sRGB;
+                default: break;
+                }
+            }
+#endif
+            return MTLPixelFormatInvalid;
+        }
         switch(format)
         {
             case RHI::Format::R8G8B8A8_UNORM:        return MTLPixelFormatRGBA8Unorm;
@@ -29,6 +49,7 @@ namespace dyf::Backends
 			case RHI::Format::R8G8B8A8_UNORM_SRGB:   return MTLPixelFormatRGBA8Unorm_sRGB;
 			case RHI::Format::B8G8R8A8_UNORM_SRGB:   return MTLPixelFormatBGRA8Unorm_sRGB;
             case RHI::Format::R16G16B16A16_FLOAT:    return MTLPixelFormatRGBA16Float;
+            case RHI::Format::R16_FLOAT:             return MTLPixelFormatR16Float;
 			case RHI::Format::R32G32_FLOAT:          return MTLPixelFormatRG32Float;
             case RHI::Format::R32_FLOAT:             return MTLPixelFormatR32Float;
             case RHI::Format::R32G32B32A32_FLOAT:    return MTLPixelFormatRGBA32Float;
@@ -42,6 +63,21 @@ namespace dyf::Backends
 			case RHI::Format::R16_UINT:              return MTLPixelFormatR16Uint;
             default:                                 return MTLPixelFormatInvalid;
         }
+    }
+
+    bool MetalTexture::SupportsDdsCompression(void* device, RHI::Format format) noexcept
+    {
+        id<MTLDevice> nativeDevice = (__bridge id<MTLDevice>)device;
+        if(nativeDevice == nil || !RHI::IsBlockCompressed(format)) return false;
+        // BC is optional on iOS/iPadOS; OS version alone does not imply GPU support.
+        // https://developer.apple.com/documentation/metal/mtldevice/supportsbctexturecompression
+#if (TARGET_OS_OSX && defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 110000) || \
+    ((TARGET_OS_IOS || TARGET_OS_MACCATALYST) && defined(__IPHONE_OS_VERSION_MAX_ALLOWED) && __IPHONE_OS_VERSION_MAX_ALLOWED >= 160400)
+        if(@available(macOS 11.0, iOS 16.4, macCatalyst 16.4, *))
+            if([nativeDevice respondsToSelector:@selector(supportsBCTextureCompression)])
+                return [nativeDevice supportsBCTextureCompression];
+#endif
+        return false;
     }
 
     MetalTexture::MetalTexture(const RHI::TextureDesc& desc)
@@ -64,6 +100,9 @@ namespace dyf::Backends
         m_impl->swapchainImage = false;
         id<MTLDevice> mtlDevice = (__bridge id<MTLDevice>)device;
 		const MTLPixelFormat pixelFormat = ToMTLFormat(desc.format);
+		if(RHI::IsBlockCompressed(desc.format) &&
+			(desc.usage != RHI::TextureUsage::ShaderResource || !SupportsDdsCompression(device, desc.format)))
+			return;
 		if(mtlDevice == nil || desc.width == 0 || desc.height == 0 ||
 			desc.depthOrArraySize == 0 || desc.mipLevels == 0 ||
 			desc.mipLevels > MetalValidation::MaximumMipCount(desc.width, desc.height) ||

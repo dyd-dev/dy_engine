@@ -32,6 +32,7 @@ struct RenderEnvironmentResources
 {
     RenderEnvironmentConstants constants = {};
     RHI::TextureHandle prefilter = nullptr, probePrefilter = nullptr;
+    RHI::TextureHandle brdf = nullptr;
     RHI::BufferHandle probeData = nullptr, probeParameters = nullptr;
     RHI::BufferHandle constantBuffer = nullptr;
     RenderTexture diffuse = {}, specular = {};
@@ -71,6 +72,10 @@ struct RenderGeometryDraw
     Math::float4 baseColor = {1,1,1,1};
     std::array<RHI::TextureHandle,ToIndex(MaterialTextureKind::Count)> textures = {};
     uint32_t textureFlags = 0;
+    // Direct instancing uses instanceBuffer's 128-byte model/previous-MVP rows.
+    // The provider culls instances before batching; localBounds describes the representative.
+    // Indirect draws obtain their instance count from indirectArguments instead.
+    uint32_t instanceCount = 1;
 };
 // 등록 순서와 별개로 불투명 조명 뒤 안개, 투명체, 최종 출력 순서를 유지한다.
 enum class RenderStage { BeforeOpaque, OpaqueLighting, Background, AfterOpaque, Atmosphere, Transparency, PostProcess };
@@ -109,6 +114,11 @@ struct RenderFrame
     bool environmentCapture = false;
     bool hasShadows = false;
     bool outputWritten = false;
+    // Opt-in: the current depth texture/resource contains complete nearest
+    // opaque and alpha-mask coverage for Main with the same camera, geometry,
+    // LOD, sidedness and alpha tests. Later changes must clear this flag.
+    // The renderer may preserve this depth and use early fragment tests.
+    bool opaqueDepthComplete = false;
 };
 
 class RenderExtension

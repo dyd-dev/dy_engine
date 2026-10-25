@@ -216,7 +216,8 @@ bool Renderer::Impl::UpdateLightingBuffer(
     const auto* first=reinterpret_cast<const uint8_t*>(&constants);
     // 이번 상수의 CPU 바이트를 임시 캐시에 복사한다. 여기서 lightingBytes를 교체하지 않아 제출 실패가 기존 성공 캐시를 덮지 않는다.
     pendingLightingBytes.assign(first,first+sizeof(constants));
-    if(lightingReady && pendingLightingBytes==lightingBytes)return true; // 직전 성공 업로드와 값이 완전히 같으면 기존 상수 버퍼를 그대로 읽는다.
+    const bool noAreaLights=constants.areaLightCounts.x==0.0f && constants.areaLightCounts.y==0.0f;
+    if(lightingReady && pendingLightingBytes==lightingBytes) {frameNoAreaLights=noAreaLights;return true;} // 직전 성공 업로드와 값이 완전히 같으면 기존 상수 버퍼를 그대로 읽는다.
 	if(lightingReady) { const RHI::ResourceBarrierDesc barrier={lightingBuffer,nullptr,RHI::ResourceState::ConstantBuffer,RHI::ResourceState::CopyDestination,{}}; commandList.ResourceBarrier(&barrier,1); } // 기존 상수 버퍼를 다시 갱신할 때만 복사 대상 상태로 전환한다.
 	if(!device->UpdateBuffer( // CPU 상수를 GPU 버퍼에 복사하는 명령 기록에 실패하면 false를 반환한다.
 			commandList,
@@ -233,6 +234,7 @@ bool Renderer::Impl::UpdateLightingBuffer(
 		{}
 	};
 	commandList.ResourceBarrier(&after, 1);
+	frameNoAreaLights=noAreaLights;
 	return true;
 }
 

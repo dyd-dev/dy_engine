@@ -1,5 +1,6 @@
 #include "dyf/Mesh.h"
 #include "RendererInternal.h"
+#include "SceneAlgorithms.h"
 #include "dyf/Camera.h"
 #include "dyf/Scene.h"
 #include <meshoptimizer.h>
@@ -25,11 +26,14 @@ std::vector<MeshLod> BuildMeshLods(const MeshData& mesh,uint32_t maxLevels)
         for(uint32_t i=0;i<vertexCount;++i) sequential[i]=i;
     }
     const auto& original=mesh.indices.empty() ? sequential : mesh.indices;
-    if(original.size()<768 || original.size()%3 || original.size()>UINT32_MAX/sizeof(uint32_t)) return result; // 작은 메시, 삼각형 개수가 맞지 않는 목록, 32비트 버퍼 크기를 넘는 목록은 제외한다.
+    // A nonempty triangle list cannot shrink below one triangle. Every larger
+    // valid list may attempt simplification under the same error policy.
+    if(original.size()<=3 || original.size()%3 || original.size()>UINT32_MAX/sizeof(uint32_t)) return result;
     for(uint32_t index:original) if(index>=vertexCount) return result; // 범위 밖 정점 인덱스가 하나라도 있으면 외부 축약 함수에 잘못된 자료를 넘기지 않는다.
     for(const auto& v:mesh.vertices)
-        for(float value:{v.position.x,v.position.y,v.position.z,v.normal.x,v.normal.y,v.normal.z,v.uv.x,v.uv.y})
-            if(!std::isfinite(value)) return result; // 위치·UV 또는 표면에 수직인 방향(법선)에 NaN·무한대가 있으면 축약 오차를 계산할 수 없어 원본 메시를 유지한다.
+        for(float value:{v.position.x,v.position.y,v.position.z,v.normal.x,v.normal.y,v.normal.z,v.uv.x,v.uv.y,
+            v.color.x,v.color.y,v.color.z,v.color.w})
+            if(!std::isfinite(value)) return result; // 위치·법선·UV·정점 색에 NaN·무한대가 있으면 축약 오차를 계산할 수 없어 원본 메시를 유지한다.
     // FBX triangle corners may be separate indices even when their attributes
     // are identical. Restore that connectivity only for simplification. Compare
     // actual components, never float3/Vertex padding or position alone.
@@ -50,7 +54,7 @@ std::vector<MeshLod> BuildMeshLods(const MeshData& mesh,uint32_t maxLevels)
     // 압축 정점 번호별로 원본 정점 하나를 기억한다. 최종 LOD는 이 대표 번호를 통해 원래 정점 버퍼를 그대로 참조한다.
     std::vector<uint32_t> representatives(compactCount,UINT32_MAX);
     std::vector<std::array<float,3>> positions(compactCount);
-    std::vector<std::array<float,5>> attributes(compactCount);
+    std::vector<std::array<float,9>> attributes(compactCount);
     for(uint32_t index:original)
     {
         const auto compact=remap[index];
@@ -58,7 +62,8 @@ std::vector<MeshLod> BuildMeshLods(const MeshData& mesh,uint32_t maxLevels)
         representatives[compact]=index;
         const auto& v=mesh.vertices[index];
         positions[compact]={v.position.x,v.position.y,v.position.z};
-        attributes[compact]={v.normal.x,v.normal.y,v.normal.z,v.uv.x,v.uv.y};
+        attributes[compact]={v.normal.x,v.normal.y,v.normal.z,v.uv.x,v.uv.y,
+            v.color.x,v.color.y,v.color.z,v.color.w};
     }
     std::vector<uint32_t> current(original.size());
     // 임시 인덱스를 압축 정점 번호로 바꾼다. 이 번호는 축약 내부에서만 사용하고 반환 시 원본 번호로 복구한다.
@@ -66,23 +71,26 @@ std::vector<MeshLod> BuildMeshLods(const MeshData& mesh,uint32_t maxLevels)
     std::vector<uint32_t>().swap(remap);
     const float scale=meshopt_simplifyScale(positions.front().data(),compactCount,sizeof(positions.front()));
     if(!std::isfinite(scale) || scale<=0) return result; // 메시 크기 기반 오차 환산값이 유한한 양수가 아니면 축약 단계를 만들지 않는다.
-    // 법선 3성분·UV 2성분에 오차 가중치를 주고 엄격한 위상 제약과 열린 경계 고정으로 음영·UV 경계 및 재질 사이의 틈을 보호한다.
-    const float weights[]={0.5f,0.5f,0.5f,0.5f,0.5f};
+    // 법선 3성분·UV 2성분·정점 색 4성분에 오차 가중치를 주고 엄격한 위상 제약과 열린 경계 고정으로 음영·UV·색 경계 및 재질 사이의 틈을 보호한다.
+    const float weights[]={0.5f,0.5f,0.5f,0.5f,0.5f,0.5f,0.5f,0.5f,0.5f};
     result.reserve(std::min(maxLevels,3u));
     float cumulativeError=0;
     for(uint32_t level=0;level<std::min(maxLevels,3u);++level)
     {
-        // 단계마다 원본 인덱스 수를 1/2, 1/4, 1/8 목표로 줄이되 최소 96개 인덱스와 삼각형 단위를 유지한다.
-        const size_t target=std::max<size_t>(96,(original.size()>>(level+1))/3*3);
+        // Keep the requested half/quarter/eighth targets and triangle alignment;
+        // the minimum is one valid triangle, not an estimated useful mesh size.
+        const size_t target=std::max<size_t>(3,(original.size()>>(level+1))/3*3);
         if(target>=current.size()) break; // 목표가 현재보다 작지 않으면 더 축약할 의미가 없어 반복을 끝낸다.
         std::vector<uint32_t> reduced(current.size());
         float error=0;
         const size_t count=meshopt_simplifyWithAttributes(reduced.data(),current.data(),current.size(),
-            positions.front().data(),compactCount,sizeof(positions.front()),attributes.front().data(),sizeof(attributes.front()),weights,5,nullptr,
+            positions.front().data(),compactCount,sizeof(positions.front()),attributes.front().data(),sizeof(attributes.front()),weights,9,nullptr,
             target,0.04f,meshopt_SimplifyLockBorder,&error);
-        if(!count || count%3 || count>=current.size()-current.size()/10 || !std::isfinite(error)) break; // 유효한 삼각형이 없거나 약 10%도 줄지 않거나 오차가 비정상이면 남은 단계를 생성하지 않는다.
+        // Accept actual index-count progress; a guessed minimum percentage of
+        // saved triangles is independent of the configured visual error limit.
+        if(!count || count%3 || count>=current.size() || !std::isfinite(error) || error<0) break;
         reduced.resize(count);
-        // 법선·UV 가중치가 섞인 단계별 오차를 메시 단위로 환산·누적해 화면 픽셀 기반 LOD 선택에 쓰며, 엄밀한 기하 거리 상한으로 해석하지 않는다.
+        // 법선·UV·정점 색 가중치가 섞인 단계별 오차를 메시 단위로 환산·누적해 화면 픽셀 기반 LOD 선택에 쓰며, 엄밀한 기하 거리 상한으로 해석하지 않는다.
         cumulativeError+=error*scale;
         if(!std::isfinite(cumulativeError)) break; // 누적 오차가 수치 범위를 벗어나면 이 단계를 반환 목록에 넣지 않는다.
         // 축약된 삼각형 순서를 정점 캐시 재사용에 유리하게 정리한 후 원본 정점 번호로 변환한다.
@@ -140,7 +148,7 @@ void Renderer::Impl::SelectLods(const Scene& scene,const Camera& camera,uint32_t
         const auto entity=static_cast<EntityID>(i);
         const auto material=scene.GetEntityMaterial(entity);
         if(gpu && IsValid(material) && ToIndex(material)<scene.Materials().size() && // GPU 가시성 대상인 비블렌드 객체는 GPU가 LOD를 선택하므로 CPU는 중복 계산하지 않는다.
-            scene.Materials()[ToIndex(material)].alphaMode!=MaterialAlphaMode::Blend)
+            !UsesBlendedRendering(scene.Materials()[ToIndex(material)]))
         {
             entityLods[i]=0;continue;
         }

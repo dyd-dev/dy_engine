@@ -239,8 +239,18 @@ namespace dyf::Platform
 			impl->m_gpuFrameSumMilliseconds += frameMilliseconds;
 			++impl->m_gpuFrameCount;
 		}
+		double shadowMilliseconds = 0.0;
+		bool hasShadow = false, validShadow = true;
 		for(const auto& pass : passes)
 		{
+			const bool shadow = pass.name == "Shadow" || pass.name.compare(0, 12, "Shadow view ") == 0;
+			if(shadow)
+			{
+				hasShadow = true;
+				if(std::isfinite(pass.averageMilliseconds) && pass.averageMilliseconds >= 0.0)
+					shadowMilliseconds += pass.averageMilliseconds;
+				else validShadow = false;
+			}
 			if(!std::isfinite(pass.averageMilliseconds) || pass.averageMilliseconds < 0.0)
 				continue;
 			auto found = std::find_if(impl->m_gpuPassSums.begin(), impl->m_gpuPassSums.end(),
@@ -257,11 +267,13 @@ namespace dyf::Platform
 				impl->m_gpuMainSumMilliseconds += pass.averageMilliseconds;
 				++impl->m_gpuMainCount;
 			}
-			if(pass.name == "Shadow")
-			{
-				impl->m_gpuShadowSumMilliseconds += pass.averageMilliseconds;
-				++impl->m_gpuShadowCount;
-			}
+		}
+		// One GPU-frame sample may contain several atlas views. Average their sum
+		// across frames, rather than treating each view as a separate frame sample.
+		if(hasShadow && validShadow && std::isfinite(shadowMilliseconds))
+		{
+			impl->m_gpuShadowSumMilliseconds += shadowMilliseconds;
+			++impl->m_gpuShadowCount;
 		}
 	}
 

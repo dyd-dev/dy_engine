@@ -32,8 +32,9 @@ public:
     {
         uint32_t indexCount=0,firstIndex=0;
         int32_t vertexOffset=0;
-        // 간접 드로의 firstInstance는 0으로 두고, instanceOffset에 VisibleInstance 크기를 곱한 바이트 위치부터 인스턴스 버퍼를 바인딩한다. 배치별 시작 위치를 두 번 더하지 않기 위한 구성이다.
-        uint32_t instanceOffset=0,capacity=0; // 출력 인스턴스 배열에서 이 배치가 차지할 시작과 최대 개수다. 배치 구간은 서로 겹치면 안 된다.
+        // IndirectFirstInstance 지원 시 시작 행을 인수에 넣고 VB는 offset 0에 바인딩한다.
+        // 미지원 시 firstInstance 0과 이 시작점의 VB 바이트 오프셋을 사용한다.
+        uint32_t instanceOffset=0,capacity=0; // 출력 배열의 배치별 시작과 최대 개수다. 실제 GPU 가시 개수는 아니며 배치 구간은 겹치면 안 된다. // 출력 인스턴스 배열에서 이 배치가 차지할 시작과 최대 개수다. 배치 구간은 서로 겹치면 안 된다.
         std::array<uint32_t,3> padding={};
     };
     // 지터 가장자리 여유를 포함한 절두체와 화면 픽셀 오차를 계산할 CPU 입력이다. 깊이 가림에는 실제 깊이를 그린 지터 카메라를 별도로 받는다.
@@ -56,10 +57,12 @@ public:
     bool Prepare(const std::vector<Instance>&,const std::vector<Batch>&,const Settings&);
     // Prepare가 보관한 CPU 입력을 명령 목록에 복사 기록한다. 성공적인 제출 뒤 호출자가 CommitUploads를 부른다.
     bool RecordUploads(RHI::ICommandList&);
-    void CommitUploads() {m_uploadReady=true;} // 다음 업로드의 시작 자원 상태를 기억하는 제출 확정 표시다. GPU 완료 펜스는 아니다.
-    // 간접 인자 초기화와 절두체/LOD 선택 패스를 그래프에 추가한다. 그래프 실행 전에는 결과 버퍼가 새 결과로 채워지지 않는다.
+    void CommitUploads() {m_uploadReady=true;m_uploadDirty.fill(false);} // 입력 제출을 확정하고 dirty 표시를 비운다. GPU 완료 펜스는 아니다.
+    // 간접 인수 초기화와 절두체/LOD 선택 패스를 등록한다. 호출 자체가 GPU 계산을 실행하지는 않는다.
     bool AddPasses(RHI::RenderGraph&);
-    // 현재 프레임 깊이로 Hi-Z를 만들고 가림을 반영한 간접 드로 목록을 다시 생성하는 패스를 그래프에 추가한다. 이 호출 자체가 GPU 계산을 실행하지는 않는다.
+    // Texture/sampler compute layouts are optional even when buffer Compute is supported.
+    static bool SupportsOcclusion(const RHI::IDevice&);
+    // 현재 깊이로 HiZ를 만들고 가림을 반영한 간접 목록을 구성하는 패스를 등록한다.
     bool AddOcclusionPasses(RHI::RenderGraph&,RHI::TextureHandle depth,
         RHI::RGResourceHandle depthHandle,const Camera& jitteredCamera);
     // 그래프 제출이 성공한 프레임의 출력 상태를 확정하고 다음 프레임의 초기 상태/LOD 이력을 이어 간다.
@@ -72,6 +75,9 @@ public:
     RHI::RGResourceHandle GetArgumentsHandle() const {return m_argumentsGraph;}
     uint32_t GetBatchCount() const {return static_cast<uint32_t>(m_batches.size());} // CPU가 준비한 배치 수이며 컬링 후 실제 생존 인스턴스 수와 다르다.
     const Batch& GetBatch(uint32_t index) const {return m_batches[index];}
+    // False proves that the unchanged GPU frustum test cannot append an instance.
+    // Unknown/invalid bounds stay visible; this does not predict occlusion or LOD.
+    bool MayDrawBatch(uint32_t index) const {return index>=m_possibleBatches.size() || m_possibleBatches[index]!=0;}
 
 private:
     // 상태 전환 방향마다 서로 다른 기준을 적용해 잦은 전환을 막는 방식(히스테리시스)의 폭을 GPU에 전달한다.
@@ -110,10 +116,12 @@ private:
     RHI::RGResourceHandle m_instancesGraph,m_argumentsGraph;
     std::vector<Instance> m_inputData; // 원본 입력의 CPU 사본을 소유해 업로드 기록 시 호출자 벡터 수명에 의존하지 않는다.
     std::vector<Batch> m_batches;
+    std::vector<uint8_t> m_possibleBatches;
     Frame m_frameData;
     uint32_t m_capacity=0; // 모든 배치 구간을 담는 출력 인스턴스 버퍼 용량이다. GPU가 현재 사용한 길이가 아니다.
     bool m_hizReady=false,m_occlusionReady=false,m_pendingOcclusion=false; // HiZ/가림 상수의 직전 제출 상태와 이번 프레임 가림 패스 등록 여부를 구분한다.
     bool m_uploadReady=false,m_ready=false,m_resetHistory=true,m_pending=false; // 입력 제출·출력 제출·이력 초기화 요구·이번 기본 패스 등록 상태를 각각 추적한다.
+    std::array<bool,3> m_uploadDirty={true,true,true};
 };
 // C++ 구조체 크기가 셰이더 저장 버퍼의 stride와 어긋나면 컴파일 단계에서 드러나게 한다.
 static_assert(sizeof(GpuVisibility::Instance)==192);

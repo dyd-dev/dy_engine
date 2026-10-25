@@ -77,7 +77,7 @@ kernel void kernelMain(uint3 threadId [[thread_position_in_grid]],
             atomic_store_explicit(&arguments[offset+1],0,memory_order_relaxed);
             atomic_store_explicit(&arguments[offset+2],batch.firstIndex,memory_order_relaxed);
             atomic_store_explicit(&arguments[offset+3],as_type<uint>(batch.vertexOffset),memory_order_relaxed);
-            atomic_store_explicit(&arguments[offset+4],0,memory_order_relaxed);
+            atomic_store_explicit(&arguments[offset+4],operation.w!=0?batch.instanceOffset:0,memory_order_relaxed);
         }
         if(operation.z!=0 && id<frame.counts.x) history[id]=0; // 이력 재설정 요청이 있고 물체 인덱스가 유효할 때만 LOD를 0으로 되돌린다.
         return;

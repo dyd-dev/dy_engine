@@ -405,6 +405,7 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& context, const dyf::RHI::Mes
 		for (uint32_t i = 0; i < desc.bindingCount; ++i)
 		{
 			const dyf::RHI::ResourceBindingLayout& source = desc.bindings[i];
+            if(source.type!=RHI::ResourceBindingType::StaticSampler)m_requiresResourceSet=true;
 			if (source.count == 0 || ToShaderStages(source.stages) == 0 || !usedBindings.insert(source.binding).second)
 			{
 				throw std::runtime_error("Invalid or duplicate Vulkan descriptor binding");
@@ -875,6 +876,20 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& context, const dyf::RHI::Mes
 	{
 		if (m_pipeline == nullptr) throw std::runtime_error("Invalid Vulkan resource-set pipeline");
 		if (desc.bindingCount > 0 && desc.bindings == nullptr) throw std::runtime_error("Vulkan resource bindings are missing");
+
+        m_stateRequirements.reserve(GetStateRequirements().size());
+        for(const auto& source:GetStateRequirements())
+        {
+            NativeStateRequirement requirement;
+            requirement.buffer=source.buffer?dynamic_cast<VulkanBuffer*>(source.buffer):nullptr;
+            requirement.texture=source.texture?dynamic_cast<VulkanTexture*>(source.texture):nullptr;
+            if((source.buffer && !requirement.buffer) || (source.texture && !requirement.texture))
+                throw std::runtime_error("Invalid Vulkan resource-set requirement.");
+            requirement.state=source.state;
+            requirement.firstMip=source.firstMip;requirement.mipCount=source.mipCount;
+            requirement.firstLayer=source.firstLayer;requirement.layerCount=source.layerCount;
+            m_stateRequirements.push_back(requirement);
+        }
 		const dyf::RHI::PipelineLayoutDesc& layout = m_pipeline->GetLayout();
 		const VkDescriptorSetLayout setLayout = m_pipeline->GetSetLayout();
 		if (setLayout == VK_NULL_HANDLE)

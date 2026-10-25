@@ -21,6 +21,20 @@
 #include "ToneMapVertex.h"
 #include "ToneMapFragment.h"
 #endif
+#if defined(ENABLE_METAL) || defined(ENABLE_D3D12) || defined(ENABLE_VULKAN)
+#include "StockDepthPrepassFragment.h"
+#include "StockDepthPrepassFragmentNoShadows.h"
+#include "BindlessDepthPrepassFragment.h"
+#include "BindlessDepthPrepassFragmentNoShadows.h"
+#include "StockNoAreaFragment.h"
+#include "StockNoAreaFragmentNoShadows.h"
+#include "BindlessNoAreaFragment.h"
+#include "BindlessNoAreaFragmentNoShadows.h"
+#include "StockNoAreaDepthPrepassFragment.h"
+#include "StockNoAreaDepthPrepassFragmentNoShadows.h"
+#include "BindlessNoAreaDepthPrepassFragment.h"
+#include "BindlessNoAreaDepthPrepassFragmentNoShadows.h"
+#endif
 
 namespace dyf
 {
@@ -35,6 +49,58 @@ RHI::ShaderDesc Renderer::Impl::DefaultShadowFragment()
     RHI::ShaderDesc desc;desc.stage=RHI::ShaderStage::Fragment;return desc;
 #endif
 }
+
+RHI::ShaderDesc Renderer::Impl::DefaultDepthPrepassFragment(bool shadows,bool bindless)
+{
+#if defined(ENABLE_METAL)
+    constexpr const char* entry="depthPrepassFragment";
+#elif defined(ENABLE_D3D12) || defined(ENABLE_VULKAN)
+    constexpr const char* entry="main";
+#endif
+#if defined(ENABLE_METAL) || defined(ENABLE_D3D12) || defined(ENABLE_VULKAN)
+    if(bindless)
+        return shadows
+            ? RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kBindlessDepthPrepassFragment,kBindlessDepthPrepassFragmentSize}
+            : RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kBindlessDepthPrepassFragmentNoShadows,kBindlessDepthPrepassFragmentNoShadowsSize};
+    return shadows
+        ? RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kStockDepthPrepassFragment,kStockDepthPrepassFragmentSize}
+        : RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kStockDepthPrepassFragmentNoShadows,kStockDepthPrepassFragmentNoShadowsSize};
+#else
+    (void)shadows;(void)bindless;
+    RHI::ShaderDesc desc;desc.stage=RHI::ShaderStage::Fragment;return desc;
+#endif
+}
+RHI::ShaderDesc Renderer::Impl::DefaultNoAreaFragment(bool shadows,bool bindless,bool depthPrepass)
+{
+#if defined(ENABLE_METAL)
+    constexpr const char* entry="noAreaFragment";
+#elif defined(ENABLE_D3D12) || defined(ENABLE_VULKAN)
+    constexpr const char* entry="main";
+#endif
+#if defined(ENABLE_METAL) || defined(ENABLE_D3D12) || defined(ENABLE_VULKAN)
+    if(depthPrepass)
+    {
+        if(bindless)
+            return shadows
+                ? RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kBindlessNoAreaDepthPrepassFragment,kBindlessNoAreaDepthPrepassFragmentSize}
+                : RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kBindlessNoAreaDepthPrepassFragmentNoShadows,kBindlessNoAreaDepthPrepassFragmentNoShadowsSize};
+        return shadows
+            ? RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kStockNoAreaDepthPrepassFragment,kStockNoAreaDepthPrepassFragmentSize}
+            : RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kStockNoAreaDepthPrepassFragmentNoShadows,kStockNoAreaDepthPrepassFragmentNoShadowsSize};
+    }
+    if(bindless)
+        return shadows
+            ? RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kBindlessNoAreaFragment,kBindlessNoAreaFragmentSize}
+            : RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kBindlessNoAreaFragmentNoShadows,kBindlessNoAreaFragmentNoShadowsSize};
+    return shadows
+        ? RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kStockNoAreaFragment,kStockNoAreaFragmentSize}
+        : RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kStockNoAreaFragmentNoShadows,kStockNoAreaFragmentNoShadowsSize};
+#else
+    (void)shadows;(void)bindless;(void)depthPrepass;
+    RHI::ShaderDesc desc;desc.stage=RHI::ShaderStage::Fragment;return desc;
+#endif
+}
+
 // 메시·그림자·Canvas·톤 매핑의 기본 ShaderDesc를 묶어 반환하며, Metal은 라이브러리 진입점, D3D12/Vulkan은 변형별 바이트를 선택한다.
 RendererShaderDesc Renderer::Impl::DefaultShaders(bool shadows, bool bindless, bool instanced)
 {

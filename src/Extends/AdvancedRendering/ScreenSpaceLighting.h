@@ -103,7 +103,7 @@ private:
     };
     struct ScreenSet
     {
-        std::array<RHI::TextureHandle,7> textures={};
+        std::array<RHI::TextureHandle,8> textures={};
         RHI::PipelineHandle pipeline=nullptr;
         RHI::ResourceSetHandle set=nullptr;
         uint32_t unusedFrames=0;
@@ -129,22 +129,32 @@ private:
         uint32_t unusedFrames=0;
     };
     bool CreatePipelines();
+    void PrepareDepthPlane(bool enabled);
     bool CreateDenoisePipelines();
     bool PrepareDenoise(uint32_t effect,bool enabled);
     void ReleaseDenoise(uint32_t effect);
     RHI::ResourceSetHandle DenoiseResources(RHI::PipelineHandle,const std::array<RHI::TextureHandle,6>&);
     bool AddDenoise(RHI::RenderGraph&,uint32_t effect,RHI::TextureHandle raw,RHI::RGResourceHandle rawGraph,
-        RHI::TextureHandle& filtered,RHI::RGResourceHandle& filteredGraph);
+        RHI::TextureHandle& filtered,RHI::RGResourceHandle& filteredGraph,
+        RHI::TextureHandle& guide,RHI::RGResourceHandle& guideGraph);
     bool Upload(RHI::ICommandList&,RHI::BufferHandle&,bool& ready,
         const void*,uint32_t,uint32_t,RHI::BufferUsage,RHI::ResourceState,uint32_t capacityBytes=0);
     RHI::ResourceSetHandle SurfaceResources(const SurfaceDraw&,RHI::PipelineHandle);
     RHI::ResourceSetHandle ScreenResources(RHI::PipelineHandle,RHI::TextureHandle source,
-        RHI::TextureHandle hdr,RHI::TextureHandle environment,RHI::TextureHandle reflection);
+        RHI::TextureHandle hdr,RHI::TextureHandle environment,RHI::TextureHandle reflection,
+        RHI::TextureHandle guide=nullptr);
     void DrawScreen(RHI::ICommandList&,RHI::PipelineHandle,RHI::ResourceSetHandle,
         RHI::TextureHandle output,const std::array<float,4>&);
     void DestroySets();
     RHI::IDevice* m_device=nullptr;
     RHI::TextureHandle m_depth=nullptr;
+    RHI::TextureHandle m_depthPlane=nullptr;
+    RHI::ResourceState m_depthPlaneState=RHI::ResourceState::Undefined;
+    RHI::RGResourceHandle m_depthPlaneHandle;
+    RHI::ShaderHandle m_depthCopyShader=nullptr;
+    RHI::PipelineHandle m_depthCopyPipeline=nullptr;
+    RHI::ResourceSetHandle m_depthCopySet=nullptr;
+    bool m_depthPlaneAttempted=false,m_depthPlaneActive=false;
     RHI::TextureHandle m_whiteAO=nullptr,m_colorOutput=nullptr;
     std::array<RHI::TextureHandle,ImageCount> m_textures={};
     std::array<RHI::ResourceState,ImageCount> m_states={};
@@ -164,6 +174,8 @@ private:
     FrameGPU m_uploadedFrame={};
     std::vector<DrawGPU> m_gpuDraws,m_gpuScratch;
     std::vector<SurfaceDraw> m_draws;
+    std::vector<uint32_t> m_drawOrder;
+    std::vector<double> m_drawDepths;
     std::vector<RHI::ResourceSetHandle> m_drawSets;
     std::vector<ScreenSet> m_screenSets;
     std::unordered_map<SurfaceSetKey,RHI::ResourceSetHandle,SurfaceSetHash> m_surfaceSets;

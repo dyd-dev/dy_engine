@@ -5,6 +5,7 @@ layout(location=2) in vec4 worldTangent;
 layout(location=3) in vec4 currentClip;
 layout(location=4) in vec4 previousClip;
 layout(location=5) in float viewDepth;
+layout(location=6) in vec4 vertexColor;
 layout(location=0) out vec4 normalRoughAO;
 layout(location=1) out vec4 albedoMetal;
 layout(location=2) out vec4 motionDepth;
@@ -27,7 +28,7 @@ vec2 octEncode(vec3 n)
 void main()
 {
     Draw draw=draws[index.x];uint flags=draw.flags.x;
-    vec4 base=draw.baseColor;
+    vec4 base=draw.baseColor*vertexColor;
     if((flags&1u)!=0u)base*=texture(sampler2D(baseTexture,materialSampler),uv);
     if((flags&64u)!=0u)base.rgb=draw.baseColor.rgb;
     vec3 n=normalize(worldNormal);

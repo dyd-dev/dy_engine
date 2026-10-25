@@ -99,9 +99,12 @@ macro(dy_configure_shader_toolchain)
 endmacro()
 
 function(dy_compile_shader target name stage)
-    cmake_parse_arguments(SHADER "" "GLSL;HLSL;METAL;METAL_ENTRY" "INCLUDE_DIRS" ${ARGN})
+    cmake_parse_arguments(SHADER "BINARY_ONLY" "GLSL;HLSL;METAL;METAL_ENTRY;OUTPUT" "INCLUDE_DIRS" ${ARGN})
     if(NOT stage MATCHES "^(vert|hull|domain|frag|comp|mesh)$")
         message(FATAL_ERROR "dy_compile_shader: stage must be vert, hull, domain, frag, comp or mesh")
+    endif()
+    if(SHADER_BINARY_ONLY AND NOT USE_VULKAN AND NOT USE_D3D12 AND NOT USE_METAL)
+        return()
     endif()
     foreach(language IN ITEMS GLSL HLSL METAL)
         if(NOT EXISTS "${SHADER_${language}}")
@@ -111,13 +114,17 @@ function(dy_compile_shader target name stage)
     set(directory "${CMAKE_CURRENT_BINARY_DIR}/shaders/${target}")
     set(header "${directory}/${name}.h")
     set(binary "${directory}/${name}.bin")
+    if(SHADER_OUTPUT)
+        set(binary "${SHADER_OUTPUT}")
+        get_filename_component(directory "${binary}" DIRECTORY)
+    endif()
     set(embed "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/CompileShaders.cmake")
     set(includes)
     set(dependencies "${SHADER_GLSL}" "${SHADER_HLSL}" "${SHADER_METAL}")
     foreach(include IN LISTS SHADER_INCLUDE_DIRS)
         list(APPEND includes -I "${include}")
         file(GLOB_RECURSE headers CONFIGURE_DEPENDS
-            "${include}/*.inc" "${include}/*.glsl" "${include}/*.hlsl" "${include}/*.metal")
+            "${include}/*.inc" "${include}/*.h" "${include}/*.glsl" "${include}/*.hlsl" "${include}/*.metal")
         list(APPEND dependencies ${headers})
     endforeach()
     set(entry main)
@@ -133,10 +140,15 @@ function(dy_compile_shader target name stage)
         if(stage STREQUAL "mesh")
             set(glslc_extra_args "--target-env=vulkan1.3")
         endif()
+        set(depfile)
+        if(CMAKE_GENERATOR MATCHES "Ninja|Makefiles" OR NOT CMAKE_VERSION VERSION_LESS "3.21")
+            set(depfile DEPFILE "${binary}.d")
+        endif()
         add_custom_command(OUTPUT "${binary}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory "${directory}"
-            COMMAND "${DY_GLSLC}" "-fshader-stage=${glsl_stage}" ${glslc_extra_args} ${includes} "${SHADER_GLSL}" -o "${binary}"
-            DEPENDS ${dependencies} VERBATIM)
+            COMMAND "${DY_GLSLC}" "$<IF:$<CONFIG:Debug>,-O0,-O>" "-fshader-stage=${glsl_stage}" ${glslc_extra_args} ${includes}
+                -MD -MF "${binary}.d" "${SHADER_GLSL}" -o "${binary}"
+            DEPENDS ${dependencies} ${depfile} VERBATIM)
     elseif(USE_D3D12)
         if(stage STREQUAL "vert")
             set(profile vs_6_0)
@@ -175,12 +187,62 @@ function(dy_compile_shader target name stage)
         target_include_directories(${target} PRIVATE "${directory}")
         return()
     endif()
+    if(SHADER_BINARY_ONLY)
+        return()
+    endif()
     add_custom_command(OUTPUT "${header}"
         COMMAND "${CMAKE_COMMAND}" "-DINPUT=${binary}" "-DOUTPUT=${header}" "-DSYMBOL=${name}"
             "-DNAMESPACE=ShaderData" "-DENTRY_POINT=${entry}" -P "${embed}"
         DEPENDS "${binary}" "${embed}" VERBATIM)
     target_sources(${target} PRIVATE "${header}")
     target_include_directories(${target} PRIVATE "${directory}")
+endfunction()
+
+# Examples use the same native compiler commands without embedding byte arrays.
+# An imported engine does not expose its backend: no selection leaves existing
+# source/precompiled assets alone instead of guessing the archive's contents.
+function(dy_example_shader target stage source destination)
+    if(NOT USE_VULKAN AND NOT USE_D3D12 AND NOT USE_METAL)
+        return()
+    endif()
+    cmake_parse_arguments(SHADER "" "HLSL;METAL;METAL_ENTRY" "" ${ARGN})
+    foreach(path IN ITEMS "${source}" "${destination}" "${SHADER_HLSL}" "${SHADER_METAL}")
+        if(NOT path MATCHES "^Shaders/[A-Za-z0-9_./-]+$" OR path MATCHES "(^|/)[.][.]?(/|$)")
+            message(FATAL_ERROR "${target}: shader paths must remain inside Shaders")
+        endif()
+    endforeach()
+    get_filename_component(name "${destination}" NAME_WE)
+    set(binary "${CMAKE_CURRENT_BINARY_DIR}/shaders/$<CONFIG>/${target}/${name}.bin")
+    # One Metal source can contain several stage entry points. Compile its
+    # library once; each declared stage still gets its expected asset filename.
+    if(USE_METAL)
+        string(SHA256 library_name "${SHADER_METAL}")
+        set(binary "${CMAKE_CURRENT_BINARY_DIR}/shaders/$<CONFIG>/${target}/${library_name}.bin")
+    endif()
+    get_target_property(compiled "${target}" DY_EXAMPLE_COMPILED_SHADERS)
+    if(NOT binary IN_LIST compiled)
+        dy_compile_shader("${target}" "${name}" "${stage}" BINARY_ONLY OUTPUT "${binary}"
+            GLSL "${CMAKE_CURRENT_SOURCE_DIR}/${source}"
+            HLSL "${CMAKE_CURRENT_SOURCE_DIR}/${SHADER_HLSL}"
+            METAL "${CMAKE_CURRENT_SOURCE_DIR}/${SHADER_METAL}"
+            METAL_ENTRY "${SHADER_METAL_ENTRY}"
+            INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/Shaders")
+        set_property(TARGET "${target}" APPEND PROPERTY DY_EXAMPLE_COMPILED_SHADERS "${binary}")
+    endif()
+    if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        set_property(TARGET "${target}" APPEND PROPERTY DY_EXAMPLE_SHADER_ASSETS
+            "${binary}|${destination}")
+        set_property(TARGET "${target}" APPEND PROPERTY DY_EXAMPLE_ASSET_FILES
+            "${target}/${destination}")
+    else()
+        get_filename_component(output_directory "${destination}" DIRECTORY)
+        add_custom_target("${target}_${name}_shader" ALL
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:${target}>/${output_directory}"
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${binary}" "$<TARGET_FILE_DIR:${target}>/${destination}"
+            DEPENDS "${binary}" VERBATIM)
+        add_dependencies("${target}" "${target}_${name}_shader")
+    endif()
 endfunction()
 
 # Build in the caller's directory scope, shared with shader extensions.
@@ -244,7 +306,7 @@ macro(dy_build_stock_shaders)
                 add_custom_command(
                     OUTPUT "${binary}"
                     COMMAND "${CMAKE_COMMAND}" -E make_directory "${DY_STOCK_SHADER_GENERATED_DIR}"
-                    COMMAND "${DY_GLSLC}" "-fshader-stage=${stage}" "-I${DY_STOCK_SHADER_SHARED_DIR}" ${shader_defines} "${source}" -o "${binary}"
+                    COMMAND "${DY_GLSLC}" "$<IF:$<CONFIG:Debug>,-O0,-O>" "-fshader-stage=${stage}" "-I${DY_STOCK_SHADER_SHARED_DIR}" ${shader_defines} "${source}" -o "${binary}"
                     DEPENDS "${source}" ${DY_STOCK_SHADER_SHARED_SOURCES}
                     VERBATIM)
             else()
@@ -491,6 +553,58 @@ macro(dy_build_stock_shaders)
             dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.${shader_extension}" frag BindlessFragment kBindlessFragment -DRENDERER_BINDLESS=1 -DRENDERER_ENABLE_SHADOWS=1)
             dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.${shader_extension}" frag BindlessFragmentNoShadows kBindlessFragmentNoShadows -DRENDERER_BINDLESS=1 -DRENDERER_ENABLE_SHADOWS=0)
         endif()
+
+        foreach(enable_shadows IN ITEMS 1 0)
+            if(enable_shadows)
+                set(depth_prepass_suffix "")
+            else()
+                set(depth_prepass_suffix NoShadows)
+            endif()
+            if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
+                dy_embed_stock_metal_library(StockDepthPrepassFragment${depth_prepass_suffix} kStockDepthPrepassFragment${depth_prepass_suffix} mesh_ps
+                    "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}" -DRENDERER_DEPTH_PREPASS=1
+                    -DRENDERER_FRAGMENT_ENTRY=depthPrepassFragment)
+                dy_embed_stock_metal_library(BindlessDepthPrepassFragment${depth_prepass_suffix} kBindlessDepthPrepassFragment${depth_prepass_suffix} mesh_ps
+                    "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}" -DRENDERER_BINDLESS=1 -DRENDERER_DEPTH_PREPASS=1
+                    -DRENDERER_FRAGMENT_ENTRY=depthPrepassFragment)
+            else()
+                dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.${shader_extension}" frag StockDepthPrepassFragment${depth_prepass_suffix} kStockDepthPrepassFragment${depth_prepass_suffix}
+                    "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}" -DRENDERER_DEPTH_PREPASS=1)
+                dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.${shader_extension}" frag BindlessDepthPrepassFragment${depth_prepass_suffix} kBindlessDepthPrepassFragment${depth_prepass_suffix}
+                    "-DRENDERER_ENABLE_SHADOWS=${enable_shadows}" -DRENDERER_BINDLESS=1 -DRENDERER_DEPTH_PREPASS=1)
+            endif()
+        endforeach()
+
+        foreach(no_area_depth IN ITEMS 0 1)
+            foreach(no_area_shadows IN ITEMS 1 0)
+                foreach(no_area_bindless IN ITEMS 0 1)
+                    if(no_area_bindless)
+                        set(no_area_name Bindless)
+                    else()
+                        set(no_area_name Stock)
+                    endif()
+                    if(no_area_depth)
+                        string(APPEND no_area_name NoAreaDepthPrepassFragment)
+                    else()
+                        string(APPEND no_area_name NoAreaFragment)
+                    endif()
+                    if(NOT no_area_shadows)
+                        string(APPEND no_area_name NoShadows)
+                    endif()
+                    set(no_area_defines -DRENDERER_ENABLE_AREA_LIGHTS=0
+                        "-DRENDERER_ENABLE_SHADOWS=${no_area_shadows}"
+                        "-DRENDERER_BINDLESS=${no_area_bindless}"
+                        "-DRENDERER_DEPTH_PREPASS=${no_area_depth}")
+                    if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
+                        dy_embed_stock_metal_library(${no_area_name} k${no_area_name} mesh_ps
+                            ${no_area_defines} -DRENDERER_FRAGMENT_ENTRY=noAreaFragment)
+                    else()
+                        dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.${shader_extension}" frag
+                            ${no_area_name} k${no_area_name} ${no_area_defines})
+                    endif()
+                endforeach()
+            endforeach()
+        endforeach()
 
         if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
             dy_embed_stock_metal_library(GpuVisibilityCompute kGpuVisibilityCompute gpu_visibility)

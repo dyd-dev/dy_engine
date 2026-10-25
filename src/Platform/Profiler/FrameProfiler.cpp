@@ -1,6 +1,7 @@
 #include "CollectorInternal.h"
 #include "FrameProfiler.h"
 #include "GpuTimestamp.h"
+#include <algorithm>
 #include <cmath>
 #include <utility>
 
@@ -26,12 +27,15 @@ namespace dyf::Platform
 		for(const auto& query : availableQueries) device.DestroyTimestampQuery(query.first);
 		for(const auto& sample : gpuScopes) device.DestroyTimestampQuery(sample.query);
 		for(const auto query : freeScopeQueries) device.DestroyTimestampQuery(query);
+        for(auto& scope:recordingScopes) {device.DestroyTimestampQuery(scope.query);scope.query=nullptr;}
 
 		pending.clear();
 		availableQueries.clear();
 		gpuScopes.clear();
 		freeScopeQueries.clear();
 		scopeQueryCount = 0;
+        recordingScopeCount=0;
+        nextRecordingScope.store(0,std::memory_order_relaxed);
 	}
 
 	void FrameProfiler::SubmitGpuSample(GpuSample&& sample)
@@ -124,6 +128,10 @@ namespace dyf::Platform
 				for(size_t i = 0; i < sample.passes.size(); ++i)
 					passes.push_back({ sample.passes[i], milliseconds(ticks[2 + 2 * i], ticks[3 + 2 * i]), 1 });
 
+#ifdef DY_PROFILER_TRACING_ENABLED
+				PublishValue("GPU graph span ms",milliseconds(ticks[0],ticks[1]),true);
+				if(hasStart) PublishValue("GPU upload to graph ms",milliseconds(start,ticks[0]),true);
+#endif
 				profiler.AddGpuSample(hasStart ? milliseconds(start, ticks[1]) : -1.0, passes);
 			}
 
@@ -139,12 +147,37 @@ namespace dyf::Platform
 		}
 	}
 
+    void FrameProfiler::PrepareGpuScopes(std::uint32_t count) noexcept
+    {
+        if(!IsLiveCollectorEnabled())return;
+        try
+        {
+            CollectGpuScopes();
+            count=std::min(count,static_cast<uint32_t>(recordingScopes.size()));
+            gpuScopes.reserve(gpuScopes.size()+count);
+            nextRecordingScope.store(0,std::memory_order_relaxed);
+            recordingScopeCount=0;
+            for(uint32_t index=0;index<count;++index)
+            {
+                RHI::TimestampQueryHandle query=nullptr;
+                if(!freeScopeQueries.empty())
+                {query=freeScopeQueries.back();freeScopeQueries.pop_back();}
+                else if(scopeQueryCount<recordingScopes.size())
+                {query=device.CreateTimestampQuery({2});if(query)++scopeQueryCount;}
+                if(!query)break;
+                auto& slot=recordingScopes[index];
+                slot.query=query;slot.recorded=false;
+                ++recordingScopeCount;
+            }
+        }
+        catch(...) {} // Optional profiling must not prevent rendering.
+    }
+
 	FrameProfiler::GpuScope::GpuScope(FrameProfiler& owner, RHI::ICommandList& list, LiveGpuScope scope, LiveId ownerId) noexcept
 		: profiler(owner), commands(list)
 	{
 		if(!IsLiveCollectorEnabled()) return;
 
-		std::lock_guard<std::mutex> lock(owner.gpuMutex);
 		try
 		{
 			const auto context = GetLiveContext();
@@ -160,16 +193,8 @@ namespace dyf::Platform
 				return;
 			}
 
-			if(!owner.freeScopeQueries.empty())
-			{
-				query = owner.freeScopeQueries.back();
-				owner.freeScopeQueries.pop_back();
-			}
-			else if(owner.scopeQueryCount < 16)
-			{
-				query = owner.device.CreateTimestampQuery({ 2 });
-				if(query) ++owner.scopeQueryCount;
-			}
+            slot=owner.nextRecordingScope.fetch_add(1,std::memory_order_relaxed);
+            if(slot<owner.recordingScopeCount)query=owner.recordingScopes[slot].query;
 			if(!query)
 			{
 				RecordLiveGpuSpan(span);
@@ -183,12 +208,7 @@ namespace dyf::Platform
 		}
 		catch(...)
 		{
-			if(query)
-			{
-				owner.device.DestroyTimestampQuery(query);
-				--owner.scopeQueryCount;
-				query = nullptr;
-			}
+            query=nullptr; // The owner recycles the reserved slot after all callbacks join.
 			span.duration.state = LiveValueState::Unavailable;
 			RecordLiveGpuSpan(span);
 		}
@@ -198,26 +218,36 @@ namespace dyf::Platform
 	{
 		if(!query) return;
 
-		std::lock_guard<std::mutex> lock(profiler.gpuMutex);
 		try
 		{
 			commands.WriteTimestamp(query, 1);
 			span.end.command = commands.GetLiveCommandPosition();
-			profiler.gpuScopes.push_back({ query, {}, span });
+            auto& destination=profiler.recordingScopes[slot];
+            destination.span=span;
+            destination.recorded=true;
 			RecordLiveGpuSpan(span);
 		}
 		catch(...)
 		{
-			profiler.device.DestroyTimestampQuery(query);
-			--profiler.scopeQueryCount;
+            // The failed command list is never submitted; slot ownership stays on the owner.
 		}
 	}
 
 	void FrameProfiler::SubmitGpuScopes(RHI::FenceHandle completion, LiveFrameKey frame) noexcept
 	{
-		std::lock_guard<std::mutex> lock(gpuMutex);
 		try
 		{
+            // Recording is joined before this owner-only handoff. Each slot has
+            // exactly one writer, so worker recording needs no shared vector lock.
+            for(uint32_t index=0;index<recordingScopeCount;++index)
+            {
+                auto& slot=recordingScopes[index];
+                if(!slot.query)continue;
+                if(slot.recorded)gpuScopes.push_back({slot.query,{},slot.span});
+                else freeScopeQueries.push_back(slot.query);
+                slot.query=nullptr;
+            }
+            recordingScopeCount=0;
 			RHI::TimestampCalibration pair;
 			const bool calibrated = completion && device.GetTimestampCalibration(pair);
 			const auto now = LiveNowNs();
@@ -253,7 +283,6 @@ namespace dyf::Platform
 
 	void FrameProfiler::CollectGpuScopes() noexcept
 	{
-		std::lock_guard<std::mutex> lock(gpuMutex);
 		try
 		{
 			for(auto it = gpuScopes.begin(); it != gpuScopes.end();)

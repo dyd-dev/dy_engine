@@ -71,7 +71,7 @@ bool Renderer::Impl::PreparePostProcess(RHI::TextureHandle output)
     return hdrTarget!=nullptr;
 }
 // 명시한 source가 있으면 그것을, 없으면 내부 HDR 타깃을 샘플링해 output 전체를 덮는다.
-bool Renderer::Impl::RecordToneMap(RHI::ICommandList& commands,RHI::TextureHandle output,float exposure,RHI::TextureHandle source)
+bool Renderer::Impl::PrepareToneMap(RHI::TextureHandle source)
 {
     using namespace RHI;
     // 진행 중인 제출이 기존 리소스 세트를 참조할 수 있으므로 그 내용을 수정하지 않는다. 파이프라인이나 입력 텍스처가 달라지면 기존 세트를 RHI에 반납하고 새 세트를 만든다.
@@ -79,7 +79,14 @@ bool Renderer::Impl::RecordToneMap(RHI::ICommandList& commands,RHI::TextureHandl
     if(toneSet && (toneSet->GetPipeline()!=tonePipeline || toneSet->GetBindings()[0].texture!=image.texture))
     {device->DestroyResourceSet(toneSet);toneSet=nullptr;}
     if(!toneSet)toneSet=device->CreateResourceSet({tonePipeline,&image,1}); // 현재 입력용 resource set이 없으면 생성한다.
-    if(!toneSet)return false; // 세트 생성이 실패하면 그리기 기록을 시작하지 않는다.
+    return toneSet!=nullptr;
+}
+
+bool Renderer::Impl::RecordToneMap(RHI::ICommandList& commands,RHI::TextureHandle output,float exposure,RHI::TextureHandle source)
+{
+    using namespace RHI;
+    if(!toneSet || toneSet->GetPipeline()!=tonePipeline ||
+        toneSet->GetBindings()[0].texture!=(source?source:hdrTarget))return false;
     ColorAttachment color; color.texture=output;color.loadOp=LoadOp::Discard;color.storeOp=StoreOp::Store;
     commands.BeginRendering({&color,1,nullptr});
     commands.BindGraphicsPipeline(tonePipeline);

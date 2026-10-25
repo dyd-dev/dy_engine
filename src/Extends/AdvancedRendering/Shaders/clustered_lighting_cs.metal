@@ -2,6 +2,53 @@
 using namespace metal;
 struct ClusterLight {float4 positionRange;float4 colorIntensity;float4 directionOuterCos;float4 coneShadow;};
 struct ClusterParameters {float4x4 view;float4x4 projection;float4x4 inverseProjection;float4 depth;uint4 dimensions;uint4 counts;};
+inline bool ClusterSpotOutside(ClusterLight light,float3 cellCenter,float3 cellExtent,float3 lightCenter,
+    constant ClusterParameters& clusters)
+{
+    float3 source=light.positionRange.xyz,direction=light.directionOuterCos.xyz;
+    float range=light.positionRange.w,outerCos=light.directionOuterCos.w;
+    float3x3 viewLinear(clusters.view[0].xyz,clusters.view[1].xyz,clusters.view[2].xyz);
+    if(!all(isfinite(source)) || !all(isfinite(direction)) || !all(isfinite(cellCenter)) ||
+        !all(isfinite(cellExtent)) || !all(isfinite(lightCenter)) ||
+        !all(isfinite(viewLinear[0])) || !all(isfinite(viewLinear[1])) || !all(isfinite(viewLinear[2])) ||
+        !all(isfinite(clusters.view[3].xyz)) || !isfinite(range) || !isfinite(outerCos) || range<=0 || outerCos<=0 || any(cellExtent<0.f))return false;
+    float directionSquared=dot(direction,direction);
+    if(!isfinite(directionSquared) || directionSquared<=1e-12f)return false;
+    float directionLength=sqrt(directionSquared);
+    direction/=directionLength;
+    // Match the fragment direction length, then widen the floating-point boundary.
+    float effectiveCos=outerCos/directionLength;
+    if(!isfinite(effectiveCos))return false;
+    float cosine=clamp(effectiveCos-1e-5f,0.f,1.f);
+    float sine=sqrt(max(1.f-cosine*cosine,0.f));
+    float3 axis=viewLinear*direction,offset=cellCenter-lightCenter;
+    float axisSquared=dot(axis,axis);
+    if(!all(isfinite(offset)) || !isfinite(axisSquared) || axisSquared<=1e-12f)return false;
+    axis/=sqrt(axisSquared);
+    float3 radial=offset-axis*dot(offset,axis);
+    float radialSquared=dot(radial,radial);
+    if(!isfinite(radialSquared) || radialSquared<=1e-12f)return false;
+    // Any plane is valid: the support below accounts for the complete affine view.
+    float3 plane=cosine*(radial/sqrt(radialSquared))-sine*axis;
+    float3 worldPlane=transpose(viewLinear)*plane;
+    float planeSquared=dot(worldPlane,worldPlane);
+    if(!all(isfinite(plane)) || !all(isfinite(worldPlane)) || !isfinite(planeSquared) || planeSquared<=1e-12f)return false;
+    float planeLength=sqrt(planeSquared),along=dot(worldPlane,direction);
+    // Explicit perpendicular avoids cancellation between squared lengths.
+    float3 perpendicular=worldPlane-along*direction;
+    float across=length(perpendicular);
+    float support=along>=cosine*planeLength ? planeLength : cosine*along+sine*across;
+    float maximum=range*max(support,0.f);
+    float minimum=dot(plane,offset)-dot(abs(plane),cellExtent);
+    float sourceMagnitude=max(max(abs(source.x),abs(source.y)),abs(source.z))+range;
+    float linearMagnitude=dot(abs(plane),abs(viewLinear[0])+abs(viewLinear[1])+abs(viewLinear[2]));
+    float errorScale=dot(abs(plane),abs(cellCenter)+cellExtent+abs(clusters.view[3].xyz))+
+        sourceMagnitude*linearMagnitude;
+    if(!isfinite(along) || !isfinite(across) || !isfinite(support) || !isfinite(errorScale))return false;
+    float margin=1e-4f*max(1.f,errorScale);
+    if(!isfinite(maximum) || !isfinite(minimum) || !isfinite(margin))return false;
+    return minimum>maximum+margin;
+}
 kernel void clusteredLightingCompute(const device ClusterLight* clusterLights [[buffer(19)]],
     device uint* clusterList [[buffer(20)]],constant ClusterParameters& clusters [[buffer(21)]],
     uint cell [[thread_position_in_grid]])
@@ -24,6 +71,7 @@ kernel void clusteredLightingCompute(const device ClusterLight* clusterLights [[
         if(clusters.counts.z!=0)point*=distance/max(-point.z,1e-20f);else point.z=-distance;
         minimum=min(minimum,point);maximum=max(maximum,point);
     }
+    float3 cellCenter=(minimum+maximum)*.5f,cellExtent=(maximum-minimum)*.5f;
     uint base=cell*(clusters.dimensions.w+1u),count=0;
     for(uint lightIndex=0;lightIndex<clusters.counts.x;++lightIndex)
     {
@@ -33,6 +81,7 @@ kernel void clusteredLightingCompute(const device ClusterLight* clusterLights [[
         float3 delta=center-clamp(center,minimum,maximum);
         if(dot(delta,delta)<=radius*radius)
         {
+            if(light.coneShadow.y==3.f && ClusterSpotOutside(light,cellCenter,cellExtent,center,clusters))continue;
             // 셀 용량을 넘으면 전체 광원 순회로 전환한다.
             if(count==clusters.dimensions.w){clusterList[base]=0xffffffffu;return;}
             clusterList[base+1u+count++]=lightIndex;

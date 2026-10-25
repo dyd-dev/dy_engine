@@ -90,10 +90,11 @@ bool Renderer::Impl::InitializeCanvas(RHI::Format format)
     return canvasPipeline!=nullptr;
 }
 // 이미지와 정점 버퍼를 확보한 뒤 각 Draw의 viewport·clip으로 명령을 기록한다. 제출과 Present는 호출자가 수행한다.
-bool Renderer::Impl::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList, RHI::TextureHandle target, bool overlay, bool graphManagedTarget)
+bool Renderer::Impl::PrepareCanvas(const Canvas& canvas,RHI::ICommandList& commandList,
+    RHI::TextureHandle target,CanvasRecording& prepared)
 {
 #if defined(DY_LIVE_PROFILING_ENABLED) || defined(DY_PROFILER_TRACING_ENABLED) // 관측 또는 추적 빌드에서만 CPU 기록 구간을 포함한다.
-    Platform::CpuScope cpuScope(Platform::LiveStage::Record,"Canvas recording");
+    Platform::CpuScope cpuScope(Platform::LiveStage::CpuPrepare,"Canvas resources");
 #endif
     using namespace RHI;
     if(!canvas.IsValid()) {std::fprintf(stderr,"dyf: Invalid canvas dimensions.\n");return false;} // Canvas 크기가 0이면 진단하고 기록을 실패시킨다.
@@ -130,10 +131,10 @@ bool Renderer::Impl::RecordCanvas(const Canvas& canvas, RHI::ICommandList& comma
     };
     if(resolve(canvasWhite)==UINT32_MAX)return false; // 기본 흰색 이미지조차 준비하지 못하면 기록을 중단한다.
     // 각 Draw의 실제 이미지 또는 단색용 흰색 이미지를 resolve로 준비하고 캐시 인덱스를 저장한다. 뒤의 그리기 순회는 이 인덱스로 텍스처와 리소스 세트를 찾아 쓴다.
-    canvasDrawImages.clear();canvasDrawImages.reserve(canvas.draws.size());
+    prepared.images.clear();prepared.images.reserve(canvas.draws.size());
     for(const auto& draw:canvas.draws) {
         const auto index=resolve(draw.image.IsValid()?draw.image:canvasWhite);
-        if(index==UINT32_MAX)return false;canvasDrawImages.push_back(index); // Draw에 필요한 이미지가 실패하면 제출하지 않는다.
+        if(index==UINT32_MAX)return false;prepared.images.push_back(index); // Draw에 필요한 이미지가 실패하면 제출하지 않는다.
     }
     if(!canvas.vertices.empty()) // 정점이 있을 때만 버퍼를 확보하고 업로드한다.
     {
@@ -156,6 +157,24 @@ bool Renderer::Impl::RecordCanvas(const Canvas& canvas, RHI::ICommandList& comma
         const ResourceBarrierDesc barrier{vertexBuffer,nullptr,ResourceState::CopyDestination,ResourceState::VertexBuffer,{}};commandList.ResourceBarrier(&barrier,1);
         slot.ready=true;
     }
+    prepared.vertices=vertexBuffer;
+    return true;
+}
+
+bool Renderer::Impl::RecordCanvas(const Canvas& canvas,RHI::ICommandList& commandList,RHI::TextureHandle target,
+    bool overlay,bool graphManagedTarget,const CanvasRecording* prepared)
+{
+    using namespace RHI;
+    if(!prepared)
+    {
+        if(!PrepareCanvas(canvas,commandList,target,preparedCanvases[0]))return false;
+        prepared=&preparedCanvases[0];
+    }
+#if defined(DY_LIVE_PROFILING_ENABLED) || defined(DY_PROFILER_TRACING_ENABLED)
+    Platform::CpuScope cpuScope(Platform::LiveStage::Record,"Canvas recording");
+#endif
+    const auto vertexBuffer=prepared->vertices;
+    const auto& canvasDrawImages=prepared->images;
     {
         // 그래프가 타깃 상태를 관리하지 않을 때만 Present에서 RenderTarget으로 직접 전이한다.
         const ResourceBarrierDesc before{nullptr,target,ResourceState::Present,ResourceState::RenderTarget,{}};

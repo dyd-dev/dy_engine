@@ -1,5 +1,5 @@
 #pragma once
-#include <mutex>
+#include <atomic>
 
 #include "dyf/RHI/Binding.h"
 #include "dyf/RHI/Buffer.h"
@@ -65,9 +65,12 @@ namespace dyf::Backends
 			dyf::RHI::TextureSubresourceRange subresources = {};
 			VkImageAspectFlags aspectMask = 0;
 			VkImageView view = VK_NULL_HANDLE;
+			ResourceView* next = nullptr;
 		};
-		std::vector<ResourceView> m_resourceViews;
-        std::mutex m_viewMutex;
+		// Entries are immutable after publication and live until this texture's
+		// last recording/submission reference is retired by the device owner.
+		std::atomic<ResourceView*> m_resourceViews{nullptr};
+		static_assert(std::atomic<ResourceView*>::is_always_lock_free);
 		std::vector<dyf::RHI::ResourceState> m_states;
 		bool m_ownsImage = false;
 		bool m_hasKnownLayout = false;

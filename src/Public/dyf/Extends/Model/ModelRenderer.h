@@ -14,7 +14,9 @@ struct SkinInfluence;
 enum class SkinningExecutionMode : uint8_t
 {
     VertexShader,
-    ComputePreSkin
+    ComputePreSkin,
+    // GPU Compute 지원과 무관하게 CPU에서 변형한 표준 정점을 업로드한다.
+    Cpu = 2
 };
 
 // 모델 변형에 사용하는 단계만 교체한다. 다른 렌더링 단계는 Renderer의 설정을 사용한다.
@@ -116,7 +118,8 @@ private:
     RHI::PipelineHandle m_computePipeline = nullptr;
     bool m_computeShaderChanged = true;
     std::vector<MeshBuffer> m_meshBuffers;
-    // Lazily grows to maxFramesInFlight; only a completed slot is modified.
+    // Advanced motion history needs one slot beyond maxFramesInFlight.
+    // Only a completed slot which is not the history source is modified.
     std::vector<FrameResources> m_frames;
     uint32_t m_frameIndex = 0;
     RHI::BufferHandle m_influenceBuffer = nullptr;

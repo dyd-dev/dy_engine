@@ -199,4 +199,9 @@ namespace dyf::RHI
 {
 // RHI 프로파일러가 Renderer의 비공개 source ID를 얻는 제한된 연결점이다. device·source·frame을 이어 같은 출처의 이벤트를 추적한다.
 std::uint64_t ProfilerAccess::Source(const dyf::Renderer& renderer) noexcept { return renderer.GetLiveSourceId(); }
+bool ProfilerAccess::GetCurrentNoAreaProof(const dyf::Renderer& renderer,BufferHandle lights) noexcept
+{
+    const auto* state=renderer.m_impl.get();
+    return state && lights && state->frameNoAreaLights && lights==state->lightingBuffer;
+}
 }

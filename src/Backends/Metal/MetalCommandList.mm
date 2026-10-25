@@ -7,6 +7,7 @@
 #include "MetalTessellation.h"
 #include "MetalUpload.h"
 #include "MetalValidation.h"
+#include "../../RHI/InlineConstantCoverage.h"
 
 #include <algorithm>
 #include <array>
@@ -124,7 +125,7 @@ namespace dyf::Backends
 		std::unordered_map<uint32_t, VertexBinding> vertexBindings;
 		std::vector<RHI::Format> colorFormats;
 		std::vector<uint8_t> inlineConstants;
-		std::vector<uint8_t> inlineConstantCoverage;
+		RHI::Detail::InlineConstantCoverage inlineConstantCoverage;
 
 		MetalPipeline* pipeline = nullptr;
 		MetalResourceSet* resourceSet = nullptr;
@@ -216,18 +217,15 @@ namespace dyf::Backends
 			RHI::ResourceState second = RHI::ResourceState::Undefined)
 		{
 			const auto found = impl->bufferStates.find(buffer);
-			if(found != impl->bufferStates.end() &&
-				found->second != first &&
-				(second == RHI::ResourceState::Undefined || found->second != second))
-			{
-				return false;
-			}
+			if(found != impl->bufferStates.end())
+				return found->second == first || (second != RHI::ResourceState::Undefined && found->second == second);
 			MetalOperation operation = {};
 			operation.kind = OperationKind::BufferRequirement;
 			operation.buffer = buffer;
 			operation.before = first;
 			operation.after = second;
 			impl->operations.push_back(operation);
+			if(second == RHI::ResourceState::Undefined) impl->bufferStates.emplace(buffer, first);
 			return true;
 		}
 
@@ -242,12 +240,8 @@ namespace dyf::Backends
 		{
 			const auto key = TextureKey(texture, mipLevel, arrayLayer);
 			const auto found = impl->textureStates.find(key);
-			if(found != impl->textureStates.end() &&
-				found->second != first &&
-				(second == RHI::ResourceState::Undefined || found->second != second))
-			{
-				return false;
-			}
+			if(found != impl->textureStates.end())
+				return found->second == first || (second != RHI::ResourceState::Undefined && found->second == second);
 			MetalOperation operation = {};
 			operation.kind = OperationKind::TextureRequirement;
 			operation.texture = texture;
@@ -256,6 +250,7 @@ namespace dyf::Backends
 			operation.before = first;
 			operation.after = second;
 			impl->operations.push_back(operation);
+			if(second == RHI::ResourceState::Undefined) impl->textureStates.emplace(key, first);
 			return true;
 		}
 
@@ -284,6 +279,17 @@ namespace dyf::Backends
 		void RetainResource(ImplType* impl, id<MTLResource> resource)
 		{
 			if(resource != nil) [impl->retainedResources addObject:resource];
+		}
+
+		template<typename ImplType>
+		MetalUploadArena::Allocation UploadConstants(ImplType* impl, const void* data, size_t size)
+		{
+			if(!impl->uploadArena || !size) return {};
+			// 256 covers the constant-buffer alignment of both Apple and Mac GPU families.
+			// The command's completion lease keeps every page alive through GPU execution.
+			const auto upload = impl->uploadArena->Allocate(size, 256);
+			if(upload) std::memcpy(upload.data, data, size);
+			return upload;
 		}
 
 		template<typename ImplType>
@@ -390,7 +396,7 @@ namespace dyf::Backends
 		m_impl->vertexBindings.clear();
 		m_impl->colorFormats.clear();
 		m_impl->inlineConstants.clear();
-		m_impl->inlineConstantCoverage.clear();
+		m_impl->inlineConstantCoverage.Reset(0);
 		m_impl->pipeline = nullptr;
 		m_impl->resourceSet = nullptr;
 		m_impl->indexBuffer = nullptr;
@@ -530,7 +536,7 @@ namespace dyf::Backends
 		m_impl->indexFormat = RHI::Format::Unknown;
 		m_impl->indexOffset = 0;
 		m_impl->inlineConstants.clear();
-		m_impl->inlineConstantCoverage.clear();
+		m_impl->inlineConstantCoverage.Reset(0);
 		m_impl->viewportSet = false;
 		m_impl->scissorSet = false;
 		m_impl->stencilReferenceSet = false;
@@ -749,7 +755,7 @@ namespace dyf::Backends
 		m_impl->pipeline = pipeline;
 		m_impl->resourceSet = nullptr;
 		m_impl->inlineConstants.assign(pipeline->GetLayout().inlineConstantSize, 0);
-		m_impl->inlineConstantCoverage.assign(pipeline->GetLayout().inlineConstantSize, 0);
+		m_impl->inlineConstantCoverage.Reset(pipeline->GetLayout().inlineConstantSize);
 	}
 
 	void MetalCommandList::DispatchNative(uint32_t x, uint32_t y, uint32_t z)
@@ -777,8 +783,7 @@ namespace dyf::Backends
 		if(m_impl->closed || m_impl->rendering || !pipeline || !pipeline->IsCompute() ||
 			(!arguments && (!x || !y || !z)) ||
 			(pipeline->GetLayout().bindingCount && !m_impl->resourceSet) ||
-			std::any_of(m_impl->inlineConstantCoverage.begin(), m_impl->inlineConstantCoverage.end(),
-				[](uint8_t byte) { return !byte; }))
+			!m_impl->inlineConstantCoverage.IsComplete())
 		{
 			Invalidate(m_impl);
 			return;
@@ -803,16 +808,12 @@ namespace dyf::Backends
 			}
 		if(!m_impl->inlineConstants.empty())
 		{
-			id<MTLBuffer> constants = [m_impl->commandQueue.device newBufferWithBytes:m_impl->inlineConstants.data()
-				length:m_impl->inlineConstants.size() options:MTLResourceStorageModeShared];
-			if(constants == nil) Invalidate(m_impl);
+			const auto constants = UploadConstants(m_impl, m_impl->inlineConstants.data(), m_impl->inlineConstants.size());
+			if(!constants) Invalidate(m_impl);
 			else
 			{
-				RetainResource(m_impl, constants);
-				[encoder setBuffer:constants offset:0 atIndex:layout.inlineConstantBinding];
-#if !__has_feature(objc_arc)
-				[constants release];
-#endif
+				[encoder setBuffer:constants.page->buffer offset:static_cast<NSUInteger>(constants.offset)
+					atIndex:layout.inlineConstantBinding];
 			}
 		}
 		const auto* size = pipeline->GetThreadGroupSize();
@@ -843,8 +844,7 @@ namespace dyf::Backends
 		m_impl->pipeline = pipeline;
 		m_impl->resourceSet = nullptr;
 		m_impl->inlineConstants.assign(pipeline->GetLayout().inlineConstantSize, 0);
-		m_impl->inlineConstantCoverage.assign(
-			pipeline->GetLayout().inlineConstantSize, 0);
+		m_impl->inlineConstantCoverage.Reset(pipeline->GetLayout().inlineConstantSize);
 		if((pipeline->GetDesc().depthStencil.depthWriteEnabled ||
 			MetalValidation::MayWriteStencil(pipeline->GetDesc().depthStencil)) &&
 			m_impl->depthTexture != nullptr &&
@@ -1066,36 +1066,27 @@ namespace dyf::Backends
 			return;
 		}
 		std::memcpy(m_impl->inlineConstants.data() + offset, data, size);
-		std::fill(
-			m_impl->inlineConstantCoverage.begin() + offset,
-			m_impl->inlineConstantCoverage.begin() + offset + size,
-			1);
+		m_impl->inlineConstantCoverage.Write(offset, size);
 		if(m_impl->pipeline->IsCompute()) return;
-		id<MTLDevice> device = m_impl->commandQueue.device;
-		id<MTLBuffer> constants = [device newBufferWithBytes:m_impl->inlineConstants.data()
-			length:m_impl->inlineConstants.size()
-			options:MTLResourceStorageModeShared];
-		if(constants == nil)
+		const auto constants = UploadConstants(m_impl, m_impl->inlineConstants.data(), m_impl->inlineConstants.size());
+		if(!constants)
 		{
 			Invalidate(m_impl);
 			return;
 		}
-		RetainResource(m_impl, constants);
 		const RHI::PipelineLayoutDesc& layout = m_impl->pipeline->GetLayout();
 		if(HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Vertex) ||
 			HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Domain))
-			[m_impl->renderEncoder setVertexBuffer:constants
-				offset:0 atIndex:layout.inlineConstantBinding];
+			[m_impl->renderEncoder setVertexBuffer:constants.page->buffer
+				offset:static_cast<NSUInteger>(constants.offset) atIndex:layout.inlineConstantBinding];
 		if(HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Mesh))
 			if(@available(macOS 13.0, iOS 16.0, *))
-				[m_impl->renderEncoder setMeshBuffer:constants offset:0 atIndex:layout.inlineConstantBinding];
+				[m_impl->renderEncoder setMeshBuffer:constants.page->buffer
+					offset:static_cast<NSUInteger>(constants.offset) atIndex:layout.inlineConstantBinding];
 		if(HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Fragment))
-			[m_impl->renderEncoder setFragmentBuffer:constants
-				offset:0 atIndex:layout.inlineConstantBinding];
-		[m_impl->renderEncoder useResource:constants usage:MTLResourceUsageRead];
-#if !__has_feature(objc_arc)
-		[constants release];
-#endif
+			[m_impl->renderEncoder setFragmentBuffer:constants.page->buffer
+				offset:static_cast<NSUInteger>(constants.offset) atIndex:layout.inlineConstantBinding];
+		[m_impl->renderEncoder useResource:constants.page->buffer usage:MTLResourceUsageRead];
 	}
 
 	void MetalCommandList::SetViewportNative(const RHI::Viewport& viewport)
@@ -1189,11 +1180,7 @@ namespace dyf::Backends
 				}
 			}
 			if(resourceSetRequired && impl->resourceSet == nullptr) return false;
-			if(desc.layout.inlineConstantSize != 0 &&
-				(impl->inlineConstantCoverage.size() != desc.layout.inlineConstantSize ||
-					std::find(impl->inlineConstantCoverage.begin(),
-						impl->inlineConstantCoverage.end(), 0) !=
-						impl->inlineConstantCoverage.end()))
+			if(!impl->inlineConstantCoverage.IsComplete())
 			{
 				return false;
 			}
@@ -1297,10 +1284,8 @@ namespace dyf::Backends
 				(HasStage(pipeline->GetLayout().inlineConstantStages, RHI::ShaderStageFlags::Vertex) ||
 				 HasStage(pipeline->GetLayout().inlineConstantStages, RHI::ShaderStageFlags::Hull)))
 			{
-				id<MTLBuffer> constants = [m_impl->commandQueue.device
-					newBufferWithBytes:inlineConstants.data() length:inlineConstants.size()
-					options:MTLResourceStorageModeShared];
-				if(constants == nil)
+				const auto constants = UploadConstants(m_impl, inlineConstants.data(), inlineConstants.size());
+				if(!constants)
 				{
 					[compute endEncoding];
 					Invalidate(m_impl);
@@ -1309,11 +1294,8 @@ namespace dyf::Backends
 #endif
 					return;
 				}
-				RetainResource(m_impl, constants);
-				[compute setBuffer:constants offset:0 atIndex:pipeline->GetLayout().inlineConstantBinding];
-#if !__has_feature(objc_arc)
-				[constants release];
-#endif
+				[compute setBuffer:constants.page->buffer offset:static_cast<NSUInteger>(constants.offset)
+					atIndex:pipeline->GetLayout().inlineConstantBinding];
 			}
 			[compute setBuffer:factorBuffer offset:static_cast<NSUInteger>(factorRange.writeOffset)
 				atIndex:MetalPipeline::TessellationFactorBufferIndex];
@@ -1566,40 +1548,45 @@ namespace dyf::Backends
 		{
 			return false;
 		}
-		const uint32_t pixelSize = MetalValidation::FormatSize(texture->GetDesc().format);
+		const auto format = texture->GetDesc().format;
+		const bool compressed = RHI::IsBlockCompressed(format);
+		const uint32_t elementSize = compressed ? RHI::CompressedBlockBytes(format) : MetalValidation::FormatSize(format);
 		const uint32_t mipWidth = std::max(1u, texture->GetDesc().width >> mipLevel);
 		const uint32_t mipHeight = std::max(1u, texture->GetDesc().height >> mipLevel);
-		if(pixelSize == 0 || mipWidth > std::numeric_limits<uint32_t>::max() / pixelSize)
+		const uint32_t columns = compressed ? mipWidth / 4u + (mipWidth % 4u != 0) : mipWidth;
+		const uint32_t rows = compressed ? mipHeight / 4u + (mipHeight % 4u != 0) : mipHeight;
+		if(elementSize == 0 || columns > std::numeric_limits<uint32_t>::max() / elementSize)
 			return false;
-		const uint32_t tightRowPitch = mipWidth * pixelSize;
+		const uint32_t tightRowPitch = columns * elementSize;
 		const uint64_t requiredSourceBytes =
-			static_cast<uint64_t>(rowPitch) * (mipHeight - 1u) + tightRowPitch;
+			static_cast<uint64_t>(rowPitch) * (rows - 1u) + tightRowPitch;
 		if(rowPitch < tightRowPitch ||
-			slicePitch < static_cast<uint64_t>(rowPitch) * mipHeight ||
+			(compressed && rowPitch % elementSize != 0) ||
+			slicePitch < static_cast<uint64_t>(rowPitch) * rows ||
 			dataSize < requiredSourceBytes)
 		{
 			return false;
 		}
 
 		if(RHI::HasStencil(texture->GetDesc().format) ||
-			(pixelSize & (pixelSize - 1u)) != 0) return false;
+			(elementSize & (elementSize - 1u)) != 0) return false;
 
 		id<MTLTexture> nativeTexture = NativeTexture(texture);
-		const uint64_t stagingSize64 = static_cast<uint64_t>(tightRowPitch) * mipHeight;
+		const uint64_t stagingSize64 = static_cast<uint64_t>(tightRowPitch) * rows;
 		if(stagingSize64 > std::numeric_limits<NSUInteger>::max())
 		{
 			return false;
 		}
 		if(!m_impl->uploadArena) return false;
 		ReserveForAppend(m_impl->operations);
-		// Metal blit offsets and row pitches are multiples of the pixel size.
-		// Accepted native texture formats are 2/4/8/16-byte pixels, so 16 covers all.
+		// For BC, pitches count 4x4 block rows, including the final 1x1/2x2 mip.
+		// Sixteen-byte offsets cover both pixel sizes and BC1/BC3 block sizes.
 		const auto upload = m_impl->uploadArena->Allocate(stagingSize64, 16);
 		if(!upload) return false;
 		auto* destination = upload.data;
 		const auto* source = static_cast<const uint8_t*>(data);
 		// 입력 행 사이의 패딩만 건너뛴다. 마지막 행 뒤의 패딩은 요구하거나 읽지 않는다.
-		for(uint32_t row = 0; row < mipHeight; ++row)
+		for(uint32_t row = 0; row < rows; ++row)
 			std::memcpy(destination + static_cast<size_t>(row) * tightRowPitch,
 				source + static_cast<size_t>(row) * rowPitch, tightRowPitch);
 

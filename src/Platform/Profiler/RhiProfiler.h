@@ -4,15 +4,49 @@
 #include "dyf/RHI/ICommandList.h"
 #include "../../RHI/Query.h"
 #include "../../RHI/UploadMemory.h"
+#include <array>
 #include <atomic>
-#include <condition_variable>
 #include <deque>
 #include <thread>
+#include <unordered_map>
 
 namespace dyf::RHI
 {
     struct ICommandList::LiveDeferred
     {
+        // Opaque storage also holds lookup ownership for caller-managed workers.
+        // Ordinary entries share the device cache; only borrowed image generations
+        // are captured per list. Close discards unused owners promptly.
+        std::shared_ptr<const IDevice::RecordingResources> resourceLookup;
+        struct BorrowedResource
+        {
+            const void* handle=nullptr;
+            std::shared_ptr<IDevice::ResourceRecord> resource;
+            uint64_t generation=0;
+        };
+        std::vector<BorrowedResource> borrowedLookup;
+        void ClearRecordingLookup() noexcept {resourceLookup.reset();borrowedLookup.clear();}
+        // Always present opaque command-list storage, independent of profiling.
+        // Exact hits only skip the lookup in the owning reference containers.
+        // Collisions replace a hint; they never establish resource ownership.
+        std::array<const void*,16> recentTrackedHandles={};
+        const void*& TrackedHandleSlot(const void* handle) noexcept
+        {
+            const auto address=reinterpret_cast<uintptr_t>(handle);
+            return recentTrackedHandles[((address>>3)^(address>>11))&(recentTrackedHandles.size()-1)];
+        }
+        void ClearTrackedHandles() noexcept {recentTrackedHandles={};}
+        // A small exact cache avoids tree searches for the VB/IB states that
+        // Bind and Draw repeatedly require between barriers.
+        struct RecentState
+        {
+            uintptr_t resource=0;
+            uint32_t mip=0,layer=0;
+            ResourceState state=ResourceState::Undefined;
+        };
+        std::array<RecentState,8> recentStates={};
+        uint32_t recentStateCount=0,recentStateNext=0;
+        void ClearRecentStates() noexcept {recentStateCount=recentStateNext=0;}
         Platform::LiveCommandRef m_livePosition;
         Platform::LiveContext m_liveContext;
         Platform::LiveContext m_liveExecutionContext;
@@ -26,16 +60,29 @@ namespace dyf::RHI
         std::vector<Platform::LiveEvent> events;
         std::vector<Platform::LiveFlowLink> links;
         Platform::LiveEventSummary summary;
+        std::unordered_map<const void*, Platform::LiveId> objectIds;
+        Platform::LiveId FindObject(const void* object) noexcept
+        {
+            if(!object || !Platform::IsLiveCollectorEnabled()) return 0;
+            const auto found = objectIds.find(object);
+            if(found != objectIds.end()) return found->second;
+            const auto id = Platform::FindLiveObject(object);
+            if(id) try { objectIds.emplace(object, id); } catch(...) {}
+            return id;
+        }
 #endif
     };
 
     struct ProfilerAccess
     {
+        static bool HasRecordedWork(const ICommandList& commands) noexcept { return !commands.m_commands.empty(); }
         static Platform::LiveCommandRef Position(const ICommandList& commands) noexcept { return commands.GetLiveCommandPosition(); }
         static std::uint64_t Submission(const IDevice& device,FenceHandle fence) noexcept { return device.GetLiveSubmissionId(fence); }
         static void Prepare(IDevice& device,Platform::LiveFrameKey frame) noexcept { device.PrepareLiveControls(frame); }
         static void Release(IDevice& device,std::uint64_t source) noexcept { device.ReleaseLiveControls(source); }
         static std::uint64_t Source(const dyf::Renderer&) noexcept;
+        // Reuse the existing private Renderer friendship without a public API.
+        static bool GetCurrentNoAreaProof(const dyf::Renderer&,BufferHandle lights) noexcept;
     };
 
 	// Process-local 63-bit hash/token; not an OS TID and not guaranteed collision-free.
@@ -101,10 +148,7 @@ namespace dyf::RHI
 		uint64_t pendingBytes = 0;
 		uint64_t lastGpuBegin = 0, gpuWrapBase = 0;
 		bool hasGpuBegin = false;
-		std::atomic<bool> stopping { false }, workPending { false };
-		std::mutex wakeMutex;
-		std::condition_variable wake;
-		std::thread worker;
+		bool stopping=false;
 	};
 
 	struct IDevice::LiveExecutionScope

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -10,6 +11,7 @@
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 #include "Swapchain.h"
 #include "Submission.h"
@@ -29,6 +31,7 @@ namespace dyf::Platform
 
 namespace dyf::RHI
 {
+	class IDevice;
 	class ICommandList;
 	struct BufferDesc;
 	struct GraphicsPipelineDesc;
@@ -138,7 +141,8 @@ namespace dyf::RHI
         [[nodiscard]] bool Wait(FenceHandle,uint64_t timeoutNanoseconds);
         // 제출 후 backbuffer가 Present 상태일 때 표시를 요청하고 프레임을 끝낸다.
         // resize로 표시를 생략하고 swapchain 재생성을 예약한 경우도 정상 프레임 종료로 true를 반환한다.
-        // 상태 오류는 프레임을 유지한다. 네이티브 표시 요청의 실제 실패는 프레임을 마감하고 false와 stderr로 알린다.
+        // 상태 오류는 프레임을 유지한다. 표시 요청 실패는 false와 stderr로 알린다.
+        // 비동기 표시에서는 true가 요청 접수를 뜻하며, 이후 네이티브 실패는 다음 BeginFrame/Present/WaitIdle에서 보고한다.
         [[nodiscard]] bool Present();
 
 		// Swapchain 소유 handle이다. DestroyTexture에 전달하지 않는다.
@@ -175,6 +179,8 @@ namespace dyf::RHI
 		// rowPitch는 행 간 바이트 간격, slicePitch는 rowPitch*mipHeight 이상이다.
 		// dataSize는 rowPitch*(mipHeight-1)+마지막 행 픽셀 바이트 수 이상이면 된다.
 		// 마지막 행 뒤 패딩은 필요 없다. 네이티브 정렬을 위한 내부 재포장은 픽셀 값을 보존한다.
+        // BC1/BC3에서는 행이 4x4 블록 행이며 mipHeight 대신 ceil(mipHeight/4)를 사용한다.
+        // 한 행은 ceil(mipWidth/4)*블록 바이트 이상이다. 지원하는 백엔드의 sampled texture에 한한다.
 		bool UpdateTexture(
 			ICommandList& commandList,
 			TextureHandle texture,
@@ -286,9 +292,37 @@ namespace dyf::RHI
         void DiscardLivePrepared(ICommandList*,Platform::LiveOutcome) noexcept;
         void SubmitLiveWork(ICommandList* const*,uint32_t,bool,uint64_t) noexcept;
         struct RecordingState;
+        struct ResourceRecord
+        {
+            explicit ResourceRecord(std::shared_ptr<void> resource) : owner(std::move(resource)) {}
+            // Snapshot holders extend storage lifetime, while this flag only
+            // controls whether a recorder may acquire its first reference.
+            const std::shared_ptr<void> owner;
+            std::atomic<bool> registered{true};
+        };
+        using RecordingResources=std::unordered_map<const void*,std::shared_ptr<ResourceRecord>>;
+        // General resources remain stable across frames. Borrowed backbuffers
+        // stay on the generation-checked registry path instead of invalidating
+        // this cache at every BeginFrame.
+        std::shared_ptr<const RecordingResources> CaptureRecordingResources();
+        void CaptureRecordingLookup(ICommandList&);
+        struct RecordingResourceScope
+        {
+            RecordingResourceScope(const IDevice&,const RecordingResources*) noexcept;
+            ~RecordingResourceScope();
+            RecordingResourceScope(const RecordingResourceScope&)=delete;
+            RecordingResourceScope& operator=(const RecordingResourceScope&)=delete;
+            const IDevice* previousDevice;
+            const RecordingResources* previousResources;
+        };
+        static thread_local const IDevice* s_recordingDevice;
+        static thread_local const RecordingResources* s_recordingResources;
         void RecordParallel(uint32_t count, uint32_t threadCount,
             const std::function<void(uint32_t)>& record);
-		mutable std::recursive_mutex m_resourceMutex;
+        // Owner-only device state; independent command lists remain worker-local.
+        void RequireOwnerThread() const;
+        bool IsOwnerThread() const noexcept;
+        void DrainRetiredResources() noexcept;
         ResourceAllocationCounters m_allocationCounters;
 		bool m_nativeResourcesAlive = true;
 		std::unordered_set<ICommandList*> m_recordedCommands;
@@ -301,7 +335,9 @@ namespace dyf::RHI
 		void Track(void* handle, void (*destroy)(IDevice&, void*), std::vector<std::shared_ptr<void>> dependencies,
             Platform::LiveObjectKind kind,uint64_t elements=0,uint64_t bytes=0,
             const char* label="RHI resource");
-		std::unordered_map<const void*, std::shared_ptr<void>> m_resources;
+        RecordingResources m_resources;
+        std::shared_ptr<const RecordingResources> m_recordingResources;
+        void UnregisterResource(const void* handle);
 
 		DeviceDesc m_desc = {};
 		SwapchainDesc m_swapchainDesc = {};
