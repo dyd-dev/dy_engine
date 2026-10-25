@@ -53,6 +53,8 @@ namespace dyf::Platform
 		// Returns each immutable snapshot once. Ownership survives disconnect.
 		std::shared_ptr<const LiveSnapshot> Poll();
 		LiveId RequestControl(LiveId control, const ControlValue&);
+		// Queue one capture; Poll exposes its ID in source.capture.summary.captureRequest.
+		LiveId RequestFrameCapture(LiveId device, LiveId source);
 
 	private:
 		struct Impl;
@@ -62,14 +64,15 @@ namespace dyf::Platform
 
 namespace dyf::Platform::Detail
 {
-	constexpr std::uint32_t LiveProtocolVersion = 3;
+	constexpr std::uint32_t LiveProtocolVersion = 4;
 	constexpr std::size_t LiveTransferLimit = 64u * 1024u * 1024u;
 
 	enum class PacketKind : std::uint32_t
 	{
 		Snapshot = 1,
 		Control = 2,
-		ControlAck = 3
+		ControlAck = 3,
+		FrameCapture = 4
 	};
 
 	struct PacketHeader
@@ -87,12 +90,19 @@ namespace dyf::Platform::Detail
 		std::string message;
 	};
 
+	struct FrameCaptureRequest
+	{
+		LiveId request = 0, device = 0, source = 0;
+	};
+
 	std::vector<std::uint8_t> EncodeSnapshot(const LiveSnapshot&);
 	std::vector<std::uint8_t> EncodeBoundedSnapshot(LiveSnapshot&);
 	std::vector<std::uint8_t> EncodeBoundedSnapshot(const LiveSnapshot&);
 	bool DecodeSnapshot(const std::vector<std::uint8_t>&, LiveSnapshot&, std::string& error);
 	std::vector<std::uint8_t> EncodeControl(const ControlRequest&);
 	bool DecodeControl(const std::vector<std::uint8_t>&, ControlRequest&, std::string& error);
+	std::vector<std::uint8_t> EncodeFrameCapture(const FrameCaptureRequest&);
+	bool DecodeFrameCapture(const std::vector<std::uint8_t>&, FrameCaptureRequest&, std::string& error);
 	std::vector<std::uint8_t> EncodeAck(const ControlAck&);
 	bool DecodeAck(const std::vector<std::uint8_t>&, ControlAck&, std::string& error);
 	bool ValidateHeader(const PacketHeader&) noexcept;

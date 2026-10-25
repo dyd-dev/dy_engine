@@ -127,6 +127,8 @@ namespace dyf::Platform
 	{
 		LiveFrameKey key;
 		LiveId appliedRevision = 0;
+		// Zero means summary-only; intentional non-capture is not detail loss.
+		LiveId captureRequest = 0;
 		std::uint64_t beginNs = 0, endNs = 0, sampleAgeNs = 0;
 		LiveSample frame, cpuRender, gpuMain, gpuShadow, gpuMeasured;
 		LiveObjectGauge objects;
@@ -433,6 +435,9 @@ namespace dyf::Platform
 		// One latest request per source. Each side is an original representative frame,
 		// never an averaged/synthetic frame; window fields identify its aggregate.
 		LiveComparisonEvidence comparisonEvidence;
+		// The last requested frame survives subsequent summary-only frames.
+		LiveId captureRequest = 0;
+		LiveFrameEvidence capture;
 	};
 
 	struct LiveCollectorStatistics
@@ -458,6 +463,9 @@ namespace dyf::Platform
 	LiveClockInfo GetLiveClockInfo() noexcept;
 	bool SetLiveCollectorEnabled(bool enabled) noexcept;
 	bool IsLiveCollectorEnabled() noexcept;
+	// Request the next new frame of an existing source. Zero means rejected/busy.
+	LiveId RequestLiveFrameCapture(LiveId device, LiveId source, LiveId request = 0) noexcept;
+	bool IsLiveDetailEnabled(LiveFrameKey frame = {}) noexcept;
 
 	LiveId AllocateLiveId() noexcept;
 	LiveId RegisterLiveObject(const void* object, const LiveObjectDesc&) noexcept;

@@ -46,7 +46,8 @@ void ICommandList::DeferLiveEvent(const D::LiveEvent& event) noexcept
 #ifdef DY_LIVE_PROFILING_ENABLED
     auto& deferred=*m_liveDeferred;
     D::AccumulateLiveEventSummary(deferred.summary,event);
-    DeferDetail(deferred.events,event,8192,deferred.summary.omittedEvents);
+    deferred.hasSummary=true;
+    if(D::IsLiveDetailEnabled(event.context.frame))DeferDetail(deferred.events,event,8192,deferred.summary.omittedEvents);
 #else
     (void)event;
 #endif
@@ -60,6 +61,7 @@ void ICommandList::DiscardLiveDeferred() noexcept
     std::vector<D::LiveFlowLink>().swap(deferred.links);
     if(bytes) D::ReleaseLiveDetailBytes(bytes);
     deferred.summary={};
+    deferred.hasSummary=false;
     deferred.resourceIds.clear();
     deferred.commandLinks.clear();
     deferred.groupingLinks=false;
@@ -69,7 +71,7 @@ void ICommandList::FlushLiveDeferred(D::LiveContext context) noexcept
 {
 #ifdef DY_LIVE_PROFILING_ENABLED
     const auto& deferred=*m_liveDeferred;
-    if(deferred.events.empty() && deferred.links.empty() &&
+    if(!deferred.hasSummary && deferred.events.empty() && deferred.links.empty() &&
         !deferred.summary.omittedEvents && !deferred.summary.omittedLinks) return;
     D::LiveContextScope restore(context);
     // Fixed counters never depend on retained detail or space remaining for publication.
@@ -101,6 +103,7 @@ void ICommandList::RecordLiveResourceLink(D::LiveId from,D::LiveId to) noexcept
 {
 #ifdef DY_LIVE_PROFILING_ENABLED
     if(!from||!to||!D::IsLiveCollectorEnabled())return;
+    if(!D::IsLiveDetailEnabled(m_liveDeferred->m_liveContext.frame))return;
     try
     {
         if(!m_liveDeferred->m_liveContext.frame.frame)
@@ -126,7 +129,7 @@ void ICommandList::RecordLiveResourceLink(D::LiveId from,D::LiveId to) noexcept
 std::uint64_t ICommandList::FindLiveResource(const void* resource)
 {
 #ifdef DY_LIVE_PROFILING_ENABLED
-    if(!resource||!D::IsLiveCollectorEnabled())return 0;
+    if(!resource||!D::IsLiveDetailEnabled(m_liveDeferred->m_liveContext.frame))return 0;
     auto& ids=m_liveDeferred->resourceIds;
     const auto found=ids.find(resource);
     if(found!=ids.end())return found->second;
@@ -164,19 +167,25 @@ void ICommandList::RecordLiveCommand(D::LiveCommandKind commandKind,std::array<i
     {
         auto context=D::GetLiveContext();
         if(!context.frame.frame||context.frame!=m_liveDeferred->m_liveContext.frame)context=m_liveDeferred->m_liveContext;
-        D::LiveEvent event;event.id=D::AllocateLiveId();event.context=context;
+        const bool detail=D::IsLiveDetailEnabled(context.frame);
+        // Every command contributes to exact totals; only detail construction is optional.
+        D::LiveEvent event;event.id=detail?D::AllocateLiveId():0;event.context=context;
         event.command=m_liveDeferred->m_livePosition;event.command.index=++m_liveDeferred->m_livePosition.index;
-        event.resource=FindLiveResource(resource);event.kind=kind;event.commandKind=commandKind;
+        event.resource=detail?FindLiveResource(resource):0;event.kind=kind;event.commandKind=commandKind;
         event.stage=kind==D::LiveEventKind::Upload?D::LiveStage::Upload:D::LiveStage::Record;
         event.beginNs=m_liveDeferred->m_liveCommandBeginNs;event.endNs=D::LiveNowNs();event.arguments=arguments;
         event.elements=elements;event.bytes=bytes;event.operations=operations;event.fullUpload=fullUpload;
-        for(size_t i=0;label&&label[i]&&i+1<sizeof(event.label);++i)event.label[i]=label[i];
+        for(size_t i=0;detail&&label&&label[i]&&i+1<sizeof(event.label);++i)event.label[i]=label[i];
         if(!event.beginNs)event.beginNs=event.endNs;
-        if(context.frame.frame)D::RecordLiveEvent(event);else DeferLiveEvent(event);
-        RecordLiveResourceLink(event.resource,event.id);
-        RecordLiveBindings(event.id,commandKind);
-        RecordLiveResourceLink(context.batch,event.id);
-        RecordLiveResourceLink(m_liveDeferred->m_livePreviousEvent,event.id);
+        // Only an owned frame is guaranteed to end after this recording flushes.
+        if(context.frame.frame&&(detail||!m_liveDeferred->m_liveRecordFrame.ownsFrame))D::RecordLiveEvent(event);else DeferLiveEvent(event);
+        if(detail)
+        {
+            RecordLiveResourceLink(event.resource,event.id);
+            RecordLiveBindings(event.id,commandKind);
+            RecordLiveResourceLink(context.batch,event.id);
+            RecordLiveResourceLink(m_liveDeferred->m_livePreviousEvent,event.id);
+        }
         m_liveDeferred->m_livePreviousEvent=event.id;m_liveDeferred->m_liveCommandBeginNs=0;
     }
     catch(...) {m_liveDeferred->m_liveCommandBeginNs=0;}
@@ -837,8 +846,8 @@ class RecordedCommandList final : public ICommandList
         m_commands.push_back([=](ICommandList& n){n.BindResourceSetNative(resources);return true;});
         RecordLiveCommand(D::LiveCommandKind::Bind,{},resources,resources->GetBindingCount(),0,1,D::LiveEventKind::Command,false,"Resource set");
 #ifdef DY_LIVE_PROFILING_ENABLED
+        if(!D::IsLiveDetailEnabled(m_liveDeferred->m_liveContext.frame))return;
         m_liveDeferred->groupingLinks=true;
-#endif
         const auto resourceId=FindLiveResource(resources);
         for(uint32_t i=0;i<resources->GetBindingCount();++i)
         {
@@ -847,6 +856,7 @@ class RecordedCommandList final : public ICommandList
             RecordLiveResourceLink(FindLiveResource(binding.texture),resourceId);
         }
         FlushLiveResourceLinks();
+#endif
     }
     void BindVertexBufferNative(uint32_t binding, BufferHandle buffer, uint32_t offset) override
     { m_commands.push_back([=](ICommandList& n){n.BindVertexBufferNative(binding,buffer,offset);return true;});

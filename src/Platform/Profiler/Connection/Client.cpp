@@ -20,9 +20,11 @@ namespace dyf::Platform
 		mutable std::mutex mutex;
 		ProfilerClientState state = ProfilerClientState::Disconnected;
 		std::string error;
+		std::string captureError;
 		std::shared_ptr<const LiveSnapshot> snapshot;
 		std::uint64_t delivered = 0;
 		std::deque<ControlRequest> outbound;
+		std::deque<Detail::FrameCaptureRequest> captures;
 		std::map<LiveId, ControlStatus> localRequests;
 		LiveId nextRequest = []
 		{
@@ -40,6 +42,7 @@ namespace dyf::Platform
 			state = ProfilerClientState::Failed;
 			error = std::move(message);
 			outbound.clear();
+			captures.clear();
 		}
 
 		void Disconnect() noexcept
@@ -49,7 +52,9 @@ namespace dyf::Platform
 			std::lock_guard<std::mutex> lock(mutex);
 			state = ProfilerClientState::Disconnected;
 			outbound.clear();
+			captures.clear();
 			localRequests.clear();
+			captureError.clear();
 			snapshot.reset();
 			delivered = 0;
 		}
@@ -81,9 +86,11 @@ namespace dyf::Platform
 		bool SendControls(HANDLE pipe)
 		{
 			std::deque<ControlRequest> requests;
+			std::deque<Detail::FrameCaptureRequest> captureRequests;
 			{
 				std::lock_guard<std::mutex> lock(mutex);
 				requests.swap(outbound);
+				captureRequests.swap(captures);
 			}
 			for(const auto& request : requests)
 			{
@@ -91,6 +98,15 @@ namespace dyf::Platform
 				if(!Detail::SendPacket(pipe, Detail::PacketKind::Control, payload, stop))
 				{
 					Fail("Control write failed");
+					return false;
+				}
+			}
+			for(const auto & request : captureRequests)
+			{
+				const auto payload = Detail::EncodeFrameCapture(request);
+				if(!Detail::SendPacket(pipe, Detail::PacketKind::FrameCapture, payload, stop))
+				{
+					Fail("Frame capture request write failed");
 					return false;
 				}
 			}
@@ -115,6 +131,7 @@ namespace dyf::Platform
 					found->second.state = ControlState::Rejected;
 					found->second.message = acknowledgement.message;
 				}
+				else captureError = acknowledgement.message;
 			}
 			return true;
 		}
@@ -248,7 +265,7 @@ namespace dyf::Platform
 	{
 		if(!impl) return {};
 		std::lock_guard<std::mutex> lock(impl->mutex);
-		return impl->error;
+		return impl->error.empty() ? impl->captureError : impl->error;
 	}
 
 	std::shared_ptr<const LiveSnapshot> ProfilerClient::Poll()
@@ -279,5 +296,21 @@ namespace dyf::Platform
 		impl->localRequests[id] = std::move(status);
 		while(impl->localRequests.size() > 256) impl->localRequests.erase(impl->localRequests.begin());
 		return id;
+	}
+
+	LiveId ProfilerClient::RequestFrameCapture(LiveId device, LiveId source)
+	{
+		if(!impl || !device || !source) return 0;
+		std::lock_guard<std::mutex> lock(impl->mutex);
+		if(impl->state != ProfilerClientState::Connected || impl->captures.size() >= 64) return 0;
+		if(!impl->nextRequest)
+		{
+			impl->error = "Request ID space exhausted";
+			return 0;
+		}
+		const auto request = impl->nextRequest++;
+		impl->captures.push_back({request, device, source});
+		impl->captureError.clear();
+		return request;
 	}
 }

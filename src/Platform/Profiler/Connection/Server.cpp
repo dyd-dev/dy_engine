@@ -92,10 +92,17 @@ namespace dyf::Platform
 				std::vector<std::uint8_t> payload;
 				ControlRequest request;
 				std::string error;
-				if(!Detail::ReceivePacket(handle, header, payload, stop) ||
-					header.kind != static_cast<std::uint32_t>(Detail::PacketKind::Control) ||
-					!Detail::DecodeControl(payload, request, error))
-					return false;
+				if(!Detail::ReceivePacket(handle, header, payload, stop)) return false;
+				if(header.kind == static_cast<std::uint32_t>(Detail::PacketKind::FrameCapture))
+				{
+					Detail::FrameCaptureRequest capture;
+					if(!Detail::DecodeFrameCapture(payload, capture, error)) return false;
+					const bool accepted = RequestLiveFrameCapture(capture.device, capture.source, capture.request) != 0;
+					const auto acknowledgement = Detail::EncodeAck({capture.request, accepted,
+						accepted ? "" : "Frame capture rejected: missing source, disabled collector or capture pending"});
+					return Detail::SendPacket(handle, Detail::PacketKind::ControlAck, acknowledgement, stop);
+				}
+				if(header.kind != static_cast<std::uint32_t>(Detail::PacketKind::Control) || !Detail::DecodeControl(payload, request, error)) return false;
 
 				const bool accepted = Detail::EnqueueControl(request) != 0;
 				const auto acknowledgement = Detail::EncodeAck({request.request, accepted,

@@ -207,9 +207,11 @@ bool Renderer::Impl::RecordCanvas(const Canvas& canvas, RHI::ICommandList& comma
                 if(!scissor.width || !scissor.height) continue; // 정수 픽셀로 바꾼 뒤 면적이 없으면 건너뛴다.
                 // Canvas와 배치·정점 버퍼의 관계를 관측 이벤트에 연결한다. 이 메타데이터가 그리기 결과를 대신하지 않는다.
                 auto batchContext=Platform::GetLiveContext();batchContext.object=canvas.liveId;
-                if(Platform::IsLiveCollectorEnabled()){ // 수집이 켜져 있을 때만 배치와 자원 관계를 기록한다.
-                    batchContext.batch=Platform::GetLiveBatchPath(liveId,{canvas.liveId,(std::uint64_t(draw.first)<<32)|count});
-                    Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Data;batch.first=draw.first;batch.elements=count;batch.bytes=std::uint64_t(count)*sizeof(Canvas::Vertex);batch.stride=sizeof(Canvas::Vertex);batch.resource=Platform::FindLiveObject(vertexBuffer);batch.reason=splitReason;Platform::RecordLiveEvent(batch);Platform::RecordLiveLink({canvas.liveId,batch.id});
+                if(Platform::IsLiveCollectorEnabled()){ // 배치는 집계하고 자원 관계는 상세 캡처 때만 기록한다.
+                    const bool detail=Platform::IsLiveDetailEnabled(batchContext.frame);
+                    batchContext.batch=detail?Platform::GetLiveBatchPath(liveId,{canvas.liveId,(std::uint64_t(draw.first)<<32)|count}):0;
+                    Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Data;batch.first=draw.first;batch.elements=count;batch.bytes=std::uint64_t(count)*sizeof(Canvas::Vertex);batch.stride=sizeof(Canvas::Vertex);batch.resource=detail?Platform::FindLiveObject(vertexBuffer):0;batch.reason=splitReason;Platform::RecordLiveEvent(batch);
+                    if(detail)Platform::RecordLiveLink({canvas.liveId,batch.id});
                 }
                 Platform::LiveContextScope linkedBatch(batchContext);
                 commandList.SetViewport({v.x,v.y,v.width,v.height,0,1});

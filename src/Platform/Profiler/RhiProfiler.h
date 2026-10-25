@@ -29,6 +29,7 @@ namespace dyf::RHI
         std::vector<Platform::LiveEvent> events;
         std::vector<Platform::LiveFlowLink> links;
         Platform::LiveEventSummary summary;
+        bool hasSummary=false;
 #endif
     };
 
