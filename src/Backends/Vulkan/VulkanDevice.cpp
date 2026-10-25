@@ -1609,7 +1609,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 	bool VulkanDevice::Impl::CreateInstance()
 	{
-
+        const auto enumerateVersion = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+            vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"));
+        if(enumerateVersion && enumerateVersion(&m_context.apiVersion)!=VK_SUCCESS)return false;
+        m_context.apiVersion=std::min(m_context.apiVersion,uint32_t(VK_API_VERSION_1_3));
         uint32_t availableCount=0;
         if(vkEnumerateInstanceExtensionProperties(nullptr,&availableCount,nullptr)!=VK_SUCCESS)return false;
         std::vector<VkExtensionProperties> available(availableCount);
@@ -1631,7 +1634,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 #endif
         if(supported(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME))
             extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
-        m_surfaceMaintenanceEnabled=supported(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME) &&
+        m_surfaceMaintenanceEnabled=m_context.apiVersion>=VK_API_VERSION_1_1 && supported(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME) &&
             supported(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
         if(m_surfaceMaintenanceEnabled)
         {
@@ -1657,7 +1660,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		application.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
 		application.pEngineName = "dy_engine";
 		application.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-		application.apiVersion = VK_API_VERSION_1_3;
+		application.apiVersion = m_context.apiVersion;
 
 		VkInstanceCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -1716,15 +1719,22 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		const VkPhysicalDevice device = devices[m_owner.GetDesc().adapterIndex];
 		VkPhysicalDeviceProperties properties{};
 		vkGetPhysicalDeviceProperties(device, &properties);
-		if (properties.apiVersion < VK_API_VERSION_1_3) return false;
+		m_context.apiVersion = std::min(m_context.apiVersion, properties.apiVersion);
+        m_context.negativeViewportSupported=m_context.apiVersion>=VK_API_VERSION_1_1;
 
 		VkPhysicalDeviceVulkan13Features vulkan13{};
 		vulkan13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-		VkPhysicalDeviceFeatures2 features{};
-		features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-		features.pNext = &vulkan13;
-		vkGetPhysicalDeviceFeatures2(device, &features);
-		if (!vulkan13.dynamicRendering || !vulkan13.synchronization2) return false;
+		VkPhysicalDeviceFeatures features{};
+        vkGetPhysicalDeviceFeatures(device,&features);
+        if(m_context.apiVersion>=VK_API_VERSION_1_3)
+        {
+            const auto getFeatures2=reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
+                vkGetInstanceProcAddr(m_context.instance,"vkGetPhysicalDeviceFeatures2"));
+            VkPhysicalDeviceFeatures2 features2{};
+            features2.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;features2.pNext=&vulkan13;
+            if(getFeatures2)getFeatures2(device,&features2);
+            m_context.modernRendering=vulkan13.dynamicRendering && vulkan13.synchronization2;
+        }
 
 		uint32_t familyCount = 0;
 		vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, nullptr);
@@ -1740,17 +1750,19 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 		if (!indices.IsComplete()) return false;
 
-            std::fprintf(stderr, "[Vulkan] GPU=%s vendor=%u device=%u driverVersionRaw=%u api=%u.%u.%u validation=%s capture=%s\n",
+            std::fprintf(stderr, "[Vulkan] GPU=%s vendor=%u device=%u driverVersionRaw=%u api=%u.%u.%u path=%s validation=%s capture=%s\n",
                 properties.deviceName, properties.vendorID, properties.deviceID, properties.driverVersion,
-                VK_API_VERSION_MAJOR(properties.apiVersion), VK_API_VERSION_MINOR(properties.apiVersion), VK_API_VERSION_PATCH(properties.apiVersion),
+                VK_API_VERSION_MAJOR(m_context.apiVersion), VK_API_VERSION_MINOR(m_context.apiVersion), VK_API_VERSION_PATCH(m_context.apiVersion),
+                m_context.modernRendering ? "modern" : "legacy",
                 m_owner.GetDesc().enableValidation ? "on" : "off", m_debugMessenger != VK_NULL_HANDLE ? "on" : "off");
 		m_context.physicalDevice = device;
 		m_context.queueIndices = indices;
 		// 선택 시 조회한 불변 정보는 모든 명령 래퍼와 기능 검사에서 함께 사용한다.
 		auto physicalInfo=std::make_shared<VulkanPhysicalDeviceInfo>();
 		physicalInfo->properties=properties;
-		physicalInfo->features=features.features;
+		physicalInfo->features=features;
 		physicalInfo->graphicsQueue=families[indices.graphicsFamily];
+        physicalInfo->maintenance4Supported=vulkan13.maintenance4==VK_TRUE;
 		m_context.physicalInfo=std::move(physicalInfo);
 		return true;
 	}
@@ -1781,7 +1793,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		vulkan13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 		vulkan13.dynamicRendering = VK_TRUE;
 		vulkan13.synchronization2 = VK_TRUE;
-		vulkan13.maintenance4 = VK_TRUE;
+		vulkan13.maintenance4 = m_context.physicalInfo->maintenance4Supported;
+        void* featureChain=m_context.modernRendering ? &vulkan13 : nullptr;
+        const auto getFeatures2=m_context.apiVersion>=VK_API_VERSION_1_1 ? reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
+            vkGetInstanceProcAddr(m_context.instance,"vkGetPhysicalDeviceFeatures2")) : nullptr;
 
 		uint32_t extensionCount = 0;
 		vkEnumerateDeviceExtensionProperties(m_context.physicalDevice, nullptr, &extensionCount, nullptr);
@@ -1804,12 +1819,12 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		meshFeaturesToEnable.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
 		bool enableMeshShader = false;
 
-		if (hasMeshShaderExtension)
+		if (m_context.modernRendering && hasMeshShaderExtension && getFeatures2)
 		{
 			VkPhysicalDeviceFeatures2 features2{};
 			features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 			features2.pNext = &meshFeaturesSupported;
-			vkGetPhysicalDeviceFeatures2(m_context.physicalDevice, &features2);
+			getFeatures2(m_context.physicalDevice, &features2);
 			if (meshFeaturesSupported.meshShader == VK_TRUE)
 			{
 				enableMeshShader = true;
@@ -1819,6 +1834,13 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		}
 
 		std::vector<const char*> extensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+        if(!m_context.negativeViewportSupported && std::any_of(availableExtensions.begin(),availableExtensions.end(),[](const auto& extension) {
+            return std::strcmp(extension.extensionName,VK_KHR_MAINTENANCE_1_EXTENSION_NAME)==0;
+        }))
+        {
+            extensions.push_back(VK_KHR_MAINTENANCE_1_EXTENSION_NAME);
+            m_context.negativeViewportSupported=true;
+        }
         const char* calibrationFunction = nullptr;
 #if defined(_WIN32)
         const char* calibrationExtension = nullptr;
@@ -1829,7 +1851,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
             if(std::strcmp(extension.extensionName, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) == 0)
                 calibrationExtension = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
         }
-        if(calibrationExtension && m_owner.GetTimestampValidBits())
+        if(m_context.apiVersion>=VK_API_VERSION_1_1 && calibrationExtension && m_owner.GetTimestampValidBits())
         {
             const bool khr = std::strcmp(calibrationExtension, "VK_KHR_calibrated_timestamps") == 0;
             const auto getDomains = reinterpret_cast<PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsEXT>(
@@ -1854,37 +1876,46 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		if (enableMeshShader)
 		{
 			extensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
-			vulkan13.pNext = &meshFeaturesToEnable;
+			meshFeaturesToEnable.pNext = featureChain;
+            featureChain=&meshFeaturesToEnable;
 		}
 
         VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT maintenance{};
         maintenance.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT;
-        if(m_surfaceMaintenanceEnabled && std::any_of(availableExtensions.begin(),availableExtensions.end(),[](const auto& extension) {
+        if(getFeatures2 && m_surfaceMaintenanceEnabled && std::any_of(availableExtensions.begin(),availableExtensions.end(),[](const auto& extension) {
             return std::strcmp(extension.extensionName,VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME)==0;
         }))
         {
             VkPhysicalDeviceFeatures2 features{};
             features.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
             features.pNext=&maintenance;
-            vkGetPhysicalDeviceFeatures2(m_context.physicalDevice,&features);
+            getFeatures2(m_context.physicalDevice,&features);
             m_presentFencesEnabled=maintenance.swapchainMaintenance1==VK_TRUE;
             if(m_presentFencesEnabled)
             {
                 extensions.push_back(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
-                maintenance.pNext=vulkan13.pNext;
-                vulkan13.pNext=&maintenance;
+                maintenance.pNext=featureChain;
+                featureChain=&maintenance;
             }
         }
 
 		VkDeviceCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-		info.pNext = &vulkan13;
+		info.pNext = featureChain;
 		info.queueCreateInfoCount = 1;
 		info.pQueueCreateInfos = &queueInfo;
 		info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
 		info.ppEnabledExtensionNames = extensions.data();
 		info.pEnabledFeatures = &enabled;
 		if (vkCreateDevice(m_context.physicalDevice, &info, nullptr, &m_context.device) != VK_SUCCESS) return false;
+        if(m_context.modernRendering)
+        {
+            m_context.beginRendering=reinterpret_cast<PFN_vkCmdBeginRendering>(vkGetDeviceProcAddr(m_context.device,"vkCmdBeginRendering"));
+            m_context.endRendering=reinterpret_cast<PFN_vkCmdEndRendering>(vkGetDeviceProcAddr(m_context.device,"vkCmdEndRendering"));
+            m_context.pipelineBarrier2=reinterpret_cast<PFN_vkCmdPipelineBarrier2>(vkGetDeviceProcAddr(m_context.device,"vkCmdPipelineBarrier2"));
+            m_context.writeTimestamp2=reinterpret_cast<PFN_vkCmdWriteTimestamp2>(vkGetDeviceProcAddr(m_context.device,"vkCmdWriteTimestamp2"));
+            if(!m_context.beginRendering || !m_context.endRendering || !m_context.pipelineBarrier2 || !m_context.writeTimestamp2)return false;
+        }
 #ifdef DY_RENDERDOC_ENABLED
         if(m_context.debugUtilsEnabled)
         {
