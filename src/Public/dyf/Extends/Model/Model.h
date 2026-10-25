@@ -6,6 +6,7 @@
 #include "dyf/Light.h"
 #include <string>
 #include <array>
+#include <optional>
 #include <vector>
 
 namespace dyf
@@ -83,10 +84,17 @@ namespace dyf
 		// 빈 문자열은 보존한다. 경로는 모델 파일 기준 상대 경로나 절대 경로다.
 		std::array<std::string, ToIndex(MaterialTextureKind::Count)> texturePaths = {};
 		std::string roughnessTexturePath;
+		// Unset values preserve source coverage and culling independently of transmission.
+		std::optional<MaterialAlphaMode> alphaMode = std::nullopt;
+		std::optional<bool> doubleSided = std::nullopt;
+		// Repair only missing named FBX texture UV references. Valid source UV0
+		// references stay unchanged; the fallback must be the mesh's existing UV0.
+		std::optional<std::string> fbxFallbackTextureUvSet = std::nullopt;
 	};
 
 	struct ModelLoadOptions
 	{
+		// Additional V flip after format conversion (FBX V-up is converted by default).
 		bool flipV = false;
 		uint64_t maxSourceBytes = 512ull * 1024ull * 1024ull;
 		// fastgltf does not expose a bounded heap allocator, so this limits parser-owned input payloads.
@@ -104,7 +112,15 @@ namespace dyf
 		float fbxConstantTrackTolerance = 1.0e-5f;
 		// Source conventions are explicit: ordinary FBX specular RGB is not an ORM map.
 		bool fbxSpecularTextureIsOrm = false;
+		// Some packed source conventions reserve R without supplying authored occlusion.
+		bool fbxSpecularTextureHasOcclusion = true;
+		// Explicit source convention: a FBX Bump connection contains tangent-space normals.
+		bool fbxBumpTextureIsNormalMap = false;
 		bool fbxBaseColorTextureHasOpacity = false;
+		// When texture alpha is present, explicitly choose its coverage convention; unset detects binary alpha.
+		std::optional<MaterialAlphaMode> fbxBaseColorAlphaMode;
+		// Unsupported material semantics fail by default; opt in to warned approximations.
+		bool allowMaterialFallbacks = false;
 		// +1 for OpenGL/glTF tangent-space normals; -1 for DirectX sources.
 		float normalMapYSign = 1.0f;
 		std::vector<ModelMaterialOverride> materialOverrides;
@@ -112,6 +128,9 @@ namespace dyf
 		// Maximum concurrent deferred external-image decodes in LoadModelAsset; >=1.
 		// Workers end when loading completes. This does not change asset identity.
 		uint32_t textureDecodeThreadCount = 1;
+		// Zero keeps source dimensions; otherwise cap both texture axes and decode
+		// deferred images sequentially to bound full-resolution decoder temporaries.
+		uint32_t maxTextureDimension = 0;
 	};
 
 	// Scene에 모델 파일을 추가할 때 사용하는 설정이다. 모델 객체나 생성된 인스턴스가 아니다.

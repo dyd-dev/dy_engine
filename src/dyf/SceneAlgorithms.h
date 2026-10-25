@@ -2,6 +2,7 @@
 #include "dyf/Camera.h"
 #include "dyf/Material.h"
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cmath>
 #include <iterator>
@@ -10,6 +11,20 @@
 
 namespace dyf
 {
+    // Optical transmission and geometric alpha coverage are independent. Both
+    // need the transparent lighting path, while retaining their authored alpha mode.
+    inline bool UsesBlendedRendering(const MaterialDesc& material)
+    {
+        return material.alphaMode == MaterialAlphaMode::Blend || material.transmissionFactor > 0.0f;
+    }
+
+    inline bool IsAffineTransform(const Math::float4x4& matrix)
+    {
+        if(matrix.m[3]!=0 || matrix.m[7]!=0 || matrix.m[11]!=0 || matrix.m[15]!=1)return false;
+        for(float value:matrix.m)if(!std::isfinite(value))return false;
+        return true;
+    }
+
     // 재질의 셰이더 상수와 파이프라인 설정을 비교하며, ID와 이미지 정체성은 별도 키에서 비교한다.
     inline bool EqualMaterial(const MaterialDesc& a,const MaterialDesc& b)
     {
@@ -40,58 +55,90 @@ namespace dyf
         return seed;
     }
 
-    // 로컬 좌표의 각 축에 나란한 면으로 물체를 감싸는 상자(AABB)를 사용한다.
-    // 여덟 꼭짓점을 world와 view-projection으로 변환하고, 같은 clip 평면 바깥에 모든 꼭짓점이 놓이는지 검사한다.
-    inline bool OutsideCamera(const Math::Bounds3& bounds,const Math::float4x4& world,const Camera& camera)
+    // 로컬 AABB를 카메라 평면의 지지점으로 검사한다. 카메라 평면은 재사용하고 지원하지 않는 투영은 컬링하지 않는다.
+    class CameraFrustum
     {
-        if(!bounds.valid)return false; // 경계가 없으면 화면 밖이라고 판단하지 않는다.
-        // Unknown projective world/view contracts fail open. Standard perspective and
-        // orthographic projections (including reversed axes) use homogeneous ZO planes.
-        const auto affine=[](const Math::float4x4& m) {return m.m[3]==0 && m.m[7]==0 && m.m[11]==0 && m.m[15]==1;};
-        const auto& p=camera.projection;
-        if(!affine(world) || !affine(camera.view) || // 지원하지 않는 world/view/투영 형태이면 컬링하지 않는다.
-            !((p.m[11]==-1 && p.m[15]==0) || (p.m[11]==0 && p.m[15]==1)) ||
-            p.m[1]!=0 || p.m[2]!=0 || p.m[3]!=0 || p.m[4]!=0 || p.m[6]!=0 || p.m[7]!=0 ||
-            p.m[0]==0 || p.m[5]==0 || p.m[10]==0)return false;
-        const auto viewProjection=p*camera.view;
-        for(float v:viewProjection.m)if(!std::isfinite(v))return false; // 카메라 변환 결과가 비유한 값이면 객체를 남긴다.
-        for(float v:world.m)if(!std::isfinite(v))return false; // world 행렬에 비유한 값이 있으면 객체를 남긴다.
-        // 모든 꼭짓점이 같은 평면 바깥에 있을 때만 AABB 전체를 제외한다. 꼭짓점 하나라도 안쪽 또는 경계 여유 안에 있으면 그 평면으로는 제외할 수 없다.
-        bool outside[6]={true,true,true,true,true,true};
-        for(uint32_t corner=0;corner<8;++corner) {
-            const double x=(corner&1)?bounds.max.x:bounds.min.x;
-            const double y=(corner&2)?bounds.max.y:bounds.min.y;
-            const double z=(corner&4)?bounds.max.z:bounds.min.z;
-            const double point[]={x,y,z,1};
-            double transformed[4]={},magnitude[4]={},clip[4]={};
-            for(uint32_t row=0;row<4;++row)for(uint32_t column=0;column<4;++column) {
-                const double term=world.m[column*4+row]*point[column];
-                transformed[row]+=term;magnitude[row]+=std::abs(term);
-            }
-            // 큰 양수 항과 음수 항이 더해지면 최종 clip 값이 작아도 계산 오차는 클 수 있다.
-            // 각 곱셈 항의 절댓값 합까지 모아 경계 여유를 정하므로 큰 월드 좌표의 객체를 반올림 오차만으로 제거하지 않는다.
-            double errorScale=1;
-            for(uint32_t row=0;row<4;++row) {
-                double sum=0;
-                for(uint32_t column=0;column<4;++column) {
-                    const double coefficient=viewProjection.m[column*4+row];
-                    clip[row]+=coefficient*transformed[column];sum+=std::abs(coefficient)*magnitude[column];
+        Math::float4x4 m_viewProjection={};
+        std::array<std::array<double,4>,6> m_planes={};
+        bool m_valid=false;
+    public:
+        explicit CameraFrustum(const Camera& camera)
+        {
+            // Unknown projection contracts fail open, including oblique/projective views.
+            const auto& p=camera.projection;
+            if(!IsAffineTransform(camera.view) ||
+                !((p.m[11]==-1 && p.m[15]==0) || (p.m[11]==0 && p.m[15]==1)) ||
+                p.m[1]!=0 || p.m[2]!=0 || p.m[3]!=0 || p.m[4]!=0 || p.m[6]!=0 || p.m[7]!=0 ||
+                p.m[0]==0 || p.m[5]==0 || p.m[10]==0)return;
+            m_viewProjection=p*camera.view;
+            for(float value:m_viewProjection.m)if(!std::isfinite(value))return;
+            for(uint32_t plane=0;plane<6;++plane)
+                for(uint32_t column=0;column<4;++column)
+                {
+                    const double a=m_viewProjection.m[column*4+3];
+                    const double b=m_viewProjection.m[column*4+plane/2];
+                    m_planes[plane][column]=plane==4 ? b : a+(plane%2 ? -b : b);
                 }
+            m_valid=true;
+        }
+        bool Outside(const Math::Bounds3& bounds,const Math::float4x4& world) const
+        {
+            if(!m_valid || !bounds.valid || !IsAffineTransform(world))return false;
+            const double minimum[]={bounds.min.x,bounds.min.y,bounds.min.z};
+            const double maximum[]={bounds.max.x,bounds.max.y,bounds.max.z};
+            double magnitude[4]={};
+            for(uint32_t axis=0;axis<3;++axis)
+                if(!std::isfinite(minimum[axis]) || !std::isfinite(maximum[axis]) || minimum[axis]>maximum[axis])return false;
+            double center[4]={0,0,0,1},clip[4]={};
+            for(uint32_t row=0;row<3;++row)
+            {
+                center[row]=world.m[12+row];
+                for(uint32_t column=0;column<3;++column)
+                    center[row]+=world.m[column*4+row]*(minimum[column]+maximum[column])*.5;
+            }
+            for(uint32_t row=0;row<4;++row)
+                for(uint32_t column=0;column<4;++column)
+                    clip[row]+=m_viewProjection.m[column*4+row]*center[column];
+            // An interior point proves intersection. Most visible objects stop before support tests.
+            if(clip[2]>=0 && clip[3]>=clip[2] && clip[3]>=std::abs(clip[0]) && clip[3]>=std::abs(clip[1]))return false;
+            for(uint32_t row=0;row<4;++row)
+            {
+                magnitude[row]=std::abs(double(world.m[12+row]));
+                for(uint32_t column=0;column<3;++column)
+                    magnitude[row]+=std::abs(double(world.m[column*4+row]))*
+                        std::max(std::abs(minimum[column]),std::abs(maximum[column]));
+            }
+            // This bound covers the cancellation scale of every corner in the old test.
+            double errorScale=1;
+            for(uint32_t row=0;row<4;++row)
+            {
+                double sum=0;
+                for(uint32_t column=0;column<4;++column)
+                    sum+=std::abs(double(m_viewProjection.m[column*4+row]))*magnitude[column];
                 errorScale=std::max(errorScale,sum);
             }
-            for(double v:clip)if(!std::isfinite(v))return false; // 꼭짓점의 clip 변환에 NaN·무한대가 생기면 화면 밖이라고 확정하지 않고 객체를 남긴다.
-            // Includes cancellation at large world coordinates, not just final clip size.
+            // 큰 월드 좌표에서 상쇄되는 항의 크기도 오차 여유에 포함해 반올림만으로 객체를 제거하지 않는다.
             const double epsilon=1e-5*errorScale;
-            // 좌우·상하 평면은 w±x/y, 깊이 0..w 범위는 z와 w-z로 검사한다.
-            const double distances[]={clip[3]+clip[0],clip[3]-clip[0],clip[3]+clip[1],clip[3]-clip[1],clip[2],clip[3]-clip[2]};
-            bool canReject=false;
-            for(uint32_t plane=0;plane<6;++plane) {
-                outside[plane]=outside[plane] && distances[plane]<-epsilon;
-                canReject=canReject || outside[plane];
+            for(const auto& plane:m_planes)
+            {
+                // Pull the world-space plane into local space and test its support vertex.
+                double distance=plane[3];
+                for(uint32_t row=0;row<3;++row)distance+=plane[row]*world.m[12+row];
+                for(uint32_t axis=0;axis<3;++axis)
+                {
+                    double coefficient=0;
+                    for(uint32_t row=0;row<3;++row)coefficient+=plane[row]*world.m[axis*4+row];
+                    distance+=coefficient*(coefficient>=0 ? maximum[axis] : minimum[axis]);
+                }
+                if(distance < -epsilon)return true;
             }
-            if(!canReject)return false; // 각 평면에 대해 안쪽 또는 경계 여유 안의 꼭짓점을 이미 찾았다면, 남은 꼭짓점을 검사해도 전체가 바깥이 될 수 없어 객체를 남긴다.
+            return false;
         }
-        return std::any_of(std::begin(outside),std::end(outside),[](bool value){return value;});
+    };
+
+    inline bool OutsideCamera(const Math::Bounds3& bounds,const Math::float4x4& world,const Camera& camera)
+    {
+        return CameraFrustum(camera).Outside(bounds,world);
     }
 
     struct SpotConeAngles { float inner,outer; };

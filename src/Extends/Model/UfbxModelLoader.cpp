@@ -79,7 +79,6 @@ namespace dyf
 					result.m[column * 4 + row] = static_cast<float>(source.cols[column].v[row]);
 			return result;
 		}
-
 		[[nodiscard]] NodeTransform ToNodeTransform(const ufbx_transform& source)
 		{
 			NodeTransform result;
@@ -178,13 +177,43 @@ namespace dyf
 			return node.mesh != nullptr && node.mesh->skin_deformers.count == 0 &&
 				node.mesh->blend_deformers.count == 0 && UsesLocalFbxGeometry(scene, node);
 		}
-		[[nodiscard]] std::string FbxGeometryKey(const ufbx_node& node)
+		using FbxMaterialCullingUsage = std::map<const ufbx_material*, uint8_t>;
+		[[nodiscard]] const ufbx_material* FbxNodeMaterial(const ufbx_node& node, uint32_t slot)
+		{
+			if(slot < node.materials.count) return node.materials[slot];
+			return slot < node.mesh->materials.count ? node.mesh->materials[slot] : nullptr;
+		}
+		[[nodiscard]] FbxMaterialCullingUsage FindMaterialCullingUsage(
+			const ufbx_scene& scene, const std::vector<bool>& cullingOff)
+		{
+			FbxMaterialCullingUsage usage;
+			std::map<const ufbx_mesh*, std::vector<uint32_t>> usedSlots;
+			for(size_t index = 0; index < scene.nodes.count; ++index)
+			{
+				const auto& node = *scene.nodes[index];
+				if(!node.mesh) continue;
+				auto [slots, inserted] = usedSlots.try_emplace(node.mesh);
+				if(inserted)
+				{
+					std::set<uint32_t> unique;
+					for(size_t face = 0; face < node.mesh->faces.count; ++face)
+						if(node.mesh->faces[face].num_indices >= 3u)
+							unique.insert(face < node.mesh->face_material.count ? node.mesh->face_material[face] : 0u);
+					slots->second.assign(unique.begin(), unique.end());
+				}
+				for(uint32_t slot : slots->second)
+					usage[FbxNodeMaterial(node, slot)] |= cullingOff[index] ? 2u : 1u;
+			}
+			return usage;
+		}
+		[[nodiscard]] std::string FbxGeometryKey(const ufbx_node& node, bool cullingOff)
 		{
 			// Geometric pivots/offsets are baked into node-local vertices. Compare
 			// their exact source bits, as well as per-instance material overrides.
 			const auto& mesh = *node.mesh;
 			std::string key(reinterpret_cast<const char*>(&mesh.typed_id), sizeof(mesh.typed_id));
 			key.append(reinterpret_cast<const char*>(node.geometry_to_node.v), sizeof(node.geometry_to_node.v));
+			key.push_back(cullingOff ? 1 : 0);
 			const size_t slots = std::max(node.materials.count, mesh.materials.count);
 			for(size_t slot = 0; slot < slots; ++slot)
 			{
@@ -198,6 +227,8 @@ namespace dyf
 			const std::string& filepath,
 			const ufbx_scene& scene,
 			const ModelLoadOptions& options,
+			const std::vector<bool>& cullingOff,
+			const FbxMaterialCullingUsage& materialCullingUsage,
 			double bakeRate,
 			std::vector<size_t>& sampleCounts,
 			uint64_t& decodedBytes)
@@ -207,6 +238,10 @@ namespace dyf
 			if(!budget.CheckNodes(scene.nodes.count)
 				|| !budget.AddBytes(scene.nodes.count, sizeof(ModelNode), "nodes")
 				|| !budget.AddBytes(scene.materials.count, sizeof(ModelMaterialInfo), "materials")) return false;
+			const auto sidedVariants = std::count_if(materialCullingUsage.begin(), materialCullingUsage.end(), [](const auto& entry) {
+				return entry.second == 3u && (!entry.first || !entry.first->features.double_sided.enabled);
+			});
+			if(!budget.AddBytes(sidedVariants, sizeof(ModelMaterialInfo), "FBX node culling material variants")) return false;
 			if(options.importLights)
 			{
 				for(size_t i = 0; i < scene.nodes.count; ++i)
@@ -229,6 +264,11 @@ namespace dyf
 			}
 
 			if(!budget.AddBytes(scene.anim_stacks.count, sizeof(AnimationClip), "FBX animation clips")) return false;
+			// Uniform morph evaluation may retain one FloatKey per sample. Bound
+			// that work by the caller's existing key/decoded-byte budgets, rather
+			// than imposing an unrelated duration-dependent per-track sample cap.
+			const uint64_t maxBakeSamples = std::min({options.maxAnimationKeys,
+				options.maxDecodedBytes / sizeof(FloatKey), static_cast<uint64_t>(SIZE_MAX)});
 			for(size_t stackIndex = 0; stackIndex < scene.anim_stacks.count; ++stackIndex)
 			{
 				const ufbx_anim_stack* stack = scene.anim_stacks.data[stackIndex];
@@ -236,11 +276,15 @@ namespace dyf
 				const double span = stack->time_end - stack->time_begin;
 				const double duration = std::max(0.0, span);
 				const double intervals = std::ceil(duration * bakeRate);
-				// The per-track cap is below both size_t and uint64_t limits on supported platforms.
-				// Check while still floating point; conversion and +1 are then bounded.
 				if(!std::isfinite(stack->time_begin) || !std::isfinite(stack->time_end)
-					|| !std::isfinite(span) || !std::isfinite(intervals) || intervals > 99999.0)
-					return ReportModelError(filepath, "FBX animation exceeds the per-track bake sample limit");
+					|| !std::isfinite(span) || duration > std::numeric_limits<float>::max()
+					|| !std::isfinite(intervals))
+					return ReportModelError(filepath, "FBX animation timing exceeds the finite model time range");
+				// A strict comparison with the count limit leaves room for +1.
+				// Even if a large integer limit rounds upward as double, the next
+				// lower representable interval still fits that integer limit.
+				if(intervals >= static_cast<double>(maxBakeSamples))
+					return ReportModelError(filepath, "FBX animation bake samples exceed maxAnimationKeys, maxDecodedBytes or the addressable range");
 				const size_t sampleCount = static_cast<size_t>(intervals) + 1u;
 				sampleCounts[stackIndex] = sampleCount;
 				// Key storage is accounted after baking the source's animated channels
@@ -255,7 +299,7 @@ namespace dyf
 				if(mesh == nullptr) continue;
 				if(!budget.AddBytes(std::max<size_t>(1, mesh->material_parts.count),
 					sizeof(ModelMesh) + sizeof(ModelAssetMesh), "FBX mesh instances")) return false;
-				if(CanShareFbxGeometry(scene, node) && !countedGeometry.insert(FbxGeometryKey(node)).second) continue;
+				if(CanShareFbxGeometry(scene, node) && !countedGeometry.insert(FbxGeometryKey(node, cullingOff[nodeIndex])).second) continue;
 				uint64_t triangleVertexCount = 0u;
 				for(size_t faceIndex = 0; faceIndex < mesh->faces.count; ++faceIndex)
 				{
@@ -584,7 +628,8 @@ namespace dyf
 						? options.maxDecodedBytes - decodedTextureBytes
 						: 0u;
 					bool limitExceeded = false;
-					if(!LoadImage(static_cast<const uint8_t*>(source->content.data), source->content.size, texture, remainingDecodedBytes, &limitExceeded))
+					if(!LoadImage(static_cast<const uint8_t*>(source->content.data),source->content.size,
+                        texture,remainingDecodedBytes,options.maxTextureDimension,&limitExceeded))
 					{
 						return ReportModelError(
 							filepath,
@@ -669,7 +714,7 @@ namespace dyf
 						{
 							Image decoded;
 							if(LoadImage(encoded.data(), encoded.size(), decoded,
-								options.maxDecodedBytes - decodedTextureBytes, &limitExceeded))
+								options.maxDecodedBytes-decodedTextureBytes,options.maxTextureDimension,&limitExceeded))
 							{
 								decodedTextureBytes += decoded.GetPixels().size();
 								decoded.SetSourcePath(canonicalPath.string());
@@ -752,6 +797,35 @@ namespace dyf
 			opts.scale_helper_name.data = "(scale helper)";
 			opts.scale_helper_name.length = SIZE_MAX;
 
+			struct NodeCulling { uint32_t typedId; std::string name; bool off; };
+			std::map<uint32_t, NodeCulling> sourceCulling;
+			if(!lightsOnly)
+			{
+				// Culling is a raw FBX Model child, not a ufbx material feature.
+				// Retain only a bounded metadata parse, then release its DOM before geometry decoding.
+				// Keep animation: scale keys determine inherited-scale helpers and node identities.
+				ufbx_load_opts metadataOptions = opts;
+				metadataOptions.ignore_geometry = true;
+				metadataOptions.ignore_embedded = true;
+				metadataOptions.load_external_files = false;
+				metadataOptions.generate_missing_normals = false;
+				metadataOptions.retain_dom = true;
+				ufbx_error metadataError{};
+				std::unique_ptr<ufbx_scene, void(*)(ufbx_scene*)> metadata(
+					ufbx_load_file(sourcePath.string().c_str(), &metadataOptions, &metadataError), ufbx_free_scene);
+				if(!metadata) return ReportModelError(filepath, "failed to read bounded FBX node metadata: " + std::string(metadataError.info));
+				if(metadata->nodes.count > options.maxNodes) return ReportModelError(filepath, "FBX metadata node count exceeds maxNodes");
+				for(const auto* node : metadata->nodes)
+				{
+					const auto* raw = node->element.dom_node ? ufbx_dom_find(node->element.dom_node, "Culling") : nullptr;
+					const std::string mode = raw && raw->values.count > 0u ? ToString(raw->values[0].value_str) : std::string{};
+					if(mode == "CullingOnCW" && !AllowMaterialFallback(filepath, options,
+						"FBX clockwise front-face culling is unsupported; using counterclockwise fronts: " + ToString(node->name))) return false;
+					const bool off = mode == "CullingOff";
+					sourceCulling.emplace(node->element_id, NodeCulling{node->typed_id, ToString(node->name), off});
+				}
+			}
+
 			ufbx_error error;
 			ufbx_scene* scene = ufbx_load_file(sourcePath.string().c_str(), &opts, &error);
 			if(externalFileContext.pathRejected || externalFileContext.sourceLimitExceeded)
@@ -784,6 +858,20 @@ namespace dyf
 					std::string("failed to load model through ufbx: ") + error.info);
 			}
 			std::unique_ptr<ufbx_scene, void(*)(ufbx_scene*)> sceneOwner(scene, ufbx_free_scene);
+			std::vector<bool> cullingOff(scene->nodes.count, false);
+			if(!lightsOnly)
+			{
+				if(sourceCulling.size() != scene->nodes.count) return ReportModelError(filepath, "FBX node metadata count does not match geometry parse");
+				for(size_t index = 0; index < scene->nodes.count; ++index)
+				{
+					const auto* node = scene->nodes[index];
+					const auto found = sourceCulling.find(node->element_id);
+					if(found == sourceCulling.end() || found->second.typedId != node->typed_id || found->second.name != ToString(node->name))
+						return ReportModelError(filepath, "FBX node metadata identity does not match geometry parse");
+					cullingOff[index] = found->second.off;
+				}
+				sourceCulling.clear();
+			}
 			if(lightsOnly)
 			{
 				ModelLoadBudget budget(filepath, options);
@@ -794,9 +882,10 @@ namespace dyf
 				return true;
 			}
 			const double fbxBakeRate = static_cast<double>(options.fbxBakeRate);
+			const auto materialCullingUsage = FindMaterialCullingUsage(*scene, cullingOff);
 			std::vector<size_t> sampleCounts;
 			uint64_t geometryBytes = 0u;
-			if(!ValidateFbxLoadLimits(filepath, *scene, options, fbxBakeRate, sampleCounts, geometryBytes)) return false;
+			if(!ValidateFbxLoadLimits(filepath, *scene, options, cullingOff, materialCullingUsage, fbxBakeRate, sampleCounts, geometryBytes)) return false;
 			ModelLoadOptions textureOptions = options;
 			textureOptions.maxDecodedBytes -= geometryBytes;
 			outModel = {};
@@ -1118,6 +1207,20 @@ namespace dyf
 
 			outModel.materials.reserve(scene->materials.count);
 			std::map<const ufbx_material*, uint32_t> materialIndices;
+			std::set<const ufbx_texture*> checkedTextureSemantics;
+			std::vector<const ufbx_texture*> currentMaterialTextures;
+			std::map<uint32_t, std::vector<const ufbx_texture*>> materialTextures;
+			auto validateTexture = [&](const ufbx_material_map& map) {
+				const auto* texture = map.texture;
+				if(!texture || !map.texture_enabled) return true;
+				currentMaterialTextures.push_back(texture);
+				if(!checkedTextureSemantics.insert(texture).second) return true;
+				if(texture->has_uv_transform && !AllowMaterialFallback(filepath, options,
+					"FBX nonidentity texture UV transform is unsupported; using untransformed UVs")) return false;
+				if((texture->wrap_u != UFBX_WRAP_REPEAT || texture->wrap_v != UFBX_WRAP_REPEAT) &&
+					!AllowMaterialFallback(filepath, options, "FBX texture wrapping is unsupported; using repeat")) return false;
+				return true;
+			};
 			auto textureIndex = [&](const ufbx_material_map& map) -> uint32_t {
 				const ufbx_texture* source = map.texture;
 				if(source == nullptr || !map.texture_enabled) return UINT32_MAX;
@@ -1134,7 +1237,9 @@ namespace dyf
 				material.hasTexture[slot] = true;
 			};
 			auto applyTexture = [&](ModelMaterialInfo& material, MaterialTextureKind kind, const ufbx_material_map& map) {
+				if(!validateTexture(map)) return false;
 				applyTextureIndex(material, kind, textureIndex(map));
+				return true;
 			};
 			// Scalar FBX maps are independent images. Pack their red channels into the
 			// renderer's G=roughness/B=metallic layout instead of discarding either map.
@@ -1188,6 +1293,7 @@ namespace dyf
 			{
 				ufbx_material* mat = scene->materials.data[i];
 				ModelMaterialInfo material = {};
+				currentMaterialTextures.clear();
 				material.name = ToString(mat->name);
 				const float baseFactor = static_cast<float>(mat->pbr.base_factor.value_real);
 				const bool legacyTransparency = mat->shader_type == UFBX_SHADER_FBX_LAMBERT
@@ -1203,8 +1309,12 @@ namespace dyf
 				float opacity = mat->pbr.opacity.has_value ? static_cast<float>(mat->pbr.opacity.value_real) : 1.0f;
 				if(mat->pbr.base_color.value_components == 4)
 					opacity *= static_cast<float>(mat->pbr.base_color.value_vec4.w);
-				if(!mat->pbr.opacity.has_value && legacyTransparency)
-					opacity *= 1.0f - legacyTransmission;
+				if(!mat->pbr.opacity.has_value)
+				{
+					const auto* sourceOpacity = ufbx_find_prop(&mat->props, "Opacity");
+					if(sourceOpacity) opacity *= static_cast<float>(sourceOpacity->value_real);
+					else if(legacyTransparency) opacity *= 1.0f - legacyTransmission;
+				}
 				material.material.baseColor = Math::float4(
 					static_cast<float>(mat->pbr.base_color.value_vec3.x) * baseFactor,
 					static_cast<float>(mat->pbr.base_color.value_vec3.y) * baseFactor,
@@ -1224,8 +1334,15 @@ namespace dyf
 					static_cast<float>(mat->pbr.emission_color.value_vec3.y) * emissiveFactor,
 					static_cast<float>(mat->pbr.emission_color.value_vec3.z) * emissiveFactor);
 				material.material.doubleSided = mat->features.double_sided.enabled;
-				material.material.transmissionFactor = legacyTransparency ? legacyTransmission
-					: static_cast<float>(mat->pbr.transmission_factor.value_real);
+				// Reuse the source material when every drawing node disables culling.
+				// A mixed off/on material still gets a distinct off variant below.
+				if(const auto usage = materialCullingUsage.find(mat); usage != materialCullingUsage.end() && usage->second == 2u)
+					material.material.doubleSided = true;
+				// Legacy FBX transparency describes coverage, not a physical BTDF.
+				// ufbx also exposes legacy TransparencyFactor through its approximate PBR maps.
+				material.material.transmissionFactor = mat->features.pbr.enabled &&
+					mat->pbr.transmission_factor.has_value && !mat->pbr.transmission_factor.feature_disabled
+					? static_cast<float>(mat->pbr.transmission_factor.value_real) : 0.0f;
 				if(mat->pbr.specular_ior.has_value)
 					material.material.indexOfRefraction = static_cast<float>(mat->pbr.specular_ior.value_real);
 				if(mat->pbr.transmission_depth.has_value && mat->pbr.transmission_depth.value_real > 0.0)
@@ -1256,7 +1373,7 @@ namespace dyf
 				const ufbx_material_map& baseColorTexture = mat->pbr.base_color.texture != nullptr
 					? mat->pbr.base_color
 					: mat->fbx.diffuse_color;
-				applyTexture(material, MaterialTextureKind::BaseColor, baseColorTexture);
+				if(!applyTexture(material, MaterialTextureKind::BaseColor, baseColorTexture)) return false;
 				material.material.baseColor.w = std::clamp(opacity, 0.0f, 1.0f);
 				material.material.metallicFactor = std::clamp(material.material.metallicFactor, 0.0f, 1.0f);
 				material.material.roughnessFactor = std::clamp(material.material.roughnessFactor, 0.0f, 1.0f);
@@ -1267,13 +1384,15 @@ namespace dyf
 					? mat->fbx.specular_color : mat->pbr.specular_color;
 				if(options.fbxSpecularTextureIsOrm && textureIndex(specularTexture) != UINT32_MAX)
 				{
-					applyTexture(material, MaterialTextureKind::MetallicRoughness, specularTexture);
-					applyTexture(material, MaterialTextureKind::Occlusion, specularTexture);
+					if(!applyTexture(material, MaterialTextureKind::MetallicRoughness, specularTexture)) return false;
+					if(options.fbxSpecularTextureHasOcclusion)
+						if(!applyTexture(material, MaterialTextureKind::Occlusion, specularTexture)) return false;
 					material.material.metallicFactor = 1.0f;
 					material.material.roughnessFactor = 1.0f;
 				}
 				else if(roughnessIndex != UINT32_MAX || metallicIndex != UINT32_MAX)
 				{
+					if(!validateTexture(roughnessMap) || !validateTexture(mat->pbr.metalness)) return false;
 					const float glossinessFactor = glossiness && roughnessMap.has_value
 						? static_cast<float>(roughnessMap.value_real) : 1.0f;
 					if(!std::isfinite(glossinessFactor))
@@ -1288,12 +1407,15 @@ namespace dyf
 					: (mat->fbx.normal_map.texture != nullptr
 						? mat->fbx.normal_map
 						: mat->fbx.bump);
-				applyTexture(material, MaterialTextureKind::Normal, normalTexture);
-				applyTexture(material, MaterialTextureKind::Occlusion, mat->pbr.ambient_occlusion);
+				if(mat->fbx.bump.texture && mat->fbx.bump.texture_enabled &&
+					!options.fbxBumpTextureIsNormalMap && !AllowMaterialFallback(filepath, options,
+						"FBX bump texture requires height-map support or explicit fbxBumpTextureIsNormalMap; using tangent-space normals")) return false;
+				if(!applyTexture(material, MaterialTextureKind::Normal, normalTexture) ||
+					!applyTexture(material, MaterialTextureKind::Occlusion, mat->pbr.ambient_occlusion)) return false;
 				const ufbx_material_map& emissiveTexture = mat->pbr.emission_color.texture != nullptr
 					? mat->pbr.emission_color
 					: mat->fbx.emission_color;
-				applyTexture(material, MaterialTextureKind::Emissive, emissiveTexture);
+				if(!applyTexture(material, MaterialTextureKind::Emissive, emissiveTexture)) return false;
 				if(options.fbxBaseColorTextureHasOpacity)
 				{
 					const uint32_t baseIndex = material.textureIndices[ToIndex(MaterialTextureKind::BaseColor)];
@@ -1303,32 +1425,76 @@ namespace dyf
 						for(size_t pixel = 3; pixel < pixels.size(); pixel += 4)
 						{
 							if(pixels[pixel] == 255u) continue;
+							if(options.fbxBaseColorAlphaMode)
+							{
+								material.material.alphaMode = *options.fbxBaseColorAlphaMode;
+								break;
+							}
 							material.material.alphaMode = pixels[pixel] == 0u
 								? MaterialAlphaMode::Mask : MaterialAlphaMode::Blend;
 							if(material.material.alphaMode == MaterialAlphaMode::Blend) break;
 						}
 					}
 				}
-				if(material.material.baseColor.w < 1.0f || material.material.transmissionFactor > 0.0f)
+				if(material.material.baseColor.w < 1.0f)
 					material.material.alphaMode = MaterialAlphaMode::Blend;
-				if(material.material.transmissionFactor > 0.0f) material.material.doubleSided = true;
 				materialIndices[mat] = static_cast<uint32_t>(outModel.materials.size());
+				materialTextures.emplace(static_cast<uint32_t>(outModel.materials.size()), currentMaterialTextures);
 				outModel.materials.push_back(std::move(material));
 			}
 			[[maybe_unused]] const uint32_t defaultMaterialIndex = EnsureDefaultMaterial(outModel);
+			if(const auto usage = materialCullingUsage.find(nullptr); usage != materialCullingUsage.end() && usage->second == 2u)
+				outModel.materials[defaultMaterialIndex].material.doubleSided = true;
+			std::map<uint32_t, uint32_t> sidedMaterialVariants;
+			std::set<std::pair<uint32_t, uint32_t>> checkedMaterialUvSets;
+			std::map<std::string, std::string> materialUvFallbacks;
+			for(const auto& override : options.materialOverrides)
+				if(override.fbxFallbackTextureUvSet) materialUvFallbacks[override.name] = *override.fbxFallbackTextureUvSet;
 
 			auto resolveMaterialIndex = [&](ufbx_node* node, ufbx_mesh* sourceMesh, uint32_t localMaterialIndex) -> uint32_t {
-				ufbx_material* material = nullptr;
-				if(localMaterialIndex < node->materials.count)
-				{
-					material = node->materials.data[localMaterialIndex];
-				}
-				else if(localMaterialIndex < sourceMesh->materials.count)
-				{
-					material = sourceMesh->materials.data[localMaterialIndex];
-				}
+				const ufbx_material* material = FbxNodeMaterial(*node, localMaterialIndex);
 				const auto it = materialIndices.find(material);
-				return it != materialIndices.end() ? it->second : defaultMaterialIndex;
+				const uint32_t original = it != materialIndices.end() ? it->second : defaultMaterialIndex;
+				if(checkedMaterialUvSets.emplace(sourceMesh->typed_id, original).second)
+				{
+					const std::string firstUv = sourceMesh->uv_sets.count ? ToString(sourceMesh->uv_sets[0].name) : std::string{};
+					const auto fallback = materialUvFallbacks.find(outModel.materials[original].name);
+					for(const auto* texture : materialTextures[original])
+					{
+						const std::string requested = ToString(texture->uv_set);
+						if(sourceMesh->vertex_uv.exists && (requested.empty() || requested == firstUv)) continue;
+						bool namedSetExists = false;
+						for(const auto& uvSet : sourceMesh->uv_sets)
+							if(requested == ToString(uvSet.name)) namedSetExists = true;
+						if(fallback != materialUvFallbacks.end())
+						{
+							// A repair cannot replace a real second stream. It only resolves
+							// dangling names, independently for each mesh using this material.
+							if(namedSetExists || requested.empty() || !sourceMesh->uv_sets.count ||
+								!sourceMesh->uv_sets[0].vertex_uv.exists || !sourceMesh->vertex_uv.exists || fallback->second != firstUv)
+							{
+								(void)ReportModelError(filepath, "FBX missing-UV fallback must resolve an absent source name to the first existing UV set: " +
+									outModel.materials[original].name + "; source=" + requested + "; fallback=" + fallback->second + "; first=" + firstUv);
+								return UINT32_MAX;
+							}
+							continue;
+						}
+						if(!AllowMaterialFallback(filepath, options, "FBX material references an unavailable UV set; using the first UV set")) return UINT32_MAX;
+					}
+				}
+				if(!cullingOff[node->typed_id] || outModel.materials[original].material.doubleSided) return original;
+				if(const auto variant = sidedMaterialVariants.find(original); variant != sidedMaterialVariants.end()) return variant->second;
+				if(outModel.materials.size() >= UINT32_MAX)
+				{
+					(void)ReportModelError(filepath, "FBX material variant count exceeds the supported index range");
+					return UINT32_MAX;
+				}
+				ModelMaterialInfo variant = outModel.materials[original];
+				variant.material.doubleSided = true;
+				const uint32_t index = static_cast<uint32_t>(outModel.materials.size());
+				outModel.materials.push_back(std::move(variant));
+				sidedMaterialVariants.emplace(original, index);
+				return index;
 			};
 
 			Math::float3 lightBoundsMin = Math::float3(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
@@ -1397,7 +1563,8 @@ namespace dyf
 				const ufbx_matrix normalMatrix = ufbx_matrix_for_normals(&vertexMatrix);
 				const Math::float4x4 nodeToWorld = ToFloat4x4(node->node_to_world);
 				const bool hasAuthoredTangents = sourceMesh->vertex_tangent.exists;
-				const auto geometryKey = shareGeometry ? FbxGeometryKey(*node) : std::string{};
+				const bool reverseV = !options.flipV;
+				const auto geometryKey = shareGeometry ? FbxGeometryKey(*node, cullingOff[ni]) : std::string{};
 				const auto existingGeometry = shareGeometry ? sharedGeometry.find(geometryKey) : sharedGeometry.end();
 				if(existingGeometry != sharedGeometry.end())
 				{
@@ -1435,7 +1602,9 @@ namespace dyf
 					const uint32_t localMaterialIndex = fi < sourceMesh->face_material.count
 						? sourceMesh->face_material.data[fi]
 						: 0u;
-					ModelMesh& mesh = getMesh(resolveMaterialIndex(node, sourceMesh, localMaterialIndex));
+					const uint32_t materialIndex = resolveMaterialIndex(node, sourceMesh, localMaterialIndex);
+					if(materialIndex >= outModel.materials.size()) return false;
+					ModelMesh& mesh = getMesh(materialIndex);
 					std::vector<uint32_t> triIndices((face.num_indices - 2u) * 3u);
 					const size_t numTris = ufbx_triangulate_face(triIndices.data(), triIndices.size(), sourceMesh, face);
 
@@ -1519,7 +1688,7 @@ namespace dyf
 									"ufbx vertex tangent contains non-finite values");
 							}
 
-							float handedness = -1.0f;
+							float handedness = reverseV ? -1.0f : 1.0f;
 							if(sourceMesh->vertex_bitangent.exists)
 							{
 								const ufbx_vec3 localBitangent =
@@ -1536,9 +1705,8 @@ namespace dyf
 										filepath,
 										"ufbx vertex bitangent contains non-finite values");
 								}
-								// Imported FBX bitangent uses the authored V axis, while the engine flips V.
-								handedness = Dot(Cross(vertex.normal, tangent), bitangent) < 0.0f
-									? 1.0f : -1.0f;
+								const float sourceSign = Dot(Cross(vertex.normal, tangent), bitangent) < 0.0f ? -1.0f : 1.0f;
+								handedness = sourceSign * (reverseV ? -1.0f : 1.0f);
 							}
 							vertex.tangent = Math::float4(tangent.x, tangent.y, tangent.z, handedness);
 						}
@@ -1546,15 +1714,24 @@ namespace dyf
 						if(sourceMesh->vertex_uv.exists)
 						{
 							const ufbx_vec2 uv = ufbx_get_vertex_vec2(&sourceMesh->vertex_uv, index);
-							// FBX 포맷은 기본적으로 텍스처 좌표계 Y축(V)이 아래에서 위로 향하지만,
-							// 통합 엔진에서는 텍스처 이미지의 수직 반전을 수행하지 않으므로 UV의 Y축을 반전시켜야 렌더링 시 정상 출력됩니다.
-							vertex.uv = Math::float2(static_cast<float>(uv.x), 1.0f - static_cast<float>(uv.y));
+							// Convert FBX's V-up coordinates to the image convention, then apply the optional extra flip.
+							vertex.uv = Math::float2(static_cast<float>(uv.x),
+								reverseV ? 1.0f - static_cast<float>(uv.y) : static_cast<float>(uv.y));
 							if(!IsFinite(vertex.uv))
 							{
 								return ReportModelError(
 									filepath,
 									"ufbx vertex UV contains non-finite values");
 							}
+						}
+
+						if(sourceMesh->vertex_color.exists)
+						{
+							const auto color = ufbx_get_vertex_vec4(&sourceMesh->vertex_color, index);
+							vertex.color = {static_cast<float>(color.x),static_cast<float>(color.y),
+								static_cast<float>(color.z),static_cast<float>(color.w)};
+							if(!IsFinite(Math::float3(vertex.color.x,vertex.color.y,vertex.color.z)) || !std::isfinite(vertex.color.w))
+								return ReportModelError(filepath, "ufbx vertex color contains non-finite values");
 						}
 
 						if(skinDeformer != nullptr)
