@@ -1,4 +1,11 @@
-struct Params { float4 sizeTime; float4 settings; float4 jitter; float4 extra; };
+struct Params {
+    float2 screenSize;
+    float time;
+    uint lightCount;
+    float exposure;
+    float roughness;
+    float metallic;
+};
 struct Input { float4 position :SV_Position; float2 uv :TEXCOORD0; };
 struct Output { float4 c0 : SV_Target0; float4 c1 : SV_Target1; float4 c2 : SV_Target2; };
 cbuffer Config:register(b15) { Params p; };
@@ -11,7 +18,7 @@ Output main(Input input) {
     float3 forward=normalize(float3(0.0,0.0,0.8)-cameraPosition);
     float3 right=normalize(cross(forward,float3(0.0,0.0,1.0)));
     float3 up=cross(right,forward);
-    float2 q=(uv*2.0-1.0)*float2(p.sizeTime.x/p.sizeTime.y,-1.0);
+    float2 q=(uv*2.0-1.0)*float2(p.screenSize.x/p.screenSize.y,-1.0);
     float3 rd=normalize(forward+0.55*(q.x*right+q.y*up));
     Surface s; s.distance=40.0; s.position=cameraPosition+rd*40.0;
     s.normal=float3(0.0,0.0,1.0); s.albedo=float3(0.04,0.08,0.14); s.material=-1.0;
@@ -35,7 +42,7 @@ Output main(Input input) {
         }
     }
     o.c0=float4(s.position,s.material>=0.0 ? 1.0 : 0.0);
-    o.c1=float4(s.normal,clamp(p.settings.y,0.05,1.0));
-    o.c2=float4(s.albedo,s.material>0.0 ? p.settings.z : 0.0);
+    o.c1=float4(s.normal,clamp(p.roughness,0.05,1.0));
+    o.c2=float4(s.albedo,s.material>0.0 ? p.metallic : 0.0);
     return o;
 }

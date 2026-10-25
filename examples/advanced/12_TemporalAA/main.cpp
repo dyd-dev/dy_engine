@@ -9,18 +9,24 @@
 
 using namespace dyf::RHI;
 struct alignas(16) Params {
-    float sizeTime[4] = {960, 640, 0, 0};
-    float settings[4] = {1, .45f, .8f, .9f};
-    float jitter[4] = {};
-    float extra[4] = {};
+    float screenSize[2] = {};
+    float time = 0;
+    float previousTime = 0;
+    float jitter[2] = {};
+    float previousJitter[2] = {};
+    float historyWeight = .9f;
+    float historyValid = 0;
 };
 
 int main() {
+    const auto readShader = [](const char* path) {
+        std::ifstream file(path, std::ios::binary);
+        return std::vector<char>{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    };
+
     Params params;
     dyf::Platform::Window window(960, 640, "Advanced / TemporalAA");
-
-    DeviceDesc deviceDesc;
-    std::unique_ptr<IDevice> owner(IDevice::Create(deviceDesc));
+    std::unique_ptr<IDevice> owner(IDevice::Create({}));
 
     auto& device = *owner;
 
@@ -28,41 +34,9 @@ int main() {
     SwapchainDesc swap;
     swap.window = window.GetHandle();
     swap.format = DefaultSwapchainFormat;
-    swap.minimumImageCount = 2;
-    swap.presentMode = PresentMode::Fifo;
     (void)device.CreateSwapchain(swap);
 
-    // 예제 폴더에서 연결한 엔진의 백엔드에 맞는 명령으로 셰이더를 컴파일한다.
-    // Metal의 macosx SDK는 대상에 따라 iphoneos 또는 iphonesimulator로 바꾼다.
-    // Vulkan: glslc -fshader-stage=vert Shaders/vertex.glsl -o Shaders/vertex.bin
-    // D3D12: dxc -T vs_6_0 -E main Shaders/vertex.hlsl -Fo Shaders/vertex.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/vertex.metal -o Shaders/vertex.air
-    //        xcrun -sdk macosx metallib Shaders/vertex.air -o Shaders/vertex.bin
-    std::ifstream vertexFile("Shaders/vertex.bin", std::ios::binary);
-    const std::vector<char> vertexBinary{
-        std::istreambuf_iterator<char>(vertexFile), std::istreambuf_iterator<char>()};
-    // Vulkan: glslc -fshader-stage=frag Shaders/scene.glsl -o Shaders/scene.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/scene.hlsl -Fo Shaders/scene.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/scene.metal -o Shaders/scene.air
-    //        xcrun -sdk macosx metallib Shaders/scene.air -o Shaders/scene.bin
-    std::ifstream sceneFile("Shaders/scene.bin", std::ios::binary);
-    const std::vector<char> sceneBinary{
-        std::istreambuf_iterator<char>(sceneFile), std::istreambuf_iterator<char>()};
-    // Vulkan: glslc -fshader-stage=frag Shaders/resolve.glsl -o Shaders/resolve.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/resolve.hlsl -Fo Shaders/resolve.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/resolve.metal -o Shaders/resolve.air
-    //        xcrun -sdk macosx metallib Shaders/resolve.air -o Shaders/resolve.bin
-    std::ifstream resolveFile("Shaders/resolve.bin", std::ios::binary);
-    const std::vector<char> resolveBinary{
-        std::istreambuf_iterator<char>(resolveFile), std::istreambuf_iterator<char>()};
-    // Vulkan: glslc -fshader-stage=frag Shaders/present.glsl -o Shaders/present.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/present.hlsl -Fo Shaders/present.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/present.metal -o Shaders/present.air
-    //        xcrun -sdk macosx metallib Shaders/present.air -o Shaders/present.bin
-    std::ifstream presentFile("Shaders/present.bin", std::ios::binary);
-    const std::vector<char> presentBinary{
-        std::istreambuf_iterator<char>(presentFile), std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
+#ifdef __APPLE__
     constexpr const char* vertexEntryPoint = "vertexMain";
     constexpr const char* sceneEntryPoint = "fragmentMain";
     constexpr const char* resolveEntryPoint = "fragmentMain";
@@ -73,6 +47,10 @@ int main() {
     constexpr const char* resolveEntryPoint = "main";
     constexpr const char* presentEntryPoint = "main";
 #endif
+    const auto vertexBinary = readShader("Shaders/vertex.bin");
+    const auto sceneBinary = readShader("Shaders/scene.bin");
+    const auto resolveBinary = readShader("Shaders/resolve.bin");
+    const auto presentBinary = readShader("Shaders/present.bin");
 
     auto vertexShader = resources.Keep(device.CreateShader(
         {ShaderStage::Vertex, vertexEntryPoint, vertexBinary.data(), vertexBinary.size()}));
@@ -89,7 +67,6 @@ int main() {
     sampler.addressU = sampler.addressV = sampler.addressW = SamplerAddressMode::ClampToEdge;
     sampler.mipLodBias = sampler.minLod = sampler.maxLod = 0;
 
-    std::vector<ResourceBindingLayout> sceneBindings;
     std::array<ColorAttachmentDesc, 2> sceneColors{};
     for (auto& attachment : sceneColors)
         attachment = {Format::R16G16B16A16_FLOAT, {}, ColorWriteMask::All};
@@ -97,11 +74,14 @@ int main() {
     sceneDesc.vertexShader = vertexShader;
     sceneDesc.fragmentShader = sceneShader;
     sceneDesc.topology = PrimitiveTopology::TriangleList;
-    sceneDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
+    sceneDesc.raster.fillMode = FillMode::Solid;
+    sceneDesc.raster.cullMode = CullMode::None;
+    sceneDesc.raster.frontFace = FrontFace::CounterClockwise;
     sceneDesc.colorAttachments = sceneColors.data();
     sceneDesc.colorAttachmentCount = uint32_t(sceneColors.size());
-    sceneDesc.layout = {sceneBindings.data(), uint32_t(sceneBindings.size()), sizeof(Params),
-                        ShaderStageFlags::Fragment, 15};
+    sceneDesc.layout.inlineConstantSize = sizeof(Params);
+    sceneDesc.layout.inlineConstantStages = ShaderStageFlags::Fragment;
+    sceneDesc.layout.inlineConstantBinding = 15;
     auto scenePipeline = resources.Keep(device.CreateGraphicsPipeline(sceneDesc));
 
     std::vector<ResourceBindingLayout> resolveBindings;
@@ -109,16 +89,16 @@ int main() {
     resolveBindings.push_back({1, ResourceBindingType::SampledTexture, 1, ShaderStageFlags::Fragment, {}});
     resolveBindings.push_back({2, ResourceBindingType::SampledTexture, 1, ShaderStageFlags::Fragment, {}});
     resolveBindings.push_back({8, ResourceBindingType::StaticSampler, 1, ShaderStageFlags::Fragment, sampler});
-    std::array<ColorAttachmentDesc, 1> resolveColors{};
-    for (auto& attachment : resolveColors)
-        attachment = {Format::R16G16B16A16_FLOAT, {}, ColorWriteMask::All};
+    ColorAttachmentDesc resolveColor{Format::R16G16B16A16_FLOAT, {}, ColorWriteMask::All};
     GraphicsPipelineDesc resolveDesc;
     resolveDesc.vertexShader = vertexShader;
     resolveDesc.fragmentShader = resolveShader;
     resolveDesc.topology = PrimitiveTopology::TriangleList;
-    resolveDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
-    resolveDesc.colorAttachments = resolveColors.data();
-    resolveDesc.colorAttachmentCount = uint32_t(resolveColors.size());
+    resolveDesc.raster.fillMode = FillMode::Solid;
+    resolveDesc.raster.cullMode = CullMode::None;
+    resolveDesc.raster.frontFace = FrontFace::CounterClockwise;
+    resolveDesc.colorAttachments = &resolveColor;
+    resolveDesc.colorAttachmentCount = 1;
     resolveDesc.layout = {resolveBindings.data(), uint32_t(resolveBindings.size()), sizeof(Params),
                           ShaderStageFlags::Fragment, 15};
     auto resolvePipeline = resources.Keep(device.CreateGraphicsPipeline(resolveDesc));
@@ -126,16 +106,16 @@ int main() {
     std::vector<ResourceBindingLayout> presentBindings;
     presentBindings.push_back({0, ResourceBindingType::SampledTexture, 1, ShaderStageFlags::Fragment, {}});
     presentBindings.push_back({8, ResourceBindingType::StaticSampler, 1, ShaderStageFlags::Fragment, sampler});
-    std::array<ColorAttachmentDesc, 1> presentColors{};
-    for (auto& attachment : presentColors)
-        attachment = {DefaultSwapchainFormat, {}, ColorWriteMask::All};
+    ColorAttachmentDesc presentColor{DefaultSwapchainFormat, {}, ColorWriteMask::All};
     GraphicsPipelineDesc presentDesc;
     presentDesc.vertexShader = vertexShader;
     presentDesc.fragmentShader = presentShader;
     presentDesc.topology = PrimitiveTopology::TriangleList;
-    presentDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
-    presentDesc.colorAttachments = presentColors.data();
-    presentDesc.colorAttachmentCount = uint32_t(presentColors.size());
+    presentDesc.raster.fillMode = FillMode::Solid;
+    presentDesc.raster.cullMode = CullMode::None;
+    presentDesc.raster.frontFace = FrontFace::CounterClockwise;
+    presentDesc.colorAttachments = &presentColor;
+    presentDesc.colorAttachmentCount = 1;
     presentDesc.layout.bindings = presentBindings.data();
     presentDesc.layout.bindingCount = uint32_t(presentBindings.size());
     auto presentPipeline = resources.Keep(device.CreateGraphicsPipeline(presentDesc));
@@ -216,15 +196,15 @@ int main() {
                 {presentPipeline, present1Bindings.data(), uint32_t(present1Bindings.size())}));
         }
 
-        params.sizeTime[0] = float(imageWidth);
-        params.sizeTime[1] = float(imageHeight);
-        params.sizeTime[2] = float(frame) / 60.0f;
+        params.screenSize[0] = float(imageWidth);
+        params.screenSize[1] = float(imageHeight);
+        params.time = float(frame) / 60.0f;
 
         const bool historyValid = !initializeImages;
-        params.extra[0] = historyValid ? 1.0f : 0.0f;
-        params.extra[3] = historyValid ? previousTime : params.sizeTime[2];
-        params.jitter[2] = historyValid ? previousJitter[0] : 0;
-        params.jitter[3] = historyValid ? previousJitter[1] : 0;
+        params.historyValid = historyValid ? 1.0f : 0.0f;
+        params.previousTime = historyValid ? previousTime : params.time;
+        params.previousJitter[0] = historyValid ? previousJitter[0] : 0;
+        params.previousJitter[1] = historyValid ? previousJitter[1] : 0;
         // Halton(2, 3) 수열의 첫 여덟 위치를 반복한다.
         constexpr float sampleOffsets[8][2] = {
             {0, -1.f/6}, {-.25f, 1.f/6}, {.25f, -7.f/18}, {-.375f, -1.f/18},
@@ -286,7 +266,7 @@ int main() {
             colors[1].storeOp = StoreOp::Store;
             commands->BeginRendering({colors.data(), uint32_t(colors.size()), nullptr});
             commands->BindGraphicsPipeline(scenePipeline);
-            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight), 0, 1});
+            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight)});
             commands->SetScissor({0, 0, imageWidth, imageHeight});
             commands->SetInlineConstants(0, sizeof(params), &params);
             commands->DrawInstanced(3, 1, 0, 0);
@@ -310,7 +290,7 @@ int main() {
             commands->BeginRendering({colors.data(), uint32_t(colors.size()), nullptr});
             commands->BindGraphicsPipeline(resolvePipeline);
             commands->BindResourceSet(resolveSet);
-            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight), 0, 1});
+            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight)});
             commands->SetScissor({0, 0, imageWidth, imageHeight});
             commands->SetInlineConstants(0, sizeof(params), &params);
             commands->DrawInstanced(3, 1, 0, 0);
@@ -331,7 +311,7 @@ int main() {
             commands->BeginRendering({colors.data(), uint32_t(colors.size()), nullptr});
             commands->BindGraphicsPipeline(presentPipeline);
             commands->BindResourceSet(presentSet);
-            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight), 0, 1});
+            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight)});
             commands->SetScissor({0, 0, imageWidth, imageHeight});
             commands->DrawInstanced(3, 1, 0, 0);
             commands->EndRendering();
@@ -343,7 +323,7 @@ int main() {
         (void)commands->Close();
         (void)device.Submit(&commands, 1);
         initializeImages = false;
-        previousTime = params.sizeTime[2];
+        previousTime = params.time;
         previousJitter[0] = params.jitter[0];
         previousJitter[1] = params.jitter[1];
 

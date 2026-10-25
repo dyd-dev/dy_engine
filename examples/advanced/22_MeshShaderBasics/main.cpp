@@ -10,30 +10,20 @@ using namespace dyf::RHI;
 
 int main()
 {
-    // Vulkan: glslc -fshader-stage=mesh --target-env=vulkan1.3 Shaders/basic_ms.glsl -o Shaders/basic_ms.bin
-    // D3D12: dxc -T ms_6_5 -E main Shaders/basic_ms.hlsl -Fo Shaders/basic_ms.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/basic.metal -o Shaders/basic_ms.air
-    //        xcrun -sdk macosx metallib Shaders/basic_ms.air -o Shaders/basic_ms.bin
-    std::ifstream basic_msFile("Shaders/basic_ms.bin",std::ios::binary);
-    const std::vector<char> basic_msBinary{
-        std::istreambuf_iterator<char>(basic_msFile),std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
+    const auto readShader = [](const char* path) {
+        std::ifstream file(path, std::ios::binary);
+        return std::vector<char>{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    };
+
+#ifdef __APPLE__
     const char* basic_msEntry="meshMain";
-#else
-    const char* basic_msEntry="main";
-#endif
-    // Vulkan: glslc -fshader-stage=frag Shaders/basic_ps.glsl -o Shaders/basic_ps.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/basic_ps.hlsl -Fo Shaders/basic_ps.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/basic.metal -o Shaders/basic_ps.air
-    //        xcrun -sdk macosx metallib Shaders/basic_ps.air -o Shaders/basic_ps.bin
-    std::ifstream basic_psFile("Shaders/basic_ps.bin",std::ios::binary);
-    const std::vector<char> basic_psBinary{
-        std::istreambuf_iterator<char>(basic_psFile),std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
     const char* basic_psEntry="fragmentMain";
 #else
+    const char* basic_msEntry="main";
     const char* basic_psEntry="main";
 #endif
+    const auto basic_msBinary = readShader("Shaders/basic_ms.bin");
+    const auto basic_psBinary = readShader("Shaders/basic_ps.bin");
 
     dyf::Platform::Window window(800,600,"Advanced / Mesh shader basics");
     std::unique_ptr<IDevice> device(IDevice::Create({}));
@@ -51,7 +41,9 @@ int main()
     MeshPipelineDesc pipelineDesc;
     pipelineDesc.meshShader=meshShader;
     pipelineDesc.fragmentShader=fragmentShader;
-    pipelineDesc.raster={FillMode::Solid,CullMode::None,FrontFace::CounterClockwise,0,0,0};
+    pipelineDesc.raster.fillMode = FillMode::Solid;
+    pipelineDesc.raster.cullMode = CullMode::None;
+    pipelineDesc.raster.frontFace = FrontFace::CounterClockwise;
     pipelineDesc.colorAttachments=&output;
     pipelineDesc.colorAttachmentCount=1;
     auto* pipeline=resources.Keep(device->CreateMeshPipeline(pipelineDesc));
@@ -78,7 +70,7 @@ int main()
         color.clearColor[3]=1.0f;
         commands->BeginRendering({&color,1,nullptr});
         commands->BindGraphicsPipeline(pipeline);
-        commands->SetViewport({0,0,float(extent.width),float(extent.height),0,1});
+        commands->SetViewport({0,0,float(extent.width),float(extent.height)});
         commands->SetScissor({0,0,extent.width,extent.height});
         // 정점 버퍼 없이 메쉬 셰이더가 정점 세 개와 삼각형 한 개를 만든다.
         commands->DispatchMesh(1,1,1);

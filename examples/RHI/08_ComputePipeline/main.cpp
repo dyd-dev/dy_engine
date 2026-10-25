@@ -14,20 +14,12 @@ namespace Platform = dyf::Platform;
 
 int main()
 {
-    // 해당 예제 폴더에서 실행한다. 연결한 백엔드에 맞는 명령으로 .bin을 준비한다.
-    // Vulkan: glslc -fshader-stage=comp Shaders/compute.glsl -o Shaders/compute.bin
-    // D3D12: dxc -T cs_6_0 -E main Shaders/compute.hlsl -Fo Shaders/compute.bin
-    // Vulkan: glslc -fshader-stage=vert Shaders/vertex.glsl -o Shaders/vertex.bin
-    // D3D12: dxc -T vs_6_0 -E main Shaders/vertex.hlsl -Fo Shaders/vertex.bin
-    // Vulkan: glslc -fshader-stage=frag Shaders/fragment.glsl -o Shaders/fragment.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/fragment.hlsl -Fo Shaders/fragment.bin
-    // Metal: 대상 SDK에 맞춰 macosx를 변경한다.
-    // xcrun -sdk macosx metal -c Shaders/program.metal -o Shaders/program.air
-    // 각 셰이더가 같은 라이브러리에서 자신의 진입점을 선택한다.
-    // xcrun -sdk macosx metallib Shaders/program.air -o Shaders/compute.bin
-    // xcrun -sdk macosx metallib Shaders/program.air -o Shaders/vertex.bin
-    // xcrun -sdk macosx metallib Shaders/program.air -o Shaders/fragment.bin
-#ifdef DY_EXAMPLE_METAL
+    const auto readShader = [](const char* path) {
+        std::ifstream file(path, std::ios::binary);
+        return std::vector<char>{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    };
+
+#ifdef __APPLE__
     constexpr const char* computeEntry = "computeMain";
     constexpr const char* vertexEntry = "vertexMain";
     constexpr const char* fragmentEntry = "fragmentMain";
@@ -36,15 +28,9 @@ int main()
     constexpr const char* vertexEntry = "main";
     constexpr const char* fragmentEntry = "main";
 #endif
-    std::ifstream computeFile("Shaders/compute.bin", std::ios::binary);
-    const std::vector<char> computeBinary{
-        std::istreambuf_iterator<char>(computeFile), std::istreambuf_iterator<char>()};
-    std::ifstream vertexFile("Shaders/vertex.bin", std::ios::binary);
-    const std::vector<char> vertexBinary{
-        std::istreambuf_iterator<char>(vertexFile), std::istreambuf_iterator<char>()};
-    std::ifstream fragmentFile("Shaders/fragment.bin", std::ios::binary);
-    const std::vector<char> fragmentBinary{
-        std::istreambuf_iterator<char>(fragmentFile), std::istreambuf_iterator<char>()};
+    const auto computeBinary = readShader("Shaders/compute.bin");
+    const auto vertexBinary = readShader("Shaders/vertex.bin");
+    const auto fragmentBinary = readShader("Shaders/fragment.bin");
 
     // 1. 창은 표시 대상만 제공한다. GPU 작업은 공개 RHI로 직접 구성한다.
     Platform::Window window(960, 640, "RHI / 08 Compute Pipeline");
@@ -53,8 +39,6 @@ int main()
     RHI::SwapchainDesc swapchain;
     swapchain.window = window.GetHandle();
     swapchain.format = RHI::DefaultSwapchainFormat;
-    swapchain.presentMode = RHI::PresentMode::Fifo;
-    swapchain.minimumImageCount = 2;
     (void)device->CreateSwapchain(swapchain);
 
     // 셰이더 조합과 입력 형식, 고정 기능 상태를 하나의 GPU 파이프라인으로 만든다.
@@ -95,7 +79,6 @@ int main()
     computeDesc.layout = {&outputBinding,1,16,RHI::ShaderStageFlags::Compute,15};
     // 그룹 하나의 스레드 3개가 정점 하나씩 생성한다.
     computeDesc.threadGroupSize[0] = 3;
-    computeDesc.threadGroupSize[1] = computeDesc.threadGroupSize[2] = 1;
     auto* computePipeline = device->CreateComputePipeline(computeDesc);
 
     RHI::BufferDesc generatedDesc;
@@ -150,7 +133,7 @@ int main()
         color.clearColor[2] = 0.08f;
         color.clearColor[3] = 1;
         commands->BeginRendering({&color, 1, nullptr});
-        commands->SetViewport({0, 0, float(extent.width), float(extent.height), 0, 1});
+        commands->SetViewport({0, 0, float(extent.width), float(extent.height)});
         commands->SetScissor({0, 0, extent.width, extent.height});
         commands->BindGraphicsPipeline(pipeline);
         commands->BindVertexBuffer(0,generatedVertices,0);

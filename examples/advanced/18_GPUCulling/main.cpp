@@ -13,42 +13,23 @@ using namespace dyf::RHI;
 
 int main()
 {
-    // Vulkan: glslc -fshader-stage=comp Shaders/cull.glsl -o Shaders/cull.bin
-    // D3D12: dxc -T cs_6_0 -E main Shaders/cull.hlsl -Fo Shaders/cull.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/program.metal -o Shaders/cull.air
-    //        xcrun -sdk macosx metallib Shaders/cull.air -o Shaders/cull.bin
-    std::ifstream cullFile("Shaders/cull.bin",std::ios::binary);
-    const std::vector<char> cullBinary{
-        std::istreambuf_iterator<char>(cullFile),std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
+    const auto readShader = [](const char* path) {
+        std::ifstream file(path, std::ios::binary);
+        return std::vector<char>{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    };
+
+#ifdef __APPLE__
     const char* cullEntry="cullObjects";
-#else
-    const char* cullEntry="main";
-#endif
-    // Vulkan: glslc -fshader-stage=vert Shaders/vertex.glsl -o Shaders/vertex.bin
-    // D3D12: dxc -T vs_6_0 -E main Shaders/vertex.hlsl -Fo Shaders/vertex.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/program.metal -o Shaders/vertex.air
-    //        xcrun -sdk macosx metallib Shaders/vertex.air -o Shaders/vertex.bin
-    std::ifstream vertexFile("Shaders/vertex.bin",std::ios::binary);
-    const std::vector<char> vertexBinary{
-        std::istreambuf_iterator<char>(vertexFile),std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
     const char* vertexEntry="vertexMain";
-#else
-    const char* vertexEntry="main";
-#endif
-    // Vulkan: glslc -fshader-stage=frag Shaders/fragment.glsl -o Shaders/fragment.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/fragment.hlsl -Fo Shaders/fragment.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/program.metal -o Shaders/fragment.air
-    //        xcrun -sdk macosx metallib Shaders/fragment.air -o Shaders/fragment.bin
-    std::ifstream fragmentFile("Shaders/fragment.bin",std::ios::binary);
-    const std::vector<char> fragmentBinary{
-        std::istreambuf_iterator<char>(fragmentFile),std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
     const char* fragmentEntry="fragmentMain";
 #else
+    const char* cullEntry="main";
+    const char* vertexEntry="main";
     const char* fragmentEntry="main";
 #endif
+    const auto cullBinary = readShader("Shaders/cull.bin");
+    const auto vertexBinary = readShader("Shaders/vertex.bin");
+    const auto fragmentBinary = readShader("Shaders/fragment.bin");
 
     constexpr uint32_t objectCount=1600;
     dyf::Platform::Window window(1100,720,"Advanced / GPU frustum culling");
@@ -101,7 +82,9 @@ int main()
     const ColorAttachmentDesc format{swapchain.format,{},ColorWriteMask::All};
     GraphicsPipelineDesc graphicsDesc;graphicsDesc.vertexShader=vs;graphicsDesc.fragmentShader=fs;
     graphicsDesc.topology=PrimitiveTopology::TriangleList;
-    graphicsDesc.raster={FillMode::Solid,CullMode::None,FrontFace::CounterClockwise,0,0,0};
+    graphicsDesc.raster.fillMode = FillMode::Solid;
+    graphicsDesc.raster.cullMode = CullMode::None;
+    graphicsDesc.raster.frontFace = FrontFace::CounterClockwise;
     graphicsDesc.colorAttachments=&format;graphicsDesc.colorAttachmentCount=1;
     graphicsDesc.layout={graphicsBindings,2,sizeof(Frame),ShaderStageFlags::Vertex,15};
     auto* graphics=resources.Keep(device.CreateGraphicsPipeline(graphicsDesc));
@@ -173,7 +156,7 @@ int main()
         commands->BeginRendering({&color,1,nullptr});
         commands->BindGraphicsPipeline(graphics);
         commands->BindResourceSet(graphicsSet);
-        commands->SetViewport({0,0,float(extent.width),float(extent.height),0,1});
+        commands->SetViewport({0,0,float(extent.width),float(extent.height)});
         commands->SetScissor({0,0,extent.width,extent.height});
         commands->SetInlineConstants(0,sizeof(data),&data);
         commands->DrawIndirect(arguments);

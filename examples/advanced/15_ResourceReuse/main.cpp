@@ -4,6 +4,8 @@
 #include <fstream>
 #include <iterator>
 #include <array>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -12,30 +14,20 @@ namespace RHI = dyf::RHI;
 
 int main()
 {
-    // Vulkan: glslc -fshader-stage=vert Shaders/canvas_vs.glsl -o Shaders/vertex.bin
-    // D3D12: dxc -T vs_6_0 -E main Shaders/canvas_vs.hlsl -Fo Shaders/vertex.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/canvas.metal -o Shaders/vertex.air
-    //        xcrun -sdk macosx metallib Shaders/vertex.air -o Shaders/vertex.bin
-    std::ifstream vertexFile("Shaders/vertex.bin",std::ios::binary);
-    const std::vector<char> vertexBinary{
-        std::istreambuf_iterator<char>(vertexFile),std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
+    const auto readShader = [](const char* path) {
+        std::ifstream file(path, std::ios::binary);
+        return std::vector<char>{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    };
+
+#ifdef __APPLE__
     const char* vertexEntry="canvasVertex";
-#else
-    const char* vertexEntry="main";
-#endif
-    // Vulkan: glslc -fshader-stage=frag Shaders/canvas_ps.glsl -o Shaders/fragment.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/canvas_ps.hlsl -Fo Shaders/fragment.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/canvas.metal -o Shaders/fragment.air
-    //        xcrun -sdk macosx metallib Shaders/fragment.air -o Shaders/fragment.bin
-    std::ifstream fragmentFile("Shaders/fragment.bin",std::ios::binary);
-    const std::vector<char> fragmentBinary{
-        std::istreambuf_iterator<char>(fragmentFile),std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
     const char* fragmentEntry="canvasFragment";
 #else
+    const char* vertexEntry="main";
     const char* fragmentEntry="main";
 #endif
+    const auto vertexBinary = readShader("Shaders/vertex.bin");
+    const auto fragmentBinary = readShader("Shaders/fragment.bin");
 
     dyf::Platform::Window window(800, 600, "Advanced / Resource reuse");
     std::unique_ptr<RHI::IDevice> owner(RHI::IDevice::Create({}));
@@ -52,24 +44,14 @@ int main()
         {-0.5f, -0.5f}, {0.5f, -0.5f}, {0.5f, 0.5f},
         {-0.5f, -0.5f}, {0.5f, 0.5f}, {-0.5f, 0.5f}
     }};
-    constexpr uint32_t side = 16, objectCount = side * side;
-    std::array<Instance, objectCount> instances{};
-    for(uint32_t i = 0; i < objectCount; ++i)
-    {
-        const uint32_t x = i % side, y = i / side;
-        instances[i] = {
-            -0.9f + (x + 0.5f) * 1.8f / side, -0.9f + (y + 0.5f) * 1.8f / side,
-            1.55f / side, 1.55f / side,
-            0.2f + 0.7f * x / (side - 1), 0.2f + 0.7f * y / (side - 1), 0.8f, 1.0f
-        };
-    }
+    Instance instance{0, 0, 0.4f, 0.4f, 0.2f, 0.7f, 1, 1};
     RHI::BufferDesc vertexDesc;
     vertexDesc.size = sizeof(vertices);
     vertexDesc.usage = RHI::BufferUsage::Vertex;
     vertexDesc.initialState = RHI::ResourceState::CopyDestination;
     auto* vertexBuffer = resources.Keep(device.CreateBuffer(vertexDesc));
     RHI::BufferDesc instanceDesc;
-    instanceDesc.size = sizeof(instances);
+    instanceDesc.size = sizeof(instance);
     instanceDesc.usage = RHI::BufferUsage::Vertex;
     instanceDesc.initialState = RHI::ResourceState::CopyDestination;
     auto* instanceBuffer = resources.Keep(device.CreateBuffer(instanceDesc));
@@ -96,11 +78,14 @@ int main()
     pipelineDesc.vertexBufferCount = 2;
     pipelineDesc.vertexAttributes = attributes;
     pipelineDesc.vertexAttributeCount = 3;
-    pipelineDesc.raster = {RHI::FillMode::Solid, RHI::CullMode::None, RHI::FrontFace::CounterClockwise, 0, 0, 0};
+    pipelineDesc.raster.fillMode = RHI::FillMode::Solid;
+    pipelineDesc.raster.cullMode = RHI::CullMode::None;
+    pipelineDesc.raster.frontFace = RHI::FrontFace::CounterClockwise;
     pipelineDesc.colorAttachments = &output;
     pipelineDesc.colorAttachmentCount = 1;
     auto* pipeline = resources.Keep(device.CreateGraphicsPipeline(pipelineDesc));
 
+    const auto started = std::chrono::steady_clock::now();
     bool uploaded = false;
     while(window.IsRunning())
     {
@@ -123,7 +108,10 @@ int main()
                 RHI::ResourceState::VertexBuffer, RHI::ResourceState::CopyDestination, {}};
             commands->ResourceBarrier(&writable, 1);
         }
-        (void)device.UpdateBuffer(*commands, instanceBuffer, 0, instances.data(), sizeof(instances));
+        const float time = std::chrono::duration<float>(std::chrono::steady_clock::now() - started).count();
+        instance.x = 0.6f * std::sin(time);
+        instance.y = 0.4f * std::cos(time);
+        (void)device.UpdateBuffer(*commands, instanceBuffer, 0, &instance, sizeof(instance));
         const RHI::ResourceBarrierDesc readable{instanceBuffer, nullptr,
             RHI::ResourceState::CopyDestination, RHI::ResourceState::VertexBuffer, {}};
         commands->ResourceBarrier(&readable, 1);
@@ -145,9 +133,9 @@ int main()
         commands->BindGraphicsPipeline(pipeline);
         commands->BindVertexBuffer(0, vertexBuffer, 0);
         commands->BindVertexBuffer(1, instanceBuffer, 0);
-        commands->SetViewport({0, 0, float(extent.width), float(extent.height), 0, 1});
+        commands->SetViewport({0, 0, float(extent.width), float(extent.height)});
         commands->SetScissor({0, 0, extent.width, extent.height});
-        commands->DrawInstanced(uint32_t(vertices.size()), objectCount, 0, 0);
+        commands->DrawInstanced(uint32_t(vertices.size()), 1, 0, 0);
         commands->EndRendering();
         const RHI::ResourceBarrierDesc end{nullptr, target,
             RHI::ResourceState::RenderTarget, RHI::ResourceState::Present, {}};

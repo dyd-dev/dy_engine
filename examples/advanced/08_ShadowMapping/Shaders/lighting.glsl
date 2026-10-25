@@ -1,10 +1,14 @@
 #version 450
-struct Params { vec4 sizeTime; vec4 settings; vec4 jitter; vec4 extra; };
+struct Params {
+    vec2 screenSize;
+    float exposure;
+    float shadowBias;
+};
 layout(push_constant) uniform Config { Params p; };
 layout(location=0) in vec2 uv;
 layout(location=0) out vec4 result0;
-layout(set=0,binding=0) uniform texture2D image0;
-layout(set=0,binding=8) uniform sampler imageSampler;
+layout(set=0,binding=0) uniform texture2D shadowMap;
+layout(set=0,binding=8) uniform sampler shadowSampler;
 
 // Analytic surfaces keep this lighting exercise independent of model assets.
 struct Surface { vec3 position; vec3 normal; vec3 albedo; float distance; float material; };
@@ -13,7 +17,7 @@ void main() {
     vec3 forward=normalize(vec3(0.0,0.0,0.8)-cameraPosition);
     vec3 right=normalize(cross(forward,vec3(0.0,0.0,1.0)));
     vec3 up=cross(right,forward);
-    vec2 q=(uv*2.0-1.0)*vec2(p.sizeTime.x/p.sizeTime.y,-1.0);
+    vec2 q=(uv*2.0-1.0)*vec2(p.screenSize.x/p.screenSize.y,-1.0);
     vec3 rd=normalize(forward+0.55*(q.x*right+q.y*up));
     Surface s; s.distance=40.0; s.position=cameraPosition+rd*40.0;
     s.normal=vec3(0.0,0.0,1.0); s.albedo=vec3(0.04,0.08,0.14); s.material=-1.0;
@@ -36,8 +40,14 @@ void main() {
             s.material=float(i+1);
         }
     }
+    vec3 lightDirection=normalize(vec3(0.5,0.3,1.0));
+    vec2 shadowUV=(s.position.xy+(6.0-s.position.z)*vec2(0.5,0.3))/10.0+0.5;
+    float storedDepth=texture(sampler2D(shadowMap,shadowSampler),shadowUV).r;
+    float receiverDepth=(6.0-s.position.z)/8.0;
+    bool insideShadowMap=all(greaterThanEqual(shadowUV,vec2(0.0))) && all(lessThanEqual(shadowUV,vec2(1.0)));
+    float visibility=insideShadowMap && receiverDepth-p.shadowBias>storedDepth ? 0.0 : 1.0;
     vec3 color=s.material<0.0 ? s.albedo : s.albedo*(0.1+visibility*max(dot(s.normal,lightDirection),0.0));
-    vec3 displayColor=max(color*p.settings.x,vec3(0.0));
+    vec3 displayColor=max(color*p.exposure,vec3(0.0));
     for(int channel=0; channel<3; channel++) {
         float value=displayColor[channel];
         displayColor[channel]=value<=0.0031308 ? value*12.92 : 1.055*pow(value,1.0/2.4)-0.055;

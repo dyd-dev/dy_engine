@@ -1,5 +1,10 @@
 #version 450
-struct Params { vec4 sizeTime; vec4 settings; vec4 jitter; vec4 extra; };
+struct Params {
+    vec2 screenSize;
+    float time;
+    uint lightCount;
+    float exposure;
+};
 layout(push_constant) uniform Config { Params p; };
 layout(location=0) in vec2 uv;
 layout(location=0) out vec4 result0;
@@ -12,7 +17,7 @@ void main() {
     vec3 forward=normalize(vec3(0.0,0.0,0.8)-cameraPosition);
     vec3 right=normalize(cross(forward,vec3(0.0,0.0,1.0)));
     vec3 up=cross(right,forward);
-    vec2 q=(uv*2.0-1.0)*vec2(p.sizeTime.x/p.sizeTime.y,-1.0);
+    vec2 q=(uv*2.0-1.0)*vec2(p.screenSize.x/p.screenSize.y,-1.0);
     vec3 rd=normalize(forward+0.55*(q.x*right+q.y*up));
     Surface s; s.distance=40.0; s.position=cameraPosition+rd*40.0;
     s.normal=vec3(0.0,0.0,1.0); s.albedo=vec3(0.04,0.08,0.14); s.material=-1.0;
@@ -44,9 +49,9 @@ void main() {
         uint count=indices[base];color=s.albedo*0.04;
         bool outside=any(lessThan(normalized,vec3(0.0))) || any(greaterThanEqual(normalized,vec3(1.0)));
         if(outside) {
-            for(int i=0;i<int(p.extra.z);i++) {
+            for(int i=0;i<int(p.lightCount);i++) {
             float f=float(i);
-            vec3 position=vec3(sin(f*2.17+p.sizeTime.z*0.17)*4.0,cos(f*1.37+p.sizeTime.z*0.11)*3.0,0.5+fract(f*0.319)*2.5);
+            vec3 position=vec3(sin(f*2.17+p.time*0.17)*4.0,cos(f*1.37+p.time*0.11)*3.0,0.5+fract(f*0.319)*2.5);
             vec3 delta=position-s.position; float d=length(delta), radius=2.4;
             float attenuation=pow(max(1.0-d/radius,0.0),2.0);
             color+=s.albedo*(0.4+0.6*cos(vec3(0.0,2.1,4.2)+float(i)*0.71))*max(dot(s.normal,delta/max(d,0.001)),0.0)*attenuation*1.8;
@@ -54,14 +59,14 @@ void main() {
         } else {
             for(uint j=0u;j<count;j++) {
             int i=int(indices[base+1u+j]); float f=float(i);
-            vec3 position=vec3(sin(f*2.17+p.sizeTime.z*0.17)*4.0,cos(f*1.37+p.sizeTime.z*0.11)*3.0,0.5+fract(f*0.319)*2.5);
+            vec3 position=vec3(sin(f*2.17+p.time*0.17)*4.0,cos(f*1.37+p.time*0.11)*3.0,0.5+fract(f*0.319)*2.5);
             vec3 delta=position-s.position; float d=length(delta), radius=2.4;
             float attenuation=pow(max(1.0-d/radius,0.0),2.0);
             color+=s.albedo*(0.4+0.6*cos(vec3(0.0,2.1,4.2)+float(i)*0.71))*max(dot(s.normal,delta/max(d,0.001)),0.0)*attenuation*1.8;
         }
         }
     }
-    vec3 c=color*p.settings.x;
+    vec3 c=color*p.exposure;
     c=clamp((c*(2.51*c+0.03))/(c*(2.43*c+0.59)+0.14),vec3(0.0),vec3(1.0));
     for(int channel=0;channel<3;channel++) {
         float x=max(c[channel],0.0);

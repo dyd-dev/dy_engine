@@ -11,7 +11,6 @@ int main()
     dyf::RHI::SwapchainDesc swapchain;
     swapchain.window = window.GetHandle();
     swapchain.format = dyf::RHI::DefaultSwapchainFormat;
-    swapchain.presentMode = dyf::RHI::PresentMode::Fifo;
     (void)device->CreateSwapchain(swapchain);
     auto gui = dyf::Gui::Create(window, *device);
 

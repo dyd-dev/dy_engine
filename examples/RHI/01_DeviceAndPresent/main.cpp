@@ -15,8 +15,6 @@ int main()
     RHI::SwapchainDesc swapchain;
     swapchain.window = window.GetHandle();
     swapchain.format = RHI::DefaultSwapchainFormat;
-    swapchain.presentMode = RHI::PresentMode::Fifo;
-    swapchain.minimumImageCount = 2;
     (void)device->CreateSwapchain(swapchain);
 
     // 이 예제는 셰이더·파이프라인·Draw 없이 clear와 제출 수명을 먼저 보여준다.

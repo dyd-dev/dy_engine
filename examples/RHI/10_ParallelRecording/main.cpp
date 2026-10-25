@@ -15,23 +15,12 @@ namespace Platform = dyf::Platform;
 
 int main()
 {
-    // 해당 예제 폴더에서 실행한다. 연결한 백엔드에 맞는 명령으로 .bin을 준비한다.
-    // Vulkan: glslc -fshader-stage=vert Shaders/scene_vertex.glsl -o Shaders/scene_vertex.bin
-    // D3D12: dxc -T vs_6_0 -E main Shaders/scene_vertex.hlsl -Fo Shaders/scene_vertex.bin
-    // Vulkan: glslc -fshader-stage=frag Shaders/scene_fragment.glsl -o Shaders/scene_fragment.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/scene_fragment.hlsl -Fo Shaders/scene_fragment.bin
-    // Vulkan: glslc -fshader-stage=vert Shaders/display_vertex.glsl -o Shaders/display_vertex.bin
-    // D3D12: dxc -T vs_6_0 -E main Shaders/display_vertex.hlsl -Fo Shaders/display_vertex.bin
-    // Vulkan: glslc -fshader-stage=frag Shaders/display_fragment.glsl -o Shaders/display_fragment.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/display_fragment.hlsl -Fo Shaders/display_fragment.bin
-    // Metal: 대상 SDK에 맞춰 macosx를 변경한다.
-    // xcrun -sdk macosx metal -c Shaders/program.metal -o Shaders/program.air
-    // 각 셰이더가 같은 라이브러리에서 자신의 진입점을 선택한다.
-    // xcrun -sdk macosx metallib Shaders/program.air -o Shaders/scene_vertex.bin
-    // xcrun -sdk macosx metallib Shaders/program.air -o Shaders/scene_fragment.bin
-    // xcrun -sdk macosx metallib Shaders/program.air -o Shaders/display_vertex.bin
-    // xcrun -sdk macosx metallib Shaders/program.air -o Shaders/display_fragment.bin
-#ifdef DY_EXAMPLE_METAL
+    const auto readShader = [](const char* path) {
+        std::ifstream file(path, std::ios::binary);
+        return std::vector<char>{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    };
+
+#ifdef __APPLE__
     constexpr const char* scene_vertexEntry = "sceneVertex";
     constexpr const char* scene_fragmentEntry = "sceneFragment";
     constexpr const char* display_vertexEntry = "displayVertex";
@@ -42,18 +31,10 @@ int main()
     constexpr const char* display_vertexEntry = "main";
     constexpr const char* display_fragmentEntry = "main";
 #endif
-    std::ifstream scene_vertexFile("Shaders/scene_vertex.bin", std::ios::binary);
-    const std::vector<char> scene_vertexBinary{
-        std::istreambuf_iterator<char>(scene_vertexFile), std::istreambuf_iterator<char>()};
-    std::ifstream scene_fragmentFile("Shaders/scene_fragment.bin", std::ios::binary);
-    const std::vector<char> scene_fragmentBinary{
-        std::istreambuf_iterator<char>(scene_fragmentFile), std::istreambuf_iterator<char>()};
-    std::ifstream display_vertexFile("Shaders/display_vertex.bin", std::ios::binary);
-    const std::vector<char> display_vertexBinary{
-        std::istreambuf_iterator<char>(display_vertexFile), std::istreambuf_iterator<char>()};
-    std::ifstream display_fragmentFile("Shaders/display_fragment.bin", std::ios::binary);
-    const std::vector<char> display_fragmentBinary{
-        std::istreambuf_iterator<char>(display_fragmentFile), std::istreambuf_iterator<char>()};
+    const auto scene_vertexBinary = readShader("Shaders/scene_vertex.bin");
+    const auto scene_fragmentBinary = readShader("Shaders/scene_fragment.bin");
+    const auto display_vertexBinary = readShader("Shaders/display_vertex.bin");
+    const auto display_fragmentBinary = readShader("Shaders/display_fragment.bin");
 
     Platform::Window window(960, 640, "RHI / 10 Parallel Recording");
     std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create({}));
@@ -61,8 +42,6 @@ int main()
     RHI::SwapchainDesc swapchain;
     swapchain.window = window.GetHandle();
     swapchain.format = RHI::DefaultSwapchainFormat;
-    swapchain.presentMode = RHI::PresentMode::Fifo;
-    swapchain.minimumImageCount = 2;
     (void)device->CreateSwapchain(swapchain);
 
     // 1. Pipeline과 Shader는 메인 스레드에서 만들고 기록 중에는 공유해서 읽는다.
@@ -87,7 +66,9 @@ int main()
     sceneDesc.raster.frontFace = RHI::FrontFace::CounterClockwise;
     sceneDesc.colorAttachments = &sceneOutput;
     sceneDesc.colorAttachmentCount = 1;
-    sceneDesc.layout = {nullptr, 0, 16, RHI::ShaderStageFlags::Vertex, 15};
+    sceneDesc.layout.inlineConstantSize = 16;
+    sceneDesc.layout.inlineConstantStages = RHI::ShaderStageFlags::Vertex;
+    sceneDesc.layout.inlineConstantBinding = 15;
     auto* scenePipeline = device->CreateGraphicsPipeline(sceneDesc);
 
     RHI::SamplerDesc sampler;
@@ -196,7 +177,7 @@ int main()
                     color.clearColor[3] = 1;
                     commands->BeginRendering({&color, 1, nullptr});
                     commands->BindGraphicsPipeline(scenePipeline);
-                    commands->SetViewport({0, 0, 512, 512, 0, 1});
+                    commands->SetViewport({0, 0, 512, 512});
                     commands->SetScissor({0, 0, 512, 512});
                     const float parameters[4] = {elapsed * 0.4f + float(i) * 1.2f, 0, 0, 0};
                     commands->SetInlineConstants(0, sizeof(parameters), parameters);
@@ -226,7 +207,7 @@ int main()
         color.clearColor[3] = 1;
         composite->BeginRendering({&color, 1, nullptr});
         composite->BindGraphicsPipeline(displayPipeline);
-        composite->SetViewport({0, 0, float(extent.width), float(extent.height), 0, 1});
+        composite->SetViewport({0, 0, float(extent.width), float(extent.height)});
         composite->SetScissor({0, 0, extent.width, extent.height});
         for(uint32_t i = 0; i < workerCount; ++i)
         {

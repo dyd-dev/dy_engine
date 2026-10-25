@@ -11,22 +11,23 @@
 using namespace dyf::RHI;
 
 struct alignas(16) Params {
-    float sizeTime[4] = {960, 640, 0, 0};
-    float settings[4] = {1, .45f, .8f, .9f};
-    float jitter[4] = {};
-    float extra[4] = {};
+    float screenSize[2] = {};
+    float time = 0;
+    float exposure = 1;
+    float density = .22f;
+    float heightFalloff = .7f;
+    uint32_t stepCount = 64;
 };
 
 int main() {
+    const auto readShader = [](const char* path) {
+        std::ifstream file(path, std::ios::binary);
+        return std::vector<char>{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    };
+
     Params params;
-    params.extra[0] = .22f;
-    params.extra[1] = 64;
-    params.settings[1] = .7f;
     dyf::Platform::Window window(960, 640, "Advanced / 13_VolumetricFog");
-
-    DeviceDesc deviceDesc;
-
-    std::unique_ptr<IDevice> owner(IDevice::Create(deviceDesc));
+    std::unique_ptr<IDevice> owner(IDevice::Create({}));
 
     auto& device = *owner;
 
@@ -35,35 +36,10 @@ int main() {
     SwapchainDesc swap;
     swap.window = window.GetHandle();
     swap.format = DefaultSwapchainFormat;
-    swap.minimumImageCount = 2;
-    swap.presentMode = PresentMode::Fifo;
 
     (void)device.CreateSwapchain(swap);
 
-    // 예제 폴더에서 연결한 엔진의 백엔드에 맞는 명령으로 셰이더를 컴파일한다.
-    // Metal의 macosx SDK는 대상에 따라 iphoneos 또는 iphonesimulator로 바꾼다.
-    // Vulkan: glslc -fshader-stage=vert Shaders/vertex.glsl -o Shaders/vertex.bin
-    // D3D12: dxc -T vs_6_0 -E main Shaders/vertex.hlsl -Fo Shaders/vertex.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/vertex.metal -o Shaders/vertex.air
-    //        xcrun -sdk macosx metallib Shaders/vertex.air -o Shaders/vertex.bin
-    std::ifstream vertexFile("Shaders/vertex.bin", std::ios::binary);
-    const std::vector<char> vertexBinary{
-        std::istreambuf_iterator<char>(vertexFile), std::istreambuf_iterator<char>()};
-    // Vulkan: glslc -fshader-stage=frag Shaders/scene.glsl -o Shaders/scene.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/scene.hlsl -Fo Shaders/scene.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/scene.metal -o Shaders/scene.air
-    //        xcrun -sdk macosx metallib Shaders/scene.air -o Shaders/scene.bin
-    std::ifstream sceneFile("Shaders/scene.bin", std::ios::binary);
-    const std::vector<char> sceneBinary{
-        std::istreambuf_iterator<char>(sceneFile), std::istreambuf_iterator<char>()};
-    // Vulkan: glslc -fshader-stage=frag Shaders/fog.glsl -o Shaders/fog.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/fog.hlsl -Fo Shaders/fog.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/fog.metal -o Shaders/fog.air
-    //        xcrun -sdk macosx metallib Shaders/fog.air -o Shaders/fog.bin
-    std::ifstream fogFile("Shaders/fog.bin", std::ios::binary);
-    const std::vector<char> fogBinary{
-        std::istreambuf_iterator<char>(fogFile), std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
+#ifdef __APPLE__
     constexpr const char* vertexEntryPoint = "vertexMain";
     constexpr const char* sceneEntryPoint = "fragmentMain";
     constexpr const char* fogEntryPoint = "fragmentMain";
@@ -72,6 +48,9 @@ int main() {
     constexpr const char* sceneEntryPoint = "main";
     constexpr const char* fogEntryPoint = "main";
 #endif
+    const auto vertexBinary = readShader("Shaders/vertex.bin");
+    const auto sceneBinary = readShader("Shaders/scene.bin");
+    const auto fogBinary = readShader("Shaders/fog.bin");
 
     auto vertexShader = resources.Keep(device.CreateShader({
         ShaderStage::Vertex,
@@ -106,10 +85,14 @@ int main() {
     sceneDesc.vertexShader = vertexShader;
     sceneDesc.fragmentShader = sceneShader;
     sceneDesc.topology = PrimitiveTopology::TriangleList;
-    sceneDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
+    sceneDesc.raster.fillMode = FillMode::Solid;
+    sceneDesc.raster.cullMode = CullMode::None;
+    sceneDesc.raster.frontFace = FrontFace::CounterClockwise;
     sceneDesc.colorAttachments = &sceneColorDesc;
     sceneDesc.colorAttachmentCount = 1;
-    sceneDesc.layout = {nullptr, 0, sizeof(Params), ShaderStageFlags::Fragment, 15};
+    sceneDesc.layout.inlineConstantSize = sizeof(Params);
+    sceneDesc.layout.inlineConstantStages = ShaderStageFlags::Fragment;
+    sceneDesc.layout.inlineConstantBinding = 15;
     auto scenePipeline = resources.Keep(device.CreateGraphicsPipeline(sceneDesc));
 
     std::vector<ResourceBindingLayout> fogBindings;
@@ -120,7 +103,9 @@ int main() {
     fogDesc.vertexShader = vertexShader;
     fogDesc.fragmentShader = fogShader;
     fogDesc.topology = PrimitiveTopology::TriangleList;
-    fogDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
+    fogDesc.raster.fillMode = FillMode::Solid;
+    fogDesc.raster.cullMode = CullMode::None;
+    fogDesc.raster.frontFace = FrontFace::CounterClockwise;
     fogDesc.colorAttachments = &fogColorDesc;
     fogDesc.colorAttachmentCount = 1;
     fogDesc.layout = {fogBindings.data(), uint32_t(fogBindings.size()), sizeof(Params), ShaderStageFlags::Fragment, 15};
@@ -167,9 +152,9 @@ int main() {
             fogSet = imageResources->Keep(device.CreateResourceSet({fogPipeline, fogSetBindings.data(), uint32_t(fogSetBindings.size())}));
         }
 
-        params.sizeTime[0] = float(imageWidth);
-        params.sizeTime[1] = float(imageHeight);
-        params.sizeTime[2] = float(frame) / 60.0f;
+        params.screenSize[0] = float(imageWidth);
+        params.screenSize[1] = float(imageHeight);
+        params.time = float(frame) / 60.0f;
 
         dyf::RHI::ResourceScope frameResources(device);
         auto* commands = frameResources.Keep(device.AcquireCommandList());
@@ -185,7 +170,7 @@ int main() {
 
             commands->BeginRendering({colors.data(), uint32_t(colors.size()), nullptr});
             commands->BindGraphicsPipeline(scenePipeline);
-            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight), 0, 1});
+            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight)});
             commands->SetScissor({0, 0, imageWidth, imageHeight});
             commands->SetInlineConstants(0, sizeof(params), &params);
             commands->DrawInstanced(3, 1, 0, 0);
@@ -207,7 +192,7 @@ int main() {
             commands->BeginRendering({colors.data(), uint32_t(colors.size()), nullptr});
             commands->BindGraphicsPipeline(fogPipeline);
             commands->BindResourceSet(fogSet);
-            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight), 0, 1});
+            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight)});
             commands->SetScissor({0, 0, imageWidth, imageHeight});
             commands->SetInlineConstants(0, sizeof(params), &params);
             commands->DrawInstanced(3, 1, 0, 0);

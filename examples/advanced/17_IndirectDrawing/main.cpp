@@ -12,42 +12,23 @@ using namespace dyf::RHI;
 
 int main()
 {
-    // Vulkan: glslc -fshader-stage=comp Shaders/generate.glsl -o Shaders/generate.bin
-    // D3D12: dxc -T cs_6_0 -E main Shaders/generate.hlsl -Fo Shaders/generate.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/program.metal -o Shaders/generate.air
-    //        xcrun -sdk macosx metallib Shaders/generate.air -o Shaders/generate.bin
-    std::ifstream generateFile("Shaders/generate.bin",std::ios::binary);
-    const std::vector<char> generateBinary{
-        std::istreambuf_iterator<char>(generateFile),std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
+    const auto readShader = [](const char* path) {
+        std::ifstream file(path, std::ios::binary);
+        return std::vector<char>{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    };
+
+#ifdef __APPLE__
     const char* generateEntry="generateArguments";
-#else
-    const char* generateEntry="main";
-#endif
-    // Vulkan: glslc -fshader-stage=vert Shaders/vertex.glsl -o Shaders/vertex.bin
-    // D3D12: dxc -T vs_6_0 -E main Shaders/vertex.hlsl -Fo Shaders/vertex.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/program.metal -o Shaders/vertex.air
-    //        xcrun -sdk macosx metallib Shaders/vertex.air -o Shaders/vertex.bin
-    std::ifstream vertexFile("Shaders/vertex.bin",std::ios::binary);
-    const std::vector<char> vertexBinary{
-        std::istreambuf_iterator<char>(vertexFile),std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
     const char* vertexEntry="vertexMain";
-#else
-    const char* vertexEntry="main";
-#endif
-    // Vulkan: glslc -fshader-stage=frag Shaders/fragment.glsl -o Shaders/fragment.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/fragment.hlsl -Fo Shaders/fragment.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/program.metal -o Shaders/fragment.air
-    //        xcrun -sdk macosx metallib Shaders/fragment.air -o Shaders/fragment.bin
-    std::ifstream fragmentFile("Shaders/fragment.bin",std::ios::binary);
-    const std::vector<char> fragmentBinary{
-        std::istreambuf_iterator<char>(fragmentFile),std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
     const char* fragmentEntry="fragmentMain";
 #else
+    const char* generateEntry="main";
+    const char* vertexEntry="main";
     const char* fragmentEntry="main";
 #endif
+    const auto generateBinary = readShader("Shaders/generate.bin");
+    const auto vertexBinary = readShader("Shaders/vertex.bin");
+    const auto fragmentBinary = readShader("Shaders/fragment.bin");
 
     dyf::Platform::Window window(1000, 650, "Advanced / GPU-generated indirect drawing");
     
@@ -100,10 +81,14 @@ int main()
     graphicsDesc.vertexShader = vs;
     graphicsDesc.fragmentShader = fs;
     graphicsDesc.topology = PrimitiveTopology::TriangleList;
-    graphicsDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
+    graphicsDesc.raster.fillMode = FillMode::Solid;
+    graphicsDesc.raster.cullMode = CullMode::None;
+    graphicsDesc.raster.frontFace = FrontFace::CounterClockwise;
     graphicsDesc.colorAttachments = &format;
     graphicsDesc.colorAttachmentCount = 1;
-    graphicsDesc.layout = {nullptr, 0, 16, ShaderStageFlags::Vertex, 15};
+    graphicsDesc.layout.inlineConstantSize = 16;
+    graphicsDesc.layout.inlineConstantStages = ShaderStageFlags::Vertex;
+    graphicsDesc.layout.inlineConstantBinding = 15;
     auto* graphics = resources.Keep(device.CreateGraphicsPipeline(graphicsDesc));
 
     const auto start = std::chrono::steady_clock::now();
@@ -161,7 +146,7 @@ int main()
         color.clearColor[3] = 1.0f;
         commands->BeginRendering({&color, 1, nullptr});
         commands->BindGraphicsPipeline(graphics);
-        commands->SetViewport({0, 0, float(extent.width), float(extent.height), 0, 1});
+        commands->SetViewport({0, 0, float(extent.width), float(extent.height)});
         commands->SetScissor({0, 0, extent.width, extent.height});
         // Keep the grids and triangles proportional while the tiled window resizes.
         const float aspect = float(extent.width) / float(extent.height);

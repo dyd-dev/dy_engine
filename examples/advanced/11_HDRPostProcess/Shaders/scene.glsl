@@ -1,5 +1,11 @@
 #version 450
-struct Params { vec4 sizeTime; vec4 settings; vec4 jitter; vec4 extra; };
+struct Params {
+    vec2 screenSize;
+    float exposure;
+    float threshold;
+    float bloomStrength;
+    float emissiveIntensity;
+};
 layout(push_constant) uniform Config { Params p; };
 layout(location=0) in vec2 uv;
 layout(location=0) out vec4 result0;
@@ -14,7 +20,7 @@ void main() {
     vec3 forward=normalize(vec3(0.0,0.0,0.8)-cameraPosition);
     vec3 right=normalize(cross(forward,vec3(0.0,0.0,1.0)));
     vec3 up=cross(right,forward);
-    vec2 cameraCoord=(uv*2.0-1.0)*vec2(p.sizeTime.x/p.sizeTime.y,-1.0);
+    vec2 cameraCoord=(uv*2.0-1.0)*vec2(p.screenSize.x/p.screenSize.y,-1.0);
     vec3 rd=normalize(forward+0.55*(cameraCoord.x*right+cameraCoord.y*up));
 
     Surface s; s.distance=40.0; s.position=cameraPosition+rd*40.0;
@@ -40,9 +46,9 @@ void main() {
     }
 vec3 color=s.albedo;
 if(s.material>=0.0) color=s.albedo*(0.07+max(dot(s.normal,normalize(vec3(-0.3,-0.5,1.0))),0.0))*2.0;
-if(s.material>1.5 && s.material<2.5) color+=vec3(0.1,0.55,1.0)*p.extra.x;
+if(s.material>1.5 && s.material<2.5) color+=vec3(0.1,0.55,1.0)*p.emissiveIntensity;
 vec2 q=uv-vec2(0.78,0.22);
-color+=vec3(1.0,0.55,0.12)*exp(-dot(q,q)*1600.0)*p.extra.x*2.0;
+color+=vec3(1.0,0.55,0.12)*exp(-dot(q,q)*1600.0)*p.emissiveIntensity*2.0;
 result0=vec4(color,1.0);
 
 }

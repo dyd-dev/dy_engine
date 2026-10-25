@@ -2,12 +2,16 @@ bool2 greaterThanEqual(float2 a,float2 b) { return a>=b; }
 bool3 greaterThanEqual(float3 a,float3 b) { return a>=b; }
 bool2 lessThanEqual(float2 a,float2 b) { return a<=b; }
 
-struct Params { float4 sizeTime; float4 settings; float4 jitter; float4 extra; };
+struct Params {
+    float2 screenSize;
+    float exposure;
+    float shadowBias;
+};
 struct Input { float4 position :SV_Position; float2 uv :TEXCOORD0; };
 struct Output { float4 c0 : SV_Target0; };
 cbuffer Config:register(b15) { Params p; };
-Texture2D<float4> image0:register(t0);
-SamplerState imageSampler:register(s8);
+Texture2D<float4> shadowMap:register(t0);
+SamplerState shadowSampler:register(s8);
 
 // Analytic surfaces keep this lighting exercise independent of model assets.
 struct Surface { float3 position; float3 normal; float3 albedo; float distance; float material; };
@@ -17,7 +21,7 @@ Output main(Input input) {
     float3 forward=normalize(float3(0.0,0.0,0.8)-cameraPosition);
     float3 right=normalize(cross(forward,float3(0.0,0.0,1.0)));
     float3 up=cross(right,forward);
-    float2 q=(uv*2.0-1.0)*float2(p.sizeTime.x/p.sizeTime.y,-1.0);
+    float2 q=(uv*2.0-1.0)*float2(p.screenSize.x/p.screenSize.y,-1.0);
     float3 rd=normalize(forward+0.55*(q.x*right+q.y*up));
     Surface s; s.distance=40.0; s.position=cameraPosition+rd*40.0;
     s.normal=float3(0.0,0.0,1.0); s.albedo=float3(0.04,0.08,0.14); s.material=-1.0;
@@ -40,8 +44,14 @@ Output main(Input input) {
             s.material=float(i+1);
         }
     }
+    float3 lightDirection=normalize(float3(0.5,0.3,1.0));
+    float2 shadowUV=(s.position.xy+(6.0-s.position.z)*float2(0.5,0.3))/10.0+0.5;
+    float storedDepth=shadowMap.SampleLevel(shadowSampler,shadowUV,0).r;
+    float receiverDepth=(6.0-s.position.z)/8.0;
+    bool insideShadowMap=all(shadowUV>=float2(0.0,0.0)) && all(shadowUV<=float2(1.0,1.0));
+    float visibility=insideShadowMap && receiverDepth-p.shadowBias>storedDepth ? 0.0 : 1.0;
     float3 color=s.material<0.0 ? s.albedo : s.albedo*(0.1+visibility*max(dot(s.normal,lightDirection),0.0));
-    float3 displayColor=max(color*p.settings.x,float3(0.0,0.0,0.0));
+    float3 displayColor=max(color*p.exposure,float3(0.0,0.0,0.0));
     for(int channel=0; channel<3; channel++) {
         float value=displayColor[channel];
         displayColor[channel]=value<=0.0031308 ? value*12.92 : 1.055*pow(value,1.0/2.4)-0.055;

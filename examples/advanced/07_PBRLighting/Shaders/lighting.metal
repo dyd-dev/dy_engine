@@ -1,7 +1,12 @@
 #include <metal_stdlib>
 using namespace metal;
 
-struct Params { float4 sizeTime; float4 settings; float4 jitter; float4 extra; };
+struct Params {
+    float2 screenSize;
+    float exposure;
+    float roughness;
+    float metallic;
+};
 struct Input { float4 position [[position]]; float2 uv ; };
 struct Output { float4 c0 [[color(0)]]; };
 
@@ -13,7 +18,7 @@ fragment Output fragmentMain(Input input [[stage_in]], constant Params& p [[buff
     float3 forward=normalize(float3(0.0,0.0,0.8)-cameraPosition);
     float3 right=normalize(cross(forward,float3(0.0,0.0,1.0)));
     float3 up=cross(right,forward);
-    float2 q=(uv*2.0-1.0)*float2(p.sizeTime.x/p.sizeTime.y,-1.0);
+    float2 q=(uv*2.0-1.0)*float2(p.screenSize.x/p.screenSize.y,-1.0);
     float3 rd=normalize(forward+0.55*(q.x*right+q.y*up));
     Surface s; s.distance=40.0; s.position=cameraPosition+rd*40.0;
     s.normal=float3(0.0,0.0,1.0); s.albedo=float3(0.04,0.08,0.14); s.material=-1.0;
@@ -38,8 +43,8 @@ fragment Output fragmentMain(Input input [[stage_in]], constant Params& p [[buff
     }
     float3 color=s.albedo;
     if(s.material>=0.0) {
-        float rough=clamp(p.settings.y*(0.45+0.3*s.material),0.045,1.0);
-        float metal=s.material>0.0 ? p.settings.z : 0.0;
+        float rough=clamp(p.roughness*(0.45+0.3*s.material),0.045,1.0);
+        float metal=s.material>0.0 ? p.metallic : 0.0;
         float3 l=normalize(float3(-0.5,-0.3,1.0)), v=normalize(cameraPosition-s.position);
         float3 n=s.normal, base=s.albedo;
         float3 h=normalize(v+l); float nl=max(dot(n,l),0.0),nv=max(dot(n,v),0.001);
@@ -51,7 +56,7 @@ fragment Output fragmentMain(Input input [[stage_in]], constant Params& p [[buff
         float3 f0=mix(float3(0.04),base,metal), f=f0+(1.0-f0)*pow(1.0-vh,5.0);
         color=((1.0-f)*(1.0-metal)*base/3.14159265+d*g*f/max(4.0*nv*nl,0.001))*nl*4.0+s.albedo*0.035;
     }
-    float3 c=color*p.settings.x;
+    float3 c=color*p.exposure;
     c=clamp((c*(2.51*c+0.03))/(c*(2.43*c+0.59)+0.14),float3(0.0),float3(1.0));
     for(int channel=0;channel<3;channel++) {
         float x=max(c[channel],0.0);

@@ -1,5 +1,12 @@
 #version 450
-struct Params { vec4 sizeTime; vec4 settings; vec4 jitter; vec4 extra; };
+struct Params {
+    vec2 screenSize;
+    float time;
+    uint lightCount;
+    float exposure;
+    float roughness;
+    float metallic;
+};
 layout(push_constant) uniform Config { Params p; };
 layout(location=0) in vec2 uv;
 layout(location=0) out vec4 result0;
@@ -13,7 +20,7 @@ void main() {
     vec3 forward=normalize(vec3(0.0,0.0,0.8)-cameraPosition);
     vec3 right=normalize(cross(forward,vec3(0.0,0.0,1.0)));
     vec3 up=cross(right,forward);
-    vec2 q=(uv*2.0-1.0)*vec2(p.sizeTime.x/p.sizeTime.y,-1.0);
+    vec2 q=(uv*2.0-1.0)*vec2(p.screenSize.x/p.screenSize.y,-1.0);
     vec3 rd=normalize(forward+0.55*(q.x*right+q.y*up));
     Surface s; s.distance=40.0; s.position=cameraPosition+rd*40.0;
     s.normal=vec3(0.0,0.0,1.0); s.albedo=vec3(0.04,0.08,0.14); s.material=-1.0;
@@ -37,6 +44,6 @@ void main() {
         }
     }
     result0=vec4(s.position,s.material>=0.0 ? 1.0 : 0.0);
-    result1=vec4(s.normal,clamp(p.settings.y,0.05,1.0));
-    result2=vec4(s.albedo,s.material>0.0 ? p.settings.z : 0.0);
+    result1=vec4(s.normal,clamp(p.roughness,0.05,1.0));
+    result2=vec4(s.albedo,s.material>0.0 ? p.metallic : 0.0);
 }

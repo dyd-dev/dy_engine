@@ -9,19 +9,23 @@
 
 using namespace dyf::RHI;
 struct alignas(16) Params {
-    float sizeTime[4] = {960, 640, 0, 0};
-    float settings[4] = {1, .45f, .8f, .9f};
-    float jitter[4] = {};
-    float extra[4] = {};
+    float screenSize[2] = {};
+    float time = 0;
+    uint32_t lightCount = 24;
+    float exposure = 1;
+    float roughness = .45f;
+    float metallic = .8f;
 };
 
 int main() {
-    Params params;
-    params.extra[2] = 24;
-    dyf::Platform::Window window(960, 640, "Advanced / DeferredLighting");
+    const auto readShader = [](const char* path) {
+        std::ifstream file(path, std::ios::binary);
+        return std::vector<char>{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    };
 
-    DeviceDesc deviceDesc;
-    std::unique_ptr<IDevice> owner(IDevice::Create(deviceDesc));
+    Params params;
+    dyf::Platform::Window window(960, 640, "Advanced / DeferredLighting");
+    std::unique_ptr<IDevice> owner(IDevice::Create({}));
 
     auto& device = *owner;
 
@@ -29,34 +33,9 @@ int main() {
     SwapchainDesc swap;
     swap.window = window.GetHandle();
     swap.format = DefaultSwapchainFormat;
-    swap.minimumImageCount = 2;
-    swap.presentMode = PresentMode::Fifo;
     (void)device.CreateSwapchain(swap);
 
-    // 예제 폴더에서 연결한 엔진의 백엔드에 맞는 명령으로 셰이더를 컴파일한다.
-    // Metal의 macosx SDK는 대상에 따라 iphoneos 또는 iphonesimulator로 바꾼다.
-    // Vulkan: glslc -fshader-stage=vert Shaders/vertex.glsl -o Shaders/vertex.bin
-    // D3D12: dxc -T vs_6_0 -E main Shaders/vertex.hlsl -Fo Shaders/vertex.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/vertex.metal -o Shaders/vertex.air
-    //        xcrun -sdk macosx metallib Shaders/vertex.air -o Shaders/vertex.bin
-    std::ifstream vertexFile("Shaders/vertex.bin", std::ios::binary);
-    const std::vector<char> vertexBinary{
-        std::istreambuf_iterator<char>(vertexFile), std::istreambuf_iterator<char>()};
-    // Vulkan: glslc -fshader-stage=frag Shaders/geometry.glsl -o Shaders/geometry.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/geometry.hlsl -Fo Shaders/geometry.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/geometry.metal -o Shaders/geometry.air
-    //        xcrun -sdk macosx metallib Shaders/geometry.air -o Shaders/geometry.bin
-    std::ifstream geometryFile("Shaders/geometry.bin", std::ios::binary);
-    const std::vector<char> geometryBinary{
-        std::istreambuf_iterator<char>(geometryFile), std::istreambuf_iterator<char>()};
-    // Vulkan: glslc -fshader-stage=frag Shaders/lighting.glsl -o Shaders/lighting.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/lighting.hlsl -Fo Shaders/lighting.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/lighting.metal -o Shaders/lighting.air
-    //        xcrun -sdk macosx metallib Shaders/lighting.air -o Shaders/lighting.bin
-    std::ifstream lightingFile("Shaders/lighting.bin", std::ios::binary);
-    const std::vector<char> lightingBinary{
-        std::istreambuf_iterator<char>(lightingFile), std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
+#ifdef __APPLE__
     constexpr const char* vertexEntryPoint = "vertexMain";
     constexpr const char* geometryEntryPoint = "fragmentMain";
     constexpr const char* lightingEntryPoint = "fragmentMain";
@@ -65,6 +44,9 @@ int main() {
     constexpr const char* geometryEntryPoint = "main";
     constexpr const char* lightingEntryPoint = "main";
 #endif
+    const auto vertexBinary = readShader("Shaders/vertex.bin");
+    const auto geometryBinary = readShader("Shaders/geometry.bin");
+    const auto lightingBinary = readShader("Shaders/lighting.bin");
 
     auto vertexShader = resources.Keep(device.CreateShader(
         {ShaderStage::Vertex, vertexEntryPoint, vertexBinary.data(), vertexBinary.size()}));
@@ -79,7 +61,6 @@ int main() {
     sampler.addressU = sampler.addressV = sampler.addressW = SamplerAddressMode::ClampToEdge;
     sampler.mipLodBias = sampler.minLod = sampler.maxLod = 0;
 
-    std::vector<ResourceBindingLayout> geometryBindings;
     std::array<ColorAttachmentDesc, 3> geometryColors{};
     for (auto& attachment : geometryColors)
         attachment = {Format::R16G16B16A16_FLOAT, {}, ColorWriteMask::All};
@@ -87,11 +68,14 @@ int main() {
     geometryDesc.vertexShader = vertexShader;
     geometryDesc.fragmentShader = geometryShader;
     geometryDesc.topology = PrimitiveTopology::TriangleList;
-    geometryDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
+    geometryDesc.raster.fillMode = FillMode::Solid;
+    geometryDesc.raster.cullMode = CullMode::None;
+    geometryDesc.raster.frontFace = FrontFace::CounterClockwise;
     geometryDesc.colorAttachments = geometryColors.data();
     geometryDesc.colorAttachmentCount = uint32_t(geometryColors.size());
-    geometryDesc.layout = {geometryBindings.data(), uint32_t(geometryBindings.size()), sizeof(Params),
-                           ShaderStageFlags::Fragment, 15};
+    geometryDesc.layout.inlineConstantSize = sizeof(Params);
+    geometryDesc.layout.inlineConstantStages = ShaderStageFlags::Fragment;
+    geometryDesc.layout.inlineConstantBinding = 15;
     auto geometryPipeline = resources.Keep(device.CreateGraphicsPipeline(geometryDesc));
 
     std::vector<ResourceBindingLayout> lightingBindings;
@@ -99,16 +83,16 @@ int main() {
     lightingBindings.push_back({1, ResourceBindingType::SampledTexture, 1, ShaderStageFlags::Fragment, {}});
     lightingBindings.push_back({2, ResourceBindingType::SampledTexture, 1, ShaderStageFlags::Fragment, {}});
     lightingBindings.push_back({8, ResourceBindingType::StaticSampler, 1, ShaderStageFlags::Fragment, sampler});
-    std::array<ColorAttachmentDesc, 1> lightingColors{};
-    for (auto& attachment : lightingColors)
-        attachment = {DefaultSwapchainFormat, {}, ColorWriteMask::All};
+    ColorAttachmentDesc lightingColor{DefaultSwapchainFormat, {}, ColorWriteMask::All};
     GraphicsPipelineDesc lightingDesc;
     lightingDesc.vertexShader = vertexShader;
     lightingDesc.fragmentShader = lightingShader;
     lightingDesc.topology = PrimitiveTopology::TriangleList;
-    lightingDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
-    lightingDesc.colorAttachments = lightingColors.data();
-    lightingDesc.colorAttachmentCount = uint32_t(lightingColors.size());
+    lightingDesc.raster.fillMode = FillMode::Solid;
+    lightingDesc.raster.cullMode = CullMode::None;
+    lightingDesc.raster.frontFace = FrontFace::CounterClockwise;
+    lightingDesc.colorAttachments = &lightingColor;
+    lightingDesc.colorAttachmentCount = 1;
     lightingDesc.layout = {lightingBindings.data(), uint32_t(lightingBindings.size()), sizeof(Params),
                            ShaderStageFlags::Fragment, 15};
     auto lightingPipeline = resources.Keep(device.CreateGraphicsPipeline(lightingDesc));
@@ -164,9 +148,9 @@ int main() {
                 {lightingPipeline, lightingSetBindings.data(), uint32_t(lightingSetBindings.size())}));
         }
 
-        params.sizeTime[0] = float(imageWidth);
-        params.sizeTime[1] = float(imageHeight);
-        params.sizeTime[2] = float(frame) / 60.0f;
+        params.screenSize[0] = float(imageWidth);
+        params.screenSize[1] = float(imageHeight);
+        params.time = float(frame) / 60.0f;
 
         dyf::RHI::ResourceScope frameResources(device);
         auto* commands = frameResources.Keep(device.AcquireCommandList());
@@ -193,7 +177,7 @@ int main() {
             colors[2].storeOp = StoreOp::Store;
             commands->BeginRendering({colors.data(), uint32_t(colors.size()), nullptr});
             commands->BindGraphicsPipeline(geometryPipeline);
-            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight), 0, 1});
+            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight)});
             commands->SetScissor({0, 0, imageWidth, imageHeight});
             commands->SetInlineConstants(0, sizeof(params), &params);
             commands->DrawInstanced(3, 1, 0, 0);
@@ -220,7 +204,7 @@ int main() {
             commands->BeginRendering({colors.data(), uint32_t(colors.size()), nullptr});
             commands->BindGraphicsPipeline(lightingPipeline);
             commands->BindResourceSet(lightingSet);
-            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight), 0, 1});
+            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight)});
             commands->SetScissor({0, 0, imageWidth, imageHeight});
             commands->SetInlineConstants(0, sizeof(params), &params);
             commands->DrawInstanced(3, 1, 0, 0);

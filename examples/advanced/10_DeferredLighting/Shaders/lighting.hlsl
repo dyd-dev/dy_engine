@@ -1,17 +1,24 @@
-struct Params { float4 sizeTime; float4 settings; float4 jitter; float4 extra; };
+struct Params {
+    float2 screenSize;
+    float time;
+    uint lightCount;
+    float exposure;
+    float roughness;
+    float metallic;
+};
 struct Input { float4 position :SV_Position; float2 uv :TEXCOORD0; };
 struct Output { float4 c0 : SV_Target0; };
 cbuffer Config:register(b15) { Params p; };
-Texture2D<float4> image0:register(t0);
-Texture2D<float4> image1:register(t1);
-Texture2D<float4> image2:register(t2);
+Texture2D<float4> positionBuffer:register(t0);
+Texture2D<float4> normalBuffer:register(t1);
+Texture2D<float4> albedoBuffer:register(t2);
 SamplerState imageSampler:register(s8);
 
 struct Surface { float3 position; float3 normal; float3 albedo; float distance; float material; };
 Output main(Input input) {
     float2 uv=input.uv; Output o;
 
-    float4 position=image0.SampleLevel(imageSampler,uv,0), normal=image1.SampleLevel(imageSampler,uv,0), albedo=image2.SampleLevel(imageSampler,uv,0);
+    float4 position=positionBuffer.SampleLevel(imageSampler,uv,0), normal=normalBuffer.SampleLevel(imageSampler,uv,0), albedo=albedoBuffer.SampleLevel(imageSampler,uv,0);
     float3 color=albedo.rgb;
     if(position.w>0.5) {
         float3 n=normalize(normal.xyz),v=normalize(float3(0.0,-6.0,3.5)-position.xyz);
@@ -27,15 +34,15 @@ Output main(Input input) {
         color=((1.0-f)*(1.0-metal)*base/3.14159265+d*g*f/max(4.0*nv*nl,0.001))*nl*3.0+albedo.rgb*0.04;
         // Multiple lights consume the same geometry buffers; no geometry redraw.
         Surface s; s.position=position.xyz;s.normal=n;s.albedo=albedo.rgb;s.distance=0.0;s.material=0.0;
-        for(int i=0;i<int(p.extra.z);i++) {
+        for(int i=0;i<int(p.lightCount);i++) {
             float f=float(i);
-            float3 position=float3(sin(f*2.17+p.sizeTime.z*0.17)*4.0,cos(f*1.37+p.sizeTime.z*0.11)*3.0,0.5+frac(f*0.319)*2.5);
+            float3 position=float3(sin(f*2.17+p.time*0.17)*4.0,cos(f*1.37+p.time*0.11)*3.0,0.5+frac(f*0.319)*2.5);
             float3 delta=position-s.position; float d=length(delta), radius=2.4;
             float attenuation=pow(max(1.0-d/radius,0.0),2.0);
             color+=s.albedo*(0.4+0.6*cos(float3(0.0,2.1,4.2)+float(i)*0.71))*max(dot(s.normal,delta/max(d,0.001)),0.0)*attenuation*1.8;
         }
     }
-    float3 c=color*p.settings.x;
+    float3 c=color*p.exposure;
     c=clamp((c*(2.51*c+0.03))/(c*(2.43*c+0.59)+0.14),(float3)(0.0),(float3)(1.0));
     for(int channel=0;channel<3;channel++) {
         float x=max(c[channel],0.0);

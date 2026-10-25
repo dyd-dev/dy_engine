@@ -1,15 +1,19 @@
+#include "dyf.h"
 #include "dyf/RHI.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace RHI = dyf::RHI;
 
 int main()
 {
+    dyf::Platform::Window window(560,288,"Advanced / Two parallel uploads");
     std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create({}));
     RHI::ResourceScope resources(*device);
     constexpr uint32_t width=256, height=256;
@@ -59,4 +63,23 @@ int main()
     (void)device->WaitIdle();
     for(auto* commands:commandLists)
         device->DestroyCommandList(commands);
+
+    dyf::Canvas canvas(560,288);
+    canvas.Clear({0.04f,0.06f,0.10f,1});
+    for(uint32_t i=0;i<2;++i)
+    {
+        RHI::TextureReadback result;
+        (void)device->ReadTexture(textures[i],result);
+        std::vector<uint8_t> pixels(width*height*4);
+        for(uint32_t y=0;y<result.height;++y)
+            std::copy_n(result.pixels.data()+y*result.rowPitch,width*4,pixels.data()+y*width*4);
+        canvas.Image(dyf::Image(width,height,std::move(pixels)),{float(16+i*272),16,256,256});
+    }
+    auto renderer=dyf::Renderer::Create(window.GetHandle());
+    while(window.IsRunning())
+    {
+        window.PollEvents();
+        if(!window.IsRunning()) break;
+        renderer->Render(canvas);
+    }
 }

@@ -1,7 +1,13 @@
 #include <metal_stdlib>
 using namespace metal;
 
-struct Params { float4 sizeTime; float4 settings; float4 jitter; float4 extra; };
+struct Params {
+    float2 screenSize;
+    float exposure;
+    float threshold;
+    float bloomStrength;
+    float emissiveIntensity;
+};
 struct Input { float4 position [[position]]; float2 uv ; };
 struct Output { float4 c0 [[color(0)]]; };
 
@@ -16,7 +22,7 @@ float2 uv=input.uv; Output o;
     float3 forward=normalize(float3(0.0,0.0,0.8)-cameraPosition);
     float3 right=normalize(cross(forward,float3(0.0,0.0,1.0)));
     float3 up=cross(right,forward);
-    float2 cameraCoord=(uv*2.0-1.0)*float2(p.sizeTime.x/p.sizeTime.y,-1.0);
+    float2 cameraCoord=(uv*2.0-1.0)*float2(p.screenSize.x/p.screenSize.y,-1.0);
     float3 rd=normalize(forward+0.55*(cameraCoord.x*right+cameraCoord.y*up));
 
     Surface s; s.distance=40.0; s.position=cameraPosition+rd*40.0;
@@ -42,9 +48,9 @@ float2 uv=input.uv; Output o;
     }
 float3 color=s.albedo;
 if(s.material>=0.0) color=s.albedo*(0.07+max(dot(s.normal,normalize(float3(-0.3,-0.5,1.0))),0.0))*2.0;
-if(s.material>1.5 && s.material<2.5) color+=float3(0.1,0.55,1.0)*p.extra.x;
+if(s.material>1.5 && s.material<2.5) color+=float3(0.1,0.55,1.0)*p.emissiveIntensity;
 float2 q=uv-float2(0.78,0.22);
-color+=float3(1.0,0.55,0.12)*exp(-dot(q,q)*1600.0)*p.extra.x*2.0;
+color+=float3(1.0,0.55,0.12)*exp(-dot(q,q)*1600.0)*p.emissiveIntensity*2.0;
 o.c0=float4(color,1.0);
 
 return o;

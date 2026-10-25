@@ -12,30 +12,20 @@ namespace RHI = dyf::RHI;
 
 int main()
 {
-    // Vulkan: glslc -fshader-stage=vert Shaders/canvas_vs.glsl -o Shaders/vertex.bin
-    // D3D12: dxc -T vs_6_0 -E main Shaders/canvas_vs.hlsl -Fo Shaders/vertex.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/canvas.metal -o Shaders/vertex.air
-    //        xcrun -sdk macosx metallib Shaders/vertex.air -o Shaders/vertex.bin
-    std::ifstream vertexFile("Shaders/vertex.bin",std::ios::binary);
-    const std::vector<char> vertexBinary{
-        std::istreambuf_iterator<char>(vertexFile),std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
+    const auto readShader = [](const char* path) {
+        std::ifstream file(path, std::ios::binary);
+        return std::vector<char>{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    };
+
+#ifdef __APPLE__
     const char* vertexEntry="canvasVertex";
-#else
-    const char* vertexEntry="main";
-#endif
-    // Vulkan: glslc -fshader-stage=frag Shaders/array_ps.glsl -o Shaders/array_fragment.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/array_ps.hlsl -Fo Shaders/array_fragment.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/canvas.metal -o Shaders/array_fragment.air
-    //        xcrun -sdk macosx metallib Shaders/array_fragment.air -o Shaders/array_fragment.bin
-    std::ifstream array_fragmentFile("Shaders/array_fragment.bin",std::ios::binary);
-    const std::vector<char> array_fragmentBinary{
-        std::istreambuf_iterator<char>(array_fragmentFile),std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
     const char* array_fragmentEntry="arrayFragment";
 #else
+    const char* vertexEntry="main";
     const char* array_fragmentEntry="main";
 #endif
+    const auto vertexBinary = readShader("Shaders/vertex.bin");
+    const auto array_fragmentBinary = readShader("Shaders/array_fragment.bin");
 
     dyf::Platform::Window window(800, 600, "Advanced / Fixed descriptor arrays");
     std::unique_ptr<RHI::IDevice> owner(RHI::IDevice::Create({}));
@@ -108,7 +98,9 @@ int main()
     pipelineDesc.vertexBufferCount = 1;
     pipelineDesc.vertexAttributes = attributes;
     pipelineDesc.vertexAttributeCount = 2;
-    pipelineDesc.raster = {RHI::FillMode::Solid, RHI::CullMode::None, RHI::FrontFace::CounterClockwise, 0, 0, 0};
+    pipelineDesc.raster.fillMode = RHI::FillMode::Solid;
+    pipelineDesc.raster.cullMode = RHI::CullMode::None;
+    pipelineDesc.raster.frontFace = RHI::FrontFace::CounterClockwise;
     pipelineDesc.colorAttachments = &output;
     pipelineDesc.colorAttachmentCount = 1;
     pipelineDesc.layout = {bindings, 2, sizeof(Constants),
@@ -167,7 +159,7 @@ int main()
         commands->BindGraphicsPipeline(pipeline);
         commands->BindVertexBuffer(0, vertexBuffer, 0);
         commands->BindResourceSet(materials);
-        commands->SetViewport({0, 0, float(extent.width), float(extent.height), 0, 1});
+        commands->SetViewport({0, 0, float(extent.width), float(extent.height)});
         commands->SetScissor({0, 0, extent.width, extent.height});
         for(uint32_t i = 0; i < side * side; ++i)
         {

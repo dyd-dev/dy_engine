@@ -12,30 +12,20 @@ namespace RHI = dyf::RHI;
 
 int main()
 {
-    // Vulkan: glslc -fshader-stage=vert Shaders/canvas_vs.glsl -o Shaders/vertex.bin
-    // D3D12: dxc -T vs_6_0 -E main Shaders/canvas_vs.hlsl -Fo Shaders/vertex.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/canvas.metal -o Shaders/vertex.air
-    //        xcrun -sdk macosx metallib Shaders/vertex.air -o Shaders/vertex.bin
-    std::ifstream vertexFile("Shaders/vertex.bin",std::ios::binary);
-    const std::vector<char> vertexBinary{
-        std::istreambuf_iterator<char>(vertexFile),std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
+    const auto readShader = [](const char* path) {
+        std::ifstream file(path, std::ios::binary);
+        return std::vector<char>{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    };
+
+#ifdef __APPLE__
     const char* vertexEntry="canvasVertex";
-#else
-    const char* vertexEntry="main";
-#endif
-    // Vulkan: glslc -fshader-stage=frag Shaders/canvas_ps.glsl -o Shaders/fragment.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/canvas_ps.hlsl -Fo Shaders/fragment.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/canvas.metal -o Shaders/fragment.air
-    //        xcrun -sdk macosx metallib Shaders/fragment.air -o Shaders/fragment.bin
-    std::ifstream fragmentFile("Shaders/fragment.bin",std::ios::binary);
-    const std::vector<char> fragmentBinary{
-        std::istreambuf_iterator<char>(fragmentFile),std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
     const char* fragmentEntry="canvasFragment";
 #else
+    const char* vertexEntry="main";
     const char* fragmentEntry="main";
 #endif
+    const auto vertexBinary = readShader("Shaders/vertex.bin");
+    const auto fragmentBinary = readShader("Shaders/fragment.bin");
 
     dyf::Platform::Window window(800, 600, "Advanced / Instancing and batching");
     std::unique_ptr<RHI::IDevice> owner(RHI::IDevice::Create({}));
@@ -96,7 +86,9 @@ int main()
     pipelineDesc.vertexBufferCount = 2;
     pipelineDesc.vertexAttributes = attributes;
     pipelineDesc.vertexAttributeCount = 3;
-    pipelineDesc.raster = {RHI::FillMode::Solid, RHI::CullMode::None, RHI::FrontFace::CounterClockwise, 0, 0, 0};
+    pipelineDesc.raster.fillMode = RHI::FillMode::Solid;
+    pipelineDesc.raster.cullMode = RHI::CullMode::None;
+    pipelineDesc.raster.frontFace = RHI::FrontFace::CounterClockwise;
     pipelineDesc.colorAttachments = &output;
     pipelineDesc.colorAttachmentCount = 1;
     auto* pipeline = resources.Keep(device.CreateGraphicsPipeline(pipelineDesc));
@@ -137,7 +129,7 @@ int main()
         commands->BindGraphicsPipeline(pipeline);
         commands->BindVertexBuffer(0, vertexBuffer, 0);
         commands->BindVertexBuffer(1, instanceBuffer, 0);
-        commands->SetViewport({0, 0, float(extent.width), float(extent.height), 0, 1});
+        commands->SetViewport({0, 0, float(extent.width), float(extent.height)});
         commands->SetScissor({0, 0, extent.width, extent.height});
         // 정점은 슬롯 0에서, 위치와 색상은 인스턴스마다 슬롯 1에서 읽는다.
         commands->DrawInstanced(uint32_t(vertices.size()), objectCount, 0, 0);

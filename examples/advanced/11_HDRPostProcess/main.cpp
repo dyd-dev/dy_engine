@@ -11,22 +11,22 @@
 using namespace dyf::RHI;
 
 struct alignas(16) Params {
-    float sizeTime[4] = {960, 640, 0, 0};
-    float settings[4] = {1, .45f, .8f, .9f};
-    float jitter[4] = {};
-    float extra[4] = {};
+    float screenSize[2] = {};
+    float exposure = 1;
+    float threshold = 1;
+    float bloomStrength = .35f;
+    float emissiveIntensity = 12;
 };
 
 int main() {
+    const auto readShader = [](const char* path) {
+        std::ifstream file(path, std::ios::binary);
+        return std::vector<char>{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    };
+
     Params params;
-    params.settings[1] = 1;
-    params.settings[2] = .35f;
-    params.extra[0] = 12;
     dyf::Platform::Window window(960, 640, "Advanced / 11_HDRPostProcess");
-
-    DeviceDesc deviceDesc;
-
-    std::unique_ptr<IDevice> owner(IDevice::Create(deviceDesc));
+    std::unique_ptr<IDevice> owner(IDevice::Create({}));
 
     auto& device = *owner;
 
@@ -35,49 +35,10 @@ int main() {
     SwapchainDesc swap;
     swap.window = window.GetHandle();
     swap.format = DefaultSwapchainFormat;
-    swap.minimumImageCount = 2;
-    swap.presentMode = PresentMode::Fifo;
 
     (void)device.CreateSwapchain(swap);
 
-    // 예제 폴더에서 연결한 엔진의 백엔드에 맞는 명령으로 셰이더를 컴파일한다.
-    // Metal의 macosx SDK는 대상에 따라 iphoneos 또는 iphonesimulator로 바꾼다.
-    // Vulkan: glslc -fshader-stage=vert Shaders/vertex.glsl -o Shaders/vertex.bin
-    // D3D12: dxc -T vs_6_0 -E main Shaders/vertex.hlsl -Fo Shaders/vertex.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/vertex.metal -o Shaders/vertex.air
-    //        xcrun -sdk macosx metallib Shaders/vertex.air -o Shaders/vertex.bin
-    std::ifstream vertexFile("Shaders/vertex.bin", std::ios::binary);
-    const std::vector<char> vertexBinary{
-        std::istreambuf_iterator<char>(vertexFile), std::istreambuf_iterator<char>()};
-    // Vulkan: glslc -fshader-stage=frag Shaders/scene.glsl -o Shaders/scene.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/scene.hlsl -Fo Shaders/scene.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/scene.metal -o Shaders/scene.air
-    //        xcrun -sdk macosx metallib Shaders/scene.air -o Shaders/scene.bin
-    std::ifstream sceneFile("Shaders/scene.bin", std::ios::binary);
-    const std::vector<char> sceneBinary{
-        std::istreambuf_iterator<char>(sceneFile), std::istreambuf_iterator<char>()};
-    // Vulkan: glslc -fshader-stage=frag Shaders/bright.glsl -o Shaders/bright.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/bright.hlsl -Fo Shaders/bright.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/bright.metal -o Shaders/bright.air
-    //        xcrun -sdk macosx metallib Shaders/bright.air -o Shaders/bright.bin
-    std::ifstream brightFile("Shaders/bright.bin", std::ios::binary);
-    const std::vector<char> brightBinary{
-        std::istreambuf_iterator<char>(brightFile), std::istreambuf_iterator<char>()};
-    // Vulkan: glslc -fshader-stage=frag Shaders/blur.glsl -o Shaders/blur.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/blur.hlsl -Fo Shaders/blur.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/blur.metal -o Shaders/blur.air
-    //        xcrun -sdk macosx metallib Shaders/blur.air -o Shaders/blur.bin
-    std::ifstream blurFile("Shaders/blur.bin", std::ios::binary);
-    const std::vector<char> blurBinary{
-        std::istreambuf_iterator<char>(blurFile), std::istreambuf_iterator<char>()};
-    // Vulkan: glslc -fshader-stage=frag Shaders/tonemap.glsl -o Shaders/tonemap.bin
-    // D3D12: dxc -T ps_6_0 -E main Shaders/tonemap.hlsl -Fo Shaders/tonemap.bin
-    // Metal: xcrun -sdk macosx metal -c Shaders/tonemap.metal -o Shaders/tonemap.air
-    //        xcrun -sdk macosx metallib Shaders/tonemap.air -o Shaders/tonemap.bin
-    std::ifstream tonemapFile("Shaders/tonemap.bin", std::ios::binary);
-    const std::vector<char> tonemapBinary{
-        std::istreambuf_iterator<char>(tonemapFile), std::istreambuf_iterator<char>()};
-#ifdef DY_EXAMPLE_METAL
+#ifdef __APPLE__
     constexpr const char* vertexEntryPoint = "vertexMain";
     constexpr const char* sceneEntryPoint = "fragmentMain";
     constexpr const char* brightEntryPoint = "fragmentMain";
@@ -90,6 +51,11 @@ int main() {
     constexpr const char* blurEntryPoint = "main";
     constexpr const char* tonemapEntryPoint = "main";
 #endif
+    const auto vertexBinary = readShader("Shaders/vertex.bin");
+    const auto sceneBinary = readShader("Shaders/scene.bin");
+    const auto brightBinary = readShader("Shaders/bright.bin");
+    const auto blurBinary = readShader("Shaders/blur.bin");
+    const auto tonemapBinary = readShader("Shaders/tonemap.bin");
 
     auto vertexShader = resources.Keep(device.CreateShader({
         ShaderStage::Vertex,
@@ -136,10 +102,14 @@ int main() {
     sceneDesc.vertexShader = vertexShader;
     sceneDesc.fragmentShader = sceneShader;
     sceneDesc.topology = PrimitiveTopology::TriangleList;
-    sceneDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
+    sceneDesc.raster.fillMode = FillMode::Solid;
+    sceneDesc.raster.cullMode = CullMode::None;
+    sceneDesc.raster.frontFace = FrontFace::CounterClockwise;
     sceneDesc.colorAttachments = &hdrColorDesc;
     sceneDesc.colorAttachmentCount = 1;
-    sceneDesc.layout = {nullptr, 0, sizeof(Params), ShaderStageFlags::Fragment, 15};
+    sceneDesc.layout.inlineConstantSize = sizeof(Params);
+    sceneDesc.layout.inlineConstantStages = ShaderStageFlags::Fragment;
+    sceneDesc.layout.inlineConstantBinding = 15;
     auto scenePipeline = resources.Keep(device.CreateGraphicsPipeline(sceneDesc));
 
     std::vector<ResourceBindingLayout> brightBindings;
@@ -150,7 +120,9 @@ int main() {
     brightDesc.vertexShader = vertexShader;
     brightDesc.fragmentShader = brightShader;
     brightDesc.topology = PrimitiveTopology::TriangleList;
-    brightDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
+    brightDesc.raster.fillMode = FillMode::Solid;
+    brightDesc.raster.cullMode = CullMode::None;
+    brightDesc.raster.frontFace = FrontFace::CounterClockwise;
     brightDesc.colorAttachments = &hdrColorDesc;
     brightDesc.colorAttachmentCount = 1;
     brightDesc.layout = {brightBindings.data(), uint32_t(brightBindings.size()), sizeof(Params), ShaderStageFlags::Fragment, 15};
@@ -164,7 +136,9 @@ int main() {
     blurDesc.vertexShader = vertexShader;
     blurDesc.fragmentShader = blurShader;
     blurDesc.topology = PrimitiveTopology::TriangleList;
-    blurDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
+    blurDesc.raster.fillMode = FillMode::Solid;
+    blurDesc.raster.cullMode = CullMode::None;
+    blurDesc.raster.frontFace = FrontFace::CounterClockwise;
     blurDesc.colorAttachments = &hdrColorDesc;
     blurDesc.colorAttachmentCount = 1;
     blurDesc.layout = {blurBindings.data(), uint32_t(blurBindings.size()), sizeof(Params), ShaderStageFlags::Fragment, 15};
@@ -179,7 +153,9 @@ int main() {
     tonemapDesc.vertexShader = vertexShader;
     tonemapDesc.fragmentShader = tonemapShader;
     tonemapDesc.topology = PrimitiveTopology::TriangleList;
-    tonemapDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
+    tonemapDesc.raster.fillMode = FillMode::Solid;
+    tonemapDesc.raster.cullMode = CullMode::None;
+    tonemapDesc.raster.frontFace = FrontFace::CounterClockwise;
     tonemapDesc.colorAttachments = &ldrColorDesc;
     tonemapDesc.colorAttachmentCount = 1;
     tonemapDesc.layout = {tonemapBindings.data(), uint32_t(tonemapBindings.size()), sizeof(Params), ShaderStageFlags::Fragment, 15};
@@ -196,8 +172,6 @@ int main() {
     ResourceSetHandle brightSet = nullptr;
     ResourceSetHandle blurSet = nullptr;
     ResourceSetHandle tonemapSet = nullptr;
-
-    uint64_t frame = 0;
 
     while (window.IsRunning()) {
         window.PollEvents();
@@ -253,9 +227,8 @@ int main() {
             tonemapSet = imageResources->Keep(device.CreateResourceSet({tonemapPipeline, tonemapSetBindings.data(), uint32_t(tonemapSetBindings.size())}));
         }
 
-        params.sizeTime[0] = float(imageWidth);
-        params.sizeTime[1] = float(imageHeight);
-        params.sizeTime[2] = float(frame) / 60.0f;
+        params.screenSize[0] = float(imageWidth);
+        params.screenSize[1] = float(imageHeight);
 
         dyf::RHI::ResourceScope frameResources(device);
         auto* commands = frameResources.Keep(device.AcquireCommandList());
@@ -271,7 +244,7 @@ int main() {
 
             commands->BeginRendering({colors.data(), uint32_t(colors.size()), nullptr});
             commands->BindGraphicsPipeline(scenePipeline);
-            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight), 0, 1});
+            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight)});
             commands->SetScissor({0, 0, imageWidth, imageHeight});
             commands->SetInlineConstants(0, sizeof(params), &params);
             commands->DrawInstanced(3, 1, 0, 0);
@@ -293,7 +266,7 @@ int main() {
             commands->BeginRendering({colors.data(), uint32_t(colors.size()), nullptr});
             commands->BindGraphicsPipeline(brightPipeline);
             commands->BindResourceSet(brightSet);
-            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight), 0, 1});
+            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight)});
             commands->SetScissor({0, 0, imageWidth, imageHeight});
             commands->SetInlineConstants(0, sizeof(params), &params);
             commands->DrawInstanced(3, 1, 0, 0);
@@ -315,7 +288,7 @@ int main() {
             commands->BeginRendering({colors.data(), uint32_t(colors.size()), nullptr});
             commands->BindGraphicsPipeline(blurPipeline);
             commands->BindResourceSet(blurSet);
-            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight), 0, 1});
+            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight)});
             commands->SetScissor({0, 0, imageWidth, imageHeight});
             commands->SetInlineConstants(0, sizeof(params), &params);
             commands->DrawInstanced(3, 1, 0, 0);
@@ -337,7 +310,7 @@ int main() {
             commands->BeginRendering({colors.data(), uint32_t(colors.size()), nullptr});
             commands->BindGraphicsPipeline(tonemapPipeline);
             commands->BindResourceSet(tonemapSet);
-            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight), 0, 1});
+            commands->SetViewport({0, 0, float(imageWidth), float(imageHeight)});
             commands->SetScissor({0, 0, imageWidth, imageHeight});
             commands->SetInlineConstants(0, sizeof(params), &params);
             commands->DrawInstanced(3, 1, 0, 0);
@@ -351,7 +324,6 @@ int main() {
         (void)device.Submit(&commands, 1);
 
         initializeImages = false;
-        ++frame;
 
         (void)device.Present();
     }

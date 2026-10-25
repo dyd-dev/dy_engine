@@ -4,7 +4,12 @@ bool3 lessThan(float3 a,float3 b) { return a<b; }
 bool2 greaterThanEqual(float2 a,float2 b) { return a>=b; }
 bool3 greaterThanEqual(float3 a,float3 b) { return a>=b; }
 
-struct Params { float4 sizeTime; float4 settings; float4 jitter; float4 extra; };
+struct Params {
+    float2 screenSize;
+    float time;
+    uint lightCount;
+    float exposure;
+};
 struct Input { float4 position :SV_Position; float2 uv :TEXCOORD0; };
 struct Output { float4 c0 : SV_Target0; };
 cbuffer Config:register(b15) { Params p; };
@@ -18,7 +23,7 @@ Output main(Input input) {
     float3 forward=normalize(float3(0.0,0.0,0.8)-cameraPosition);
     float3 right=normalize(cross(forward,float3(0.0,0.0,1.0)));
     float3 up=cross(right,forward);
-    float2 q=(uv*2.0-1.0)*float2(p.sizeTime.x/p.sizeTime.y,-1.0);
+    float2 q=(uv*2.0-1.0)*float2(p.screenSize.x/p.screenSize.y,-1.0);
     float3 rd=normalize(forward+0.55*(q.x*right+q.y*up));
     Surface s; s.distance=40.0; s.position=cameraPosition+rd*40.0;
     s.normal=float3(0.0,0.0,1.0); s.albedo=float3(0.04,0.08,0.14); s.material=-1.0;
@@ -50,9 +55,9 @@ Output main(Input input) {
         uint count=indices[base];color=s.albedo*0.04;
         bool outside=any(lessThan(normalized,(float3)(0.0))) || any(greaterThanEqual(normalized,(float3)(1.0)));
         if(outside) {
-            for(int i=0;i<int(p.extra.z);i++) {
+            for(int i=0;i<int(p.lightCount);i++) {
             float f=float(i);
-            float3 position=float3(sin(f*2.17+p.sizeTime.z*0.17)*4.0,cos(f*1.37+p.sizeTime.z*0.11)*3.0,0.5+frac(f*0.319)*2.5);
+            float3 position=float3(sin(f*2.17+p.time*0.17)*4.0,cos(f*1.37+p.time*0.11)*3.0,0.5+frac(f*0.319)*2.5);
             float3 delta=position-s.position; float d=length(delta), radius=2.4;
             float attenuation=pow(max(1.0-d/radius,0.0),2.0);
             color+=s.albedo*(0.4+0.6*cos(float3(0.0,2.1,4.2)+float(i)*0.71))*max(dot(s.normal,delta/max(d,0.001)),0.0)*attenuation*1.8;
@@ -60,14 +65,14 @@ Output main(Input input) {
         } else {
             for(uint j=0u;j<count;j++) {
             int i=int(indices[base+1u+j]); float f=float(i);
-            float3 position=float3(sin(f*2.17+p.sizeTime.z*0.17)*4.0,cos(f*1.37+p.sizeTime.z*0.11)*3.0,0.5+frac(f*0.319)*2.5);
+            float3 position=float3(sin(f*2.17+p.time*0.17)*4.0,cos(f*1.37+p.time*0.11)*3.0,0.5+frac(f*0.319)*2.5);
             float3 delta=position-s.position; float d=length(delta), radius=2.4;
             float attenuation=pow(max(1.0-d/radius,0.0),2.0);
             color+=s.albedo*(0.4+0.6*cos(float3(0.0,2.1,4.2)+float(i)*0.71))*max(dot(s.normal,delta/max(d,0.001)),0.0)*attenuation*1.8;
         }
         }
     }
-    float3 c=color*p.settings.x;
+    float3 c=color*p.exposure;
     c=clamp((c*(2.51*c+0.03))/(c*(2.43*c+0.59)+0.14),(float3)(0.0),(float3)(1.0));
     for(int channel=0;channel<3;channel++) {
         float x=max(c[channel],0.0);
