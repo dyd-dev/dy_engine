@@ -142,6 +142,8 @@ endif()
 
 # Compiler options.
 if(MSVC)
+    # Use the requested alignment for STL storage shared by engine consumers.
+    target_compile_definitions(dy_engine_options INTERFACE _ENABLE_EXTENDED_ALIGNED_STORAGE)
     target_compile_options(dy_engine_options INTERFACE /W4 /utf-8 /wd4201)
 else()
     target_compile_options(dy_engine_options INTERFACE -Wall -Wextra)

@@ -6,8 +6,12 @@
 //
 
 #import <UIKit/UIKit.h>
+#include <stdbool.h>
+
+typedef int (*DYExampleEntry)(int, char**, const char*, const char*, void (*)(bool));
 
 @interface ViewController : UIViewController
 
++ (void)setExampleEntry:(DYExampleEntry)entry;
 
 @end

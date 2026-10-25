@@ -35,7 +35,16 @@ macro(dy_configure_shader_toolchain)
             list(APPEND dy_shader_tool_hints "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin")
         endif()
         if(ANDROID AND ANDROID_NDK)
-            list(APPEND dy_shader_tool_hints "${ANDROID_NDK}/shader-tools")
+            if(CMAKE_HOST_SYSTEM_NAME STREQUAL "Windows")
+                set(dy_ndk_host windows-x86_64)
+            elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Darwin")
+                set(dy_ndk_host darwin-x86_64)
+            else()
+                set(dy_ndk_host linux-x86_64)
+            endif()
+            list(APPEND dy_shader_tool_hints
+                "${ANDROID_NDK}/shader-tools/${dy_ndk_host}"
+                "${ANDROID_NDK}/shader-tools")
         endif()
         if(USE_D3D12 AND NOT DY_DXC)
             find_program(DY_DXC NAMES dxc HINTS ${dy_shader_tool_hints}
