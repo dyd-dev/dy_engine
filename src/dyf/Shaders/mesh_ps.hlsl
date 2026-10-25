@@ -445,23 +445,23 @@ inline float LtcPolygonIntegral(float3 normal,float3 viewDir,float3 position,
         for(int candidate=0;candidate<2;++candidate)
         {
             // 현재 변과 반구 경계의 교점 또는 안쪽 정점을 담는 임시 위치다. 선택한 위치를 정규화한 뒤 직전 경계점과의 모서리 적분에 사용한다.
-            float3 point;
+            float3 sampleDirection;
             if(candidate==0) // 먼저 모서리와 z=0 경계의 교점을 처리하고 다음 후보에서 원래 끝점을 처리한다.
             {
                 if(previousInside==currentInside)continue; // 두 끝점이 같은 쪽이면 z=0을 가로지르지 않아 교점 후보가 없다.
-                point=lerp(previous,current,clamp(previous.z/(previous.z-current.z),0.0,1.0));
-                point.z=0;
+                sampleDirection=lerp(previous,current,clamp(previous.z/(previous.z-current.z),0.0,1.0));
+                sampleDirection.z=0;
             }
             else
             {
                 if(!currentInside)continue; // 원래 끝점이 표면 아래 반구에 있으면 잘린 다각형에서 제외한다.
-                point=current;
+                sampleDirection=current;
             }
-            float squared=dot(point,point);
+            float squared=dot(sampleDirection,sampleDirection);
             if(squared<=1e-20)continue; // 원점에 너무 가까워 방향을 정규화할 수 없는 경계점은 건너뛴다.
-            point*=rsqrt(squared);
-            if(haveVertex)sum+=LtcEdgeIntegral(last,point);else {first=point;haveVertex=true;} // 첫 점은 시작점으로 보관하고 이후 점은 직전 점과 이루는 모서리의 적분을 더한다.
-            last=point;
+            sampleDirection*=rsqrt(squared);
+            if(haveVertex)sum+=LtcEdgeIntegral(last,sampleDirection);else {first=sampleDirection;haveVertex=true;} // 첫 점은 시작점으로 보관하고 이후 점은 직전 점과 이루는 모서리의 적분을 더한다.
+            last=sampleDirection;
         }
         previous=current;
     }

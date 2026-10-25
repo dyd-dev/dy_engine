@@ -2,11 +2,8 @@ name: CI toolchain
 description: Install the SDK/compiler needed by the selected backend.
 inputs:
   api:
-    description: vulkan, d3d12, metal or null
+    description: vulkan, d3d12 or metal
     required: true
-  clang:
-    description: Install LLVM for the independent CPU sanitizer build
-    default: 'false'
 runs:
   using: composite
   steps:
@@ -15,35 +12,19 @@ runs:
       shell: bash
       run: |
         sudo apt-get update
-        sudo apt-get install -y ninja-build xorg-dev pkg-config
-        if [ '${{ inputs.clang }}' = true ]; then
-          sudo apt-get install -y clang
-        fi
+        sudo apt-get install -y ninja-build xorg-dev pkg-config fonts-dejavu-core
         if [ '${{ inputs.api }}' = vulkan ]; then
           sudo apt-get install -y mesa-vulkan-drivers xvfb xauth
         fi
-    - name: Windows LLVM
-      if: runner.os == 'Windows' && inputs.clang == 'true'
-      shell: pwsh
-      run: |
-        $llvm = Join-Path $env:RUNNER_TEMP 'dy-ci-llvm-21.1.8'
-        if (-not (Test-Path "$llvm/bin/clang-cl.exe")) {
-          $installer = Join-Path $env:RUNNER_TEMP 'llvm-21.1.8.exe'
-          Invoke-WebRequest 'https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/LLVM-21.1.8-win64.exe' -OutFile $installer
-          if ((Get-FileHash $installer -Algorithm SHA256).Hash -ne '7a5386c26497db1691f320121e5b113364dd0274b98e55f15f4dbc00c0450113') { throw 'LLVM checksum mismatch' }
-          $process = Start-Process $installer -ArgumentList @('/S', "/D=$llvm") -Wait -PassThru -WindowStyle Hidden
-          if ($process.ExitCode -ne 0) { throw "LLVM installation failed: $($process.ExitCode)" }
-        }
-        "DY_CI_LLVM=$llvm" >> $env:GITHUB_ENV
-        "$llvm/bin" >> $env:GITHUB_PATH
-        Get-ChildItem "$llvm/lib/clang/*/lib/windows" -Directory | ForEach-Object { $_.FullName >> $env:GITHUB_PATH }
-    - name: macOS LLVM
-      if: runner.os == 'macOS' && inputs.clang == 'true'
+    - name: macOS build tools
+      if: runner.os == 'macOS'
       shell: bash
       run: |
-        brew list llvm >/dev/null 2>&1 || brew install llvm
-        echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
-        echo "DY_CI_LLVM=$(brew --prefix llvm)" >> "$GITHUB_ENV"
+        command -v cmake >/dev/null || brew install cmake
+        command -v ninja >/dev/null || brew install ninja
+        if [ '${{ inputs.api }}' = metal ] && ! xcrun -sdk macosx metal --version; then
+          xcodebuild -downloadComponent metalToolchain
+        fi
     - name: Linux Vulkan SDK
       if: runner.os == 'Linux' && inputs.api == 'vulkan'
       shell: bash
@@ -79,6 +60,3 @@ runs:
       run: |
         cmake --version
         python --version
-        if [ '${{ inputs.clang }}' = true ]; then
-          if [ "$RUNNER_OS" = Windows ]; then clang-cl --version; else clang++ --version; fi
-        fi

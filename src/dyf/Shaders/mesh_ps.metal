@@ -482,7 +482,7 @@ inline uint ClusterBase(float3 position,constant ClusterParameters& clusters)
     if(any(coordinate<0) || any(coordinate>=1))return 0xffffffffu; // 군집 화면 범위 [0,1) 밖이면 전체 국소 광원 경로로 돌린다.
     float slice=clusters.counts.z!=0u?log(distance/clusters.depth.x)/clusters.depth.z:
         (distance-clusters.depth.x)/(clusters.depth.y-clusters.depth.x);
-    uint3 index=min(uint3(coordinate*float2(clusters.dimensions.xy),slice*float(clusters.dimensions.z)),clusters.dimensions.xyz-uint3(1));
+    uint3 index=min(uint3(float3(coordinate*float2(clusters.dimensions.xy),slice*float(clusters.dimensions.z))),clusters.dimensions.xyz-uint3(1));
     return (index.x+clusters.dimensions.x*(index.y+clusters.dimensions.y*index.z))*(clusters.dimensions.w+1u);
 }
 
