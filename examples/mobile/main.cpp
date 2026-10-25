@@ -1,3 +1,4 @@
+// Common example host compiled only by the native Android and iOS applications.
 #include "dyf/Canvas.h"
 #include "dyf/Font.h"
 #include "dyf/Platform/Window.h"
@@ -10,6 +11,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -25,6 +27,7 @@
 #include <fstream>
 #include <memory>
 #include <sstream>
+#include <sys/stat.h>
 #endif
 #ifdef DY_PROFILER_TRACING_ENABLED
 #include "dyf/Extends/Tracy.h"
@@ -210,7 +213,7 @@ std::unique_ptr<dyf::Font> LoadFont(float size)
 std::string Title(const Example& example)
 {
     std::string_view name(example.name);
-    for(const auto prefix : {std::string_view("Advanced"), std::string_view("Showcase"), std::string_view("Dyf"), std::string_view("Rhi"), std::string_view("RHI")})
+    for(const auto prefix : {std::string_view("Advanced"), std::string_view("Dyf"), std::string_view("Rhi"), std::string_view("RHI")})
         if(name.substr(0, prefix.size()) == prefix) { name.remove_prefix(prefix.size()); break; }
     std::string result;
     for(size_t i = 0; i < name.size(); ++i)
@@ -260,21 +263,20 @@ int OpenGui([[maybe_unused]] const Example*& selected, std::string status)
     config.recordingThreadCount = 1;
     auto renderer = dyf::Renderer::Create(window.GetHandle(), config);
     if(!renderer) return 1;
+    const void* rendererWindow = window.GetHandle();
+    auto rendererSurfaceGeneration = window.GetSurfaceGeneration();
 
 #if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IPHONE)
     Process child;
 #endif
     const Example* active = nullptr;
-    int category = 0, lastWidth = 0, lastHeight = 0, redrawFrames = 3;
+    int category = 0, lastWidth = 0, lastHeight = 0;
     float scroll = 0, fontScale = 0, dragOffset = 0;
     bool dragging = false;
     std::unique_ptr<dyf::Canvas> canvas;
     std::unique_ptr<dyf::Font> font, heading;
     constexpr const char* categories[] = {
         "All examples", "dyf", "RHI", "advanced",
-#ifdef DY_BUILD_SHOWCASE
-        "showcase",
-#endif
     };
     std::vector<size_t> visible;
 
@@ -289,14 +291,25 @@ int OpenGui([[maybe_unused]] const Example*& selected, std::string status)
             status = std::string(active->name) + (result == 0 ? " closed." : result == 77 ?
                 ": unavailable on this backend, or not implemented." : ": exited with code " + std::to_string(result) + ".");
             active = nullptr;
-            redrawFrames = 3;
         }
 #endif
+        const auto nativeWindow = window.GetHandle();
+        const auto surfaceGeneration = window.GetSurfaceGeneration();
+        if(renderer && (nativeWindow != rendererWindow || surfaceGeneration != rendererSurfaceGeneration))
+            renderer.reset();
         const auto size = window.GetSize(), pixels = window.GetFramebufferSize();
-        if(size.width <= 0 || size.height <= 0 || pixels.width <= 0 || pixels.height <= 0 || window.IsMinimized())
+        if(!nativeWindow || size.width <= 0 || size.height <= 0 || pixels.width <= 0 || pixels.height <= 0 ||
+            window.IsMinimized() || !window.HasFocus())
         {
             Window::WaitEvents(.05);
             continue;
+        }
+        if(!renderer)
+        {
+            renderer = dyf::Renderer::Create(nativeWindow, config);
+            if(!renderer) return 1;
+            rendererWindow = nativeWindow;
+            rendererSurfaceGeneration = surfaceGeneration;
         }
 #ifdef __ANDROID__
         const float uiScale = std::max(1.f, static_cast<float>(size.width) / 1080.f);
@@ -312,19 +325,15 @@ int OpenGui([[maybe_unused]] const Example*& selected, std::string status)
             heading = LoadFont(28 * sy);
             if(!font || !heading) throw std::runtime_error("No supported system font found for the launcher.");
             fontScale = sy;
-            redrawFrames = 3;
         }
         if(lastWidth != pixels.width || lastHeight != pixels.height)
         {
             canvas = std::make_unique<dyf::Canvas>(pixels.width, pixels.height);
             lastWidth = pixels.width;
             lastHeight = pixels.height;
-            redrawFrames = 3;
         }
-        // This static browser should leave the GPU available to the running example.
-        if(!window.GetInput().GetEvents().empty()) redrawFrames = 3;
-        if(!redrawFrames) { Window::WaitEvents(.05); continue; }
-        --redrawFrames;
+        // A skipped frame is not a presentation. Keep retrying while the native
+        // window is active; the renderer uses VSync to pace the browser.
         canvas->Clear({.045f,.055f,.075f,1});
         View view{*canvas, *font, *heading, sx, sy};
         const auto& input = window.GetInput();
@@ -446,8 +455,10 @@ int OpenGui([[maybe_unused]] const Example*& selected, std::string status)
 }
 }
 
-extern "C" int DyfRunExamples(int argc, char** argv, const char* assetRoot, const char* fontPath,
-    void (*onExampleChanged)(bool)) try
+namespace
+{
+int RunExamples(int argc, char** argv, const char* assetRoot, const char* fontPath,
+    void (*onExampleChanged)(bool), const std::function<void(const Example&)>& prepareAssets = {}) try
 {
 #ifdef DY_PROFILER_TRACING_ENABLED
     dyf::TracyAdapter tracy;
@@ -465,25 +476,34 @@ extern "C" int DyfRunExamples(int argc, char** argv, const char* assetRoot, cons
     const auto invoke = [&](const Example& example, const std::vector<std::string>& arguments)
     {
         if(!example.entry) return 77;
-        auto directory = root / example.executable;
-        if(!std::filesystem::is_directory(directory)) directory = root;
-        std::filesystem::current_path(directory);
-        std::vector<std::string> values{example.name};
-        values.insert(values.end(), arguments.begin(), arguments.end());
-        std::vector<char*> pointers;
-        for(auto& value : values) pointers.push_back(value.data());
-        pointers.push_back(nullptr);
-        if(onExampleChanged) onExampleChanged(true);
         int result = 1;
-        try { result = example.entry(static_cast<int>(values.size()), pointers.data()); }
+        bool started = false;
+        try
+        {
+            // The browser and --list need no model assets. Prepare only the
+            // selected entry's directory.
+            if(prepareAssets) prepareAssets(example);
+            auto directory = root / example.executable;
+            if(!std::filesystem::is_directory(directory)) directory = root;
+            std::filesystem::current_path(directory);
+            std::vector<std::string> values{example.name};
+            values.insert(values.end(), arguments.begin(), arguments.end());
+            std::vector<char*> pointers;
+            for(auto& value : values) pointers.push_back(value.data());
+            pointers.push_back(nullptr);
+            if(onExampleChanged) onExampleChanged(true);
+            started = true;
+            result = example.entry(static_cast<int>(values.size()), pointers.data());
+        }
         catch(const std::exception& error) { std::cerr << example.name << ": " << error.what() << '\n'; }
-        if(onExampleChanged) onExampleChanged(false);
+        if(started && onExampleChanged) onExampleChanged(false);
         std::filesystem::current_path(root);
         return result;
     };
 #else
     (void)assetRoot;
     (void)onExampleChanged;
+    (void)prepareAssets;
 #endif
     if(argc > 1)
     {
@@ -491,7 +511,7 @@ extern "C" int DyfRunExamples(int argc, char** argv, const char* assetRoot, cons
         if(selection == "--list") { List(); return 0; }
         if(selection == "--help")
         {
-            std::cout << "visualizer [--list | number | target-name] [example arguments...]\n"
+            std::cout << "examples [--list | number | target-name] [example arguments...]\n"
                 "Without arguments, open the GUI example browser.\n";
             return 0;
         }
@@ -530,54 +550,291 @@ catch(const std::exception& error)
     std::cerr << error.what() << '\n';
     return 1;
 }
+}
+
+extern "C" int DyfRunExamples(int argc, char** argv, const char* assetRoot, const char* fontPath,
+    void (*onExampleChanged)(bool))
+{
+    return RunExamples(argc, argv, assetRoot, fontPath, onExampleChanged);
+}
 
 #ifdef __ANDROID__
 namespace
 {
 using Asset = std::unique_ptr<AAsset, decltype(&AAsset_close)>;
 
-std::string PrepareAssets(android_app& app)
+// NativeActivity runs this entry on a native thread. Attach only while reading
+// the launch intent or installed-package metadata.
+class JavaEnvironment
 {
-    const auto root = std::filesystem::path(app.activity->internalDataPath) / "examples";
-    Asset manifest(AAssetManager_open(app.activity->assetManager, "files.txt", AASSET_MODE_BUFFER), AAsset_close);
-    if(!manifest) throw std::runtime_error("Packaged example asset list is missing.");
-    const auto size = AAsset_getLength64(manifest.get());
-    if(size < 0 || size > 16 * 1024 * 1024) throw std::runtime_error("Invalid example asset list.");
-    std::string contents(static_cast<size_t>(size), '\0');
-    size_t offset = 0;
-    while(offset < contents.size())
+public:
+    explicit JavaEnvironment(JavaVM& vm) : vm(vm)
     {
-        const auto count = AAsset_read(manifest.get(), contents.data() + offset, contents.size() - offset);
-        if(count <= 0) throw std::runtime_error("Cannot read example asset list.");
-        offset += static_cast<size_t>(count);
+        const auto result = vm.GetEnv(reinterpret_cast<void**>(&env), JNI_VERSION_1_6);
+        if(result == JNI_EDETACHED)
+        {
+            if(vm.AttachCurrentThread(&env, nullptr) != JNI_OK)
+                throw std::runtime_error("Cannot attach Android example thread to Java.");
+            attached = true;
+        }
+        else if(result != JNI_OK)
+            throw std::runtime_error("Cannot access Android Java environment.");
+        if(env->PushLocalFrame(16) < 0)
+        {
+            env->ExceptionClear();
+            if(attached) vm.DetachCurrentThread();
+            throw std::runtime_error("Cannot allocate Android example references.");
+        }
     }
-    std::filesystem::create_directories(root);
-    std::istringstream paths(contents);
-    std::string relative;
-    while(std::getline(paths, relative))
+    ~JavaEnvironment()
     {
-        if(!relative.empty() && relative.back() == '\r') relative.pop_back();
-        if(relative.empty()) continue;
-        const std::filesystem::path path(relative);
-        if(path.is_absolute() || path.has_root_name())
-            throw std::runtime_error("Invalid packaged asset path.");
-        for(const auto& component : path)
-            if(component == "..") throw std::runtime_error("Invalid packaged asset path.");
-        Asset asset(AAssetManager_open(app.activity->assetManager, relative.c_str(), AASSET_MODE_STREAMING), AAsset_close);
+        env->PopLocalFrame(nullptr);
+        if(attached) vm.DetachCurrentThread();
+    }
+    JNIEnv* operator->() const { return env; }
+    void Require(bool condition, const char* message) const
+    {
+        if(env->ExceptionCheck())
+        {
+            env->ExceptionClear();
+            throw std::runtime_error(message);
+        }
+        if(!condition) throw std::runtime_error(message);
+    }
+
+private:
+    JavaVM& vm;
+    JNIEnv* env = nullptr;
+    bool attached = false;
+};
+
+std::string LaunchExample(ANativeActivity& activity)
+{
+    JavaEnvironment env(*activity.vm);
+    const auto activityClass = env->GetObjectClass(activity.clazz);
+    const auto getIntent = env->GetMethodID(activityClass, "getIntent", "()Landroid/content/Intent;");
+    const auto intent = env->CallObjectMethod(activity.clazz, getIntent);
+    if(!intent) return {};
+    const auto intentClass = env->GetObjectClass(intent);
+    const auto getStringExtra = env->GetMethodID(intentClass, "getStringExtra", "(Ljava/lang/String;)Ljava/lang/String;");
+    const auto key = env->NewStringUTF("dy_example");
+    const auto value = static_cast<jstring>(env->CallObjectMethod(intent, getStringExtra, key));
+    if(env->ExceptionCheck())
+    {
+        env->ExceptionClear();
+        throw std::runtime_error("dy_example must be a string naming an example target.");
+    }
+    if(!value) return {};
+    const auto text = env->GetStringUTFChars(value, nullptr);
+    if(!text)
+    {
+        env->ExceptionClear();
+        throw std::runtime_error("Cannot read dy_example launch selection.");
+    }
+    std::string selection(text);
+    env->ReleaseStringUTFChars(value, text);
+    return selection;
+}
+
+thread_local const char* launchSelection = nullptr;
+
+void ReportExampleState(bool running)
+{
+    if(launchSelection)
+        __android_log_print(ANDROID_LOG_INFO, "dy_engine", "dy_example=%s state=%s",
+            launchSelection, running ? "started" : "stopped");
+}
+
+std::string InstalledApkIdentity(ANativeActivity& activity)
+{
+    JavaEnvironment env(*activity.vm);
+    constexpr const char* error = "Cannot read installed Android package identity.";
+    const auto activityClass = env->GetObjectClass(activity.clazz);
+    env.Require(activityClass, error);
+    const auto getPackageManager = env->GetMethodID(activityClass, "getPackageManager", "()Landroid/content/pm/PackageManager;");
+    env.Require(getPackageManager, error);
+    const auto getPackageName = env->GetMethodID(activityClass, "getPackageName", "()Ljava/lang/String;");
+    env.Require(getPackageName, error);
+    const auto getPackageCodePath = env->GetMethodID(activityClass, "getPackageCodePath", "()Ljava/lang/String;");
+    env.Require(getPackageCodePath, error);
+    const auto manager = env->CallObjectMethod(activity.clazz, getPackageManager);
+    env.Require(manager, error);
+    const auto name = env->CallObjectMethod(activity.clazz, getPackageName);
+    env.Require(name, error);
+    const auto managerClass = env->GetObjectClass(manager);
+    env.Require(managerClass, error);
+    const auto getPackageInfo = env->GetMethodID(managerClass, "getPackageInfo", "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;");
+    env.Require(getPackageInfo, error);
+    const auto info = env->CallObjectMethod(manager, getPackageInfo, name, jint{0});
+    env.Require(info, error);
+    const auto infoClass = env->GetObjectClass(info);
+    env.Require(infoClass, error);
+    const auto lastUpdateTime = env->GetFieldID(infoClass, "lastUpdateTime", "J");
+    env.Require(lastUpdateTime, error);
+    const auto updated = env->GetLongField(info, lastUpdateTime);
+    env.Require(true, error);
+    const auto path = static_cast<jstring>(env->CallObjectMethod(activity.clazz, getPackageCodePath));
+    env.Require(path, error);
+    const auto release = [&](const char* value) { if(value) env->ReleaseStringUTFChars(path, value); };
+    const std::unique_ptr<const char, decltype(release)> text(env->GetStringUTFChars(path, nullptr), release);
+    env.Require(text != nullptr, error);
+    struct stat metadata{};
+    if(::stat(text.get(), &metadata) != 0 || !S_ISREG(metadata.st_mode))
+        throw std::runtime_error("Cannot read installed Android APK metadata.");
+    // versionCode may remain unchanged across development installs. Package
+    // update time and the actual immutable installed APK identify this cache.
+    std::ostringstream identity;
+    identity << text.get() << '\n' << updated << ' ' << metadata.st_dev << ' ' << metadata.st_ino << ' '
+        << metadata.st_size << ' ' << metadata.st_mtim.tv_sec << ' ' << metadata.st_mtim.tv_nsec << '\n';
+    return identity.str();
+}
+
+class AndroidAssets
+{
+public:
+    explicit AndroidAssets(android_app& app) : m_app(app),
+        m_root(std::filesystem::path(app.activity->internalDataPath) / "examples")
+    {
+        std::filesystem::create_directories(m_root);
+    }
+
+    const std::filesystem::path& Root() const { return m_root; }
+
+    void Prepare(const Example& example)
+    {
+        const std::filesystem::path target(example.executable);
+        if(target.empty() || target.has_parent_path() || target == "." || target == "..")
+            throw std::runtime_error("Invalid example asset directory.");
+        LoadManifest();
+        const std::string prefix = target.string() + "/";
+        std::vector<const std::string*> paths;
+        std::string expected = "dyf-example-assets-v1\n" + m_identity;
+        for(const auto& relative : m_paths)
+            if(relative.compare(0, prefix.size(), prefix) == 0)
+            {
+                paths.push_back(&relative);
+                expected += relative + '\n';
+            }
+        const auto directory = m_root / target;
+        const auto marker = m_root / ".asset-cache" / (target.string() + ".ready");
+        if(Matches(marker, expected) && Complete(paths)) return;
+
+        // These are framework-owned extracted resources, not application user
+        // storage. Clear only this target so removed/renamed APK assets cannot
+        // survive an update or an interrupted extraction.
+        std::filesystem::remove(marker);
+        std::filesystem::remove_all(directory);
+        std::filesystem::create_directories(directory);
+        for(const auto* relative : paths) Extract(*relative);
+        std::filesystem::create_directories(marker.parent_path());
+        auto pending = marker;
+        pending += ".tmp";
+        {
+            std::ofstream output(pending, std::ios::binary | std::ios::trunc);
+            output.write(expected.data(), static_cast<std::streamsize>(expected.size()));
+            output.close();
+            if(!output) throw std::runtime_error("Cannot record extracted example assets.");
+        }
+        // No valid marker exists until every selected asset has been closed.
+        std::filesystem::rename(pending, marker);
+    }
+
+private:
+    void LoadManifest()
+    {
+        if(!m_identity.empty()) return;
+        const auto identity = InstalledApkIdentity(*m_app.activity);
+        Asset manifest(AAssetManager_open(m_app.activity->assetManager, "files.txt", AASSET_MODE_BUFFER), AAsset_close);
+        if(!manifest) throw std::runtime_error("Packaged example asset list is missing.");
+        const auto size = AAsset_getLength64(manifest.get());
+        if(size < 0 || size > 16 * 1024 * 1024) throw std::runtime_error("Invalid example asset list.");
+        std::string contents(static_cast<size_t>(size), '\0');
+        size_t offset = 0;
+        while(offset < contents.size())
+        {
+            const auto count = AAsset_read(manifest.get(), contents.data() + offset, contents.size() - offset);
+            if(count <= 0) throw std::runtime_error("Cannot read example asset list.");
+            offset += static_cast<size_t>(count);
+        }
+        std::vector<std::string> entries;
+        std::istringstream paths(contents);
+        std::string relative;
+        while(std::getline(paths, relative))
+        {
+            if(!relative.empty() && relative.back() == '\r') relative.pop_back();
+            if(relative.empty()) continue;
+            const std::filesystem::path path(relative);
+            if(path.is_absolute() || path.has_root_name())
+                throw std::runtime_error("Invalid packaged asset path.");
+            for(const auto& component : path)
+                if(component == ".." || component == ".")
+                    throw std::runtime_error("Invalid packaged asset path.");
+            entries.push_back(std::move(relative));
+        }
+        m_paths = std::move(entries);
+        m_identity = identity;
+    }
+
+    static bool Matches(const std::filesystem::path& path, const std::string& expected)
+    {
+        std::ifstream input(path, std::ios::binary);
+        if(!input) return false;
+        std::string existing(expected.size(), '\0');
+        input.read(existing.data(), static_cast<std::streamsize>(existing.size()));
+        return input.gcount() == static_cast<std::streamsize>(expected.size()) &&
+            input.peek() == std::char_traits<char>::eof() && !input.bad() && existing == expected;
+    }
+
+    bool Complete(const std::vector<const std::string*>& paths) const
+    {
+        for(const auto* relative : paths)
+        {
+            Asset asset(AAssetManager_open(m_app.activity->assetManager, relative->c_str(), AASSET_MODE_STREAMING), AAsset_close);
+            if(!asset) return false;
+            const auto size = AAsset_getLength64(asset.get());
+            const auto destination = m_root / *relative;
+            std::error_code error;
+            if(size < 0 || !std::filesystem::is_regular_file(destination, error) || error ||
+                std::filesystem::file_size(destination, error) != static_cast<uintmax_t>(size) || error)
+                return false;
+        }
+        return true;
+    }
+
+    void Extract(const std::string& relative)
+    {
+        Asset asset(AAssetManager_open(m_app.activity->assetManager, relative.c_str(), AASSET_MODE_STREAMING), AAsset_close);
         if(!asset) throw std::runtime_error("Packaged asset is missing: " + relative);
-        const auto destination = root / path;
+        const auto size = AAsset_getLength64(asset.get());
+        if(size < 0) throw std::runtime_error("Invalid packaged asset size: " + relative);
+        const auto expectedBytes = static_cast<uint64_t>(size);
+        uint64_t copiedBytes = 0;
+        const auto destination = m_root / relative;
         std::filesystem::create_directories(destination.parent_path());
         std::ofstream output(destination, std::ios::binary | std::ios::trunc);
         if(!output) throw std::runtime_error("Cannot extract example asset: " + relative);
         std::array<char, 64 * 1024> buffer;
         int count;
         while((count = AAsset_read(asset.get(), buffer.data(), buffer.size())) > 0)
+        {
+            if(static_cast<uint64_t>(count) > expectedBytes - copiedBytes)
+                throw std::runtime_error("Packaged asset size changed: " + relative);
             output.write(buffer.data(), count);
+            if(!output) throw std::runtime_error("Cannot extract example asset: " + relative);
+            copiedBytes += static_cast<uint64_t>(count);
+            dyf::Platform::Window::PollEvents();
+            if(m_app.destroyRequested) throw std::runtime_error("Example asset extraction interrupted.");
+        }
         output.close();
-        if(count < 0 || !output) throw std::runtime_error("Cannot extract example asset: " + relative);
+        if(count < 0 || !output || copiedBytes != expectedBytes)
+            throw std::runtime_error("Cannot extract complete example asset: " + relative);
     }
-    return root.string();
-}
+
+    android_app& m_app;
+    std::filesystem::path m_root;
+    std::string m_identity;
+    std::vector<std::string> m_paths;
+};
 }
 
 int DyfRunExamples(android_app* state)
@@ -586,15 +843,22 @@ int DyfRunExamples(android_app* state)
     int result = 1;
     try
     {
-        const auto assets = PrepareAssets(*state);
+        AndroidAssets assets(*state);
+        auto selection = LaunchExample(*state->activity);
         char name[] = "dy_engine examples";
-        char* arguments[] = {name, nullptr};
-        result = DyfRunExamples(1, arguments, assets.c_str(), "/system/fonts/Roboto-Regular.ttf", nullptr);
+        char* arguments[] = {name, selection.empty() ? nullptr : selection.data(), nullptr};
+        launchSelection = selection.empty() ? nullptr : selection.c_str();
+        const auto root = assets.Root().string();
+        result = RunExamples(selection.empty() ? 1 : 2, arguments,
+            root.c_str(), "/system/fonts/Roboto-Regular.ttf", ReportExampleState,
+            [&](const Example& example) { assets.Prepare(example); });
+        launchSelection = nullptr;
         __android_log_print(result == 0 ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
             "dy_engine", "Application exited with code %d", result);
     }
     catch(const std::exception& error)
     {
+        launchSelection = nullptr;
         __android_log_print(ANDROID_LOG_ERROR, "dy_engine", "Examples: %s", error.what());
     }
     if(!state->destroyRequested)

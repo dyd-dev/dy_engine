@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | `USE_VULKAN` | `OFF` (Windows) | Windows에서 Vulkan 선택 |
 | `USE_D3D12` | `OFF` (Windows)| Windows에서 Direct3D 12 선택 |
-| `DY_BUILD_EXAMPLES` | `OFF` | 예제와 통합 실행기 빌드 |
+| `DY_BUILD_EXAMPLES` | `OFF` | 데스크톱 단독 예제 빌드 |
 | `DY_EXTEND_MODEL` | `OFF` | 모델 로딩·애니메이션 확장 |
 | `DY_EXTEND_ADVANCED_RENDERING` | `OFF` | 고급 렌더링 확장 |
 | `DY_EXTEND_IMGUI` | `OFF` | 데스크톱 ImGui 확장 |

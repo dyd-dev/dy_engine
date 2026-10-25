@@ -9,6 +9,18 @@ if(APPLE)
     set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 endif()
 include(Engine_Options)
+option(DY_ENABLE_SHADER_COMPILER "Embed the optional Vulkan GLSL compiler." OFF)
+if(DY_ENABLE_SHADER_COMPILER)
+    if(NOT USE_VULKAN)
+        message(FATAL_ERROR "DY_ENABLE_SHADER_COMPILER currently requires the Vulkan backend.")
+    endif()
+    if(CMAKE_VERSION VERSION_LESS "3.27")
+        message(FATAL_ERROR "DY_ENABLE_SHADER_COMPILER requires CMake 3.27 or newer for glslang.")
+    endif()
+endif()
+if(DY_BUILD_CONFORMANCE_TESTS)
+    enable_testing()
+endif()
 find_package(Threads REQUIRED)
 include(Dependencies)
 
@@ -22,6 +34,7 @@ target_sources(dy_engine PRIVATE
     src/RHI/IDevice.cpp
     src/RHI/RenderGraph.cpp
     src/RHI/Resources.cpp
+    src/RHI/ShaderCompiler.cpp
     src/RHI/ThreadPool.cpp
 
     src/dyf/BasicEnvironmentResources.cpp
@@ -66,6 +79,34 @@ target_sources(dy_engine PRIVATE
     src/Platform/Profiler/FrameProfiler.cpp
     src/Platform/Profiler/RhiProfiler.cpp
 )
+
+if(DY_ENABLE_SHADER_COMPILER)
+    # Keep third-party options local and embed its objects in the engine archive.
+    # Consumers need neither glslang archives/headers nor this CMake project.
+    function(dy_build_shader_compiler)
+        set(BUILD_SHARED_LIBS OFF)
+        set(BUILD_EXTERNAL OFF)
+        set(ENABLE_SPIRV ON)
+        set(ENABLE_OPT OFF)
+        set(ENABLE_HLSL OFF)
+        set(ENABLE_GLSLANG_BINARIES OFF)
+        set(ENABLE_SPVREMAPPER OFF)
+        set(ENABLE_PCH OFF)
+        set(GLSLANG_TESTS OFF)
+        set(GLSLANG_ENABLE_INSTALL OFF)
+        FetchContent_Declare(dy_glslang
+            GIT_REPOSITORY "https://github.com/KhronosGroup/glslang.git"
+            GIT_TAG "15.1.0"
+            GIT_SHALLOW TRUE)
+        FetchContent_MakeAvailable(dy_glslang)
+        target_sources(dy_engine PRIVATE
+            $<TARGET_OBJECTS:glslang>
+            $<TARGET_OBJECTS:glslang-default-resource-limits>)
+        target_include_directories(dy_engine SYSTEM PRIVATE "${dy_glslang_SOURCE_DIR}")
+        target_compile_definitions(dy_engine PRIVATE DY_SHADER_COMPILER_ENABLED=1)
+    endfunction()
+    dy_build_shader_compiler()
+endif()
 
 set(dy_window_libraries)
 set(dy_window_include_directories)

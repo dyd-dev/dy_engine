@@ -7,5 +7,5 @@ float n=settings.value.z,f=settings.value.w;
 float z=distant?10000.0+(nearFace?0.0:.002):(nearFace?2.0:3.0);
 vec2 center=vec2(distant?.48:-.48,nearFace?.06:-.06);
 vec2 ndc=center+corners[gl_VertexIndex]*vec2(.34,.5);
-float clipDepth=settings.value.x>.5?(f*n-n*z)/(f-n):(f*z-f*n)/(f-n);
+    float clipDepth=(f*n-n*z)/(f-n);
 gl_Position=vec4(ndc*z,clipDepth,z);color=nearFace?vec3(.1,.85,.35):vec3(.9,.12,.2);}

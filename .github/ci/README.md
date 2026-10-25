@@ -1,6 +1,6 @@
 # 플랫폼별 빌드 CI
 
-모든 브랜치의 push에서 공통 examples 앱을 Debug/Release로 빌드합니다. CI는 빌드 성공 여부만 판정합니다.
+모든 브랜치의 push에서 데스크톱 단독 예제와 Android·iOS 앱을 Debug/Release로 빌드합니다. CI는 빌드 성공 여부만 판정합니다.
 
 | 플랫폼 | 빌드 |
 | --- | --- |
@@ -10,7 +10,9 @@
 | Android | Gradle Debug/Release APK, arm64-v8a/x86_64 |
 | iOS | Xcode Debug/Release, 실기기·시뮬레이터 arm64, 코드 서명 제외 |
 
-일반 examples 빌드가 등록한 예제들도 함께 빌드됩니다. CI에서는 기존 옵션으로 외부 showcase의 기본 장면·HDR 경로를 빈 값으로 지정합니다.
+데스크톱은 `DY_BUILD_EXAMPLES=ON`으로 구성한 전체 타깃을 빌드합니다. 예제는 `vertex.h`·`fragment.h`를 생성하지 않고 단독 실행 파일로 빌드합니다.
+
+모바일은 네이티브 예제 앱을 빌드합니다. 선택적 런타임 GLSL 컴파일러는 기본값 OFF를 사용합니다. 앱 실행이나 예제의 런타임 셰이더 로딩은 검사하지 않습니다.
 
 Android SDK·NDK·CMake 버전은 `android/app/build.gradle`에서 읽습니다. iOS는 기존 Xcode 프로젝트와 빌드 단계를 사용합니다. CI 전용 테스트 타깃이나 제품 소스 계측을 추가하지 않습니다.
 
