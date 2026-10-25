@@ -21,7 +21,7 @@ int main()
 
         dyf::RHI::SwapchainDesc swapchain;
         swapchain.window = window.GetHandle();
-        swapchain.format = dyf::RHI::Format::B8G8R8A8_UNORM;
+        swapchain.format = dyf::RHI::DefaultSwapchainFormat;
         // 네이티브 창은 0으로 크기를 유도하고, Null 검증은 명시 크기를 요구한다.
         if (!device->Supports(dyf::RHI::Feature::Rasterization))
         {
