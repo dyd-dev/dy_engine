@@ -1,31 +1,17 @@
 cmake_minimum_required(VERSION 3.20)
 project(AdvancedInstancingBatching LANGUAGES CXX)
-get_filename_component(engine_default "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
-set(DY_ENGINE_SOURCE_DIR "${engine_default}" CACHE PATH "dy_engine source directory.")
+
 if(NOT TARGET dy_engine)
-    add_subdirectory("${DY_ENGINE_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/dy_engine" EXCLUDE_FROM_ALL)
+    find_path(DY_ENGINE_INCLUDE_DIR dyf/RHI.h REQUIRED)
+    find_library(DY_ENGINE_LIBRARY NAMES dy_engine REQUIRED)
+    add_library(dy_engine STATIC IMPORTED)
+    set_target_properties(dy_engine PROPERTIES
+        IMPORTED_LOCATION "${DY_ENGINE_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${DY_ENGINE_INCLUDE_DIR}"
+        INTERFACE_LINK_LIBRARIES "${DY_ENGINE_LINK_LIBRARIES}")
 endif()
-include("${DY_ENGINE_SOURCE_DIR}/cmake/CompileShaders.cmake")
+
 add_executable(AdvancedInstancingBatching main.cpp)
+target_compile_features(AdvancedInstancingBatching PRIVATE cxx_std_17)
 target_link_libraries(AdvancedInstancingBatching PRIVATE dy_engine)
-set(shader_dir "${CMAKE_CURRENT_SOURCE_DIR}/Shaders")
-dy_compile_shader(AdvancedInstancingBatching vertex vert
-    GLSL "${shader_dir}/canvas_vs.glsl"
-    HLSL "${shader_dir}/canvas_vs.hlsl"
-    METAL "${shader_dir}/canvas.metal"
-    METAL_ENTRY canvasVertex
-    INCLUDE_DIRS "${shader_dir}")
-dy_compile_shader(AdvancedInstancingBatching fragment frag
-    GLSL "${shader_dir}/canvas_ps.glsl"
-    HLSL "${shader_dir}/canvas_ps.hlsl"
-    METAL "${shader_dir}/canvas.metal"
-    METAL_ENTRY canvasFragment
-    INCLUDE_DIRS "${shader_dir}")
-
-
-if(DY_ENABLE_TRACY)
-    target_link_libraries(AdvancedInstancingBatching PRIVATE dyf::Tracy)
-endif()
-if(DY_ENABLE_RENDERDOC)
-    target_link_libraries(AdvancedInstancingBatching PRIVATE dyf::RenderDoc)
-endif()
+target_compile_definitions(AdvancedInstancingBatching PRIVATE "$<$<BOOL:${USE_METAL}>:DY_EXAMPLE_METAL>")

@@ -1,76 +1,71 @@
-#include "dyf/RHI/IDevice.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI.h"
-#include "generate.h"
-#include "vertex.h"
-#include "fragment.h"
 
-#include <charconv>
+#include <fstream>
+#include <iterator>
 #include <chrono>
 #include <cstdint>
-#include <iostream>
 #include <memory>
-#include <stdexcept>
-#include <string_view>
+#include <vector>
 
 using namespace dyf::RHI;
 
-int main(int argc, char** argv) try
+int main()
 {
-    const auto check = [](bool ok, const char* message) {
-        if(!ok) throw std::runtime_error(message);
-    };
-    uint32_t frameLimit = 0;
-    bool validation = false;
-    for(int i = 1; i < argc; ++i)
-    {
-        const std::string_view argument(argv[i]);
-        if(argument == "--help")
-        {
-            std::cout << "AdvancedIndirectDrawing [--frames N] [--validation]\n"
-                "GPU compute generates both draw argument structures; no CPU readback.\n"
-                "Left cyan: DrawIndirect. Right orange: DrawIndexedIndirect.\n"
-                "DispatchIndirect launches the generator from an uploaded {1,1,1} argument.\n"
-                "Instance counts vary between 0 and 64. Escape closes the window.\n"
-                "Exit codes: success 0, error 1, unsupported device 77.\n";
-            return 0;
-        }
-        if(argument == "--validation") validation = true;
-        else if(argument == "--frames" && i + 1 < argc)
-        {
-            const std::string_view value(argv[++i]);
-            const auto result = std::from_chars(value.data(), value.data() + value.size(), frameLimit);
-            check(result.ec == std::errc{} && result.ptr == value.data() + value.size(),
-                "--frames requires an unsigned 32-bit integer (0 = unlimited).");
-        }
-        else throw std::runtime_error("Unknown or incomplete argument; use --help.");
-    }
+    // Vulkan: glslc -fshader-stage=comp Shaders/generate.glsl -o Shaders/generate.bin
+    // D3D12: dxc -T cs_6_0 -E main Shaders/generate.hlsl -Fo Shaders/generate.bin
+    // Metal: xcrun -sdk macosx metal -c Shaders/program.metal -o Shaders/generate.air
+    //        xcrun -sdk macosx metallib Shaders/generate.air -o Shaders/generate.bin
+    std::ifstream generateFile("Shaders/generate.bin",std::ios::binary);
+    const std::vector<char> generateBinary{
+        std::istreambuf_iterator<char>(generateFile),std::istreambuf_iterator<char>()};
+#ifdef DY_EXAMPLE_METAL
+    const char* generateEntry="generateArguments";
+#else
+    const char* generateEntry="main";
+#endif
+    // Vulkan: glslc -fshader-stage=vert Shaders/vertex.glsl -o Shaders/vertex.bin
+    // D3D12: dxc -T vs_6_0 -E main Shaders/vertex.hlsl -Fo Shaders/vertex.bin
+    // Metal: xcrun -sdk macosx metal -c Shaders/program.metal -o Shaders/vertex.air
+    //        xcrun -sdk macosx metallib Shaders/vertex.air -o Shaders/vertex.bin
+    std::ifstream vertexFile("Shaders/vertex.bin",std::ios::binary);
+    const std::vector<char> vertexBinary{
+        std::istreambuf_iterator<char>(vertexFile),std::istreambuf_iterator<char>()};
+#ifdef DY_EXAMPLE_METAL
+    const char* vertexEntry="vertexMain";
+#else
+    const char* vertexEntry="main";
+#endif
+    // Vulkan: glslc -fshader-stage=frag Shaders/fragment.glsl -o Shaders/fragment.bin
+    // D3D12: dxc -T ps_6_0 -E main Shaders/fragment.hlsl -Fo Shaders/fragment.bin
+    // Metal: xcrun -sdk macosx metal -c Shaders/program.metal -o Shaders/fragment.air
+    //        xcrun -sdk macosx metallib Shaders/fragment.air -o Shaders/fragment.bin
+    std::ifstream fragmentFile("Shaders/fragment.bin",std::ios::binary);
+    const std::vector<char> fragmentBinary{
+        std::istreambuf_iterator<char>(fragmentFile),std::istreambuf_iterator<char>()};
+#ifdef DY_EXAMPLE_METAL
+    const char* fragmentEntry="fragmentMain";
+#else
+    const char* fragmentEntry="main";
+#endif
 
     dyf::Platform::Window window(1000, 650, "Advanced / GPU-generated indirect drawing");
-    check(window.GetHandle() != nullptr, "Window creation failed.");
-    DeviceDesc deviceDesc;
-    deviceDesc.enableValidation = validation;
-    std::unique_ptr<IDevice> owner(IDevice::Create(deviceDesc));
-    check(bool(owner), "Device creation failed.");
+    
+    std::unique_ptr<IDevice> owner(IDevice::Create({}));
+    
     auto& device = *owner;
-    if(!device.Supports(Feature::Rasterization) || !device.Supports(Feature::Compute) ||
-        !device.Supports(Feature::IndirectDraw) || !device.Supports(Feature::IndirectDispatch))
-    {
-        std::cout << "UNSUPPORTED: requires rasterization, compute, indirect drawing and indirect dispatch.\n";
-        return 77;
-    }
     dyf::RHI::ResourceScope resources(device);
     SwapchainDesc swapchain;
     swapchain.window = window.GetHandle();
     swapchain.format = DefaultSwapchainFormat;
-    check(device.CreateSwapchain(swapchain), "Swapchain creation failed.");
+    (void)device.CreateSwapchain(swapchain);
 
     auto* cs = resources.Keep(device.CreateShader({ShaderStage::Compute,
-        ShaderData::generateEntryPoint, ShaderData::generate, ShaderData::generateSize}));
+        generateEntry, generateBinary.data(), generateBinary.size()}));
     auto* vs = resources.Keep(device.CreateShader({ShaderStage::Vertex,
-        ShaderData::vertexEntryPoint, ShaderData::vertex, ShaderData::vertexSize}));
+        vertexEntry, vertexBinary.data(), vertexBinary.size()}));
     auto* fs = resources.Keep(device.CreateShader({ShaderStage::Fragment,
-        ShaderData::fragmentEntryPoint, ShaderData::fragment, ShaderData::fragmentSize}));
+        fragmentEntry, fragmentBinary.data(), fragmentBinary.size()}));
 
     // Compute writes all 9 words: DrawIndirectArguments, then DrawIndexedIndirectArguments.
     constexpr uint32_t indexedOffset = sizeof(DrawIndirectArguments);
@@ -111,18 +106,15 @@ int main(int argc, char** argv) try
     graphicsDesc.layout = {nullptr, 0, 16, ShaderStageFlags::Vertex, 15};
     auto* graphics = resources.Keep(device.CreateGraphicsPipeline(graphicsDesc));
 
-    std::cout << "Left cyan: DrawIndirect | right orange: DrawIndexedIndirect\n"
-        "GPU-generated instance counts: 0..64; CPU does not read the argument buffer.\n";
     const auto start = std::chrono::steady_clock::now();
     uint32_t frame = 0;
-    while(window.IsRunning() && (!frameLimit || frame < frameLimit))
+    while(window.IsRunning())
     {
         window.PollEvents();
-        if(!window.IsRunning() || window.GetInput().WasPressed(dyf::Platform::Key::Escape)) break;
+        if(!window.IsRunning()) break;
         if(!device.BeginFrame())
         {
-            check(!device.IsLost(), "Device lost during BeginFrame.");
-            window.WaitEvents(0.001);
+            
             continue;
         }
         dyf::RHI::ResourceScope frameResources(device);
@@ -130,10 +122,8 @@ int main(int argc, char** argv) try
         if(frame == 0)
         {
             const DispatchIndirectArguments dispatch{1, 1, 1};
-            check(device.UpdateBuffer(*commands, dispatchArguments, 0, &dispatch, sizeof(dispatch)),
-                "Dispatch argument upload failed.");
-            check(device.UpdateBuffer(*commands, indexBuffer, 0, indices, sizeof(indices)),
-                "Index upload failed.");
+            (void)device.UpdateBuffer(*commands, dispatchArguments, 0, &dispatch, sizeof(dispatch));
+            (void)device.UpdateBuffer(*commands, indexBuffer, 0, indices, sizeof(indices));
             const ResourceBarrierDesc ready[] = {
                 {dispatchArguments, nullptr, ResourceState::CopyDestination, ResourceState::IndirectArgument, {}},
                 {indexBuffer, nullptr, ResourceState::CopyDestination, ResourceState::IndexBuffer, {}}
@@ -156,7 +146,7 @@ int main(int argc, char** argv) try
         commands->ResourceBarrier(&generated, 1);
 
         auto* target = device.GetBackBuffer();
-        check(target != nullptr, "Backbuffer unavailable.");
+        
         const auto& extent = target->GetDesc();
         const ResourceBarrierDesc begin{nullptr, target,
             ResourceState::Present, ResourceState::RenderTarget, {}};
@@ -187,16 +177,11 @@ int main(int argc, char** argv) try
         const ResourceBarrierDesc end{nullptr, target,
             ResourceState::RenderTarget, ResourceState::Present, {}};
         commands->ResourceBarrier(&end, 1);
-        check(commands->Close(), "Indirect command recording failed.");
-        check(device.Submit(&commands, 1), "Indirect submission failed.");
-        check(device.Present(), "Present failed.");
+        (void)commands->Close();
+        (void)device.Submit(&commands, 1);
+        (void)device.Present();
         ++frame;
     }
-    check(device.WaitIdle(), "WaitIdle failed.");
+    (void)device.WaitIdle();
     return 0;
-}
-catch(const std::exception& error)
-{
-    std::cerr << error.what() << '\n';
-    return 1;
 }

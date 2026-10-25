@@ -1,99 +1,85 @@
-// 데스크톱은 main의 루프, iOS는 CreatePBRLighting으로 만든 객체의 Tick을 사용한다.
-// Renderer 생성 시 파이프라인을 준비하고, Draw에서 전체 화면 PBR 패스를 제출한다.
-#include "../common/Example.h"
-#ifndef DY_ADVANCED_IOS
+#include "dyf/RHI.h"
 #include "dyf/Platform/Window.h"
-#endif
+#include <vector>
+#include <iterator>
+#include <fstream>
+#include <cstdint>
+#include <memory>
 
 using namespace dyf::RHI;
-using namespace advanced;
-namespace {
-// 같은 앱에 두 예제를 연결해도 셰이더 데이터의 이름이 충돌하지 않는다.
-#include "vertex.h"
-#include "lighting.h"
 
-Options ParseOptions(int argc, char **argv) {
-    Options options;
+struct alignas(16) Params {
+    float sizeTime[4] = {960, 640, 0, 0};
+    float settings[4] = {1, .45f, .8f, .9f};
+    float jitter[4] = {};
+    float extra[4] = {};
+};
 
-    for (int i = 1; i < argc; i++) {
-        std::string arg = argv[i];
-        if (arg == "--help") {
-            std::puts("PBRLighting\n--mode pbr|lambert|normal, --roughness [0.045,1], --metallic [0,1], "
-                      "--exposure [0.01,20]\n--frames N (0=unlimited), --capture path.ppm, --time SECONDS, "
-                      "--validation\n--capture defaults to 1 frames unless --frames is supplied.");
-            options.help = true;
-            return options;
-        }
-        if (arg == "--validation") {
-            options.validation = true;
-            continue;
-        }
-        if (i + 1 >= argc)
-            throw std::runtime_error("Missing value for " + arg);
-        std::string value = argv[++i];
-        if (arg == "--frames") {
-            double n = Number(value, 0, 10000000);
-            if (std::floor(n) != n)
-                throw std::runtime_error("Frame count must be an integer.");
-            options.frameLimit = uint64_t(n);
-            options.framesSpecified = true;
-        } else if (arg == "--capture")
-            options.capture = value;
-        else if (arg == "--time") {
-            options.timeValue = float(Number(value, 0, 1000000));
-            options.fixedTime = true;
-        } else if (arg == "--mode") {
-            if (value == "pbr")
-                options.params.sizeTime[3] = 0;
-            else if (value == "lambert")
-                options.params.sizeTime[3] = 1;
-            else if (value == "normal")
-                options.params.sizeTime[3] = 2;
-            else
-                throw std::runtime_error("Unknown mode: " + value);
-        } else if (arg == "--roughness") {
-            double n = Number(value, 0.045, 1);
-            options.params.settings[1] = float(n);
-        } else if (arg == "--metallic") {
-            double n = Number(value, 0, 1);
-            options.params.settings[2] = float(n);
-        } else if (arg == "--exposure") {
-            double n = Number(value, 0.01, 20);
-            options.params.settings[0] = float(n);
-        } else
-            throw std::runtime_error("Unknown option: " + arg);
-    }
-    if (!options.capture.empty() && !options.framesSpecified)
-        options.frameLimit = 1;
-    if (!options.capture.empty() && options.frameLimit == 0)
-        throw std::runtime_error("Capture requires a finite frame count.");
-    return options;
-}
+int main() {
+    Params params;
+    dyf::Platform::Window window(960, 640, "Advanced / 07_PBRLighting");
+    std::unique_ptr<IDevice> owner(IDevice::Create({}));
+    auto& device = *owner;
+    ResourceScope resources(device);
+    SwapchainDesc swapchain;
+    swapchain.window = window.GetHandle();
+    swapchain.format = DefaultSwapchainFormat;
+    swapchain.minimumImageCount = 2;
+    swapchain.presentMode = PresentMode::Fifo;
+    (void)device.CreateSwapchain(swapchain);
 
-class Renderer final : public Example {
-  public:
-    Renderer(const void *window, const Options &options) : Example(window, options) {
-        auto vertexShader = resources.Keep(device.CreateShader(
-            {ShaderStage::Vertex, ShaderData::vertexEntryPoint, ShaderData::vertex, ShaderData::vertexSize}));
-        auto lightingShader =
-            resources.Keep(device.CreateShader({ShaderStage::Fragment, ShaderData::lightingEntryPoint,
-                                                ShaderData::lighting, ShaderData::lightingSize}));
-        // PBR 조명을 그릴 파이프라인을 준비한다.
-        ColorAttachmentDesc colorDesc{ExampleColorFormat, {}, ColorWriteMask::All};
-        GraphicsPipelineDesc lightingDesc;
-        lightingDesc.vertexShader = vertexShader;
-        lightingDesc.fragmentShader = lightingShader;
-        lightingDesc.topology = PrimitiveTopology::TriangleList;
-        lightingDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
-        lightingDesc.colorAttachments = &colorDesc;
-        lightingDesc.colorAttachmentCount = 1;
-        lightingDesc.layout = {nullptr, 0, sizeof(Params),
-                               ShaderStageFlags::Fragment, 15};
-        lightingPipeline = resources.Keep(device.CreateGraphicsPipeline(lightingDesc));
-    }
+    // 예제 폴더에서 연결한 엔진의 백엔드에 맞는 명령으로 셰이더를 컴파일한다.
+    // Metal의 macosx SDK는 대상에 따라 iphoneos 또는 iphonesimulator로 바꾼다.
+    // Vulkan: glslc -fshader-stage=vert Shaders/vertex.glsl -o Shaders/vertex.bin
+    // D3D12: dxc -T vs_6_0 -E main Shaders/vertex.hlsl -Fo Shaders/vertex.bin
+    // Metal: xcrun -sdk macosx metal -c Shaders/vertex.metal -o Shaders/vertex.air
+    //        xcrun -sdk macosx metallib Shaders/vertex.air -o Shaders/vertex.bin
+    std::ifstream vertexFile("Shaders/vertex.bin", std::ios::binary);
+    const std::vector<char> vertexBinary{
+        std::istreambuf_iterator<char>(vertexFile), std::istreambuf_iterator<char>()};
+    // Vulkan: glslc -fshader-stage=frag Shaders/lighting.glsl -o Shaders/lighting.bin
+    // D3D12: dxc -T ps_6_0 -E main Shaders/lighting.hlsl -Fo Shaders/lighting.bin
+    // Metal: xcrun -sdk macosx metal -c Shaders/lighting.metal -o Shaders/lighting.air
+    //        xcrun -sdk macosx metallib Shaders/lighting.air -o Shaders/lighting.bin
+    std::ifstream lightingFile("Shaders/lighting.bin", std::ios::binary);
+    const std::vector<char> lightingBinary{
+        std::istreambuf_iterator<char>(lightingFile), std::istreambuf_iterator<char>()};
+#ifdef DY_EXAMPLE_METAL
+    constexpr const char* vertexEntryPoint = "vertexMain";
+    constexpr const char* lightingEntryPoint = "fragmentMain";
+#else
+    constexpr const char* vertexEntryPoint = "main";
+    constexpr const char* lightingEntryPoint = "main";
+#endif
 
-  private:
-    void Draw(TextureHandle backbuffer) override {
+    auto vertexShader = resources.Keep(device.CreateShader(
+        {ShaderStage::Vertex, vertexEntryPoint, vertexBinary.data(), vertexBinary.size()}));
+    auto lightingShader =
+        resources.Keep(device.CreateShader({ShaderStage::Fragment, lightingEntryPoint,
+                                            lightingBinary.data(), lightingBinary.size()}));
+    ColorAttachmentDesc colorDesc{DefaultSwapchainFormat, {}, ColorWriteMask::All};
+    GraphicsPipelineDesc lightingDesc;
+    lightingDesc.vertexShader = vertexShader;
+    lightingDesc.fragmentShader = lightingShader;
+    lightingDesc.topology = PrimitiveTopology::TriangleList;
+    lightingDesc.raster = {FillMode::Solid, CullMode::None, FrontFace::CounterClockwise, 0, 0, 0};
+    lightingDesc.colorAttachments = &colorDesc;
+    lightingDesc.colorAttachmentCount = 1;
+    lightingDesc.layout = {nullptr, 0, sizeof(Params),
+                           ShaderStageFlags::Fragment, 15};
+    auto lightingPipeline = resources.Keep(device.CreateGraphicsPipeline(lightingDesc));
+
+    uint32_t imageWidth = 0, imageHeight = 0;
+    uint64_t frame = 0;
+    while (window.IsRunning()) {
+        window.PollEvents();
+        if (!window.IsRunning()) break;
+        if (!device.BeginFrame()) continue;
+        auto backbuffer = device.GetBackBuffer();
+        params.sizeTime[0] = float(backbuffer->GetDesc().width);
+        params.sizeTime[1] = float(backbuffer->GetDesc().height);
+        params.sizeTime[2] = float(frame) / 60.f;
+
         const auto dimensions = backbuffer->GetDesc();
         imageWidth = dimensions.width;
         imageHeight = dimensions.height;
@@ -101,7 +87,6 @@ class Renderer final : public Example {
         ResourceScope frameResources(device);
         auto *commands = frameResources.Keep(device.AcquireCommandList());
 
-        // 전체 화면 삼각형으로 절차적 구·바닥을 계산한다. 정점 수 3은 구체 개수가 아니다.
         {
             const ResourceBarrierDesc backbufferBarrier{
                 nullptr, backbuffer, ResourceState::Present, ResourceState::RenderTarget, {}};
@@ -122,41 +107,11 @@ class Renderer final : public Example {
         const ResourceBarrierDesc presentBarrier{
             nullptr, backbuffer, ResourceState::RenderTarget, ResourceState::Present, {}};
         commands->ResourceBarrier(&presentBarrier, 1);
-        if (!commands->Close() || !device.Submit(&commands, 1))
-            throw std::runtime_error("Frame recording/submission failed.");
-        // GPU 명령 제출에 성공한 뒤 공통 Tick()에서 프레임 수를 갱신한다.
+        (void)commands->Close();
+        (void)device.Submit(&commands, 1);
+
+        (void)device.Present();
+        ++frame;
     }
-
-    PipelineHandle lightingPipeline = nullptr;
-};
-} // namespace
-
-// iOS 앱의 진입점. 플랫폼 화면 주소를 받되 옵션 해석과 렌더링은 기존 예제를 사용한다.
-std::unique_ptr<Example> advanced::CreatePBRLighting(const void *view, int argc, char **argv) {
-    const auto options = ParseOptions(argc, argv);
-    if (options.help)
-        return nullptr;
-    return std::make_unique<Renderer>(view, options);
+    (void)device.WaitIdle();
 }
-
-#ifndef DY_ADVANCED_IOS
-int main(int argc, char **argv) try {
-    const auto options = ParseOptions(argc, argv);
-    if (options.help)
-        return 0;
-    dyf::Platform::Window window(960, 640, "Advanced / 07_PBRLighting");
-    if (!window.GetHandle())
-        throw std::runtime_error("Window creation failed.");
-    Renderer renderer(window.GetHandle(), options);
-    while (window.IsRunning()) {
-        window.PollEvents();
-        if (!window.IsRunning() || !renderer.Tick())
-            break;
-    }
-    renderer.WaitIdle();
-    return 0;
-} catch (const std::exception &error) {
-    std::fprintf(stderr, "PBRLighting: %s\n", error.what());
-    return 1;
-}
-#endif

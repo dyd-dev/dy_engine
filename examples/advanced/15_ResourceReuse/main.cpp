@@ -1,367 +1,160 @@
-#include "../../../src/Platform/Profiler/CollectorInternal.h"
-#include "dyf/RHI/IDevice.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI.h"
-#include "dyf/Platform/Profiler.h"
-#include "vertex.h"
-#include "fragment.h"
 
+#include <fstream>
+#include <iterator>
 #include <array>
-#include <chrono>
 #include <cstdint>
-#include <cstdio>
-#include <cstdlib>
 #include <memory>
-#include <stdexcept>
-#include <string>
 #include <vector>
 
 namespace RHI = dyf::RHI;
-namespace Live = dyf::Platform;
-using Clock = std::chrono::steady_clock;
 
-namespace {
-
-// 오류 검사 도우미 함수
-void Check(bool ok, const char* operation) { if (!ok) throw std::runtime_error(operation); }
-
-// =============================================================================
-// [설정값 및 옵션 정의]
-// 리소스 생성 및 재사용 비교를 위한 실행 옵션 구조체
-// =============================================================================
-struct Options {
-    std::string mode;
-    uint32_t frames = 0;
-    bool validation = false;
-};
-
-// 명령행 인자 파싱 함수
-bool Parse(int argc, char** argv, Options& options, const char* modes, const char* description) {
-    for (int i = 1; i < argc; ++i) {
-        const std::string argument = argv[i];
-
-        if (argument == "--help") {
-            std::printf("%s\n--mode %s --frames N (0 = unlimited) --validation\n",
-                        description, modes);
-            return false;
-        }
-
-        if (argument == "--validation") {
-            options.validation = true;
-        } else if ((argument == "--mode" || argument == "--frames") && i + 1 < argc) {
-            const std::string value = argv[++i];
-
-            if (argument == "--mode") {
-                options.mode = value;
-            } else {
-                char* end = nullptr;
-                const auto count = std::strtoull(value.c_str(), &end, 10);
-                Check(!value.empty() && value[0] != '-' && end && *end == '\0' && count <= UINT32_MAX,
-                      "--frames requires an unsigned 32-bit integer");
-                options.frames = uint32_t(count);
-            }
-        } else {
-            throw std::runtime_error("Unknown or incomplete argument; use --help");
-        }
-    }
-    return true;
-}
-
-
-} // namespace
-
-// =============================================================================
-// [메인 진입점]
-// =============================================================================
-int main(int argc, char** argv) {
-    try {
-        Options options;
-        options.mode = "reuse";
-
-        if (!Parse(argc, argv, options, "create|reuse",
-                   "Identical instanced picture: allocate a buffer every frame versus reuse one buffer.")) {
-            return 0;
-        }
-
-        Check(options.mode == "create" || options.mode == "reuse", "Invalid --mode");
-
-        // 1. 윈도우 생성 (해상도: 800x600)
-        dyf::Platform::Window window(800, 600, "Advanced / 15_ResourceReuse");
-        Check(window.GetHandle() != nullptr, "Window creation failed");
-
-        // 2. RHI 렌더 디바이스 생성
-        RHI::DeviceDesc deviceDesc;
-        deviceDesc.enableValidation = options.validation;
-
-        std::unique_ptr<RHI::IDevice> deviceOwner(RHI::IDevice::Create(deviceDesc));
-        Check(bool(deviceOwner), "Device creation failed");
-        auto& device = *deviceOwner;
-
-        dyf::RHI::ResourceScope resources(device);
-
-        // 3. 스왑체인 생성
-        RHI::SwapchainDesc swapchain;
-        swapchain.window = window.GetHandle();
-        swapchain.format = RHI::DefaultSwapchainFormat;
-        swapchain.minimumImageCount = 2;
-        swapchain.presentMode = RHI::PresentMode::Fifo;
-
-        Check(device.CreateSwapchain(swapchain), "Swapchain creation failed");
-
-        // 4. 버텍스 및 인스턴스 데이터 준비
-        // 정점 버퍼와 인스턴스 버퍼는 서로 다른 입력 슬롯이다.
-        struct Vertex {
-            float x, y;
-        };
-
-        struct Instance {
-            float x, y, scaleX, scaleY, r, g, b, a;
-        };
-
-        const std::array<Vertex, 6> vertices{{
-            {-0.5f, -0.5f}, {0.5f, -0.5f}, {0.5f, 0.5f},
-            {-0.5f, -0.5f}, {0.5f, 0.5f}, {-0.5f, 0.5f}
-        }};
-
-        constexpr uint32_t side = 16;
-        constexpr uint32_t objectCount = side * side;
-        std::array<Instance, objectCount> instances{};
-
-        for (uint32_t i = 0; i < objectCount; ++i) {
-            const uint32_t x = i % side;
-            const uint32_t y = i / side;
-            instances[i] = {
-                -0.9f + (x + 0.5f) * 1.8f / side,
-                -0.9f + (y + 0.5f) * 1.8f / side,
-                1.55f / side,
-                1.55f / side,
-                0.2f + 0.7f * x / (side - 1),
-                0.2f + 0.7f * y / (side - 1),
-                0.8f,
-                1.0f
-            };
-        }
-
-        RHI::BufferDesc vertexDesc;
-        vertexDesc.size = sizeof(vertices);
-        vertexDesc.usage = RHI::BufferUsage::Vertex;
-        vertexDesc.initialState = RHI::ResourceState::CopyDestination;
-        auto* vertexBuffer = resources.Keep(device.CreateBuffer(vertexDesc));
-
-        RHI::BufferDesc instanceDesc;
-        instanceDesc.size = sizeof(instances);
-        instanceDesc.usage = RHI::BufferUsage::Vertex;
-        instanceDesc.initialState = RHI::ResourceState::CopyDestination;
-
-        // create 모드는 프레임 dyf::RHI::ResourceScope에서 생성/해제하고 reuse 모드는 이 버퍼 하나를 유지한다.
-        RHI::BufferHandle reusableBuffer = nullptr;
-        std::unique_ptr<RHI::ResourceScope> reusableResources;
-        bool reusableUploaded = false;
-        uint64_t bufferCreations = 0;
-        double allocationMilliseconds = 0.0;
-
-        const auto createReusable = [&]() {
-            auto owned = std::make_unique<RHI::ResourceScope>(device);
-            const auto start = Clock::now();
-            auto* buffer = device.CreateBuffer(instanceDesc);
-            allocationMilliseconds += std::chrono::duration<double, std::milli>(Clock::now() - start).count();
-            if(!buffer) return false;
-            owned->Keep(buffer);
-            reusableBuffer = buffer;
-            reusableResources = std::move(owned);
-            reusableUploaded = false;
-            ++bufferCreations;
-            return true;
-        };
-        if(options.mode == "reuse") Check(createReusable(), "Instance buffer creation failed");
-
-        // 5. 셰이더 및 그래픽스 파이프라인 생성
-        auto* vs = resources.Keep(device.CreateShader({
-            RHI::ShaderStage::Vertex,
-            ShaderData::vertexEntryPoint,
-            ShaderData::vertex,
-            ShaderData::vertexSize
-        }));
-        auto* fs = resources.Keep(device.CreateShader({
-            RHI::ShaderStage::Fragment,
-            ShaderData::fragmentEntryPoint,
-            ShaderData::fragment,
-            ShaderData::fragmentSize
-        }));
-
-        const std::array<RHI::VertexBufferLayout, 2> input{{
-            {0, sizeof(Vertex), RHI::VertexStepMode::Vertex},
-            {1, sizeof(Instance), RHI::VertexStepMode::Instance}
-        }};
-
-        const std::array<RHI::VertexAttribute, 3> attributes{{
-            {0, 0, RHI::Format::R32G32_FLOAT, 0},
-            {1, 1, RHI::Format::R32G32B32A32_FLOAT, 0},
-            {2, 1, RHI::Format::R32G32B32A32_FLOAT, 16}
-        }};
-
-        RHI::ColorAttachmentDesc output{swapchain.format, {}, RHI::ColorWriteMask::All};
-
-        RHI::GraphicsPipelineDesc pipelineDesc;
-        pipelineDesc.vertexShader = vs;
-        pipelineDesc.fragmentShader = fs;
-        pipelineDesc.topology = RHI::PrimitiveTopology::TriangleList;
-        pipelineDesc.vertexBuffers = input.data();
-        pipelineDesc.vertexBufferCount = uint32_t(input.size());
-        pipelineDesc.vertexAttributes = attributes.data();
-        pipelineDesc.vertexAttributeCount = uint32_t(attributes.size());
-        pipelineDesc.raster = {RHI::FillMode::Solid, RHI::CullMode::None, RHI::FrontFace::CounterClockwise, 0, 0, 0};
-        pipelineDesc.colorAttachments = &output;
-        pipelineDesc.colorAttachmentCount = 1;
-
-        auto* pipeline = resources.Keep(device.CreateGraphicsPipeline(pipelineDesc));
-        const auto liveOwner=Live::FindLiveObject(&device);
-        Live::ControlDesc reuse;reuse.device=reuse.source=reuse.owner=liveOwner;
-        reuse.key="example15.reuse";reuse.label="Reuse instance buffer";
-        reuse.application=Live::ControlApplication::ResourceRebuild;reuse.appliedValue=options.mode=="reuse";
-        auto reuseControl=Live::RegisterControl(reuse,[&](const Live::ControlRequest& request,Live::LiveFrameKey){
-            const bool enabled=std::get<bool>(request.value),previous=options.mode=="reuse";
-            if(enabled==previous)return Live::ControlApplyResult{Live::ControlState::Applied,previous,{}};
-            if(enabled&&!createReusable())return Live::ControlApplyResult{Live::ControlState::Failed,previous,"Instance buffer creation failed"};
-            if(!enabled){reusableResources.reset();reusableBuffer=nullptr;reusableUploaded=false;}
-            options.mode=enabled?"reuse":"create";
-            return Live::ControlApplyResult{Live::ControlState::Applied,enabled,{}};
-        });
-
-        uint32_t frame = 0;
-        uint64_t drawCalls = 0;
-        double recordMilliseconds = 0.0;
-
-        // =====================================================================
-        // [메인 렌더 루프]
-        // =====================================================================
-        while (window.IsRunning() && (options.frames == 0 || frame < options.frames)) {
-            window.PollEvents();
-            if (!window.IsRunning()) {
-                break;
-            }
-
-            if (!device.BeginFrame()) {
-                Check(!device.IsLost(), "Device lost during BeginFrame");
-                continue; // 최소화/resize로 준비되지 않은 프레임은 세지 않는다.
-            }
-            const auto liveFrame=Live::GetLiveContext().frame;
-            Live::PollControls(liveOwner,liveFrame);
-            Live::SetLiveObjectGauge(liveFrame,{Live::LiveValueState::Ready,objectCount});
-
-            // 제출된 명령이 참조 자원을 GPU 완료까지 유지하므로 이 scope는 프레임 끝에 해제할 수 있다.
-            dyf::RHI::ResourceScope frameResources(device);
-            auto* commands = frameResources.Keep(device.AcquireCommandList());
-            auto* instanceBuffer = reusableBuffer;
-
-            if (options.mode == "create") {
-                const auto allocationStart = Clock::now();
-                instanceBuffer = frameResources.Keep(device.CreateBuffer(instanceDesc));
-                allocationMilliseconds += std::chrono::duration<double, std::milli>(Clock::now() - allocationStart).count();
-                ++bufferCreations;
-            }
-
-            const auto recordStart = Clock::now();
-
-            if (frame == 0) {
-                Check(device.UpdateBuffer(*commands, vertexBuffer, 0, vertices.data(), sizeof(vertices)), "Vertex upload failed");
-                const RHI::ResourceBarrierDesc uploaded{
-                    vertexBuffer, nullptr,
-                    RHI::ResourceState::CopyDestination, RHI::ResourceState::VertexBuffer, {}
-                };
-                commands->ResourceBarrier(&uploaded, 1);
-            }
-
-            if (options.mode == "reuse" && reusableUploaded) {
-                // 이전 프레임의 vertex read가 끝난 뒤 같은 저장소에 다시 쓴다.
-                const RHI::ResourceBarrierDesc beforeUpload{
-                    instanceBuffer, nullptr,
-                    RHI::ResourceState::VertexBuffer, RHI::ResourceState::CopyDestination, {}
-                };
-                commands->ResourceBarrier(&beforeUpload, 1);
-            }
-
-            Check(device.UpdateBuffer(*commands, instanceBuffer, 0, instances.data(), sizeof(instances)), "Instance upload failed");
-            const RHI::ResourceBarrierDesc afterUpload{
-                instanceBuffer, nullptr,
-                RHI::ResourceState::CopyDestination, RHI::ResourceState::VertexBuffer, {}
-            };
-            commands->ResourceBarrier(&afterUpload, 1);
-
-            // --- 렌더 패스 기록 ---
-            auto* backBuffer = device.GetBackBuffer(); // resize 이후의 실제 handle/크기를 매 프레임 사용한다.
-            const auto& extent = backBuffer->GetDesc();
-
-            const RHI::ResourceBarrierDesc begin{
-                nullptr, backBuffer,
-                RHI::ResourceState::Present, RHI::ResourceState::RenderTarget, {}
-            };
-            commands->ResourceBarrier(&begin, 1);
-
-            RHI::ColorAttachment color;
-            color.texture = backBuffer;
-            color.loadOp = RHI::LoadOp::Clear;
-            color.storeOp = RHI::StoreOp::Store;
-            color.clearColor[0] = 0.025f;
-            color.clearColor[1] = 0.035f;
-            color.clearColor[2] = 0.055f;
-            color.clearColor[3] = 1.0f;
-
-            commands->BeginRendering({&color, 1, nullptr});
-            commands->BindGraphicsPipeline(pipeline);
-            commands->BindVertexBuffer(0, vertexBuffer, 0);
-            commands->BindVertexBuffer(1, instanceBuffer, 0);
-            commands->SetViewport({0, 0, float(extent.width), float(extent.height), 0, 1});
-            commands->SetScissor({0, 0, extent.width, extent.height});
-            {
-#ifdef DY_LIVE_PROFILING_ENABLED
-                auto context=Live::GetLiveContext();context.batch=Live::GetLiveBatchId(liveOwner,0);
-                Live::LiveContextScope batchContext(context);
-                Live::LiveEvent batch;batch.id=context.batch;batch.context=context;
-                batch.kind=Live::LiveEventKind::Batch;batch.stage=Live::LiveStage::Data;batch.elements=objectCount;
-                batch.bytes=sizeof(instances);batch.stride=sizeof(Instance);batch.resource=Live::FindLiveObject(instanceBuffer);
-                batch.reason=Live::LiveSplitReason::EndOfInput;Live::RecordLiveEvent(batch);
-                Live::RecordLiveLink({batch.id,batch.resource});
+int main()
+{
+    // Vulkan: glslc -fshader-stage=vert Shaders/canvas_vs.glsl -o Shaders/vertex.bin
+    // D3D12: dxc -T vs_6_0 -E main Shaders/canvas_vs.hlsl -Fo Shaders/vertex.bin
+    // Metal: xcrun -sdk macosx metal -c Shaders/canvas.metal -o Shaders/vertex.air
+    //        xcrun -sdk macosx metallib Shaders/vertex.air -o Shaders/vertex.bin
+    std::ifstream vertexFile("Shaders/vertex.bin",std::ios::binary);
+    const std::vector<char> vertexBinary{
+        std::istreambuf_iterator<char>(vertexFile),std::istreambuf_iterator<char>()};
+#ifdef DY_EXAMPLE_METAL
+    const char* vertexEntry="canvasVertex";
+#else
+    const char* vertexEntry="main";
 #endif
-                commands->DrawInstanced(uint32_t(vertices.size()), objectCount, 0, 0);
-            }
-            ++drawCalls;
-            commands->EndRendering();
+    // Vulkan: glslc -fshader-stage=frag Shaders/canvas_ps.glsl -o Shaders/fragment.bin
+    // D3D12: dxc -T ps_6_0 -E main Shaders/canvas_ps.hlsl -Fo Shaders/fragment.bin
+    // Metal: xcrun -sdk macosx metal -c Shaders/canvas.metal -o Shaders/fragment.air
+    //        xcrun -sdk macosx metallib Shaders/fragment.air -o Shaders/fragment.bin
+    std::ifstream fragmentFile("Shaders/fragment.bin",std::ios::binary);
+    const std::vector<char> fragmentBinary{
+        std::istreambuf_iterator<char>(fragmentFile),std::istreambuf_iterator<char>()};
+#ifdef DY_EXAMPLE_METAL
+    const char* fragmentEntry="canvasFragment";
+#else
+    const char* fragmentEntry="main";
+#endif
 
-            const RHI::ResourceBarrierDesc end{
-                nullptr, backBuffer,
-                RHI::ResourceState::RenderTarget, RHI::ResourceState::Present, {}
-            };
-            commands->ResourceBarrier(&end, 1);
+    dyf::Platform::Window window(800, 600, "Advanced / Resource reuse");
+    std::unique_ptr<RHI::IDevice> owner(RHI::IDevice::Create({}));
+    auto& device = *owner;
+    RHI::ResourceScope resources(device);
+    RHI::SwapchainDesc swapchain;
+    swapchain.window = window.GetHandle();
+    swapchain.format = RHI::DefaultSwapchainFormat;
+    (void)device.CreateSwapchain(swapchain);
 
-            Check(commands->Close(), "Command recording failed");
-            recordMilliseconds += std::chrono::duration<double, std::milli>(Clock::now() - recordStart).count();
-
-            Check(device.Submit(&commands, 1), "Submission failed");
-            if(options.mode=="reuse")reusableUploaded=true;
-
-
-            Check(device.Present(), "Present failed");
-            ++frame;
-        }
-
-        // =====================================================================
-        // [종료 및 통계 출력]
-        // =====================================================================
-        Check(device.WaitIdle(), "WaitIdle failed");
-
-        std::printf("mode=%s frames=%u objects=%u draw_calls=%llu cpu_record_ms=%.3f avg_record_us=%.3f\n",
-                    options.mode.c_str(), frame, objectCount, static_cast<unsigned long long>(drawCalls),
-                    recordMilliseconds, frame ? recordMilliseconds * 1000.0 / frame : 0.0);
-        std::printf("instance_buffer_creations=%llu instance_buffer_bytes=%u uploaded_bytes=%llu cpu_allocation_ms=%.3f\n",
-                    static_cast<unsigned long long>(bufferCreations), unsigned(sizeof(instances)),
-                    static_cast<unsigned long long>(uint64_t(frame) * sizeof(instances)), allocationMilliseconds);
-        std::puts("Both modes upload the same bytes and issue one draw per frame. CPU allocation/recording timings exclude GPU execution and present.");
-
-        return 0;
-
-    } catch (const std::exception& error) {
-        std::fprintf(stderr, "%s\n", error.what());
-        return 1;
+    struct Vertex { float x, y; };
+    struct Instance { float x, y, scaleX, scaleY, r, g, b, a; };
+    const std::array<Vertex, 6> vertices{{
+        {-0.5f, -0.5f}, {0.5f, -0.5f}, {0.5f, 0.5f},
+        {-0.5f, -0.5f}, {0.5f, 0.5f}, {-0.5f, 0.5f}
+    }};
+    constexpr uint32_t side = 16, objectCount = side * side;
+    std::array<Instance, objectCount> instances{};
+    for(uint32_t i = 0; i < objectCount; ++i)
+    {
+        const uint32_t x = i % side, y = i / side;
+        instances[i] = {
+            -0.9f + (x + 0.5f) * 1.8f / side, -0.9f + (y + 0.5f) * 1.8f / side,
+            1.55f / side, 1.55f / side,
+            0.2f + 0.7f * x / (side - 1), 0.2f + 0.7f * y / (side - 1), 0.8f, 1.0f
+        };
     }
+    RHI::BufferDesc vertexDesc;
+    vertexDesc.size = sizeof(vertices);
+    vertexDesc.usage = RHI::BufferUsage::Vertex;
+    vertexDesc.initialState = RHI::ResourceState::CopyDestination;
+    auto* vertexBuffer = resources.Keep(device.CreateBuffer(vertexDesc));
+    RHI::BufferDesc instanceDesc;
+    instanceDesc.size = sizeof(instances);
+    instanceDesc.usage = RHI::BufferUsage::Vertex;
+    instanceDesc.initialState = RHI::ResourceState::CopyDestination;
+    auto* instanceBuffer = resources.Keep(device.CreateBuffer(instanceDesc));
+
+    auto* vertexShader = resources.Keep(device.CreateShader({RHI::ShaderStage::Vertex,
+        vertexEntry, vertexBinary.data(), vertexBinary.size()}));
+    auto* fragmentShader = resources.Keep(device.CreateShader({RHI::ShaderStage::Fragment,
+        fragmentEntry, fragmentBinary.data(), fragmentBinary.size()}));
+    const RHI::VertexBufferLayout inputs[] = {
+        {0, sizeof(Vertex), RHI::VertexStepMode::Vertex},
+        {1, sizeof(Instance), RHI::VertexStepMode::Instance}
+    };
+    const RHI::VertexAttribute attributes[] = {
+        {0, 0, RHI::Format::R32G32_FLOAT, 0},
+        {1, 1, RHI::Format::R32G32B32A32_FLOAT, 0},
+        {2, 1, RHI::Format::R32G32B32A32_FLOAT, 16}
+    };
+    const RHI::ColorAttachmentDesc output{swapchain.format, {}, RHI::ColorWriteMask::All};
+    RHI::GraphicsPipelineDesc pipelineDesc;
+    pipelineDesc.vertexShader = vertexShader;
+    pipelineDesc.fragmentShader = fragmentShader;
+    pipelineDesc.topology = RHI::PrimitiveTopology::TriangleList;
+    pipelineDesc.vertexBuffers = inputs;
+    pipelineDesc.vertexBufferCount = 2;
+    pipelineDesc.vertexAttributes = attributes;
+    pipelineDesc.vertexAttributeCount = 3;
+    pipelineDesc.raster = {RHI::FillMode::Solid, RHI::CullMode::None, RHI::FrontFace::CounterClockwise, 0, 0, 0};
+    pipelineDesc.colorAttachments = &output;
+    pipelineDesc.colorAttachmentCount = 1;
+    auto* pipeline = resources.Keep(device.CreateGraphicsPipeline(pipelineDesc));
+
+    bool uploaded = false;
+    while(window.IsRunning())
+    {
+        window.PollEvents();
+        if(!window.IsRunning()) break;
+        if(!device.BeginFrame()) continue;
+        RHI::ResourceScope frameResources(device);
+        auto* commands = frameResources.Keep(device.AcquireCommandList());
+        if(!uploaded)
+        {
+            (void)device.UpdateBuffer(*commands, vertexBuffer, 0, vertices.data(), sizeof(vertices));
+            const RHI::ResourceBarrierDesc ready[] = {
+                {vertexBuffer, nullptr, RHI::ResourceState::CopyDestination, RHI::ResourceState::VertexBuffer, {}}
+            };
+            commands->ResourceBarrier(ready, 1);
+        }
+        if(uploaded)
+        {
+            const RHI::ResourceBarrierDesc writable{instanceBuffer, nullptr,
+                RHI::ResourceState::VertexBuffer, RHI::ResourceState::CopyDestination, {}};
+            commands->ResourceBarrier(&writable, 1);
+        }
+        (void)device.UpdateBuffer(*commands, instanceBuffer, 0, instances.data(), sizeof(instances));
+        const RHI::ResourceBarrierDesc readable{instanceBuffer, nullptr,
+            RHI::ResourceState::CopyDestination, RHI::ResourceState::VertexBuffer, {}};
+        commands->ResourceBarrier(&readable, 1);
+        uploaded = true;
+        auto* target = device.GetBackBuffer();
+        const auto extent = target->GetDesc();
+        const RHI::ResourceBarrierDesc begin{nullptr, target,
+            RHI::ResourceState::Present, RHI::ResourceState::RenderTarget, {}};
+        commands->ResourceBarrier(&begin, 1);
+        RHI::ColorAttachment color;
+        color.texture = target;
+        color.loadOp = RHI::LoadOp::Clear;
+        color.storeOp = RHI::StoreOp::Store;
+        color.clearColor[0] = 0.025f;
+        color.clearColor[1] = 0.035f;
+        color.clearColor[2] = 0.055f;
+        color.clearColor[3] = 1.0f;
+        commands->BeginRendering({&color, 1, nullptr});
+        commands->BindGraphicsPipeline(pipeline);
+        commands->BindVertexBuffer(0, vertexBuffer, 0);
+        commands->BindVertexBuffer(1, instanceBuffer, 0);
+        commands->SetViewport({0, 0, float(extent.width), float(extent.height), 0, 1});
+        commands->SetScissor({0, 0, extent.width, extent.height});
+        commands->DrawInstanced(uint32_t(vertices.size()), objectCount, 0, 0);
+        commands->EndRendering();
+        const RHI::ResourceBarrierDesc end{nullptr, target,
+            RHI::ResourceState::RenderTarget, RHI::ResourceState::Present, {}};
+        commands->ResourceBarrier(&end, 1);
+        (void)commands->Close();
+        (void)device.Submit(&commands, 1);
+        (void)device.Present();
+    }
+    (void)device.WaitIdle();
 }

@@ -1,190 +1,125 @@
-#include "dyf/RHI/IDevice.h"
-#include "dyf.h"
+#include "dyf/Platform/Window.h"
 #include "dyf/RHI.h"
-#include "vertex.h"
-#include "scene.h"
-#include "bright.h"
-#include "blur.h"
-#include "tonemap.h"
 
-#include <algorithm>
+#include <iterator>
+#include <fstream>
 #include <array>
-#include <cmath>
-#include <cstddef>
 #include <cstdint>
-#include <cstdio>
 #include <memory>
-#include <stdexcept>
-#include <string>
 #include <vector>
 
 using namespace dyf::RHI;
 
-namespace {
-
-// =============================================================================
-// [셰이더 상수 버퍼 구조체]
-// 16바이트 정렬된 4개 벡터 (총 64바이트)
-// =============================================================================
 struct alignas(16) Params {
-    float sizeTime[4] = {960, 640, 0, 0}; // width, height, time, mode(0:aces, 1:reinhard, 2:clamp, 3:no-bloom, 4:bloom)
-    float settings[4] = {1, 0.45f, 0.8f, 0.9f}; // exposure, threshold, bloom, unused
+    float sizeTime[4] = {960, 640, 0, 0};
+    float settings[4] = {1, .45f, .8f, .9f};
     float jitter[4] = {};
-    float extra[4] = {}; // extra[0]: emission intensity (default 12)
+    float extra[4] = {};
 };
 
-static_assert(sizeof(Params) == 64 && alignof(Params) == 16);
-static_assert(offsetof(Params, settings) == 16 &&
-              offsetof(Params, jitter) == 32 &&
-              offsetof(Params, extra) == 48);
-
-// 수치 인자 검증 및 변환 도우미 함수
-double Number(const std::string& value, double minimum, double maximum) {
-    size_t consumed = 0;
-    double result = std::stod(value, &consumed);
-    if (consumed != value.size() || !std::isfinite(result) || result < minimum || result > maximum) {
-        throw std::runtime_error("Numeric option out of range: " + value);
-    }
-    return result;
-}
-
-
-} // namespace
-
-// =============================================================================
-// [메인 진입점]
-// =============================================================================
-int main(int argc, char** argv) try {
+int main() {
     Params params;
     params.settings[1] = 1;
-    params.settings[2] = 0.35f;
+    params.settings[2] = .35f;
     params.extra[0] = 12;
-
-    uint64_t frameLimit = 0;
-    bool framesSpecified = false;
-    bool validation = false;
-    bool fixedTime = false;
-    float timeValue = 0;
-
-    // 명령행 옵션 파싱
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-
-        if (arg == "--help") {
-            std::puts("HDRPostProcess\n"
-                      "--mode aces|reinhard|clamp|no-bloom|bloom, --threshold [0,20], --bloom [0,5], --emission [1,100], --exposure [0.01,20]\n"
-                      "--frames N (0=unlimited), --time SECONDS, --validation");
-            return 0;
-        }
-
-        if (arg == "--validation") {
-            validation = true;
-            continue;
-        }
-
-        if (i + 1 >= argc) {
-            throw std::runtime_error("Missing value for " + arg);
-        }
-
-        std::string value = argv[++i];
-
-        if (arg == "--frames") {
-            double n = Number(value, 0, 10000000);
-            if (std::floor(n) != n) {
-                throw std::runtime_error("Frame count must be an integer.");
-            }
-            frameLimit = uint64_t(n);
-            framesSpecified = true;
-        } else if (arg == "--time") {
-            timeValue = float(Number(value, 0, 1000000));
-            fixedTime = true;
-        } else if (arg == "--mode") {
-            if (value == "aces") {
-                params.sizeTime[3] = 0;
-            } else if (value == "reinhard") {
-                params.sizeTime[3] = 1;
-            } else if (value == "clamp") {
-                params.sizeTime[3] = 2;
-            } else if (value == "no-bloom") {
-                params.sizeTime[3] = 3;
-            } else if (value == "bloom") {
-                params.sizeTime[3] = 4;
-            } else {
-                throw std::runtime_error("Unknown mode: " + value);
-            }
-        } else if (arg == "--threshold") {
-            params.settings[1] = float(Number(value, 0, 20));
-        } else if (arg == "--bloom") {
-            params.settings[2] = float(Number(value, 0, 5));
-        } else if (arg == "--emission") {
-            params.extra[0] = float(Number(value, 1, 100));
-        } else if (arg == "--exposure") {
-            params.settings[0] = float(Number(value, 0.01, 20));
-        } else {
-            throw std::runtime_error("Unknown option: " + arg);
-        }
-    }
-
-
-    // 1. 윈도우 생성 (해상도: 960x640)
     dyf::Platform::Window window(960, 640, "Advanced / 11_HDRPostProcess");
-    if (!window.GetHandle()) {
-        throw std::runtime_error("Window creation failed.");
-    }
 
-    // 2. RHI 렌더 디바이스 생성
     DeviceDesc deviceDesc;
-    deviceDesc.enableValidation = validation;
 
     std::unique_ptr<IDevice> owner(IDevice::Create(deviceDesc));
-    if (!owner) {
-        throw std::runtime_error("Device creation failed.");
-    }
+
     auto& device = *owner;
 
     dyf::RHI::ResourceScope resources(device);
 
-    // 3. 스왑체인 생성
     SwapchainDesc swap;
     swap.window = window.GetHandle();
     swap.format = DefaultSwapchainFormat;
     swap.minimumImageCount = 2;
     swap.presentMode = PresentMode::Fifo;
 
-    if (!device.CreateSwapchain(swap)) {
-        throw std::runtime_error("Swapchain creation failed.");
-    }
+    (void)device.CreateSwapchain(swap);
 
-    // 4. 셰이더 모듈 로드
+    // 예제 폴더에서 연결한 엔진의 백엔드에 맞는 명령으로 셰이더를 컴파일한다.
+    // Metal의 macosx SDK는 대상에 따라 iphoneos 또는 iphonesimulator로 바꾼다.
+    // Vulkan: glslc -fshader-stage=vert Shaders/vertex.glsl -o Shaders/vertex.bin
+    // D3D12: dxc -T vs_6_0 -E main Shaders/vertex.hlsl -Fo Shaders/vertex.bin
+    // Metal: xcrun -sdk macosx metal -c Shaders/vertex.metal -o Shaders/vertex.air
+    //        xcrun -sdk macosx metallib Shaders/vertex.air -o Shaders/vertex.bin
+    std::ifstream vertexFile("Shaders/vertex.bin", std::ios::binary);
+    const std::vector<char> vertexBinary{
+        std::istreambuf_iterator<char>(vertexFile), std::istreambuf_iterator<char>()};
+    // Vulkan: glslc -fshader-stage=frag Shaders/scene.glsl -o Shaders/scene.bin
+    // D3D12: dxc -T ps_6_0 -E main Shaders/scene.hlsl -Fo Shaders/scene.bin
+    // Metal: xcrun -sdk macosx metal -c Shaders/scene.metal -o Shaders/scene.air
+    //        xcrun -sdk macosx metallib Shaders/scene.air -o Shaders/scene.bin
+    std::ifstream sceneFile("Shaders/scene.bin", std::ios::binary);
+    const std::vector<char> sceneBinary{
+        std::istreambuf_iterator<char>(sceneFile), std::istreambuf_iterator<char>()};
+    // Vulkan: glslc -fshader-stage=frag Shaders/bright.glsl -o Shaders/bright.bin
+    // D3D12: dxc -T ps_6_0 -E main Shaders/bright.hlsl -Fo Shaders/bright.bin
+    // Metal: xcrun -sdk macosx metal -c Shaders/bright.metal -o Shaders/bright.air
+    //        xcrun -sdk macosx metallib Shaders/bright.air -o Shaders/bright.bin
+    std::ifstream brightFile("Shaders/bright.bin", std::ios::binary);
+    const std::vector<char> brightBinary{
+        std::istreambuf_iterator<char>(brightFile), std::istreambuf_iterator<char>()};
+    // Vulkan: glslc -fshader-stage=frag Shaders/blur.glsl -o Shaders/blur.bin
+    // D3D12: dxc -T ps_6_0 -E main Shaders/blur.hlsl -Fo Shaders/blur.bin
+    // Metal: xcrun -sdk macosx metal -c Shaders/blur.metal -o Shaders/blur.air
+    //        xcrun -sdk macosx metallib Shaders/blur.air -o Shaders/blur.bin
+    std::ifstream blurFile("Shaders/blur.bin", std::ios::binary);
+    const std::vector<char> blurBinary{
+        std::istreambuf_iterator<char>(blurFile), std::istreambuf_iterator<char>()};
+    // Vulkan: glslc -fshader-stage=frag Shaders/tonemap.glsl -o Shaders/tonemap.bin
+    // D3D12: dxc -T ps_6_0 -E main Shaders/tonemap.hlsl -Fo Shaders/tonemap.bin
+    // Metal: xcrun -sdk macosx metal -c Shaders/tonemap.metal -o Shaders/tonemap.air
+    //        xcrun -sdk macosx metallib Shaders/tonemap.air -o Shaders/tonemap.bin
+    std::ifstream tonemapFile("Shaders/tonemap.bin", std::ios::binary);
+    const std::vector<char> tonemapBinary{
+        std::istreambuf_iterator<char>(tonemapFile), std::istreambuf_iterator<char>()};
+#ifdef DY_EXAMPLE_METAL
+    constexpr const char* vertexEntryPoint = "vertexMain";
+    constexpr const char* sceneEntryPoint = "fragmentMain";
+    constexpr const char* brightEntryPoint = "fragmentMain";
+    constexpr const char* blurEntryPoint = "fragmentMain";
+    constexpr const char* tonemapEntryPoint = "fragmentMain";
+#else
+    constexpr const char* vertexEntryPoint = "main";
+    constexpr const char* sceneEntryPoint = "main";
+    constexpr const char* brightEntryPoint = "main";
+    constexpr const char* blurEntryPoint = "main";
+    constexpr const char* tonemapEntryPoint = "main";
+#endif
+
     auto vertexShader = resources.Keep(device.CreateShader({
         ShaderStage::Vertex,
-        ShaderData::vertexEntryPoint,
-        ShaderData::vertex,
-        ShaderData::vertexSize
+        vertexEntryPoint,
+        vertexBinary.data(),
+        vertexBinary.size()
     }));
     auto sceneShader = resources.Keep(device.CreateShader({
         ShaderStage::Fragment,
-        ShaderData::sceneEntryPoint,
-        ShaderData::scene,
-        ShaderData::sceneSize
+        sceneEntryPoint,
+        sceneBinary.data(),
+        sceneBinary.size()
     }));
     auto brightShader = resources.Keep(device.CreateShader({
         ShaderStage::Fragment,
-        ShaderData::brightEntryPoint,
-        ShaderData::bright,
-        ShaderData::brightSize
+        brightEntryPoint,
+        brightBinary.data(),
+        brightBinary.size()
     }));
     auto blurShader = resources.Keep(device.CreateShader({
         ShaderStage::Fragment,
-        ShaderData::blurEntryPoint,
-        ShaderData::blur,
-        ShaderData::blurSize
+        blurEntryPoint,
+        blurBinary.data(),
+        blurBinary.size()
     }));
     auto tonemapShader = resources.Keep(device.CreateShader({
         ShaderStage::Fragment,
-        ShaderData::tonemapEntryPoint,
-        ShaderData::tonemap,
-        ShaderData::tonemapSize
+        tonemapEntryPoint,
+        tonemapBinary.data(),
+        tonemapBinary.size()
     }));
 
     SamplerDesc sampler;
@@ -197,7 +132,6 @@ int main(int argc, char** argv) try {
     ColorAttachmentDesc hdrColorDesc{Format::R16G16B16A16_FLOAT, {}, ColorWriteMask::All};
     ColorAttachmentDesc ldrColorDesc{DefaultSwapchainFormat, {}, ColorWriteMask::All};
 
-    // --- 파이프라인 1: HDR 씬 렌더링 ---
     GraphicsPipelineDesc sceneDesc;
     sceneDesc.vertexShader = vertexShader;
     sceneDesc.fragmentShader = sceneShader;
@@ -208,7 +142,6 @@ int main(int argc, char** argv) try {
     sceneDesc.layout = {nullptr, 0, sizeof(Params), ShaderStageFlags::Fragment, 15};
     auto scenePipeline = resources.Keep(device.CreateGraphicsPipeline(sceneDesc));
 
-    // --- 파이프라인 2: 밝은 영역 추출 및 가로 가우시안 블러 ---
     std::vector<ResourceBindingLayout> brightBindings;
     brightBindings.push_back({0, ResourceBindingType::SampledTexture, 1, ShaderStageFlags::Fragment, {}});
     brightBindings.push_back({8, ResourceBindingType::StaticSampler, 1, ShaderStageFlags::Fragment, sampler});
@@ -223,7 +156,6 @@ int main(int argc, char** argv) try {
     brightDesc.layout = {brightBindings.data(), uint32_t(brightBindings.size()), sizeof(Params), ShaderStageFlags::Fragment, 15};
     auto brightPipeline = resources.Keep(device.CreateGraphicsPipeline(brightDesc));
 
-    // --- 파이프라인 3: 세로 가우시안 블러 ---
     std::vector<ResourceBindingLayout> blurBindings;
     blurBindings.push_back({0, ResourceBindingType::SampledTexture, 1, ShaderStageFlags::Fragment, {}});
     blurBindings.push_back({8, ResourceBindingType::StaticSampler, 1, ShaderStageFlags::Fragment, sampler});
@@ -238,7 +170,6 @@ int main(int argc, char** argv) try {
     blurDesc.layout = {blurBindings.data(), uint32_t(blurBindings.size()), sizeof(Params), ShaderStageFlags::Fragment, 15};
     auto blurPipeline = resources.Keep(device.CreateGraphicsPipeline(blurDesc));
 
-    // --- 파이프라인 4: 톤매핑 및 블룸 합성 ---
     std::vector<ResourceBindingLayout> tonemapBindings;
     tonemapBindings.push_back({0, ResourceBindingType::SampledTexture, 1, ShaderStageFlags::Fragment, {}});
     tonemapBindings.push_back({1, ResourceBindingType::SampledTexture, 1, ShaderStageFlags::Fragment, {}});
@@ -268,34 +199,20 @@ int main(int argc, char** argv) try {
 
     uint64_t frame = 0;
 
-    // =========================================================================
-    // [메인 렌더 루프]
-    // =========================================================================
-    while (!frameLimit || frame < frameLimit) {
+    while (window.IsRunning()) {
         window.PollEvents();
         if (!window.IsRunning()) {
             break;
         }
 
-        if (!device.BeginFrame()) {
-            if (device.IsLost()) {
-                throw std::runtime_error("Device lost.");
-            }
-            continue;
-        }
+        if (!device.BeginFrame()) continue;
 
         auto backbuffer = device.GetBackBuffer();
-        if (!backbuffer) {
-            throw std::runtime_error("Backbuffer unavailable.");
-        }
 
         const auto dimensions = backbuffer->GetDesc();
 
-        // 윈도우 크기 변경 시 중간 HDR 텍스처 재할당
         if (dimensions.width != imageWidth || dimensions.height != imageHeight) {
-            if (!device.WaitIdle()) {
-                throw std::runtime_error("Resize wait failed.");
-            }
+            (void)device.WaitIdle();
             imageResources = std::make_unique<dyf::RHI::ResourceScope>(device);
             imageWidth = dimensions.width;
             imageHeight = dimensions.height;
@@ -338,54 +255,13 @@ int main(int argc, char** argv) try {
 
         params.sizeTime[0] = float(imageWidth);
         params.sizeTime[1] = float(imageHeight);
-        params.sizeTime[2] = fixedTime ? timeValue : float(frame) / 60.0f;
+        params.sizeTime[2] = float(frame) / 60.0f;
 
         dyf::RHI::ResourceScope frameResources(device);
         auto* commands = frameResources.Keep(device.AcquireCommandList());
 
-        // 초기 텍스처 상태 클리어
-        if (initializeImages) {
-            {
-                const ResourceBarrierDesc barrier{nullptr, hdrScene, ResourceState::Undefined, ResourceState::RenderTarget, {}};
-                commands->ResourceBarrier(&barrier, 1);
-                ColorAttachment a;
-                a.texture = hdrScene;
-                a.loadOp = LoadOp::Clear;
-                a.storeOp = StoreOp::Store;
-                commands->BeginRendering({&a, 1, nullptr});
-                commands->EndRendering();
-                const ResourceBarrierDesc ready{nullptr, hdrScene, ResourceState::RenderTarget, ResourceState::ShaderResource, {}};
-                commands->ResourceBarrier(&ready, 1);
-            }
-            {
-                const ResourceBarrierDesc barrier{nullptr, bloomHorizontal, ResourceState::Undefined, ResourceState::RenderTarget, {}};
-                commands->ResourceBarrier(&barrier, 1);
-                ColorAttachment a;
-                a.texture = bloomHorizontal;
-                a.loadOp = LoadOp::Clear;
-                a.storeOp = StoreOp::Store;
-                commands->BeginRendering({&a, 1, nullptr});
-                commands->EndRendering();
-                const ResourceBarrierDesc ready{nullptr, bloomHorizontal, ResourceState::RenderTarget, ResourceState::ShaderResource, {}};
-                commands->ResourceBarrier(&ready, 1);
-            }
-            {
-                const ResourceBarrierDesc barrier{nullptr, bloomVertical, ResourceState::Undefined, ResourceState::RenderTarget, {}};
-                commands->ResourceBarrier(&barrier, 1);
-                ColorAttachment a;
-                a.texture = bloomVertical;
-                a.loadOp = LoadOp::Clear;
-                a.storeOp = StoreOp::Store;
-                commands->BeginRendering({&a, 1, nullptr});
-                commands->EndRendering();
-                const ResourceBarrierDesc ready{nullptr, bloomVertical, ResourceState::RenderTarget, ResourceState::ShaderResource, {}};
-                commands->ResourceBarrier(&ready, 1);
-            }
-        }
-
-        // --- 1단계: 선형 HDR 씬 렌더링 ---
         {
-            const ResourceBarrierDesc hdrSceneBarrier{nullptr, hdrScene, ResourceState::ShaderResource, ResourceState::RenderTarget, {}};
+            const ResourceBarrierDesc hdrSceneBarrier{nullptr, hdrScene, initializeImages ? ResourceState::Undefined : ResourceState::ShaderResource, ResourceState::RenderTarget, {}};
             commands->ResourceBarrier(&hdrSceneBarrier, 1);
 
             std::array<ColorAttachment, 1> colors{};
@@ -405,9 +281,8 @@ int main(int argc, char** argv) try {
             commands->ResourceBarrier(&hdrSceneReady, 1);
         }
 
-        // --- 2단계: 고휘도 영역 추출 및 가로 가우시안 블러 ---
         {
-            const ResourceBarrierDesc bloomHorizontalBarrier{nullptr, bloomHorizontal, ResourceState::ShaderResource, ResourceState::RenderTarget, {}};
+            const ResourceBarrierDesc bloomHorizontalBarrier{nullptr, bloomHorizontal, initializeImages ? ResourceState::Undefined : ResourceState::ShaderResource, ResourceState::RenderTarget, {}};
             commands->ResourceBarrier(&bloomHorizontalBarrier, 1);
 
             std::array<ColorAttachment, 1> colors{};
@@ -428,9 +303,8 @@ int main(int argc, char** argv) try {
             commands->ResourceBarrier(&bloomHorizontalReady, 1);
         }
 
-        // --- 3단계: 세로 가우시안 블러 ---
         {
-            const ResourceBarrierDesc bloomVerticalBarrier{nullptr, bloomVertical, ResourceState::ShaderResource, ResourceState::RenderTarget, {}};
+            const ResourceBarrierDesc bloomVerticalBarrier{nullptr, bloomVertical, initializeImages ? ResourceState::Undefined : ResourceState::ShaderResource, ResourceState::RenderTarget, {}};
             commands->ResourceBarrier(&bloomVerticalBarrier, 1);
 
             std::array<ColorAttachment, 1> colors{};
@@ -451,7 +325,6 @@ int main(int argc, char** argv) try {
             commands->ResourceBarrier(&bloomVerticalReady, 1);
         }
 
-        // --- 4단계: 블룸 합성, 노출 보정 및 톤매핑 ---
         {
             const ResourceBarrierDesc backbufferBarrier{nullptr, backbuffer, ResourceState::Present, ResourceState::RenderTarget, {}};
             commands->ResourceBarrier(&backbufferBarrier, 1);
@@ -471,32 +344,19 @@ int main(int argc, char** argv) try {
             commands->EndRendering();
         }
 
-        // 백버퍼 프레젠트 상태 전이
         const ResourceBarrierDesc presentBarrier{nullptr, backbuffer, ResourceState::RenderTarget, ResourceState::Present, {}};
         commands->ResourceBarrier(&presentBarrier, 1);
 
-        if (!commands->Close() || !device.Submit(&commands, 1)) {
-            throw std::runtime_error("Frame recording/submission failed.");
-        }
+        (void)commands->Close();
+        (void)device.Submit(&commands, 1);
 
         initializeImages = false;
         ++frame;
 
-
-        if (!device.Present()) {
-            throw std::runtime_error("Present failed.");
-        }
+        (void)device.Present();
     }
 
-    // =========================================================================
-    // [종료 및 GPU 대기]
-    // =========================================================================
-    if (!device.WaitIdle()) {
-        throw std::runtime_error("Final GPU wait failed.");
-    }
+    (void)device.WaitIdle();
     return 0;
 
-} catch (const std::exception& error) {
-    std::fprintf(stderr, "HDRPostProcess: %s\n", error.what());
-    return 1;
 }

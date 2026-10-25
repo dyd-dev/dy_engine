@@ -22,7 +22,7 @@ kernel void cullObjects(constant Frame& frame [[buffer(15)]],device const float4
     const float2 margin=sphere.w*sqrt(frame.projection.xy*frame.projection.xy+1.f);
     const bool inside=position.z+sphere.w>=frame.projection.z && position.z-sphere.w<=frame.projection.w &&
         all(abs(position.xy)*frame.projection.xy<=position.z+margin);
-    if(frame.controls.y==1 && !inside) return;
+    if(!inside) return;
     const uint slot=atomic_fetch_add_explicit(arguments+1,1u,memory_order_relaxed);
     visibleIds[slot]=id;
 }
@@ -32,7 +32,7 @@ vertex Output vertexMain(uint vertex [[vertex_id]],uint instance [[instance_id]]
     device const uint* visibleIds [[buffer(1)]])
 {
     const float2 vertices[3]={float2(-.8f,-.6f),float2(.8f,-.6f),float2(0,.95f)};
-    const uint id=frame.controls.z!=0?visibleIds[instance]:frame.controls.w;
+    const uint id=visibleIds[instance];
     float4 sphere=bounds[id];const float phase=.37f*float(id);
     sphere.xy+=.25f*float2(sin(frame.camera.w+phase),cos(frame.camera.w*.8f+phase));
     float3 position=sphere.xyz-frame.camera.xyz;position.xy+=vertices[vertex]*sphere.w;

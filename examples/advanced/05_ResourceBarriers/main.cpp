@@ -1,151 +1,77 @@
-#include "dyf/RHI/IDevice.h"
 #include "dyf/RHI.h"
 #include "dyf/Platform/Window.h"
-#include "vertex.h"
-#include "fragment.h"
-#include "producer.h"
 
-#include <algorithm>
-#include <array>
-#include <chrono>
-#include <cmath>
-#include <cstdint>
-#include <iostream>
-#include <limits>
-#include <memory>
-#include <stdexcept>
-#include <string>
-#include <thread>
 #include <vector>
+#include <iterator>
+#include <fstream>
+#include <cstdint>
+#include <memory>
 
 using namespace dyf::RHI;
 
-namespace {
-
-// =============================================================================
-// [설정값 및 옵션 정의]
-// 리소스 배리어 및 상태 전이 예제의 실행 옵션 구조체
-// =============================================================================
-struct Options {
-    uint32_t frames = 0;       // 실행할 총 프레임 수 (0이면 무한 루프)
-    uint32_t flight = 2;       // 동시 In-flight 프레임 수 (1 ~ 4)
-    bool validation = false;   // RHI 디버그/유효성 검사 계층 활성화 여부
-    bool wait = false;         // 프로듀서 패스마다 즉시 제출 및 GPU 대기 수행 여부
-};
-
-// 명령행 인자 파싱 함수
-Options Parse(int argc, char** argv) {
-    Options options;
-
-    for (int i = 1; i < argc; ++i) {
-        const std::string arg = argv[i];
-
-        auto value = [&]() -> std::string {
-            if (++i == argc) {
-                throw std::runtime_error("Missing option value");
-            }
-            return argv[i];
-        };
-
-        if (arg == "--frames") {
-            options.frames = uint32_t(std::stoul(value()));
-        } else if (arg == "--flight") {
-            options.flight = uint32_t(std::stoul(value()));
-        } else if (arg == "--validation") {
-            options.validation = true;
-        } else if (arg == "--wait") {
-            options.wait = true;
-        } else {
-            throw std::runtime_error("Unknown option: " + arg);
-        }
-    }
-
-    if (options.flight < 1 || options.flight > 4) {
-        throw std::runtime_error("Invalid option range");
-    }
-
-
-    return options;
-}
-
-void Check(bool ok, const char* operation) { if (!ok) throw std::runtime_error(operation); }
-
-
-// 성능 표본 통계 분석 및 출력 함수
-void Statistics(const char* name, std::vector<double> samples) {
-    if (samples.empty()) {
-        return;
-    }
-
-    std::sort(samples.begin(), samples.end());
-    double sum = 0;
-    for (double sample : samples) {
-        sum += sample;
-    }
-
-    std::cout << name << ": samples=" << samples.size()
-              << " mean=" << sum / samples.size() << " ms"
-              << " median=" << samples[samples.size() / 2] << " ms"
-              << " p95=" << samples[(samples.size() - 1) * 95 / 100] << " ms\n";
-}
-
-} // namespace
-
-// =============================================================================
-// [메인 진입점]
-// =============================================================================
-int main(int argc, char** argv) try {
-    // 도움말(--help) 출력
-    for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--help") {
-            std::cout << "ResourceBarriers: --wait submits and waits after each producer pass; default records all passes and submits once.\n"
-                      << "Common: --frames N --validation\n";
-            return 0;
-        }
-    }
-
-    const auto options = Parse(argc, argv);
-
-    // 1. 윈도우 생성 (해상도: 800x600)
+int main() {
     dyf::Platform::Window window(800, 600, "Advanced / 05_ResourceBarriers");
-    Check(window.GetHandle() != nullptr, "Window creation failed");
 
-    // 2. RHI 렌더 디바이스 생성
     DeviceDesc deviceDesc;
-    deviceDesc.enableValidation = options.validation;
-    deviceDesc.maxFramesInFlight = options.flight;
+    deviceDesc.maxFramesInFlight = 2;
 
     std::unique_ptr<IDevice> owner(IDevice::Create(deviceDesc));
-    Check(owner != nullptr, "Device creation failed");
-    auto& device = *owner;
 
-    if (!device.Supports(Feature::Rasterization)) {
-        std::cout << "UNSUPPORTED: this backend does not rasterize.\n";
-        return 77;
-    }
+    auto& device = *owner;
 
     dyf::RHI::ResourceScope resources(device);
 
-    // 3. 스왑체인(Swapchain) 생성
     SwapchainDesc swapchain;
     swapchain.window = window.GetHandle();
     swapchain.format = DefaultSwapchainFormat;
     swapchain.minimumImageCount = 2;
 
-    Check(device.CreateSwapchain(swapchain), "Requested swapchain configuration unsupported");
+    (void)device.CreateSwapchain(swapchain);
 
-    // 4. 공통 셰이더 생성
+    // 예제 폴더에서 연결한 엔진의 백엔드에 맞는 명령으로 셰이더를 컴파일한다.
+    // Metal의 macosx SDK는 대상에 따라 iphoneos 또는 iphonesimulator로 바꾼다.
+    // Vulkan: glslc -fshader-stage=vert Shaders/vertex.glsl -o Shaders/vertex.bin
+    // D3D12: dxc -T vs_6_0 -E main Shaders/vertex.hlsl -Fo Shaders/vertex.bin
+    // Metal: xcrun -sdk macosx metal -c Shaders/program.metal -o Shaders/vertex.air
+    //        xcrun -sdk macosx metallib Shaders/vertex.air -o Shaders/vertex.bin
+    std::ifstream vertexFile("Shaders/vertex.bin", std::ios::binary);
+    const std::vector<char> vertexBinary{
+        std::istreambuf_iterator<char>(vertexFile), std::istreambuf_iterator<char>()};
+    // Vulkan: glslc -fshader-stage=frag Shaders/fragment.glsl -o Shaders/fragment.bin
+    // D3D12: dxc -T ps_6_0 -E main Shaders/fragment.hlsl -Fo Shaders/fragment.bin
+    // Metal: xcrun -sdk macosx metal -c Shaders/program.metal -o Shaders/fragment.air
+    //        xcrun -sdk macosx metallib Shaders/fragment.air -o Shaders/fragment.bin
+    std::ifstream fragmentFile("Shaders/fragment.bin", std::ios::binary);
+    const std::vector<char> fragmentBinary{
+        std::istreambuf_iterator<char>(fragmentFile), std::istreambuf_iterator<char>()};
+    // Vulkan: glslc -fshader-stage=frag Shaders/producer.glsl -o Shaders/producer.bin
+    // D3D12: dxc -T ps_6_0 -E main Shaders/producer.hlsl -Fo Shaders/producer.bin
+    // Metal: xcrun -sdk macosx metal -c Shaders/program.metal -o Shaders/producer.air
+    //        xcrun -sdk macosx metallib Shaders/producer.air -o Shaders/producer.bin
+    std::ifstream producerFile("Shaders/producer.bin", std::ios::binary);
+    const std::vector<char> producerBinary{
+        std::istreambuf_iterator<char>(producerFile), std::istreambuf_iterator<char>()};
+#ifdef DY_EXAMPLE_METAL
+    constexpr const char* vertexEntryPoint = "vertexMain";
+    constexpr const char* fragmentEntryPoint = "fragmentMain";
+    constexpr const char* producerEntryPoint = "producerMain";
+#else
+    constexpr const char* vertexEntryPoint = "main";
+    constexpr const char* fragmentEntryPoint = "main";
+    constexpr const char* producerEntryPoint = "main";
+#endif
+
     auto* vertex = resources.Keep(device.CreateShader({
         ShaderStage::Vertex,
-        ShaderData::vertexEntryPoint,
-        ShaderData::vertex,
-        ShaderData::vertexSize
+        vertexEntryPoint,
+        vertexBinary.data(),
+        vertexBinary.size()
     }));
     auto* fragment = resources.Keep(device.CreateShader({
         ShaderStage::Fragment,
-        ShaderData::fragmentEntryPoint,
-        ShaderData::fragment,
-        ShaderData::fragmentSize
+        fragmentEntryPoint,
+        fragmentBinary.data(),
+        fragmentBinary.size()
     }));
 
     ColorAttachmentDesc colorFormat{swapchain.format, {}, ColorWriteMask::All};
@@ -159,12 +85,11 @@ int main(int argc, char** argv) try {
     desc.colorAttachmentCount = 1;
     desc.layout = {nullptr, 0, 16, ShaderStageFlags::Vertex | ShaderStageFlags::Fragment, 15};
 
-    // 5. 프로듀서 파이프라인 생성 (중간 R8G8B8A8_UNORM 텍스처로 렌더링)
     auto* producerShader = resources.Keep(device.CreateShader({
         ShaderStage::Fragment,
-        ShaderData::producerEntryPoint,
-        ShaderData::producer,
-        ShaderData::producerSize
+        producerEntryPoint,
+        producerBinary.data(),
+        producerBinary.size()
     }));
 
     GraphicsPipelineDesc producerDesc = desc;
@@ -174,7 +99,6 @@ int main(int argc, char** argv) try {
 
     auto* producer = resources.Keep(device.CreateGraphicsPipeline(producerDesc));
 
-    // 6. 디스플레이 파이프라인 생성 (중간 텍스처를 샘플링하여 백버퍼로 복사 및 출력)
     SamplerDesc sampler;
     sampler.minFilter = sampler.magFilter = sampler.mipFilter = SamplerFilter::Nearest;
     sampler.addressU = sampler.addressV = sampler.addressW = SamplerAddressMode::ClampToEdge;
@@ -189,33 +113,21 @@ int main(int argc, char** argv) try {
 
     auto* display = resources.Keep(device.CreateGraphicsPipeline(desc));
 
-    // 중간 텍스처 및 리소스 바인딩 세트 핸들
     TextureHandle intermediate = nullptr;
     ResourceSetHandle bindings = nullptr;
     ResourceState intermediateState = ResourceState::Undefined;
 
-    uint32_t frame = 0;
-    std::vector<double> cpuMs;
-
-    // =========================================================================
-    // [메인 렌더 루프]
-    // =========================================================================
-    while (!options.frames || frame < options.frames) {
+    while (window.IsRunning()) {
         window.PollEvents();
         if (!window.IsRunning()) {
             break;
         }
 
-        if (!device.BeginFrame()) {
-            Check(!device.IsLost(), "Device lost");
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
+        if (!device.BeginFrame()) continue;
 
         auto* target = device.GetBackBuffer();
         const auto& extent = target->GetDesc();
 
-        // 윈도우 크기 변경 시 중간 텍스처 및 리소스 세트 재생성
         if (!intermediate || intermediate->GetDesc().width != extent.width || intermediate->GetDesc().height != extent.height) {
             if (bindings) {
                 device.DestroyResourceSet(bindings);
@@ -231,31 +143,25 @@ int main(int argc, char** argv) try {
             texture.usage = TextureUsage::RenderTarget | TextureUsage::ShaderResource;
 
             intermediate = device.CreateTexture(texture);
-            Check(intermediate != nullptr, "Intermediate texture creation failed");
 
             ResourceBinding input;
             input.binding = 0;
             input.texture = intermediate;
 
             bindings = device.CreateResourceSet({display, &input, 1});
-            Check(bindings != nullptr, "ResourceSet creation failed");
+
             intermediateState = ResourceState::Undefined;
         }
 
         dyf::RHI::ResourceScope frameResources(device);
         auto* commands = frameResources.Keep(device.AcquireCommandList());
-        const auto start = std::chrono::steady_clock::now();
 
-        // --- 1단계: 중간 텍스처를 RenderTarget 상태로 전이 ---
         const ResourceBarrierDesc before{nullptr, intermediate, intermediateState, ResourceState::RenderTarget, {}};
         commands->ResourceBarrier(&before, 1);
 
         float parameters[4] = {0, 0, 0, 0};
 
-        // --- 2단계: 다중 프로듀서 패스 실행 (연속 쓰기 간 배리어 처리) ---
-        // 각 패스는 직접 Begin/EndRendering을 기록하며, RHI가 후처리 순서를 결정하지 않음
         for (uint32_t pass = 0; pass < 2; ++pass) {
-            // 두 번째 패스 이전에 Write-After-Write(쓰기 후 쓰기) 배리어 삽입
             if (pass) {
                 const ResourceBarrierDesc writeAfterWrite{nullptr, intermediate, ResourceState::RenderTarget, ResourceState::RenderTarget, {}};
                 commands->ResourceBarrier(&writeAfterWrite, 1);
@@ -277,24 +183,14 @@ int main(int argc, char** argv) try {
             commands->DrawInstanced(3, 1, 0, 0);
             commands->EndRendering();
 
-            // --wait 옵션 활성화 시 패스마다 커맨드 제출 및 GPU 대기
-            if (options.wait) {
-                Check(commands->Close(), "Producer close failed");
-                FenceHandle completion;
-                Check(device.Submit({&commands, 1, nullptr, 0}, completion), "Producer submit failed");
-                Check(device.Wait(completion, UINT64_MAX), "Producer wait failed");
-                commands = frameResources.Keep(device.AcquireCommandList());
-            }
         }
 
-        // --- 3단계: 중간 텍스처 -> ShaderResource, 백버퍼 -> RenderTarget 상태 전이 ---
         const ResourceBarrierDesc ready[] = {
             {nullptr, intermediate, ResourceState::RenderTarget, ResourceState::ShaderResource, {}},
             {nullptr, target, ResourceState::Present, ResourceState::RenderTarget, {}}
         };
         commands->ResourceBarrier(ready, 2);
 
-        // --- 4단계: 디스플레이 패스 (중간 텍스처를 백버퍼로 렌더링) ---
         ColorAttachment color;
         color.texture = target;
         color.loadOp = LoadOp::Discard;
@@ -311,29 +207,15 @@ int main(int argc, char** argv) try {
         commands->DrawInstanced(3, 1, 0, 0);
         commands->EndRendering();
 
-        // 백버퍼 -> Present 상태 전이
         ResourceBarrierDesc after{nullptr, target, ResourceState::RenderTarget, ResourceState::Present, {}};
         commands->ResourceBarrier(&after, 1);
 
-        Check(commands->Close(), "Display close failed");
-        Check(device.Submit(&commands, 1), "Display submit failed");
+        (void)commands->Close();
+        (void)device.Submit(&commands, 1);
         intermediateState = ResourceState::ShaderResource;
 
-        // CPU 타이밍 기록
-        cpuMs.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
-        if (cpuMs.size() > 4096) {
-            cpuMs.erase(cpuMs.begin(), cpuMs.begin() + 2048);
-        }
-
-
-        Check(device.Present(), "Present failed");
-        ++frame;
+        (void)device.Present();
     }
-
-    // =========================================================================
-    // [종료 및 자원 해제]
-    // =========================================================================
-    Statistics("CPU record/submit incl optional waits", cpuMs);
 
     if (bindings) {
         device.DestroyResourceSet(bindings);
@@ -342,10 +224,7 @@ int main(int argc, char** argv) try {
         device.DestroyTexture(intermediate);
     }
 
-    Check(device.WaitIdle(), "WaitIdle failed");
+    (void)device.WaitIdle();
     return 0;
 
-} catch (const std::exception& e) {
-    std::cerr << e.what() << '\n';
-    return 1;
 }
