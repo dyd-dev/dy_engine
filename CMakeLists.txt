@@ -221,9 +221,12 @@ if(DY_EXTEND_IMGUI)
     add_subdirectory(src/Extends/ImGui)
 endif()
 
-# Examples are added only for a top-level engine build.
+# Examples and Showcase are added only for a top-level engine build.
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     if(DY_BUILD_EXAMPLES)
         add_subdirectory(examples)
+    endif()
+    if(DY_BUILD_SHOWCASE)
+        add_subdirectory(showcase)
     endif()
 endif()

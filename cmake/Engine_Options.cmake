@@ -31,9 +31,14 @@ option(DY_EXTEND_MODEL "Build the optional Model extension." OFF)
 option(DY_EXTEND_IMGUI "Build the optional Dear ImGui extension." OFF)
 option(DY_EXTEND_ADVANCED_RENDERING "Build the optional AdvancedRendering extension." OFF)
 
-# Examples.
+# Examples and Showcase.
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     option(DY_BUILD_EXAMPLES "Build the self-contained dyf and RHI examples." OFF)
+    option(DY_BUILD_SHOWCASE "Build the presentation scenes and prepare their assets." "${DY_BUILD_EXAMPLES}")
+endif()
+if(DY_BUILD_SHOWCASE)
+    set(DY_EXTEND_MODEL ON CACHE BOOL "Build the optional Model extension." FORCE)
+    set(DY_EXTEND_ADVANCED_RENDERING ON CACHE BOOL "Build the optional AdvancedRendering extension." FORCE)
 endif()
 
 # Platform and dependency settings.
