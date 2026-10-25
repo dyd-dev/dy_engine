@@ -46,6 +46,7 @@ namespace dyf::Platform
 		std::atomic<std::uint64_t> testCommandPruneEntries { 0 };
 		std::atomic<std::uint64_t> testLateFlowCopies { 0 }, testBoundedSnapshotCopies { 0 };
 		std::atomic<std::uint64_t> testMetricChanges { 0 }, testWireWriteChecks { 0 }, testBatchLocks { 0 };
+		std::atomic<std::uint64_t> testFrameLookups { 0 }, testEventInputCopies { 0 }, testEventSummaryScratchBytes { 0 };
 		std::atomic<std::int64_t> testAllocationFailure { - 1 };
 #endif
 		void AggregationAllocationPoint()
@@ -1067,6 +1068,9 @@ namespace dyf::Platform
 
 		std::shared_ptr<FrameRecord> Frame(LiveFrameKey key)
 		{
+#if defined(DY_LIVE_TEST_CLOCK) && !defined(DY_LIVE_COST_TIMING)
+			++testFrameLookups;
+#endif
 			if(currentFrame && currentFrame->summary.key == key) return currentFrame;
 			auto & s = S();
 			std::lock_guard<std::mutex> lock(s.mutex);
@@ -1221,7 +1225,7 @@ namespace dyf::Platform
 #ifdef DY_LIVE_TEST_CLOCK
 	Detail::TestLiveWork Detail::TakeTestLiveWork() noexcept
 	{
-		return { testHistoryFrameVisits.exchange(0), testLinkFrameLocks.exchange(0), testCommandPruneEntries.exchange(0), testLateFlowCopies.exchange(0), testBoundedSnapshotCopies.exchange(0), testMetricChanges.exchange(0), testWireWriteChecks.exchange(0), testBatchLocks.exchange(0) };
+		return { testHistoryFrameVisits.exchange(0), testLinkFrameLocks.exchange(0), testCommandPruneEntries.exchange(0), testLateFlowCopies.exchange(0), testBoundedSnapshotCopies.exchange(0), testMetricChanges.exchange(0), testWireWriteChecks.exchange(0), testBatchLocks.exchange(0), testFrameLookups.exchange(0), testEventInputCopies.exchange(0), testEventSummaryScratchBytes.exchange(0) };
 	}
 	void Detail::RecordTestBoundedSnapshotCopy() noexcept { ++testBoundedSnapshotCopies; }
 	void Detail::RecordTestWireWrite() noexcept { ++testWireWriteChecks; }
@@ -1486,6 +1490,7 @@ namespace dyf::Platform
 	void SetLiveContext(LiveContext value) noexcept
 	{
 		context = value;
+		if(currentFrame && currentFrame->summary.key == value.frame) return;
 		if(!value.frame.frame)
 		{
 			currentFrame.reset();
@@ -1737,80 +1742,82 @@ namespace dyf::Platform
 		SetLiveContext(token.previous);
 	}
 
+	namespace
+	{
+		bool AccumulateEventData(LiveCounters<std::uint64_t> & counts, LiveStageMetrics * stage, const LiveEvent & e) noexcept
+		{
+			if(!IsLiveCollectorEnabled()) return true;
+			if(e.kind == LiveEventKind::UploadMemory)
+			{
+				if(e.operations != 1 || !e.bytes || e.arguments [0] < 0 || e.arguments [0] > 1)
+				{
+					return false;
+				}
+				if(e.arguments [0]) ++counts.uploadPageReuses;
+				else
+				{
+					++counts.uploadPageAllocations;
+					counts.uploadPageAllocationBytes += e.bytes;
+				}
+				return true;
+			}
+
+			if(!stage) return false;
+			stage->elements += e.elements;
+			stage->bytes += e.bytes;
+			stage->operations += e.operations;
+			if(e.endNs >= e.beginNs && e.endNs)
+			{
+				stage->cpu.state = LiveValueState::Ready;
+				stage->cpu.milliseconds += double(e.endNs - e.beginNs) / 1e6;
+			}
+
+			if(e.kind == LiveEventKind::Command)
+			{
+				switch(e.commandKind)
+				{
+					case LiveCommandKind::Draw : ++counts.draw;
+					counts.instances += e.arguments [1];
+					break;
+					case LiveCommandKind::DrawIndexed : ++counts.drawIndexed;
+					counts.instances += e.arguments [1];
+					break;
+					case LiveCommandKind::Dispatch : ++counts.dispatch;
+					break;
+					case LiveCommandKind::DispatchMesh : ++counts.dispatchMesh;
+					break;
+					case LiveCommandKind::Barrier : counts.barriers += e.operations;
+					break;
+					case LiveCommandKind::Bind : counts.bindings += e.operations;
+					break;
+					default : break;
+				}
+			}
+
+			else if(e.kind == LiveEventKind::Upload)
+			{
+				++counts.uploadCalls;
+				counts.uploadBytes += e.bytes;
+				if(e.fullUpload) ++counts.fullUploads;
+				else ++counts.partialUploads;
+			}
+
+			else if(e.kind == LiveEventKind::Batch)
+			{
+				++counts.batches;
+				counts.elements += e.elements;
+			}
+
+			else if(e.kind == LiveEventKind::DataRange) counts.dirtyRanges += e.operations;
+			else if(e.kind == LiveEventKind::Wait) counts.waits += e.operations ? e.operations : 1;
+			return true;
+		}
+	}
+
 	void AccumulateLiveEventSummary(LiveEventSummary & summary, const LiveEvent & e) noexcept
 	{
-		if(!IsLiveCollectorEnabled()) return;
-		if(e.kind == LiveEventKind::UploadMemory)
-		{
-			if(e.operations != 1 || !e.bytes || e.arguments [0] < 0 || e.arguments [0] > 1)
-			{
-				++summary.omittedEvents;
-				return;
-			}
-			if(e.arguments [0]) ++summary.recorded.uploadPageReuses;
-			else
-			{
-				++summary.recorded.uploadPageAllocations;
-				summary.recorded.uploadPageAllocationBytes += e.bytes;
-			}
-			return;
-		}
-
-		if(static_cast<std::size_t>(e.stage) >= LiveStageCount)
-		{
-			++summary.omittedEvents;
-			return;
-		}
-
-		auto & stage = summary.stages [static_cast<std::size_t>(e.stage)];
-		stage.elements += e.elements;
-		stage.bytes += e.bytes;
-		stage.operations += e.operations;
-		if(e.endNs >= e.beginNs && e.endNs)
-		{
-			stage.cpu.state = LiveValueState::Ready;
-			stage.cpu.milliseconds += double(e.endNs - e.beginNs) / 1e6;
-		}
-
-		auto & counts = summary.recorded;
-		if(e.kind == LiveEventKind::Command)
-		{
-			switch(e.commandKind)
-			{
-				case LiveCommandKind::Draw : ++counts.draw;
-				counts.instances += e.arguments [1];
-				break;
-				case LiveCommandKind::DrawIndexed : ++counts.drawIndexed;
-				counts.instances += e.arguments [1];
-				break;
-				case LiveCommandKind::Dispatch : ++counts.dispatch;
-				break;
-				case LiveCommandKind::DispatchMesh : ++counts.dispatchMesh;
-				break;
-				case LiveCommandKind::Barrier : counts.barriers += e.operations;
-				break;
-				case LiveCommandKind::Bind : counts.bindings += e.operations;
-				break;
-				default : break;
-			}
-		}
-
-		else if(e.kind == LiveEventKind::Upload)
-		{
-			++counts.uploadCalls;
-			counts.uploadBytes += e.bytes;
-			if(e.fullUpload) ++counts.fullUploads;
-			else ++counts.partialUploads;
-		}
-
-		else if(e.kind == LiveEventKind::Batch)
-		{
-			++counts.batches;
-			counts.elements += e.elements;
-		}
-
-		else if(e.kind == LiveEventKind::DataRange) counts.dirtyRanges += e.operations;
-		else if(e.kind == LiveEventKind::Wait) counts.waits += e.operations ? e.operations : 1;
+		const auto index = static_cast<std::size_t>(e.stage);
+		if(!AccumulateEventData(summary.recorded, index < LiveStageCount ? &summary.stages[index] : nullptr, e)) ++summary.omittedEvents;
 	}
 
 	// Keep room for submission accounting and GPU results when optional detail fills.
@@ -1878,9 +1885,17 @@ namespace dyf::Platform
 		auto & s = S();
 		try
 		{
-			auto e = input;
-			if(!e.context.frame.frame) e.context = context;
-			if(!e.id) e.id = AllocateLiveId();
+			std::optional<LiveEvent> normalized;
+			if(!input.context.frame.frame || !input.id)
+			{
+				normalized = input;
+#if defined(DY_LIVE_TEST_CLOCK) && !defined(DY_LIVE_COST_TIMING)
+				++testEventInputCopies;
+#endif
+				if(!normalized->context.frame.frame) normalized->context = context;
+				if(!normalized->id) normalized->id = AllocateLiveId();
+			}
+			const auto & e = normalized ? *normalized : input;
 			auto f = Frame(e.context.frame);
 			if(!f)
 			{
@@ -1902,19 +1917,8 @@ namespace dyf::Platform
 				e.command.generation, e.outcome))) return;
 			if(includeSummary)
 			{
-				LiveEventSummary eventSummary;
-				AccumulateLiveEventSummary(eventSummary, e);
-				auto counts = eventSummary.recorded;
-				auto & stage = summary.stages [static_cast<std::size_t>(e.stage)];
-				const auto & extra = eventSummary.stages [static_cast<std::size_t>(e.stage)];
-				stage.elements += extra.elements;
-				stage.bytes += extra.bytes;
-				stage.operations += extra.operations;
-				if(extra.cpu.state == LiveValueState::Ready)
-				{
-					stage.cpu.state = LiveValueState::Ready;
-					stage.cpu.milliseconds += extra.cpu.milliseconds;
-				}
+				LiveCounters<std::uint64_t> counts;
+				AccumulateEventData(counts, &summary.stages[static_cast<std::size_t>(e.stage)], e);
 				if(e.kind == LiveEventKind::Submission)
 				{
 					if(e.outcome == LiveOutcome::Submitted || e.outcome == LiveOutcome::Completed)
