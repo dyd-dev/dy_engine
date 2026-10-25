@@ -16,12 +16,24 @@
 #include <string_view>
 #include <vector>
 
+#ifdef __ANDROID__
+#include <android/asset_manager.h>
+#include <android/log.h>
+#include <android_native_app_glue.h>
+#include "Platform/Windows/AndroidApplication.h"
+#include <array>
+#include <fstream>
+#include <memory>
+#include <sstream>
+#endif
+#ifdef DY_PROFILER_TRACING_ENABLED
+#include "dyf/Extends/Tracy.h"
+#endif
+
 #ifdef __APPLE__
 #include <TargetConditionals.h>
 #endif
-#if defined(__ANDROID__) || (defined(__APPLE__) && TARGET_OS_IPHONE)
-#include "ExampleDeclarations.inc"
-#else
+#if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IPHONE)
 #ifdef _WIN32
 #include <Windows.h>
 #else
@@ -39,10 +51,12 @@ struct Example
     const char* category;
     int (*entry)(int, char**) = nullptr;
 };
-const Example examples[] = {
-#include "ExampleTargets.inc"
-};
+}
 
+#include "ExampleTargets.inc"
+
+namespace
+{
 void List()
 {
     for(size_t i = 0; i < std::size(examples); ++i)
@@ -427,9 +441,12 @@ int OpenGui([[maybe_unused]] const Example*& selected, std::string status)
 }
 }
 
-int DyfRunExamples(int argc, char** argv, const char* assetRoot, const char* fontPath,
+extern "C" int DyfRunExamples(int argc, char** argv, const char* assetRoot, const char* fontPath,
     void (*onExampleChanged)(bool)) try
 {
+#ifdef DY_PROFILER_TRACING_ENABLED
+    dyf::TracyAdapter tracy;
+#endif
     if(fontPath && *fontPath)
     {
 #ifdef _WIN32
@@ -508,6 +525,87 @@ catch(const std::exception& error)
     std::cerr << error.what() << '\n';
     return 1;
 }
+
+#ifdef __ANDROID__
+namespace
+{
+using Asset = std::unique_ptr<AAsset, decltype(&AAsset_close)>;
+
+std::string PrepareAssets(android_app& app)
+{
+    const auto root = std::filesystem::path(app.activity->internalDataPath) / "examples";
+    Asset manifest(AAssetManager_open(app.activity->assetManager, "files.txt", AASSET_MODE_BUFFER), AAsset_close);
+    if(!manifest) throw std::runtime_error("Packaged example asset list is missing.");
+    const auto size = AAsset_getLength64(manifest.get());
+    if(size < 0 || size > 16 * 1024 * 1024) throw std::runtime_error("Invalid example asset list.");
+    std::string contents(static_cast<size_t>(size), '\0');
+    size_t offset = 0;
+    while(offset < contents.size())
+    {
+        const auto count = AAsset_read(manifest.get(), contents.data() + offset, contents.size() - offset);
+        if(count <= 0) throw std::runtime_error("Cannot read example asset list.");
+        offset += static_cast<size_t>(count);
+    }
+    std::filesystem::create_directories(root);
+    std::istringstream paths(contents);
+    std::string relative;
+    while(std::getline(paths, relative))
+    {
+        if(!relative.empty() && relative.back() == '\r') relative.pop_back();
+        if(relative.empty()) continue;
+        const std::filesystem::path path(relative);
+        if(path.is_absolute() || path.has_root_name())
+            throw std::runtime_error("Invalid packaged asset path.");
+        for(const auto& component : path)
+            if(component == "..") throw std::runtime_error("Invalid packaged asset path.");
+        Asset asset(AAssetManager_open(app.activity->assetManager, relative.c_str(), AASSET_MODE_STREAMING), AAsset_close);
+        if(!asset) throw std::runtime_error("Packaged asset is missing: " + relative);
+        const auto destination = root / path;
+        std::filesystem::create_directories(destination.parent_path());
+        std::ofstream output(destination, std::ios::binary | std::ios::trunc);
+        if(!output) throw std::runtime_error("Cannot extract example asset: " + relative);
+        std::array<char, 64 * 1024> buffer;
+        int count;
+        while((count = AAsset_read(asset.get(), buffer.data(), buffer.size())) > 0)
+            output.write(buffer.data(), count);
+        output.close();
+        if(count < 0 || !output) throw std::runtime_error("Cannot extract example asset: " + relative);
+    }
+    return root.string();
+}
+}
+
+int DyfRunExamples(android_app* state)
+{
+    dyf::Platform::AndroidApplication application(*state);
+    int result = 1;
+    try
+    {
+        const auto assets = PrepareAssets(*state);
+        char name[] = "dy_engine examples";
+        char* arguments[] = {name, nullptr};
+        result = DyfRunExamples(1, arguments, assets.c_str(), "/system/fonts/Roboto-Regular.ttf", nullptr);
+        __android_log_print(result == 0 ? ANDROID_LOG_INFO : ANDROID_LOG_ERROR,
+            "dy_engine", "Application exited with code %d", result);
+    }
+    catch(const std::exception& error)
+    {
+        __android_log_print(ANDROID_LOG_ERROR, "dy_engine", "Examples: %s", error.what());
+    }
+    if(!state->destroyRequested)
+    {
+        ANativeActivity_finish(state->activity);
+        while(!state->destroyRequested)
+        {
+            int events = 0;
+            android_poll_source* source = nullptr;
+            if(ALooper_pollOnce(-1, nullptr, &events, reinterpret_cast<void**>(&source)) >= 0 && source)
+                source->process(state, source);
+        }
+    }
+    return result;
+}
+#endif
 
 #if !defined(__ANDROID__) && !(defined(__APPLE__) && TARGET_OS_IPHONE)
 int main(int argc, char** argv)

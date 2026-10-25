@@ -3,12 +3,12 @@
 #import <CoreText/CoreText.h>
 #include "Platform/Windows/IOSApplication.h"
 #include <cmath>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
 
-int DyfRunExamples(int, char**, const char*, const char*, void (*)(bool));
 using dyf::Platform::InputEvent;
 using dyf::Platform::InputEventType;
 using dyf::Platform::InputAction;
@@ -131,6 +131,7 @@ static Key PhysicalKey(UIKeyboardHIDUsage usage) {
 @end
 
 static __weak ViewController* activeController;
+static DYExampleEntry exampleEntry;
 static void ExampleChanged(bool running) {
     dispatch_async(dispatch_get_main_queue(), ^{
         [activeController setExampleRunning:running];
@@ -145,6 +146,9 @@ static std::string SystemFontPath() {
 }
 
 @implementation ViewController
++ (void)setExampleEntry:(DYExampleEntry)entry {
+    exampleEntry=entry;
+}
 - (void)loadView {
     self.view=[[MetalView alloc] initWithFrame:CGRectZero];
     self.view.backgroundColor=UIColor.blackColor;
@@ -198,7 +202,7 @@ static std::string SystemFontPath() {
     if(!self.view.window) return;
     self.view.contentScaleFactor=self.view.window.screen.scale;
     [self publishWindowState];
-    if(_started || self.view.bounds.size.width<=0 || self.view.bounds.size.height<=0) return;
+    if(!exampleEntry || _started || self.view.bounds.size.width<=0 || self.view.bounds.size.height<=0) return;
     _started=YES;
     _stopping=NO;
     [_errorLabel removeFromSuperview];
@@ -217,8 +221,9 @@ static std::string SystemFontPath() {
         [self publishWindowState];
         [self.view becomeFirstResponder];
         const auto application=_application;
+        const auto entry=exampleEntry;
         ViewController* owner=self; // Retain the controller/view until worker cleanup completes.
-        _runner=std::thread([application,owner,arguments=std::move(arguments),assetRoot,font]() mutable {
+        _runner=std::thread([application,owner,entry,arguments=std::move(arguments),assetRoot,font]() mutable {
             int result=1;
             std::string error;
             try {
@@ -226,9 +231,11 @@ static std::string SystemFontPath() {
                     std::vector<char*> argv;
                     for(auto& value:arguments) argv.push_back(value.data());
                     argv.push_back(nullptr);
-                    return DyfRunExamples(int(arguments.size()),argv.data(),assetRoot.c_str(),font.c_str(),ExampleChanged);
+                    return entry(int(arguments.size()),argv.data(),assetRoot.c_str(),font.c_str(),ExampleChanged);
                 });
             } catch(const std::exception& exception) { error=exception.what(); }
+            std::fprintf(stderr,"Application exited with code %d\n",result);
+            std::fflush(stderr);
             // All engine resources and synchronous main-queue calls are finished.
             // Only now may the UIKit thread join the already-finishing worker.
             dispatch_async(dispatch_get_main_queue(), ^{

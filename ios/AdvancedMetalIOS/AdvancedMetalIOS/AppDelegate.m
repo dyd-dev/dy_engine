@@ -6,6 +6,9 @@
 //
 
 #import "AppDelegate.h"
+#import "ViewController.h"
+
+int DyfRunExamples(int, char**, const char*, const char*, void (*)(bool));
 
 @interface AppDelegate ()
 
@@ -16,6 +19,7 @@
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     // 앱 시작을 승인한다. 렌더링 초기화는 ViewController가 담당한다.
+    [ViewController setExampleEntry:DyfRunExamples];
     return YES;
 }
 
