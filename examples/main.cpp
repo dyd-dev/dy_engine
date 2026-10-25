@@ -256,7 +256,12 @@ int OpenGui([[maybe_unused]] const Example*& selected, std::string status)
     bool dragging = false;
     std::unique_ptr<dyf::Canvas> canvas;
     std::unique_ptr<dyf::Font> font, heading;
-    constexpr const char* categories[] = {"All examples", "dyf", "RHI", "advanced", "showcase"};
+    constexpr const char* categories[] = {
+        "All examples", "dyf", "RHI", "advanced",
+#ifdef DY_BUILD_SHOWCASE
+        "showcase",
+#endif
+    };
     std::vector<size_t> visible;
 
     while(window.IsRunning())
