@@ -19,7 +19,19 @@ namespace dyf::Backends
         VkDevice device=VK_NULL_HANDLE;
         VkCommandPool pool=VK_NULL_HANDLE;
         VkCommandBuffer buffer=VK_NULL_HANDLE;
-        ~VulkanCommandStorage() {if(pool)vkDestroyCommandPool(device,pool,nullptr);}
+        struct LegacyRendering {VkRenderPass pass=VK_NULL_HANDLE;VkFramebuffer framebuffer=VK_NULL_HANDLE;};
+        std::vector<LegacyRendering> legacyRendering;
+        void ClearLegacyRendering() noexcept
+        {
+            for(const auto& rendering:legacyRendering)
+            {
+                if(rendering.framebuffer)vkDestroyFramebuffer(device,rendering.framebuffer,nullptr);
+                if(rendering.pass)vkDestroyRenderPass(device,rendering.pass,nullptr);
+            }
+            legacyRendering.clear();
+        }
+        ~VulkanCommandStorage()
+        {ClearLegacyRendering();if(pool)vkDestroyCommandPool(device,pool,nullptr);}
     };
 
     VulkanCommandPoolCache::VulkanCommandPoolCache(const VulkanContext& context)
@@ -120,7 +132,12 @@ namespace dyf::Backends
             std::fill_n(reset.query->initialized.begin()+reset.first,reset.count,uint8_t{1});
     }
     void VulkanCommandList::WriteTimestampNative(RHI::TimestampQueryHandle query,uint32_t index)
-    {vkCmdWriteTimestamp2(m_commandBuffer,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,static_cast<VulkanTimestampQuery*>(query)->pool,index);}
+    {
+        const auto pool=static_cast<VulkanTimestampQuery*>(query)->pool;
+        if(m_context.modernRendering)
+            m_context.writeTimestamp2(m_commandBuffer,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,pool,index);
+        else vkCmdWriteTimestamp(m_commandBuffer,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,pool,index);
+    }
 	namespace
 	{
 		struct StateInfo
@@ -165,6 +182,13 @@ namespace dyf::Backends
 				return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT };
 			}
 		}
+
+        VkPipelineStageFlags LegacyStages(VkPipelineStageFlags2 stages,bool source)
+        {
+            // StateInfo uses core 1.0 stage bits; the legacy API cannot use NONE.
+            const auto result=static_cast<VkPipelineStageFlags>(stages);
+            return result?result:(source?VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT:VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        }
 
 
 		VkAttachmentLoadOp ToLoadOp(dyf::RHI::LoadOp op)
@@ -324,6 +348,8 @@ namespace dyf::Backends
 	{
         // 완료 fence나 미제출 폐기로 안전성이 확인된 pool만 재사용한다.
         // wrapper와 업로드 arena의 소멸은 기존 참조·페이지 반환 순서를 유지한다.
+        // Framebuffers must not outlive the command's retained attachment views.
+        if(m_commandStorage)m_commandStorage->ClearLegacyRendering();
         if(m_poolReusable && IsValid())m_commandPools->Return(std::move(m_commandStorage));
         else m_commandStorage.reset();
 	}
@@ -359,7 +385,42 @@ namespace dyf::Backends
             dependency.pBufferMemoryBarriers=bufferBarriers.data();
             dependency.imageMemoryBarrierCount=static_cast<uint32_t>(imageBarriers.size());
             dependency.pImageMemoryBarriers=imageBarriers.data();
-            vkCmdPipelineBarrier2(m_commandBuffer,&dependency);
+            if(m_context.modernRendering)m_context.pipelineBarrier2(m_commandBuffer,&dependency);
+            else
+            {
+                std::vector<VkBufferMemoryBarrier> legacyBuffers;
+                std::vector<VkImageMemoryBarrier> legacyImages;
+                legacyBuffers.reserve(bufferBarriers.size());legacyImages.reserve(imageBarriers.size());
+                VkPipelineStageFlags sourceStages=0,destinationStages=0;
+                const auto stages=[&](const auto& barrier) {
+                    sourceStages|=LegacyStages(barrier.srcStageMask,true);
+                    destinationStages|=LegacyStages(barrier.dstStageMask,false);
+                };
+                for(const auto& source:bufferBarriers)
+                {
+                    stages(source);
+                    VkBufferMemoryBarrier barrier{};barrier.sType=VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+                    barrier.srcAccessMask=static_cast<VkAccessFlags>(source.srcAccessMask);
+                    barrier.dstAccessMask=static_cast<VkAccessFlags>(source.dstAccessMask);
+                    barrier.srcQueueFamilyIndex=source.srcQueueFamilyIndex;barrier.dstQueueFamilyIndex=source.dstQueueFamilyIndex;
+                    barrier.buffer=source.buffer;barrier.offset=source.offset;barrier.size=source.size;
+                    legacyBuffers.push_back(barrier);
+                }
+                for(const auto& source:imageBarriers)
+                {
+                    stages(source);
+                    VkImageMemoryBarrier barrier{};barrier.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                    barrier.srcAccessMask=static_cast<VkAccessFlags>(source.srcAccessMask);
+                    barrier.dstAccessMask=static_cast<VkAccessFlags>(source.dstAccessMask);
+                    barrier.oldLayout=source.oldLayout;barrier.newLayout=source.newLayout;
+                    barrier.srcQueueFamilyIndex=source.srcQueueFamilyIndex;barrier.dstQueueFamilyIndex=source.dstQueueFamilyIndex;
+                    barrier.image=source.image;barrier.subresourceRange=source.subresourceRange;
+                    legacyImages.push_back(barrier);
+                }
+                vkCmdPipelineBarrier(m_commandBuffer,sourceStages,destinationStages,0,0,nullptr,
+                    static_cast<uint32_t>(legacyBuffers.size()),legacyBuffers.data(),
+                    static_cast<uint32_t>(legacyImages.size()),legacyImages.data());
+            }
             bufferBarriers.clear(); imageBarriers.clear();
         };
 		for (uint32_t i = 0; i < count; ++i)
@@ -669,7 +730,47 @@ namespace dyf::Backends
 		rendering.pColorAttachments = colorAttachments.empty() ? nullptr : colorAttachments.data();
 		rendering.pDepthAttachment = depthPointer;
 		rendering.pStencilAttachment = stencilPointer;
-		vkCmdBeginRendering(m_commandBuffer, &rendering);
+        if(m_context.modernRendering)m_context.beginRendering(m_commandBuffer,&rendering);
+        else
+        {
+            std::vector<VkAttachmentDescription> attachments;
+            std::vector<VkImageView> views;
+            std::vector<VkClearValue> clearValues;
+            const auto attachmentCount=desc.colorAttachmentCount+(depthPointer?1u:0u);
+            attachments.reserve(attachmentCount);views.reserve(attachmentCount);clearValues.reserve(attachmentCount);
+            const auto append=[&](const VkRenderingAttachmentInfo& source,VkFormat format) {
+                VkAttachmentDescription attachment{};
+                attachment.format=format;attachment.samples=VK_SAMPLE_COUNT_1_BIT;
+                attachment.loadOp=source.loadOp;attachment.storeOp=source.storeOp;
+                attachment.stencilLoadOp=VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                attachment.stencilStoreOp=VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                // RHI resource barriers own transitions before and after the pass.
+                attachment.initialLayout=source.imageLayout;attachment.finalLayout=source.imageLayout;
+                attachments.push_back(attachment);views.push_back(source.imageView);clearValues.push_back(source.clearValue);
+            };
+            for(uint32_t i=0;i<desc.colorAttachmentCount;++i)
+                append(colorAttachments[i],ToVulkanFormat(m_colorFormats[i]));
+            if(depthPointer)
+            {
+                append(*depthPointer,ToVulkanFormat(m_depthFormat));
+                // Preserve the stencil plane when only depth is attached.
+                attachments.back().stencilLoadOp=stencilPointer?stencilPointer->loadOp:VK_ATTACHMENT_LOAD_OP_LOAD;
+                attachments.back().stencilStoreOp=stencilPointer?stencilPointer->storeOp:VK_ATTACHMENT_STORE_OP_STORE;
+            }
+            // Allocate ownership before native creation so every failure is reclaimed.
+            m_commandStorage->legacyRendering.emplace_back();
+            auto& native=m_commandStorage->legacyRendering.back();
+            native.pass=CreateVulkanLegacyRenderPass(m_context.device,attachments.data(),desc.colorAttachmentCount,depthPointer!=nullptr);
+            if(!native.pass){Fail();return;}
+            VkFramebufferCreateInfo framebuffer{};framebuffer.sType=VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            framebuffer.renderPass=native.pass;framebuffer.attachmentCount=attachmentCount;framebuffer.pAttachments=views.data();
+            framebuffer.width=width;framebuffer.height=height;framebuffer.layers=1;
+            if(vkCreateFramebuffer(m_context.device,&framebuffer,nullptr,&native.framebuffer)!=VK_SUCCESS){Fail();return;}
+            VkRenderPassBeginInfo begin{};begin.sType=VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            begin.renderPass=native.pass;begin.framebuffer=native.framebuffer;begin.renderArea=rendering.renderArea;
+            begin.clearValueCount=attachmentCount;begin.pClearValues=clearValues.data();
+            vkCmdBeginRenderPass(m_commandBuffer,&begin,VK_SUBPASS_CONTENTS_INLINE);
+        }
 		m_rendering = true;
 	}
 
@@ -680,7 +781,8 @@ namespace dyf::Backends
 			Fail();
 			return;
 		}
-		vkCmdEndRendering(m_commandBuffer);
+        if(m_context.modernRendering)m_context.endRendering(m_commandBuffer);
+        else vkCmdEndRenderPass(m_commandBuffer);
 		m_rendering = false;
 	}
 
@@ -910,15 +1012,15 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		}
 		VkViewport native{};
 		native.x = viewport.x;
-		native.y = viewport.y + viewport.height;
+		native.y = m_context.negativeViewportSupported?viewport.y+viewport.height:viewport.y;
 		native.width = viewport.width;
-		native.height = -viewport.height;
+		native.height = m_context.negativeViewportSupported?-viewport.height:viewport.height;
 		native.minDepth = viewport.minDepth;
 		native.maxDepth = viewport.maxDepth;
-        if(!std::isfinite(native.y) || native.width>m_maxViewportDimensions[0] || -native.height>m_maxViewportDimensions[1] ||
+        if(!std::isfinite(native.y) || native.width>m_maxViewportDimensions[0] || viewport.height>m_maxViewportDimensions[1] ||
             native.x<m_viewportBounds[0] || double(native.x)+native.width>m_viewportBounds[1] ||
             native.y<m_viewportBounds[0] || native.y>m_viewportBounds[1] ||
-            double(native.y)+native.height<m_viewportBounds[0])
+            double(native.y)+native.height<m_viewportBounds[0] || double(native.y)+native.height>m_viewportBounds[1])
         { Fail(); return; }
 		vkCmdSetViewport(m_commandBuffer, 0, 1, &native);
 		m_hasViewport = true;
@@ -1018,7 +1120,8 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		if (m_rendering)
 		{
 			Fail();
-			vkCmdEndRendering(m_commandBuffer);
+            if(m_context.modernRendering)m_context.endRendering(m_commandBuffer);
+            else vkCmdEndRenderPass(m_commandBuffer);
 			m_rendering = false;
 		}
         const auto result=vkEndCommandBuffer(m_commandBuffer);
