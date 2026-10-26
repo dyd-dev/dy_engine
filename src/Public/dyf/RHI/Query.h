@@ -5,6 +5,7 @@
 
 namespace dyf::RHI
 {
+// Native implementations supply storage; the common RHI owns query lifetime.
 class TimestampQuery
 {
 public:

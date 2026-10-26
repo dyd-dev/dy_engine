@@ -42,7 +42,7 @@ public:
     {
         Camera camera;
         uint32_t width=0,height=0;
-        float pixelError=1,hysteresis=0.1f;
+        float pixelError=1,screenSize=0.5f,hysteresis=0.1f;
         bool frustum=true,lod=true,resetHistory=false; // 각 검사 사용 여부와 인스턴스 순서 변경 시 LOD 이력 초기화 요청이다.
     };
 
@@ -87,6 +87,7 @@ private:
         std::array<Math::float4,6> planes={};
         Math::float4 depthRow={};
         Math::float4 projection={};
+        Math::float4 lodScreenSizes={}; // LOD1~3을 허용하는 최대 화면 지름(픽셀)이다.
         std::array<uint32_t,4> counts={};
     };
     // 실제 깊이와 정렬되는 지터 view-projection 및 viewport·깊이 여유·화면 여유·HiZ 단계 수를 별도 전달한다.

@@ -182,16 +182,19 @@ void Renderer::Impl::SelectLods(const Scene& scene,const Camera& camera,uint32_t
         const float depth=-Math::TransformPoint(camera.view,center).z;
         if(perspective && depth<=radius+0.001f) continue; // 카메라가 경계 구 안/근처에 있으면 가까운 면의 오차를 안전하게 환산할 수 없어 축약하지 않는다.
         const float pixelsPerUnit=projection*(perspective ? 1.0f/(depth-radius) : 1.0f);
-        if(!std::isfinite(pixelsPerUnit) || pixelsPerUnit<0) continue; // 픽셀 환산 배율이 유효하지 않으면 기존 0 선택을 유지한다.
+        const float screenSize=2.0f*radius*pixelsPerUnit;
+        if(!std::isfinite(pixelsPerUnit) || pixelsPerUnit<0 || !std::isfinite(screenSize)) continue; // 픽셀 환산 배율·화면 지름이 유효하지 않으면 기존 0 선택을 유지한다.
         previous=std::min<uint32_t>(previous,mesh.lods.size());
         uint32_t selected=0;
         for(uint32_t level=1;level<=mesh.lods.size();++level)
         {
             const auto& lod=mesh.lods[level-1];
             // 더 거친 단계로 갈 때는 허용값을 줄이고 이전보다 세밀한 쪽에서는 늘린다. 같은 경계에서 LOD가 매 프레임 왕복하는 것을 줄이는 히스테리시스다.
-            const float limit=config.lodPixelError*(level>previous ? 1-config.lodHysteresis : 1+config.lodHysteresis);
+            const float transition=level>previous ? 1-config.lodHysteresis : 1+config.lodHysteresis;
+            const float limit=config.lodPixelError*transition;
+            const float screenLimit=config.lodScreenSize*std::min(width,height)*transition/(1u<<(level-1));
             const float projected=lod.error*scale*pixelsPerUnit;
-            if(!lod.ready || !lod.buffer || !std::isfinite(projected) || projected>limit) break; // 인덱스가 준비되지 않았거나 예상 픽셀 오차가 한도를 넘으면 그 이후 더 거친 단계도 선택하지 않는다.
+            if(!lod.ready || !lod.buffer || !std::isfinite(projected) || projected>limit || screenSize>screenLimit) break; // 화면 크기와 오차 기준을 모두 만족하는 축약 단계만 허용한다.
             selected=level;
         }
         // 모든 조건을 통과한 가장 큰 단계 번호를 이번 엔티티 선택으로 보관한다. 실제 인덱스 버퍼 선택은 후속 드로 경로가 수행한다.

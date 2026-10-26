@@ -1,6 +1,5 @@
-#include "../../Platform/Profiler/CollectorInternal.h"
 #include "D3D12Device.h"
-#include "../../Platform/Profiler/RhiProfiler.h"
+#include "dyf/RHI/Backend/Observation.h"
 #include "D3D12Buffer.h"
 #include "D3D12CommandList.h"
 #include "D3D12PipelineState.h"
@@ -235,11 +234,10 @@ namespace dyf::Backends
         commands->ResourceBarrier(1, &barrier);
         const CD3DX12_TEXTURE_COPY_LOCATION source(resource, 0u);
         const CD3DX12_TEXTURE_COPY_LOCATION destination(buffer.Get(), footprint);
-        {
-            RHI::LiveRhiScope copy(Platform::LiveEventKind::CpuWork,Platform::LiveStage::NativeTranslate,"Readback: record texture copy");
-            copy.event.resource=Platform::FindLiveObject(texture);copy.event.bytes=bytes;copy.event.operations=1;
-            commands->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
-        }
+        RHI::Backend::ReadbackTrace observed(texture,bytes);
+        observed.Copy();
+        commands->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        observed.Finish();
         std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
         commands->ResourceBarrier(1, &barrier);
         if(FAILED(commands->Close())) return false;
@@ -251,16 +249,10 @@ namespace dyf::Backends
         m_internal->readbackResources.emplace_back(commands.Get());
         m_internal->readbackResources.emplace_back(fence.Get());
         ID3D12CommandList* native = commands.Get();
-        const auto liveSubmission=Platform::IsLiveCollectorEnabled()?Platform::AllocateLiveId():0;
-        {
-            RHI::LiveRhiScope submit(Platform::LiveEventKind::CpuWork,Platform::LiveStage::Submit,"Readback: native submission");
-            submit.event.resource=Platform::FindLiveObject(texture);submit.event.submission=liveSubmission;submit.event.operations=1;
-            m_internal->commandQueue->ExecuteCommandLists(1, &native);submit.event.outcome=Platform::LiveOutcome::Submitted;
-        }
-        if(liveSubmission)Platform::SetLiveGpuCoverage(Platform::GetLiveContext().frame,false);
-        RHI::LiveRhiScope wait(Platform::LiveEventKind::Wait,Platform::LiveStage::Submit,"Readback: fence wait");
-        wait.event.resource=Platform::FindLiveObject(texture);wait.event.submission=liveSubmission;wait.event.operations=1;
-        wait.event.outcome=Platform::LiveOutcome::Failed;
+        observed.Submit();
+        m_internal->commandQueue->ExecuteCommandLists(1, &native);
+        observed.Finish();
+        observed.Wait();
         if(FAILED(m_internal->commandQueue->Signal(fence.Get(), 1)) ||
             FAILED(fence->SetEventOnCompletion(1, event.handle)) ||
             WaitForSingleObject(event.handle, INFINITE) != WAIT_OBJECT_0 ||
@@ -269,8 +261,7 @@ namespace dyf::Backends
             m_internal->submissionFaulted = true;
             return false;
         }
-        wait.event.outcome=Platform::LiveOutcome::Completed;wait.Finish();
-        RHI::RecordLiveReadbackCompletion(liveSubmission,Platform::FindLiveObject(texture));
+        observed.Finish();
         m_internal->readbackResources.resize(retirementBase);
         void* mapped = nullptr;
         const D3D12_RANGE range{0, static_cast<SIZE_T>(storageBytes)};
@@ -1064,19 +1055,8 @@ void D3D12Device::DestroySwapchainNative()
             m_internal->commandQueue != nullptr && m_internal->fence != nullptr;
         for (uint32_t index = 0; index < count; ++index)
         {
-            if (cmdLists[index] == nullptr) return false;
-            if (std::find(cmdLists, cmdLists + index, cmdLists[index]) != cmdLists + index)
-                return false;
-
-            const auto owned = m_internal->FindActiveCommandList(cmdLists[index]);
-            if (owned == m_internal->activeCommandLists.end()) return false;
-
-            D3D12CommandList* commandList = owned->get();
-            if (!commandList->IsClosed() ||
-                commandList->GetNativeList() == nullptr)
-            {
-                return false;
-            }
+            // Common preparation owns and closes each unique native replay list.
+            auto* commandList = static_cast<D3D12CommandList*>(cmdLists[index]);
 
             for (D3D12Texture* image : commandList->GetReferencedSwapchainImages())
             {
@@ -1092,18 +1072,6 @@ void D3D12Device::DestroySwapchainNative()
                 static_cast<ID3D12CommandList*>(commandList->GetNativeList()));
         }
 
-        D3D12SubmissionState resourceStates = {};
-        if (submissionValid)
-        {
-            for (D3D12CommandList* commandList : submittedCommandLists)
-            {
-                if (!commandList->ValidateForSubmit(resourceStates))
-                {
-                    submissionValid = false;
-                    break;
-                }
-            }
-        }
         if (!submissionValid)
         {
             for (D3D12CommandList* commandList : submittedCommandLists)
@@ -2650,13 +2618,8 @@ void D3D12Device::DestroySwapchainNative()
         uint32_t size)
     {
         if (m_internal == nullptr) return false;
-        auto* d3dCommandList = dynamic_cast<D3D12CommandList*>(&commandList);
-        auto* d3dBuffer = dynamic_cast<D3D12Buffer*>(buffer);
-        const auto owned = m_internal->FindActiveCommandList(d3dCommandList);
-        return d3dCommandList != nullptr && d3dBuffer != nullptr &&
-            owned != m_internal->activeCommandLists.end() &&
-            d3dCommandList->RecordBufferUpload(
-                d3dBuffer, offset, data, size);
+        return static_cast<D3D12CommandList&>(commandList).RecordBufferUpload(
+            static_cast<D3D12Buffer*>(buffer), offset, data, size);
     }
 
     bool D3D12Device::UpdateTextureNative(
@@ -2670,13 +2633,8 @@ void D3D12Device::DestroySwapchainNative()
         uint32_t slicePitch)
     {
         if (m_internal == nullptr) return false;
-        auto* d3dCommandList = dynamic_cast<D3D12CommandList*>(&commandList);
-        auto* d3dTexture = dynamic_cast<D3D12Texture*>(texture);
-        const auto owned = m_internal->FindActiveCommandList(d3dCommandList);
-        return d3dCommandList != nullptr && d3dTexture != nullptr &&
-            owned != m_internal->activeCommandLists.end() &&
-            d3dCommandList->RecordTextureUpload(
-                d3dTexture,
+        return static_cast<D3D12CommandList&>(commandList).RecordTextureUpload(
+                static_cast<D3D12Texture*>(texture),
                 mipLevel,
                 arrayLayer,
                 data,

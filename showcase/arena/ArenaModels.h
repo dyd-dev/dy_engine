@@ -308,7 +308,7 @@ private:
 
     void ApplyCellOffsets(const Actor& actor)
     {
-        if(!dyf::IsValid(actor.instance)) return;
+        if(m_layout.CellCount() == 1 || !dyf::IsValid(actor.instance)) return;
         const auto& instance = m_scene.GetModelInstance(actor.instance);
         // UpdateAnimations has just restored each binding's canonical transform.
         // Apply offsets once here so a paused scene never accumulates them.

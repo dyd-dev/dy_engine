@@ -1,5 +1,5 @@
 #include "dyf/RHI/ICommandList.h"
-#include "Query.h"
+#include "dyf/RHI/Query.h"
 #include "dyf/RHI/IDevice.h"
 #include "Validation.h"
 #include "../Platform/Profiler/RhiProfiler.h"
@@ -164,8 +164,8 @@ void ICommandList::RecordLiveBindings(D::LiveId event,D::LiveCommandKind kind) n
     const bool draw=kind==D::LiveCommandKind::Draw||kind==D::LiveCommandKind::DrawIndexed;
     if(!draw&&kind!=D::LiveCommandKind::Dispatch&&kind!=D::LiveCommandKind::DispatchMesh)return;
     RecordLiveResourceLink(m_liveDeferred->FindObject(m_pipeline),event);
-    if(draw&&m_pipeline)for(const auto binding:m_pipeline->m_requiredVertexBindings)
-    {const auto found=m_vertexBuffers.find(binding);if(found!=m_vertexBuffers.end())RecordLiveResourceLink(m_liveDeferred->FindObject(found->second),event);}
+    if(draw&&m_pipeline)for(const auto& binding:m_pipeline->m_vertexBuffers)
+    {const auto found=m_vertexBuffers.find(binding.binding);if(found!=m_vertexBuffers.end())RecordLiveResourceLink(m_liveDeferred->FindObject(found->second.buffer),event);}
     if(kind==D::LiveCommandKind::DrawIndexed)RecordLiveResourceLink(m_liveDeferred->FindObject(m_indexBuffer),event);
     if(m_resourceSet&&m_resourceSet->GetPipeline()==m_pipeline)
     {
@@ -522,6 +522,9 @@ try
     for(uint32_t i=0;i<desc.colorAttachmentCount;++i)
         m_colorFormats.push_back(desc.colorAttachments[i].texture->GetDesc().format);
     m_depthStencilFormat=desc.depthStencilAttachment ? desc.depthStencilAttachment->texture->GetDesc().format : Format::Unknown;
+    m_depthStencilState=desc.depthStencilAttachment?desc.depthStencilAttachment->state:ResourceState::Undefined;
+    m_stencilAttachment=HasStencil(m_depthStencilFormat)&&desc.depthStencilAttachment->stencilLoadOp!=LoadOp::Undefined;
+    m_stencilReference=false;
     DepthStencilAttachment depthCopy;
     const auto* nativeDepth=desc.depthStencilAttachment;
     if(nativeDepth && m_depthStencilFormat==Format::D32_FLOAT &&
@@ -543,10 +546,10 @@ void ICommandList::EndRendering() try
 { if(CanRecordCommands()) EndRenderingNative(); }
 catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::BindGraphicsPipeline(PipelineHandle pipeline) try
-{if(!Track(pipeline))return;if(pipeline->IsCompute()){m_recordingFailed=true;return;}m_resourceSet=nullptr;BindGraphicsPipelineNative(pipeline);}
+{if(!Track(pipeline))return;if(pipeline->IsCompute()){m_recordingFailed=true;return;}m_liveDeferred->inlineConstants.Reset(pipeline->GetLayout().inlineConstantSize);m_resourceSet=nullptr;BindGraphicsPipelineNative(pipeline);}
 catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::BindComputePipeline(PipelineHandle pipeline) try
-{if(!Track(pipeline))return;if(m_rendering||!pipeline->IsCompute()){m_recordingFailed=true;return;}m_resourceSet=nullptr;BindComputePipelineNative(pipeline);}
+{if(!Track(pipeline))return;if(m_rendering||!pipeline->IsCompute()){m_recordingFailed=true;return;}m_liveDeferred->inlineConstants.Reset(pipeline->GetLayout().inlineConstantSize);m_resourceSet=nullptr;BindComputePipelineNative(pipeline);}
 catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::Dispatch(uint32_t x,uint32_t y,uint32_t z) try
 {if(!CanRecordCommands())return;if(m_rendering||!m_pipeline||!m_pipeline->IsCompute()||!x||!y||!z){m_recordingFailed=true;return;}if(ValidateBindings(false,true))DispatchNative(x,y,z);}
@@ -599,8 +602,12 @@ try
     if(!Track(buffer))return;
     if(!m_rendering || !m_pipeline || m_pipeline->IsCompute() || offset>=buffer->GetDesc().size || !HasUsage(buffer->GetDesc().usage,BufferUsage::Vertex))
     {m_recordingFailed=true;return;}
+    const auto& layouts=m_pipeline->m_vertexBuffers;
+    const auto layout=std::find_if(layouts.begin(),layouts.end(),[&](const VertexBufferLayout& value){return value.binding==binding;});
+    if(layout==layouts.end() || layout->stride>buffer->GetDesc().size-offset)
+    {m_recordingFailed=true;return;}
     RequireState(buffer,0,0,ResourceState::VertexBuffer);
-    m_vertexBuffers[binding]=buffer;
+    m_vertexBuffers[binding]={buffer,offset};
     BindVertexBufferNative(binding,buffer,offset);
 }
 catch(...) { m_recordingFailed=true; throw; }
@@ -609,9 +616,10 @@ try
 {
     if(!Track(buffer))return;
     if(!m_rendering || (format!=Format::R16_UINT && format!=Format::R32_UINT) || offset>=buffer->GetDesc().size ||
-        offset%FormatSize(format) || !HasUsage(buffer->GetDesc().usage,BufferUsage::Index))
+        offset%FormatSize(format) || FormatSize(format)>buffer->GetDesc().size-offset || !HasUsage(buffer->GetDesc().usage,BufferUsage::Index))
     {m_recordingFailed=true;return;}
     RequireState(buffer,0,0,ResourceState::IndexBuffer);
+    m_indexFormat=format;m_indexOffset=offset;
     BindIndexBufferNative(buffer,format,offset);
 }
 catch(...) { m_recordingFailed=true; throw; }
@@ -621,13 +629,14 @@ try
     if(!CanRecordCommands()) return;
     if(!data || !size || !m_pipeline || offset%4 || size%4 || offset>m_pipeline->GetLayout().inlineConstantSize ||
         size>m_pipeline->GetLayout().inlineConstantSize-offset) { m_recordingFailed = true; return; }
+    m_liveDeferred->inlineConstants.Write(offset,size);
     SetInlineConstantsNative(offset, size, data);
 }
 catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::SetViewport(const Viewport& viewport) try
 {
     if(!CanRecordCommands())return;
-    if(!std::isfinite(viewport.x+viewport.y+viewport.width+viewport.height+viewport.minDepth+viewport.maxDepth) ||
+    if(!m_rendering || !std::isfinite(viewport.x+viewport.y+viewport.width+viewport.height+viewport.minDepth+viewport.maxDepth) ||
         viewport.width<=0 || viewport.height<=0 || viewport.minDepth<0 || viewport.maxDepth>1 || viewport.minDepth>viewport.maxDepth)
     {m_recordingFailed=true;return;}
     SetViewportNative(viewport);
@@ -636,7 +645,7 @@ catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::SetScissor(const Rect& rect) try
 {
     if(!CanRecordCommands())return;
-    if(rect.x<0 || rect.y<0 || !rect.width || !rect.height) {m_recordingFailed=true;return;}
+    if(!m_rendering || rect.x<0 || rect.y<0 || !rect.width || !rect.height) {m_recordingFailed=true;return;}
     SetScissorNative(rect);
 }
 catch(...) { m_recordingFailed=true; throw; }
@@ -644,16 +653,18 @@ void ICommandList::SetStencilReference(uint32_t reference)
 try
 {
     if(!CanRecordCommands())return;
+    if(!m_rendering) {m_recordingFailed=true;return;}
     if(reference>255)
     {
         m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,"SetStencilReference: the 8-bit stencil reference must be in [0,255]; high bits are not silently discarded.");
         m_recordingFailed=true;return;
     }
+    m_stencilReference=true;
     SetStencilReferenceNative(reference);
 }
 catch(...) { m_recordingFailed=true; throw; }
 
-bool ICommandList::ValidateBindings(bool indexed, bool compute)
+bool ICommandList::ValidateBindings(bool indexed,bool compute,uint32_t count,uint32_t instances,uint32_t first,uint32_t firstInstance)
 {
     const auto fail=[&](const char* message) {
         m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,message);
@@ -662,19 +673,31 @@ bool ICommandList::ValidateBindings(bool indexed, bool compute)
     };
     if(!m_pipeline || m_pipeline->IsCompute()!=compute || m_pipeline->IsMesh())
         return fail("Draw/Dispatch: bind a pipeline of the matching type before execution.");
+    if(!m_liveDeferred->inlineConstants.IsComplete())
+        return fail("Draw/Dispatch: write all inline constants after selecting the pipeline.");
     if(!compute)
     {
-        if(!m_rendering || m_colorFormats!=m_pipeline->m_colorFormats || m_depthStencilFormat!=m_pipeline->m_depthStencilFormat)
+        if(!m_rendering || !m_viewport || !m_scissor || m_colorFormats!=m_pipeline->m_colorFormats || m_depthStencilFormat!=m_pipeline->m_depthStencilFormat)
             return fail("Draw: rendering attachment formats must match the graphics pipeline.");
-        for(uint32_t binding:m_pipeline->m_requiredVertexBindings)
+        if(m_pipeline->m_usesStencil&&(!m_stencilAttachment||!m_stencilReference))
+            return fail("Draw: stencil pipelines require a configured stencil attachment and reference.");
+        if(m_pipeline->m_requiresDepthWrite&&m_depthStencilState!=ResourceState::DepthWrite)
+            return fail("Draw: depth or stencil writes require a DepthWrite attachment.");
+        for(const auto& binding:m_pipeline->m_vertexBuffers)
         {
-            const auto found=m_vertexBuffers.find(binding);
+            const auto found=m_vertexBuffers.find(binding.binding);
             if(found==m_vertexBuffers.end())return fail("Draw: a vertex attribute binding has no vertex buffer.");
-            RequireState(found->second,0,0,ResourceState::VertexBuffer);
+            const uint64_t firstElement=binding.stepMode==VertexStepMode::Instance?firstInstance:indexed?0:first;
+            const uint64_t elements=binding.stepMode==VertexStepMode::Instance?instances:indexed?0:count;
+            if(firstElement+elements>(found->second.buffer->GetDesc().size-found->second.offset)/binding.stride)
+                return fail("Draw: vertex or instance range exceeds its bound buffer.");
+            RequireState(found->second.buffer,0,0,ResourceState::VertexBuffer);
         }
         if(indexed)
         {
             if(!m_indexBuffer)return fail("DrawIndexed: no index buffer is bound.");
+            if(uint64_t(first)+count>(m_indexBuffer->GetDesc().size-m_indexOffset)/FormatSize(m_indexFormat))
+                return fail("DrawIndexed: index range exceeds its bound buffer.");
             RequireState(m_indexBuffer,0,0,ResourceState::IndexBuffer);
         }
     }
@@ -719,8 +742,14 @@ bool ICommandList::ValidateMeshBindings()
     };
     if(!m_pipeline || !m_pipeline->IsMesh())
         return fail("DispatchMesh: bind a mesh pipeline before execution.");
-    if(!m_rendering || m_colorFormats!=m_pipeline->m_colorFormats || m_depthStencilFormat!=m_pipeline->m_depthStencilFormat)
+    if(!m_liveDeferred->inlineConstants.IsComplete())
+        return fail("DispatchMesh: write all inline constants after selecting the pipeline.");
+    if(!m_rendering || !m_viewport || !m_scissor || m_colorFormats!=m_pipeline->m_colorFormats || m_depthStencilFormat!=m_pipeline->m_depthStencilFormat)
         return fail("DispatchMesh: rendering attachment formats must match the mesh pipeline.");
+    if(m_pipeline->m_usesStencil&&(!m_stencilAttachment||!m_stencilReference))
+        return fail("DispatchMesh: stencil pipelines require a configured stencil attachment and reference.");
+    if(m_pipeline->m_requiresDepthWrite&&m_depthStencilState!=ResourceState::DepthWrite)
+        return fail("DispatchMesh: depth or stencil writes require a DepthWrite attachment.");
     if(m_resourceSet && m_resourceSet->GetPipeline()!=m_pipeline)
         return fail("DispatchMesh: bind a complete ResourceSet for the current pipeline after selecting that pipeline.");
     if(!m_resourceSet)
@@ -734,11 +763,11 @@ bool ICommandList::ValidateMeshBindings()
 }
 void ICommandList::DrawInstanced(uint32_t vertices, uint32_t instances, uint32_t firstVertex, uint32_t firstInstance)
 try
-{ if(CanRecordCommands() && ValidateBindings(false,false)) DrawInstancedNative(vertices, instances, firstVertex, firstInstance); }
+{ if(CanRecordCommands() && vertices && instances && ValidateBindings(false,false,vertices,instances,firstVertex,firstInstance)) DrawInstancedNative(vertices, instances, firstVertex, firstInstance); }
 catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::DrawIndexedInstanced(uint32_t indices, uint32_t instances, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance)
 try
-{ if(CanRecordCommands() && ValidateBindings(true,false)) DrawIndexedInstancedNative(indices, instances, firstIndex, vertexOffset, firstInstance); }
+{ if(CanRecordCommands() && indices && instances && ValidateBindings(true,false,indices,instances,firstIndex,firstInstance)) DrawIndexedInstancedNative(indices, instances, firstIndex, vertexOffset, firstInstance); }
 catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::DrawIndirect(BufferHandle arguments, uint32_t offset)
 try
@@ -955,11 +984,12 @@ class RecordedCommandList final : public ICommandList
         if(D::IsLiveCollectorEnabled())
         {
             RecordLiveCommand(D::LiveCommandKind::Bind,{},resources,resources->GetBindingCount(),0,1,D::LiveEventKind::Command,false,"Resource set");
+            const auto resourceId=m_liveDeferred->FindObject(resources);
             for(uint32_t i=0;i<resources->GetBindingCount();++i)
             {
                 const auto& binding=resources->GetBindings()[i];
-                RecordLiveResourceLink(D::FindLiveObject(binding.buffer),D::FindLiveObject(resources));
-                RecordLiveResourceLink(D::FindLiveObject(binding.texture),D::FindLiveObject(resources));
+                RecordLiveResourceLink(m_liveDeferred->FindObject(binding.buffer),resourceId);
+                RecordLiveResourceLink(m_liveDeferred->FindObject(binding.texture),resourceId);
             }
         }
 #endif

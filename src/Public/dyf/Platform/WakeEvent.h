@@ -32,7 +32,7 @@
 #endif
 #endif
 
-namespace dyf::RHI::Detail
+namespace dyf::Platform
 {
 // Counting wake notifications, initially zero. An early signal is retained until
 // Wait consumes it. This parks work recipients; it never protects shared state.

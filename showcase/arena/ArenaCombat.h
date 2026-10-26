@@ -395,6 +395,13 @@ private:
         const auto& member = m_members[salvo.owner];
         const double offset = RangedPlan(member.group).shotOffset + member.ordinal * .04;
         const double age = Loop(time - offset - 2.20 - salvo.burst * .11,4);
+        auto& effect = out.effects[salvo.effect];
+        effect.serial = salvo.effect + 1;
+        effect.owner = salvo.owner;
+        const float speed = salvo.spell ? 11.f : 21.f;
+        // The authored flight range is at most 22; no flight or impact can
+        // remain active after this bound, regardless of obstacle intersections.
+        if(age >= double(22.f / speed) + .32) return;
         const double launch = Loop(time - age,Duration);
         auto start = RangedPose(member,launch).position;
         const auto target = HeroPose(launch + .25).position;
@@ -404,10 +411,7 @@ private:
         const float range = FlightRange(start,direction,std::clamp(dyf::Math::Length(target - start) + 4,8.f,22.f));
         auto end = start + direction * range;
         end.z = .18f;
-        const float duration = range / (salvo.spell ? 11.f : 21.f), arc = salvo.spell ? .6f : .28f;
-        auto& effect = out.effects[salvo.effect];
-        effect.serial = salvo.effect + 1;
-        effect.owner = salvo.owner;
+        const float duration = range / speed, arc = salvo.spell ? .6f : .28f;
         if(age < duration)
         {
             const float fraction = float(age) / duration;

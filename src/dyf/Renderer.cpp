@@ -68,8 +68,9 @@ namespace
             return RendererFailure("Texture preparation requires at least one thread.");
         // 상태 전환 방향마다 서로 다른 기준을 적용해 잦은 전환을 막는 방식(히스테리시스)의 폭을 검사한다.
         if(!std::isfinite(desc.lodPixelError) || desc.lodPixelError<=0 || // LOD 픽셀 오차는 유한한 양수, 히스테리시스 폭은 유한한 0 이상 0.5 미만이어야 한다.
+            !std::isfinite(desc.lodScreenSize) || desc.lodScreenSize<=0 || desc.lodScreenSize>1 ||
             !std::isfinite(desc.lodHysteresis) || desc.lodHysteresis<0 || desc.lodHysteresis>=0.5f)
-            return RendererFailure("LOD requires positive pixel error and hysteresis in [0, 0.5).");
+            return RendererFailure("LOD requires positive pixel error, screen size in (0, 1], and hysteresis in [0, 0.5).");
         if(desc.lighting.shadowQuality > ShadowQuality::High) // 정의된 그림자 품질 열거 범위 밖의 값은 거부한다.
             return RendererFailure("Invalid shadow configuration.");
         if(desc.lighting.shadowBlockerSamples<1 || desc.lighting.shadowBlockerSamples>32 || // 표본 수가 1..32 밖이거나 필터 반경이 음수/비유한 값이면 실패한다.

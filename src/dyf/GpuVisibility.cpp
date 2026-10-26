@@ -142,6 +142,7 @@ bool GpuVisibility::Prepare(const std::vector<Instance>& inputs,const std::vecto
     if(inputs.empty() || batches.empty() || inputs.size()>UINT32_MAX/sizeof(Instance) || // 빈 입력·범위 초과·0 크기·비유한 값·양수가 아닌 픽셀 오차·허용 범위 밖 히스테리시스를 거부한다.
         batches.size()>UINT32_MAX/sizeof(Batch) || !settings.width || !settings.height ||
         !std::isfinite(settings.pixelError) || settings.pixelError<=0 ||
+        !std::isfinite(settings.screenSize) || settings.screenSize<=0 || settings.screenSize>1 ||
         !std::isfinite(settings.hysteresis) || settings.hysteresis<0 || settings.hysteresis>=.5f) return false;
     uint64_t capacity=0;
     for(const auto& batch:batches)
@@ -224,6 +225,8 @@ bool GpuVisibility::Prepare(const std::vector<Instance>& inputs,const std::vecto
     // 가로/세로 중 큰 픽셀 투영 배율, 허용 오차, 히스테리시스, 원근 여부를 한 float4로 넘긴다.
     m_frameData.projection={std::max(std::abs(projection.m[0])*settings.width,std::abs(projection.m[5])*settings.height)*.5f,
         settings.pixelError,settings.hysteresis,std::abs(projection.m[15])<1e-6f ? 1.f : 0.f};
+    const float screenSize=settings.screenSize*std::min(settings.width,settings.height);
+    m_frameData.lodScreenSizes={screenSize,screenSize*.5f,screenSize*.25f,0};
     m_frameData.counts={static_cast<uint32_t>(inputs.size()),static_cast<uint32_t>(batches.size()),settings.frustum?1u:0u,settings.lod?1u:0u};
     m_uploadDirty[2]=m_uploadDirty[2] || std::memcmp(&previousFrame,&m_frameData,sizeof(Frame))!=0;
     m_possibleBatches.assign(batches.size(),settings.frustum?0u:1u);

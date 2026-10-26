@@ -124,7 +124,7 @@ int main(int argc, char** argv)
                     "Pointer/touch controls, render settings and GPU pass timings are available on screen.\n"
                     "A/B freezes the scene/camera, disables GPU culling/profiler, keeps mobile VSync, and changes only CPU instancing.");
                 std::puts("Benchmark: --benchmark-frames N --benchmark-output NEW.csv [--benchmark-warmup 120] [--benchmark-step 0.016666666666666666]\n"
-                    "--benchmark-skin-cache on|off compares shared skin transforms with per-vertex evaluation (default on).\n"
+                    "--benchmark-skin-cache on|off compares CPU bounds transform caching with per-vertex evaluation (default on).\n"
                     "Warm-up freezes at t=0; measurement advances only after successful submissions.\n"
                     "Benchmark hides HUD, keeps mobile VSync, preserves profile quality, drains GPU work and refuses existing CSV files.");
                 return 0;
@@ -342,7 +342,6 @@ int main(int argc, char** argv)
             };
             std::vector<Frame> measured;
             measured.reserve(benchmarkFrames);
-            double modelPrepareTotal = 0;
             std::vector<std::pair<uint32_t, Platform::ProfilerTimingSnapshot>> windows;
             uint64_t lastSequence = renderer->GetProfilerTimingSnapshot().sequence;
             uint64_t successful = 0, animatedIndex = 0;
@@ -400,7 +399,6 @@ int main(int argc, char** argv)
                 frame.interval = intervalTimer.ElapsedMilliseconds(); intervalTimer.Reset();
                 frame.statistics = renderer->GetLastRenderStatistics();
                 measured.push_back(frame);
-                modelPrepareTotal += modelRenderer->GetCpuPrepareMilliseconds();
                 const auto& timing = renderer->GetProfilerTimingSnapshot();
                 if(timing.sequence != lastSequence)
                 {
@@ -512,8 +510,7 @@ int main(int argc, char** argv)
             output << "# summary submission_interval samples=" << intervals.size()
                 << " mean_ms=" << std::accumulate(intervals.begin(), intervals.end(), 0.0)/intervals.size()
                 << " p50_ms=" << percentile(.5) << " p95_ms=" << percentile(.95) << " p99_ms=" << percentile(.99) << '\n'
-                << "# summary model_prepare samples=" << measured.size()
-                << " mean_ms=" << modelPrepareTotal/measured.size() << '\n'
+                << "# summary model_prepare unavailable\n"
                 << "# summary profiler_cpu samples=" << cpuCount;
             if(cpuCount) output << " mean_ms=" << cpuTotal/cpuCount;
             else output << " unavailable";

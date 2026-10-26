@@ -1,9 +1,8 @@
-#include "../../Platform/Profiler/CollectorInternal.h"
 #include "VulkanDevice.h"
-#include "../../Platform/Profiler/RhiProfiler.h"
+#include "dyf/RHI/Backend/Observation.h"
 #include "VulkanQuery.h"
 #include "VulkanPresentQueue.h"
-#include "../../RHI/WakeEvent.h"
+#include "dyf/Platform/WakeEvent.h"
 #include <cstdio>
 
 #include "dyf/RHI/Buffer.h"
@@ -317,7 +316,7 @@ namespace dyf::Backends
         void TryPrefetchImage();
         VkResult AcquireImage(uint32_t slot,uint64_t timeout,uint32_t& image,bool prefetch=false);
         VkResult WaitForAcquisitions(uint64_t timeout=1000000000ull);
-        static void WakePresentThread(std::atomic<bool>& sleeping,RHI::Detail::WakeEvent& wake)
+        static void WakePresentThread(std::atomic<bool>& sleeping,Platform::WakeEvent& wake)
         {
             if(sleeping.exchange(false,std::memory_order_acq_rel))
                 wake.Signal();
@@ -338,7 +337,7 @@ namespace dyf::Backends
         std::thread m_presentThread;
         std::atomic<bool> m_presentStop{false},m_presentSleeping{false},m_presentResultSleeping{false};
         std::atomic<bool> m_presentDeviceLost{false};
-        RHI::Detail::WakeEvent m_presentWake,m_presentResultWake;
+        Platform::WakeEvent m_presentWake,m_presentResultWake;
         bool m_prefetchedImage=false,m_prefetchedSuboptimal=false;
         uint32_t m_prefetchedImageIndex=0,m_prefetchedFrameSlot=0;
         uint64_t m_prefetchSuccess=0,m_prefetchNotReady=0,m_prefetchTimeout=0;
@@ -1307,22 +1306,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		std::vector<VulkanCommandList*> selected;
 		selected.reserve(count);
 		for (uint32_t i = 0; i < count; ++i)
-		{
-			if (commandLists[i] == nullptr ||
-				std::find(commandLists, commandLists + i, commandLists[i]) != commandLists + i)
-			{
-				return false;
-			}
-			const auto acquired = std::find_if(
-				m_acquiredCommandLists.begin(),
-				m_acquiredCommandLists.end(),
-				[requested = commandLists[i]](
-					const std::unique_ptr<VulkanCommandList, VulkanObjectDeleter>& candidate) {
-					return candidate.get() == requested;
-				});
-			if (acquired == m_acquiredCommandLists.end() || !(*acquired)->IsClosed()) return false;
-			selected.push_back(acquired->get());
-		}
+            selected.push_back(static_cast<VulkanCommandList*>(commandLists[i]));
 
 		std::vector<std::unique_ptr<VulkanCommandList, VulkanObjectDeleter>> consumed;
 		consumed.reserve(count);
@@ -1335,6 +1319,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 					const std::unique_ptr<VulkanCommandList, VulkanObjectDeleter>& candidate) {
 					return candidate.get() == commandList;
 				});
+            if(acquired == m_acquiredCommandLists.end() || !(*acquired)->IsClosed()) return false;
 			consumed.push_back(std::move(*acquired));
 			m_acquiredCommandLists.erase(acquired);
 		}
@@ -1370,11 +1355,6 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			return false;
 		}
 
-		VulkanSubmissionState resourceStates{};
-		for (VulkanCommandList* commandList : selected)
-		{
-			if (!commandList->ValidateForSubmit(resourceStates)) return false;
-		}
         // 중간 제출의 최종 상태는 제한하지 않는다. Present에서 공통 RHI가 검사한다.
 
 		std::vector<VkCommandBuffer> nativeCommandBuffers;
@@ -1681,11 +1661,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		VkBufferImageCopy copy{};
 		copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
 		copy.imageExtent = {desc.width, desc.height, 1};
-		{
-			dyf::RHI::LiveRhiScope observed(dyf::Platform::LiveEventKind::CpuWork,dyf::Platform::LiveStage::NativeTranslate,"Readback: record texture copy");
-			observed.event.resource=dyf::Platform::FindLiveObject(texture);observed.event.bytes=bytes;observed.event.operations=1;
-			vkCmdCopyImageToBuffer(command, image->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,resources.buffer,1,&copy);
-		}
+		dyf::RHI::Backend::ReadbackTrace observed(texture,bytes);
+		observed.Copy();
+		vkCmdCopyImageToBuffer(command, image->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,resources.buffer,1,&copy);
+		observed.Finish();
 		VkBufferMemoryBarrier hostRead{};
 		hostRead.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
 		hostRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1707,14 +1686,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 		submit.commandBufferCount = 1;
 		submit.pCommandBuffers = &command;
-		const auto liveSubmission=dyf::Platform::IsLiveCollectorEnabled()?dyf::Platform::AllocateLiveId():0;
-		VkResult submitted;
-		{
-			dyf::RHI::LiveRhiScope observed(dyf::Platform::LiveEventKind::CpuWork,dyf::Platform::LiveStage::Submit,"Readback: native submission");
-			observed.event.resource=dyf::Platform::FindLiveObject(texture);observed.event.submission=liveSubmission;observed.event.operations=1;
-			submitted=vkQueueSubmit(m_context.graphicsQueue,1,&submit,VK_NULL_HANDLE);
-			observed.event.outcome=submitted==VK_SUCCESS?dyf::Platform::LiveOutcome::Submitted:dyf::Platform::LiveOutcome::Failed;
-		}
+		observed.Submit();
+		const VkResult submitted=vkQueueSubmit(m_context.graphicsQueue,1,&submit,VK_NULL_HANDLE);
+		observed.Finish(submitted==VK_SUCCESS);
 		if(submitted != VK_SUCCESS)
 		{
 			// OOM submit failures leave the commands unsubmitted. Other failures
@@ -1727,12 +1701,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			LogVulkanFailure("vkQueueSubmit(readback)", submitted);
 			return false;
 		}
-		if(liveSubmission)dyf::Platform::SetLiveGpuCoverage(dyf::Platform::GetLiveContext().frame,false);
-		dyf::RHI::LiveRhiScope observedWait(dyf::Platform::LiveEventKind::Wait,dyf::Platform::LiveStage::Submit,"Readback: queue wait");
-		observedWait.event.resource=dyf::Platform::FindLiveObject(texture);observedWait.event.submission=liveSubmission;observedWait.event.operations=1;
+		observed.Wait();
 		const VkResult waited = vkQueueWaitIdle(m_context.graphicsQueue);
-		observedWait.event.outcome=waited==VK_SUCCESS?dyf::Platform::LiveOutcome::Completed:dyf::Platform::LiveOutcome::Failed;
-		observedWait.Finish();
+		observed.Finish(waited==VK_SUCCESS);
 		if(waited != VK_SUCCESS)
 		{
 			m_submissionFaulted = true;
@@ -1742,7 +1713,6 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			return false;
 		}
 		dyf::RHI::TextureReadback output;
-		dyf::RHI::RecordLiveReadbackCompletion(liveSubmission,dyf::Platform::FindLiveObject(texture));
 		output.width = desc.width; output.height = desc.height;
 		output.rowPitch = desc.width * 4u; output.format = desc.format;
 		output.pixels.resize(static_cast<size_t>(bytes));
@@ -1930,13 +1900,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 	{
 		VulkanCommandList* nativeCommandList = dynamic_cast<VulkanCommandList*>(&commandList);
 		VulkanBuffer* nativeBuffer = dynamic_cast<VulkanBuffer*>(buffer);
-		if (nativeCommandList == nullptr || nativeBuffer == nullptr ||
-			std::find(m_buffers.begin(), m_buffers.end(), buffer) == m_buffers.end() ||
-			std::none_of(m_acquiredCommandLists.begin(), m_acquiredCommandLists.end(),
-				[nativeCommandList](
-					const std::unique_ptr<VulkanCommandList, VulkanObjectDeleter>& candidate) {
-					return candidate.get() == nativeCommandList;
-				}))
+		if (nativeCommandList == nullptr || nativeBuffer == nullptr)
 		{
 			return false;
 		}
@@ -1955,13 +1919,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 	{
 		VulkanCommandList* nativeCommandList = dynamic_cast<VulkanCommandList*>(&commandList);
 		VulkanTexture* nativeTexture = dynamic_cast<VulkanTexture*>(texture);
-		if (nativeCommandList == nullptr || nativeTexture == nullptr ||
-			std::find(m_textures.begin(), m_textures.end(), texture) == m_textures.end() ||
-			std::none_of(m_acquiredCommandLists.begin(), m_acquiredCommandLists.end(),
-				[nativeCommandList](
-					const std::unique_ptr<VulkanCommandList, VulkanObjectDeleter>& candidate) {
-					return candidate.get() == nativeCommandList;
-				}))
+		if (nativeCommandList == nullptr || nativeTexture == nullptr)
 		{
 			return false;
 		}

@@ -18,7 +18,7 @@ struct VisibleInstance {float4x4 model,previousMVP;};
 // planes는 정규화된 절두체 6면, depthRow는 시점 앞쪽 거리를 구하는 행이다.
 // 상태 전환 방향마다 서로 다른 기준을 적용해 잦은 전환을 막는 방식(히스테리시스)의 폭을 projection에 담는다.
 // projection은 픽셀 배율·허용 오차·히스테리시스 폭·원근 여부, counts는 물체 수·배치 수·절두체 검사·LOD 사용 순서다.
-struct Frame {float4 planes[6];float4 depthRow,projection;uint4 counts;};
+struct Frame {float4 planes[6];float4 depthRow,projection,lodScreenSizes;uint4 counts;};
 #if GPU_VISIBILITY_OCCLUSION // 가림 빌드에서만 Hi-Z 자원·판정 함수·제거 조건을 포함한다.
 struct OcclusionFrame {float4x4 viewProjection;float4 viewport;uint4 info;};
 // 경계 구를 감싸는 상자의 8개 꼭짓점을 투영해 화면 사각형과 가장 가까운 깊이를 구한다. near plane을 걸치거나 수치가 불안정하면 제거하지 않는다.
@@ -101,16 +101,18 @@ kernel void kernelMain(uint3 threadId [[thread_position_in_grid]],
         float depth=dot(frame.depthRow,float4(input.centerRadius.xyz,1));
         bool perspective=frame.projection.w>.5f;
         float pixels=frame.projection.x*(perspective?1.f/max(depth-input.centerRadius.w,.001f):1.f);
+        float screenSize=2.0f*input.centerRadius.w*pixels;
         // 픽셀 배율이 유한한 0 이상일 때만 LOD를 낮추며, 원근 투영에서는 경계 구 전체가 카메라 앞에 있어야 한다.
-        if((!perspective || depth>input.centerRadius.w+.001f) && isfinite(pixels) && pixels>=0)
+        if((!perspective || depth>input.centerRadius.w+.001f) && isfinite(pixels) && pixels>=0 && isfinite(screenSize))
         {
             uint previous=min(history[id],input.metadata.x-1);
             for(uint level=1;level<input.metadata.x;++level)
             {
                 float error=input.lodErrors[level]*pixels;
                 // 이전 LOD보다 거칠게 바꿀 때는 더 엄격한 한도, 되돌아올 때는 느슨한 한도를 써 경계에서 LOD가 왕복하는 현상을 줄인다.
-                float limit=frame.projection.y*(level>previous?1-frame.projection.z:1+frame.projection.z);
-                if(!isfinite(error) || error<0 || error>limit) break; // LOD 오차가 비유한값·음수이거나 허용 픽셀 한도를 넘으면 더 거친 단계 탐색을 멈춘다.
+                float transition=level>previous?1-frame.projection.z:1+frame.projection.z;
+                float limit=frame.projection.y*transition;
+                if(!isfinite(error) || error<0 || error>limit || screenSize>frame.lodScreenSizes[level-1]*transition) break; // 화면 크기와 오차 기준을 모두 만족하는 축약 단계만 허용한다.
                 selected=level;
             }
         }

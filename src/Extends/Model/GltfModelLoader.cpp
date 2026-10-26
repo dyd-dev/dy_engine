@@ -511,6 +511,8 @@ namespace dyf
 			if(!budget.CheckNodes(gltf.nodes.size())
 				|| !budget.AddBytes(gltf.nodes.size(), sizeof(ModelNode), "nodes")
 				|| !budget.AddBytes(gltf.materials.size(), sizeof(ModelMaterialInfo), "materials")) return false;
+			for(const auto& node : gltf.nodes)
+				if(node.cameraIndex.has_value() && !budget.AddBytes(1u, sizeof(ModelCamera), "source cameras")) return false;
 			for(const fastgltf::Skin& skin : gltf.skins)
 			{
 				if(!budget.CheckJoints(skin.joints.size())
@@ -924,6 +926,31 @@ namespace dyf
 					return ReportModelError(
 						filepath,
 						"glTF node contains non-finite transform values");
+				}
+				if(source.cameraIndex.has_value())
+				{
+					if(*source.cameraIndex >= gltf.cameras.size()) return false;
+					ModelCamera camera;
+					camera.nodeIndex = static_cast<uint32_t>(nodeIndex);
+					const auto& sourceCamera = gltf.cameras[*source.cameraIndex].camera;
+					if(const auto* perspective = std::get_if<fastgltf::Camera::Perspective>(&sourceCamera))
+					{
+						camera.verticalFovRadians = static_cast<float>(perspective->yfov);
+						camera.nearPlane = static_cast<float>(perspective->znear);
+						camera.farPlane = perspective->zfar.has_value()
+							? static_cast<float>(*perspective->zfar) : std::numeric_limits<float>::infinity();
+						if(perspective->aspectRatio.has_value()) camera.aspect = static_cast<float>(*perspective->aspectRatio);
+					}
+					else
+					{
+						const auto& orthographic = std::get<fastgltf::Camera::Orthographic>(sourceCamera);
+						camera.perspective = false;
+						camera.nearPlane = static_cast<float>(orthographic.znear);
+						camera.farPlane = static_cast<float>(orthographic.zfar);
+						camera.orthographicHeight = static_cast<float>(2.0 * orthographic.ymag);
+						camera.aspect = static_cast<float>(orthographic.xmag / orthographic.ymag);
+					}
+					outModel.cameras.push_back(camera);
 				}
 				if(source.meshIndex.has_value())
 				{

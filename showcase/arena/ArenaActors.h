@@ -59,7 +59,7 @@ class ArenaActors
 {
     using float3 = dyf::Math::float3;
     using Handle = dyf::EntityHandle;
-    struct Cast { Handle projectile; std::array<Handle,3> fragments; };
+    struct Cast { Handle projectile; std::array<Handle,3> fragments; bool active = false; };
 
 public:
     [[nodiscard]] static constexpr double LoopDuration() { return ArenaCombat::Duration; }
@@ -139,6 +139,8 @@ private:
         using namespace dyf::Math;
         using arena_actor_detail::Hidden;
         auto& cast = m_casts[index];
+        if(!effect.active && !cast.active) return;
+        cast.active = effect.active;
         if(!effect.active)
         {
             cast.projectile.SetTransform(Hidden());

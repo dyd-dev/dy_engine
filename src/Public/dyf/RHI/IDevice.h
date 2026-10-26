@@ -16,6 +16,7 @@
 #include "Swapchain.h"
 #include "Submission.h"
 #include "Feature.h"
+#include "Format.h"
 #include "dyf/Platform/Profiler.h"
 #include <stdexcept>
 
@@ -52,6 +53,8 @@ namespace dyf::RHI
         UniformBufferBytes, StorageBufferBytes, SamplerAnisotropy, TessellationPatchControlPoints,
         TextureArrayLayers
     };
+
+    enum class FormatFeature : uint8_t { LinearFiltering, CompressedSampling };
 
 	struct DeviceDesc
 	{
@@ -91,6 +94,7 @@ namespace dyf::RHI
 
 		[[nodiscard]] static IDevice* Create(const DeviceDesc& desc);
 		[[nodiscard]] bool Supports(Feature) const;
+        [[nodiscard]] bool Supports(Format,FormatFeature) const noexcept;
         // Counts device-created resources, including resources retained by pending GPU work.
         // Swapchain-owned images are excluded.
         [[nodiscard]] ResourceAllocationCounters GetResourceAllocationCounters() const;
@@ -192,6 +196,10 @@ namespace dyf::RHI
 			uint32_t slicePitch);
 
 	protected:
+		// Native hooks receive common-validated descriptors, device-owned resources
+		// and closed, distinct replay lists. Common RHI pins their lifetimes through
+		// completion. Adapters translate API limits, layouts, synchronization and errors;
+		// they do not search a second ownership registry or repeat common validation.
         IDevice();
         void StopLiveProfiling() noexcept;
         virtual UploadMemoryStatistics GetUploadMemoryStatisticsNative() const;
@@ -218,6 +226,7 @@ namespace dyf::RHI
         virtual bool GetTimestampCalibrationNative(TimestampCalibration&) const {return false;}
         virtual bool IsLostNative() const = 0;
         virtual bool SupportsNative(Feature) const = 0;
+        virtual bool SupportsFormatNative(Format,FormatFeature) const noexcept { return false; }
     virtual uint64_t GetLimitNative(Limit) const = 0;
     virtual bool SupportsSamplerNative(const SamplerDesc&) const = 0;
         virtual bool SupportsPipelineLayoutNative(const PipelineLayoutDesc&) const = 0;

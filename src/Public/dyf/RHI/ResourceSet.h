@@ -5,6 +5,7 @@
 
 namespace dyf::RHI
 {
+// Immutable binding metadata shared by the recorder and native API adapters.
 class ResourceSet
 {
 public:

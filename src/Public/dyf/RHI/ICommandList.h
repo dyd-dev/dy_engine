@@ -101,6 +101,9 @@ namespace dyf::RHI
 		bool Close();
 
 	protected:
+        // Only the common recorder replays these hooks. Resource ownership, ranges,
+        // binding compatibility and inline-constant completeness are checked there.
+        // Native implementations retain API-specific encoding and state/layout tracking.
         ICommandList();
         virtual bool ReplayNative(const std::vector<std::function<bool(ICommandList&)>>& commands);
         virtual void BeginDebugEventNative(const char*, const DebugLabelColor&) {}
@@ -184,14 +187,19 @@ namespace dyf::RHI
         uint64_t m_completion=0;
         uint64_t m_imageGeneration=0;
         bool m_rendering=false, m_viewport=false, m_scissor=false;
+        bool m_stencilAttachment=false,m_stencilReference=false;
         uint32_t m_debugEventDepth = 0;
         PipelineHandle m_pipeline=nullptr;
         BufferHandle m_indexBuffer=nullptr;
         ResourceSetHandle m_resourceSet=nullptr;
-        std::map<uint32_t,BufferHandle> m_vertexBuffers;
+        struct VertexBinding { BufferHandle buffer; uint32_t offset; };
+        std::map<uint32_t,VertexBinding> m_vertexBuffers;
+        Format m_indexFormat=Format::Unknown;
+        uint32_t m_indexOffset=0;
         std::vector<Format> m_colorFormats;
         Format m_depthStencilFormat=Format::Unknown;
-        bool ValidateBindings(bool indexed, bool compute);
+        ResourceState m_depthStencilState=ResourceState::Undefined;
+        bool ValidateBindings(bool indexed,bool compute,uint32_t count=0,uint32_t instances=0,uint32_t first=0,uint32_t firstInstance=0);
         bool ValidateMeshBindings();
         bool ValidateIndirectArguments(BufferHandle, uint32_t offset, uint32_t size);
         bool RequireResourceSetStates(ResourceSetHandle);

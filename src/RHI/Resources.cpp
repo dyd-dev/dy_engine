@@ -5,15 +5,82 @@
 #include "Validation.h"
 #include "dyf/RHI/Readback.h"
 #include "ThreadPool.h"
-#include "Query.h"
+#include "dyf/RHI/Query.h"
+#include "dyf/RHI/Backend/Observation.h"
 #include "../Platform/Profiler/RhiProfiler.h"
 #include <chrono>
 #include <deque>
+#include <new>
 #include <stdexcept>
 #include <thread>
 
 namespace dyf::RHI
 {
+#if defined(DY_LIVE_PROFILING_ENABLED) || defined(DY_PROFILER_TRACING_ENABLED)
+struct Backend::ReadbackTrace::State
+{
+    Platform::LiveId resource=0,submission=0;
+    uint64_t bytes=0;
+    std::optional<LiveRhiScope> scope;
+    State(TextureHandle texture,uint64_t size) noexcept
+        :resource(Platform::FindLiveObject(texture)),bytes(size) {}
+};
+Backend::ReadbackTrace::ReadbackTrace(TextureHandle texture,uint64_t bytes) noexcept
+    :m_state(new(std::nothrow) State(texture,bytes)) {}
+Backend::ReadbackTrace::~ReadbackTrace()=default;
+void Backend::ReadbackTrace::Copy() noexcept
+{
+    if(!m_state)return;
+    auto& state=*m_state;
+    state.scope.emplace(Platform::LiveEventKind::CpuWork,Platform::LiveStage::NativeTranslate,"Readback: record texture copy");
+    state.scope->event.resource=state.resource;
+    state.scope->event.bytes=state.bytes;state.scope->event.operations=1;
+    state.scope->event.outcome=Platform::LiveOutcome::Failed;
+}
+void Backend::ReadbackTrace::Submit() noexcept
+{
+    if(!m_state)return;
+    auto& state=*m_state;
+    state.submission=Platform::IsLiveCollectorEnabled()?Platform::AllocateLiveId():0;
+    state.scope.emplace(Platform::LiveEventKind::CpuWork,Platform::LiveStage::Submit,"Readback: native submission");
+    state.scope->event.resource=state.resource;state.scope->event.submission=state.submission;
+    state.scope->event.operations=1;state.scope->event.outcome=Platform::LiveOutcome::Failed;
+}
+void Backend::ReadbackTrace::Wait() noexcept
+{
+    if(!m_state)return;
+    auto& state=*m_state;
+    state.scope.emplace(Platform::LiveEventKind::Wait,Platform::LiveStage::Submit,"Readback: native wait");
+    state.scope->event.resource=state.resource;state.scope->event.submission=state.submission;
+    state.scope->event.operations=1;state.scope->event.outcome=Platform::LiveOutcome::Failed;
+}
+void Backend::ReadbackTrace::Finish(bool success) noexcept
+{
+    if(!m_state || !m_state->scope)return;
+    auto& state=*m_state;
+    auto& event=state.scope->event;
+    const bool wait=event.kind==Platform::LiveEventKind::Wait;
+    const bool submit=event.stage==Platform::LiveStage::Submit&&!wait;
+    event.outcome=!success?Platform::LiveOutcome::Failed:
+        wait?Platform::LiveOutcome::Completed:submit?Platform::LiveOutcome::Submitted:Platform::LiveOutcome::Observed;
+    state.scope.reset();
+    if(success&&submit&&state.submission)
+        Platform::SetLiveGpuCoverage(Platform::GetLiveContext().frame,false);
+    if(success&&wait)RecordLiveReadbackCompletion(state.submission,state.resource);
+}
+#endif
+#ifdef DY_LIVE_PROFILING_ENABLED
+void Backend::ObserveUploadPage(uint64_t bytes,bool reused) noexcept
+{
+    const auto context=Platform::GetLiveContext();
+    if(!context.frame.frame||!Platform::IsLiveCollectorEnabled())return;
+    Platform::LiveEvent event;event.id=Platform::AllocateLiveId();event.context=context;
+    event.kind=Platform::LiveEventKind::UploadMemory;event.stage=Platform::LiveStage::NativeTranslate;
+    event.arguments[0]=reused?1:0;event.bytes=bytes;event.operations=1;
+    Platform::RecordLiveEvent(event);
+}
+#endif
+
 ResourceSet::ResourceSet(const ResourceSetDesc& desc) : m_pipeline(desc.pipeline)
 {
     if(!m_pipeline || (desc.bindingCount && !desc.bindings))
@@ -97,6 +164,7 @@ struct IDevice::RecordingState
     // Entries may still be in flight; Acquire checks completion before reset.
     std::deque<CachedCommand> commands;
     uint64_t commandBytes=0;
+    uint64_t completedSubmission=0;
     bool reportedReuse=false;
 };
 
@@ -573,14 +641,26 @@ ICommandList* IDevice::AcquireCommandList()
     ICommandList* cached=nullptr;
     if(!m_recording->commands.empty())
     {
-        const uint64_t completed=GetCompletedSubmissionNative();
-        for(auto entry=m_recording->commands.begin();entry!=m_recording->commands.end();++entry)
+        const auto findReady=[&] {
+            auto entry=m_recording->commands.begin();
+            for(;entry!=m_recording->commands.end();++entry)
+                if(entry->commands->m_completion<=m_recording->completedSubmission)break;
+            return entry;
+        };
+        auto entry=findReady();
+        if(entry==m_recording->commands.end())
         {
-            if(entry->commands->m_completion>completed) continue;
+            // A proven completion stays valid for this device. Poll again only
+            // when the cache has no entry covered by that monotonic serial.
+            const uint64_t completed=GetCompletedSubmissionNative();
+            if(completed>m_recording->completedSubmission)m_recording->completedSubmission=completed;
+            entry=findReady();
+        }
+        if(entry!=m_recording->commands.end())
+        {
             cached=entry->commands.release();
             m_recording->commandBytes-=entry->bytes;
             m_recording->commands.erase(entry);
-            break;
         }
     }
     std::unique_ptr<ICommandList, decltype(rollback)> owner(cached?cached:ICommandList::CreateRecorded(), rollback);
@@ -699,6 +779,7 @@ bool IDevice::ResetCommandList(ICommandList* commands)
     commands->m_recordedStates.clear();
     commands->m_requiredResourceSets.clear();
     commands->m_liveDeferred->ClearRecentStates();
+    commands->m_liveDeferred->inlineConstants.Reset(0);
 #ifdef DY_LIVE_PROFILING_ENABLED
     commands->m_liveDeferred->objectIds.clear();
 #endif
@@ -709,12 +790,15 @@ bool IDevice::ResetCommandList(ICommandList* commands)
     commands->m_recordingClosed=commands->m_recordingFailed=false;
     commands->m_debugEventDepth=0;
     commands->m_rendering=commands->m_viewport=commands->m_scissor=false;
+    commands->m_stencilAttachment=commands->m_stencilReference=false;
     commands->m_pipeline=nullptr;
     commands->m_indexBuffer=nullptr;
+    commands->m_indexFormat=Format::Unknown;commands->m_indexOffset=0;
     commands->m_resourceSet=nullptr;
     commands->m_vertexBuffers.clear();
     commands->m_colorFormats.clear();
     commands->m_depthStencilFormat=Format::Unknown;
+    commands->m_depthStencilState=ResourceState::Undefined;
     commands->m_completion=commands->m_imageGeneration=0;
     if(commands->m_liveDeferred->m_livePosition.commandList)++commands->m_liveDeferred->m_livePosition.generation;
     commands->m_liveDeferred->m_livePosition.index=0;
@@ -873,6 +957,7 @@ bool IDevice::Submit(ICommandList** commands, uint32_t count)
         commands[i]->FlushLiveDeferred(commands[i]->m_liveDeferred->m_liveContext);
     }
     const uint64_t completed=GetCompletedSubmissionNative();
+    bool needsPreparation=false;
     for(uint32_t i=0;i<count;++i)
     {
         if(!commands[i] || !m_userCommands.count(commands[i]) || !commands[i]->m_recordingClosed ||
@@ -880,6 +965,7 @@ bool IDevice::Submit(ICommandList** commands, uint32_t count)
             (commands[i]->m_imageGeneration && !m_frameActive) ||
             (commands[i]->m_imageGeneration && commands[i]->m_imageGeneration!=m_imageGeneration)) return false;
         for(uint32_t j=0;j<i;++j) if(commands[i]==commands[j]) return false;
+        if(!commands[i]->m_preparedNative)needsPreparation=true;
     }
     // 제출이 성공할 때까지 전역 상태를 유지하고 배리어로 바뀐 상태만 따로 보관한다.
     ICommandList::StateMap states;
@@ -917,7 +1003,7 @@ bool IDevice::Submit(ICommandList** commands, uint32_t count)
         }
     }
     std::vector<ICommandList*> native(count);
-    if(!PrepareCommandLists(commands, count)) return false;
+    if(needsPreparation && !PrepareCommandLists(commands, count)) return false;
     for(uint32_t i=0;i<count;++i)
     {
         native[i]=commands[i]->m_preparedNative;
@@ -1036,24 +1122,21 @@ PipelineHandle IDevice::CreateGraphicsPipeline(const GraphicsPipelineDesc& desc)
     // Complete fallible metadata allocation before acquiring the native object.
     // Track owns all failures once its shared_ptr construction begins.
     std::vector<std::shared_ptr<void>> dependencies{vertex, hull, domain, fragment};
-    std::vector<uint32_t> requiredVertexBindings;
+    std::vector<VertexBufferLayout> vertexBuffers;
     std::vector<Format> colorFormats;
-    for(uint32_t i=0;i<desc.vertexAttributeCount;++i)
-    {
-        const uint32_t binding=desc.vertexAttributes[i].binding;
-        if(std::find(requiredVertexBindings.begin(),requiredVertexBindings.end(),binding)==requiredVertexBindings.end())
-            requiredVertexBindings.push_back(binding);
-    }
+    if(desc.vertexBufferCount)vertexBuffers.assign(desc.vertexBuffers,desc.vertexBuffers+desc.vertexBufferCount);
     for(uint32_t i=0;i<desc.colorAttachmentCount;++i)
         colorFormats.push_back(desc.colorAttachments[i].format);
     auto* pipeline = CreateGraphicsPipelineNative(desc);
     if(!pipeline) ReportDiagnostic(DiagnosticSeverity::Error,"CreateGraphicsPipeline: native creation failed; no fallback pipeline was substituted.");
     if(pipeline)
     {
-        pipeline->m_requiredVertexBindings = std::move(requiredVertexBindings);
+        pipeline->m_vertexBuffers = std::move(vertexBuffers);
         pipeline->m_colorFormats = std::move(colorFormats);
         pipeline->m_depthStencilFormat=desc.depthStencil.format;
         pipeline->m_topology=desc.topology;
+        pipeline->m_usesStencil=desc.depthStencil.stencilEnabled;
+        pipeline->m_requiresDepthWrite=desc.depthStencil.depthWriteEnabled||MayWriteStencil(desc.depthStencil);
     }
     if(pipeline) { ++m_allocationCounters.pipelines.live; ++m_allocationCounters.pipelines.created; }
     char description[192];std::snprintf(description,sizeof(description),"Graphics pipeline; topology=%s; stages=Vertex%s%s%s; patchControlPoints=%u",
@@ -1081,6 +1164,8 @@ PipelineHandle IDevice::CreateMeshPipeline(const MeshPipelineDesc& desc)
     {
         pipeline->m_colorFormats = std::move(colorFormats);
         pipeline->m_depthStencilFormat=desc.depthStencil.format;
+        pipeline->m_usesStencil=desc.depthStencil.stencilEnabled;
+        pipeline->m_requiresDepthWrite=desc.depthStencil.depthWriteEnabled||MayWriteStencil(desc.depthStencil);
     }
     if(pipeline) { ++m_allocationCounters.pipelines.live; ++m_allocationCounters.pipelines.created; }
     Track(pipeline, [](IDevice& device, void* handle) {

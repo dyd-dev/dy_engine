@@ -3,7 +3,7 @@
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/Texture.h"
 #include "dyf/RHI/Pipeline.h"
-#include "../RHI/ResourceSet.h"
+#include "dyf/RHI/ResourceSet.h"
 #include "dyf/RHI/Shader.h"
 #include "OutputColor.h"
 #include <algorithm>

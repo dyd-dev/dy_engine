@@ -50,6 +50,8 @@ struct ModelRenderer::ProfilingState
     std::array<Platform::LiveId,4> optimizationRequests{};
     std::array<Platform::ControlRegistration,4> catalog;
     std::deque<GpuSample> gpuSamples;
+    std::array<RHI::TimestampQueryHandle,8> availableQueries{};
+    uint32_t availableQueryCount = 0;
     std::vector<std::weak_ptr<const MeshData>> influenceMeshes;
     std::vector<SkinTransformGroups> skinTransformGroups;
     uint64_t influenceRevision = 1;
@@ -60,7 +62,7 @@ namespace
 {
 constexpr bool ModelOptimizationConfig::* ModelPolicies[]={&ModelOptimizationConfig::reuseFrameBuffers,&ModelOptimizationConfig::skipUnchangedUploads,&ModelOptimizationConfig::cacheStaticMeshes,&ModelOptimizationConfig::cacheInfluences};
 bool SameOptimizations(const ModelOptimizationConfig& a,const ModelOptimizationConfig& b) noexcept
-{for(const auto flag:ModelPolicies)if(a.*flag!=b.*flag)return false;return true;}
+{for(const auto flag:ModelPolicies)if(a.*flag!=b.*flag)return false;return a.cacheSkinTransforms==b.cacheSkinTransforms;}
 template<class Cleanup>
 struct ScopeExit
 {
@@ -222,6 +224,8 @@ ModelRenderer::~ModelRenderer()
     ReleaseFrameBuffers();
     ReleaseMeshBuffers();
     for(const auto& sample : m_profiling->gpuSamples) device.DestroyTimestampQuery(sample.query);
+    for(uint32_t index = 0; index < m_profiling->availableQueryCount; ++index)
+        device.DestroyTimestampQuery(m_profiling->availableQueries[index]);
     if(m_computePipeline) device.DestroyPipeline(m_computePipeline);
     if(m_computeShader) device.DestroyShader(m_computeShader);
 }
@@ -452,7 +456,11 @@ void ModelRenderer::CollectGpuSamples()
             }
             Platform::RecordLiveGpuSpan(span);
         }
-        device.DestroyTimestampQuery(sample.query);
+        // The completion fence also covers the query writes. Reset only when
+        // this completed query is acquired for another deformation submission.
+        if(m_profiling->availableQueryCount < m_profiling->availableQueries.size())
+            m_profiling->availableQueries[m_profiling->availableQueryCount++] = sample.query;
+        else device.DestroyTimestampQuery(sample.query);
         m_profiling->gpuSamples.pop_front();
     }
 }
@@ -625,7 +633,8 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
     auto* influenceBuffer = m_influenceBuffer;
     // Completed unused slots must not pin buffers from historical scenes indefinitely.
     // Pointer identity is only a retirement key; uploads/validation use the actual data above.
-    std::vector<uintptr_t> workingSet = {uintptr_t(compute), uintptr_t(cpu), reinterpret_cast<uintptr_t>(influenceBuffer),
+    auto& workingSet = frame.workingSet;
+    workingSet = {uintptr_t(compute), uintptr_t(cpu), reinterpret_cast<uintptr_t>(influenceBuffer),
         compute ? reinterpret_cast<uintptr_t>(m_computePipeline) : 0,
         scene.Meshes().size(), scene.GetEntityCount(), std::max(size_t{1}, palette.size())};
     for(const auto& mesh : scene.Meshes())
@@ -645,7 +654,6 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
         if(index != selected && index != m_historyFrame && m_frames[index].workingSet != workingSet &&
             (!m_frames[index].completion || device.IsComplete(m_frames[index].completion)))
             ReleaseFrame(m_frames[index]);
-    frame.workingSet = std::move(workingSet);
     size_t cursor = 0;
     auto bufferSlot = [&](uint32_t size, uint32_t stride, RHI::BufferUsage usage,
         RHI::ResourceState state) -> FrameBuffer* {
@@ -778,7 +786,7 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
             }
             const ProfilingState::SkinTransformGroups* transformGroups = nullptr;
             const std::vector<uint32_t>* boundsVertices = nullptr;
-            if(positionsOnly && !sharedDeformation)
+            if(positionsOnly && !sharedDeformation && m_optimizationConfig.cacheSkinTransforms)
             {
                 auto& groups = m_profiling->skinTransformGroups[meshIndex];
                 // Influence groups depend on the published range; the bounds
@@ -932,9 +940,37 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
     if(compute && prepared && acquire())
     {
         if(Platform::IsLiveCollectorEnabled()){const auto context=Platform::GetLiveContext();liveCompute.id=Platform::AllocateLiveId();liveCompute.frame=context.frame;liveCompute.appliedRevision=context.appliedRevision;liveCompute.owner=m_profiling->id;liveCompute.scope=Platform::LiveGpuScope::ModelCompute;liveCompute.duration.state=device.Supports(RHI::Feature::TimestampQuery)?Platform::LiveValueState::Pending:Platform::LiveValueState::Unsupported;}
-        if(device.Supports(RHI::Feature::TimestampQuery)) query = device.CreateTimestampQuery({2});
+        if(device.Supports(RHI::Feature::TimestampQuery))
+        {
+            if(m_profiling->availableQueryCount)
+                query = m_profiling->availableQueries[--m_profiling->availableQueryCount];
+            else if(m_profiling->gpuSamples.size() < m_profiling->availableQueries.size())
+                query = device.CreateTimestampQuery({2});
+            if(liveCompute.id && !query) liveCompute.duration.state = Platform::LiveValueState::Unavailable;
+        }
         if(query) { commands->ResetTimestamps(query, 0, 2); commands->WriteTimestamp(query, 0); }
         if(liveCompute.id)liveCompute.begin.command=commands->GetLiveCommandPosition();
+        // Immutable mesh inputs are shared by independent deformation outputs.
+        // Keep them readable until the whole compute batch has been recorded.
+        std::vector<RHI::BufferHandle> sources;
+        for(uint32_t index = 0; index < scene.GetEntityCount(); ++index)
+            if(scene.GetEntitySkinPaletteOffset(static_cast<EntityID>(index)) != UINT32_MAX &&
+                (deformationSource[index] == UINT32_MAX || deformationSource[index] == index))
+            {
+                if(!m_draws[index].vertexBuffer) return Failure("Skinning source buffer is missing.");
+                sources.push_back(m_draws[index].vertexBuffer);
+            }
+        std::sort(sources.begin(), sources.end(), std::less<RHI::BufferHandle>{});
+        sources.erase(std::unique(sources.begin(), sources.end()), sources.end());
+        std::vector<RHI::ResourceBarrierDesc> before, after;
+        before.reserve(sources.size());
+        after.reserve(sources.size() + scene.GetEntityCount());
+        for(auto* source : sources)
+        {
+            before.push_back({source, nullptr, RHI::ResourceState::VertexBuffer, RHI::ResourceState::ShaderResource, {}});
+            after.push_back({source, nullptr, RHI::ResourceState::ShaderResource, RHI::ResourceState::VertexBuffer, {}});
+        }
+        commands->ResourceBarrier(before.data(), static_cast<uint32_t>(before.size()));
         commands->BindComputePipeline(m_computePipeline);
         for(uint32_t index = 0; index < scene.GetEntityCount(); ++index)
         {
@@ -950,9 +986,8 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
             const uint32_t sourceEntity = deformationSource[index];
             if(sourceEntity != UINT32_MAX && sourceEntity != index)
             {
-                // The leader precedes every alias and has already completed its
-                // output transition. Frame ownership and previous deformation
-                // history remain per entity even when current geometry is shared.
+                // The leader precedes every alias. Its output becomes vertex
+                // readable at the end of this batch, before any raster use.
                 draw.vertexBuffer = m_draws[sourceEntity].vertexBuffer;
                 if(frame.sets[index].handle) device.DestroyResourceSet(frame.sets[index].handle);
                 frame.sets[index] = {};
@@ -986,8 +1021,6 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
                 set.pipeline = m_computePipeline;
                 set.bindings = bindings;
             }
-            const RHI::ResourceBarrierDesc before{source, nullptr, RHI::ResourceState::VertexBuffer, RHI::ResourceState::ShaderResource, {}};
-            commands->ResourceBarrier(&before, 1);
             if(cached->state != RHI::ResourceState::UnorderedAccess)
             {
                 const RHI::ResourceBarrierDesc ready{output, nullptr, cached->state, RHI::ResourceState::UnorderedAccess, {}};
@@ -998,14 +1031,11 @@ bool ModelRenderer::Prepare(const ModelScene& scene)
             const std::array<uint32_t, 4> constants = {count, m_influenceOffsets[ToIndex(scene.GetEntityMesh(entity))], paletteOffset, 0};
             commands->SetInlineConstants(0, sizeof(constants), constants.data());
             commands->Dispatch((count + 63) / 64, 1, 1);
-            const std::array<RHI::ResourceBarrierDesc, 2> after = {{
-                {source, nullptr, RHI::ResourceState::ShaderResource, RHI::ResourceState::VertexBuffer, {}},
-                {output, nullptr, RHI::ResourceState::UnorderedAccess, RHI::ResourceState::VertexBuffer, {}}
-            }};
-            commands->ResourceBarrier(after.data(), static_cast<uint32_t>(after.size()));
+            after.push_back({output, nullptr, RHI::ResourceState::UnorderedAccess, RHI::ResourceState::VertexBuffer, {}});
             cached->state = RHI::ResourceState::VertexBuffer;
             draw.vertexBuffer = output;
         }
+        commands->ResourceBarrier(after.data(), static_cast<uint32_t>(after.size()));
         if(query) commands->WriteTimestamp(query, 1);
         if(liveCompute.id)liveCompute.end.command=commands->GetLiveCommandPosition();
     }
@@ -1035,6 +1065,7 @@ bool ModelRenderer::RenderScene(const ModelScene& scene, const Camera* camera, c
     Platform::LiveFrameScope liveFrame(Platform::FindLiveObject(&m_renderer.GetDevice()),m_renderer.GetLiveSourceId());
     m_renderer.GetDevice().PrepareLiveControls(liveFrame.GetKey());
     bool rendered = false;
+    bool skipped = false;
     bool drawAttempted = false;
     RHI::FenceHandle previousDraw;
     uint32_t consumedHistoryFrame = UINT32_MAX;
@@ -1048,6 +1079,7 @@ bool ModelRenderer::RenderScene(const ModelScene& scene, const Camera* camera, c
             if(consumedHistoryFrame < m_frames.size()) m_frames[consumedHistoryFrame].completion = completion;
         }
     }};
+    ScopeExit endFrame{[&] {m_renderer.EndModelFrame();}};
     try
     {
         if(readback) *readback = {};
@@ -1063,10 +1095,16 @@ bool ModelRenderer::RenderScene(const ModelScene& scene, const Camera* camera, c
         }
         // 이전 복원 자체가 실패했다면 원래 설정을 덮어쓰지 않고 다시 복원부터 처리한다.
         bool prepared = false;
-        if(RestoreShaders() && (stockGeometry || ConfigureShaders()) &&
-            m_renderer.PrepareLiveFrame(liveFrame.GetKey()))
+        if(RestoreShaders() && (stockGeometry || ConfigureShaders()))
         {
-            prepared = Prepare(scene);
+            // Apply pending output settings and acquire before CPU/GPU deformation.
+            // Renderer takes frame cleanup ownership when it begins its draw path.
+            bool available = false;
+            if(m_renderer.BeginModelFrame(liveFrame.GetKey(),available))
+            {
+                if(available) prepared = Prepare(scene);
+                else {rendered = true;skipped = true;}
+            }
         }
         if(prepared)
         {
@@ -1079,7 +1117,7 @@ bool ModelRenderer::RenderScene(const ModelScene& scene, const Camera* camera, c
             if(rendered && stockGeometry && completion && completion != previousDraw)
             {
                 // 확보 실패로 생략한 프레임은 이전 변형 기준을 전진시키지 않는다.
-                m_historyDraws = m_draws;
+                m_historyDraws.swap(m_draws);
                 m_historyMeshes.resize(scene.GetEntityCount());
                 m_historyVertexCounts.resize(scene.GetEntityCount());
                 for(uint32_t index = 0; index < scene.GetEntityCount(); ++index)
@@ -1101,7 +1139,7 @@ bool ModelRenderer::RenderScene(const ModelScene& scene, const Camera* camera, c
     catch(...) { (void)Failure("Model rendering failed."); }
     // 성공, 준비 실패, 예외 경로 모두 복원을 예약한 후 호출자에게 돌아간다.
     const bool restored = RestoreShaders();
-    liveFrame.SetOutcome(rendered&&restored?Platform::LiveOutcome::Completed:Platform::LiveOutcome::Failed);
+    liveFrame.SetOutcome(rendered&&restored?(skipped?Platform::LiveOutcome::Skipped:Platform::LiveOutcome::Completed):Platform::LiveOutcome::Failed);
     if(!rendered || !restored) InvalidateHistory();
     return rendered && restored;
 }

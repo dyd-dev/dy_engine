@@ -8,9 +8,19 @@ namespace dyf::Backends
     public:
         MetalDevice();
         ~MetalDevice() override;
+
+    protected:
         bool SupportsDdsCompression(RHI::Format) const noexcept;
         bool SupportsLinearFiltering(RHI::Format) const noexcept;
-
+        bool SupportsFormatNative(RHI::Format format,RHI::FormatFeature feature) const noexcept override
+        {
+            switch(feature)
+            {
+            case RHI::FormatFeature::LinearFiltering: return SupportsLinearFiltering(format);
+            case RHI::FormatFeature::CompressedSampling: return SupportsDdsCompression(format);
+            }
+            return false;
+        }
         void DestroySwapchainNative() override;
         bool WaitIdleNative() override;
         bool IsLostNative() const override;

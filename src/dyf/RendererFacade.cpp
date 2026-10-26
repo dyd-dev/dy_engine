@@ -18,6 +18,26 @@ const RendererConfig& Renderer::GetAppliedConfig() const { return m_impl->config
 Platform::LiveId Renderer::GetLiveSourceId() const noexcept { return m_impl->liveId; }
 void Renderer::InitializeLiveProfiling() noexcept { m_impl->InitializeLiveProfiling(); }
 bool Renderer::PrepareLiveFrame(Platform::LiveFrameKey frame) noexcept { return m_impl->PrepareLiveFrame(frame); }
+bool Renderer::BeginModelFrame(Platform::LiveFrameKey frame,bool& available) noexcept
+{
+    available=false;
+    EndModelFrame();
+    if(m_impl->modelFramePending || !m_impl->PrepareLiveFrame(frame))return false;
+    try
+    {
+        Platform::CpuTimer timer;
+        available=m_impl->device->BeginFrame();
+        m_impl->modelFramePending=available;
+        m_impl->m_profiler.AddAcquireWait(timer.ElapsedMilliseconds());
+        if(!available) {m_impl->lastStatistics={};m_impl->livePreparedFrame=0;}
+        return available || !m_impl->device->IsLost();
+    }
+    catch(...) {return false;}
+}
+void Renderer::EndModelFrame() noexcept
+{
+    Impl::FrameEnd end{*m_impl->device,m_impl->modelFramePending};
+}
 void Renderer::PublishLiveGeometryAvailability(bool custom) noexcept { m_impl->PublishLiveGeometryAvailability(custom); }
 
 // Mesh 편의 호출은 내부에서 임시 Scene과 기본 방향광을 구성한다. Scene 호출은 사용자가 등록한 광원 구성 그대로 RenderScene으로 간다.

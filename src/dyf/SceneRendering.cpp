@@ -98,6 +98,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             return true;
         }
         if(!selectedOutput) framePending=true; // 창 프레임을 확보한 경우에만 아직 Present로 닫지 않은 상태를 표시한다.
+        if(!selectedOutput) modelFramePending=false; // Model의 선행 확보를 이 함수의 FrameEnd로 넘긴다.
         // 창 획득 뒤 어느 지점에서 돌아가도 열린 프레임을 닫으려는 보호 객체다. 오프스크린은 새 창 프레임을 열지 않는다.
         FrameEnd frameEnd{*nativeDevice,framePending};
         timing.cpuAcquireMilliseconds=selectedOutput?0.0:m_profiler.TakeAcquireWait()+acquireTimer.ElapsedMilliseconds();

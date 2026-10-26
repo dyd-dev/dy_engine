@@ -1,6 +1,5 @@
 #include "EnvironmentLighting.h"
-#include "RHI/FormatCapabilities.h"
-#include "RHI/ResourceSet.h"
+#include "dyf/RHI/ResourceSet.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -539,7 +538,7 @@ bool EnvironmentLighting::Prepare(RHI::IDevice& device,RHI::ICommandList& upload
 {
     using namespace RHI;
     if(m_device && m_device!=&device) Reset();
-    if(!m_device) m_linearFiltering=RHI::Detail::SupportsLinearFiltering(device,Format::R32G32B32A32_FLOAT);
+    if(!m_device) m_linearFiltering=device.Supports(Format::R32G32B32A32_FLOAT,RHI::FormatFeature::LinearFiltering);
     m_device=&device;m_prepared=false;m_specularRecorded=m_diffuseRecorded=false;
     if(!width || !height || !std::isfinite(environment.intensity) || environment.intensity<0 ||
         !std::isfinite(environment.rotationRadians)) return false;
@@ -662,9 +661,12 @@ bool EnvironmentLighting::Prepare(RHI::IDevice& device,RHI::ICommandList& upload
     m_frame.environment=m_data;
     m_frame.specularColor={environment.specularColor.x*environment.specularIntensity,
         environment.specularColor.y*environment.specularIntensity,environment.specularColor.z*environment.specularIntensity,0};
-    if(!UploadConstants(uploads,m_constants,m_constantsReady,m_constantBytes,&m_data,sizeof(m_data)) ||
-        !UploadConstants(uploads,m_frameBuffer,m_frameReady,m_frameBytes,&m_frame,sizeof(m_frame))) return false;
-    if((m_diffuseEnabled || m_specularEnabled || IsBackgroundEnabled()) && !CreatePipelines()) return false;
+    if(!UploadConstants(uploads,m_constants,m_constantsReady,m_constantBytes,&m_data,sizeof(m_data))) return false;
+    // Neutral environment bindings remain available without uploading a camera
+    // buffer that only the environment's own GPU passes consume.
+    const bool needsGpuPass=m_diffuseEnabled || m_specularEnabled || IsBackgroundEnabled();
+    if(needsGpuPass && (!UploadConstants(uploads,m_frameBuffer,m_frameReady,m_frameBytes,&m_frame,sizeof(m_frame)) ||
+        !CreatePipelines())) return false;
     m_prepared=true;return true;
 }
 

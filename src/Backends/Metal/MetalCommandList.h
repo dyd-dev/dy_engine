@@ -1,9 +1,7 @@
 #pragma once
 
 #include <cstdint>
-#include <map>
 #include <memory>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -17,17 +15,13 @@ namespace dyf::Backends
 	struct MetalObjectDeleter;
 	struct MetalUploadPage;
 
-	struct MetalSubmissionState
-	{
-		std::unordered_map<MetalBuffer*, RHI::ResourceState> buffers;
-		std::map<std::pair<MetalTexture*, uint32_t>, RHI::ResourceState> textureSubresources;
-	};
-
 	class MetalCommandList final : public RHI::ICommandList
 	{
 	public:
 		explicit MetalCommandList(void* commandQueue,
 			std::shared_ptr<MetalDetail::UploadPagePool<MetalUploadPage>> uploadPool = {});
+
+	protected:
         bool ReplayNative(const std::vector<std::function<bool(ICommandList&)>>& commands) override;
         void GlobalBarrierNative() override;
 
@@ -100,10 +94,10 @@ namespace dyf::Backends
 			uint32_t rowPitch,
 			uint32_t slicePitch);
 
-		[[nodiscard]] bool ValidateForSubmit(MetalSubmissionState& state) const;
 		void CommitResourceStates();
 
 	private:
+		friend class MetalDevice;
 		friend struct MetalObjectDeleter;
 
 		~MetalCommandList() override;

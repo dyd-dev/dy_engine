@@ -313,6 +313,7 @@ struct Renderer::Impl
     bool shadersPending=false;
     // BeginFrame 성공 뒤 Present로 닫지 못한 창 프레임이 있는지 나타낸다. 제출 완료나 GPU 실행 중 여부를 나타내는 플래그는 아니다.
     bool framePending=false;
+    bool modelFramePending=false;
     bool m_environmentCapture=false,m_environmentCaptureEmitters=true;
     bool m_environmentCaptureVisibility=false;
     // 해당 프레임의 사용자 draw 입력까지 포함해 표준 지오메트리 최적화가 가능한지 기록한다.

@@ -2,8 +2,9 @@
 #include "CollectorInternal.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/RHI/ICommandList.h"
-#include "../../RHI/Query.h"
-#include "../../RHI/UploadMemory.h"
+#include "dyf/RHI/Query.h"
+#include "dyf/RHI/Backend/UploadMemory.h"
+#include "../../RHI/InlineConstantCoverage.h"
 #include <array>
 #include <atomic>
 #include <deque>
@@ -14,6 +15,7 @@ namespace dyf::RHI
 {
     struct ICommandList::LiveDeferred
     {
+        Detail::InlineConstantCoverage inlineConstants;
         // Opaque storage also holds lookup ownership for caller-managed workers.
         // Ordinary entries share the device cache; only borrowed image generations
         // are captured per list. Close discards unused owners promptly.
@@ -77,6 +79,8 @@ namespace dyf::RHI
     {
         static bool HasRecordedWork(const ICommandList& commands) noexcept { return !commands.m_commands.empty(); }
         static Platform::LiveCommandRef Position(const ICommandList& commands) noexcept { return commands.GetLiveCommandPosition(); }
+        static void RecordLink(ICommandList& commands,Platform::LiveId from,Platform::LiveId to) noexcept
+        { commands.RecordLiveResourceLink(from,to); }
         static std::uint64_t Submission(const IDevice& device,FenceHandle fence) noexcept { return device.GetLiveSubmissionId(fence); }
         static void Prepare(IDevice& device,Platform::LiveFrameKey frame) noexcept { device.PrepareLiveControls(frame); }
         static void Release(IDevice& device,std::uint64_t source) noexcept { device.ReleaseLiveControls(source); }

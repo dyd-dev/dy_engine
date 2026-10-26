@@ -669,10 +669,13 @@ namespace dyf
 		asset.nodes = std::move(model.nodes);
 		asset.skins = std::move(model.skins);
 		asset.animations = std::move(model.animations);
+		asset.cameras = std::move(model.cameras);
 		asset.directionalLights = std::move(model.directionalLights);
 		asset.pointLights = std::move(model.pointLights);
 		asset.spotLights = std::move(model.spotLights);
 		asset.assetTransform = model.assetTransform;
+		asset.sourceToYUp = model.sourceToYUp;
+		asset.sourceUnitMeters = model.sourceUnitMeters;
 		asset.hasBounds = bounds.valid;
 		if(bounds.valid)
 		{

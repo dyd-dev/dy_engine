@@ -142,31 +142,4 @@ namespace dyf::Backends::NullValidation
             layerCount <= texture->GetDesc().depthOrArraySize - firstLayer;
     }
 
-    [[nodiscard]] inline bool ResolveBindingSubresources(
-        RHI::Texture* texture,
-        const RHI::ResourceBinding& binding,
-        RHI::ResourceBindingType type,
-        uint32_t& firstMip,
-        uint32_t& mipCount,
-        uint32_t& firstLayer,
-        uint32_t& layerCount)
-    {
-        return NullValidation::ResolveSubresources(
-            texture, binding.subresources,
-            firstMip, mipCount, firstLayer, layerCount) &&
-            (type != RHI::ResourceBindingType::StorageTexture || mipCount == 1);
-    }
-
-    [[nodiscard]] inline const RHI::ResourceBindingLayout* FindLayoutBinding(
-        const RHI::PipelineLayoutDesc& layout,
-        uint32_t binding)
-    {
-        for(uint32_t index = 0; index < layout.bindingCount; ++index)
-        {
-            const RHI::ResourceBindingLayout& candidate = layout.bindings[index];
-            if(candidate.binding == binding)
-                return &candidate;
-        }
-        return nullptr;
-    }
 }

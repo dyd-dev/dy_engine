@@ -53,6 +53,8 @@ namespace dyf
 		std::shared_ptr<const std::vector<float>> m_pixels;
 	};
 	[[nodiscard]] bool LoadHdrImage(const std::string& path,HdrImage& image);
+	// Zero keeps the source size; a limit preserves HDR values while bounding both axes.
+	[[nodiscard]] bool LoadHdrImage(const std::string& path,HdrImage& image,uint32_t maxDimension);
 
 	// 실패하면 stderr로 원인을 알리고 false를 반환한다. DDS BC1/2/3/4/5/7 및
 	// RGBA/BGRA8도 CPU에서 RGBA8로 해제한다. 원본 크기·알파를 유지하며 색 변환은 하지 않는다.

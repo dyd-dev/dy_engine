@@ -52,17 +52,4 @@ namespace dyf::Backends::D3D12Validation
             return false;
         }
     }
-
-    [[nodiscard]] inline const RHI::ResourceBindingLayout* FindLayoutBinding(
-        const RHI::PipelineLayoutDesc& layout,
-        uint32_t binding)
-    {
-        for(uint32_t index = 0; index < layout.bindingCount; ++index)
-        {
-            const RHI::ResourceBindingLayout& candidate = layout.bindings[index];
-            if(candidate.binding == binding)
-                return &candidate;
-        }
-        return nullptr;
-    }
 }

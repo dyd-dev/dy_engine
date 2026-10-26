@@ -1,5 +1,4 @@
 #include "TransparentRendering.h"
-#include "RHI/FormatCapabilities.h"
 #include "Platform/Profiler/RhiProfiler.h"
 #include "SceneAlgorithms.h"
 #include "ShaderLayout.h"
@@ -86,7 +85,7 @@ bool TransparentRendering::CreatePipelines()
     bindings.push_back({9,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Fragment,linear});
     bindings.push_back({10,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Fragment,nearest});
     auto environmentLinear=nearest;environmentLinear.addressU=SamplerAddressMode::Repeat;
-    if(RHI::Detail::SupportsLinearFiltering(*m_device,Format::R32G32B32A32_FLOAT))
+    if(m_device->Supports(Format::R32G32B32A32_FLOAT,RHI::FormatFeature::LinearFiltering))
         environmentLinear.minFilter=environmentLinear.magFilter=environmentLinear.mipFilter=SamplerFilter::Linear;
     bindings.push_back({15,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Fragment,environmentLinear});
     bindings.push_back({11,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Vertex|ShaderStageFlags::Fragment,{}});
@@ -128,7 +127,7 @@ bool TransparentRendering::CreatePipelines()
         transparentColors[1].writeMask=ColorWriteMask::Red;
         // This query also proves sampled-image support; unknown backends keep RGBA16F.
         // Supports(desc) checks attachment blending and independent write masks together.
-        m_reactiveFormat=RHI::Detail::SupportsLinearFiltering(*m_device,Format::R16_FLOAT) && m_device->Supports(desc)
+        m_reactiveFormat=m_device->Supports(Format::R16_FLOAT,RHI::FormatFeature::LinearFiltering) && m_device->Supports(desc)
             ?Format::R16_FLOAT:Format::R16G16B16A16_FLOAT;
     }
     transparentColors[1].format=m_reactiveFormat;
@@ -243,7 +242,7 @@ bool TransparentRendering::Prepare(IDevice& device,ICommandList& uploads,const C
 {
     if(layers!=1 && layers!=2) return false;
     m_layers=layers;
-    m_nativeFiltering=trustedEnvironment && RHI::Detail::SupportsLinearFiltering(device,Format::R32G32B32A32_FLOAT);
+    m_nativeFiltering=trustedEnvironment && device.Supports(Format::R32G32B32A32_FLOAT,RHI::FormatFeature::LinearFiltering);
     if(m_recorded)
     {
         // An uncommitted frame may have stopped before restoring the copy's state.

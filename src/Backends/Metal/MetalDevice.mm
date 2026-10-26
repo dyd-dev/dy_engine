@@ -947,11 +947,6 @@ void MetalDevice::DestroySwapchainNative()
             return false;
         }
 
-		MetalSubmissionState resourceStates = {};
-		for(MetalCommandList* commandList : submittedCommandLists)
-		{
-			if(!commandList->ValidateForSubmit(resourceStates)) return false;
-		}
         m_impl->submissions.emplace_back();
         Impl::Submission& submission = m_impl->submissions.back();
         submission.value = m_impl->nextSubmissionValue++;
@@ -1053,22 +1048,6 @@ void MetalDevice::DestroySwapchainNative()
     RHI::PipelineHandle MetalDevice::CreateGraphicsPipelineNative(
         const RHI::GraphicsPipelineDesc& desc)
     {
-		const auto ownsShader = [this](RHI::ShaderHandle shader)
-		{
-			return std::find_if(
-				m_impl->liveShaders.begin(), m_impl->liveShaders.end(),
-				[shader](const std::unique_ptr<MetalShader, MetalObjectDeleter>& candidate)
-				{
-					return static_cast<RHI::ShaderHandle>(candidate.get()) == shader;
-				}) != m_impl->liveShaders.end();
-		};
-		if(!ownsShader(desc.vertexShader) ||
-			(desc.hullShader != nullptr && !ownsShader(desc.hullShader)) ||
-			(desc.domainShader != nullptr && !ownsShader(desc.domainShader)) ||
-			(desc.fragmentShader != nullptr && !ownsShader(desc.fragmentShader)))
-		{
-			return nullptr;
-		}
         auto pipeline = std::unique_ptr<MetalPipeline, MetalObjectDeleter>(
             new MetalPipeline(desc, (__bridge void*)m_impl->device));
 		if(pipeline->GetNativePipeline() == nullptr ||
@@ -1083,20 +1062,6 @@ void MetalDevice::DestroySwapchainNative()
     RHI::PipelineHandle MetalDevice::CreateMeshPipelineNative(
         const RHI::MeshPipelineDesc& desc)
     {
-		const auto ownsShader = [this](RHI::ShaderHandle shader)
-		{
-			return std::find_if(
-				m_impl->liveShaders.begin(), m_impl->liveShaders.end(),
-				[shader](const std::unique_ptr<MetalShader, MetalObjectDeleter>& candidate)
-				{
-					return static_cast<RHI::ShaderHandle>(candidate.get()) == shader;
-				}) != m_impl->liveShaders.end();
-		};
-		if(!ownsShader(desc.meshShader) ||
-			(desc.fragmentShader != nullptr && !ownsShader(desc.fragmentShader)))
-		{
-			return nullptr;
-		}
         auto pipeline = std::unique_ptr<MetalPipeline, MetalObjectDeleter>(
             new MetalPipeline(desc, (__bridge void*)m_impl->device));
 		if(pipeline->GetNativePipeline() == nullptr ||
@@ -1110,53 +1075,9 @@ void MetalDevice::DestroySwapchainNative()
 	RHI::ResourceSetHandle MetalDevice::CreateResourceSetNative(
 		const RHI::ResourceSetDesc& desc)
 	{
-		const auto pipelineIt = std::find_if(
-			m_impl->livePipelines.begin(), m_impl->livePipelines.end(),
-			[requested = desc.pipeline](
-				const std::unique_ptr<MetalPipeline, MetalObjectDeleter>& candidate)
-			{
-				return static_cast<RHI::PipelineHandle>(candidate.get()) == requested;
-			});
-		if(pipelineIt == m_impl->livePipelines.end() ||
-			(desc.bindingCount != 0 && desc.bindings == nullptr))
-		{
-			return nullptr;
-		}
-
 		uint32_t textureBindingCount = 0;
 		for(uint32_t index = 0; index < desc.bindingCount; ++index)
-		{
-			const RHI::ResourceBinding& binding = desc.bindings[index];
-			if(binding.buffer != nullptr)
-			{
-				const auto bufferIt = std::find_if(
-					m_impl->liveBuffers.begin(), m_impl->liveBuffers.end(),
-					[requested = binding.buffer](
-						const std::unique_ptr<MetalBuffer, MetalObjectDeleter>& candidate)
-					{
-						return static_cast<RHI::BufferHandle>(candidate.get()) == requested;
-					});
-				if(bufferIt == m_impl->liveBuffers.end() ||
-					(*bufferIt)->GetNativeBuffer() == nullptr)
-					return nullptr;
-			}
-			if(binding.texture != nullptr)
-			{
-				const auto textureIt = std::find_if(
-					m_impl->liveTextures.begin(), m_impl->liveTextures.end(),
-					[requested = binding.texture](
-						const std::unique_ptr<MetalTexture, MetalObjectDeleter>& candidate)
-					{
-						return static_cast<RHI::TextureHandle>(candidate.get()) == requested;
-					});
-				if(textureIt == m_impl->liveTextures.end() ||
-					(*textureIt)->GetNativeTexture() == nullptr)
-					return nullptr;
-				++textureBindingCount;
-			}
-		}
-		// The validator dereferences handles; check live ownership first.
-		if(!MetalValidation::ValidateResourceSetDesc(desc)) return nullptr;
+			if(desc.bindings[index].texture != nullptr) ++textureBindingCount;
 		auto resourceSet = std::unique_ptr<MetalResourceSet, MetalObjectDeleter>(
 			new MetalResourceSet(desc));
 		if(resourceSet->GetTextureBindings().size() != textureBindingCount) return nullptr;
@@ -1212,23 +1133,8 @@ void MetalDevice::DestroySwapchainNative()
 		const void* data,
 		uint32_t size)
     {
-		const auto ownedCommandList = std::find_if(
-			m_impl->activeCommandLists.begin(), m_impl->activeCommandLists.end(),
-			[requested = &commandList](
-				const std::unique_ptr<MetalCommandList, MetalObjectDeleter>& candidate)
-			{
-				return static_cast<RHI::ICommandList*>(candidate.get()) == requested;
-			});
-		const auto ownedBuffer = std::find_if(
-			m_impl->liveBuffers.begin(), m_impl->liveBuffers.end(),
-			[buffer](const std::unique_ptr<MetalBuffer, MetalObjectDeleter>& candidate)
-			{
-				return static_cast<RHI::BufferHandle>(candidate.get()) == buffer;
-			});
-		return ownedCommandList != m_impl->activeCommandLists.end() &&
-			ownedBuffer != m_impl->liveBuffers.end() &&
-			(*ownedCommandList)->RecordBufferUpdate(
-				ownedBuffer->get(), offset, data, size);
+		return static_cast<MetalCommandList&>(commandList).RecordBufferUpdate(
+			static_cast<MetalBuffer*>(buffer), offset, data, size);
     }
 
 	bool MetalDevice::UpdateTextureNative(
@@ -1241,29 +1147,9 @@ void MetalDevice::DestroySwapchainNative()
 		uint32_t rowPitch,
 		uint32_t slicePitch)
     {
-		const auto ownedCommandList = std::find_if(
-			m_impl->activeCommandLists.begin(), m_impl->activeCommandLists.end(),
-			[requested = &commandList](
-				const std::unique_ptr<MetalCommandList, MetalObjectDeleter>& candidate)
-			{
-				return static_cast<RHI::ICommandList*>(candidate.get()) == requested;
-			});
-		const auto ownedTexture = std::find_if(
-			m_impl->liveTextures.begin(), m_impl->liveTextures.end(),
-			[texture](const std::unique_ptr<MetalTexture, MetalObjectDeleter>& candidate)
-			{
-				return static_cast<RHI::TextureHandle>(candidate.get()) == texture;
-			});
-		return ownedCommandList != m_impl->activeCommandLists.end() &&
-			ownedTexture != m_impl->liveTextures.end() &&
-			(*ownedCommandList)->RecordTextureUpdate(
-				ownedTexture->get(),
-				mipLevel,
-				arrayLayer,
-				data,
-				dataSize,
-				rowPitch,
-				slicePitch);
+		return static_cast<MetalCommandList&>(commandList).RecordTextureUpdate(
+			static_cast<MetalTexture*>(texture), mipLevel, arrayLayer,
+			data, dataSize, rowPitch, slicePitch);
     }
 
     RHI::TextureHandle MetalDevice::GetBackBufferNative()

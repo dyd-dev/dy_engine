@@ -179,6 +179,7 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
     GpuVisibility::Settings settings;
     settings.camera=camera;settings.width=width;settings.height=height;
     settings.pixelError=config.lodPixelError;settings.hysteresis=config.lodHysteresis;
+    settings.screenSize=config.lodScreenSize;
     settings.frustum=config.enableFrustumCulling;settings.lod=config.enableLod;
     const std::weak_ptr<Scene> owner=scene.m_lifetime;
     settings.resetHistory=keys!=visibilityKeys || visibilityScene.expired() ||

@@ -2,7 +2,7 @@
 
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/Pipeline.h"
-#include "ResourceSet.h"
+#include "dyf/RHI/ResourceSet.h"
 #include "dyf/RHI/Shader.h"
 #include "dyf/RHI/Texture.h"
 #include <algorithm>

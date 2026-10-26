@@ -29,13 +29,6 @@ namespace dyf::Backends
         std::unique_ptr<Impl> m_impl;
     };
 
-    struct D3D12SubmissionState
-    {
-        std::unordered_map<D3D12Buffer*, RHI::ResourceState> buffers;
-        std::map<std::pair<D3D12Texture*, uint32_t>, RHI::ResourceState>
-            textureSubresources;
-    };
-
     class D3D12CommandList final : public RHI::ICommandList
     {
     public:
@@ -46,6 +39,8 @@ namespace dyf::Backends
             void* dispatchSignature = nullptr,
             RHI::Detail::UploadPolicy policy = {},
             std::shared_ptr<D3D12CommandPoolCache> commandPool = {});
+
+    protected:
         void AllowPoolReuse();
         void ResetTimestampsNative(RHI::TimestampQueryHandle, uint32_t, uint32_t) override;
         void WriteTimestampNative(RHI::TimestampQueryHandle, uint32_t) override;
@@ -92,11 +87,11 @@ namespace dyf::Backends
             uint32_t dataSize,
             uint32_t rowPitch,
             uint32_t slicePitch);
-        [[nodiscard]] bool ValidateForSubmit(
-            D3D12SubmissionState& state) const;
         void CommitResourceStates();
 
     private:
+        friend class D3D12Device;
+        friend struct D3D12InternalState;
         friend struct D3D12ObjectDeleter;
 
         ~D3D12CommandList() override;

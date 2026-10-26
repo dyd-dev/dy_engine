@@ -1,6 +1,5 @@
 #include "dyf/Image.h"
 #include "ImageDds.h"
-#include "RHI/FormatCapabilities.h"
 #include "RendererInternal.h"
 #include "dyf/Scene.h"
 #include "dyf/RHI/ICommandList.h"
@@ -100,7 +99,7 @@ namespace dyf
                 {
                     auto format=dds->format;
                     if(srgb) format=format==RHI::Format::BC1_UNORM ? RHI::Format::BC1_UNORM_SRGB : RHI::Format::BC3_UNORM_SRGB;
-                    if(RHI::Detail::SupportsDdsCompression(*device,format))
+                    if(device->Supports(format,RHI::FormatFeature::CompressedSampling))
                     {
                         result.dds=dds;result.format=format;
                         return result;

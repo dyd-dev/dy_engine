@@ -32,6 +32,8 @@ struct ModelOptimizationConfig
     bool skipUnchangedUploads=true;
     bool cacheStaticMeshes=true;
     bool cacheInfluences=true;
+    // Share identical skin transforms and source vertices in CPU bounds evaluation.
+    bool cacheSkinTransforms=true;
 };
 
 // 모델 변형과 그 GPU 자원은 선택 확장이 소유한다. renderer는 이 객체보다 오래 살아 있어야 한다.

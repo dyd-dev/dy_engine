@@ -1,5 +1,5 @@
 #include "ThreadPool.h"
-#include "WakeEvent.h"
+#include "dyf/Platform/WakeEvent.h"
 #include "dyf/Platform/Profiler.h"
 #include "../Platform/Profiler/CollectorInternal.h"
 #include <algorithm>
@@ -21,7 +21,7 @@ static_assert(std::atomic<uint32_t>::is_always_lock_free && std::atomic<bool>::i
 // may therefore return or exit its thread without destroying an in-flight wake.
 struct CallerCompletion final
 {
-    Detail::WakeEvent ready;
+    Platform::WakeEvent ready;
     std::atomic<uint32_t> references{1};
     void Retain() noexcept { references.fetch_add(1, std::memory_order_relaxed); }
     void Release() noexcept
@@ -60,14 +60,14 @@ struct ThreadPool::Storage
     struct alignas(128) WorkerJob
     {
         std::atomic<Batch*> batch{nullptr};
-        Detail::WakeEvent ready;
+        Platform::WakeEvent ready;
         std::exception_ptr failure;
     };
     explicit Storage(uint32_t workers) : jobs(std::make_unique<WorkerJob[]>(workers)) {}
     std::unique_ptr<WorkerJob[]> jobs;
     // Producers only push; worker zero alone detaches/reverses and dispatches.
     std::atomic<Batch*> requests{nullptr};
-    Detail::WakeEvent requestReady, batchFinished;
+    Platform::WakeEvent requestReady, batchFinished;
     std::atomic<bool> stopping{false}, workersStopping{false};
 };
 
@@ -138,6 +138,9 @@ void ThreadPool::ExecuteBatch(Batch& batch, uint32_t worker)
 #ifdef DY_LIVE_PROFILING_ENABLED
         Platform::LiveContextScope restored(batch.liveContext);
 #endif
+#if defined(DY_LIVE_PROFILING_ENABLED) || defined(DY_PROFILER_TRACING_ENABLED)
+        Platform::CpuScope timing(Platform::LiveStage::CpuPrepare, "ThreadPool tasks");
+#endif
         for(;;)
         {
             auto item = batch.next.load(std::memory_order_relaxed);
@@ -147,9 +150,6 @@ void ThreadPool::ExecuteBatch(Batch& batch, uint32_t worker)
             if(item >= batch.count) break;
             try
             {
-#if defined(DY_LIVE_PROFILING_ENABLED) || defined(DY_PROFILER_TRACING_ENABLED)
-                Platform::CpuScope timing(Platform::LiveStage::CpuPrepare, "ThreadPool task");
-#endif
                 batch.task(batch.context, item);
             }
             catch(...)

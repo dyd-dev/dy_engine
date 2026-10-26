@@ -205,6 +205,8 @@ namespace dyf
 		// 메인·표면·투명 패스는 선택한 LOD를 공유하며, 그림자는 원본 LOD를 유지해 카메라 LOD 변경만으로 정적 그림자가 무효화되지 않게 한다.
 		bool enableLod = true;
 		float lodPixelError = 1.0f;
+		// 경계 구의 화면 지름 / 화면 짧은 변. LOD1의 최대 비율이며 다음 단계마다 절반으로 줄인다.
+		float lodScreenSize = 0.5f;
 		float lodHysteresis = 0.15f;
 		bool debugLodColor = false;
 		// Feature::Wireframe이 필요한 표준 고급 HDR 진단으로, 불투명·마스크 Main을 깊이 선행 패스 위에 LOD 색 선으로 표시한다.
@@ -367,6 +369,8 @@ private:
     friend class ModelRenderer;
     void InitializeLiveProfiling() noexcept;
     bool PrepareLiveFrame(Platform::LiveFrameKey) noexcept;
+    bool BeginModelFrame(Platform::LiveFrameKey,bool& available) noexcept;
+    void EndModelFrame() noexcept;
     void PublishLiveGeometryAvailability(bool) noexcept;
     // 구현과 자원 배치를 공개 헤더 밖에 숨기는 PImpl 경계다. unique_ptr가 Impl을 단독 소유하고 소멸자는 구현 파일에서 실제 정리 코드를 호출한다.
     struct Impl;

@@ -195,6 +195,12 @@ namespace dyf::RHI
         m_passUseOffsets.reserve(size_t(passCount) + 1);
         m_passUseOffsets.push_back(0);
         std::vector<std::vector<uint32_t>> edges(passCount);
+        const auto addDependency=[&](uint32_t before,uint32_t after) {
+            auto& outgoing=edges[before];
+            // Destination passes are visited in order; a repeated edge is
+            // always the last one, even when several resources establish it.
+            if(outgoing.empty() || outgoing.back()!=after)outgoing.push_back(after);
+        };
         std::vector<uint32_t> lastWriter(m_resources.size(), noPass);
         std::vector<std::vector<uint32_t>> readers(m_resources.size());
         std::vector<ResourceState> states;
@@ -211,11 +217,11 @@ namespace dyf::RHI
         for(uint32_t pass = 0; pass < passCount; ++pass)
         {
             if(!m_passes[pass]->HasExecuteCallback()) return Fail("every pass needs an execute callback.");
-            if(lastGlobal != noPass) edges[lastGlobal].push_back(pass);
+            if(lastGlobal != noPass) addDependency(lastGlobal,pass);
             if(m_passes[pass]->HasGlobalBarrier())
             {
                 const uint32_t first = lastGlobal == noPass ? 0 : lastGlobal + 1;
-                for(uint32_t previous = first; previous < pass; ++previous) edges[previous].push_back(pass);
+                for(uint32_t previous = first; previous < pass; ++previous) addDependency(previous,pass);
                 lastGlobal = pass;
             }
             usedIndices.clear();
@@ -249,11 +255,11 @@ namespace dyf::RHI
             {
                 const auto use = uses[index];
                 m_passUses.push_back({index, use.state});
-                if(lastWriter[index] != noPass) edges[lastWriter[index]].push_back(pass);
+                if(lastWriter[index] != noPass) addDependency(lastWriter[index],pass);
                 // Read/read의 상태가 달라도 layout/state 전환에는 실행 순서가 필요하다.
                 if(use.write || states[index] != use.state)
                 {
-                    for(uint32_t reader : readers[index]) edges[reader].push_back(pass);
+                    for(uint32_t reader : readers[index]) addDependency(reader,pass);
                     readers[index].clear();
                 }
                 if(use.write) lastWriter[index] = pass;
@@ -361,7 +367,11 @@ namespace dyf::RHI
             const auto linkResource=[&](const RGResourceBinding& binding,bool write)
             {
                 const auto& resource=m_resources[m_resourceIndices.at(binding.handle.id)];
+#ifdef DY_LIVE_PROFILING_ENABLED
+                const auto id=commands->m_liveDeferred->FindObject(resource.buffer?static_cast<const void*>(resource.buffer):resource.texture);
+#else
                 const auto id=Platform::FindLiveObject(resource.buffer?static_cast<const void*>(resource.buffer):resource.texture);
+#endif
                 commands->RecordLiveResourceLink(write?eventId:id,write?id:eventId);
             };
             for(const auto& binding:m_passes[pass]->GetReads())linkResource(binding,false);

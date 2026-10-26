@@ -4,7 +4,7 @@
 #include "BasicEnvironmentResources.h"
 #include "dyf/Scene.h"
 #include "dyf/RHI/Buffer.h"
-#include "../RHI/ResourceSet.h"
+#include "dyf/RHI/ResourceSet.h"
 #include <algorithm>
 #include <array>
 #include <functional>

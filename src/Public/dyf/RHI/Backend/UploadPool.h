@@ -1,9 +1,6 @@
 #pragma once
-#include "../Platform/Profiler/CollectorInternal.h"
+#include "Observation.h"
 #include "UploadMemory.h"
-#ifdef DY_LIVE_PROFILING_ENABLED
-#include "dyf/Platform/Profiler.h"
-#endif
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -120,16 +117,7 @@ public:
             if(!ReserveInUse(page->capacity))return {};
             Accumulate(m_reuseCount,1);
         }
-#ifdef DY_LIVE_PROFILING_ENABLED
-        const auto context=Platform::GetLiveContext();
-        if(context.frame.frame&&Platform::IsLiveCollectorEnabled())
-        {
-            Platform::LiveEvent event;event.id=Platform::AllocateLiveId();event.context=context;
-            event.kind=Platform::LiveEventKind::UploadMemory;event.stage=Platform::LiveStage::NativeTranslate;
-            event.arguments[0]=reused?1:0;event.bytes=page->capacity;event.operations=1;
-            Platform::RecordLiveEvent(event);
-        }
-#endif
+        Backend::ObserveUploadPage(page->capacity,reused);
         return Lease(std::move(owner),std::move(page));
     }
     [[nodiscard]] RequestStatistics* RegisterRequests() noexcept

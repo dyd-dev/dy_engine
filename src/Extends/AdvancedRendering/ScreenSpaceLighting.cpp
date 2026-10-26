@@ -471,14 +471,11 @@ bool ScreenSpaceLighting::Prepare(IDevice& device,ICommandList& uploads,TextureH
         if(settings.frustumCulling && !draw.instanceBuffer && !draw.indirectArguments && frustum.Outside(draw.localBounds,draw.model)) continue;
         if(!draw.vertexBuffer || !draw.indexBuffer) return fail();
         for(auto* texture:draw.textures) if(!texture) return fail();
-        DrawGPU gpu;
+        DrawGPU gpu{};
         gpu.model=draw.model;
         gpu.previousMVP=m_historyValid?draw.previousMVP:camera.projection*camera.view*draw.model;
-        const size_t drawIndex=m_gpuScratch.size();
-        if(drawIndex<m_gpuDraws.size() &&
-            std::memcmp(&m_gpuDraws[drawIndex].model,&draw.model,sizeof(draw.model))==0)
-            gpu.normalMatrix=m_gpuDraws[drawIndex].normalMatrix;
-        else if(!Math::InverseTranspose(draw.model,gpu.normalMatrix)) gpu.normalMatrix=Math::float4x4::Identity();
+        // Surface vertex shaders derive their normal matrix from the effective
+        // model, including instance rows. Keep the unused ABI field initialized.
         gpu.baseColor=draw.baseColor;
         gpu.materialParams={material.metallicFactor,material.roughnessFactor,
             material.normalScale,material.occlusionStrength};

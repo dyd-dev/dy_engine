@@ -79,6 +79,14 @@ namespace dyf
 					result.m[column * 4 + row] = static_cast<float>(source.cols[column].v[row]);
 			return result;
 		}
+		[[nodiscard]] Math::float3 AxisDirection(ufbx_coordinate_axis axis)
+		{
+			Math::float3 result(0,0,0);
+			const unsigned value = static_cast<unsigned>(axis);
+			if(value < 6u) result[value / 2u] = (value & 1u) ? -1.0f : 1.0f;
+			return result;
+		}
+
 		[[nodiscard]] NodeTransform ToNodeTransform(const ufbx_transform& source)
 		{
 			NodeTransform result;
@@ -238,6 +246,8 @@ namespace dyf
 			if(!budget.CheckNodes(scene.nodes.count)
 				|| !budget.AddBytes(scene.nodes.count, sizeof(ModelNode), "nodes")
 				|| !budget.AddBytes(scene.materials.count, sizeof(ModelMaterialInfo), "materials")) return false;
+			for(const auto* node : scene.nodes)
+				if(node->camera && !budget.AddBytes(1u, sizeof(ModelCamera), "source cameras")) return false;
 			const auto sidedVariants = std::count_if(materialCullingUsage.begin(), materialCullingUsage.end(), [](const auto& entry) {
 				return entry.second == 3u && (!entry.first || !entry.first->features.double_sided.enabled);
 			});
@@ -872,11 +882,30 @@ namespace dyf
 				}
 				sourceCulling.clear();
 			}
+			auto setSourceMetadata = [&] {
+				// Preserve source geometry/animation. Viewers may explicitly apply this basis.
+				if(ufbx_coordinate_axes_valid(scene->settings.axes))
+				{
+					const ufbx_coordinate_axis axes[] = {
+						scene->settings.axes.right, scene->settings.axes.up, scene->settings.axes.front};
+					outModel.sourceToYUp = Math::float4x4::Identity();
+					for(size_t row = 0; row < 3; ++row)
+					{
+						for(size_t column = 0; column < 3; ++column)
+							outModel.sourceToYUp.m[column * 4 + row] = 0.0f;
+						const unsigned axis = static_cast<unsigned>(axes[row]);
+						outModel.sourceToYUp.m[(axis / 2u) * 4 + row] = (axis & 1u) ? -1.0f : 1.0f;
+					}
+				}
+				if(std::isfinite(scene->settings.unit_meters) && scene->settings.unit_meters > 0.0)
+					outModel.sourceUnitMeters = scene->settings.unit_meters;
+			};
 			if(lightsOnly)
 			{
 				ModelLoadBudget budget(filepath, options);
 				if(!budget.CheckNodes(scene->nodes.count)) return false;
 				outModel = {};
+				setSourceMetadata();
 				if(!ImportUfbxLights(filepath, *scene, *lightOnlyBounds, outModel, &budget)) return false;
 				if(decodedBytes != nullptr) *decodedBytes = budget.DecodedBytes();
 				return true;
@@ -889,6 +918,7 @@ namespace dyf
 			ModelLoadOptions textureOptions = options;
 			textureOptions.maxDecodedBytes -= geometryBytes;
 			outModel = {};
+			setSourceMetadata();
 			std::map<const ufbx_texture*, uint32_t> textureIndices;
 			uint64_t decodedTextureBytes = 0u;
 			if(!LoadUfbxTextureAssets(
@@ -921,6 +951,26 @@ namespace dyf
 					const auto parent = nodeIndices.find(source->parent);
 					if(parent == nodeIndices.end()) return false;
 					node.parentIndex = static_cast<int32_t>(parent->second);
+				}
+				if(source->camera != nullptr)
+				{
+					const auto& sourceCamera = *source->camera;
+					ModelCamera camera;
+					camera.nodeIndex = static_cast<uint32_t>(nodeIndex);
+					camera.perspective = sourceCamera.projection_mode == UFBX_PROJECTION_MODE_PERSPECTIVE;
+					camera.verticalFovRadians = camera.perspective
+						? static_cast<float>(sourceCamera.field_of_view_deg.y * (3.14159265358979323846 / 180.0)) : 0.0f;
+					camera.nearPlane = static_cast<float>(sourceCamera.near_plane);
+					camera.farPlane = static_cast<float>(sourceCamera.far_plane);
+					if(std::isfinite(sourceCamera.aspect_ratio) && sourceCamera.aspect_ratio > 0)
+						camera.aspect = static_cast<float>(sourceCamera.aspect_ratio);
+					if(!camera.perspective) camera.orthographicHeight = static_cast<float>(sourceCamera.orthographic_size.y);
+					// ufbx leaves projection_axes unset unless target_camera_axes was requested.
+					camera.localForward = ufbx_coordinate_axes_valid(sourceCamera.projection_axes)
+						? AxisDirection(sourceCamera.projection_axes.front) * -1.0f : Math::float3(1,0,0);
+					camera.localUp = ufbx_coordinate_axes_valid(sourceCamera.projection_axes)
+						? AxisDirection(sourceCamera.projection_axes.up) : Math::float3(0,1,0);
+					outModel.cameras.push_back(camera);
 				}
 			}
 

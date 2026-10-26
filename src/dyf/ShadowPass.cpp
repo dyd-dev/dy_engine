@@ -1,10 +1,11 @@
 #include "../Platform/Profiler/CollectorInternal.h"
+#include "../Platform/Profiler/RhiProfiler.h"
 #include "RendererInternal.h"
 #include "SceneAlgorithms.h"
 #include "DrawCommands.h"
 #include "dyf/Camera.h"
 #include "dyf/Scene.h"
-#include "../RHI/ResourceSet.h"
+#include "dyf/RHI/ResourceSet.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -260,6 +261,7 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
     Platform::CpuScope cpuScope(Platform::LiveStage::Record,"RendererShadow");
 #endif
     Platform::FrameProfiler::GpuScope liveGpu(m_profiler,commands,Platform::LiveGpuScope::RendererShadow,liveId);
+    Platform::LiveId sceneBatch=0,instanceId=0;
     const bool stock=stockDrawInputs;
     const bool instanced=UsesInstanceStream();
     const bool baseInstance=stock && instanced;
@@ -283,6 +285,7 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
 		// 그림자 뷰마다 아틀라스 타일 viewport/scissor를 설정한다. 같은 객체가 여러 뷰에 그려지면 통계에도 각 뷰 작업이 따로 누적된다.
 		for(uint32_t view = 0; view < shadows.viewCount; ++view)
 		{
+            Platform::LiveId passBatch=0;
 			bool inlineConstantsValid=false;
             bool instanceStreamBound=false;
 			const ShadowFrustum frustum(shadows.constants.lightViewProjectionMatrix[view]);
@@ -360,19 +363,23 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
         auto batchContext=Platform::GetLiveContext();
         if(Platform::IsLiveCollectorEnabled()) // 수집 중이면 그림자 배치의 범위·제한된 이유 분류와 원본 객체 링크를 남긴다.
         {
-            const auto sceneBatch=Platform::GetLiveBatchId(liveId,scene.m_liveId);
-            const auto passBatch=Platform::GetLiveBatchId(sceneBatch,100+view);
+            if(!sceneBatch)
+            {
+                sceneBatch=Platform::GetLiveBatchId(liveId,scene.m_liveId);
+                instanceId=Platform::FindLiveObject(instanceBuffer);
+            }
+            if(!passBatch)passBatch=Platform::GetLiveBatchId(sceneBatch,100+view);
             batchContext.batch=Platform::GetLiveBatchId(passBatch,(uint64_t(entityIndex)<<32)|count);
             batchContext.object=entityIndex<scene.m_liveEntities.size()?scene.m_liveEntities[entityIndex]:scene.m_liveId;
             Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;
             batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Data;
             batch.first=entityIndex;batch.elements=count;batch.stride=2*sizeof(Math::float4x4);
-            batch.bytes=uint64_t(count)*batch.stride;batch.resource=Platform::FindLiveObject(instanceBuffer);
+            batch.bytes=uint64_t(count)*batch.stride;batch.resource=instanceId;
             // 이 그림자 배치의 reason은 사용자 기하·인스턴싱 OFF·그 밖(None)만 구분한다. 위에서 실제로 묶기를 끝낸 메시·재질·절두체 조건은 각각 기록하지 않는다.
             batch.reason=!stock?Platform::LiveSplitReason::CustomGeometry:!instanced?Platform::LiveSplitReason::InstancingDisabled:Platform::LiveSplitReason::None;
             Platform::RecordLiveEvent(batch);
             for(uint32_t i=0;i<count&&entityIndex+i<scene.m_liveEntities.size();++i)
-                Platform::RecordLiveLink({scene.m_liveEntities[entityIndex+i],batch.id});
+                RHI::ProfilerAccess::RecordLink(commands,scene.m_liveEntities[entityIndex+i],batch.id);
         }
         Platform::LiveContextScope linkedBatch(batchContext);
 				const auto* input = draws ? &(*draws)[entityIndex] : nullptr;

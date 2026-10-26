@@ -1,6 +1,6 @@
 #include "WindowBackend.h"
 #include "IOSApplication.h"
-#include "../../RHI/WakeEvent.h"
+#include "dyf/Platform/WakeEvent.h"
 #import <UIKit/UIKit.h>
 #include <array>
 #include <atomic>
@@ -73,7 +73,7 @@ namespace dyf::Platform
         WindowLayout producerLayout;
         std::atomic<bool> stopped{false},consumerActive{false},waiting{false};
         std::atomic<uint64_t> latestWindow{0},closeThrough{0};
-        RHI::Detail::WakeEvent changed;
+        WakeEvent changed;
 
         static constexpr uint32_t InputCapacity=4096;
         std::array<InputEvent,InputCapacity> events;
