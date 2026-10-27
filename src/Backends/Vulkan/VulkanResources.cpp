@@ -82,6 +82,7 @@ namespace dyf::Backends
         case dyf::RHI::Format::BC1_UNORM_SRGB: return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
         case dyf::RHI::Format::BC3_UNORM: return VK_FORMAT_BC3_UNORM_BLOCK;
         case dyf::RHI::Format::BC3_UNORM_SRGB: return VK_FORMAT_BC3_SRGB_BLOCK;
+        case dyf::RHI::Format::BC5_UNORM: return VK_FORMAT_BC5_UNORM_BLOCK;
 		case dyf::RHI::Format::R16G16B16A16_FLOAT: return VK_FORMAT_R16G16B16A16_SFLOAT;
         case dyf::RHI::Format::R16_FLOAT: return VK_FORMAT_R16_SFLOAT;
 		case dyf::RHI::Format::R32G32_FLOAT: return VK_FORMAT_R32G32_SFLOAT;
@@ -282,12 +283,9 @@ namespace dyf::Backends
 	VulkanTexture::~VulkanTexture()
 	{
 		if (!m_ownsImage) return;
-		for (auto* resourceView = m_resourceViews.load(std::memory_order_relaxed); resourceView;)
+		for (const ResourceView& resourceView : m_resourceViews)
 		{
-			auto* next = resourceView->next;
-			if (resourceView->view != VK_NULL_HANDLE) vkDestroyImageView(m_device, resourceView->view, nullptr);
-			delete resourceView;
-			resourceView = next;
+			if (resourceView.view != VK_NULL_HANDLE) vkDestroyImageView(m_device, resourceView.view, nullptr);
 		}
 		if (m_imageView != VK_NULL_HANDLE) vkDestroyImageView(m_device, m_imageView, nullptr);
 		if (m_image != VK_NULL_HANDLE) vkDestroyImage(m_device, m_image, nullptr);
@@ -345,6 +343,8 @@ namespace dyf::Backends
 
 	VkImageView VulkanTexture::GetResourceView(const dyf::RHI::TextureSubresourceRange& subresources, bool sampled)
 	{
+        // Different recording workers can request attachment views of one texture.
+        std::lock_guard<std::mutex> lock(m_viewMutex);
 		if (subresources.firstMipLevel >= GetDesc().mipLevels || subresources.firstArrayLayer >= GetDesc().depthOrArraySize) return VK_NULL_HANDLE;
 		const uint32_t mipLevelCount = subresources.mipLevelCount == 0
 			? GetDesc().mipLevels - subresources.firstMipLevel
@@ -370,19 +370,17 @@ namespace dyf::Backends
 		dyf::RHI::TextureSubresourceRange resolved = subresources;
 		resolved.mipLevelCount = mipLevelCount;
 		resolved.arrayLayerCount = arrayLayerCount;
-		const auto matches = [&resolved, aspectMask](const ResourceView& resourceView) {
-			const auto& range = resourceView.subresources;
-			return resourceView.aspectMask == aspectMask && range.firstMipLevel == resolved.firstMipLevel &&
-				range.mipLevelCount == resolved.mipLevelCount &&
-				range.firstArrayLayer == resolved.firstArrayLayer &&
-				range.arrayLayerCount == resolved.arrayLayerCount;
-		};
-		auto* head = m_resourceViews.load(std::memory_order_acquire);
-		for (auto* existing = head; existing; existing = existing->next)
-			if (matches(*existing)) return existing->view;
-		// Allocate metadata first so an allocation failure cannot leak a native
-		// view. Each worker owns its candidate until publication succeeds.
-		auto* candidate = new ResourceView{resolved, aspectMask};
+		const auto existing = std::find_if(
+			m_resourceViews.begin(),
+			m_resourceViews.end(),
+			[&resolved, aspectMask](const ResourceView& resourceView) {
+				const dyf::RHI::TextureSubresourceRange& view = resourceView.subresources;
+				return resourceView.aspectMask == aspectMask && view.firstMipLevel == resolved.firstMipLevel &&
+					view.mipLevelCount == resolved.mipLevelCount &&
+					view.firstArrayLayer == resolved.firstArrayLayer &&
+					view.arrayLayerCount == resolved.arrayLayerCount;
+			});
+		if (existing != m_resourceViews.end()) return existing->view;
 
 		VkImageViewCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -394,27 +392,18 @@ namespace dyf::Backends
 		info.subresourceRange.levelCount = resolved.mipLevelCount;
 		info.subresourceRange.baseArrayLayer = resolved.firstArrayLayer;
 		info.subresourceRange.layerCount = resolved.arrayLayerCount;
-		if (vkCreateImageView(m_device, &info, nullptr, &candidate->view) != VK_SUCCESS)
+		VkImageView view = VK_NULL_HANDLE;
+		if (vkCreateImageView(m_device, &info, nullptr, &view) != VK_SUCCESS) return VK_NULL_HANDLE;
+		try
 		{
-			delete candidate;
-			return VK_NULL_HANDLE;
+			m_resourceViews.push_back({ resolved, aspectMask, view });
 		}
-		for (;;)
+		catch (...)
 		{
-			// Another worker may have published the same key while this worker
-			// created its view. Only the winner remains visible to command lists.
-			for (auto* existing = head; existing; existing = existing->next)
-			{
-				if (!matches(*existing)) continue;
-				vkDestroyImageView(m_device, candidate->view, nullptr);
-				delete candidate;
-				return existing->view;
-			}
-			candidate->next = head;
-			if (m_resourceViews.compare_exchange_weak(head, candidate,
-				std::memory_order_acq_rel, std::memory_order_acquire))
-				return candidate->view;
+			vkDestroyImageView(m_device, view, nullptr);
+			throw;
 		}
+		return view;
 	}
 
 	VkImageLayout VulkanTexture::GetBarrierOldLayout(dyf::RHI::ResourceState state) const

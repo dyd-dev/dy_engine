@@ -603,6 +603,7 @@ void main()
             vec3 fallback=normalize(cross(abs(n.z)<.99?vec3(0,0,1):vec3(0,1,0),n));
             vec3 t=TransparentPixelNormalizeOr(worldTangent.xyz-n*dot(n,worldTangent.xyz),fallback),b=cross(n,t)*worldTangent.w;
             vec3 mapped=texture(sampler2D(normalTexture,materialSampler),uv).xyz*2-1;
+            if((flags&256u)!=0u)mapped.z=sqrt(max(0.0,1.0-dot(mapped.xy,mapped.xy)));
             mapped.xy*=draw.material.z;mapped.y*=(draw.emissive.w<0?-1.0:1.0);
             n=TransparentPixelNormalizeOr(mat3(t,b,n)*mapped,n);
         }

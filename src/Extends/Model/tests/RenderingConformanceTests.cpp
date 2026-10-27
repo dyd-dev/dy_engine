@@ -433,6 +433,60 @@ public:
         std::puts("PASS mirrored culling/normals, regular versus instanced normals and tiny nonsingular transforms.");
     }
 
+    void Bc5Normals()
+    {
+        if(!m_device->Supports(RHI::Format::BC5_UNORM,RHI::FormatFeature::CompressedSampling))
+        {std::puts("SKIP native BC5 normals: compressed sampling unsupported.");return;}
+        std::vector<uint8_t> encoded(128+16*3,0);
+        const auto put=[&](size_t offset,uint32_t value){std::memcpy(encoded.data()+offset,&value,4);};
+        put(0,0x20534444);put(4,124);put(8,0x21007);put(12,4);put(16,4);put(28,3);
+        put(76,32);put(80,0x80000004u);put(84,0x32495441);put(88,0x59583241);put(108,0x401008);
+        for(size_t offset=128;offset<encoded.size();offset+=16)
+        {encoded[offset]=180;encoded[offset+1]=140;encoded[offset+8]=100;encoded[offset+9]=80;}
+        Image normal;Require(LoadImage(encoded.data(),encoded.size(),normal),"BC5 fixture decode failed.");
+        normal.SetColorSpace(ColorSpace::Linear);
+        const Image decoded(4,4,normal.GetPixels(),ColorSpace::Linear);
+        MaterialDesc material;material.normalTexture=decoded;
+        Scene reference;Require(bool(reference.Add(Quad(),material)),"BC5 reference scene failed.");
+        material.normalTexture=normal;
+        Scene compressed;Require(bool(compressed.Add(Quad(),material)),"BC5 compressed scene failed.");
+        auto config=Config(true);config.advanced.surfaceDebugView=SurfaceDebugView::Normal;
+        const auto expected=Render(reference,"normal-rgba-reference",config);
+        const auto actual=Render(compressed,"normal-bc5-native",config);
+        const auto compare=[&](const RHI::TextureReadback& a,const RHI::TextureReadback& b,const char* label){
+            for(uint32_t x:{64u,128u,192u}) {
+                const auto* pixel=a.pixels.data()+size_t(128)*a.rowPitch+x*4;
+                Expect(b,x,128,{pixel[0],pixel[1],pixel[2],pixel[3]},label,2);
+            }
+        };
+        compare(expected,actual,"BC5 reconstructed normal");
+        Require(normal.ReleaseDecodedPixels()>0,"BC5 decoded cache was not retained.");
+        compare(expected,Render(compressed,"normal-bc5-cache-released",config),"BC5 released-cache normal");
+        Require(normal.ReleaseDecodedPixels()==0,"Stable GPU BC5 binding redecoded the CPU cache.");
+        // The same encoded image used as a generic color retains its public RGBA semantics.
+        material.normalTexture={};material.baseColorTexture=normal;material.unlit=true;
+        Scene color;Require(bool(color.Add(Quad(),material)),"BC5 generic-color scene failed.");
+        material.baseColorTexture=decoded;
+        Scene colorReference;Require(bool(colorReference.Add(Quad(),material)),"BC5 color reference failed.");
+        config=Config();config.lighting.enabled=false;
+        compare(Render(colorReference,"bc5-color-rgba-reference",config),Render(color,"bc5-color-rgba-fallback",config),"BC5 non-normal RGBA fallback");
+        Image srgbNormal=normal;srgbNormal.SetColorSpace(ColorSpace::Srgb);
+        Image srgbDecoded=decoded;srgbDecoded.SetColorSpace(ColorSpace::Srgb);
+        material.baseColorTexture=srgbNormal;Scene srgb;Require(bool(srgb.Add(Quad(),material)),"BC5 sRGB color scene failed.");
+        material.baseColorTexture=srgbDecoded;Scene srgbReference;Require(bool(srgbReference.Add(Quad(),material)),"BC5 sRGB reference failed.");
+        compare(Render(srgbReference,"bc5-srgb-rgba-reference",config),Render(srgb,"bc5-srgb-rgba-fallback",config),"BC5 sRGB generic fallback");
+        material.baseColorTexture={};material.baseColor={.7f,.5f,.3f,.5f};material.unlit=false;
+        material.alphaMode=MaterialAlphaMode::Blend;material.roughnessFactor=1;material.normalTexture=normal;
+        Scene transparent;Require(bool(transparent.Add(Quad(),material)),"BC5 transparent scene failed.");
+        material.normalTexture=decoded;Scene transparentReference;
+        Require(bool(transparentReference.Add(Quad(),material)),"BC5 transparent reference failed.");
+        DirectionalLight light;light.direction={.3f,.2f,1};light.intensity=1;
+        Require(bool(transparent.Add(light)) && bool(transparentReference.Add(light)),"BC5 transparent light failed.");
+        config=Config(true);
+        compare(Render(transparentReference,"bc5-transparent-rgba-reference",config),Render(transparent,"bc5-transparent-native",config),"BC5 transparent normal");
+        std::puts("PASS BC5 native normal reconstruction, explicit CPU cache release and generic-color RGBA fallback.");
+    }
+
     void ImportedModel()
     {
         if(m_options.model.empty())return;
@@ -619,7 +673,7 @@ public:
     {
         VertexColors();Coverage(false);
         for(uint32_t layers:{1u,2u}){Coverage(true,layers);Transmission(layers);}
-        NearestDepthAlphaHoles();ProjectiveVisibility();NormalsAndInstancing();ImportedModel();SkinnedModel();
+        NearestDepthAlphaHoles();ProjectiveVisibility();NormalsAndInstancing();Bc5Normals();ImportedModel();SkinnedModel();
         Require(m_device->WaitIdle(),"Final GPU wait failed.");
         std::printf("INFO reactive storage=%s; direct half-value precision readback unavailable (ReadTexture supports RGBA8/BGRA8 only).\n",
             m_reactiveFormat==RHI::Format::R16_FLOAT?"R16_FLOAT":"RGBA16_FLOAT");

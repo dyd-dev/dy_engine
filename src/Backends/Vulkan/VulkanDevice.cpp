@@ -1,5 +1,6 @@
+#include "../../Platform/Profiler/CollectorInternal.h"
 #include "VulkanDevice.h"
-#include "dyf/RHI/Backend/Observation.h"
+#include "../../Platform/Profiler/RhiProfiler.h"
 #include "VulkanQuery.h"
 #include "VulkanPresentQueue.h"
 #include "dyf/Platform/WakeEvent.h"
@@ -859,7 +860,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		if (requestedPresentMode == VK_PRESENT_MODE_MAX_ENUM_KHR) return false;
 
         ConfigurePresentWorker();
-        const uint32_t preferredImages=m_asyncPresent
+        const uint32_t requestedImages=m_asyncPresent
             ? static_cast<uint32_t>(std::min<uint64_t>(UINT32_MAX,std::max<uint64_t>(3,uint64_t(desc.minimumImageCount)+1)))
             : desc.minimumImageCount;
 		bool oldSwapchainRetired = false;
@@ -872,8 +873,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
                 requestedColorSpace,
                 requestedCompositeAlpha,
 				requestedPresentMode,
-                desc.minimumImageCount,
-                preferredImages,
+				requestedImages,
 				desc.allowReadback,
 				m_hasSwapchainDesc ? 0 : desc.initialWidth,
 				m_hasSwapchainDesc ? 0 : desc.initialHeight,
@@ -916,14 +916,14 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		m_retiredReleaseSubmission = 0;
 		m_swapchainPresented = false;
         m_prefetchedImage=false;
-        std::fprintf(stderr,"[Vulkan] Swapchain images: requiredMinimum=%u preferred=%u actual=%zu.\n",
-            desc.minimumImageCount,preferredImages,m_swapchain.GetImageCount());
-		if (m_swapchain.GetImageCount() != preferredImages)
+        std::fprintf(stderr,"[Vulkan] Swapchain images: requested=%u actual=%zu.\n",
+            requestedImages,m_swapchain.GetImageCount());
+		if (m_swapchain.GetImageCount() > requestedImages)
 		{
 			char message[192];
 			std::snprintf(message, sizeof(message),
-                "Vulkan swapchain requires at least %u images, prefers %u; the surface/driver allocated %zu.",
-                desc.minimumImageCount, preferredImages, m_swapchain.GetImageCount());
+				"Vulkan swapchain requested at least %u images; the surface/driver allocated %zu.",
+				requestedImages, m_swapchain.GetImageCount());
 			m_owner.ReportDiagnostic(DiagnosticSeverity::Info, message);
 		}
 		return true;
@@ -1306,7 +1306,22 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		std::vector<VulkanCommandList*> selected;
 		selected.reserve(count);
 		for (uint32_t i = 0; i < count; ++i)
-            selected.push_back(static_cast<VulkanCommandList*>(commandLists[i]));
+		{
+			if (commandLists[i] == nullptr ||
+				std::find(commandLists, commandLists + i, commandLists[i]) != commandLists + i)
+			{
+				return false;
+			}
+			const auto acquired = std::find_if(
+				m_acquiredCommandLists.begin(),
+				m_acquiredCommandLists.end(),
+				[requested = commandLists[i]](
+					const std::unique_ptr<VulkanCommandList, VulkanObjectDeleter>& candidate) {
+					return candidate.get() == requested;
+				});
+			if (acquired == m_acquiredCommandLists.end() || !(*acquired)->IsClosed()) return false;
+			selected.push_back(acquired->get());
+		}
 
 		std::vector<std::unique_ptr<VulkanCommandList, VulkanObjectDeleter>> consumed;
 		consumed.reserve(count);
@@ -1319,7 +1334,6 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 					const std::unique_ptr<VulkanCommandList, VulkanObjectDeleter>& candidate) {
 					return candidate.get() == commandList;
 				});
-            if(acquired == m_acquiredCommandLists.end() || !(*acquired)->IsClosed()) return false;
 			consumed.push_back(std::move(*acquired));
 			m_acquiredCommandLists.erase(acquired);
 		}
@@ -1355,6 +1369,11 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			return false;
 		}
 
+		VulkanSubmissionState resourceStates{};
+		for (VulkanCommandList* commandList : selected)
+		{
+			if (!commandList->ValidateForSubmit(resourceStates)) return false;
+		}
         // 중간 제출의 최종 상태는 제한하지 않는다. Present에서 공통 RHI가 검사한다.
 
 		std::vector<VkCommandBuffer> nativeCommandBuffers;
@@ -1661,10 +1680,11 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		VkBufferImageCopy copy{};
 		copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
 		copy.imageExtent = {desc.width, desc.height, 1};
-		dyf::RHI::Backend::ReadbackTrace observed(texture,bytes);
-		observed.Copy();
-		vkCmdCopyImageToBuffer(command, image->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,resources.buffer,1,&copy);
-		observed.Finish();
+		{
+			dyf::RHI::LiveRhiScope observed(dyf::Platform::LiveEventKind::CpuWork,dyf::Platform::LiveStage::NativeTranslate,"Readback: record texture copy");
+			observed.event.resource=dyf::Platform::FindLiveObject(texture);observed.event.bytes=bytes;observed.event.operations=1;
+			vkCmdCopyImageToBuffer(command, image->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,resources.buffer,1,&copy);
+		}
 		VkBufferMemoryBarrier hostRead{};
 		hostRead.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
 		hostRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1686,9 +1706,14 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
 		submit.commandBufferCount = 1;
 		submit.pCommandBuffers = &command;
-		observed.Submit();
-		const VkResult submitted=vkQueueSubmit(m_context.graphicsQueue,1,&submit,VK_NULL_HANDLE);
-		observed.Finish(submitted==VK_SUCCESS);
+		const auto liveSubmission=dyf::Platform::IsLiveCollectorEnabled()?dyf::Platform::AllocateLiveId():0;
+		VkResult submitted;
+		{
+			dyf::RHI::LiveRhiScope observed(dyf::Platform::LiveEventKind::CpuWork,dyf::Platform::LiveStage::Submit,"Readback: native submission");
+			observed.event.resource=dyf::Platform::FindLiveObject(texture);observed.event.submission=liveSubmission;observed.event.operations=1;
+			submitted=vkQueueSubmit(m_context.graphicsQueue,1,&submit,VK_NULL_HANDLE);
+			observed.event.outcome=submitted==VK_SUCCESS?dyf::Platform::LiveOutcome::Submitted:dyf::Platform::LiveOutcome::Failed;
+		}
 		if(submitted != VK_SUCCESS)
 		{
 			// OOM submit failures leave the commands unsubmitted. Other failures
@@ -1701,9 +1726,12 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			LogVulkanFailure("vkQueueSubmit(readback)", submitted);
 			return false;
 		}
-		observed.Wait();
+		if(liveSubmission)dyf::Platform::SetLiveGpuCoverage(dyf::Platform::GetLiveContext().frame,false);
+		dyf::RHI::LiveRhiScope observedWait(dyf::Platform::LiveEventKind::Wait,dyf::Platform::LiveStage::Submit,"Readback: queue wait");
+		observedWait.event.resource=dyf::Platform::FindLiveObject(texture);observedWait.event.submission=liveSubmission;observedWait.event.operations=1;
 		const VkResult waited = vkQueueWaitIdle(m_context.graphicsQueue);
-		observed.Finish(waited==VK_SUCCESS);
+		observedWait.event.outcome=waited==VK_SUCCESS?dyf::Platform::LiveOutcome::Completed:dyf::Platform::LiveOutcome::Failed;
+		observedWait.Finish();
 		if(waited != VK_SUCCESS)
 		{
 			m_submissionFaulted = true;
@@ -1713,6 +1741,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			return false;
 		}
 		dyf::RHI::TextureReadback output;
+		dyf::RHI::RecordLiveReadbackCompletion(liveSubmission,dyf::Platform::FindLiveObject(texture));
 		output.width = desc.width; output.height = desc.height;
 		output.rowPitch = desc.width * 4u; output.format = desc.format;
 		output.pixels.resize(static_cast<size_t>(bytes));
@@ -1900,7 +1929,13 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 	{
 		VulkanCommandList* nativeCommandList = dynamic_cast<VulkanCommandList*>(&commandList);
 		VulkanBuffer* nativeBuffer = dynamic_cast<VulkanBuffer*>(buffer);
-		if (nativeCommandList == nullptr || nativeBuffer == nullptr)
+		if (nativeCommandList == nullptr || nativeBuffer == nullptr ||
+			std::find(m_buffers.begin(), m_buffers.end(), buffer) == m_buffers.end() ||
+			std::none_of(m_acquiredCommandLists.begin(), m_acquiredCommandLists.end(),
+				[nativeCommandList](
+					const std::unique_ptr<VulkanCommandList, VulkanObjectDeleter>& candidate) {
+					return candidate.get() == nativeCommandList;
+				}))
 		{
 			return false;
 		}
@@ -1919,7 +1954,13 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 	{
 		VulkanCommandList* nativeCommandList = dynamic_cast<VulkanCommandList*>(&commandList);
 		VulkanTexture* nativeTexture = dynamic_cast<VulkanTexture*>(texture);
-		if (nativeCommandList == nullptr || nativeTexture == nullptr)
+		if (nativeCommandList == nullptr || nativeTexture == nullptr ||
+			std::find(m_textures.begin(), m_textures.end(), texture) == m_textures.end() ||
+			std::none_of(m_acquiredCommandLists.begin(), m_acquiredCommandLists.end(),
+				[nativeCommandList](
+					const std::unique_ptr<VulkanCommandList, VulkanObjectDeleter>& candidate) {
+					return candidate.get() == nativeCommandList;
+				}))
 		{
 			return false;
 		}
@@ -1935,10 +1976,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 	bool VulkanDevice::Impl::CreateInstance()
 	{
-        const auto enumerateVersion = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
-            vkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"));
-        if(enumerateVersion && enumerateVersion(&m_context.apiVersion)!=VK_SUCCESS)return false;
-        m_context.apiVersion=std::min(m_context.apiVersion,uint32_t(VK_API_VERSION_1_3));
+
         uint32_t availableCount=0;
         if(vkEnumerateInstanceExtensionProperties(nullptr,&availableCount,nullptr)!=VK_SUCCESS)return false;
         std::vector<VkExtensionProperties> available(availableCount);
@@ -1960,7 +1998,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 #endif
         if(supported(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME))
             extensions.push_back(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME);
-        m_surfaceMaintenanceEnabled=m_context.apiVersion>=VK_API_VERSION_1_1 && supported(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME) &&
+        m_surfaceMaintenanceEnabled=supported(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME) &&
             supported(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
         if(m_surfaceMaintenanceEnabled)
         {
@@ -1986,7 +2024,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		application.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
 		application.pEngineName = "dy_engine";
 		application.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-		application.apiVersion = m_context.apiVersion;
+		application.apiVersion = VK_API_VERSION_1_3;
 
 		VkInstanceCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -2045,22 +2083,15 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		const VkPhysicalDevice device = devices[m_owner.GetDesc().adapterIndex];
 		VkPhysicalDeviceProperties properties{};
 		vkGetPhysicalDeviceProperties(device, &properties);
-		m_context.apiVersion = std::min(m_context.apiVersion, properties.apiVersion);
-        m_context.negativeViewportSupported=m_context.apiVersion>=VK_API_VERSION_1_1;
+		if (properties.apiVersion < VK_API_VERSION_1_3) return false;
 
 		VkPhysicalDeviceVulkan13Features vulkan13{};
 		vulkan13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-		VkPhysicalDeviceFeatures features{};
-        vkGetPhysicalDeviceFeatures(device,&features);
-        if(m_context.apiVersion>=VK_API_VERSION_1_3)
-        {
-            const auto getFeatures2=reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
-                vkGetInstanceProcAddr(m_context.instance,"vkGetPhysicalDeviceFeatures2"));
-            VkPhysicalDeviceFeatures2 features2{};
-            features2.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;features2.pNext=&vulkan13;
-            if(getFeatures2)getFeatures2(device,&features2);
-            m_context.modernRendering=vulkan13.dynamicRendering && vulkan13.synchronization2;
-        }
+		VkPhysicalDeviceFeatures2 features{};
+		features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+		features.pNext = &vulkan13;
+		vkGetPhysicalDeviceFeatures2(device, &features);
+		if (!vulkan13.dynamicRendering || !vulkan13.synchronization2) return false;
 
 		uint32_t familyCount = 0;
 		vkGetPhysicalDeviceQueueFamilyProperties(device, &familyCount, nullptr);
@@ -2076,19 +2107,17 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 		if (!indices.IsComplete()) return false;
 
-            std::fprintf(stderr, "[Vulkan] GPU=%s vendor=%u device=%u driverVersionRaw=%u api=%u.%u.%u path=%s validation=%s capture=%s\n",
+            std::fprintf(stderr, "[Vulkan] GPU=%s vendor=%u device=%u driverVersionRaw=%u api=%u.%u.%u validation=%s capture=%s\n",
                 properties.deviceName, properties.vendorID, properties.deviceID, properties.driverVersion,
-                VK_API_VERSION_MAJOR(m_context.apiVersion), VK_API_VERSION_MINOR(m_context.apiVersion), VK_API_VERSION_PATCH(m_context.apiVersion),
-                m_context.modernRendering ? "modern" : "legacy",
+                VK_API_VERSION_MAJOR(properties.apiVersion), VK_API_VERSION_MINOR(properties.apiVersion), VK_API_VERSION_PATCH(properties.apiVersion),
                 m_owner.GetDesc().enableValidation ? "on" : "off", m_debugMessenger != VK_NULL_HANDLE ? "on" : "off");
 		m_context.physicalDevice = device;
 		m_context.queueIndices = indices;
 		// 선택 시 조회한 불변 정보는 모든 명령 래퍼와 기능 검사에서 함께 사용한다.
 		auto physicalInfo=std::make_shared<VulkanPhysicalDeviceInfo>();
 		physicalInfo->properties=properties;
-		physicalInfo->features=features;
+		physicalInfo->features=features.features;
 		physicalInfo->graphicsQueue=families[indices.graphicsFamily];
-        physicalInfo->maintenance4Supported=vulkan13.maintenance4==VK_TRUE;
 		m_context.physicalInfo=std::move(physicalInfo);
 		return true;
 	}
@@ -2130,10 +2159,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		vulkan13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
 		vulkan13.dynamicRendering = VK_TRUE;
 		vulkan13.synchronization2 = VK_TRUE;
-		vulkan13.maintenance4 = m_context.physicalInfo->maintenance4Supported;
-        void* featureChain=m_context.modernRendering ? &vulkan13 : nullptr;
-        const auto getFeatures2=m_context.apiVersion>=VK_API_VERSION_1_1 ? reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
-            vkGetInstanceProcAddr(m_context.instance,"vkGetPhysicalDeviceFeatures2")) : nullptr;
+		vulkan13.maintenance4 = VK_TRUE;
 
 		uint32_t extensionCount = 0;
 		vkEnumerateDeviceExtensionProperties(m_context.physicalDevice, nullptr, &extensionCount, nullptr);
@@ -2156,12 +2182,12 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		meshFeaturesToEnable.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
 		bool enableMeshShader = false;
 
-		if (m_context.modernRendering && hasMeshShaderExtension && getFeatures2)
+		if (hasMeshShaderExtension)
 		{
 			VkPhysicalDeviceFeatures2 features2{};
 			features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
 			features2.pNext = &meshFeaturesSupported;
-			getFeatures2(m_context.physicalDevice, &features2);
+			vkGetPhysicalDeviceFeatures2(m_context.physicalDevice, &features2);
 			if (meshFeaturesSupported.meshShader == VK_TRUE)
 			{
 				enableMeshShader = true;
@@ -2171,13 +2197,6 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		}
 
 		std::vector<const char*> extensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
-        if(!m_context.negativeViewportSupported && std::any_of(availableExtensions.begin(),availableExtensions.end(),[](const auto& extension) {
-            return std::strcmp(extension.extensionName,VK_KHR_MAINTENANCE_1_EXTENSION_NAME)==0;
-        }))
-        {
-            extensions.push_back(VK_KHR_MAINTENANCE_1_EXTENSION_NAME);
-            m_context.negativeViewportSupported=true;
-        }
         const char* calibrationFunction = nullptr;
 #if defined(_WIN32)
         const char* calibrationExtension = nullptr;
@@ -2188,7 +2207,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
             if(std::strcmp(extension.extensionName, VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME) == 0)
                 calibrationExtension = VK_EXT_CALIBRATED_TIMESTAMPS_EXTENSION_NAME;
         }
-        if(m_context.apiVersion>=VK_API_VERSION_1_1 && calibrationExtension && m_owner.GetTimestampValidBits())
+        if(calibrationExtension && m_owner.GetTimestampValidBits())
         {
             const bool khr = std::strcmp(calibrationExtension, "VK_KHR_calibrated_timestamps") == 0;
             const auto getDomains = reinterpret_cast<PFN_vkGetPhysicalDeviceCalibrateableTimeDomainsEXT>(
@@ -2213,46 +2232,37 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		if (enableMeshShader)
 		{
 			extensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
-			meshFeaturesToEnable.pNext = featureChain;
-            featureChain=&meshFeaturesToEnable;
+			vulkan13.pNext = &meshFeaturesToEnable;
 		}
 
         VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT maintenance{};
         maintenance.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT;
-        if(getFeatures2 && m_surfaceMaintenanceEnabled && std::any_of(availableExtensions.begin(),availableExtensions.end(),[](const auto& extension) {
+        if(m_surfaceMaintenanceEnabled && std::any_of(availableExtensions.begin(),availableExtensions.end(),[](const auto& extension) {
             return std::strcmp(extension.extensionName,VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME)==0;
         }))
         {
             VkPhysicalDeviceFeatures2 features{};
             features.sType=VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
             features.pNext=&maintenance;
-            getFeatures2(m_context.physicalDevice,&features);
+            vkGetPhysicalDeviceFeatures2(m_context.physicalDevice,&features);
             m_presentFencesEnabled=maintenance.swapchainMaintenance1==VK_TRUE;
             if(m_presentFencesEnabled)
             {
                 extensions.push_back(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
-                maintenance.pNext=featureChain;
-                featureChain=&maintenance;
+                maintenance.pNext=vulkan13.pNext;
+                vulkan13.pNext=&maintenance;
             }
         }
 
 		VkDeviceCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-		info.pNext = featureChain;
+		info.pNext = &vulkan13;
 		info.queueCreateInfoCount = sameFamily ? 1u : 2u;
 		info.pQueueCreateInfos = queueInfos;
 		info.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
 		info.ppEnabledExtensionNames = extensions.data();
 		info.pEnabledFeatures = &enabled;
 		if (vkCreateDevice(m_context.physicalDevice, &info, nullptr, &m_context.device) != VK_SUCCESS) return false;
-        if(m_context.modernRendering)
-        {
-            m_context.beginRendering=reinterpret_cast<PFN_vkCmdBeginRendering>(vkGetDeviceProcAddr(m_context.device,"vkCmdBeginRendering"));
-            m_context.endRendering=reinterpret_cast<PFN_vkCmdEndRendering>(vkGetDeviceProcAddr(m_context.device,"vkCmdEndRendering"));
-            m_context.pipelineBarrier2=reinterpret_cast<PFN_vkCmdPipelineBarrier2>(vkGetDeviceProcAddr(m_context.device,"vkCmdPipelineBarrier2"));
-            m_context.writeTimestamp2=reinterpret_cast<PFN_vkCmdWriteTimestamp2>(vkGetDeviceProcAddr(m_context.device,"vkCmdWriteTimestamp2"));
-            if(!m_context.beginRendering || !m_context.endRendering || !m_context.pipelineBarrier2 || !m_context.writeTimestamp2)return false;
-        }
 #ifdef DY_RENDERDOC_ENABLED
         if(m_context.debugUtilsEnabled)
         {

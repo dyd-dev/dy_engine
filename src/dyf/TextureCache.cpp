@@ -21,6 +21,15 @@
 
 namespace dyf
 {
+    namespace {
+    auto TextureKey(const Image& image,bool normal,const RHI::IDevice& device)
+    {
+        const auto* dds=Detail::ImageDdsAccess::Get(image);
+        const bool native=normal && image.GetColorSpace()==ColorSpace::Linear && dds && dds->normalMap &&
+            dds->format==RHI::Format::BC5_UNORM && device.Supports(RHI::Format::BC5_UNORM,RHI::FormatFeature::CompressedSampling);
+        return std::make_tuple(Detail::ImageDdsAccess::Identity(image),image.GetColorSpace(),native);
+    }
+    }
 	// 재질 이미지를 RHI 캐시 슬롯에 맞추고 같은 픽셀·색 공간은 공유하며, ShaderResource로의 업로드 제출이 미확정인 슬롯만 처리하고 실패하면 false를 반환한다.
 	bool Renderer::Impl::SyncTextures(const Scene& scene, RHI::IDevice* device)
 	{
@@ -28,14 +37,19 @@ namespace dyf
 
 		for(auto& slot:m_textures) slot.used=false;
 		std::vector<uint32_t> pending;
+		const bool stock=UsesStockGeometry();
 		for(const auto& material : scene.Materials())
 		{
+			uint32_t kind=0;
 			for(const Image* image : {&material.baseColorTexture, &material.metallicRoughnessTexture,
 				&material.normalTexture, &material.occlusionTexture, &material.emissiveTexture})
 			{
+				const uint32_t slotKind=kind++;
+				if(stock && ((slotKind==3 && material.occlusionStrength==0) ||
+					(slotKind==4 && material.emissiveColor.x==0 && material.emissiveColor.y==0 && material.emissiveColor.z==0)))continue;
 				// 유효한 이미지의 픽셀 소유자·색 공간 키를 찾아 기존 슬롯을 재사용한다.
 				if(!image->IsValid()) continue;
-				const auto key=std::make_pair(image->GetPixels().data(),image->GetColorSpace());
+                const auto key=TextureKey(*image,stock && slotKind==2,*device);
 				auto found=m_indices.find(key);
 				if(found==m_indices.end())
 				{
@@ -48,12 +62,13 @@ namespace dyf
 					catch(...) {if(append)m_textures.pop_back();throw;}
 					if(!append) m_freeTextureSlots.pop_back();
 					m_textures[index].source=std::move(source);
+                    m_textures[index].nativeNormal=std::get<2>(key);
 				}
 				auto& slot=m_textures[found->second];
 				if(slot.used) continue;
 				slot.used=true;
 				if(slot.state==RHI::ResourceState::ShaderResource) continue;
-				if(image->GetPixels().size()>std::numeric_limits<uint32_t>::max() ||
+				if(uint64_t(image->GetWidth())*image->GetHeight()>std::numeric_limits<uint32_t>::max()/4 ||
 					image->GetWidth()>static_cast<uint32_t>(std::numeric_limits<int>::max()/4) ||
 					image->GetHeight()>static_cast<uint32_t>(std::numeric_limits<int>::max()))
 				{
@@ -71,7 +86,7 @@ namespace dyf
 			if(!slot.used && slot.source.IsValid())
 			{
 				device->DestroyTexture(slot.texture);
-				m_indices.erase({slot.source.GetPixels().data(),slot.source.GetColorSpace()});
+                m_indices.erase({Detail::ImageDdsAccess::Identity(slot.source),slot.source.GetColorSpace(),slot.nativeNormal});
 				slot={};
 				m_freeTextureSlots.push_back(i);
 			}
@@ -91,20 +106,22 @@ namespace dyf
 			const Image& image = m_textures[textureIndex].source;
 			PreparedMips result;
 			uint32_t width = image.GetWidth(), height = image.GetHeight();
-			const uint8_t* source = image.GetPixels().data();
 			const bool srgb = image.GetColorSpace() == ColorSpace::Srgb;
             result.format=srgb ? RHI::Format::R8G8B8A8_UNORM_SRGB : RHI::Format::R8G8B8A8_UNORM;
             if(allowCompressed)
                 if(const auto* dds=Detail::ImageDdsAccess::Get(image))
                 {
                     auto format=dds->format;
-                    if(srgb) format=format==RHI::Format::BC1_UNORM ? RHI::Format::BC1_UNORM_SRGB : RHI::Format::BC3_UNORM_SRGB;
-                    if(device->Supports(format,RHI::FormatFeature::CompressedSampling))
+                    if(srgb && format!=RHI::Format::BC5_UNORM)
+                        format=format==RHI::Format::BC1_UNORM ? RHI::Format::BC1_UNORM_SRGB : RHI::Format::BC3_UNORM_SRGB;
+                    if((format!=RHI::Format::BC5_UNORM || m_textures[textureIndex].nativeNormal) &&
+                        device->Supports(format,RHI::FormatFeature::CompressedSampling))
                     {
                         result.dds=dds;result.format=format;
                         return result;
                     }
                 }
+			const uint8_t* source = image.GetPixels().data();
 			while(width > 1 || height > 1)
 			{
 				const uint32_t nextWidth = std::max(1u, width / 2);
@@ -224,7 +241,7 @@ namespace dyf
 			if(nextPreparation < pending.size()) // 한 이미지 업로드가 끝나면 다음 CPU 준비 작업을 보충한다.
 				prepared.emplace_back(std::async(launch, prepareMips, pending[nextPreparation++],true));
 		}
-        std::fprintf(stderr,"[Renderer] Material texture uploads: %zu images, %u preserved DDS BC1/BC3; payload=%llu bytes, RGBA equivalent=%llu bytes.\n",
+        std::fprintf(stderr,"[Renderer] Material texture uploads: %zu images, %u preserved DDS BC1/BC3/BC5; payload=%llu bytes, RGBA equivalent=%llu bytes.\n",
             pending.size(),compressedTextures,static_cast<unsigned long long>(uploadedBytes),static_cast<unsigned long long>(rgbaBytes));
 		return true;
 	}
@@ -258,7 +275,7 @@ void Renderer::Impl::UpdateMaterialStates(const Scene& scene)
 		materialState.textures[ToIndex(MaterialTextureKind::MetallicRoughness)] =
 			ResolveTexture(material.metallicRoughnessTexture);
 		materialState.textures[ToIndex(MaterialTextureKind::Normal)] =
-			ResolveTexture(material.normalTexture);
+            ResolveTexture(material.normalTexture,true);
 		materialState.textures[ToIndex(MaterialTextureKind::Occlusion)] =
 			ResolveTexture(material.occlusionTexture);
 		materialState.textures[ToIndex(MaterialTextureKind::Emissive)] =
@@ -277,6 +294,8 @@ void Renderer::Impl::UpdateMaterialStates(const Scene& scene)
 		// texture owners/bindings, and preserve presence flags for custom shaders.
 		if(stockShaders)
 		{
+            if(materialState.textures[ToIndex(MaterialTextureKind::Normal)]->GetDesc().format==RHI::Format::BC5_UNORM)
+                materialState.textureFlags|=RendererTextureFlagBc5Normal;
 			if(material.occlusionStrength == 0.0f)
 				materialState.textureFlags &= ~(1u << ToIndex(MaterialTextureKind::Occlusion));
 			if(material.emissiveColor.x == 0.0f && material.emissiveColor.y == 0.0f && material.emissiveColor.z == 0.0f)
@@ -286,9 +305,9 @@ void Renderer::Impl::UpdateMaterialStates(const Scene& scene)
 }
 
 	// 픽셀 주소와 색 공간으로 찾되 제출 상태가 ShaderResource인 슬롯만 반환한다. 이 조회 자체가 GPU 완료를 기다리지는 않는다.
-	RHI::TextureHandle Renderer::Impl::ResolveTexture(const Image& image) const
+    RHI::TextureHandle Renderer::Impl::ResolveTexture(const Image& image,bool normal) const
 	{
-		const auto found = m_indices.find({image.GetPixels().data(), image.GetColorSpace()});
+        const auto found = m_indices.find(TextureKey(image,normal && UsesStockGeometry(),*device));
 		if(found == m_indices.end()) return nullptr; // 현재 재질 이미지 목록에 없는 입력이면 nullptr다.
 		const TextureSlot& slot = m_textures[found->second];
 		return slot.state == RHI::ResourceState::ShaderResource ? slot.texture : nullptr;

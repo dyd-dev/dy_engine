@@ -37,6 +37,7 @@ void main()
         vec3 t=normalize(worldTangent.xyz-n*dot(n,worldTangent.xyz));
         vec3 b=cross(n,t)*worldTangent.w;
         vec3 mapped=texture(sampler2D(normalTexture,materialSampler),uv).xyz*2.0-1.0;
+        if((flags&256u)!=0u)mapped.z=sqrt(max(0.0,1.0-dot(mapped.xy,mapped.xy)));
         mapped.xy*=draw.materialParams.z;mapped.y*=draw.alpha.y<0?-1.0:1.0;n=normalize(mat3(t,b,n)*mapped);
     }
     vec2 mr=draw.materialParams.xy;

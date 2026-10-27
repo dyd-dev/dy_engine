@@ -595,6 +595,7 @@ Output main(Input input,bool frontFacing:SV_IsFrontFace)
             float3 fallback=normalize(cross(abs(n.z)<.99?float3(0,0,1):float3(0,1,0),n));
             float3 t=TransparentPixelNormalizeOr(input.worldTangent.xyz-n*dot(n,input.worldTangent.xyz),fallback),b=cross(n,t)*input.worldTangent.w;
             float3 mapped=normalTexture.Sample(materialSampler,input.uv).xyz*2-1;
+            if((flags&256u)!=0u)mapped.z=sqrt(max(0.0f,1.0f-dot(mapped.xy,mapped.xy)));
             mapped.xy*=draw.material.z;mapped.y*=(draw.emissive.w<0?-1.0:1.0);
             n=TransparentPixelNormalizeOr(t*mapped.x+b*mapped.y+n*mapped.z,n);
         }

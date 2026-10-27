@@ -37,6 +37,7 @@
 #define RENDERER_TEXTURE_FLAG_OCCLUSION 8
 #define RENDERER_TEXTURE_FLAG_EMISSIVE 16
 #define RENDERER_TEXTURE_FLAG_RECEIVE_SHADOW 32
+#define RENDERER_TEXTURE_FLAG_BC5_NORMAL 256
 
 #ifndef RENDERER_ENABLE_SHADOWS // 그림자 사용 여부를 파이프라인이 명시하지 않았으면 컴파일 오류를 내어 자원 배치 불일치를 막는다.
 #error RENDERER_ENABLE_SHADOWS must be defined
@@ -699,6 +700,8 @@ inline float3 ResolveNormal(
     const float3x3 tangentBasis = float3x3(tangent, bitangent, normal);
     float3 tangentNormal =
         normalTexture.sample(materialSampler, input.uv).xyz * 2.0f - 1.0f;
+    if((textureFlags & RENDERER_TEXTURE_FLAG_BC5_NORMAL)!=0u)
+        tangentNormal.z=sqrt(max(0.0f,1.0f-dot(tangentNormal.xy,tangentNormal.xy)));
     tangentNormal.xy *= drawConstants.materialParams.z;
     if((drawConstants.padding1 & 8u)!=0u) tangentNormal.y=-tangentNormal.y; // 법선 맵의 Y 방향이 반대인 재질이면 접선 공간 Y 성분만 뒤집는다.
     return normalize(tangentBasis * tangentNormal);

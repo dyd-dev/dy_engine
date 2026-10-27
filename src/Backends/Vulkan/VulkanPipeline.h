@@ -12,8 +12,6 @@ namespace dyf::Backends
 	struct VulkanObjectDeleter;
     class VulkanBuffer;
     class VulkanTexture;
-    VkRenderPass CreateVulkanLegacyRenderPass(VkDevice device,
-        const VkAttachmentDescription* attachments,uint32_t colorCount,bool hasDepth);
 
 	class VulkanShader final : public dyf::RHI::Shader
 	{
@@ -55,7 +53,7 @@ namespace dyf::Backends
 
 		void CreateDescriptorLayouts(const VulkanContext& context, const dyf::RHI::PipelineLayoutDesc& desc);
 		void CreatePipelineLayout(const dyf::RHI::PipelineLayoutDesc& desc);
-		void CreatePipeline(const VulkanContext& context,const dyf::RHI::GraphicsPipelineDesc& desc);
+		void CreatePipeline(const dyf::RHI::GraphicsPipelineDesc& desc);
 		void CreatePipeline(const dyf::RHI::MeshPipelineDesc& desc);
 		void Cleanup();
 

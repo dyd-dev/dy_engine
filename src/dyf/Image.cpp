@@ -11,6 +11,8 @@
 #include <array>
 #include <cstring>
 #include <fstream>
+#include <atomic>
+#include <mutex>
 
 // 파일과 모델 내장 이미지의 디코딩은 이 CPU 이미지 로더에서 담당한다.
 #define STB_IMAGE_IMPLEMENTATION
@@ -27,8 +29,26 @@
 
 namespace dyf
 {
+namespace Detail
+{
+struct ImagePixels
+{
+    explicit ImagePixels(std::vector<uint8_t> values):pixels(std::move(values)),byteCount(pixels.size()) {}
+    std::vector<uint8_t> pixels;
+    const size_t byteCount;
+    std::mutex mutex;
+    std::atomic<bool> decoded{true};
+};
+}
 namespace
 {
+    bool RestorableDds(const Detail::ImageDdsData* dds,uint32_t width,uint32_t height)
+    {
+        if(!dds || dds->mips.empty())return false;
+        const uint32_t blockBytes=dds->format==RHI::Format::BC1_UNORM?8u:
+            dds->format==RHI::Format::BC3_UNORM || dds->format==RHI::Format::BC5_UNORM?16u:0u;
+        return blockBytes && uint64_t((uint64_t(width)+3)/4)*((uint64_t(height)+3)/4)*blockBytes==dds->mips[0].size();
+    }
     // stb 임시 픽셀의 소유자다. 조기 반환이나 예외에도 stbi_image_free로 해제한다.
     using DecodedPixels = std::unique_ptr<stbi_uc, decltype(&stbi_image_free)>;
 
@@ -181,10 +201,12 @@ namespace
     {
         // Normal-map reconstruction and legacy swizzles change decoded pixels.
         // Keep those inputs on the existing RGBA path.
-        if(info.normalMap || info.swapRedGreen || info.swapRedAlpha) return RHI::Format::Unknown;
         uint32_t fullMips=1;
         for(uint32_t size=std::max(info.width,info.height);size>1;size>>=1) ++fullMips;
         if(info.mipCount!=fullMips) return RHI::Format::Unknown;
+        if(info.format==DdsFormat::BC5 && info.normalMap && !info.swapRedGreen && !info.swapRedAlpha)
+            return RHI::Format::BC5_UNORM;
+        if(info.normalMap || info.swapRedGreen || info.swapRedAlpha) return RHI::Format::Unknown;
         if(info.format==DdsFormat::BC1) return RHI::Format::BC1_UNORM;
         if(info.format==DdsFormat::BC3) return RHI::Format::BC3_UNORM;
         return RHI::Format::Unknown;
@@ -196,6 +218,7 @@ namespace
         if(format==RHI::Format::Unknown) return;
         auto data=std::make_shared<Detail::ImageDdsData>();
         data->format=format;
+        data->normalMap=info.normalMap;
         data->mips.reserve(info.mipCount);
         uint32_t width=info.width,height=info.height;
         // ParseDds has checked every level and the complete source byte range.
@@ -474,22 +497,51 @@ namespace dyf
 // 입력 벡터를 불변 공유 저장소로 옮긴다. 생성 시 크기 불일치를 거부하지 않으므로 IsValid로 확인한다.
 Image::Image(uint32_t width, uint32_t height, std::vector<uint8_t> rgba8, ColorSpace colorSpace)
     : m_width(width), m_height(height),
-      m_pixels(std::make_shared<const std::vector<uint8_t>>(std::move(rgba8))), m_colorSpace(colorSpace)
+      m_pixels(std::make_shared<Detail::ImagePixels>(std::move(rgba8))), m_colorSpace(colorSpace)
 {
 }
 
 // 양수 해상도와 RGBA 네 성분 단위 및 정확한 픽셀 개수를 검사한다.
 bool Image::IsValid() const
 {
-    return m_width && m_height && m_pixels && m_pixels->size() % 4 == 0 &&
-        static_cast<uint64_t>(m_width) * m_height == m_pixels->size() / 4;
+    return m_width && m_height && m_pixels && m_pixels->byteCount % 4 == 0 &&
+        static_cast<uint64_t>(m_width) * m_height == m_pixels->byteCount / 4;
 }
 
 // 저장소가 없으면 공통 빈 배열을 반환해 읽는 쪽에 항상 유효한 참조를 준다.
 const std::vector<uint8_t>& Image::GetPixels() const
 {
     static const std::vector<uint8_t> empty;
-    return m_pixels ? *m_pixels : empty;
+    if(!m_pixels)return empty;
+    if(!m_pixels->decoded.load(std::memory_order_acquire))
+    {
+        std::lock_guard<std::mutex> lock(m_pixels->mutex);
+        if(!m_pixels->decoded.load(std::memory_order_relaxed))
+        {
+            if(!RestorableDds(m_dds.get(),m_width,m_height))throw std::runtime_error("Invalid preserved DDS cache.");
+            DdsInfo info;info.width=m_width;info.height=m_height;
+            info.format=m_dds->format==RHI::Format::BC1_UNORM?DdsFormat::BC1:
+                m_dds->format==RHI::Format::BC3_UNORM?DdsFormat::BC3:DdsFormat::BC5;
+            info.normalMap=m_dds->normalMap;
+            info.blockBytes=info.format==DdsFormat::BC1?8:16;
+            Image decoded;
+            if(!DecodeDdsPixels(info,m_dds->mips[0].data(),m_pixels->byteCount,decoded,nullptr))
+                throw std::runtime_error("Preserved DDS reconstruction failed.");
+            m_pixels->pixels=std::move(decoded.m_pixels->pixels);
+            m_pixels->decoded.store(true,std::memory_order_release);
+        }
+    }
+    return m_pixels->pixels;
+}
+
+uint64_t Image::ReleaseDecodedPixels() const
+{
+    if(!IsValid() || !RestorableDds(m_dds.get(),m_width,m_height))return 0;
+    std::lock_guard<std::mutex> lock(m_pixels->mutex);
+    const uint64_t bytes=m_pixels->pixels.capacity();
+    std::vector<uint8_t>().swap(m_pixels->pixels);
+    m_pixels->decoded.store(false,std::memory_order_release);
+    return bytes;
 }
 
 // 이미지의 출처 문자열만 교체한다. 픽셀이나 GPU 캐시를 수정하지 않는다.

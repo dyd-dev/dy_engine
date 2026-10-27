@@ -125,6 +125,8 @@ namespace dyf
 	static_assert(sizeof(RendererShadowConstants) == 13024u);
 
 	// 한 Draw의 카메라/모델 행렬과 재질 상수다. 인스턴싱 경로는 개별 모델 정보 일부를 별도 버퍼에서 공급한다.
+    inline constexpr uint32_t RendererTextureFlagBc5Normal=256u;
+    static_assert((RendererTextureFlagBc5Normal&255u)==0,"BC5 must not overlap stock texture/debug flags or transparent unlit.");
 	struct DrawConstants
 	{
 		Math::float4x4 viewProjectionMatrix;

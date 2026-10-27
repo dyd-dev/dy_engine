@@ -6,9 +6,11 @@
 #include "dyf/Camera.h"
 #include "dyf/Scene.h"
 #include "dyf/RHI/ResourceSet.h"
+#include "dyf/RHI/Buffer.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 
 namespace dyf
@@ -128,8 +130,146 @@ bool ShadowBatchNearDepth(const Math::Bounds3& bounds,const Math::float4x4& matr
 
 }
 
+void Renderer::Impl::ShadowCasterVolume::Build(const Camera& camera,float nearPlane,float farPlane,
+    Math::float3 toLight,double padding)
+{
+    count=0;
+    if(!std::isfinite(nearPlane) || !std::isfinite(farPlane) || farPlane<=nearPlane ||
+        !std::isfinite(padding) || padding<0)return;
+    for(float value:camera.view.m)if(!std::isfinite(value))return;
+    if(camera.view.m[3]!=0 || camera.view.m[7]!=0 || camera.view.m[11]!=0 || camera.view.m[15]!=1)return;
+    const double length=std::sqrt(double(toLight.x)*toLight.x+double(toLight.y)*toLight.y+double(toLight.z)*toLight.z);
+    if(!std::isfinite(length) || length<1e-12)return;
+    const double direction[]={toLight.x/length,toLight.y/length,toLight.z/length};
+    const auto matrix=camera.projection*camera.view;
+    std::array<std::array<double,4>,6> receiver={};
+    std::array<double,6> slope={};
+    for(uint32_t i=0;i<6;++i)
+    {
+        auto& plane=receiver[i];
+        for(uint32_t column=0;column<4;++column)
+            plane[column]=i<4 ? double(matrix.m[column*4+3])+(i%2?-1:1)*double(matrix.m[column*4+i/2]) :
+                (i==4?-1:1)*double(camera.view.m[column*4+2]);
+        if(i>=4)plane[3]+=i==4?-double(nearPlane):double(farPlane);
+        const double norm=std::sqrt(plane[0]*plane[0]+plane[1]*plane[1]+plane[2]*plane[2]);
+        if(!std::isfinite(norm) || norm<1e-12)return;
+        for(auto& value:plane) {value/=norm;if(!std::isfinite(value))return;}
+        for(uint32_t axis=0;axis<3;++axis)slope[i]+=plane[axis]*direction[axis];
+    }
+    const auto append=[&](std::array<double,4> plane) {
+        const double norm=std::sqrt(plane[0]*plane[0]+plane[1]*plane[1]+plane[2]*plane[2]);
+        if(!(norm>1e-12) || !std::isfinite(norm))return;
+        for(auto& value:plane)value/=norm;
+        plane[3]+=padding;
+        planes[count++]=plane;
+    };
+    // Extrude receiver half-spaces toward the light; silhouette edges close the volume.
+    for(uint32_t i=0;i<6;++i)
+    {
+        if(slope[i]>1e-8)append(receiver[i]);
+        for(uint32_t j=i+1;j<6;++j)
+        {
+            if(i/2==j/2 || !((slope[i]>1e-8 && slope[j]<-1e-8) ||
+                (slope[j]>1e-8 && slope[i]<-1e-8)))continue;
+            std::array<double,4> plane;
+            for(uint32_t k=0;k<4;++k)plane[k]=receiver[i][k]*std::abs(slope[j])+receiver[j][k]*std::abs(slope[i]);
+            append(plane);
+        }
+    }
+}
+
+bool Renderer::Impl::ShadowCasterVolume::Outside(const Math::Bounds3& bounds,const std::array<double,3>& magnitude) const
+{
+    if(!bounds.valid)return false;
+    for(uint32_t i=0;i<count;++i)
+    {
+        const auto& plane=planes[i];
+        const double maximum[]={bounds.max.x,bounds.max.y,bounds.max.z};
+        const double minimum[]={bounds.min.x,bounds.min.y,bounds.min.z};
+        double distance=plane[3],scale=std::abs(plane[3]);
+        for(uint32_t axis=0;axis<3;++axis) {
+            distance+=plane[axis]*(plane[axis]>=0?maximum[axis]:minimum[axis]);
+            scale+=std::abs(plane[axis])*magnitude[axis];
+        }
+        if(distance < -1e-5*std::max(1.0,scale))return true;
+    }
+    return false;
+}
+
+bool Renderer::Impl::ShadowInstanceData::Build(const Scene& scene,const ShadowData& shadows,
+    const std::vector<ShadowCaster>& casters,bool cull)
+{
+    draws.clear();views.clear();entities.clear();matrices.clear();visible.clear();keys.clear();order.clear();
+    constexpr uint32_t stride=2*sizeof(Math::float4x4);
+    if(!cull || casters.empty() || !shadows.viewCount ||
+        shadows.viewCount>std::size(shadows.constants.lightViewProjectionMatrix) ||
+        uint64_t(casters.size())*shadows.viewCount>UINT32_MAX/stride)return false;
+    keys.reserve(casters.size());order.reserve(casters.size());
+    for(const auto& caster:casters)
+    {
+        if(!caster.arena || !caster.sortSafe || caster.entity>=scene.GetEntityCount() ||
+            caster.material>=scene.Materials().size())return false;
+        const auto& material=scene.Materials()[caster.material];
+        const bool mask=material.alphaMode==MaterialAlphaMode::Mask;
+        uint32_t cutoff=0,alpha=0;
+        if(mask)
+        {
+            if(!std::isfinite(material.alphaCutoff) || !std::isfinite(material.baseColor.w))return false;
+            std::memcpy(&cutoff,&material.alphaCutoff,sizeof(cutoff));
+            std::memcpy(&alpha,&material.baseColor.w,sizeof(alpha));
+        }
+        const uint32_t coverage=(mask?1u:0u) | (material.doubleSided?2u:0u) |
+            (caster.mirrored?4u:0u) | (mask && (caster.coverageFlags&1u)?8u:0u);
+        keys.emplace_back(caster.mesh,reinterpret_cast<uintptr_t>(caster.pipeline),
+            reinterpret_cast<uintptr_t>(caster.set),coverage,cutoff,alpha);
+    }
+    views.resize(shadows.viewCount);visible.reserve(casters.size());
+    for(uint32_t i=0;i<casters.size();++i)order.push_back(i);
+    std::sort(order.begin(),order.end(),[&](uint32_t a,uint32_t b) {
+        return keys[a]!=keys[b] ? keys[a]<keys[b] : a<b;
+    });
+    for(uint32_t view=0;view<shadows.viewCount;++view)
+    {
+        const auto& projection=shadows.constants.lightViewProjectionMatrix[view];
+        bool perspective=false;
+        if(!ShadowSortProjection(projection,shadows.constants.viewProjectionParams[view],perspective))return false;
+        const ShadowFrustum frustum(projection);
+        visible.clear();
+        for(uint32_t i:order)
+            if(!frustum.Outside(casters[i].worldBounds.bounds,casters[i].worldBounds.magnitude) &&
+                !shadows.casterVolumes[view].Outside(casters[i].worldBounds.bounds,casters[i].worldBounds.magnitude))visible.push_back(i);
+        const uint32_t firstDraw=static_cast<uint32_t>(draws.size());
+        for(size_t first=0;first<visible.size();)
+        {
+            const uint32_t representative=visible[first];
+            const uint32_t firstInstance=static_cast<uint32_t>(entities.size());
+            double depth=std::numeric_limits<double>::infinity();
+            size_t end=first;
+            while(end<visible.size() && keys[visible[end]]==keys[representative])
+            {
+                const auto& caster=casters[visible[end]];double nearDepth=0;
+                if(!ShadowBatchNearDepth(caster.worldBounds.bounds,projection,perspective,nearDepth))return false;
+                depth=std::min(depth,nearDepth);
+                entities.push_back(caster.entity);
+                matrices.push_back(scene.GetTransform(static_cast<EntityID>(caster.entity)));
+                matrices.push_back({}); // Preserve the canonical two-matrix instance stride.
+                ++end;
+            }
+            draws.push_back({representative,firstInstance,static_cast<uint32_t>(end-first),depth});
+            first=end;
+        }
+        auto& range=views[view];range={firstDraw,static_cast<uint32_t>(draws.size()-firstDraw)};
+        // Keep early depth rejection useful after grouping nonconsecutive entities.
+        std::sort(draws.begin()+firstDraw,draws.end(),[](const Draw& a,const Draw& b) {
+            return a.depth<b.depth || (a.depth==b.depth && a.caster<b.caster);
+        });
+    }
+    return draws.size()<entities.size();
+}
+
 // 공통 월드 경계 준비→재질/객체별 세트 준비→아틀라스 전체 깊이 Clear→각 뷰 타일의 객체 배치 기록 순서다.
-bool Renderer::Impl::PrepareShadowPassResources(const Scene& scene,const std::vector<RendererDrawDesc>* draws)
+bool Renderer::Impl::PrepareShadowPassResources(const Scene& scene,const ShadowData& shadows,
+    RHI::ICommandList& uploads,const std::vector<RendererDrawDesc>* draws)
 {
 #if defined(DY_LIVE_PROFILING_ENABLED) || defined(DY_PROFILER_TRACING_ENABLED)
     Platform::CpuScope cpuScope(Platform::LiveStage::CpuPrepare,"Shadow resources");
@@ -139,6 +279,7 @@ bool Renderer::Impl::PrepareShadowPassResources(const Scene& scene,const std::ve
 	const bool instanced=UsesInstanceStream();
 	const bool perEntity=draws && !stock;
 	const bool cull=stock && config.enableFrustumCulling;
+    shadowInstancesActive=false;
     // 양면·알파 커버리지·면 반전과 compact 정점 여부로 파이프라인을 고른다. 면 반전은 변환 행렬식의 부호로 판단한다.
     const auto shadowPipelineFor=[&](const MaterialDesc& material,bool mirrored,bool compact=false) {
         // 비표준 입력에는 기존 fragment의 재질별 면 판정을 유지한다.
@@ -168,6 +309,7 @@ bool Renderer::Impl::PrepareShadowPassResources(const Scene& scene,const std::ve
         if(shadowFragmentShader && UsesBlendedRendering(material))continue;
         ShadowCaster caster;
         caster.entity=i;caster.mesh=meshIndex;caster.material=materialIndex;
+        caster.coverageFlags=materialStates[materialIndex].textureFlags&1u;
         const auto vertexBuffer=draws && (*draws)[i].vertexBuffer ? (*draws)[i].vertexBuffer : mesh.vertexBuffer;
         const bool originalVertices=stock && vertexBuffer==mesh.vertexBuffer;
         caster.arena=originalVertices && shadowArenaVertices && shadowArenaIndices && shadowArenaGeneration &&
@@ -251,7 +393,34 @@ bool Renderer::Impl::PrepareShadowPassResources(const Scene& scene,const std::ve
             if(!caster.set)return false;
         }
 	}
-    return true;
+    if(!stock || !instanced || !UsesStockGeometry() ||
+        !shadowInstances.Build(scene,shadows,casters,cull))return true;
+    constexpr uint32_t stride=2*sizeof(Math::float4x4);
+    const auto bytes=static_cast<uint32_t>(shadowInstances.matrices.size()*sizeof(Math::float4x4));
+    if(!shadowInstanceBuffer || shadowInstanceBuffer->GetDesc().size<bytes)
+    {
+        const uint64_t capacity=std::min<uint64_t>(UINT32_MAX/stride*stride,
+            std::max<uint64_t>(bytes,shadowInstanceBuffer ? uint64_t(shadowInstanceBuffer->GetDesc().size)*2 : stride*64));
+        // The frame transaction retains the old handle until the draw submission succeeds.
+        const auto replacement=device->CreateBuffer({static_cast<uint32_t>(capacity),stride,
+            RHI::BufferUsage::Vertex,RHI::ResourceState::CopyDestination});
+        if(!replacement)return true; // Optional batching keeps the existing instance path on allocation failure.
+        shadowInstanceBuffer=replacement;
+        shadowInstanceReady=false;
+    }
+    if(!shadowInstanceBuffer)return false;
+    shadowInstancesActive=true;
+    if(config.enableIncrementalTransformUploads && shadowInstanceReady &&
+        shadowInstanceBytes.size()==shadowInstances.matrices.size() &&
+        std::memcmp(shadowInstanceBytes.data(),shadowInstances.matrices.data(),bytes)==0)return true;
+    if(shadowInstanceReady)
+    {
+        const RHI::ResourceBarrierDesc before={shadowInstanceBuffer,nullptr,RHI::ResourceState::VertexBuffer,
+            RHI::ResourceState::CopyDestination,{}};
+        uploads.ResourceBarrier(&before,1);
+    }
+    return RecordBufferUpload(device,uploads,shadowInstanceBuffer,shadowInstances.matrices.data(),bytes,
+        RHI::ResourceState::VertexBuffer);
 }
 
 bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,const ShadowData& shadows,
@@ -266,6 +435,8 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
     const bool instanced=UsesInstanceStream();
     const bool baseInstance=stock && instanced;
     const bool cull=stock && config.enableFrustumCulling;
+    const bool packed=shadowInstancesActive;
+    const auto instanceSource=packed ? shadowInstanceBuffer : instanceBuffer;
     const auto& casters=shadowCasterScratch;
 #ifdef DY_RENDERDOC_ENABLED
     commands.BeginDebugEvent("Shadow");
@@ -291,20 +462,23 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
 			const ShadowFrustum frustum(shadows.constants.lightViewProjectionMatrix[view]);
             // 광원 절두체 밖임을 보수적으로 확인한 객체만 이번 뷰 목록에서 제거한다.
             auto& visible=shadowViewScratch;
-            if(cull) {
+            if(cull && !packed) {
                 visible.clear();
                 visible.reserve(casters.size());
                 for(uint32_t i=0;i<casters.size();++i) {
                     const auto& bounds=casters[i].worldBounds;
-                    if(!frustum.Outside(bounds.bounds,bounds.magnitude))visible.push_back(i);
+                    if(!frustum.Outside(bounds.bounds,bounds.magnitude) &&
+                        !shadows.casterVolumes[view].Outside(bounds.bounds,bounds.magnitude))visible.push_back(i);
                 }
             }
+            const auto packedRange=packed ? shadowInstances.views[view] : ShadowInstanceData::View{};
             const auto casterAt=[&](uint32_t index) -> const ShadowCaster& {
+                if(packed)return casters[shadowInstances.draws[packedRange.first+index].caster];
                 return casters[cull ? visible[index] : index];
             };
-            const auto visibleCount=cull ? visible.size() : casters.size();
+            const auto visibleCount=packed ? packedRange.count : cull ? visible.size() : casters.size();
             bool perspectiveSort=false;
-            if(stock && cull && visibleCount>1 && UsesStockGeometry() &&
+            if(!packed && stock && cull && visibleCount>1 && UsesStockGeometry() &&
                 ShadowSortProjection(shadows.constants.lightViewProjectionMatrix[view],
                     shadows.constants.viewProjectionParams[view],perspectiveSort))
             {
@@ -349,16 +523,18 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
 				const uint32_t entityIndex=caster.entity;
 				const auto entity = static_cast<EntityID>(entityIndex);
 				const auto& lighting = scene.GetEntityLighting(entity);
-				// 미리 판정한 호환 배치에 속하고 객체 ID도 연속인 항목만 한 draw로 묶는다.
+				// Packed draws already group compatible entities; the fallback still requires consecutive entity rows.
 				const uint32_t materialIndex=caster.material;
 				const auto& mesh = m_meshes[caster.mesh];
 				const auto& material=scene.Materials()[materialIndex];
-				uint32_t count=1;
-                while(drawIndex+count<visibleCount) {
+                const auto* packedDraw=packed ? &shadowInstances.draws[packedRange.first+drawIndex] : nullptr;
+				uint32_t count=packedDraw ? packedDraw->count : 1;
+                while(!packed && drawIndex+count<visibleCount) {
                     const auto& next=casterAt(drawIndex+count);
                     if(next.batch!=caster.batch || next.entity!=entityIndex+count)break;
                     ++count;
                 }
+                const uint32_t firstInstance=packedDraw ? packedDraw->first : entityIndex;
         // 배치 ID에 Renderer→Scene→그림자 view→객체 범위를 연결한다. 메인 패스와 다른 pass ID를 사용해 같은 객체의 작업을 섞지 않는다.
         auto batchContext=Platform::GetLiveContext();
         if(Platform::IsLiveCollectorEnabled()) // 수집 중이면 그림자 배치의 범위·제한된 이유 분류와 원본 객체 링크를 남긴다.
@@ -366,20 +542,24 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
             if(!sceneBatch)
             {
                 sceneBatch=Platform::GetLiveBatchId(liveId,scene.m_liveId);
-                instanceId=Platform::FindLiveObject(instanceBuffer);
+                instanceId=Platform::FindLiveObject(instanceSource);
             }
             if(!passBatch)passBatch=Platform::GetLiveBatchId(sceneBatch,100+view);
             batchContext.batch=Platform::GetLiveBatchId(passBatch,(uint64_t(entityIndex)<<32)|count);
             batchContext.object=entityIndex<scene.m_liveEntities.size()?scene.m_liveEntities[entityIndex]:scene.m_liveId;
             Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;
             batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Data;
-            batch.first=entityIndex;batch.elements=count;batch.stride=2*sizeof(Math::float4x4);
+            batch.first=firstInstance;batch.elements=count;batch.stride=2*sizeof(Math::float4x4);
             batch.bytes=uint64_t(count)*batch.stride;batch.resource=instanceId;
             // 이 그림자 배치의 reason은 사용자 기하·인스턴싱 OFF·그 밖(None)만 구분한다. 위에서 실제로 묶기를 끝낸 메시·재질·절두체 조건은 각각 기록하지 않는다.
             batch.reason=!stock?Platform::LiveSplitReason::CustomGeometry:!instanced?Platform::LiveSplitReason::InstancingDisabled:Platform::LiveSplitReason::None;
             Platform::RecordLiveEvent(batch);
-            for(uint32_t i=0;i<count&&entityIndex+i<scene.m_liveEntities.size();++i)
-                RHI::ProfilerAccess::RecordLink(commands,scene.m_liveEntities[entityIndex+i],batch.id);
+            for(uint32_t i=0;i<count;++i)
+            {
+                const auto original=packed ? shadowInstances.entities[firstInstance+i] : entityIndex+i;
+                if(original<scene.m_liveEntities.size())
+                    RHI::ProfilerAccess::RecordLink(commands,scene.m_liveEntities[original],batch.id);
+            }
         }
         Platform::LiveContextScope linkedBatch(batchContext);
 				const auto* input = draws ? &(*draws)[entityIndex] : nullptr;
@@ -402,11 +582,11 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
                 if(instanced)
                 {
                     // Stock shaders consume only instance attributes: offset zero
-                    // plus firstInstance selects the same consecutive entity rows.
-                    if(!baseInstance)commands.BindVertexBuffer(1,instanceBuffer,entityIndex*2*sizeof(Math::float4x4));
+                    // plus firstInstance selects either packed rows or canonical entity rows.
+                    if(!baseInstance)commands.BindVertexBuffer(1,instanceSource,firstInstance*2*sizeof(Math::float4x4));
                     else if(!instanceStreamBound)
                     {
-                        commands.BindVertexBuffer(1,instanceBuffer,0);
+                        commands.BindVertexBuffer(1,instanceSource,0);
                         instanceStreamBound=true;
                     }
                 }
@@ -439,18 +619,18 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
                 const uint32_t firstIndex=caster.arena ? mesh.shadowArena.indexByteOffset/
                     (indexFormat==RHI::Format::R16_UINT?2u:4u) : 0;
                 const int32_t baseVertex=caster.arena ? static_cast<int32_t>(mesh.shadowArena.baseVertex) : 0;
-				commands.DrawIndexedInstanced(mesh.indexCount,count,firstIndex,baseVertex,baseInstance?entityIndex:0);
+				commands.DrawIndexedInstanced(mesh.indexCount,count,firstIndex,baseVertex,baseInstance?firstInstance:0);
                 if(caster.arena && !shadowArenaReported)
                 {
-                    std::fprintf(stderr,"[Renderer] Shared shadow arena selected: generation=%llu mixed R16/R32 index ranges; original draw/triangle order.\n",
-                        static_cast<unsigned long long>(shadowArenaGeneration));
+                    std::fprintf(stderr,"[Renderer] Shared shadow arena selected: generation=%llu mixed R16/R32 index ranges; %s, cache-optimized triangle order.\n",
+                        static_cast<unsigned long long>(shadowArenaGeneration),packed?"packed instance batches":"entity instance runs");
                     shadowArenaReported=true;
                 }
 				++recordingStatistics.shadowDrawCount;
 				recordingStatistics.shadowInstanceCount+=count;
 				recordingStatistics.shadowTriangleCount+=uint64_t(mesh.indexCount/3)*count;
 				// 배치에 포함한 객체는 다음 draw에서 중복 기록하지 않는다.
-				drawIndex+=count;
+				drawIndex+=packed ? 1u : count;
 			}
 		}
 		commands.EndRendering();

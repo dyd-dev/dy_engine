@@ -36,6 +36,7 @@ namespace dyf::Backends
                 case RHI::Format::BC1_UNORM_SRGB: return MTLPixelFormatBC1_RGBA_sRGB;
                 case RHI::Format::BC3_UNORM: return MTLPixelFormatBC3_RGBA;
                 case RHI::Format::BC3_UNORM_SRGB: return MTLPixelFormatBC3_RGBA_sRGB;
+                case RHI::Format::BC5_UNORM: return MTLPixelFormatBC5_RGUnorm;
                 default: break;
                 }
             }

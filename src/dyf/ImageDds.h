@@ -22,11 +22,13 @@ namespace dyf::Detail
 struct ImageDdsData
 {
     RHI::Format format = RHI::Format::Unknown;
+    bool normalMap = false;
     std::vector<std::vector<uint8_t>> mips;
 };
 
 struct ImageDdsAccess
 {
+    static const void* Identity(const Image& image) { return image.m_pixels.get(); }
     static const ImageDdsData* Get(const Image& image) { return image.m_dds.get(); }
     static void Set(Image& image, std::shared_ptr<const ImageDdsData> data)
     { image.m_dds = std::move(data); }

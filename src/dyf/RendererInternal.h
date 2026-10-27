@@ -88,10 +88,18 @@ struct Renderer::Impl
     RendererConfig liveAppliedConfig;
     bool SupportsBindlessMaterials() const;
 
+    struct ShadowCasterVolume
+    {
+        std::array<std::array<double,4>,18> planes={};
+        uint32_t count=0;
+        void Build(const Camera&,float nearPlane,float farPlane,Math::float3 toLight,double padding);
+        bool Outside(const Math::Bounds3&,const std::array<double,3>& magnitude) const;
+    };
     // 프레임별 광원 행렬과 아틀라스 배치를 CPU에서 계산한 결과다. viewCount는 실제 그림자 뷰 수이며 GPU 완료 건수가 아니다.
     struct ShadowData
     {
         RendererShadowConstants constants={};
+        std::array<ShadowCasterVolume,128> casterVolumes={};
         uint32_t viewCount=0,columns=1,rows=1,resolution=1;
         float directionalDistance=0;
     };
@@ -143,11 +151,23 @@ struct Renderer::Impl
     };
     struct ShadowCaster
     {
-        uint32_t entity=0,mesh=0,material=0,batch=0;
+        uint32_t entity=0,mesh=0,material=0,batch=0,coverageFlags=0;
         bool mirrored=false,compact=false,arena=false,sortSafe=false;
         RHI::PipelineHandle pipeline=nullptr;
         RHI::ResourceSetHandle set=nullptr;
         ShadowBounds worldBounds;
+    };
+    struct ShadowInstanceData
+    {
+        struct Draw {uint32_t caster,first,count;double depth;};
+        struct View {uint32_t first=0,count=0;};
+        using Key=std::tuple<uint32_t,uintptr_t,uintptr_t,uint32_t,uint32_t,uint32_t>;
+        std::vector<Draw> draws;
+        std::vector<View> views;
+        std::vector<uint32_t> entities,visible,order;
+        std::vector<Math::float4x4> matrices;
+        std::vector<Key> keys;
+        bool Build(const Scene&,const ShadowData&,const std::vector<ShadowCaster>&,bool cull);
     };
     // 파이프라인과 전체 바인딩을 키로 자원 세트를 재사용한다. 해시는 후보 검색용이고 unusedFrames는 캐시에서 제거할 시기를 정한다.
     struct CachedSet { RHI::ResourceSetHandle set=nullptr; uint32_t unusedFrames=0; size_t keyHash=0; };
@@ -167,6 +187,7 @@ struct Renderer::Impl
         RHI::TextureHandle texture=nullptr;
         RHI::ResourceState state=RHI::ResourceState::Undefined;
         bool used=false;
+        bool nativeNormal=false;
     };
     // Canvas 이미지의 텍스처·자원 세트와 프레임 사용 이력을 묶는다. CanvasVertexSlot은 정점 버퍼의 용량 재사용을 위한 별도 저장소다.
     struct CanvasImageSlot
@@ -278,7 +299,8 @@ struct Renderer::Impl
     static Math::float4 LodColor(uint32_t level);
     bool CreateMaterialResourceSets(const Scene&,RHI::ICommandList&,const std::vector<RendererDrawDesc>*,std::vector<RHI::ResourceSetHandle>&);
     bool PrepareMainPassResources(const Scene&,RHI::ICommandList&,const std::vector<RendererDrawDesc>*);
-    bool PrepareShadowPassResources(const Scene&,const std::vector<RendererDrawDesc>*);
+    bool PrepareShadowPassResources(const Scene&,const ShadowData&,RHI::ICommandList&,
+        const std::vector<RendererDrawDesc>*);
     bool RecordShadowPass(const Scene&,const Camera&,const ShadowData&,RHI::ICommandList&,
         const std::vector<RendererDrawDesc>*);
     bool RecordMainPass(const Scene&,const Camera&,RHI::ICommandList&,
@@ -287,7 +309,7 @@ struct Renderer::Impl
     void ReleaseGeometry(RHI::IDevice*);
     bool SyncTextures(const Scene&,RHI::IDevice*);
     void ReleaseTextures(RHI::IDevice*);
-    RHI::TextureHandle ResolveTexture(const Image&) const;
+    RHI::TextureHandle ResolveTexture(const Image&,bool normal=false) const;
     bool InitializeCanvas(RHI::Format);
     bool PrepareCanvas(const Canvas&,RHI::ICommandList&,RHI::TextureHandle,CanvasRecording&);
     bool RecordCanvas(const Canvas&,RHI::ICommandList&,RHI::TextureHandle,bool overlay,bool graphManagedTarget = false,
@@ -385,6 +407,10 @@ struct Renderer::Impl
     std::vector<uint32_t> shadowViewScratch;
     std::vector<double> shadowBatchDepthScratch;
     bool shadowBatchSortReported=false;
+    ShadowInstanceData shadowInstances;
+    std::vector<Math::float4x4> shadowInstanceBytes;
+    RHI::BufferHandle shadowInstanceBuffer=nullptr;
+    bool shadowInstanceReady=false,shadowInstancesActive=false;
     ShadowAtlasCache shadowAtlasCache;
     std::array<float,4> shadowCascadeRadii={};
     float shadowCascadeNear=0,shadowCascadeFar=0,shadowCascadeAspect=0;
@@ -407,7 +433,7 @@ struct Renderer::Impl
     bool lodDebugActive=false,wireframeActive=false;
     std::vector<TextureSlot> m_textures;
     std::vector<uint32_t> m_freeTextureSlots;
-    std::map<std::pair<const uint8_t*,ColorSpace>,uint32_t> m_indices;
+    std::map<std::tuple<const void*,ColorSpace,bool>,uint32_t> m_indices;
     std::vector<SceneMaterialState> materialStates;
     // 확장 모듈이 환경/지역광을 공급하지 않을 때 사용할 기본 자원이다. extensions는 등록 순서를 유지하며 Impl이 단독 소유한다.
     std::unique_ptr<BasicEnvironmentResources> basicEnvironment;

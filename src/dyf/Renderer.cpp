@@ -374,6 +374,11 @@ void Renderer::Impl::SwapResources(Impl& other)
     swap(shadowBindingScratch,other.shadowBindingScratch);
     swap(shadowCasterScratch,other.shadowCasterScratch);
     swap(shadowViewScratch,other.shadowViewScratch);
+    swap(shadowInstances,other.shadowInstances);
+    swap(shadowInstanceBytes,other.shadowInstanceBytes);
+    swap(shadowInstanceBuffer,other.shadowInstanceBuffer);
+    swap(shadowInstanceReady,other.shadowInstanceReady);
+    swap(shadowInstancesActive,other.shadowInstancesActive);
 
 }
 
@@ -682,7 +687,7 @@ void Renderer::Impl::Shutdown()
     // 이하 반복문은 생성된 비어 있지 않은 핸들만 타입에 맞는 Destroy 함수로 정리한다. Scene 원본 소유권을 삭제하는 작업은 아니다.
     for(auto* texture:{depthStencilTarget,shadowDepthTarget,hdrTarget})if(texture)device->DestroyTexture(texture); // 메인 깊이·그림자 깊이·HDR 중간 출력 중 실제 생성된 텍스처만 해제한다.
     for(auto* texture:defaultMaterialTextures)if(texture)device->DestroyTexture(texture); // 생성된 기본 대체 텍스처만 해제한다.
-    for(auto* buffer:{lightingBuffer,shadowMatrixBuffer,instanceBuffer,materialIndexBuffer,cpuInstanceBuffer})if(buffer)device->DestroyBuffer(buffer); // 존재하는 프레임 상수/인스턴스/재질 인덱스 버퍼만 해제한다.
+    for(auto* buffer:{lightingBuffer,shadowMatrixBuffer,instanceBuffer,materialIndexBuffer,cpuInstanceBuffer,shadowInstanceBuffer})if(buffer)device->DestroyBuffer(buffer); // 존재하는 프레임 상수/인스턴스/재질 인덱스 버퍼만 해제한다.
     for(auto* value:{pipeline,shadowPipeline,canvasPipeline,tonePipeline})if(value)device->DestroyPipeline(value); // 생성된 메인·그림자·Canvas·톤 매핑 파이프라인만 해제한다.
     for(auto* value:materialPipelines)if(value)device->DestroyPipeline(value); // 생성된 재질 변형 파이프라인만 해제한다.
     for(auto* value:depthPrepassPipelines)if(value)device->DestroyPipeline(value);

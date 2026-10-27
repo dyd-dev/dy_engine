@@ -19,6 +19,7 @@
 #define RENDERER_TEXTURE_FLAG_OCCLUSION 8
 #define RENDERER_TEXTURE_FLAG_EMISSIVE 16
 #define RENDERER_TEXTURE_FLAG_RECEIVE_SHADOW 32
+#define RENDERER_TEXTURE_FLAG_BC5_NORMAL 256
 
 #ifndef RENDERER_ENABLE_SHADOWS // 그림자 사용 여부를 파이프라인이 명시하지 않았으면 컴파일 오류를 내어 자원 배치 불일치를 막는다.
 #error RENDERER_ENABLE_SHADOWS must be defined
@@ -270,6 +271,8 @@ float3 GetNormal(PSInput input, uint textureFlags)
     // GLSL·Metal은 T/B/N을 열로 놓고 행렬×법선을 계산한다. HLSL은 생성자의 행으로 놓은 뒤 법선×행렬을 계산하여 같은 월드 방향을 얻는다.
     float3x3 tbn = float3x3(tangent, bitangent, normal);
     float3 tangentNormal = SampleMaterial(2u,input.uv).xyz * 2.0 - 1.0;
+    if((textureFlags & RENDERER_TEXTURE_FLAG_BC5_NORMAL)!=0u)
+        tangentNormal.z=sqrt(max(0.0f,1.0f-dot(tangentNormal.xy,tangentNormal.xy)));
     tangentNormal.xy *= normalScale;
     if((padding1 & 8u)!=0u) tangentNormal.y=-tangentNormal.y; // 법선 맵의 Y 방향이 반대인 재질이면 접선 공간 Y 성분만 뒤집는다.
     return normalize(mul(tangentNormal, tbn));

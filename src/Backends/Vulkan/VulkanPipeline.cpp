@@ -2,7 +2,6 @@
 
 #include "VulkanResources.h"
 #include "VulkanValidation.h"
-#include "VulkanShaderCompat.h"
 
 #include <algorithm>
 #include <array>
@@ -265,28 +264,6 @@ namespace dyf::Backends
 		}
 	}
 
-    VkRenderPass CreateVulkanLegacyRenderPass(VkDevice device,
-        const VkAttachmentDescription* attachments,uint32_t colorCount,bool hasDepth)
-    {
-        std::vector<VkAttachmentReference> colors(colorCount);
-        for(uint32_t i=0;i<colorCount;++i)colors[i]={i,attachments[i].initialLayout};
-        VkAttachmentReference depth{};
-        if(hasDepth)depth={colorCount,attachments[colorCount].initialLayout};
-        VkSubpassDescription subpass{};
-        subpass.pipelineBindPoint=VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount=colorCount;
-        subpass.pColorAttachments=colors.data();
-        subpass.pDepthStencilAttachment=hasDepth?&depth:nullptr;
-        VkRenderPassCreateInfo info{};
-        info.sType=VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        info.attachmentCount=colorCount+(hasDepth?1u:0u);
-        info.pAttachments=attachments;
-        info.subpassCount=1;
-        info.pSubpasses=&subpass;
-        VkRenderPass renderPass=VK_NULL_HANDLE;
-        return vkCreateRenderPass(device,&info,nullptr,&renderPass)==VK_SUCCESS?renderPass:VK_NULL_HANDLE;
-    }
-
 	VulkanShader::VulkanShader(const VulkanContext& context, const dyf::RHI::ShaderDesc& desc)
 		: dyf::RHI::Shader(desc)
 		, m_device(context.device)
@@ -304,11 +281,6 @@ namespace dyf::Backends
 		// uint32_t alignment requirement on callers or embedded byte arrays.
 		std::vector<uint32_t> words(desc.binarySize / sizeof(uint32_t));
 		std::memcpy(words.data(), desc.binary, desc.binarySize);
-        const uint32_t maxSpirv=context.apiVersion>=VK_API_VERSION_1_3?0x00010600u:
-            context.apiVersion>=VK_API_VERSION_1_2?0x00010500u:
-            context.apiVersion>=VK_API_VERSION_1_1?0x00010300u:0x00010000u;
-        if(words.size()<5 || words[0]!=0x07230203u || words[1]>maxSpirv)
-            throw std::runtime_error("Shader SPIR-V version exceeds the selected Vulkan API version");
 		info.pCode = words.data();
 		if (vkCreateShaderModule(m_device, &info, nullptr, &m_module) != VK_SUCCESS)
 		{
@@ -331,7 +303,7 @@ namespace dyf::Backends
 		{
 			CreateDescriptorLayouts(context, desc.layout);
 			CreatePipelineLayout(desc.layout);
-			CreatePipeline(context,desc);
+			CreatePipeline(desc);
 		}
 		catch (...)
 		{
@@ -469,7 +441,7 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& context, const dyf::RHI::Mes
 		}
 	}
 
-	void VulkanPipeline::CreatePipeline(const VulkanContext& context,const dyf::RHI::GraphicsPipelineDesc& desc)
+	void VulkanPipeline::CreatePipeline(const dyf::RHI::GraphicsPipelineDesc& desc)
 	{
 		if ((desc.vertexBufferCount > 0 && desc.vertexBuffers == nullptr) ||
 			(desc.vertexAttributeCount > 0 && desc.vertexAttributes == nullptr) ||
@@ -659,7 +631,7 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& context, const dyf::RHI::Mes
 
 		VkGraphicsPipelineCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-		info.pNext = context.modernRendering?&rendering:nullptr;
+		info.pNext = &rendering;
 		info.stageCount = shaderStageCount;
 		info.pStages = shaderStages.data();
 		info.pVertexInputState = &vertexInput;
@@ -673,46 +645,6 @@ VulkanPipeline::VulkanPipeline(const VulkanContext& context, const dyf::RHI::Mes
 		info.pDynamicState = &dynamicState;
 		info.layout = m_pipelineLayout;
 		info.renderPass = VK_NULL_HANDLE;
-        struct TemporaryObjects {
-            VkDevice device;
-            VkRenderPass renderPass=VK_NULL_HANDLE;
-            VkShaderModule shader=VK_NULL_HANDLE;
-            ~TemporaryObjects() {
-                if(shader)vkDestroyShaderModule(device,shader,nullptr);
-                if(renderPass)vkDestroyRenderPass(device,renderPass,nullptr);
-            }
-        } temporary{m_device};
-        if(!context.modernRendering)
-        {
-            const bool hasDepth=depthFormat!=VK_FORMAT_UNDEFINED;
-            std::vector<VkAttachmentDescription> attachments(colorFormats.size()+(hasDepth?1u:0u));
-            for(size_t i=0;i<attachments.size();++i)
-            {
-                auto& attachment=attachments[i];
-                attachment.format=i<colorFormats.size()?colorFormats[i]:depthFormat;
-                attachment.samples=VK_SAMPLE_COUNT_1_BIT;
-                attachment.loadOp=attachment.stencilLoadOp=VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-                attachment.storeOp=attachment.stencilStoreOp=VK_ATTACHMENT_STORE_OP_DONT_CARE;
-                attachment.initialLayout=attachment.finalLayout=i<colorFormats.size()?
-                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-            }
-            temporary.renderPass=CreateVulkanLegacyRenderPass(m_device,attachments.data(),
-                static_cast<uint32_t>(colorFormats.size()),hasDepth);
-            if(!temporary.renderPass)throw std::runtime_error("Failed to create compatible Vulkan render pass");
-            info.renderPass=temporary.renderPass;
-        }
-        if(!context.negativeViewportSupported)
-        {
-            const auto* finalVertexShader=domainShader?domainShader:vertexShader;
-            const auto words=VulkanFlipPositionY(*finalVertexShader);
-            VkShaderModuleCreateInfo module{};
-            module.sType=VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-            module.codeSize=words.size()*sizeof(uint32_t);
-            module.pCode=words.data();
-            if(vkCreateShaderModule(m_device,&module,nullptr,&temporary.shader)!=VK_SUCCESS)
-                throw std::runtime_error("Failed to create positive-viewport Vulkan shader");
-            shaderStages[domainShader?2u:0u].module=temporary.shader;
-        }
 		if (vkCreateGraphicsPipelines(m_device, VK_NULL_HANDLE, 1, &info, nullptr, &m_pipeline) != VK_SUCCESS)
 		{
 			throw std::runtime_error("Failed to create Vulkan graphics pipeline");

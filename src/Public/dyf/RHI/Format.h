@@ -25,7 +25,8 @@ namespace dyf::RHI
         BC1_UNORM_SRGB,
         BC3_UNORM,
         BC3_UNORM_SRGB,
-        R16_FLOAT
+        R16_FLOAT,
+        BC5_UNORM
 	};
 
 	[[nodiscard]] inline constexpr bool HasStencil(Format format)
@@ -43,13 +44,13 @@ namespace dyf::RHI
     [[nodiscard]] inline constexpr bool IsBlockCompressed(Format format)
     {
         return format == Format::BC1_UNORM || format == Format::BC1_UNORM_SRGB ||
-            format == Format::BC3_UNORM || format == Format::BC3_UNORM_SRGB;
+            format == Format::BC3_UNORM || format == Format::BC3_UNORM_SRGB || format == Format::BC5_UNORM;
     }
 
     [[nodiscard]] inline constexpr uint32_t CompressedBlockBytes(Format format)
     {
         return format == Format::BC1_UNORM || format == Format::BC1_UNORM_SRGB ? 8u :
-            format == Format::BC3_UNORM || format == Format::BC3_UNORM_SRGB ? 16u : 0u;
+            format == Format::BC3_UNORM || format == Format::BC3_UNORM_SRGB || format == Format::BC5_UNORM ? 16u : 0u;
     }
 
 }

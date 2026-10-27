@@ -1,6 +1,7 @@
 #include "../Platform/Profiler/CollectorInternal.h"
 #include "dyf/Image.h"
 #include "RendererInternal.h"
+#include "ImageDds.h"
 #include "dyf/Platform/Profiler.h"
 #include "dyf/Canvas.h"
 
@@ -105,7 +106,7 @@ bool Renderer::Impl::PrepareCanvas(const Canvas& canvas,RHI::ICommandList& comma
     const auto resolve=[&](const Image& image)->uint32_t {
         for(uint32_t i=0;i<canvasImages.size();++i) {
             auto& cached=canvasImages[i];
-            if((config.enableCanvasImageCache||cached.used) && cached.source.GetPixels().data()==image.GetPixels().data() && // 캐시 허용 또는 이번 프레임 내 재사용이고 이미지 정체성이 같으면 기존 슬롯을 쓴다.
+            if((config.enableCanvasImageCache||cached.used) && Detail::ImageDdsAccess::Identity(cached.source)==Detail::ImageDdsAccess::Identity(image) && // 캐시 허용 또는 이번 프레임 내 재사용이고 이미지 정체성이 같으면 기존 슬롯을 쓴다.
                 cached.source.GetColorSpace()==image.GetColorSpace() &&
                 cached.source.GetWidth()==image.GetWidth() && cached.source.GetHeight()==image.GetHeight()) {
                 cached.used=true;return i;

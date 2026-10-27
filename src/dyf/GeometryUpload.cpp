@@ -79,13 +79,18 @@ bool Renderer::Impl::BuildCompactShadowGeometry(const std::vector<RendererVertex
         {
             mapped=static_cast<uint32_t>(shadowVertices.size());
             shadowVertices.emplace_back();
-            // Preserve the existing compact vertex bits, triangle and corner order.
+            // Preserve compact vertex bits and each triangle's corner order.
             std::memcpy(&shadowVertices.back().px,&vertices[index].px,3*sizeof(float));
             std::memcpy(&shadowVertices.back().u,&vertices[index].u,2*sizeof(float));
             shadowVertices.back().alpha=vertices[index].ca;
         }
         index=mapped;
     }
+    // Depth-only stock shadows keep each triangle's corner bits while reusing transformed vertices.
+    meshopt_optimizeVertexCache(shadowIndices.data(),shadowIndices.data(),shadowIndices.size(),shadowVertices.size());
+    const size_t compactCount=meshopt_optimizeVertexFetch(shadowVertices.data(),shadowIndices.data(),shadowIndices.size(),
+        shadowVertices.data(),shadowVertices.size(),sizeof(CompactShadowVertex));
+    shadowVertices.resize(compactCount);
     return true;
 }
 

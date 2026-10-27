@@ -409,6 +409,33 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             }
             if(frameOpaqueDepthComplete && !noAreaDepthPrepassPipelines[0])frameNoAreaLights=false;
         }
+        // Mirror FrameBuffers: retain the previous allocation/bytes until the list containing this upload is submitted.
+        struct ShadowInstanceFrame
+        {
+            Impl& r;
+            RHI::BufferHandle previous;
+            bool previousReady,committed=false;
+            explicit ShadowInstanceFrame(Impl& owner):r(owner),previous(r.shadowInstanceBuffer),previousReady(r.shadowInstanceReady) {}
+            ~ShadowInstanceFrame()
+            {
+                if(committed) {if(r.shadowInstanceBuffer!=previous)r.device->DestroyBuffer(previous);}
+                else
+                {
+                    if(r.shadowInstanceBuffer!=previous)r.device->DestroyBuffer(r.shadowInstanceBuffer);
+                    r.shadowInstanceBuffer=previous;r.shadowInstanceReady=previousReady;r.shadowInstancesActive=false;
+                }
+            }
+            void Commit()
+            {
+                if(r.shadowInstancesActive)
+                {
+                    r.shadowInstanceReady=true;
+                    r.shadowInstanceBytes.swap(r.shadowInstances.matrices);
+                }
+                committed=true;
+            }
+        } shadowInstanceFrame(*this);
+        shadowInstancesActive=false;
         struct FrameCommands
         {
             RHI::IDevice& device;
@@ -424,7 +451,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         // All registry/cache changes finish on the owner before worker snapshots.
         // Their upload commands execute before the graph in the same submission.
         if(!PrepareMainPassResources(scene,*frame.preparation,draws) ||
-            (drawShadows && !PrepareShadowPassResources(scene,draws)) ||
+            (drawShadows && !PrepareShadowPassResources(scene,shadows,*frame.preparation,draws)) ||
             (toneMap && !PrepareToneMap(renderFrame.color.texture)) ||
             (overlay && !PrepareCanvas(*overlay,*frame.preparation,overlayTarget,preparedCanvases[0])) ||
             (profilerOverlay && !PrepareCanvas(*profilerOverlay,*frame.preparation,overlayTarget,preparedCanvases[1])))
@@ -478,6 +505,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             static_cast<uint32_t>(frame.lists.size()), nullptr, 0}, completion);
         timing.cpuSubmitMilliseconds+=submitTimer.ElapsedMilliseconds();
         if(drawn) { // draw 제출에 성공했을 때만 이력·통계·쿼리 소유권을 확정한다.
+            shadowInstanceFrame.Commit();
             if(frameNoAreaLights && recordingStatistics.mainDrawCount && !noAreaReported)
             {
                 std::fputs("[Renderer] Main area-light-free shader active: uploaded Rect/Disc counts are zero; no graph lighting writes or global barriers.\n",stderr);

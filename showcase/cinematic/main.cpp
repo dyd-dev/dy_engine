@@ -271,6 +271,7 @@ int main(int argc, char** argv)
         uint32_t framesInFlight = 2;
         unsigned requestedComparisonMode = UINT32_MAX;
         std::string benchmarkOutput;
+        std::string benchmarkCaptureDirectory;
         const auto benchmarkCount = [](const char* value) {
             uint32_t count = 0;
             const auto end = value + std::char_traits<char>::length(value);
@@ -323,6 +324,7 @@ int main(int argc, char** argv)
                 "  --benchmark-step N       Scene seconds per measured submission (default 0 = frozen); warm-up stays at --start\n"
                 "                          Pose k uses min(tour duration, start + k*step), independent of render speed/retries\n"
                 "  --benchmark-output FILE  New CSV: wall/statistics per frame, CPU/GPU profiler windows separately\n"
+                "  --benchmark-capture-dir DIR  Write first/middle/last measured frames as PPM; use a separate quality run\n"
                 "                          Benchmark hides HUD; mobile keeps VSync. Selected profile quality is preserved\n"
                 "  --benchmark-cpu-zones    Optional CPU Shadow/MainForward/native replay/submit diagnostics (requires tracing)\n"
                 "  --profile MODE           auto (default), desktop, mobile; mobile uses 720p/512px textures\n"
@@ -378,6 +380,8 @@ int main(int argc, char** argv)
             }
             else if(argument == "--benchmark-output" && i + 1 < argc)
             { benchmarkRequested = true; benchmarkOutput = argv[++i]; }
+            else if(argument == "--benchmark-capture-dir" && i + 1 < argc)
+            { benchmarkRequested = true; benchmarkCaptureDirectory = argv[++i]; }
             else if(argument == "--benchmark-cpu-zones")
             { benchmarkRequested = true; benchmarkCpuZones = true; }
             else if(argument == "--recording-workers" && i + 1 < argc)
@@ -882,6 +886,7 @@ int main(int argc, char** argv)
 #endif
         if(!window.GetHandle()) return 1;
         RendererConfig config;
+        config.allowReadback=!benchmarkCaptureDirectory.empty();
         config.renderWidth = renderWidth;
         config.renderHeight = renderHeight;
         config.clearColor = {.10f, .15f, .22f, 1};
@@ -931,6 +936,8 @@ int main(int argc, char** argv)
         }
         // Preserve the authored sun/sky radiance; meter exposure in the HDR graph.
         config.advanced.autoExposure = emerald;
+        // Quality captures compare the same exposure target without wall-clock adaptation drift.
+        if(!benchmarkCaptureDirectory.empty())config.advanced.exposureAdaptationSpeed=1000000;
         // The room probe supplies reflected diffuse illumination without noisy
         // screen-space emitter samples or a second copy of that same bounce.
         if(bistroInterior) config.advanced.diffuseGI = false;
@@ -1091,6 +1098,15 @@ int main(int argc, char** argv)
             "F5 baseline OFF (CPU for deformation) | F6 candidate ON (GPU compute) at saved view | F7 clear comparison\n"
             "Preparing first frame: uploading scene textures and meshes...\n", stderr);
 
+        const auto releaseCpuImageCache=[&] {
+            uint64_t released=0;
+            for(const auto& material:scene.Materials())
+                for(const Image* image:{&material.baseColorTexture,&material.metallicRoughnessTexture,
+                    &material.normalTexture,&material.occlusionTexture,&material.emissiveTexture})
+                    released+=image->ReleaseDecodedPixels();
+            std::fprintf(stderr,"[Showcase] Released decoded DDS cache after upload: %llu bytes; original blocks retained.\n",
+                static_cast<unsigned long long>(released));
+        };
         if(benchmarkRequested)
         {
             const double benchmarkStartTime = tourTime;
@@ -1158,8 +1174,11 @@ int main(int argc, char** argv)
                 trace.received = false;
                 trace.diagnosticSubmission = submitted >= benchmarkWarmup ? static_cast<uint32_t>(measured.size()+1) : 0;
                 Platform::CpuTimer renderTimer;
-                if(actor.Loaded()) { if(!modelRenderer->Render(scene,camera)) return 1; }
-                else if(!renderer->Render(scene,camera)) return 1;
+                const bool capture=!benchmarkCaptureDirectory.empty() && submitted>=benchmarkWarmup &&
+                    (measured.empty() || measured.size()==benchmarkFrames/2 || measured.size()+1==benchmarkFrames);
+                Image captured;
+                if(actor.Loaded()) { if(!modelRenderer->Render(scene,camera,capture?&captured:nullptr)) return 1; }
+                else if(!renderer->Render(scene,camera,capture?&captured:nullptr)) return 1;
                 BenchmarkFrame frame;
                 frame.renderWall = renderTimer.ElapsedMilliseconds();
                 frame.wall = frameTimer.ElapsedMilliseconds();
@@ -1167,6 +1186,7 @@ int main(int argc, char** argv)
                 const auto completion = renderer->GetLastRenderCompletion();
                 if(!completion || completion == previous) { waitForEvents(.001); continue; }
                 ++submitted;
+                if(submitted==1)releaseCpuImageCache();
                 if(submitted <= benchmarkWarmup)
                 {
                     if(submitted == benchmarkWarmup)
@@ -1188,6 +1208,18 @@ int main(int argc, char** argv)
                 frame.hasCpu = trace.received;
                 frame.statistics = renderer->GetLastRenderStatistics();
                 measured.push_back(frame);
+                if(capture)
+                {
+                    if(!captured.IsValid())throw std::runtime_error("Benchmark image capture failed.");
+                    std::filesystem::create_directories(benchmarkCaptureDirectory);
+                    const auto path=std::filesystem::path(benchmarkCaptureDirectory)/("frame-"+std::to_string(measured.size())+".ppm");
+                    if(std::filesystem::exists(path))throw std::runtime_error("Benchmark image already exists: "+path.string());
+                    std::ofstream image(path,std::ios::binary);
+                    image<<"P6\n"<<captured.GetWidth()<<' '<<captured.GetHeight()<<"\n255\n";
+                    const auto& pixels=captured.GetPixels();
+                    for(size_t i=0;i<pixels.size();i+=4)image.write(reinterpret_cast<const char*>(pixels.data()+i),3);
+                    if(!image)throw std::runtime_error("Benchmark image write failed.");
+                }
                 const auto& timing = renderer->GetProfilerTimingSnapshot();
                 if(timing.sequence != lastSequence)
                 {
@@ -1859,6 +1891,7 @@ int main(int argc, char** argv)
             if(!ready && completion)
             {
                 ready = true;
+                releaseCpuImageCache();
                 clock.Reset();
                 std::fputs("First frame submitted.\n", stderr);
             }

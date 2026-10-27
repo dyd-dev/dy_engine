@@ -1,7 +1,6 @@
 #pragma once
 
 #include "dyf/RHI/IDevice.h"
-#include "dyf/RHI/Format.h"
 
 #include <memory>
 
@@ -15,18 +14,6 @@ namespace dyf::Backends
 		VulkanDevice();
 		~VulkanDevice() override;
 
-	protected:
-        bool SupportsLinearFiltering(RHI::Format) const noexcept;
-        bool SupportsDdsCompression(RHI::Format) const noexcept;
-        bool SupportsFormatNative(RHI::Format format,RHI::FormatFeature feature) const noexcept override
-        {
-            switch(feature)
-            {
-            case RHI::FormatFeature::LinearFiltering: return SupportsLinearFiltering(format);
-            case RHI::FormatFeature::CompressedSampling: return SupportsDdsCompression(format);
-            }
-            return false;
-        }
 		void DestroySwapchainNative() override;
         bool WaitIdleNative() override;
         bool IsLostNative() const override;
@@ -73,17 +60,29 @@ namespace dyf::Backends
 			uint32_t rowPitch,
 			uint32_t slicePitch) override;
 
+	protected:
+        bool SupportsLinearFiltering(RHI::Format) const noexcept;
+        bool SupportsDdsCompression(RHI::Format) const noexcept;
+        bool SupportsFormatNative(RHI::Format format,RHI::FormatFeature feature) const noexcept override
+        {
+            switch(feature)
+            {
+            case RHI::FormatFeature::LinearFiltering: return SupportsLinearFiltering(format);
+            case RHI::FormatFeature::CompressedSampling: return SupportsDdsCompression(format);
+            }
+            return false;
+        }
         RHI::UploadMemoryStatistics GetUploadMemoryStatisticsNative() const override;
         bool SetUploadMemoryPolicyNative(bool,bool) override;
 		int Initialize(const void* windowHandle, const dyf::RHI::DeviceDesc& desc) override;
 
+	private:
         RHI::TimestampQueryHandle CreateTimestampQueryNative(const RHI::TimestampQueryDesc&) override;
         void DestroyTimestampQueryNative(RHI::TimestampQueryHandle) override;
         bool ReadTimestampsNative(RHI::TimestampQueryHandle,uint32_t,uint32_t,uint64_t*) override;
         double GetTimestampPeriodNative() const override;
         uint32_t GetTimestampValidBitsNative() const override;
         bool GetTimestampCalibrationNative(RHI::TimestampCalibration&) const override;
-	private:
 		std::unique_ptr<Impl> m_impl;
 	};
 }

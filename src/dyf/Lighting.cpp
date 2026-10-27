@@ -1,4 +1,5 @@
 #include "RendererInternal.h"
+#include "ImageDds.h"
 #include "ShaderLayout.h"
 #include "dyf/Scene.h"
 #include "dyf/Camera.h"
@@ -288,6 +289,9 @@ bool Renderer::Impl::ReuseShadowAtlas(const Scene& scene,const ShadowData& shado
     for(uint32_t i=0;i<shadows.viewCount;++i)
     {
         append(shadows.constants.lightViewProjectionMatrix[i].m);
+        append(shadows.casterVolumes[i].count);
+        for(uint32_t plane=0;plane<shadows.casterVolumes[i].count;++plane)
+            append(shadows.casterVolumes[i].planes[plane]);
         const auto& rect=shadows.constants.atlasRect[i];
         append(rect.x);append(rect.y);append(rect.z);append(rect.w);
     }
@@ -364,8 +368,8 @@ bool Renderer::Impl::ReuseShadowAtlas(const Scene& scene,const ShadowData& shado
         // 알파 마스크·양면 여부와 기본색 텍스처는 깊이에서 살아남는 픽셀을 바꾸므로 일반 색상과 달리 캐시 키에 포함한다.
         append(material.baseColor.w);append(material.alphaCutoff);append(material.doubleSided);
         append(reinterpret_cast<uintptr_t>(materialStates[ToIndex(materialId)].textures[0]));
-        // TextureCache가 프레임 사이에 보존하는 불변 원본 픽셀의 정체성·크기·색 공간도 저장해 네이티브 핸들 주소 재사용을 같은 텍스처로 오인하지 않게 한다.
-        append(reinterpret_cast<uintptr_t>(material.baseColorTexture.GetPixels().data()));
+        // 캐시 회수와 무관한 이미지 저장소 정체성·크기·색 공간으로 네이티브 핸들 주소 재사용을 구분한다.
+        append(reinterpret_cast<uintptr_t>(Detail::ImageDdsAccess::Identity(material.baseColorTexture)));
         append(material.baseColorTexture.GetWidth());append(material.baseColorTexture.GetHeight());
         append(material.baseColorTexture.GetColorSpace());
     }
@@ -403,7 +407,7 @@ void Renderer::Impl::BuildShadows(ShadowData& state,const Scene& scene,const Cam
     const uint32_t cascadeCount=quality==ShadowQuality::Low?1:4;
     auto& constants=state.constants;auto& viewCount=state.viewCount;auto& columns=state.columns;auto& rows=state.rows;
     // 재사용되는 출력 구조체를 먼저 0/최소값으로 초기화한다. 아래에서 조기 반환해도 이전 프레임 그림자 선택이 남지 않는다.
-    constants={};viewCount=0;columns=rows=state.resolution=1;state.directionalDistance=0;
+    constants={};state.casterVolumes={};viewCount=0;columns=rows=state.resolution=1;state.directionalDistance=0;
     constants.cameraView=camera.view;
     // 차폐 탐색 샘플 수·필터 샘플 수·품질별 기본 필터 배율을 기록한다. filterParams.w의 카메라 near는 아래에서 카메라 구간이 유효할 때 채운다.
     constants.filterParams={static_cast<float>(config.lighting.shadowBlockerSamples),
@@ -554,8 +558,16 @@ void Renderer::Impl::BuildShadows(ShadowData& state,const Scene& scene,const Cam
                 const float radius=std::sqrt(halfDepth*halfDepth+halfWidth*halfWidth+halfHeight*halfHeight);
                 // 반경을 1/16 단위로 올림하고 이력 안에서는 줄이지 않아 격자 수축에 따른 그림자 떨림을 막으며, 구조가 바뀌면 앞에서 이력을 초기화한다.
                 shadowCascadeRadii[c]=std::max(shadowCascadeRadii[c],std::ceil(radius*16)/16);
-                constants.lightViewProjectionMatrix[viewCount++]=
+                const uint32_t view=viewCount++;
+                constants.lightViewProjectionMatrix[view]=
                     ComputeStableCascadeViewProj(light.direction,center,shadowCascadeRadii[c],bounds,state.resolution);
+                if(stockDrawInputs && UsesStockGeometry() && config.enableFrustumCulling)
+                {
+                    const double filterRadius=std::max(double(config.lighting.shadowMaxFilterRadius),
+                        double(constants.filterParams.z)+1)+2;
+                    const double padding=2*double(shadowCascadeRadii[c])*filterRadius/state.resolution;
+                    state.casterVolumes[view].Build(camera,sliceNear,sliceFar,light.direction,padding);
+                }
             }
             state.directionalDistance=farPlane;
         }

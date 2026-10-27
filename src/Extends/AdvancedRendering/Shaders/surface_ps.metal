@@ -26,6 +26,7 @@ fragment SurfaceTargets surfaceFragment(SurfaceOutput input [[stage_in]],bool fr
         float3 t=normalize(input.worldTangent.xyz-n*dot(n,input.worldTangent.xyz));
         float3 b=cross(n,t)*input.worldTangent.w;
         float3 mapped=normalTexture.sample(materialSampler,input.uv).xyz*2.0f-1.0f;
+        if((flags&256u)!=0u)mapped.z=sqrt(max(0.0f,1.0f-dot(mapped.xy,mapped.xy)));
         mapped.xy*=draw.materialParams.z;mapped.y*=draw.alpha.y<0?-1.0f:1.0f;n=normalize(t*mapped.x+b*mapped.y+n*mapped.z);
     }
     float2 mr=draw.materialParams.xy;
