@@ -948,9 +948,9 @@ int main(int argc, char** argv)
         if(cpuCulling) config.enableGpuCulling = config.enableOcclusionCulling = false;
         config.recordingThreadCount = recordingWorkers;
         config.texturePreparationThreadCount = profile.Workers();
-        // Match Arena: desktop presentation is unpaced in normal and benchmark
-        // runs. Mobile and UIKit retain FIFO, including desktop-quality runs.
-        config.vsync = profile.mobile || window.GetNativeHandle().kind == Platform::NativeWindowKind::UIKit;
+        // Preserve FIFO for normal runs; some Wayland drivers do not support Immediate.
+        // Only desktop benchmarks request unpaced presentation.
+        config.vsync = !benchmarkRequested || profile.mobile || window.GetNativeHandle().kind == Platform::NativeWindowKind::UIKit;
         // The sink and its callback context outlive renderer/device worker shutdown,
         // including exception paths. Tracy above also outlives this temporary adapter.
         std::unique_ptr<BenchmarkTrace> benchmarkTrace;
