@@ -197,9 +197,9 @@ bool Renderer::Impl::ShadowCasterVolume::Outside(const Math::Bounds3& bounds,con
 }
 
 bool Renderer::Impl::ShadowInstanceData::Build(const Scene& scene,const ShadowData& shadows,
-    const std::vector<ShadowCaster>& casters,bool cull)
+    const std::vector<ShadowCaster>& casters,bool cull,bool allowSingleDraws)
 {
-    draws.clear();views.clear();entities.clear();matrices.clear();visible.clear();keys.clear();order.clear();
+    draws.clear();views.clear();entities.clear();matrices.clear();visible.clear();keys.clear();order.clear();arguments.clear();
     constexpr uint32_t stride=2*sizeof(Math::float4x4);
     if(!cull || casters.empty() || !shadows.viewCount ||
         shadows.viewCount>std::size(shadows.constants.lightViewProjectionMatrix) ||
@@ -221,7 +221,7 @@ bool Renderer::Impl::ShadowInstanceData::Build(const Scene& scene,const ShadowDa
         const uint32_t coverage=(mask?1u:0u) | (material.doubleSided?2u:0u) |
             (caster.mirrored?4u:0u) | (mask && (caster.coverageFlags&1u)?8u:0u);
         keys.emplace_back(caster.mesh,reinterpret_cast<uintptr_t>(caster.pipeline),
-            reinterpret_cast<uintptr_t>(caster.set),coverage,cutoff,alpha);
+            reinterpret_cast<uintptr_t>(caster.set),coverage,cutoff,alpha,caster.firstIndex,caster.indexCount);
     }
     views.resize(shadows.viewCount);visible.reserve(casters.size());
     for(uint32_t i=0;i<casters.size();++i)order.push_back(i);
@@ -264,32 +264,25 @@ bool Renderer::Impl::ShadowInstanceData::Build(const Scene& scene,const ShadowDa
             return a.depth<b.depth || (a.depth==b.depth && a.caster<b.caster);
         });
     }
-    return draws.size()<entities.size();
+    return !draws.empty() && (allowSingleDraws || draws.size()<entities.size());
 }
 
-// 공통 월드 경계 준비→재질/객체별 세트 준비→아틀라스 전체 깊이 Clear→각 뷰 타일의 객체 배치 기록 순서다.
-bool Renderer::Impl::PrepareShadowPassResources(const Scene& scene,const ShadowData& shadows,
-    RHI::ICommandList& uploads,const std::vector<RendererDrawDesc>* draws)
+void Renderer::Impl::CollectShadowViewCasters(const std::vector<ShadowCaster>& casters,
+    const ShadowData& shadows,uint32_t view,bool cull,std::vector<uint32_t>& visible)
 {
-#if defined(DY_LIVE_PROFILING_ENABLED) || defined(DY_PROFILER_TRACING_ENABLED)
-    Platform::CpuScope cpuScope(Platform::LiveStage::CpuPrepare,"Shadow resources");
-#endif
-	// 그림자 윤곽은 원본 인덱스를 사용하여 카메라 LOD 변경에도 정적 아틀라스를 재사용한다.
-	const bool stock=stockDrawInputs;
-	const bool instanced=UsesInstanceStream();
-	const bool perEntity=draws && !stock;
-	const bool cull=stock && config.enableFrustumCulling;
-    shadowInstancesActive=false;
-    // 양면·알파 커버리지·면 반전과 compact 정점 여부로 파이프라인을 고른다. 면 반전은 변환 행렬식의 부호로 판단한다.
-    const auto shadowPipelineFor=[&](const MaterialDesc& material,bool mirrored,bool compact=false) {
-        // 비표준 입력에는 기존 fragment의 재질별 면 판정을 유지한다.
-        if(!stock) return UsesStockGeometry() ? shadowMaterialPipelines[2] : shadowPipeline; // 비표준 draw 입력은 기존 fragment 커버리지를 유지하는 파이프라인을 사용한다.
-        const uint32_t variant=(material.doubleSided?1u:0u) |
-            (material.alphaMode==MaterialAlphaMode::Mask?2u:0u) | (mirrored?4u:0u);
-        if(compact)return compactShadowPipelines[variant];
-        return variant ? shadowMaterialPipelines[variant-1] : shadowPipeline;
-    };
-    // 유효한 그림자 객체와 월드 경계를 한 번 준비해 모든 광원/캐스케이드 뷰에서 재사용한다.
+    visible.clear();visible.reserve(casters.size());
+    const ShadowFrustum frustum(shadows.constants.lightViewProjectionMatrix[view]);
+    for(uint32_t i=0;i<casters.size();++i)
+    {
+        const auto& bounds=casters[i].worldBounds;
+        if(!cull || (!frustum.Outside(bounds.bounds,bounds.magnitude) &&
+            !shadows.casterVolumes[view].Outside(bounds.bounds,bounds.magnitude)))visible.push_back(i);
+    }
+}
+
+void Renderer::Impl::PrepareShadowCasters(const Scene& scene,const std::vector<RendererDrawDesc>* draws)
+{
+    const bool stock=stockDrawInputs,instanced=UsesInstanceStream(),cull=stock && config.enableFrustumCulling;
     auto& casters=shadowCasterScratch;
     casters.clear();
     casters.reserve(scene.GetEntityCount());
@@ -309,6 +302,7 @@ bool Renderer::Impl::PrepareShadowPassResources(const Scene& scene,const ShadowD
         if(shadowFragmentShader && UsesBlendedRendering(material))continue;
         ShadowCaster caster;
         caster.entity=i;caster.mesh=meshIndex;caster.material=materialIndex;
+        caster.indexCount=mesh.indexCount;
         caster.coverageFlags=materialStates[materialIndex].textureFlags&1u;
         const auto vertexBuffer=draws && (*draws)[i].vertexBuffer ? (*draws)[i].vertexBuffer : mesh.vertexBuffer;
         const bool originalVertices=stock && vertexBuffer==mesh.vertexBuffer;
@@ -337,6 +331,7 @@ bool Renderer::Impl::PrepareShadowPassResources(const Scene& scene,const ShadowD
             const auto& previousMaterial=scene.Materials()[previous.material];
             // The canonical instance stream still requires consecutive entity indices.
             bool same=previous.entity+1==i && previous.mesh==meshIndex && previous.compact==caster.compact &&
+                previous.firstIndex==caster.firstIndex && previous.indexCount==caster.indexCount &&
                 previous.arena==caster.arena &&
                 (!draws || (*draws)[previous.entity].vertexBuffer==(*draws)[i].vertexBuffer) &&
                 !UsesBlendedRendering(material) &&
@@ -350,6 +345,27 @@ bool Renderer::Impl::PrepareShadowPassResources(const Scene& scene,const ShadowD
         }
         casters.push_back(caster);
     }
+}
+
+bool Renderer::Impl::PrepareShadowPassResources(const Scene& scene,const ShadowData& shadows,
+    RHI::ICommandList& uploads,const std::vector<RendererDrawDesc>* draws)
+{
+#if defined(DY_LIVE_PROFILING_ENABLED) || defined(DY_PROFILER_TRACING_ENABLED)
+    Platform::CpuScope cpuScope(Platform::LiveStage::CpuPrepare,"Shadow resources");
+#endif
+    const bool stock=stockDrawInputs,instanced=UsesInstanceStream(),perEntity=draws && !stock;
+    const bool cull=stock && config.enableFrustumCulling;
+    const bool canIndirect=!Platform::IsLiveCollectorEnabled() && device->Supports(RHI::Feature::IndirectDraw) &&
+        device->Supports(RHI::Feature::IndirectFirstInstance);
+    shadowInstancesActive=false;shadowIndirectActive=false;
+    auto& casters=shadowCasterScratch;
+    const auto shadowPipelineFor=[&](const MaterialDesc& material,bool mirrored,bool compact=false) {
+        if(!stock)return UsesStockGeometry() ? shadowMaterialPipelines[2] : shadowPipeline;
+        const uint32_t variant=(material.doubleSided?1u:0u) |
+            (material.alphaMode==MaterialAlphaMode::Mask?2u:0u) | (mirrored?4u:0u);
+        if(compact)return compactShadowPipelines[variant];
+        return variant ? shadowMaterialPipelines[variant-1] : shadowPipeline;
+    };
 	auto& shadowSets=shadowSetScratch;
 	{
 		// 사용자 자원 입력이면 객체별, fragment가 있으면 재질별, 깊이 정점 전용이면 공통 한 세트로 구성한다.
@@ -394,7 +410,7 @@ bool Renderer::Impl::PrepareShadowPassResources(const Scene& scene,const ShadowD
         }
 	}
     if(!stock || !instanced || !UsesStockGeometry() ||
-        !shadowInstances.Build(scene,shadows,casters,cull))return true;
+        !shadowInstances.Build(scene,shadows,casters,cull,canIndirect))return true;
     constexpr uint32_t stride=2*sizeof(Math::float4x4);
     const auto bytes=static_cast<uint32_t>(shadowInstances.matrices.size()*sizeof(Math::float4x4));
     if(!shadowInstanceBuffer || shadowInstanceBuffer->GetDesc().size<bytes)
@@ -410,17 +426,49 @@ bool Renderer::Impl::PrepareShadowPassResources(const Scene& scene,const ShadowD
     }
     if(!shadowInstanceBuffer)return false;
     shadowInstancesActive=true;
-    if(config.enableIncrementalTransformUploads && shadowInstanceReady &&
+    const bool sameInstances=config.enableIncrementalTransformUploads && shadowInstanceReady &&
         shadowInstanceBytes.size()==shadowInstances.matrices.size() &&
-        std::memcmp(shadowInstanceBytes.data(),shadowInstances.matrices.data(),bytes)==0)return true;
-    if(shadowInstanceReady)
+        std::memcmp(shadowInstanceBytes.data(),shadowInstances.matrices.data(),bytes)==0;
+    if(!sameInstances)
     {
-        const RHI::ResourceBarrierDesc before={shadowInstanceBuffer,nullptr,RHI::ResourceState::VertexBuffer,
+        if(shadowInstanceReady)
+        {
+            const RHI::ResourceBarrierDesc before={shadowInstanceBuffer,nullptr,RHI::ResourceState::VertexBuffer,
+                RHI::ResourceState::CopyDestination,{}};
+            uploads.ResourceBarrier(&before,1);
+        }
+        if(!RecordBufferUpload(device,uploads,shadowInstanceBuffer,shadowInstances.matrices.data(),bytes,
+            RHI::ResourceState::VertexBuffer))return false;
+    }
+    // Preserve per-batch live links on the existing path; stock opaque/MASK runs share inline coverage constants.
+    if(!canIndirect)return true;
+    auto& arguments=shadowInstances.arguments;arguments.reserve(shadowInstances.draws.size());
+    for(const auto& draw:shadowInstances.draws)
+    {
+        const auto& caster=casters[draw.caster];const auto& range=m_meshes[caster.mesh].shadowArena;
+        const uint32_t indexSize=range.indexFormat==RHI::Format::R16_UINT?2u:4u;
+        arguments.push_back({caster.indexCount,draw.count,range.indexByteOffset/indexSize+caster.firstIndex,
+            static_cast<int32_t>(range.baseVertex),draw.first});
+    }
+    const auto argumentBytes=static_cast<uint32_t>(arguments.size()*sizeof(arguments.front()));
+    if(!shadowArgumentsBuffer || shadowArgumentsBuffer->GetDesc().size<argumentBytes)
+    {
+        const auto replacement=device->CreateBuffer({argumentBytes,sizeof(RHI::DrawIndexedIndirectArguments),
+            RHI::BufferUsage::Indirect,RHI::ResourceState::CopyDestination});
+        if(!replacement)return true;
+        shadowArgumentsBuffer=replacement;shadowArgumentsReady=false;
+    }
+    shadowIndirectActive=true;
+    if(shadowArgumentsReady && shadowArgumentBytes.size()==arguments.size() &&
+        std::memcmp(shadowArgumentBytes.data(),arguments.data(),argumentBytes)==0)return true;
+    if(shadowArgumentsReady)
+    {
+        const RHI::ResourceBarrierDesc before={shadowArgumentsBuffer,nullptr,RHI::ResourceState::IndirectArgument,
             RHI::ResourceState::CopyDestination,{}};
         uploads.ResourceBarrier(&before,1);
     }
-    return RecordBufferUpload(device,uploads,shadowInstanceBuffer,shadowInstances.matrices.data(),bytes,
-        RHI::ResourceState::VertexBuffer);
+    return RecordBufferUpload(device,uploads,shadowArgumentsBuffer,arguments.data(),argumentBytes,
+        RHI::ResourceState::IndirectArgument);
 }
 
 bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,const ShadowData& shadows,
@@ -459,18 +507,9 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
             Platform::LiveId passBatch=0;
 			bool inlineConstantsValid=false;
             bool instanceStreamBound=false;
-			const ShadowFrustum frustum(shadows.constants.lightViewProjectionMatrix[view]);
             // 광원 절두체 밖임을 보수적으로 확인한 객체만 이번 뷰 목록에서 제거한다.
             auto& visible=shadowViewScratch;
-            if(cull && !packed) {
-                visible.clear();
-                visible.reserve(casters.size());
-                for(uint32_t i=0;i<casters.size();++i) {
-                    const auto& bounds=casters[i].worldBounds;
-                    if(!frustum.Outside(bounds.bounds,bounds.magnitude) &&
-                        !shadows.casterVolumes[view].Outside(bounds.bounds,bounds.magnitude))visible.push_back(i);
-                }
-            }
+            if(cull && !packed)CollectShadowViewCasters(casters,shadows,view,true,visible);
             const auto packedRange=packed ? shadowInstances.views[view] : ShadowInstanceData::View{};
             const auto casterAt=[&](uint32_t index) -> const ShadowCaster& {
                 if(packed)return casters[shadowInstances.draws[packedRange.first+index].caster];
@@ -616,10 +655,24 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
                         commands.SetInlineConstants(sizeof(constants),static_cast<uint32_t>(input->inlineConstants.size()),input->inlineConstants.data());
                     inlineConstantsValid=true;
                 }
-                const uint32_t firstIndex=caster.arena ? mesh.shadowArena.indexByteOffset/
-                    (indexFormat==RHI::Format::R16_UINT?2u:4u) : 0;
+                uint32_t run=1;
+                if(shadowIndirectActive && packed)
+                {
+                    while(drawIndex+run<visibleCount)
+                    {
+                        const auto& next=casterAt(drawIndex+run);
+                        if(!next.arena || next.pipeline!=caster.pipeline || next.set!=caster.set ||
+                            m_meshes[next.mesh].shadowArena.indexFormat!=indexFormat ||
+                            (material.alphaMode==MaterialAlphaMode::Mask && next.material!=caster.material))break;
+                        ++run;
+                    }
+                }
+                const uint32_t firstIndex=caster.firstIndex+(caster.arena ? mesh.shadowArena.indexByteOffset/
+                    (indexFormat==RHI::Format::R16_UINT?2u:4u) : 0);
                 const int32_t baseVertex=caster.arena ? static_cast<int32_t>(mesh.shadowArena.baseVertex) : 0;
-				commands.DrawIndexedInstanced(mesh.indexCount,count,firstIndex,baseVertex,baseInstance?firstInstance:0);
+                if(shadowIndirectActive && packed)
+                    commands.DrawIndexedIndirect(shadowArgumentsBuffer,(packedRange.first+drawIndex)*sizeof(RHI::DrawIndexedIndirectArguments),run);
+                else commands.DrawIndexedInstanced(caster.indexCount,count,firstIndex,baseVertex,baseInstance?firstInstance:0);
                 if(caster.arena && !shadowArenaReported)
                 {
                     std::fprintf(stderr,"[Renderer] Shared shadow arena selected: generation=%llu mixed R16/R32 index ranges; %s, cache-optimized triangle order.\n",
@@ -627,10 +680,14 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
                     shadowArenaReported=true;
                 }
 				++recordingStatistics.shadowDrawCount;
-				recordingStatistics.shadowInstanceCount+=count;
-				recordingStatistics.shadowTriangleCount+=uint64_t(mesh.indexCount/3)*count;
+                for(uint32_t i=0;i<run;++i)
+                {
+                    const auto instances=packed ? shadowInstances.draws[packedRange.first+drawIndex+i].count : count;
+                    recordingStatistics.shadowInstanceCount+=instances;
+                    recordingStatistics.shadowTriangleCount+=uint64_t(casterAt(drawIndex+i).indexCount/3)*instances;
+                }
 				// 배치에 포함한 객체는 다음 draw에서 중복 기록하지 않는다.
-				drawIndex+=packed ? 1u : count;
+				drawIndex+=packed ? run : count;
 			}
 		}
 		commands.EndRendering();

@@ -347,7 +347,7 @@ namespace dyf::Backends
     }
 
     // 누적된 D3D12 검증 오류는 stderr에, 나머지 메시지는 stdout에 출력한다.
-    // (디버그 레이어가 켜진 디버그 빌드에서만 메시지가 쌓인다.)
+    // enableValidation으로 켠 디버그 레이어는 빌드 구성과 무관하게 수집한다.
     static void DumpInfoQueue(D3D12InternalState* internal, const char* where)
     {
         if (internal == nullptr || internal->infoQueue == nullptr) return;
@@ -435,14 +435,12 @@ namespace dyf::Backends
         m_internal->resourceBindingTier = options.ResourceBindingTier;
         m_internal->resourceBindingFeatureLevel = featureLevels.MaxSupportedFeatureLevel;
         
-#if defined(_DEBUG)
-        if (SUCCEEDED(m_internal->device.As(&m_internal->infoQueue))) {
+        if (desc.enableValidation && SUCCEEDED(m_internal->device.As(&m_internal->infoQueue))) {
             // break 하지 않고 메시지를 모아 DumpInfoQueue 가 stdout 으로 덤프한다.
             m_internal->infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, FALSE);
             m_internal->infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, FALSE);
             m_internal->infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, FALSE);
         }
-#endif
 
         // 2. 커맨드 큐 생성
         D3D12_COMMAND_QUEUE_DESC queueDesc = {};

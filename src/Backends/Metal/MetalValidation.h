@@ -74,6 +74,7 @@ namespace dyf::Backends::MetalValidation
         case RHI::ResourceState::Undefined:
         case RHI::ResourceState::Common:
         case RHI::ResourceState::CopyDestination:
+        case RHI::ResourceState::CopySource:
             return true;
         case RHI::ResourceState::VertexBuffer:
             return MetalValidation::HasUsage(desc.usage, RHI::BufferUsage::Vertex);

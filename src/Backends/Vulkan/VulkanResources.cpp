@@ -25,7 +25,7 @@ namespace dyf::Backends
 
 		VkBufferUsageFlags ToBufferUsage(dyf::RHI::BufferUsage usage)
 		{
-			VkBufferUsageFlags result = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+			VkBufferUsageFlags result = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
 			if (VulkanValidation::HasUsage(usage, dyf::RHI::BufferUsage::Vertex)) result |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
 			if (VulkanValidation::HasUsage(usage, dyf::RHI::BufferUsage::Index)) result |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
 			if (VulkanValidation::HasUsage(usage, dyf::RHI::BufferUsage::Constant)) result |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;

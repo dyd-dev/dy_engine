@@ -6,6 +6,7 @@
 #include "dyf/RHI/IDevice.h"
 #include <meshoptimizer.h>
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -48,6 +49,9 @@ void Renderer::Impl::DestroyMeshState(RHI::IDevice* device, SceneMeshState& mesh
 	DestroyBuffer(device, mesh.shadowVertexBuffer, mesh.shadowVertexReady);
 	DestroyBuffer(device, mesh.shadowIndexBuffer, mesh.shadowIndexReady);
 	DestroyBuffer(device, mesh.mainIndexBuffer, mesh.mainIndexReady);
+    DestroyBuffer(device,mesh.indirectIndexBuffer,mesh.indirectIndexReady);
+    mesh.indirectFirstIndices={};
+    mesh.indirectIndexAttemptedBytes=0;
     mesh.shadowIndexFormat=RHI::Format::R32_UINT;
 	for(auto& lod:mesh.lods) DestroyBuffer(device,lod.buffer,lod.ready);
 	mesh.lods.clear();mesh.lodsGenerated=false;
@@ -103,6 +107,16 @@ RHI::BufferHandle Renderer::Impl::MainIndexBuffer(const SceneMeshState& mesh,uin
          (!input->previousVertexBuffer || input->previousVertexBuffer==mesh.vertexBuffer));
     return stockDrawInputs && !UsesBlendedRendering(material) && originalVertices &&
         mesh.mainIndexBuffer && mesh.mainIndexReady ? mesh.mainIndexBuffer : mesh.indexBuffer;
+}
+
+RHI::BufferHandle Renderer::Impl::MainIndirectIndexBuffer(const SceneMeshState& mesh,uint32_t level,
+    const MaterialDesc& material,const RendererDrawDesc* input) const
+{
+    const bool originalVertices=!input ||
+        ((!input->vertexBuffer || input->vertexBuffer==mesh.vertexBuffer) &&
+         (!input->previousVertexBuffer || input->previousVertexBuffer==mesh.vertexBuffer));
+    return stockDrawInputs && !UsesBlendedRendering(material) && originalVertices &&
+        mesh.indirectIndexReady && mesh.indirectIndexBuffer ? mesh.indirectIndexBuffer : MainIndexBuffer(mesh,level,material,input);
 }
 
 // Scene 크기에 캐시를 맞춰 변경 메시지만 준비하며, 공개 RHI가 업로드 바이트를 복사하므로 메시별 변환 배열은 기록 직후 해제할 수 있다.
@@ -549,7 +563,7 @@ bool Renderer::Impl::PrepareShadowArena(const Scene& scene,RHI::IDevice* device)
     uint64_t retiredBytes=0;
     for(size_t index=0;index<m_meshes.size();++index)
     {
-        auto& mesh=m_meshes[index];mesh.shadowArena=ranges[index];
+        auto& mesh=m_meshes[index];mesh.shadowArena=std::move(ranges[index]);
         if(mesh.shadowArena.generation!=generation)continue;
         if(mesh.shadowVertexBuffer)retiredBytes+=mesh.shadowVertexBuffer->GetDesc().size;
         if(mesh.shadowIndexBuffer)retiredBytes+=mesh.shadowIndexBuffer->GetDesc().size;
@@ -580,5 +594,106 @@ void Renderer::Impl::ReleaseGeometry(RHI::IDevice* device)
     shadowArenaDirty=true;shadowArenaAttempted=false;shadowArenaReported=false;
 	entityLods.clear();lodMeshSources.clear();lodScene.reset();
 	lodDebugActive=wireframeActive=false;
+}
+}
+
+namespace dyf
+{
+bool Renderer::Impl::PrepareMainIndirectGeometry(const Scene& scene,RHI::IDevice* device)
+{
+    if(!device)return false;
+    if(!UsesGpuVisibility() || !stockDrawInputs || !device->Supports(RHI::Feature::IndirectFirstInstance) ||
+        Platform::IsLiveCollectorEnabled())return true;
+    struct Replacement
+    {
+        SceneMeshState* mesh=nullptr;
+        RHI::BufferHandle buffer=nullptr;
+        std::array<uint32_t,4> firstIndices={};
+    };
+    struct Pending
+    {
+        RHI::IDevice& device;
+        RHI::ICommandList* commands=nullptr;
+        std::vector<Replacement> replacements;
+        ~Pending()
+        {
+            if(commands)device.DestroyCommandList(commands);
+            for(const auto& replacement:replacements)if(replacement.buffer)device.DestroyBuffer(replacement.buffer);
+        }
+    } pending{*device};
+    try
+    {
+        for(size_t meshIndex=0;meshIndex<m_meshes.size() && meshIndex<scene.Meshes().size();++meshIndex)
+        {
+            auto& mesh=m_meshes[meshIndex];
+            if(!mesh.prepared || !mesh.indexReady || !mesh.indexBuffer || !mesh.indexCount)continue;
+            std::array<RHI::BufferHandle,4> sources={};
+            std::array<uint32_t,4> counts={},firstIndices={};
+            sources[0]=mesh.mainIndexReady && mesh.mainIndexBuffer ? mesh.mainIndexBuffer : mesh.indexBuffer;
+            counts[0]=mesh.indexCount;
+            uint32_t levels=1;
+            uint64_t indexCount=mesh.indexCount;
+            for(const auto& lod:mesh.lods)
+            {
+                if(levels==sources.size() || !lod.ready || !lod.buffer || !lod.count)break;
+                if(indexCount>UINT32_MAX/sizeof(uint32_t))break;
+                firstIndices[levels]=static_cast<uint32_t>(indexCount);
+                sources[levels]=lod.buffer;counts[levels]=lod.count;
+                indexCount+=lod.count;++levels;
+            }
+            if(levels<2 || indexCount>UINT32_MAX/sizeof(uint32_t))
+            {
+                mesh.indirectIndexReady=false;
+                continue;
+            }
+            const uint32_t bytes=static_cast<uint32_t>(indexCount*sizeof(uint32_t));
+            if(mesh.indirectIndexReady && mesh.indirectIndexBuffer && mesh.indirectIndexBuffer->GetDesc().size==bytes &&
+                mesh.indirectFirstIndices==firstIndices)continue;
+            // Expanded LOD layouts must not use offsets from the previous copy.
+            mesh.indirectIndexReady=false;
+            bool valid=true;
+            for(uint32_t level=0;level<levels;++level)
+                valid=valid && uint64_t(counts[level])*sizeof(uint32_t)<=sources[level]->GetDesc().size;
+            if(!valid)continue;
+            // shortcut: failed attempts use byte size only; track full layout keys if same-size retries become necessary.
+            if(mesh.indirectIndexAttemptedBytes==bytes)continue;
+            mesh.indirectIndexAttemptedBytes=bytes;
+            if(pending.replacements.empty())pending.replacements.reserve(m_meshes.size());
+            assert(pending.replacements.size()<pending.replacements.capacity());
+            auto* buffer=device->CreateBuffer({bytes,sizeof(uint32_t),RHI::BufferUsage::Index,RHI::ResourceState::CopyDestination});
+            if(!buffer)continue; // Optional packing retains the original/LOD draw path on allocation failure.
+            pending.replacements.push_back({&mesh,buffer,firstIndices});
+            if(!pending.commands)pending.commands=device->AcquireCommandList();
+            if(!pending.commands)return !device->IsLost();
+            for(uint32_t level=0;level<levels;++level)
+            {
+                RHI::ResourceBarrierDesc source={sources[level],nullptr,RHI::ResourceState::IndexBuffer,RHI::ResourceState::CopySource,{}};
+                pending.commands->ResourceBarrier(&source,1);
+                pending.commands->CopyBuffer(sources[level],0,buffer,firstIndices[level]*sizeof(uint32_t),counts[level]*sizeof(uint32_t));
+                std::swap(source.before,source.after);
+                pending.commands->ResourceBarrier(&source,1);
+            }
+            const RHI::ResourceBarrierDesc ready={buffer,nullptr,RHI::ResourceState::CopyDestination,RHI::ResourceState::IndexBuffer,{}};
+            pending.commands->ResourceBarrier(&ready,1);
+            assert(firstIndices[0]==0 && uint64_t(firstIndices[levels-1])+counts[levels-1]==indexCount);
+        }
+        if(!pending.commands)return true;
+        if(!pending.commands->Close() || !device->Submit(&pending.commands,1))return false;
+        for(auto& replacement:pending.replacements)
+        {
+            auto& mesh=*replacement.mesh;
+            auto* previous=mesh.indirectIndexBuffer;
+            mesh.indirectIndexBuffer=std::exchange(replacement.buffer,nullptr);
+            mesh.indirectFirstIndices=replacement.firstIndices;
+            mesh.indirectIndexReady=true;
+            mesh.indirectIndexAttemptedBytes=0;
+            if(previous)device->DestroyBuffer(previous);
+        }
+        return true;
+    }
+    catch(const std::bad_alloc&)
+    {
+        return true; // Optional packing leaves the existing per-mesh buffers available.
+    }
 }
 }

@@ -2075,6 +2075,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		enabled.depthBiasClamp = supported.depthBiasClamp;
 		enabled.tessellationShader = supported.tessellationShader;
 		enabled.drawIndirectFirstInstance = supported.drawIndirectFirstInstance;
+        enabled.multiDrawIndirect = supported.multiDrawIndirect;
         enabled.independentBlend=supported.independentBlend;
         enabled.vertexPipelineStoresAndAtomics=supported.vertexPipelineStoresAndAtomics;
         enabled.fragmentStoresAndAtomics=supported.fragmentStoresAndAtomics;

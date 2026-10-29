@@ -193,6 +193,11 @@ namespace dyf::Backends
 		public:
             // This backend applies submitted operations synchronously in queue order.
             void GlobalBarrierNative() override {}
+            void CopyBufferNative(RHI::BufferHandle source,uint32_t,RHI::BufferHandle destination,uint32_t,uint32_t) override
+            {
+                if(m_closed || !m_valid || m_rendering ||
+                    !dynamic_cast<NullBuffer*>(source) || !dynamic_cast<NullBuffer*>(destination))Invalidate();
+            }
 			void ResourceBarrierNative(
 				const RHI::ResourceBarrierDesc* barriers,
 				uint32_t count) override
@@ -480,7 +485,7 @@ namespace dyf::Backends
                 if(m_closed || !m_valid || !m_rendering || !buffer)Invalidate();
             }
 
-            void DrawIndexedIndirectNative(RHI::BufferHandle arguments,uint32_t) override
+            void DrawIndexedIndirectNative(RHI::BufferHandle arguments,uint32_t,uint32_t,uint32_t) override
             {
                 auto* buffer=dynamic_cast<NullBuffer*>(arguments);
                 if(m_closed || !m_valid || !m_rendering || !buffer)Invalidate();

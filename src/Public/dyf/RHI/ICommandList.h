@@ -65,6 +65,11 @@ namespace dyf::RHI
         // on this device's queue, including resources not imported into a graph.
         // Preserves states/layouts; transitions and cross-queue/CPU waits are separate.
         void GlobalBarrier();
+        // Outside rendering. Distinct buffers must be in CopySource and
+        // CopyDestination; offsets and nonzero size are 4-byte aligned and in bounds.
+        // Whole-buffer states do not permit copying within the same buffer.
+        void CopyBuffer(BufferHandle source, uint32_t sourceOffset,
+            BufferHandle destination, uint32_t destinationOffset, uint32_t size);
 		void BeginRendering(const RenderingDesc& desc);
 		void EndRendering();
 
@@ -102,11 +107,16 @@ namespace dyf::RHI
 			uint32_t firstInstance);
 
         // Requires Feature::IndirectDraw and ResourceState::IndirectArgument.
-        // Each call consumes one argument structure; count/instanceCount zero is a no-op.
+        // GPU argument count/instanceCount zero is a no-op.
         // firstInstance must be zero unless Feature::IndirectFirstInstance is supported.
         // PatchList pipelines additionally require Feature::IndirectTessellation.
         void DrawIndirect(BufferHandle arguments, uint32_t offset = 0);
-        void DrawIndexedIndirect(BufferHandle arguments, uint32_t offset = 0);
+        // Indexed draws share current bindings/constants. stride is 4-byte aligned
+        // and at least sizeof(DrawIndexedIndirectArguments); every argument must fit.
+        // drawCount=0 still validates bindings, offset, stride and buffer state,
+        // retains the buffer, consumes no argument bytes and emits no native draw.
+        void DrawIndexedIndirect(BufferHandle arguments, uint32_t offset = 0,
+            uint32_t drawCount = 1, uint32_t stride = sizeof(DrawIndexedIndirectArguments));
 
 		void DispatchMesh(
 			uint32_t threadGroupCountX,
@@ -129,6 +139,7 @@ namespace dyf::RHI
 		virtual ~ICommandList();
 		virtual void ResourceBarrierNative(const ResourceBarrierDesc* barriers, uint32_t count) = 0;
         virtual void GlobalBarrierNative() = 0;
+        virtual void CopyBufferNative(BufferHandle,uint32_t,BufferHandle,uint32_t,uint32_t) {m_recordingFailed=true;}
 		virtual void BeginRenderingNative(const RenderingDesc& desc) = 0;
 		virtual void EndRenderingNative() = 0;
 		virtual void BindGraphicsPipelineNative(PipelineHandle pipeline) = 0;
@@ -154,7 +165,7 @@ namespace dyf::RHI
 			int32_t vertexOffset,
 			uint32_t firstInstance) = 0;
         virtual void DrawIndirectNative(BufferHandle,uint32_t) {m_recordingFailed=true;}
-        virtual void DrawIndexedIndirectNative(BufferHandle,uint32_t) {m_recordingFailed=true;}
+        virtual void DrawIndexedIndirectNative(BufferHandle,uint32_t,uint32_t,uint32_t) {m_recordingFailed=true;}
 		virtual void DispatchMeshNative(uint32_t x, uint32_t y, uint32_t z) { (void)x; (void)y; (void)z; m_recordingFailed = true; }
 		virtual bool CloseNative() = 0;
 
@@ -218,7 +229,8 @@ namespace dyf::RHI
         ResourceState m_depthStencilState=ResourceState::Undefined;
         bool ValidateBindings(bool indexed,bool compute,uint32_t count=0,uint32_t instances=0,uint32_t first=0,uint32_t firstInstance=0);
         bool ValidateMeshBindings();
-        bool ValidateIndirectArguments(BufferHandle, uint32_t offset, uint32_t size);
+        bool ValidateIndirectArguments(BufferHandle, uint32_t offset, uint32_t argumentSize,
+            uint32_t drawCount, uint32_t stride);
         bool RequireResourceSetStates(ResourceSetHandle);
 		bool Track(const void* handle);
 		bool CanRecordCommands();

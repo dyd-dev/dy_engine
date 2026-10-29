@@ -15,6 +15,7 @@ namespace dyf::Backends
             switch (state)
             {
             case RHI::ResourceState::CopyDestination: return D3D12_RESOURCE_STATE_COPY_DEST;
+            case RHI::ResourceState::CopySource: return D3D12_RESOURCE_STATE_COPY_SOURCE;
             case RHI::ResourceState::VertexBuffer:
             case RHI::ResourceState::ConstantBuffer:
                 return D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;

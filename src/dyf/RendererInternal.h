@@ -6,6 +6,7 @@
 #include "DepthPrepassValidation.h"
 #include "dyf/RenderExtension.h"
 #include "dyf/RHI/IDevice.h"
+#include "dyf/RHI/Indirect.h"
 #include "Platform/Profiler/FrameProfiler.h"
 #include <deque>
 #include <map>
@@ -133,6 +134,10 @@ struct Renderer::Impl
             std::vector<uint32_t> indices;
         };
         RHI::BufferHandle vertexBuffer=nullptr,indexBuffer=nullptr,shadowVertexBuffer=nullptr,shadowIndexBuffer=nullptr,mainIndexBuffer=nullptr;
+        RHI::BufferHandle indirectIndexBuffer=nullptr;
+        std::array<uint32_t,4> indirectFirstIndices={};
+        bool indirectIndexReady=false;
+        uint32_t indirectIndexAttemptedBytes=0;
         RHI::Format shadowIndexFormat=RHI::Format::R32_UINT;
         ShadowArenaRange shadowArena;
         uint32_t indexCount=0;
@@ -151,7 +156,7 @@ struct Renderer::Impl
     };
     struct ShadowCaster
     {
-        uint32_t entity=0,mesh=0,material=0,batch=0,coverageFlags=0;
+        uint32_t entity=0,mesh=0,material=0,batch=0,coverageFlags=0,firstIndex=0,indexCount=0;
         bool mirrored=false,compact=false,arena=false,sortSafe=false;
         RHI::PipelineHandle pipeline=nullptr;
         RHI::ResourceSetHandle set=nullptr;
@@ -161,13 +166,14 @@ struct Renderer::Impl
     {
         struct Draw {uint32_t caster,first,count;double depth;};
         struct View {uint32_t first=0,count=0;};
-        using Key=std::tuple<uint32_t,uintptr_t,uintptr_t,uint32_t,uint32_t,uint32_t>;
+        using Key=std::tuple<uint32_t,uintptr_t,uintptr_t,uint32_t,uint32_t,uint32_t,uint32_t,uint32_t>;
         std::vector<Draw> draws;
         std::vector<View> views;
         std::vector<uint32_t> entities,visible,order;
         std::vector<Math::float4x4> matrices;
         std::vector<Key> keys;
-        bool Build(const Scene&,const ShadowData&,const std::vector<ShadowCaster>&,bool cull);
+        std::vector<RHI::DrawIndexedIndirectArguments> arguments;
+        bool Build(const Scene&,const ShadowData&,const std::vector<ShadowCaster>&,bool cull,bool allowSingleDraws=false);
     };
     // 파이프라인과 전체 바인딩을 키로 자원 세트를 재사용한다. 해시는 후보 검색용이고 unusedFrames는 캐시에서 제거할 시기를 정한다.
     struct CachedSet { RHI::ResourceSetHandle set=nullptr; uint32_t unusedFrames=0; size_t keyHash=0; };
@@ -245,6 +251,7 @@ struct Renderer::Impl
     bool UsesBindlessMaterials() const;
     bool UsesStockGeometry() const;
     RHI::BufferHandle MainIndexBuffer(const SceneMeshState&,uint32_t,const MaterialDesc&,const RendererDrawDesc*) const;
+    RHI::BufferHandle MainIndirectIndexBuffer(const SceneMeshState&,uint32_t,const MaterialDesc&,const RendererDrawDesc*) const;
     bool UsesAdvancedRendering() const;
     bool NeedsSurfacePass() const;
     // 확장 모듈의 공급/요구 자원 계약을 수집한다.
@@ -294,11 +301,15 @@ struct Renderer::Impl
     static bool BuildCompactShadowGeometry(const std::vector<RendererVertex>&,const std::vector<uint32_t>&,
         std::vector<CompactShadowVertex>&,std::vector<uint32_t>&);
     bool PrepareShadowArena(const Scene&,RHI::IDevice*);
+    bool PrepareMainIndirectGeometry(const Scene&,RHI::IDevice*);
     void SelectLods(const Scene&,const Camera&,uint32_t width,uint32_t height,const std::vector<RendererDrawDesc>*);
     uint32_t EntityLod(uint32_t entity) const;
     static Math::float4 LodColor(uint32_t level);
     bool CreateMaterialResourceSets(const Scene&,RHI::ICommandList&,const std::vector<RendererDrawDesc>*,std::vector<RHI::ResourceSetHandle>&);
     bool PrepareMainPassResources(const Scene&,RHI::ICommandList&,const std::vector<RendererDrawDesc>*);
+    void PrepareShadowCasters(const Scene&,const std::vector<RendererDrawDesc>*);
+    static void CollectShadowViewCasters(const std::vector<ShadowCaster>&,const ShadowData&,uint32_t,bool,
+        std::vector<uint32_t>&);
     bool PrepareShadowPassResources(const Scene&,const ShadowData&,RHI::ICommandList&,
         const std::vector<RendererDrawDesc>*);
     bool RecordShadowPass(const Scene&,const Camera&,const ShadowData&,RHI::ICommandList&,
@@ -411,6 +422,9 @@ struct Renderer::Impl
     std::vector<Math::float4x4> shadowInstanceBytes;
     RHI::BufferHandle shadowInstanceBuffer=nullptr;
     bool shadowInstanceReady=false,shadowInstancesActive=false;
+    RHI::BufferHandle shadowArgumentsBuffer=nullptr;
+    bool shadowArgumentsReady=false,shadowIndirectActive=false;
+    std::vector<RHI::DrawIndexedIndirectArguments> shadowArgumentBytes;
     ShadowAtlasCache shadowAtlasCache;
     std::array<float,4> shadowCascadeRadii={};
     float shadowCascadeNear=0,shadowCascadeFar=0,shadowCascadeAspect=0;

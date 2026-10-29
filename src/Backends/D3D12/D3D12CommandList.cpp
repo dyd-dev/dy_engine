@@ -89,6 +89,7 @@ namespace dyf::Backends
             switch (state)
             {
             case RHI::ResourceState::CopyDestination: return D3D12_RESOURCE_STATE_COPY_DEST;
+            case RHI::ResourceState::CopySource: return D3D12_RESOURCE_STATE_COPY_SOURCE;
             case RHI::ResourceState::VertexBuffer:
             case RHI::ResourceState::ConstantBuffer:
                 return D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
@@ -360,6 +361,23 @@ namespace dyf::Backends
     {
         const auto barrier = CD3DX12_RESOURCE_BARRIER::UAV(nullptr);
         m_internal->commandList->ResourceBarrier(1, &barrier);
+    }
+
+    void D3D12CommandList::CopyBufferNative(RHI::BufferHandle source,uint32_t sourceOffset,
+        RHI::BufferHandle destination,uint32_t destinationOffset,uint32_t size)
+    {
+        auto* input=dynamic_cast<D3D12Buffer*>(source);
+        auto* output=dynamic_cast<D3D12Buffer*>(destination);
+        if(!CanRecord(m_internal) || m_internal->rendering || !input || !output ||
+            !input->GetNativeResource() || !output->GetNativeResource())
+        {
+            RejectRecording(m_internal);return;
+        }
+        auto* nativeSource=static_cast<ID3D12Resource*>(input->GetNativeResource());
+        auto* nativeDestination=static_cast<ID3D12Resource*>(output->GetNativeResource());
+        RetainObject(m_internal->retainedObjects,nativeSource);
+        RetainObject(m_internal->retainedObjects,nativeDestination);
+        m_internal->commandList->CopyBufferRegion(nativeDestination,destinationOffset,nativeSource,sourceOffset,size);
     }
 
     void D3D12CommandList::ResourceBarrierNative(
@@ -1059,7 +1077,7 @@ namespace dyf::Backends
             m_internal->drawSignature.Get(), 1, resource, offset, nullptr, 0);
     }
 
-    void D3D12CommandList::DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset)
+    void D3D12CommandList::DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset, uint32_t drawCount, uint32_t stride)
     {
         auto* buffer = static_cast<D3D12Buffer*>(arguments);
         if (!CanRecord(m_internal) || m_internal->drawIndexedSignature == nullptr ||
@@ -1070,8 +1088,13 @@ namespace dyf::Backends
         }
         auto* resource = static_cast<ID3D12Resource*>(buffer->GetNativeResource());
         RetainObject(m_internal->retainedObjects, resource);
-        m_internal->commandList->ExecuteIndirect(
-            m_internal->drawIndexedSignature.Get(), 1, resource, offset, nullptr, 0);
+        if (stride == sizeof(RHI::DrawIndexedIndirectArguments))
+            m_internal->commandList->ExecuteIndirect(
+                m_internal->drawIndexedSignature.Get(), drawCount, resource, offset, nullptr, 0);
+        else
+            for (uint32_t draw = 0; draw < drawCount; ++draw)
+                m_internal->commandList->ExecuteIndirect(m_internal->drawIndexedSignature.Get(), 1, resource,
+                    uint64_t(offset) + uint64_t(draw) * stride, nullptr, 0);
     }
 
     void D3D12CommandList::DispatchMeshNative(uint32_t x, uint32_t y, uint32_t z)

@@ -323,6 +323,22 @@ namespace dyf::Backends
         EndBlitEncoding(m_impl);
     }
 
+    void MetalCommandList::CopyBufferNative(RHI::BufferHandle source,uint32_t sourceOffset,
+        RHI::BufferHandle destination,uint32_t destinationOffset,uint32_t size)
+    {
+        auto* input=dynamic_cast<MetalBuffer*>(source);
+        auto* output=dynamic_cast<MetalBuffer*>(destination);
+        if(!m_impl->valid || m_impl->closed || m_impl->rendering || NativeBuffer(input)==nil || NativeBuffer(output)==nil ||
+            !EnsureBlitEncoder(m_impl))
+        {
+            Invalidate(m_impl);return;
+        }
+        RetainResource(m_impl,NativeBuffer(input));
+        RetainResource(m_impl,NativeBuffer(output));
+        [m_impl->blitEncoder copyFromBuffer:NativeBuffer(input) sourceOffset:sourceOffset
+            toBuffer:NativeBuffer(output) destinationOffset:destinationOffset size:size];
+    }
+
 	void MetalCommandList::ResourceBarrierNative(
 		const RHI::ResourceBarrierDesc* barriers,
 		uint32_t count)
@@ -1142,7 +1158,7 @@ namespace dyf::Backends
 			indirectBuffer:NativeBuffer(buffer) indirectBufferOffset:offset];
 	}
 
-	void MetalCommandList::DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset)
+	void MetalCommandList::DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset, uint32_t drawCount, uint32_t stride)
 	{
 		auto* buffer = static_cast<MetalBuffer*>(arguments);
 		if(m_impl->closed || !ValidateDrawState(m_impl) ||
@@ -1155,11 +1171,13 @@ namespace dyf::Backends
 		RetainResource(m_impl, NativeBuffer(buffer));
 		const MTLIndexType indexType = m_impl->indexFormat == RHI::Format::R16_UINT
 			? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
-		[m_impl->renderEncoder
-			drawIndexedPrimitives:static_cast<MTLPrimitiveType>(m_impl->pipeline->GetNativePrimitiveType())
-			indexType:indexType indexBuffer:NativeBuffer(m_impl->indexBuffer)
-			indexBufferOffset:m_impl->indexOffset
-			indirectBuffer:NativeBuffer(buffer) indirectBufferOffset:offset];
+		for (uint32_t draw = 0; draw < drawCount; ++draw)
+			[m_impl->renderEncoder
+				drawIndexedPrimitives:static_cast<MTLPrimitiveType>(m_impl->pipeline->GetNativePrimitiveType())
+				indexType:indexType indexBuffer:NativeBuffer(m_impl->indexBuffer)
+				indexBufferOffset:m_impl->indexOffset
+				indirectBuffer:NativeBuffer(buffer)
+				indirectBufferOffset:static_cast<NSUInteger>(uint64_t(offset) + uint64_t(draw) * stride)];
 	}
 
 	void MetalCommandList::DispatchMeshNative(

@@ -4,6 +4,7 @@
 #include "GpuVisibility.h"
 #include "SceneAlgorithms.h"
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <map>
@@ -72,6 +73,7 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
 {
     visibilityActive=false;visibilityDraws.clear();
     if(!UsesGpuVisibility() || !stockDrawInputs) return true; // 장치/설정/입력 계약이 맞지 않으면 GPU 경로만 생략하고 CPU 렌더는 계속할 수 있다.
+    if(!PrepareMainIndirectGeometry(scene,device))return false;
     // 같은 메시·동등 재질·현재/이전 정점 버퍼·그림자 수신·반전 여부인 객체만 같은 그룹으로 묶는다. 재질 ID가 달라도 실제 내용이 같으면 대표 재질로 통합할 수 있다.
     using Key=std::tuple<uint32_t,uint32_t,uint32_t,uintptr_t,uintptr_t,bool,bool,bool>;
     std::map<Key,std::array<uint32_t,4>> groups;
@@ -120,6 +122,12 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
                 ids[level]=static_cast<uint32_t>(batches.size());
                 GpuVisibility::Batch batch;
                 batch.indexCount=level ? mesh.lods[level-1].count : mesh.indexCount;
+                const auto indices=MainIndirectIndexBuffer(mesh,level,scene.Materials()[materialIndex],input);
+                if(indices==mesh.indirectIndexBuffer && mesh.indirectIndexReady)
+                {
+                    batch.firstIndex=mesh.indirectFirstIndices[level];
+                    assert(uint64_t(batch.firstIndex)+batch.indexCount<=indices->GetDesc().size/sizeof(uint32_t));
+                }
                 batches.push_back(batch);visibilityDraws.push_back({i,meshIndex,materialIndex,level});
             }
             found=groups.emplace(key,ids).first;

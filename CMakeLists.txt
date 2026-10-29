@@ -236,4 +236,17 @@ if(DY_BUILD_CONFORMANCE_TESTS)
     add_executable(RhiStateTableTests tests/RhiStateTableTests.cpp)
     target_link_libraries(RhiStateTableTests PRIVATE dy_engine_options)
     add_test(NAME RhiStateTable COMMAND RhiStateTableTests)
+    if(USE_VULKAN)
+        find_program(DY_STATE_TEST_GLSLC glslc HINTS "$ENV{VULKAN_SDK}/Bin" REQUIRED)
+        set(dy_state_shader "${CMAKE_CURRENT_BINARY_DIR}/rhi_state_validation.spv")
+        add_custom_command(OUTPUT "${dy_state_shader}"
+            COMMAND "${DY_STATE_TEST_GLSLC}" -fshader-stage=compute --target-env=vulkan1.2 -O
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders/rhi_state_validation.comp" -o "${dy_state_shader}"
+            DEPENDS tests/shaders/rhi_state_validation.comp VERBATIM)
+        add_executable(RhiStateValidationTests tests/RhiStateValidationTests.cpp "${dy_state_shader}")
+        target_link_libraries(RhiStateValidationTests PRIVATE dy_engine)
+        target_compile_definitions(RhiStateValidationTests PRIVATE TEST_SHADER_PATH="${dy_state_shader}")
+        add_test(NAME RhiStateValidation COMMAND RhiStateValidationTests)
+        set_tests_properties(RhiStateValidation PROPERTIES RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+    endif()
 endif()

@@ -187,6 +187,8 @@ namespace dyf::Backends
 				return { VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT };
 			case dyf::RHI::ResourceState::CopyDestination:
 				return { VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT };
+			case dyf::RHI::ResourceState::CopySource:
+				return { VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT };
 			case dyf::RHI::ResourceState::VertexBuffer:
 				return { VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT, VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT };
 			case dyf::RHI::ResourceState::IndexBuffer:
@@ -377,6 +379,22 @@ namespace dyf::Backends
         barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
         vkCmdPipelineBarrier(m_commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+    }
+
+    void VulkanCommandList::CopyBufferNative(RHI::BufferHandle source,uint32_t sourceOffset,
+        RHI::BufferHandle destination,uint32_t destinationOffset,uint32_t size)
+    {
+        auto* input=dynamic_cast<VulkanBuffer*>(source);
+        auto* output=dynamic_cast<VulkanBuffer*>(destination);
+        if(m_closed || m_failed || m_rendering ||
+            !RequireBufferState(input,RHI::ResourceState::CopySource) ||
+            !RequireBufferState(output,RHI::ResourceState::CopyDestination))
+        {
+            Fail();return;
+        }
+        VkBufferCopy region{};
+        region.srcOffset=sourceOffset;region.dstOffset=destinationOffset;region.size=size;
+        vkCmdCopyBuffer(m_commandBuffer,input->GetHandle(),output->GetHandle(),1,&region);
     }
 
 	void VulkanCommandList::ResourceBarrierNative(const dyf::RHI::ResourceBarrierDesc* barriers, uint32_t count)
@@ -1014,7 +1032,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		vkCmdDrawIndirect(m_commandBuffer, buffer->GetHandle(), offset, 1, sizeof(VkDrawIndirectCommand));
 	}
 
-	void VulkanCommandList::DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset)
+	void VulkanCommandList::DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset, uint32_t drawCount, uint32_t stride)
 	{
 		auto* buffer = dynamic_cast<VulkanBuffer*>(arguments);
 		if (!ValidateDraw(true, 0, 0, 0, 0) ||
@@ -1023,7 +1041,18 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 			Fail();
 			return;
 		}
-		vkCmdDrawIndexedIndirect(m_commandBuffer, buffer->GetHandle(), offset, 1, sizeof(VkDrawIndexedIndirectCommand));
+		static_assert(sizeof(RHI::DrawIndexedIndirectArguments) == sizeof(VkDrawIndexedIndirectCommand));
+		const bool multiDraw = m_context.physicalInfo && m_context.physicalInfo->features.multiDrawIndirect;
+		const uint32_t maximum = multiDraw
+			? std::max(1u, m_context.physicalInfo->properties.limits.maxDrawIndirectCount) : 1u;
+		uint64_t argumentOffset = offset;
+		while (drawCount)
+		{
+			const uint32_t count = std::min(drawCount, maximum);
+			vkCmdDrawIndexedIndirect(m_commandBuffer, buffer->GetHandle(), argumentOffset, count, stride);
+			drawCount -= count;
+			argumentOffset += uint64_t(count) * stride;
+		}
 	}
 
 	void VulkanCommandList::DispatchMeshNative(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ)

@@ -51,6 +51,8 @@ namespace dyf::Backends
 
         void ResourceBarrierNative(const RHI::ResourceBarrierDesc* barriers, uint32_t count) override;
         void GlobalBarrierNative() override;
+        void CopyBufferNative(RHI::BufferHandle source, uint32_t sourceOffset,
+            RHI::BufferHandle destination, uint32_t destinationOffset, uint32_t size) override;
         void BeginRenderingNative(const RHI::RenderingDesc& desc) override;
         void EndRenderingNative() override;
 
@@ -70,7 +72,7 @@ namespace dyf::Backends
         void DrawInstancedNative(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
         void DrawIndexedInstancedNative(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
         void DrawIndirectNative(RHI::BufferHandle arguments, uint32_t offset) override;
-        void DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset) override;
+        void DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset, uint32_t drawCount, uint32_t stride) override;
         void DispatchMeshNative(uint32_t x, uint32_t y, uint32_t z) override;
 
         bool CloseNative() override;

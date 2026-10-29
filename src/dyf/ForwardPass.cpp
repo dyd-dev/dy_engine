@@ -254,6 +254,21 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
 		recordingStatistics.gpuVisibility=visibilityActive;
         if(cpuBatchesActive)recordingStatistics.culledEntityCount+=cpuCulledEntities;
         const auto& batches=visibilityActive ? visibilityDraws : cpuDraws;
+        const auto batchConstants=[&](const VisibilityDraw& draw) {
+            const auto entity=static_cast<EntityID>(draw.entity);
+            const auto& material=scene.Materials()[draw.material];
+            const uint32_t flags=materialStates[draw.material].textureFlags |
+                (scene.GetEntityLighting(entity).receiveShadow ? 32u : 0u);
+            auto constants=MakeDrawConstants(viewProjection,material,scene.GetTransform(entity),flags);
+            if(lodDebugActive)
+            {
+                const float alpha=constants.baseColor.w;
+                constants.baseColor=LodColor(draw.level);constants.baseColor.w=alpha;constants.textureFlags|=64u;
+            }
+            if(m_environmentCapture && !m_environmentCaptureEmitters)constants.emissiveColor={};
+            constants.padding2=draw.material;
+            return constants;
+        };
 		for(uint32_t batchIndex=0;batchIndex<batches.size();++batchIndex)
 		{
 			if(visibilityActive && !gpuVisibility->MayDrawBatch(batchIndex))continue;
@@ -311,26 +326,46 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
 			{
 				boundMaterial=selectedSet;commands.BindResourceSet(boundMaterial);
 			}
-			commands.BindVertexBuffer(0,input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer,0);
+            const auto vertexBuffer=input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer;
+            commands.BindVertexBuffer(0,vertexBuffer,0);
             const uint32_t firstInstance=visibilityActive ? gpuVisibility->GetBatch(batchIndex).instanceOffset : draw.instanceOffset;
 			bindInstances(visibilityActive ? gpuVisibility->GetInstanceBuffer() : cpuInstanceBuffer,
 				baseInstance ? 0 : firstInstance*sizeof(GpuVisibility::VisibleInstance));
-			commands.BindIndexBuffer(MainIndexBuffer(mesh,draw.level,material,input),RHI::Format::R32_UINT,0);
-			const uint32_t flags=materialStates[draw.material].textureFlags |
-				(scene.GetEntityLighting(entity).receiveShadow ? 32u : 0u);
-			auto constants=MakeDrawConstants(viewProjection,material,scene.GetTransform(entity),flags);
-			if(lodDebugActive) // 간접 배치의 LOD를 진단색으로 표시하고 원래 알파를 보존한다.
-			{
-				const float alpha=constants.baseColor.w;
-				constants.baseColor=LodColor(draw.level);constants.baseColor.w=alpha;constants.textureFlags|=64u;
-			}
-			if(m_environmentCapture && !m_environmentCaptureEmitters)constants.emissiveColor={};
-			constants.padding2=draw.material;
+            const auto indexBuffer=visibilityActive ? MainIndirectIndexBuffer(mesh,draw.level,material,input) :
+                MainIndexBuffer(mesh,draw.level,material,input);
+            commands.BindIndexBuffer(indexBuffer,RHI::Format::R32_UINT,0);
+            const auto constants=batchConstants(draw);
 			writeConstants(constants);
             if(visibilityActive)
             {
-                commands.DrawIndexedIndirect(gpuVisibility->GetArgumentsBuffer(),batchIndex*sizeof(RHI::DrawIndexedIndirectArguments));
-                ++recordingStatistics.indirectBatchCount;
+                uint32_t drawCount=1;
+                // The stock instance stream supplies model matrices; every other
+                // effective binding/constant must match across contiguous arguments.
+                if(baseInstance && reuseInlineConstants && !Platform::IsLiveCollectorEnabled())
+                    while(batchIndex+drawCount<batches.size())
+                    {
+                        const auto nextIndex=batchIndex+drawCount;
+                        if(!gpuVisibility->MayDrawBatch(nextIndex))break;
+                        const auto& next=batches[nextIndex];
+                        const auto& nextMesh=m_meshes[next.mesh];
+                        const auto* nextInput=draws ? &(*draws)[next.entity] : nullptr;
+                        const auto& nextMaterial=scene.Materials()[next.material];
+                        const auto nextPipeline=MaterialPipeline(nextMaterial,
+                            Math::Determinant3x3(scene.GetTransform(static_cast<EntityID>(next.entity)))<0);
+                        auto nextSet=materialSets[next.material];
+                        if(nextSet && nextSet->GetPipeline()!=nextPipeline)nextSet=mainMirroredSetScratch[next.material];
+                        if((nextInput && nextInput->vertexBuffer ? nextInput->vertexBuffer : nextMesh.vertexBuffer)!=vertexBuffer ||
+                            MainIndirectIndexBuffer(nextMesh,next.level,nextMaterial,nextInput)!=indexBuffer ||
+                            nextPipeline!=selectedPipeline || nextSet!=selectedSet)break;
+                        const auto nextConstants=batchConstants(next);
+                        if(std::memcmp(reinterpret_cast<const std::byte*>(&constants)+inlineTailOffset,
+                            reinterpret_cast<const std::byte*>(&nextConstants)+inlineTailOffset,inlineTailSize)!=0)break;
+                        ++drawCount;
+                    }
+                commands.DrawIndexedIndirect(gpuVisibility->GetArgumentsBuffer(),
+                    batchIndex*sizeof(RHI::DrawIndexedIndirectArguments),drawCount);
+                recordingStatistics.indirectBatchCount+=drawCount;
+                batchIndex+=drawCount-1;
             }
             else
             {

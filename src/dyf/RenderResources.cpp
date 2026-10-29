@@ -199,7 +199,7 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
                 const auto& selected=visibilityDraws[batchIndex];
                 const auto& batch=gpuVisibility->GetBatch(batchIndex);
                 auto indirect=draw;
-                indirect.indexBuffer=MainIndexBuffer(mesh,selected.level,scene.Materials()[materialIndex],input);
+                indirect.indexBuffer=MainIndirectIndexBuffer(mesh,selected.level,scene.Materials()[materialIndex],input);
                 indirect.indexCount=batch.indexCount;
                 indirect.instanceBuffer=gpuVisibility->GetInstanceBuffer();
                 indirect.indirectArguments=gpuVisibility->GetArgumentsBuffer();

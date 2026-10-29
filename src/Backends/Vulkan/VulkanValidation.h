@@ -50,6 +50,7 @@ namespace dyf::Backends::VulkanValidation
         case RHI::ResourceState::Undefined:
         case RHI::ResourceState::Common:
         case RHI::ResourceState::CopyDestination:
+        case RHI::ResourceState::CopySource:
             return true;
         case RHI::ResourceState::VertexBuffer:
             return VulkanValidation::HasUsage(desc.usage, RHI::BufferUsage::Vertex);

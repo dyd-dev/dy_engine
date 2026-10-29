@@ -25,7 +25,7 @@ namespace dyf::RHI
         {
             return state == ResourceState::ShaderResource || state == ResourceState::VertexBuffer ||
                 state == ResourceState::IndexBuffer || state == ResourceState::ConstantBuffer ||
-                state == ResourceState::IndirectArgument ||
+                state == ResourceState::IndirectArgument || state == ResourceState::CopySource ||
                 state == ResourceState::DepthRead || state == ResourceState::UnorderedAccess;
         }
 

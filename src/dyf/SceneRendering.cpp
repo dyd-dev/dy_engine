@@ -245,6 +245,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         // 설정 요청만으로 그림자를 사용했다고 하지 않고 파이프라인·뷰·깊이·상수·타깃 폭이 모두 준비되었는지 확인한다.
         const bool hasShadows = shadowPipeline && shadows.viewCount && shadowDepthTarget &&
             shadowMatrixBuffer && shadowDepthTarget->GetDesc().width;
+        if(hasShadows)PrepareShadowCasters(scene,draws);
         const bool cachedShadows=hasShadows && ReuseShadowAtlas(scene,shadows,draws);
         const bool drawShadows=hasShadows && !cachedShadows;
         frameNoAreaLights=frameNoAreaLights && stockDrawInputs && UsesStockGeometry() && !wireframeActive &&
@@ -413,16 +414,23 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         struct ShadowInstanceFrame
         {
             Impl& r;
-            RHI::BufferHandle previous;
-            bool previousReady,committed=false;
-            explicit ShadowInstanceFrame(Impl& owner):r(owner),previous(r.shadowInstanceBuffer),previousReady(r.shadowInstanceReady) {}
+            RHI::BufferHandle previous,previousArguments;
+            bool previousReady,previousArgumentsReady,committed=false;
+            explicit ShadowInstanceFrame(Impl& owner):r(owner),previous(r.shadowInstanceBuffer),previousArguments(r.shadowArgumentsBuffer),
+                previousReady(r.shadowInstanceReady),previousArgumentsReady(r.shadowArgumentsReady) {}
             ~ShadowInstanceFrame()
             {
-                if(committed) {if(r.shadowInstanceBuffer!=previous)r.device->DestroyBuffer(previous);}
+                if(committed)
+                {
+                    if(r.shadowInstanceBuffer!=previous)r.device->DestroyBuffer(previous);
+                    if(r.shadowArgumentsBuffer!=previousArguments)r.device->DestroyBuffer(previousArguments);
+                }
                 else
                 {
                     if(r.shadowInstanceBuffer!=previous)r.device->DestroyBuffer(r.shadowInstanceBuffer);
                     r.shadowInstanceBuffer=previous;r.shadowInstanceReady=previousReady;r.shadowInstancesActive=false;
+                    if(r.shadowArgumentsBuffer!=previousArguments)r.device->DestroyBuffer(r.shadowArgumentsBuffer);
+                    r.shadowArgumentsBuffer=previousArguments;r.shadowArgumentsReady=previousArgumentsReady;r.shadowIndirectActive=false;
                 }
             }
             void Commit()
@@ -432,10 +440,14 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
                     r.shadowInstanceReady=true;
                     r.shadowInstanceBytes.swap(r.shadowInstances.matrices);
                 }
+                if(r.shadowIndirectActive)
+                {
+                    r.shadowArgumentsReady=true;r.shadowArgumentBytes.swap(r.shadowInstances.arguments);
+                }
                 committed=true;
             }
         } shadowInstanceFrame(*this);
-        shadowInstancesActive=false;
+        shadowInstancesActive=false;shadowIndirectActive=false;
         struct FrameCommands
         {
             RHI::IDevice& device;

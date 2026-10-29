@@ -93,6 +93,7 @@ namespace dyf::RHI
     	case RHI::ResourceState::Undefined:
     	case RHI::ResourceState::Common:
     	case RHI::ResourceState::CopyDestination:
+        case RHI::ResourceState::CopySource:
     		return true;
     	case RHI::ResourceState::VertexBuffer:
     		return HasUsage(desc.usage, RHI::BufferUsage::Vertex);

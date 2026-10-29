@@ -38,6 +38,35 @@ constexpr bool StateSummaryContracts()
 }
 static_assert(StateSummaryContracts());
 
+constexpr bool CopyRangeFits(uint32_t bufferSize,uint32_t offset,uint32_t size)
+{
+    return size && offset%4==0 && size%4==0 && uint64_t(offset)+size<=bufferSize;
+}
+static_assert(CopyRangeFits(16,4,12));
+static_assert(!CopyRangeFits(16,8,12));
+static_assert(!CopyRangeFits(16,0,0));
+static_assert(!CopyRangeFits(16,2,4));
+static_assert(!CopyRangeFits(16,0,2));
+static_assert(!CopyRangeFits(UINT32_MAX,UINT32_MAX-3,8));
+
+constexpr bool IndirectArgumentsFit(uint32_t bufferSize,uint32_t offset,uint32_t argumentSize,
+    uint32_t drawCount,uint32_t stride)
+{
+    return offset%4==0 && stride%4==0 && stride>=argumentSize && offset<=bufferSize &&
+        (!drawCount || uint64_t(drawCount-1)*stride+argumentSize<=uint64_t(bufferSize)-offset);
+}
+static_assert(IndirectArgumentsFit(40,0,20,2,20));
+static_assert(IndirectArgumentsFit(48,4,20,2,24));
+static_assert(!IndirectArgumentsFit(47,4,20,2,24));
+static_assert(!IndirectArgumentsFit(UINT32_MAX,0,20,UINT32_MAX,20));
+static_assert(!IndirectArgumentsFit(UINT32_MAX,UINT32_MAX-3,20,2,UINT32_MAX-3));
+static_assert(!IndirectArgumentsFit(40,0,20,1,16));
+static_assert(!IndirectArgumentsFit(40,0,20,1,22));
+static_assert(!IndirectArgumentsFit(40,2,20,1,20));
+static_assert(IndirectArgumentsFit(40,40,20,0,20));
+static_assert(!IndirectArgumentsFit(40,44,20,0,20));
+static_assert(!IndirectArgumentsFit(40,40,20,0,16));
+
 #ifdef DY_LIVE_PROFILING_ENABLED
 constexpr size_t LiveEventBatchSize=128;
 constexpr size_t LiveLinkBatchSize=512;
@@ -314,6 +343,30 @@ try
 }
 catch(...) { m_recordingFailed=true; throw; }
 
+void ICommandList::CopyBuffer(BufferHandle source,uint32_t sourceOffset,
+    BufferHandle destination,uint32_t destinationOffset,uint32_t size)
+try
+{
+    if(!CanRecordCommands())return;
+    if(m_rendering)
+    {
+        m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,"CopyBuffer: must be recorded outside rendering.");
+        m_recordingFailed=true;return;
+    }
+    if(!Track(source) || !Track(destination))return;
+    if(source==destination || !CopyRangeFits(source->GetDesc().size,sourceOffset,size) ||
+        !CopyRangeFits(destination->GetDesc().size,destinationOffset,size))
+    {
+        m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,
+            "CopyBuffer: requires distinct buffers, 4-byte aligned offsets/nonzero size and complete source/destination ranges.");
+        m_recordingFailed=true;return;
+    }
+    RequireState(source,0,0,ResourceState::CopySource);
+    RequireState(destination,0,0,ResourceState::CopyDestination);
+    CopyBufferNative(source,sourceOffset,destination,destinationOffset,size);
+}
+catch(...) { m_recordingFailed=true; throw; }
+
 void IDevice::CaptureRecordingLookup(ICommandList& commands)
 {
     RequireOwnerThread();
@@ -580,7 +633,7 @@ try
         m_recordingFailed=true;return;
     }
     if(ValidateBindings(false,true) &&
-        ValidateIndirectArguments(arguments,offset,sizeof(DispatchIndirectArguments)))
+        ValidateIndirectArguments(arguments,offset,sizeof(DispatchIndirectArguments),1,sizeof(DispatchIndirectArguments)))
         DispatchIndirectNative(arguments,offset);
 }
 catch(...) { m_recordingFailed=true; throw; }
@@ -727,7 +780,8 @@ bool ICommandList::ValidateBindings(bool indexed,bool compute,uint32_t count,uin
     }
     return !m_resourceSet || RequireResourceSetStates(m_resourceSet);
 }
-bool ICommandList::ValidateIndirectArguments(BufferHandle arguments, uint32_t offset, uint32_t size)
+bool ICommandList::ValidateIndirectArguments(BufferHandle arguments,uint32_t offset,uint32_t argumentSize,
+    uint32_t drawCount,uint32_t stride)
 {
     if(m_pipeline && m_pipeline->m_topology==PrimitiveTopology::PatchList &&
         !m_owner->Supports(Feature::IndirectTessellation))
@@ -738,11 +792,11 @@ bool ICommandList::ValidateIndirectArguments(BufferHandle arguments, uint32_t of
     }
     if(!Track(arguments)) return false;
     const auto& desc=arguments->GetDesc();
-    if(!HasUsage(desc.usage,BufferUsage::Indirect) || offset%4 ||
-        offset>desc.size || size>desc.size-offset)
+    if(!HasUsage(desc.usage,BufferUsage::Indirect) ||
+        !IndirectArgumentsFit(desc.size,offset,argumentSize,drawCount,stride))
     {
         m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,
-            "Indirect command: requires BufferUsage::Indirect, a 4-byte aligned offset and a complete argument structure within the buffer.");
+            "Indirect command: requires BufferUsage::Indirect, 4-byte aligned offset/stride, stride at least the argument size and every argument within the buffer.");
         m_recordingFailed=true;return false;
     }
     RequireState(arguments,0,0,ResourceState::IndirectArgument);
@@ -795,11 +849,11 @@ try
         m_recordingFailed=true;return;
     }
     if(ValidateBindings(false,false) &&
-        ValidateIndirectArguments(arguments,offset,sizeof(DrawIndirectArguments)))
+        ValidateIndirectArguments(arguments,offset,sizeof(DrawIndirectArguments),1,sizeof(DrawIndirectArguments)))
         DrawIndirectNative(arguments,offset);
 }
 catch(...) { m_recordingFailed=true; throw; }
-void ICommandList::DrawIndexedIndirect(BufferHandle arguments, uint32_t offset)
+void ICommandList::DrawIndexedIndirect(BufferHandle arguments,uint32_t offset,uint32_t drawCount,uint32_t stride)
 try
 {
     if(!CanRecordCommands()) return;
@@ -810,8 +864,8 @@ try
         m_recordingFailed=true;return;
     }
     if(ValidateBindings(true,false) &&
-        ValidateIndirectArguments(arguments,offset,sizeof(DrawIndexedIndirectArguments)))
-        DrawIndexedIndirectNative(arguments,offset);
+        ValidateIndirectArguments(arguments,offset,sizeof(DrawIndexedIndirectArguments),drawCount,stride) && drawCount)
+        DrawIndexedIndirectNative(arguments,offset,drawCount,stride);
 }
 catch(...) { m_recordingFailed=true; throw; }
 
@@ -907,6 +961,13 @@ class RecordedCommandList final : public ICommandList
     void GlobalBarrierNative() override
     { m_commands.push_back([](ICommandList& native) { native.GlobalBarrierNative(); return true; });
       RecordLiveCommand(D::LiveCommandKind::Barrier,{},nullptr,0,0,1,D::LiveEventKind::Command,false,"Global barrier"); }
+    void CopyBufferNative(BufferHandle source,uint32_t sourceOffset,BufferHandle destination,
+        uint32_t destinationOffset,uint32_t size) override
+    {
+        RecordNative<&ICommandList::CopyBufferNative>(source,sourceOffset,destination,destinationOffset,size);
+        RecordLiveCommand(D::LiveCommandKind::None,{sourceOffset,destinationOffset,size},destination,0,size,1,
+            D::LiveEventKind::Command,false,"Copy buffer");
+    }
     void BeginDebugEventNative(const char* name,const DebugLabelColor& color) override
     {
 #ifdef DY_RENDERDOC_ENABLED
@@ -1089,10 +1150,10 @@ class RecordedCommandList final : public ICommandList
         if(!m_rendering || !m_pipeline || !m_viewport || !m_scissor) {m_recordingFailed=true;return;}
         RecordNative<&ICommandList::DrawIndirectNative>(arguments,offset);
     }
-    void DrawIndexedIndirectNative(BufferHandle arguments,uint32_t offset) override
+    void DrawIndexedIndirectNative(BufferHandle arguments,uint32_t offset,uint32_t drawCount,uint32_t stride) override
     {
         if(!m_rendering || !m_pipeline || !m_indexBuffer || !m_viewport || !m_scissor) {m_recordingFailed=true;return;}
-        RecordNative<&ICommandList::DrawIndexedIndirectNative>(arguments,offset);
+        RecordNative<&ICommandList::DrawIndexedIndirectNative>(arguments,offset,drawCount,stride);
     }
     void DispatchMeshNative(uint32_t x,uint32_t y,uint32_t z) override
     {

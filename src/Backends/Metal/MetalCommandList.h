@@ -24,6 +24,8 @@ namespace dyf::Backends
 	protected:
         bool ReplayNative(const std::vector<std::function<bool(ICommandList&)>>& commands) override;
         void GlobalBarrierNative() override;
+        void CopyBufferNative(RHI::BufferHandle source, uint32_t sourceOffset,
+            RHI::BufferHandle destination, uint32_t destinationOffset, uint32_t size) override;
 
 		void ResourceBarrierNative(
 			const RHI::ResourceBarrierDesc* barriers,
@@ -65,7 +67,7 @@ namespace dyf::Backends
 			int32_t vertexOffset,
 			uint32_t firstInstance) override;
 		void DrawIndirectNative(RHI::BufferHandle arguments, uint32_t offset) override;
-		void DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset) override;
+		void DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset, uint32_t drawCount, uint32_t stride) override;
 		void DispatchMeshNative(
 			uint32_t threadGroupCountX,
 			uint32_t threadGroupCountY,
