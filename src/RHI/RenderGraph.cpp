@@ -155,11 +155,23 @@ namespace dyf::RHI
             return resource.handle;
         }
         const RGResourceHandle handle{nextResourceId.fetch_add(1, std::memory_order_relaxed)};
-        m_resourceIndices.emplace(handle.id, static_cast<uint32_t>(m_resources.size()));
-        m_resources.push_back({buffer, texture, initialState, finalState, handle});
-        m_resourceNameToHandle.emplace(name, handle);
-        if(buffer)m_bufferHandles.emplace(buffer,handle);
-        else m_textureHandles.emplace(texture,handle);
+        const auto resourceCount=m_resources.size();
+        try
+        {
+            m_resources.push_back({buffer, texture, initialState, finalState, handle});
+            m_resourceIndices.emplace(handle.id, static_cast<uint32_t>(resourceCount));
+            m_resourceNameToHandle.emplace(name, handle);
+            if(buffer)m_bufferHandles.emplace(buffer,handle);
+            else m_textureHandles.emplace(texture,handle);
+        }
+        catch(...)
+        {
+            m_resourceIndices.erase(handle.id);
+            m_resourceNameToHandle.erase(name);
+            if(buffer)m_bufferHandles.erase(buffer);else m_textureHandles.erase(texture);
+            if(m_resources.size()>resourceCount)m_resources.pop_back();
+            throw;
+        }
         m_compiled = false;
         return handle;
     }

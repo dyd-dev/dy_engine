@@ -605,15 +605,13 @@ void IDevice::ReleaseResources()
     // Cached wrappers are not user handles. Destroy them while this device is
     // alive, before walking the set their destructors remove themselves from.
     if(m_recording) {m_recording->commands.clear();m_recording->commandBytes=0;}
-    std::vector<std::shared_ptr<void>> references;
-    std::vector<std::shared_ptr<const ICommandList::ReferenceSnapshot>> snapshots;
     for(auto* commands : m_recordedCommands)
     {
-        for(auto& reference : commands->m_references) references.push_back(std::move(reference));
+        // Releasing owners only queues preallocated retirement nodes; drain after detaching all lists.
         commands->m_references.clear();
         commands->m_referenceHandles.clear();
         commands->m_liveDeferred->ClearTrackedHandles();
-        if(commands->m_sharedReferences)snapshots.push_back(std::move(commands->m_sharedReferences));
+        commands->m_sharedReferences.reset();
         commands->m_owner = nullptr;
     }
     m_recordedCommands.clear();
@@ -623,8 +621,6 @@ void IDevice::ReleaseResources()
         resource.second->registered.store(false,std::memory_order_release);
     m_recordingResources.reset();
     m_resources.clear();
-    references.clear();
-    snapshots.clear();
     DrainRetiredResources();
     m_resourceStates.clear();
     m_borrowedTextures.clear();
@@ -705,12 +701,23 @@ TextureHandle IDevice::GetBackBuffer()
     auto* texture = GetBackBufferNative();
     if(texture && !Reference(texture))
     {
-        m_borrowedTextures.insert(texture);
-        m_resources.emplace(texture,std::make_shared<ResourceRecord>(
-            std::shared_ptr<void>(texture,[](void*) {})));
+        const auto stateKey=std::make_tuple(reinterpret_cast<uintptr_t>(texture),0u,0u);
+        try
+        {
+            m_borrowedTextures.insert(texture);
+            m_resources.emplace(texture,std::make_shared<ResourceRecord>(
+                std::shared_ptr<void>(texture,[](void*) {})));
+            m_resourceStates.emplace(stateKey,ResourceState::Present);
+        }
+        catch(...)
+        {
+            m_resources.erase(texture);
+            m_borrowedTextures.erase(texture);
+            m_resourceStates.erase(stateKey);
+            throw;
+        }
         if(auto* live=GetLiveState())Platform::RegisterLiveObject(texture,
             {Platform::LiveObjectKind::Texture,live->device,live->device,0,0,"Swapchain image (borrowed)"});
-        m_resourceStates[{reinterpret_cast<uintptr_t>(texture),0,0}]=ResourceState::Present;
     }
     return texture;
 }
@@ -1243,6 +1250,9 @@ try
 {
     if(commands.m_owner != this || !commands.Track(buffer) || !data || !size
         || offset > buffer->GetDesc().size || size > buffer->GetDesc().size - offset)
+    { commands.m_recordingFailed = true; return false; }
+    const auto alignment=GetLimit(Limit::BufferUpdateAlignment);
+    if(!alignment || offset%alignment || size%alignment)
     { commands.m_recordingFailed = true; return false; }
     const size_t position=commands.m_commandBytes.size();
     const auto* first=static_cast<const uint8_t*>(data);

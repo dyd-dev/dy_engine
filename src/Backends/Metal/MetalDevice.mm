@@ -490,6 +490,8 @@ uint64_t MetalDevice::GetLimitNative(RHI::Limit limit) const
         // Apple의 arrayLength 명세와 모든 지원 GPU family 표의 실제 한도다.
         // https://developer.apple.com/documentation/metal/mtltexture/arraylength
         return 2048;
+    case RHI::Limit::BufferUpdateAlignment:
+        return MetalValidation::BufferUpdateAlignment;
     case RHI::Limit::UniformBufferOffsetAlignment:
         // Apple GPU의 constant 정렬은 4B, Mac2의 정렬은 32B다. 장치 family를 확인한다.
         if(@available(macOS 11.0, *))

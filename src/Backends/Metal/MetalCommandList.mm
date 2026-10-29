@@ -1255,11 +1255,11 @@ namespace dyf::Backends
 		{
 			return false;
 		}
-		if(offset % 4u != 0 || size % 4u != 0)
+		if(offset % MetalValidation::BufferUpdateAlignment != 0 || size % MetalValidation::BufferUpdateAlignment != 0)
 		{
 			std::fprintf(stderr,
-				"dyf::RHI [error]: Metal buffer copy requires 4-byte offset and size alignment (offset=%u, size=%u); the native copy was not issued.\n",
-				offset, size);
+				"dyf::RHI [error]: Metal buffer copy requires %u-byte offset and size alignment (offset=%u, size=%u); the native copy was not issued.\n",
+				MetalValidation::BufferUpdateAlignment, offset, size);
 			return false;
 		}
 		if(!m_impl->uploadArena) return false;

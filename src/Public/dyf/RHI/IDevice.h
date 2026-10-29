@@ -51,7 +51,9 @@ namespace dyf::RHI
         InlineConstantBytes, Texture2DDimension,
         UniformBufferOffsetAlignment, StorageBufferOffsetAlignment,
         UniformBufferBytes, StorageBufferBytes, SamplerAnisotropy, TessellationPatchControlPoints,
-        TextureArrayLayers
+        TextureArrayLayers,
+        // Required byte alignment for both UpdateBuffer offset and size; 1 permits byte ranges.
+        BufferUpdateAlignment
     };
 
     enum class FormatFeature : uint8_t { LinearFiltering, CompressedSampling };
@@ -140,6 +142,8 @@ namespace dyf::RHI
         [[nodiscard]] bool PrepareCommandLists(ICommandList* const* commandLists, uint32_t count,
             uint32_t threadCount = 1);
         [[nodiscard]] bool ResetCommandList(ICommandList*);
+        // Destroy invalidates the caller's pointer immediately. Storage may be reused;
+        // stale pointers are not generation-checked and must never be passed back.
         void DestroyCommandList(ICommandList*);
 
 		// 호출 순서대로 실행하며 프레임을 끝내지 않는다. 제출한 명령과 자원은 완료까지 보유한다.
@@ -171,6 +175,8 @@ namespace dyf::RHI
         [[nodiscard]] PipelineHandle CreateMeshPipeline(const MeshPipelineDesc& desc);
 		[[nodiscard]] ResourceSetHandle CreateResourceSet(const ResourceSetDesc& desc);
 
+        // Destroy invalidates caller handles; recorded/submitted work retains its own leases.
+        // All handles expire when this device is destroyed, regardless of address reuse.
 		void DestroyBuffer(BufferHandle buffer);
 		void DestroyTexture(TextureHandle texture);
 		void DestroyShader(ShaderHandle shader);
@@ -179,6 +185,8 @@ namespace dyf::RHI
 
 		// 업로드 입력은 호출 중 복사하므로 반환 후 원본 메모리를 해제하거나 바꿀 수 있다.
 		// GPU 복사는 명령 목록에 기록되며 Submit으로 실행한다. UpdateTexture도 같은 수명 규칙을 따른다.
+        // offset/size must satisfy GetLimit(BufferUpdateAlignment); rejected here before payload copying.
+        // Vulkan/D3D12/iOS permit byte ranges; Metal macOS requires multiples of 4.
 		bool UpdateBuffer(
 			ICommandList& commandList,
 			BufferHandle buffer,

@@ -586,6 +586,8 @@ uint64_t D3D12Device::GetLimitNative(RHI::Limit limit) const
         return D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;
     case RHI::Limit::TextureArrayLayers:
         return D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION;
+    case RHI::Limit::BufferUpdateAlignment:
+        return 1;
     case RHI::Limit::UniformBufferOffsetAlignment:
         return D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
     case RHI::Limit::StorageBufferOffsetAlignment:

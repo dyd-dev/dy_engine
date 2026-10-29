@@ -385,7 +385,7 @@ namespace dyf::Backends
 		VkImageViewCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 		info.image = m_image;
-		info.viewType = arrayLayerCount > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+		info.viewType = GetDesc().depthOrArraySize > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
 		info.format = ToVulkanFormat(GetDesc().format);
 		info.subresourceRange.aspectMask = aspectMask;
 		info.subresourceRange.baseMipLevel = resolved.firstMipLevel;

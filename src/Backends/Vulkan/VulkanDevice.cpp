@@ -521,6 +521,7 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
         case RHI::Limit::InlineConstantBytes: return limits.maxPushConstantsSize;
         case RHI::Limit::Texture2DDimension: return limits.maxImageDimension2D;
         case RHI::Limit::TextureArrayLayers: return limits.maxImageArrayLayers;
+        case RHI::Limit::BufferUpdateAlignment: return 1;
         case RHI::Limit::UniformBufferOffsetAlignment: return limits.minUniformBufferOffsetAlignment;
         case RHI::Limit::StorageBufferOffsetAlignment: return limits.minStorageBufferOffsetAlignment;
         case RHI::Limit::UniformBufferBytes: return limits.maxUniformBufferRange;

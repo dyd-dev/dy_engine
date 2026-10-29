@@ -400,7 +400,8 @@ bool Gui::Record(RHI::ICommandList& commands, RHI::TextureHandle target)
         data->TotalVtxCount < 0 || data->TotalIdxCount <= 0) return Fail("Invalid ImGui geometry dimensions.");
     const uint64_t vertexBytes = uint64_t(data->TotalVtxCount) * sizeof(Vertex);
     const uint64_t indexBytes = uint64_t(data->TotalIdxCount) * sizeof(ImDrawIdx);
-    if(vertexBytes > UINT32_MAX || indexBytes > UINT32_MAX) return Fail("ImGui geometry exceeds RHI buffer limits.");
+    const uint64_t indexUploadBytes=(indexBytes+3)&~uint64_t(3);
+    if(vertexBytes > UINT32_MAX || indexUploadBytes > UINT32_MAX) return Fail("ImGui geometry exceeds RHI buffer limits.");
     const float clipWidth = std::min(width, static_cast<float>(target->GetDesc().width));
     const float clipHeight = std::min(height, static_cast<float>(target->GetDesc().height));
     if(clipWidth > INT32_MAX || clipHeight > INT32_MAX) return Fail("Target exceeds signed scissor coordinates.");
@@ -442,16 +443,17 @@ bool Gui::Record(RHI::ICommandList& commands, RHI::TextureHandle target)
         }
         indices.insert(indices.end(), list->IdxBuffer.begin(), list->IdxBuffer.end());
     }
+    indices.resize(static_cast<size_t>(indexUploadBytes/sizeof(ImDrawIdx)),0);
     const auto destroyBuffer = [&state](Buffer* buffer) { state.device.DestroyBuffer(buffer); };
     std::unique_ptr<Buffer, decltype(destroyBuffer)> vertexBuffer(state.device.CreateBuffer(
         {static_cast<uint32_t>(vertexBytes), sizeof(Vertex), BufferUsage::Vertex, ResourceState::CopyDestination}), destroyBuffer);
     std::unique_ptr<Buffer, decltype(destroyBuffer)> indexBuffer(state.device.CreateBuffer(
-        {static_cast<uint32_t>(indexBytes), sizeof(ImDrawIdx), BufferUsage::Index, ResourceState::CopyDestination}), destroyBuffer);
+        {static_cast<uint32_t>(indexUploadBytes), sizeof(ImDrawIdx), BufferUsage::Index, ResourceState::CopyDestination}), destroyBuffer);
     auto* vb = vertexBuffer.get();
     auto* ib = indexBuffer.get();
     if(!vb || !ib) return Fail("Geometry buffer creation failed.");
     if(!state.device.UpdateBuffer(commands, vb, 0, vertices.data(), static_cast<uint32_t>(vertexBytes)) ||
-        !state.device.UpdateBuffer(commands, ib, 0, indices.data(), static_cast<uint32_t>(indexBytes)))
+        !state.device.UpdateBuffer(commands, ib, 0, indices.data(), static_cast<uint32_t>(indexUploadBytes)))
         return Fail("Geometry upload recording failed.");
     const ResourceBarrierDesc barriers[] = {{vb, nullptr, ResourceState::CopyDestination, ResourceState::VertexBuffer, {}},
         {ib, nullptr, ResourceState::CopyDestination, ResourceState::IndexBuffer, {}},
@@ -498,7 +500,7 @@ bool Gui::Record(RHI::ICommandList& commands, RHI::TextureHandle target)
     commands.ResourceBarrier(&after, 1);
     state.stats.vertices = static_cast<uint32_t>(data->TotalVtxCount);
     state.stats.indices = static_cast<uint32_t>(data->TotalIdxCount);
-    state.stats.uploadBytes = vertexBytes + indexBytes;
+    state.stats.uploadBytes = vertexBytes + indexUploadBytes;
     return true;
 }
 

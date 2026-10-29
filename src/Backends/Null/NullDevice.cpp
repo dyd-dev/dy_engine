@@ -698,6 +698,7 @@ uint64_t NullDevice::GetLimitNative(RHI::Limit limit) const
     case RHI::Limit::TessellationPatchControlPoints:
     case RHI::Limit::SamplerAnisotropy: return UINT32_MAX;
     case RHI::Limit::UniformBufferOffsetAlignment:
+    case RHI::Limit::BufferUpdateAlignment:
     case RHI::Limit::StorageBufferOffsetAlignment: return 1;
     default: return 0;
     }

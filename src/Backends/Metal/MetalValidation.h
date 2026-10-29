@@ -5,9 +5,17 @@
 #include "dyf/RHI/Binding.h"
 #include "dyf/RHI/Texture.h"
 #include <algorithm>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 namespace dyf::Backends::MetalValidation
 {
+#if defined(__APPLE__) && TARGET_OS_OSX
+    inline constexpr uint32_t BufferUpdateAlignment=4;
+#else
+    inline constexpr uint32_t BufferUpdateAlignment=1;
+#endif
     [[nodiscard]] inline bool HasUsage(RHI::BufferUsage value, RHI::BufferUsage usage)
     {
         return (value & usage) != RHI::BufferUsage::None;
