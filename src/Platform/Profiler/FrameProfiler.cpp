@@ -2,6 +2,7 @@
 #include "FrameProfiler.h"
 #include "GpuTimestamp.h"
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <utility>
 
@@ -38,8 +39,10 @@ namespace dyf::Platform
         nextRecordingScope.store(0,std::memory_order_relaxed);
 	}
 
-	void FrameProfiler::SubmitGpuSample(GpuSample&& sample)
+	void FrameProfiler::SubmitGpuSample(GpuSample&& sample, LiveFrameKey frame)
 	{
+        assert((frame==LiveFrameKey{}) || (frame.device && frame.source && frame.frame));
+        sample.frame=frame;
 		pending.push_back(std::move(sample));
 	}
 
@@ -132,7 +135,9 @@ namespace dyf::Platform
 				PublishValue("GPU graph span ms",milliseconds(ticks[0],ticks[1]),true);
 				if(hasStart) PublishValue("GPU upload to graph ms",milliseconds(start,ticks[0]),true);
 #endif
-				profiler.AddGpuSample(hasStart ? milliseconds(start, ticks[1]) : -1.0, passes);
+				profiler.AddGpuSample(hasStart ? milliseconds(start, ticks[1]) : -1.0, passes, sample.frame);
+                if(hasStart) PublishGpuTiming({sample.frame,milliseconds(start,ticks[1]),
+                    milliseconds(start,ticks[0]),milliseconds(ticks[0],ticks[1])});
 			}
 
 			const auto recycle = [&](RHI::TimestampQueryHandle& query, uint32_t slots)

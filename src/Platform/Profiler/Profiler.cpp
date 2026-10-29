@@ -24,6 +24,20 @@ namespace dyf::Platform
 		traceSink.compare_exchange_strong(sink, nullptr);
 	}
 
+    bool HasFrameTimingSink() noexcept
+    {
+        const auto* sink=traceSink.load();
+        return sink && sink->frameTiming;
+    }
+    void PublishFrameTiming(const FrameTimingEvent& event) noexcept
+    {
+        if(const auto* sink=traceSink.load();sink && sink->frameTiming)sink->frameTiming(event);
+    }
+    void PublishGpuTiming(const GpuTimingSample& sample) noexcept
+    {
+        if(const auto* sink=traceSink.load();sink && sink->gpuTiming)sink->gpuTiming(sample);
+    }
+
 	TraceZone::TraceZone(const SourceLocation& location) noexcept
 	{
 #ifdef DY_PROFILER_TRACING_ENABLED
@@ -148,6 +162,7 @@ namespace dyf::Platform
 		double m_gpuFrameSumMilliseconds = 0.0;
 		uint32_t m_gpuFrameCount = 0;
 		std::vector<ProfilerPassTiming> m_gpuPassSums;
+        LiveFrameKey m_latestGpuFrame;
 		uint64_t m_sequence = 0;
 	};
 
@@ -217,6 +232,7 @@ namespace dyf::Platform
 		snapshot.cpuReadbackAverageMilliseconds = impl->m_cpuStageSums[5] / impl->m_frameCount;
 		snapshot.hasGpuFrame = impl->m_gpuFrameCount > 0;
 		snapshot.gpuFrameSampleCount = impl->m_gpuFrameCount;
+        snapshot.latestGpuFrame=impl->m_latestGpuFrame;
 		if(snapshot.hasGpuFrame)
 			snapshot.gpuFrameAverageMilliseconds = impl->m_gpuFrameSumMilliseconds / impl->m_gpuFrameCount;
 		snapshot.gpuPasses = impl->m_gpuPassSums;
@@ -232,12 +248,13 @@ namespace dyf::Platform
 		return true;
 	}
 
-	void Profiler::AddGpuSample(double frameMilliseconds, const std::vector<ProfilerPassTiming>& passes)
+	void Profiler::AddGpuSample(double frameMilliseconds, const std::vector<ProfilerPassTiming>& passes, LiveFrameKey frame)
 	{
 		if(std::isfinite(frameMilliseconds) && frameMilliseconds >= 0.0)
 		{
 			impl->m_gpuFrameSumMilliseconds += frameMilliseconds;
 			++impl->m_gpuFrameCount;
+            impl->m_latestGpuFrame=frame;
 		}
 		double shadowMilliseconds = 0.0;
 		bool hasShadow = false, validShadow = true;
@@ -262,6 +279,7 @@ namespace dyf::Platform
 			}
 			found->averageMilliseconds += pass.averageMilliseconds;
 			++found->sampleCount;
+            impl->m_latestGpuFrame=frame;
 			if(pass.name == "MainForward")
 			{
 				impl->m_gpuMainSumMilliseconds += pass.averageMilliseconds;
@@ -291,5 +309,6 @@ namespace dyf::Platform
 		impl->m_gpuFrameSumMilliseconds = 0.0;
 		impl->m_gpuFrameCount = 0;
 		impl->m_gpuPassSums.clear();
+        impl->m_latestGpuFrame={};
 	}
 }

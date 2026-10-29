@@ -319,11 +319,14 @@ namespace dyf::Backends
             VkFence fence=VK_NULL_HANDLE;
             uint32_t imageIndex=0;
             bool acquireSuboptimal=false;
+            uint64_t frame=0;
+            bool timed=false;
         };
         struct PresentResult
         {
             VkResult status=VK_SUCCESS;
             double wallMilliseconds=0,cpuMilliseconds=-1;
+            uint64_t beginNs=0,endNs=0;
         };
         using PresentWorker=VulkanPresentWorker<PresentJob,PresentResult>;
         static PresentResult CallPresent(const PresentJob&) noexcept;
@@ -333,6 +336,13 @@ namespace dyf::Backends
         VkResult AcquireImage(uint32_t slot,uint64_t timeout,uint32_t& image,bool prefetch=false);
         VkResult WaitForAcquisitions(uint64_t timeout=1000000000ull);
         void TryPrefetchImage();
+        static uint64_t WsiTimingStart() noexcept
+        {return Platform::HasFrameTimingSink()?Platform::NowNs():0;}
+        void RecordWsi(uint64_t frame,const char* name,uint64_t begin,uint64_t end,int32_t result=0) noexcept
+        {if(begin)Platform::PublishFrameTiming({reinterpret_cast<uintptr_t>(this),frame,name,begin,end,result});}
+        void RecordWsi(uint64_t frame,const char* name,uint64_t begin,int32_t result=0) noexcept
+        {if(begin)RecordWsi(frame,name,begin,Platform::NowNs(),result);}
+        uint64_t m_wsiFrame=0;
         bool m_prefetchEnabled=true;
 
 		VulkanContext m_context;
@@ -989,7 +999,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         const bool hasBegin=clock_gettime(CLOCK_THREAD_CPUTIME_ID,&begin)==0;
 #endif
 #endif
+        if(job.timed)result.beginNs=Platform::NowNs();
         result.status=vkQueuePresentKHR(job.queue,&info);
+        if(job.timed)result.endNs=Platform::NowNs();
 #ifdef DY_PROFILER_TRACING_ENABLED
 #if defined(__linux__)
         const bool hasEnd=clock_gettime(CLOCK_THREAD_CPUTIME_ID,&end)==0;
@@ -1014,6 +1026,12 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
     VkResult VulkanDevice::Impl::AcquireImage(uint32_t slot,uint64_t timeout,uint32_t& image,bool prefetch)
     {
         assert(!m_presentWorker || !m_presentWorker->Pending());
+        const auto frame=m_wsiFrame+(prefetch?0:1);
+        const auto prepared=WsiTimingStart();
+        const auto preparation=[&](VkResult result) {
+            RecordWsi(frame,prefetch?"Vulkan prefetch prepare":"Vulkan acquire prepare",prepared,static_cast<int32_t>(result));
+            return result;
+        };
         VkFence fence=VK_NULL_HANDLE;
         if(!m_acquireFences.empty())
         {
@@ -1022,14 +1040,17 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
             {
                 const auto status=vkGetFenceStatus(m_context.device,fence);
                 if(prefetch && status==VK_NOT_READY)++m_prefetchAcquireFenceBusy;
-                if(status!=VK_SUCCESS)return status;
+                if(status!=VK_SUCCESS)return preparation(status);
                 m_acquireFencePending[slot]=0;
             }
             const auto reset=vkResetFences(m_context.device,1,&fence);
-            if(reset!=VK_SUCCESS)return reset;
+            if(reset!=VK_SUCCESS)return preparation(reset);
         }
+        preparation(VK_SUCCESS);
+        const auto started=WsiTimingStart();
         const auto result=vkAcquireNextImageKHR(m_context.device,m_swapchain.GetHandle(),timeout,
             m_imageAvailableSemaphores[slot],fence,&image);
+        RecordWsi(frame,prefetch?"Vulkan prefetch acquire":"Vulkan acquire",started,static_cast<int32_t>(result));
         if(fence!=VK_NULL_HANDLE && (result==VK_SUCCESS || result==VK_SUBOPTIMAL_KHR))
             m_acquireFencePending[slot]=1;
         return result;
@@ -1083,6 +1104,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 	bool VulkanDevice::Impl::BeginFrame()
 	{
 		if (m_context.device == VK_NULL_HANDLE || m_submissionFaulted) return false;
+        const auto frameStarted=WsiTimingStart();
 		const auto unavailable = [&](const char* reason) {
 			if (m_submissionFaulted) return false;
 			const auto now = std::chrono::steady_clock::now();
@@ -1100,6 +1122,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			return false;
 		};
 		const auto available = [&] {
+            RecordWsi(m_wsiFrame,"Vulkan frame ready",frameStarted);
 			m_frameUnavailableSince = {};
 			m_frameUnavailableWarned = false;
 			return true;
@@ -1214,6 +1237,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 		m_backBuffer = m_backBuffers[m_currentImageIndex].get();
 		m_frameReady = true;
+        ++m_wsiFrame;
         // RHI의 backbuffer 시작 상태 Present를 최초 Vulkan 이미지의 Undefined 레이아웃에 대응시킨다.
         if(m_backBuffers[m_currentImageIndex]->GetBarrierOldLayout(RHI::ResourceState::Present)==VK_IMAGE_LAYOUT_UNDEFINED)
         {
@@ -1376,7 +1400,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 #ifdef DY_PROFILER_TRACING_ENABLED
         Platform::CpuTimer queueSubmitTimer;
 #endif
+        const auto submitStarted=WsiTimingStart();
 		const VkResult result = vkQueueSubmit(m_context.graphicsQueue, submitCount, submitInfos, submission.fence);
+        RecordWsi(m_wsiFrame,"Vulkan queue submit",submitStarted,static_cast<int32_t>(result));
 #ifdef DY_PROFILER_TRACING_ENABLED
         Platform::PublishValue("Vulkan queue submit ms",queueSubmitTimer.ElapsedMilliseconds(),true);
 #endif
@@ -1407,7 +1433,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
     bool VulkanDevice::Impl::Present()
     {
         if(!m_frameReady || !m_imageAcquired || m_swapchain.GetHandle()==VK_NULL_HANDLE || m_submissionFaulted)return false;
-        if(!PollPresent(true))return false;
+        const auto joinStarted=WsiTimingStart();
+        const bool joined=PollPresent(true);
+        RecordWsi(m_wsiFrame,"Vulkan previous present join",joinStarted,joined?0:-1);
+        if(!joined)return false;
         // 모든 이미지 작업 뒤에서 한 번만 표시 세마포어를 신호한다.
         SubmissionRecord completion{};
         m_submissions.reserve(m_submissions.size()+1);
@@ -1431,7 +1460,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 #ifdef DY_PROFILER_TRACING_ENABLED
         Platform::CpuTimer presentSubmitTimer;
 #endif
+        const auto presentSubmitStarted=WsiTimingStart();
         const VkResult submitted=vkQueueSubmit(m_context.graphicsQueue,1,&submit,completion.fence);
+        RecordWsi(m_wsiFrame,"Vulkan present submit",presentSubmitStarted,static_cast<int32_t>(submitted));
 #ifdef DY_PROFILER_TRACING_ENABLED
         Platform::PublishValue("Vulkan present submit ms",presentSubmitTimer.ElapsedMilliseconds(),true);
 #endif
@@ -1452,6 +1483,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         m_submissions.push_back(std::move(completion));
 
         PresentJob job{};
+        job.frame=m_wsiFrame;job.timed=Platform::HasFrameTimingSink();
         job.queue=m_context.presentQueue;job.swapchain=m_swapchain.GetHandle();job.imageIndex=m_currentImageIndex;
         job.waitSemaphore=m_renderFinishedSemaphores[m_currentImageIndex];job.acquireSuboptimal=m_recreateAfterPresent;
         if(m_presentFencesEnabled)
@@ -1492,6 +1524,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
     bool VulkanDevice::Impl::ApplyPresentResult(const PresentJob& job,const PresentResult& completed)
     {
+        RecordWsi(job.frame,"Vulkan queue present",completed.beginNs,completed.endNs,static_cast<int32_t>(completed.status));
 #ifdef DY_PROFILER_TRACING_ENABLED
         // External trace sinks remain on the owner thread, including worker results.
         Platform::PublishValue("Vulkan queue present ms",completed.wallMilliseconds,true);

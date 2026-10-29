@@ -15,10 +15,6 @@
 namespace dyf::Platform
 {
 	using LiveId = std::uint64_t;
-	struct LiveFrameKey
-	{
-		LiveId device = 0, source = 0, frame = 0;
-	};
 	inline bool operator==(LiveFrameKey a, LiveFrameKey b) noexcept
 	{
 		return a.device == b.device && a.source == b.source && a.frame == b.frame;

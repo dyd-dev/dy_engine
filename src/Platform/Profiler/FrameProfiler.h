@@ -27,10 +27,11 @@ namespace dyf::Platform
 			RHI::TimestampQueryHandle query = nullptr, start = nullptr;
 			RHI::FenceHandle completion;
 			std::vector<std::string> passes;
+            LiveFrameKey frame;
 		};
 
 		RHI::TimestampQueryHandle AcquireQuery(std::uint32_t count);
-		void SubmitGpuSample(GpuSample&&);
+		void SubmitGpuSample(GpuSample&&, LiveFrameKey frame={});
 		void PollGpuSamples();
 		bool RecordFrame(ProfilerTimingSample);
 		const ProfilerTimingSnapshot& GetSnapshot() const noexcept { return snapshot; }

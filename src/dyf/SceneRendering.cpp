@@ -545,7 +545,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             canvasFrame.Commit();
             if(samples.packet.query && completion) { // 쿼리와 유효한 completion 펜스가 모두 있을 때만 비동기 GPU 표본을 수집기로 넘긴다. 넘긴 뒤 packet을 비워 지역 소멸자가 쿼리를 중복 반납하지 않게 한다.
                 samples.packet.completion=completion;
-                m_profiler.SubmitGpuSample(std::move(samples.packet));
+                m_profiler.SubmitGpuSample(std::move(samples.packet),liveFrame.GetKey());
                 samples.packet={};
             }
             // draw 제출의 펜스와 기록한 통계를 보관한다. 뒤의 readback 또는 Present가 실패해도 이미 제출한 작업이 취소되지는 않으므로 이 값은 유지한다.
