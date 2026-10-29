@@ -168,60 +168,58 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         } samples{*nativeDevice,{}};
         if(!m_environmentCapture) samples.packet.start=m_profiler.AcquireQuery(1); // 환경 캡처를 제외한 창·텍스처 Scene 시간 측정에 프레임 시작 timestamp query를 획득한다.
 
-        {
-            // 크기가 바뀐 조명·그림자·인스턴스 버퍼만 교체하며, 업로드·닫기·제출 성공이면 과거 자원을 해제하고 실패·예외면 새 자원을 버려 핸들·ready를 복원한다.
-            struct FrameBuffers {
-                Impl& r;
-                RHI::BufferHandle light,shadow,instances,cpuInstances;
-                bool lightReady,shadowReady,instancesReady,cpuInstancesReady,committed=false;
-                explicit FrameBuffers(Impl& owner):r(owner),light(r.lightingBuffer),shadow(r.shadowMatrixBuffer),instances(r.instanceBuffer),
-                    cpuInstances(r.cpuInstanceBuffer),lightReady(r.lightingReady),shadowReady(r.shadowReady),
-                    instancesReady(r.instanceReady),cpuInstancesReady(r.cpuInstanceReady) {}
-                ~FrameBuffers() {
-                    const auto finish=[&](RHI::BufferHandle& current,RHI::BufferHandle previous,bool& ready,bool oldReady) {
-                        if(committed) {if(current!=previous)r.device->DestroyBuffer(previous);} // 업로드 제출 성공이면 교체된 과거 버퍼를 해제한다.
-                        else {if(current!=previous)r.device->DestroyBuffer(current);current=previous;ready=oldReady;} // 업로드 준비/제출 실패면 새 버퍼를 해제하고 과거 핸들/ready로 복구한다.
-                    };
-                    finish(r.lightingBuffer,light,r.lightingReady,lightReady);
-                    finish(r.shadowMatrixBuffer,shadow,r.shadowReady,shadowReady);
-                    finish(r.instanceBuffer,instances,r.instanceReady,instancesReady);
-                    finish(r.cpuInstanceBuffer,cpuInstances,r.cpuInstanceReady,cpuInstancesReady);
-                }
-            } buffers(*this);
-            // 업로드 명령 목록을 범위 소유자에 맡겨 예외나 조기 반환에서도 해제한다.
-            RHI::ResourceScope resources(*nativeDevice);
-            auto* frameDataCommand=nativeDevice->AcquireCommandList();
-            if(!frameDataCommand) return RendererFailure("Frame command list acquisition failed."); // 업로드용 명령 목록 획득 실패를 보고한다.
-            resources.Keep(frameDataCommand);
-            if(samples.packet.start) { // 유효한 시작 쿼리가 있을 때만 reset/write 명령을 기록한다.
-                frameDataCommand->ResetTimestamps(samples.packet.start,0,1);
-                frameDataCommand->WriteTimestamp(samples.packet.start,0);
+        // 크기가 바뀐 조명·그림자·인스턴스 버퍼만 교체하며, 업로드·닫기·제출 성공이면 과거 자원을 해제하고 실패·예외면 새 자원을 버려 핸들·ready를 복원한다.
+        struct FrameBuffers {
+            Impl& r;
+            RHI::BufferHandle light,shadow,instances,cpuInstances;
+            bool lightReady,shadowReady,instancesReady,cpuInstancesReady,committed=false;
+            explicit FrameBuffers(Impl& owner):r(owner),light(r.lightingBuffer),shadow(r.shadowMatrixBuffer),instances(r.instanceBuffer),
+                cpuInstances(r.cpuInstanceBuffer),lightReady(r.lightingReady),shadowReady(r.shadowReady),
+                instancesReady(r.instanceReady),cpuInstancesReady(r.cpuInstanceReady) {}
+            ~FrameBuffers() {
+                const auto finish=[&](RHI::BufferHandle& current,RHI::BufferHandle previous,bool& ready,bool oldReady) {
+                    if(committed) {if(current!=previous)r.device->DestroyBuffer(previous);} // 업로드 제출 성공이면 교체된 과거 버퍼를 해제한다.
+                    else {if(current!=previous)r.device->DestroyBuffer(current);current=previous;ready=oldReady;} // 업로드 준비/제출 실패면 새 버퍼를 해제하고 과거 핸들/ready로 복구한다.
+                };
+                finish(r.lightingBuffer,light,r.lightingReady,lightReady);
+                finish(r.shadowMatrixBuffer,shadow,r.shadowReady,shadowReady);
+                finish(r.instanceBuffer,instances,r.instanceReady,instancesReady);
+                finish(r.cpuInstanceBuffer,cpuInstances,r.cpuInstanceReady,cpuInstancesReady);
             }
-            if(!PrepareFrameResources(renderFrame,*frameDataCommand)) // 카메라/확장/조명/가시성 자원 준비가 실패하면 업로드 제출을 하지 않는다.
-                return RendererFailure("Frame resource preparation failed.");
-            if(!UpdateShadowBuffer(nativeDevice,*frameDataCommand,shadows)) // 그림자 상수 업로드 기록 실패를 전달한다.
-                return RendererFailure("Shadow constants upload recording failed.");
-            if(!UpdateLightingBuffer(scene,camera,nativeDevice,*frameDataCommand)) // 조명 상수 업로드 기록 실패를 전달한다.
-                return RendererFailure("Lighting constants upload recording failed.");
-            if(!UpdateInstanceBuffer(scene,*frameDataCommand)) // 인스턴스 변환 업로드 기록 실패를 전달한다.
-                return RendererFailure("Instance transforms upload recording failed.");
-            if(!frameDataCommand->Close()) // 논리 업로드 명령 목록을 닫지 못하면 제출하지 않는다.
-                return RendererFailure("Frame upload command list close failed.");
-            if(!nativeDevice->PrepareCommandLists(&frameDataCommand,1,1)) // 네이티브 명령 준비가 실패하면 큐 제출 단계로 가지 않는다.
-                return RendererFailure("Frame upload command list native preparation failed.");
-            Platform::CpuTimer uploadSubmitTimer;
-            // 앞서 닫고 네이티브 준비한 업로드 명령을 큐에 제출한다. 같은 큐의 뒤쪽 draw와 순서가 이어지며 여기서 GPU 완료를 기다리지는 않는다.
-            const bool submitted=nativeDevice->Submit(&frameDataCommand,1);
-            timing.cpuSubmitMilliseconds+=uploadSubmitTimer.ElapsedMilliseconds();
-            if(!submitted) return RendererFailure("Frame upload submission failed."); // 큐가 업로드 제출을 받지 못하면 버퍼 교체/ready를 확정하지 않는다.
-            // 업로드 제출 성공에 대해서만 자원 ready와 변경 바이트/revision을 확정한다. draw 제출 성공 여부는 아직 별도다.
-            lightingReady=true;shadowReady=shadowMatrixBuffer!=nullptr;instanceReady=instanceBuffer!=nullptr;
-            cpuInstanceReady=cpuInstanceBuffer!=nullptr;
-            if(visibilityActive) gpuVisibility->CommitUploads(); // GPU 가시성 업로드가 있었으면 같은 제출 성공 기준으로 확정한다.
-            if(basicEnvironment) basicEnvironment->CommitUploads(); // 기본 환경 자원을 사용했다면 그 업로드 준비도 확정한다.
-            CommitFrameData();
-            buffers.committed=true;
+        } buffers(*this);
+        struct FrameCommands
+        {
+            RHI::IDevice& device;
+            std::vector<RHI::ICommandList*> lists;
+            RHI::ICommandList* upload=nullptr;
+            RHI::ICommandList* preparation=nullptr;
+            ~FrameCommands() {
+                if(upload)device.DestroyCommandList(upload);
+                if(preparation)device.DestroyCommandList(preparation);
+                for(auto* commands:lists)device.DestroyCommandList(commands);
+            }
+        } frame{*nativeDevice,{}};
+        // 업로드 명령 목록을 범위 소유자에 맡겨 예외나 조기 반환에서도 해제한다.
+        auto* frameDataCommand=nativeDevice->AcquireCommandList();
+        if(!frameDataCommand) return RendererFailure("Frame command list acquisition failed."); // 업로드용 명령 목록 획득 실패를 보고한다.
+        frame.upload=frameDataCommand;
+        if(samples.packet.start) { // 유효한 시작 쿼리가 있을 때만 reset/write 명령을 기록한다.
+            frameDataCommand->ResetTimestamps(samples.packet.start,0,1);
+            frameDataCommand->WriteTimestamp(samples.packet.start,0);
         }
+        if(!PrepareFrameResources(renderFrame,*frameDataCommand)) // 카메라/확장/조명/가시성 자원 준비가 실패하면 업로드 제출을 하지 않는다.
+            return RendererFailure("Frame resource preparation failed.");
+        if(!UpdateShadowBuffer(nativeDevice,*frameDataCommand,shadows)) // 그림자 상수 업로드 기록 실패를 전달한다.
+            return RendererFailure("Shadow constants upload recording failed.");
+        if(!UpdateLightingBuffer(scene,camera,nativeDevice,*frameDataCommand)) // 조명 상수 업로드 기록 실패를 전달한다.
+            return RendererFailure("Lighting constants upload recording failed.");
+        if(!UpdateInstanceBuffer(scene,*frameDataCommand)) // 인스턴스 변환 업로드 기록 실패를 전달한다.
+            return RendererFailure("Instance transforms upload recording failed.");
+        if(!frameDataCommand->Close()) // 논리 업로드 명령 목록을 닫지 못하면 제출하지 않는다.
+            return RendererFailure("Frame upload command list close failed.");
+        if(!nativeDevice->PrepareCommandLists(&frameDataCommand,1,1)) // 네이티브 명령 준비가 실패하면 큐 제출 단계로 가지 않는다.
+            return RendererFailure("Frame upload command list native preparation failed.");
+        // Submit uploads with the graph so the GPU does not wait for CPU graph recording between them.
 
         // 이하 패스 기록 중 생길 Canvas 자원 변화를 보호한다. draw 제출 성공에서 Commit한다.
         CanvasFrame canvasFrame(*this);
@@ -460,16 +458,6 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             }
         } shadowInstanceFrame(*this);
         shadowInstancesActive=false;shadowIndirectActive=false;
-        struct FrameCommands
-        {
-            RHI::IDevice& device;
-            std::vector<RHI::ICommandList*> lists;
-            RHI::ICommandList* preparation=nullptr;
-            ~FrameCommands() {
-                if(preparation)device.DestroyCommandList(preparation);
-                for(auto* commands:lists)device.DestroyCommandList(commands);
-            }
-        } frame{*nativeDevice,{}};
         frame.preparation=nativeDevice->AcquireCommandList();
         if(!frame.preparation)return RendererFailure("Pass preparation command acquisition failed.");
         // All registry/cache changes finish on the owner before worker snapshots.
@@ -522,6 +510,11 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             frame.lists.insert(frame.lists.begin(),frame.preparation);
             frame.preparation=nullptr;
         }
+        if(drawn)
+        {
+            frame.lists.insert(frame.lists.begin(),frame.upload);
+            frame.upload=nullptr;
+        }
         Platform::CpuTimer submitTimer;
         RHI::FenceHandle completion;
         // 기록/네이티브 준비에 성공한 목록만 제출하고 완료 펜스를 받는다. Submit 성공은 수락된 작업을 뜻하며 펜스가 이미 완료되었음을 뜻하지 않는다.
@@ -529,6 +522,12 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             static_cast<uint32_t>(frame.lists.size()), nullptr, 0}, completion);
         timing.cpuSubmitMilliseconds+=submitTimer.ElapsedMilliseconds();
         if(drawn) { // draw 제출에 성공했을 때만 이력·통계·쿼리 소유권을 확정한다.
+            lightingReady=true;shadowReady=shadowMatrixBuffer!=nullptr;instanceReady=instanceBuffer!=nullptr;
+            cpuInstanceReady=cpuInstanceBuffer!=nullptr;
+            if(visibilityActive)gpuVisibility->CommitUploads();
+            if(basicEnvironment)basicEnvironment->CommitUploads();
+            CommitFrameData();
+            buffers.committed=true;
             shadowInstanceFrame.Commit();
             if(frameNoAreaLights && recordingStatistics.mainDrawCount && !noAreaReported)
             {
