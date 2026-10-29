@@ -22,9 +22,28 @@ namespace dyf::Backends
         ~VulkanCommandStorage() {if(pool)vkDestroyCommandPool(device,pool,nullptr);}
     };
 
+    struct VulkanCommandPoolCache::CacheBlock
+    {
+        struct Slot {std::atomic<VulkanCommandStorage*> storage{nullptr};};
+        std::array<Slot,32> slots;
+        CacheBlock* next=nullptr;
+        ~CacheBlock()
+        {for(auto& slot:slots)delete slot.storage.load(std::memory_order_relaxed);}
+    };
+
     VulkanCommandPoolCache::VulkanCommandPoolCache(const VulkanContext& context)
         :m_device(context.device),m_queueFamily(context.queueIndices.graphicsFamily) {}
-    VulkanCommandPoolCache::~VulkanCommandPoolCache()=default;
+    VulkanCommandPoolCache::~VulkanCommandPoolCache()
+    {
+        // Commands retain the cache; published blocks live until the final owner releases it.
+        auto* block=m_available.load(std::memory_order_relaxed);
+        while(block)
+        {
+            auto* next=block->next;
+            delete block;
+            block=next;
+        }
+    }
 
     void VulkanCommandPoolCache::RequireSuccess(VkResult result,const char* operation)
     {
@@ -37,10 +56,13 @@ namespace dyf::Backends
     {
         if(!m_reuseEnabled || m_device==VK_NULL_HANDLE)throw std::runtime_error("Vulkan command pool cache is unavailable");
         std::unique_ptr<VulkanCommandStorage> storage;
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if(!m_available.empty()) {storage=std::move(m_available.back());m_available.pop_back();}
-        }
+        for(auto* block=m_available.load(std::memory_order_acquire);block && !storage;block=block->next)
+            for(auto& slot:block->slots)
+            {
+                if(!slot.storage.load(std::memory_order_relaxed))continue;
+                storage.reset(slot.storage.exchange(nullptr,std::memory_order_acquire));
+                if(storage)break;
+            }
         if(storage)
             RequireSuccess(vkResetCommandPool(m_device,storage->pool,0),"vkResetCommandPool");
         else
@@ -62,12 +84,26 @@ namespace dyf::Backends
     void VulkanCommandPoolCache::Return(std::unique_ptr<VulkanCommandStorage> storage) noexcept
     {
         if(!storage || !m_reuseEnabled)return;
+        auto* owned=storage.release();
+        for(auto* block=m_available.load(std::memory_order_acquire);block;block=block->next)
+            for(auto& slot:block->slots)
+            {
+                VulkanCommandStorage* empty=nullptr;
+                if(slot.storage.compare_exchange_strong(empty,owned,std::memory_order_release,
+                    std::memory_order_relaxed))return;
+            }
         try
         {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_available.push_back(std::move(storage));
+            auto block=std::make_unique<CacheBlock>();
+            block->slots.front().storage.store(owned,std::memory_order_relaxed);
+            owned=nullptr;
+            auto* first=m_available.load(std::memory_order_acquire);
+            do {block->next=first;}
+            while(!m_available.compare_exchange_weak(first,block.get(),std::memory_order_acq_rel,
+                std::memory_order_acquire));
+            block.release();
         }
-        catch(...) {}
+        catch(...) {delete owned;} // Cache growth is optional; ownership is still released on failure.
     }
 
     void VulkanCommandList::BeginDebugEventNative(const char* name,const RHI::DebugLabelColor& color)
@@ -269,7 +305,6 @@ namespace dyf::Backends
 				mipLevelCount <= texture.GetDesc().mipLevels - range.firstMipLevel &&
 				arrayLayerCount <= texture.GetDesc().depthOrArraySize - range.firstArrayLayer;
 		}
-
 	}
 
 	std::shared_ptr<VulkanUploadPool> CreateVulkanUploadPool(const VulkanContext& context)
@@ -355,8 +390,11 @@ namespace dyf::Backends
         m_validatedResourceSets.clear();
         ClearRecentBufferStates();
 
-		std::vector<VkBufferMemoryBarrier2> bufferBarriers;
-		std::vector<VkImageMemoryBarrier2> imageBarriers;
+        // Native recording is synchronous on each thread; retain translation storage between calls.
+        thread_local std::vector<VkBufferMemoryBarrier2> bufferBarriers;
+        thread_local std::vector<VkImageMemoryBarrier2> imageBarriers;
+        bufferBarriers.clear();
+        imageBarriers.clear();
 		bufferBarriers.reserve(count);
 		imageBarriers.reserve(count);
         const auto flush=[&] {
@@ -524,7 +562,7 @@ namespace dyf::Backends
 		m_indexBuffer = nullptr;
 		m_indexFormat = dyf::RHI::Format::Unknown;
 		m_indexOffset = 0;
-		m_inlineConstantCoverage.clear();
+		m_inlineConstantCoverage.Reset(0);
 		m_hasViewport = false;
 		m_hasScissor = false;
 		m_hasStencilReference = false;
@@ -705,14 +743,14 @@ void VulkanCommandList::BindComputePipelineNative(RHI::PipelineHandle value)
     if(m_closed || m_rendering || !pipeline || !pipeline->IsCompute()){Fail();return;}
     vkCmdBindPipeline(m_commandBuffer,VK_PIPELINE_BIND_POINT_COMPUTE,pipeline->GetHandle());
     m_boundPipeline=pipeline;m_boundResourceSet=nullptr;
-    m_inlineConstantCoverage.assign(pipeline->GetLayout().inlineConstantSize,0);
+    m_inlineConstantCoverage.Reset(pipeline->GetLayout().inlineConstantSize);
 }
 void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 {
     if(m_closed || m_rendering || !m_boundPipeline || !m_boundPipeline->IsCompute() ||
         !x || !y || !z || x>m_maxComputeGroups[0] || y>m_maxComputeGroups[1] || z>m_maxComputeGroups[2] ||
         (m_boundPipeline->RequiresResourceSet() && !m_boundResourceSet) ||
-        std::any_of(m_inlineConstantCoverage.begin(),m_inlineConstantCoverage.end(),[](uint8_t byte){return !byte;}))
+        !m_inlineConstantCoverage.IsComplete())
     {Fail();return;}
     vkCmdDispatch(m_commandBuffer,x,y,z);
 }
@@ -722,7 +760,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
     auto* buffer = dynamic_cast<VulkanBuffer*>(arguments);
     if (m_closed || m_failed || m_rendering || !m_boundPipeline || !m_boundPipeline->IsCompute() ||
         (m_boundPipeline->RequiresResourceSet() && !m_boundResourceSet) ||
-        std::any_of(m_inlineConstantCoverage.begin(), m_inlineConstantCoverage.end(), [](uint8_t byte) { return !byte; }) ||
+        !m_inlineConstantCoverage.IsComplete() ||
         !RequireBufferState(buffer, RHI::ResourceState::IndirectArgument))
     {
         Fail();
@@ -750,7 +788,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 			Fail();
 			return;
 		}
-		m_inlineConstantCoverage.assign(pipeline->GetLayout().inlineConstantSize, 0);
+		m_inlineConstantCoverage.Reset(pipeline->GetLayout().inlineConstantSize);
 		vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetHandle());
 		m_boundPipeline = pipeline;
 		m_boundResourceSet = nullptr;
@@ -880,10 +918,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 			return;
 		}
 		vkCmdPushConstants(m_commandBuffer, m_boundPipeline->GetPipelineLayout(), stages, offset, size, data);
-		std::fill(
-			m_inlineConstantCoverage.begin() + static_cast<std::ptrdiff_t>(offset),
-			m_inlineConstantCoverage.begin() + static_cast<std::ptrdiff_t>(offset + size),
-			1);
+		m_inlineConstantCoverage.Write(offset, size);
 	}
 
 	void VulkanCommandList::SetViewportNative(const dyf::RHI::Viewport& viewport)
@@ -1274,8 +1309,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 			if (first + count > available / layout.stride) return false;
 		}
 		if (m_boundPipeline->RequiresResourceSet() && m_boundResourceSet == nullptr) return false;
-		return std::find(m_inlineConstantCoverage.begin(), m_inlineConstantCoverage.end(), 0) ==
-			m_inlineConstantCoverage.end();
+		return m_inlineConstantCoverage.IsComplete();
 	}
 
     VkPipelineStageFlags VulkanCommandList::GetAcquireWaitStage(
