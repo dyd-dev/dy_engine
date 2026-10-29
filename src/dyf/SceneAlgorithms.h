@@ -25,6 +25,22 @@ namespace dyf
         return true;
     }
 
+    inline bool SupportsLodProjection(const Camera& camera)
+    {
+        const auto& p=camera.projection;
+        if(!IsAffineTransform(camera.view) ||
+            !((p.m[11]==-1 && p.m[15]==0) || (p.m[11]==0 && p.m[15]==1)) ||
+            p.m[1]!=0 || p.m[2]!=0 || p.m[3]!=0 || p.m[4]!=0 || p.m[6]!=0 || p.m[7]!=0 ||
+            p.m[8]!=0 || p.m[9]!=0 || p.m[12]!=0 || p.m[13]!=0 || p.m[0]==0 || p.m[5]==0)return false;
+        for(float value:p.m)if(!std::isfinite(value))return false;
+        // shortcut: the LOD sphere/error estimate assumes a rigid view; retain LOD0 for other camera transforms.
+        const auto& v=camera.view;
+        const Math::float3 x={v.m[0],v.m[1],v.m[2]},y={v.m[4],v.m[5],v.m[6]},z={v.m[8],v.m[9],v.m[10]};
+        return std::abs(Math::LengthSquared(x)-1)<1e-4f && std::abs(Math::LengthSquared(y)-1)<1e-4f &&
+            std::abs(Math::LengthSquared(z)-1)<1e-4f && std::abs(Math::Dot(x,y))<1e-4f &&
+            std::abs(Math::Dot(x,z))<1e-4f && std::abs(Math::Dot(y,z))<1e-4f;
+    }
+
     // 재질의 셰이더 상수와 파이프라인 설정을 비교하며, ID와 이미지 정체성은 별도 키에서 비교한다.
     inline bool EqualMaterial(const MaterialDesc& a,const MaterialDesc& b)
     {

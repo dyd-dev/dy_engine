@@ -24,6 +24,16 @@ namespace
 		return Math::float3(0.0f, 0.0f, 1.0f);
 	}
 
+	Math::float4x4 LightView(const Math::float3& eye,const Math::float3& forward,const Math::float3& up)
+	{
+		// Keep the known direction: eye + forward can round back to eye at large coordinates.
+		auto view=Math::LookAtRH({0,0,0},forward,up);
+		view.m[12]=-Math::Dot({view.m[0],view.m[4],view.m[8]},eye);
+		view.m[13]=-Math::Dot({view.m[1],view.m[5],view.m[9]},eye);
+		view.m[14]=-Math::Dot({view.m[2],view.m[6],view.m[10]},eye);
+		return view;
+	}
+
 	// 카메라의 한 거리 구간을 감싸는 구로 방향광 캐스케이드를 만든다. 회전과 무관한 반경·고정 광원 축·텍셀 스냅으로 그림자 흔들림을 줄인다.
 	Math::float4x4 ComputeStableCascadeViewProj(
 		const Math::float3& lightDirection, Math::float3 center, float radius,
@@ -99,7 +109,7 @@ namespace
 			lightDistance = std::max(radius + 0.25f + 0.1f, 0.5f);
 
 			const Math::float3 lightOrigin = sceneCenter + normalizedDirection * lightDistance;
-			const Math::float4x4 view = Math::LookAtRH(lightOrigin, sceneCenter, SelectUpVector(normalizedDirection));
+			const Math::float4x4 view = LightView(lightOrigin, normalizedDirection * -1.f, SelectUpVector(normalizedDirection));
 
 			const Math::float3 corners[] = {
 				Math::float3(boundsMin.x, boundsMin.y, boundsMin.z),
@@ -152,7 +162,7 @@ namespace
 		const Math::float3 lightOrigin = sceneCenter + normalizedDirection * lightDistance;
 
 		const Math::float3 up = SelectUpVector(normalizedDirection);
-		const Math::float4x4 view = Math::LookAtRH(lightOrigin, sceneCenter, up);
+		const Math::float4x4 view = LightView(lightOrigin, normalizedDirection * -1.f, up);
 		// 그림자 깊이 기록과 조회에 사용하는 Y 방향을 맞추기 위해 직교 투영의 Y 배율 부호를 뒤집는다.
 		Math::float4x4 proj = Math::OrthographicRH_ZO(orthoWidth, orthoHeight, 0.1f, farPlane);
 		proj.m[5] = -proj.m[5];
@@ -184,7 +194,7 @@ namespace
 		std::array<Math::float4x4, 6> views = {};
 		for(uint32_t face = 0u; face < 6; ++face)
 		{
-			views[face] = projection * Math::LookAtRH(lightPosition, lightPosition + directions[face], upVectors[face]);
+			views[face] = projection * LightView(lightPosition, directions[face], upVectors[face]);
 		}
 		return views;
 	}
@@ -198,8 +208,7 @@ namespace
 		float farPlane)
 	{
 		const Math::float3 lightForward = Normalize(lightDirection);
-		const Math::float3 target = lightPosition + lightForward;
-		const Math::float4x4 view = Math::LookAtRH(lightPosition, target, SelectUpVector(lightForward));
+		const Math::float4x4 view = LightView(lightPosition, lightForward, SelectUpVector(lightForward));
 		// 스폿 투영의 깊이 계수도 near*far 대신 near/far로 계산해 작은 광원 범위의 언더플로를 줄인다. Y 배율은 아래에서 그림자 조회 방향에 맞춰 음수로 넣는다.
 		Math::float4x4 proj = Math::PerspectiveRH_ZO(fovYRadians, 1.0f, nearPlane, farPlane);
 		proj.m[10] = 1.f / (nearPlane / farPlane - 1.f);

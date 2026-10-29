@@ -1,4 +1,5 @@
 #include "GpuVisibility.h"
+#include "SceneAlgorithms.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/RHI/ICommandList.h"
 #include "dyf/RHI/Pipeline.h"
@@ -229,7 +230,8 @@ bool GpuVisibility::Prepare(const std::vector<Instance>& inputs,const std::vecto
         settings.pixelError,settings.hysteresis,std::abs(projection.m[15])<1e-6f ? 1.f : 0.f};
     const float screenSize=settings.screenSize*std::min(settings.width,settings.height);
     m_frameData.lodScreenSizes={screenSize,screenSize*.5f,screenSize*.25f,0};
-    m_frameData.counts={static_cast<uint32_t>(inputs.size()),static_cast<uint32_t>(batches.size()),settings.frustum?1u:0u,settings.lod?1u:0u};
+    m_frameData.counts={static_cast<uint32_t>(inputs.size()),static_cast<uint32_t>(batches.size()),settings.frustum?1u:0u,
+        settings.lod && SupportsLodProjection(settings.camera)?1u:0u};
     m_uploadDirty[2]=m_uploadDirty[2] || std::memcmp(&previousFrame,&m_frameData,sizeof(Frame))!=0;
     m_possibleBatches.assign(batches.size(),settings.frustum?0u:1u);
     if(settings.frustum)

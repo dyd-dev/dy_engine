@@ -131,7 +131,7 @@ void Renderer::Impl::SelectLods(const Scene& scene,const Camera& camera,uint32_t
     entityLods.resize(scene.GetEntityCount(),0);
     lodMeshSources.resize(scene.GetEntityCount());
     // 기본 기하 입력이고 환경 캡처 중이 아닐 때만 LOD를 적용한다. 와이어프레임은 고급 렌더링 경로도 필요하다.
-    const bool active=config.enableLod && stockDrawInputs && !m_environmentCapture;
+    const bool active=config.enableLod && stockDrawInputs && !m_environmentCapture && SupportsLodProjection(camera);
     wireframeActive=config.debugWireframe && UsesAdvancedRendering() && stockDrawInputs && !m_environmentCapture;
     lodDebugActive=(config.debugLodColor || wireframeActive) && stockDrawInputs && !m_environmentCapture;
     if(!active) // 사용 조건이 맞지 않으면 모든 엔티티를 원본 단계로 돌리고 종료한다.
@@ -164,6 +164,7 @@ void Renderer::Impl::SelectLods(const Scene& scene,const Camera& camera,uint32_t
         if(draws && (*draws)[i].vertexBuffer) continue; // 외부 변형 정점에는 축약 오차가 보장되지 않아 원본을 유지한다.
         if(mesh.lods.empty() || !mesh.bounds.valid || !std::isfinite(projection)) continue; // 축약 자료·경계·유한한 투영값 중 하나라도 없으면 보수적으로 원본을 그린다.
         const auto& world=scene.GetTransform(entity);
+        if(!IsAffineTransform(world)) continue;
         // ||A||2 <= sqrt(||A||1 * ||A||infinity), also conservative for shear.
         // 월드 변환의 3×3 부분에서 각 행과 열의 성분 절댓값을 더하고, 가장 큰 행합과 열합을 곱해 제곱근을 구한다.
         // 어떤 방향의 확대도 이 값보다 크지 않도록 상한을 잡아, 비균일 확대나 전단이 있는 물체의 LOD 오차를 실제보다 작게 계산하지 않는다.
