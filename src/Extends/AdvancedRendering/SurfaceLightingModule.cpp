@@ -30,10 +30,14 @@ public:
             const auto& device=renderer.GetDevice();
             const bool occlusion=config.enableGpuCulling && config.enableInstancing && config.enableOcclusionCulling &&
                 GpuVisibility::SupportsOcclusion(device);
-            requirements.needsSurface|=occlusion || (config.lighting.enabled &&
-                (quality.ambientOcclusion || quality.diffuseGI || quality.reflections));
+            const bool lighting=config.lighting.enabled;
+            requirements.needsDepth=occlusion;
+            requirements.needsNormal=lighting && (quality.ambientOcclusion || quality.diffuseGI || quality.reflections);
+            requirements.needsMaterial=lighting && (quality.diffuseGI || quality.reflections);
+            // Screen effects use Motion.z as their exact positive linear depth.
+            requirements.needsMotion=requirements.needsNormal;
         }
-        requirements.needsGeometry=requirements.needsSurface;
+        requirements.needsGeometry=requirements.RequiresDepth();
         return requirements;
     }
 
@@ -41,7 +45,7 @@ public:
     {
         m_prepared=m_recorded=false;
         if(!AdvancedModuleEnabled(frame.renderer)) return true;
-        if(!frame.requirements.needsSurface)
+        if(!frame.requirements.RequiresDepth())
         {
             if(m_lighting) m_lighting->Invalidate();
             return true;
@@ -49,6 +53,7 @@ public:
         const auto& config=frame.renderer.GetConfig();
         const auto& quality=config.advanced;
         ScreenSpaceLighting::Settings settings;
+        settings.surfaceMask=frame.requirements.SurfaceOutputMask();
         settings.frustumCulling=config.enableFrustumCulling;
         settings.ambientOcclusion=config.lighting.enabled && quality.ambientOcclusion && !frame.lodDebug;
         settings.diffuseGI=config.lighting.enabled && quality.diffuseGI && !frame.lodDebug;
@@ -71,7 +76,7 @@ public:
 
     bool AddPasses(RenderStage stage,RenderFrame& frame,RHI::RenderGraph& graph) override
     {
-        if(!AdvancedModuleEnabled(frame.renderer) || frame.outputWritten || !frame.requirements.needsSurface) return true;
+        if(!AdvancedModuleEnabled(frame.renderer) || frame.outputWritten || !frame.requirements.RequiresDepth()) return true;
         if(stage!=RenderStage::BeforeOpaque && stage!=RenderStage::AfterOpaque) return true;
         if(!m_prepared || !m_lighting) return AdvancedPassFailure("Surface lighting resources were not prepared.");
         if(stage==RenderStage::BeforeOpaque)

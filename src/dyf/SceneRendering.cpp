@@ -44,7 +44,7 @@ bool Renderer::Impl::RenderToTexture(const Scene& scene,const Camera& camera,RHI
 bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamera, const Canvas* overlay, Image* readback,
     const std::vector<RendererDrawDesc>* draws,RHI::TextureHandle selectedOutput,RHI::ResourceState before)
 {
-    frameOpaqueDepthComplete=false;frameNoAreaLights=false;depthGeometryUnchanged=false;depthProtectedInputs.clear();
+    frameOpaqueDepthComplete=frameDepthPrepassValid=false;frameNoAreaLights=false;depthGeometryUnchanged=false;depthProtectedInputs.clear();
     // main은 사용자 draw 배열의 존재만으로 라이브 제어 가용성을 먼저 게시한다. 실제 표준 호환 판정은 설정 적용 뒤 아래에서 따로 수행한다.
     InitializeLiveProfiling();PublishLiveGeometryAvailability(draws!=nullptr);
     // 장치 ID와 Renderer source ID에 현재 프레임을 묶는다. 이 문맥이 이후 업로드·패스·제출 이벤트의 출처를 연결한다.
@@ -263,7 +263,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         const auto overlayHandle=fixedOutput
             ? graph.ImportTexture("Window output",windowOutput,State::Present,State::Present) : outputHandle;
         if(!overlayHandle.IsValid()) return RendererFailure("Window output resource import failed."); // 최종 창/overlay 출력 import 실패를 전달한다.
-        const bool surfaceNeeded=requirements.needsSurface;
+        const bool surfaceNeeded=requirements.RequiresDepth();
         // 이번에 실제 사용한 장면/출력 크기와 surface·cluster·그림자/재사용 경로를 통계에 기록한다. 요청 토글 값과 구분한다.
         recordingStatistics.renderWidth=sceneTarget->GetDesc().width;
         recordingStatistics.renderHeight=sceneTarget->GetDesc().height;
@@ -318,14 +318,23 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             environment.specular.resource=graph.ImportTexture("Basic environment specular",environment.specular.texture,State::ShaderResource,State::ShaderResource);
         frameAmbientOcclusion=renderFrame.ao.texture;
         // 주변 형상에 가려 주변광이 덜 닿는 정도를 나타내는 값(AO)을 표면 패스에서 공급한다.
-        if(surfaceNeeded) // 표면 패스가 필요하면 normal·albedo·AO 입력을 확인하고 차폐 후속 패스를 구성한다.
+        if(surfaceNeeded)
         {
-            if(!renderFrame.normal.resource.IsValid() || !renderFrame.albedo.resource.IsValid() || !renderFrame.ao.resource.IsValid()) // 필수 표면 자원 중 하나라도 확장이 공급하지 않았으면 실패한다.
-                return RendererFailure("The surface extension did not provide normal, albedo and AO resources.");
+            const auto mask=requirements.SurfaceOutputMask();
+            if(!renderFrame.depth.texture || !renderFrame.depth.resource.IsValid() ||
+                ((mask&1u) && (!renderFrame.normal.texture || !renderFrame.normal.resource.IsValid())) ||
+                ((mask&2u) && (!renderFrame.albedo.texture || !renderFrame.albedo.resource.IsValid())) ||
+                ((mask&4u) && (!renderFrame.motion.texture || !renderFrame.motion.resource.IsValid())) ||
+                (requirements.needsSurface && (!renderFrame.ao.texture || !renderFrame.ao.resource.IsValid())))
+                return RendererFailure("The surface extension did not provide the requested surface resources.");
             // GPU 가시성·차폐 요청과 텍스처/샘플러 Compute 레이아웃 지원이 모두 있을 때만 HiZ 차폐를 구성한다.
             const bool effectiveOcclusion=visibilityActive && config.enableOcclusionCulling &&
                 GpuVisibility::SupportsOcclusion(*nativeDevice);
-            if(effectiveOcclusion)
+            const bool exactDepth=renderFrame.opaqueDepthComplete && depthGeometryUnchanged &&
+                renderFrame.depth.texture==depthStencilTarget && renderFrame.depth.resource==depth &&
+                depthGeometrySnapshot.Matches(renderFrame.geometry) &&
+                SameDepthCamera(depthGeometryView,depthGeometryProjection,renderFrame.camera);
+            if(effectiveOcclusion && exactDepth && !wireframeActive)
             {
                 if(!gpuVisibility->AddOcclusionPasses(graph,depthStencilTarget,depth,camera)) // 차폐 패스 구성 실패면 gpuOcclusion을 성공 사용으로 표시하지 않는다.
                     return RendererFailure("GPU occlusion pass creation failed.");
@@ -333,10 +342,12 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             }
         }
         if(!AddExtensionPasses(RenderStage::OpaqueLighting,renderFrame,graph)) return false; // 불투명 조명 확장 패스 구성 실패를 전달한다.
-        frameOpaqueDepthComplete=renderFrame.opaqueDepthComplete && depthGeometryUnchanged &&
+        frameDepthPrepassValid=renderFrame.opaqueDepthComplete && depthGeometryUnchanged &&
             stockDrawInputs && UsesStockGeometry() && shaderSources.bytes[MeshFragment].empty() &&
-            advanced && !wireframeActive && requirements.needsSurface && UsesSeparateTransparency() &&
-            renderFrame.depth.texture==depthStencilTarget && renderFrame.depth.resource==depth && depthPrepassPipelines[0];
+            advanced && requirements.RequiresDepth() &&
+            renderFrame.depth.texture==depthStencilTarget && renderFrame.depth.resource==depth &&
+            SameDepthCamera(depthGeometryView,depthGeometryProjection,renderFrame.camera);
+        frameOpaqueDepthComplete=frameDepthPrepassValid && !wireframeActive && UsesSeparateTransparency() && depthPrepassPipelines[0];
         // 색/깊이 쓰기와 조명·그림자·AO·인수 읽기 의존성을 선언해 그래프가 실행 순서와 전환을 정하게 한다.
         auto& mainPass = graph.AddPass("MainForward", RHI::RGRecordingMode::Independent);
         mainPass.Write(color, State::RenderTarget).Write(depth, State::DepthWrite);
@@ -357,7 +368,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         if(shadowDepthTarget) mainPass.Read(shadow, State::ShaderResource); // 그림자 깊이 텍스처가 있으면 메인에서 샘플링하는 의존성을 추가한다.
         if(environment.diffuse.resource.IsValid()) mainPass.Read(environment.diffuse.resource,State::ShaderResource); // 유효한 확산 환경 핸들이 있으면 읽기 의존성을 선언한다.
         if(environment.specular.resource.IsValid()) mainPass.Read(environment.specular.resource,State::ShaderResource); // 유효한 반사 환경 핸들이 있으면 읽기 의존성을 선언한다.
-        if(surfaceNeeded) // 표면 패스가 만든 AO를 메인 조명이 읽는다고 선언한다.
+        if(renderFrame.ao.resource.IsValid()) // AO를 생략한 공급자는 기본 white AO를 사용한다.
             mainPass.Read(renderFrame.ao.resource,State::ShaderResource);
         mainPass.SetExecute([&](RHI::ICommandList* commands) {
             require(RecordMainPass(scene, camera, *commands, draws, output));
@@ -395,9 +406,10 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
 #endif
                 });
         }
-        frameOpaqueDepthComplete=frameOpaqueDepthComplete && depthGeometryUnchanged &&
+        frameDepthPrepassValid=frameDepthPrepassValid && depthGeometryUnchanged &&
             depthGeometrySnapshot.Matches(renderFrame.geometry) &&
             SameDepthCamera(depthGeometryView,depthGeometryProjection,renderFrame.camera);
+        frameOpaqueDepthComplete=frameOpaqueDepthComplete && frameDepthPrepassValid;
         if(frameNoAreaLights)
         {
             // Any graph writer may replace the uploaded zero counts. Unknown

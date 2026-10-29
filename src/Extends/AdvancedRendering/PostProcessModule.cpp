@@ -17,9 +17,9 @@ public:
         if(!AdvancedModuleEnabled(renderer)) return requirements;
         const auto& config=renderer.GetConfig();
         const bool diagnostic=config.debugLodColor || config.debugWireframe;
-        requirements.needsSurface=config.advanced.temporalAA &&
+        requirements.needsMotion=config.advanced.temporalAA &&
             config.advanced.surfaceDebugView==SurfaceDebugView::None && !diagnostic;
-        requirements.needsGeometry=requirements.needsSurface;
+        requirements.needsGeometry=requirements.RequiresDepth();
         requirements.writesOutput=config.advanced.surfaceDebugView==SurfaceDebugView::None || config.debugWireframe;
         return requirements;
     }

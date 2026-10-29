@@ -1,6 +1,6 @@
 struct Draw {float4x4 model;float4x4 previousMVP;float4x4 normalMatrix;float4 baseColor;float4 materialParams;uint4 flags;float4 alpha;};
 StructuredBuffer<Draw> draws:register(t11);
-cbuffer Frame:register(b12) {float4x4 view;float4x4 projection;float4x4 inverseProjection;float4x4 viewProjection;float4 size;float4 ao;float4 lighting;float4 options;};
+cbuffer Frame:register(b12) {float4x4 view;float4x4 projection;float4x4 inverseProjection;float4x4 viewProjection;float4 size;float4 ao;float4 lighting;float4 options;uint4 outputs;};
 cbuffer Index:register(b15) {uint4 drawIndex;};
 struct Input {
     float3 position:TEXCOORD0;float3 normal:TEXCOORD1;float2 uv:TEXCOORD2;float4 tangent:TEXCOORD3;
@@ -35,18 +35,26 @@ Output main(Input input)
 {
     Draw draw=draws[drawIndex.x];
     float4x4 model=drawIndex.y!=0?transpose(float4x4(input.model0,input.model1,input.model2,input.model3)):draw.model;
-    float4x4 previousMVP=drawIndex.y!=0?transpose(float4x4(input.previous0,input.previous1,input.previous2,input.previous3)):draw.previousMVP;
-    float3x3 normalMatrix=SurfaceNormalMatrix(model);
     precise float4 world=mul(model,float4(input.position,1.0));
-    float4 viewPosition=mul(view,world);Output output;
+    Output output=(Output)0;
     precise float4 clipPosition=mul(viewProjection,world);
     // 이전 변형을 알 수 없는 표면은 이 프레임의 시간 누적을 거부한다.
-    output.currentClip=clipPosition;output.previousClip=drawIndex.z!=0?mul(previousMVP,float4(input.previousPosition,1.0)):0;
-    output.position=clipPosition;output.uv=input.uv;output.viewDepth=-viewPosition.z;output.vertexColor=input.color;
-    output.worldNormal=SurfaceNormalizeOr(mul(normalMatrix,input.normal),float3(0,0,1));
-    float3 t=mul((float3x3)model,input.tangent.xyz);
-    t-=output.worldNormal*dot(output.worldNormal,t);
-    float3 fallback=SurfaceNormalizeOr(cross(abs(output.worldNormal.z)<0.999?float3(0,0,1):float3(0,1,0),output.worldNormal),float3(1,0,0));
-    output.worldTangent=float4(SurfaceNormalizeOr(t,fallback),input.tangent.w*(determinant((float3x3)model)<0?-1.0:1.0));
+    output.currentClip=clipPosition;
+    if((outputs.w&4u)!=0u)
+    {
+        float4x4 previousMVP=drawIndex.y!=0?transpose(float4x4(input.previous0,input.previous1,input.previous2,input.previous3)):draw.previousMVP;
+        output.previousClip=drawIndex.z!=0?mul(previousMVP,float4(input.previousPosition,1.0)):0;
+        output.viewDepth=-mul(view,world).z;
+    }
+    output.position=clipPosition;output.uv=input.uv;output.vertexColor=input.color;
+    if((outputs.w&1u)!=0u)
+    {
+        float3x3 normalMatrix=SurfaceNormalMatrix(model);
+        output.worldNormal=SurfaceNormalizeOr(mul(normalMatrix,input.normal),float3(0,0,1));
+        float3 t=mul((float3x3)model,input.tangent.xyz);
+        t-=output.worldNormal*dot(output.worldNormal,t);
+        float3 fallback=SurfaceNormalizeOr(cross(abs(output.worldNormal.z)<0.999?float3(0,0,1):float3(0,1,0),output.worldNormal),float3(1,0,0));
+        output.worldTangent=float4(SurfaceNormalizeOr(t,fallback),input.tangent.w*(determinant((float3x3)model)<0?-1.0:1.0));
+    }
     return output;
 }

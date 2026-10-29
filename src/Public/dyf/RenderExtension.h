@@ -90,7 +90,18 @@ struct RenderRequirements
     bool writesOutput = false;
     bool providesLocalLights = false;
     bool providesEnvironment = false;
+    // needsSurface retains the legacy full-output contract; aggregate only the raw flags.
+    bool needsDepth = false, needsNormal = false, needsMaterial = false, needsMotion = false;
+    constexpr uint32_t SurfaceOutputMask() const
+    { return needsSurface?7u:(needsNormal?1u:0u)|(needsMaterial?2u:0u)|(needsMotion?4u:0u); }
+    constexpr bool RequiresSurface() const { return SurfaceOutputMask()!=0; }
+    constexpr bool RequiresDepth() const { return needsDepth || RequiresSurface(); }
+    constexpr bool RequiresGeometry() const { return needsGeometry || RequiresDepth(); }
 };
+static_assert([] {RenderRequirements r;r.needsDepth=true;return r.RequiresDepth() && !r.RequiresSurface() && r.RequiresGeometry();}());
+static_assert([] {RenderRequirements r;r.needsSurface=true;return r.SurfaceOutputMask()==7 && r.RequiresDepth();}());
+static_assert([] {RenderRequirements r;r.needsMotion=true;return r.SurfaceOutputMask()==4 && r.RequiresDepth();}());
+static_assert([] {RenderRequirements r;r.needsNormal=r.needsMotion=true;return !r.needsSurface && r.SurfaceOutputMask()==5;}());
 
 // 확장은 프레임 자원을 빌려 패스를 추가한다. 자원과 제출의 수명은 렌더러가 관리한다.
 struct RenderFrame

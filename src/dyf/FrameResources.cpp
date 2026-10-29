@@ -19,7 +19,7 @@ bool Renderer::Impl::UsesAdvancedRendering() const
 // 등록 모듈과 차폐 제거의 합산 요구를 조회한다. 단순히 고급 설정이 켜졌다는 이유만으로 표면 패스가 필요하다고 가정하지 않는다.
 bool Renderer::Impl::NeedsSurfacePass() const
 {
-    return CollectRequirements().needsSurface;
+    return CollectRequirements().RequiresDepth();
 }
 
 // 주변 형상에 가려 주변광이 덜 닿는 정도를 나타내는 값(AO)의 텍스처 연결을 비운다.
@@ -64,7 +64,7 @@ bool Renderer::Impl::PrepareFrameResources(RenderFrame& frame,RHI::ICommandList&
     for(auto& extension:extensions)
         if(!extension->PrepareCamera(frame)) return false; // 확장 카메라 준비 실패면 뒤의 가시성/자원 준비를 중단한다.
     if(!PrepareVisibility(scene,camera,uploads,target.width,target.height,frame.draws)) return false; // GPU 가시성 입력 준비/업로드 기록 실패를 호출부에 전달한다.
-    if(!PrepareCpuBatches(scene,camera,uploads,frame.draws,frame.requirements.needsGeometry)) return false;
+    if(!PrepareCpuBatches(scene,camera,uploads,frame.draws,(frame.requirements.SurfaceOutputMask()&4u)!=0)) return false;
     if(shaderSources.bytes[MeshFragment].empty()) // 기본 fragment를 쓰는 경우에만 기본 조명 자원을 보충한다.
     {
         // Basic material paging uses neutral environment inputs even when an
@@ -89,7 +89,7 @@ bool Renderer::Impl::PrepareFrameResources(RenderFrame& frame,RHI::ICommandList&
     UpdateFrameLighting(frame);
     PrepareRenderGeometry(frame);
     depthGeometryUnchanged=stockDrawInputs && UsesStockGeometry() && UsesAdvancedRendering() &&
-        !frame.wireframe && frame.requirements.needsSurface && frame.requirements.handlesTransparency;
+        frame.requirements.RequiresDepth();
     if(depthGeometryUnchanged)
     {
         depthGeometrySnapshot.Capture(frame.geometry);

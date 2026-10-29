@@ -148,7 +148,8 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
 	RHI::DepthStencilAttachment depth;
 	depth.texture = depthStencilTarget;
 	depth.state = RHI::ResourceState::DepthWrite;
-	depth.depthLoadOp = frameOpaqueDepthComplete || NeedsSurfacePass() ? RHI::LoadOp::Load : RHI::LoadOp::Clear;
+    // Solid wireframe prepasses share the same proof; a request alone cannot preserve stale depth.
+	depth.depthLoadOp = frameDepthPrepassValid ? RHI::LoadOp::Load : RHI::LoadOp::Clear;
 	depth.depthStoreOp = UsesAdvancedRendering() || m_environmentCapture ? RHI::StoreOp::Store : RHI::StoreOp::Discard;
 	if(RHI::HasStencil(depthStencilTarget->GetDesc().format)) // 깊이 형식에 stencil이 있으면 이 패스에서 쓰지 않는 stencil의 load/store를 Discard로 지정한다.
 	{

@@ -10,7 +10,7 @@ layout(location=9) in mat4 instancePreviousMVP;
 layout(location=13) in vec4 color;
 struct Draw {mat4 model;mat4 previousMVP;mat4 normalMatrix;vec4 baseColor;vec4 materialParams;uvec4 flags;vec4 alpha;};
 layout(std430,set=0,binding=11) readonly buffer Draws {Draw draws[];};
-layout(set=0,binding=12) uniform Frame {mat4 view;mat4 projection;mat4 inverseProjection;mat4 viewProjection;vec4 size;vec4 ao;vec4 lighting;vec4 options;} frame;
+layout(set=0,binding=12) uniform Frame {mat4 view;mat4 projection;mat4 inverseProjection;mat4 viewProjection;vec4 size;vec4 ao;vec4 lighting;vec4 options;uvec4 outputs;} frame;
 layout(push_constant) uniform Index {uvec4 index;};
 layout(location=0) out vec2 uv;
 layout(location=1) out vec3 worldNormal;
@@ -42,17 +42,25 @@ void main()
 {
     Draw draw=draws[index.x];
     mat4 model=index.y!=0u?instanceModel:draw.model;
-    mat4 previousMVP=index.y!=0u?instancePreviousMVP:draw.previousMVP;
-    mat3 normalMatrix=SurfaceNormalMatrix(model);
     precise vec4 world=model*vec4(position,1.0);
-    vec4 viewPosition=frame.view*world;
     precise vec4 clipPosition=frame.viewProjection*world;
     // 이전 변형 정점과 이전 객체·카메라 행렬을 함께 사용한다.
-    currentClip=clipPosition;previousClip=index.z!=0u?previousMVP*vec4(previousPosition,1.0):vec4(0.0);
-    gl_Position=clipPosition;uv=texcoord;viewDepth=-viewPosition.z;vertexColor=color;
-    worldNormal=SurfaceNormalizeOr(normalMatrix*normal,vec3(0,0,1));
-    vec3 t=mat3(model)*tangent.xyz;
-    t-=worldNormal*dot(worldNormal,t);
-    vec3 fallback=SurfaceNormalizeOr(cross(abs(worldNormal.z)<0.999?vec3(0,0,1):vec3(0,1,0),worldNormal),vec3(1,0,0));
-    worldTangent=vec4(SurfaceNormalizeOr(t,fallback),tangent.w*(determinant(mat3(model))<0?-1.0:1.0));
+    currentClip=clipPosition;previousClip=vec4(0.0);viewDepth=0.0;
+    if((frame.outputs.w&4u)!=0u)
+    {
+        mat4 previousMVP=index.y!=0u?instancePreviousMVP:draw.previousMVP;
+        previousClip=index.z!=0u?previousMVP*vec4(previousPosition,1.0):vec4(0.0);
+        viewDepth=-(frame.view*world).z;
+    }
+    gl_Position=clipPosition;uv=texcoord;vertexColor=color;
+    worldNormal=vec3(0,0,1);worldTangent=vec4(1,0,0,1);
+    if((frame.outputs.w&1u)!=0u)
+    {
+        mat3 normalMatrix=SurfaceNormalMatrix(model);
+        worldNormal=SurfaceNormalizeOr(normalMatrix*normal,vec3(0,0,1));
+        vec3 t=mat3(model)*tangent.xyz;
+        t-=worldNormal*dot(worldNormal,t);
+        vec3 fallback=SurfaceNormalizeOr(cross(abs(worldNormal.z)<0.999?vec3(0,0,1):vec3(0,1,0),worldNormal),vec3(1,0,0));
+        worldTangent=vec4(SurfaceNormalizeOr(t,fallback),tangent.w*(determinant(mat3(model))<0?-1.0:1.0));
+    }
 }

@@ -24,6 +24,7 @@ public:
         float aoRadius=1.2f, aoStrength=1.0f, rayDistance=12.0f;
         float giStrength=1.0f, reflectionStrength=1.0f, thickness=0.25f;
         uint32_t frameIndex=0,aoFrameIndex=0;
+        uint32_t surfaceMask=7; // normal/roughness/AO, albedo/metal, motion/linear-depth
     };
     struct GraphResources
     {
@@ -83,6 +84,7 @@ private:
     {
         Math::float4x4 view,projection,inverseProjection,viewProjection;
         Math::float4 size,ao,lighting,options;
+        std::array<uint32_t,4> outputs={};
     };
     struct SurfaceSetKey
     {
@@ -128,7 +130,7 @@ private:
         RHI::ResourceSetHandle set=nullptr;
         uint32_t unusedFrames=0;
     };
-    bool CreatePipelines();
+    bool CreatePipelines(uint32_t surfaceMask);
     void PrepareDepthPlane(bool enabled);
     bool CreateDenoisePipelines();
     bool PrepareDenoise(uint32_t effect,bool enabled);
@@ -163,7 +165,8 @@ private:
     RHI::RGResourceHandle m_frameHandle,m_drawHandle,m_depthHandle;
     GraphResources m_graph;
     std::array<RHI::ShaderHandle,6> m_shaders={};
-    std::array<RHI::PipelineHandle,4> m_surfacePipelines={};
+    std::array<RHI::PipelineHandle,32> m_surfacePipelines={};
+    std::array<RHI::ShaderHandle,3> m_compactSurfaceShaders={};
     RHI::PipelineHandle m_screenPipeline=nullptr,m_lightingPipeline=nullptr;
     RHI::PipelineHandle m_debugPipeline=nullptr;
     RHI::Format m_debugFormat=RHI::Format::Unknown;

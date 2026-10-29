@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
@@ -25,6 +26,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "RhiSurfaceConformance.h"
 
 namespace
 {
@@ -115,6 +117,7 @@ struct Options
     bool validation=false;
     bool cpuOnly=false;
     std::filesystem::path captures;
+    std::filesystem::path rhiShaders;
     std::string model;
     std::string skinnedModel;
 };
@@ -669,6 +672,124 @@ public:
         }
     }
 
+    void AdditionalContracts()
+    {
+        if(m_options.rhiShaders.empty())
+        {std::puts("SKIP added RHI/Surface contracts: pass --rhi-shader-dir with generated Canvas binaries.");return;}
+        auto observer=std::make_unique<RenderingProbe::SurfaceObserver>(*m_device,m_options.rhiShaders);
+        auto* probe=observer.get();probe->rhi.Run();
+        Require(m_renderer->AddExtension(std::move(observer)),"Surface demand observer registration failed.");
+        Scene scene;auto mesh=Quad();
+        for(size_t v=0;v<mesh.vertices.size();++v)mesh.vertices[v].uv={(v==1 || v==2)?1.f:0.f,.5f};
+        auto mask=Unlit({.25,.5,.75});mask.alphaMode=MaterialAlphaMode::Mask;mask.metallicFactor=1;
+        mask.baseColorTexture=Image(2,1,{255,255,255,0,255,255,255,255});
+        Require(bool(scene.Add(mesh,mask)),"Surface MASK fixture creation failed.");
+        probe->active=true;
+        for(uint32_t demand:{7u,0u,4u,1u,5u,3u})
+        {
+            probe->mask=demand;probe->observed=false;
+            const auto image=Render(scene,("surface-demand-"+std::to_string(demand)).c_str(),Config(true));
+            Expect(image,64,128,{18,28,48,255},"Surface MASK hole preserves Main clear",2);
+            Expect(image,192,128,Display({.25,.5,.75}),"Surface MASK covered Main pixel",2);
+            probe->Pixels();
+            if(!demand)
+            {
+                Scene layered;Require(bool(layered.Add(mesh,mask)) &&
+                    bool(layered.Add(Quad(-.95f,.95f,-.9f,.9f,-.2f),Unlit({.05,.2,.8}))),"Depth-only MASK receiver fixture failed.");
+                const auto depth=Render(layered,"surface-demand-0-mask-depth",Config(true));
+                Expect(depth,64,128,Display({.05,.2,.8}),"Zero-MRT MASK hole preserves rear geometry depth",2);
+                Expect(depth,192,128,Display({.25,.5,.75}),"Zero-MRT MASK foreground keeps nearest depth",2);
+            }
+            std::printf("PASS Surface demand mask=%u actual outputs/MRT and stock MASK pixels.\n",demand);
+        }
+        probe->active=false;
+        {
+            Platform::Window window{Size,Size,"dyf depth-only conformance"};
+            Require(window.GetHandle()!=nullptr,"Depth-only window creation failed.");
+            RHI::DeviceDesc desc;desc.enableValidation=m_options.validation;
+            std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(desc));
+            Require(bool(device),"Depth-only device creation failed.");
+            auto renderer=Renderer::Create(*device,window.GetHandle(),Config(true));
+            Require(bool(renderer),"Depth-only renderer creation failed.");
+            Require(renderer->AddExtension(std::make_unique<RenderingProbe::DepthOnlyProvider>()),"Depth-only provider registration failed.");
+            RHI::ResourceScope scope(*device);RHI::TextureDesc target;
+            target.width=target.height=Size;target.format=RHI::Format::R8G8B8A8_UNORM_SRGB;
+            target.usage=RHI::TextureUsage::RenderTarget|RHI::TextureUsage::ShaderResource;
+            auto* output=scope.Keep(device->CreateTexture(target));
+            RHI::ResourceState before=RHI::ResourceState::Undefined;
+            for(uint32_t repeat=0;repeat<2;++repeat)
+            {
+                Require(renderer->RenderToTexture(scene,m_camera,output,before),"Depth-only/no-AO render failed.");
+                before=RHI::ResourceState::ShaderResource;RHI::TextureReadback image;
+                Require(device->ReadTexture(output,image),"Depth-only readback failed.");
+                Expect(image,64,128,{18,28,48,255},"Depth-only MASK hole",2);
+                Expect(image,192,128,Display({.25,.5,.75}),"Unproven prepass cannot preserve stale zero depth",2);
+            }
+            Require(device->WaitIdle(),"Depth-only final GPU wait failed.");
+            std::puts("PASS depth-only custom provider: empty AO, unproven zero-depth prepass and repeated MASK pixels.");
+        }
+        Scene present;
+        auto colored=present.Add(Quad(),Unlit());
+        Require(bool(colored),"Present regression fixture failed.");
+        for(bool vsync:{true,false})
+        {
+            auto config=Config();config.vsync=vsync;
+            Require(m_renderer->SetConfig(config),"Present regression configuration failed.");
+            m_window.Resize(Size,Size);
+            uint32_t frames=0;bool resized=false;
+            // Acquisition retries need elapsed time, independent of CPU loop speed.
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+            while(frames<40 && std::chrono::steady_clock::now()<deadline)
+            {
+                Require(m_window.IsRunning(),"Present regression window closed.");Platform::Window::PollEvents();
+                const RGB color{.05+.01*frames,.45-.005*frames,.025+.002*frames};
+                Require(colored.SetMaterial(Unlit(color)),"Presented frame material update failed.");
+                Image capture;const bool sample=frames==0 || frames==13 || frames==21 || frames==39;
+                Require(m_renderer->Render(present,m_camera,sample?&capture:nullptr),"On-window rendering/present failed.");
+                if(!m_renderer->GetLastRenderStatistics().renderWidth){Platform::Window::WaitEvents(.001);continue;}
+                if(sample)
+                {
+                    const auto extent=m_window.GetFramebufferSize();
+                    Require(capture.IsValid() && capture.GetWidth()==uint32_t(extent.width) &&
+                        capture.GetHeight()==uint32_t(extent.height),"Presented frame readback has a stale extent.");
+                    // The default window target is UNORM; the basic output uses gamma 2.2.
+                    Pixel presented{0,0,0,255};
+                    for(size_t channel=0;channel<3;++channel)
+                        presented[channel]=uint8_t(std::lround(255*std::pow(color[channel]/(1+color[channel]),1/2.2)));
+                    RHI::TextureReadback image;image.width=capture.GetWidth();image.height=capture.GetHeight();image.rowPitch=image.width*4;
+                    image.pixels=capture.GetPixels();Expect(image,image.width/2,image.height/2,presented,"Presented changing frame pixel",2);
+                    if(frames>20)resized|=image.width==Size+32 && image.height==Size+16;
+                }
+                // Keep the next acquired image across an idle drain, and retire it on resize.
+                if(frames==12)Require(m_device->WaitIdle(),"Mid-stream Present/acquire drain failed.");
+                if(frames==20)m_window.Resize(Size+32,Size+16);
+                ++frames;
+            }
+            Require(frames==40 && resized && m_device->WaitIdle(),
+                "FIFO/Immediate Present lifecycle failed; completed="+std::to_string(frames));
+            std::printf("PASS on-window %s: 40 changing frames, sampled pixels, idle/prefetch reuse, resize and final drain.\n",vsync?"FIFO":"Immediate");
+        }
+        {
+            Platform::Window window{Size,Size,"dyf pending Present shutdown"};
+            RHI::DeviceDesc desc;desc.enableValidation=m_options.validation;desc.maxFramesInFlight=2;
+            std::unique_ptr<RHI::IDevice> device(RHI::IDevice::Create(desc));
+            Require(bool(device),"Pending Present shutdown device creation failed.");
+            RHI::SwapchainDesc output;output.window=window.GetHandle();output.format=RHI::DefaultSwapchainFormat;
+            Require(device->CreateSwapchain(output),"Pending Present shutdown swapchain creation failed.");
+            uint32_t frames=0;
+            const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(10);
+            while(frames<3 && std::chrono::steady_clock::now()<deadline)
+            {
+                Platform::Window::PollEvents();
+                if(!device->BeginFrame()){Require(!device->IsLost(),"Pending Present shutdown device lost.");Platform::Window::WaitEvents(.001);continue;}
+                Require(device->Present(),"Pending Present shutdown submission failed.");++frames;
+            }
+            Require(frames==3,"Pending Present shutdown could not acquire three frames.");
+            device.reset(); // Exercise the device's own worker/acquire drain without an explicit WaitIdle.
+            std::puts("PASS pending Present shutdown: device destroyed before window, without explicit idle.");
+        }
+    }
+
     void Run()
     {
         VertexColors();Coverage(false);
@@ -679,6 +800,7 @@ public:
             m_reactiveFormat==RHI::Format::R16_FLOAT?"R16_FLOAT":"RGBA16_FLOAT");
         std::printf("PASS RenderingConformance frames=%u size=%ux%u transparency_layer1_frames=%u transparency_layer2_nearest_frames=%u; analytic tolerances are 1-2 output bytes.\n",
             m_frames,Size,Size,m_transparencyFrames[0],m_transparencyFrames[1]);
+        AdditionalContracts();
     }
 };
 }
@@ -691,17 +813,19 @@ int main(int argc,char** argv) try
         const std::string argument=argv[i];
         if(argument=="--help")
         {
-            std::puts("RenderingConformanceTests [--cpu-only] [--validation] [--capture-dir DIR] [--model PATH] [--skinned-model PATH]\n"
+            std::puts("RenderingConformanceTests [--cpu-only] [--validation] [--capture-dir DIR] [--model PATH] [--skinned-model PATH] [--rhi-shader-dir DIR]\n"
                 "Finite analytic GPU regressions; run the client inside a headless compositor.\n"
                 "PNG files are written only with --capture-dir. --model adds a public Model import/capture, not an external-renderer reference assertion.\n"
+                "--rhi-shader-dir adds RHI/Surface contracts and FIFO/Immediate Present lifecycle checks with generated CanvasVertex.bin/CanvasFragment.bin.\n"
                 "--skinned-model compares public vertex/compute RGBA and advanced/HDR skin-transform cache OFF/ON for an actually skinned, colored fixture with fractional alpha.");
             return 0;
         }
         if(argument=="--validation")options.validation=true;
         else if(argument=="--cpu-only")options.cpuOnly=true;
-        else if((argument=="--capture-dir" || argument=="--model" || argument=="--skinned-model") && i+1<argc)
+        else if((argument=="--capture-dir" || argument=="--model" || argument=="--skinned-model" || argument=="--rhi-shader-dir") && i+1<argc)
         {
-            if(argument=="--capture-dir")options.captures=argv[++i];
+            if(argument=="--rhi-shader-dir")options.rhiShaders=argv[++i];
+            else if(argument=="--capture-dir")options.captures=argv[++i];
             else if(argument=="--model")options.model=argv[++i];
             else options.skinnedModel=argv[++i];
         }

@@ -14,7 +14,8 @@ cbuffer Index:register(b15) {uint4 drawIndex;};
 Texture2D<float4> baseTexture:register(t0);
 Texture2D<float> depthTexture:register(t6);
 SamplerState materialSampler:register(s8);
-struct Input {float4 position:SV_Position;float2 uv:TEXCOORD0;float4 vertexColor:TEXCOORD4;};
+// Keep the vertex shader's signature registers for the depth-only D3D12 pipeline.
+struct Input {float4 position:SV_Position;float2 uv:TEXCOORD0;float3 worldPosition:TEXCOORD1;float3 worldNormal:TEXCOORD2;float4 worldTangent:TEXCOORD3;float4 vertexColor:TEXCOORD4;};
 void main(Input input)
 {
     float2 uvDx=ddx(input.uv),uvDy=ddy(input.uv);

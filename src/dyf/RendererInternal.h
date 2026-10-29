@@ -376,6 +376,7 @@ struct Renderer::Impl
     std::array<RHI::PipelineHandle,8> noAreaMaterialPipelines={},noAreaDepthPrepassPipelines={};
     bool frameNoAreaLights=false,noAreaReported=false;
     bool frameOpaqueDepthComplete=false;
+    bool frameDepthPrepassValid=false;
     bool depthPrepassReported=false;
     std::vector<uint64_t> depthPassRevisions;
     std::vector<uint64_t> depthProtectedInputs;

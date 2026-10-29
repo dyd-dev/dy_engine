@@ -40,6 +40,10 @@ RenderRequirements AdvancedRendering::GetRequirements(const Renderer& renderer) 
         const auto requirements=module->GetRequirements(renderer);
         combined.providesSurface|=requirements.providesSurface;
         combined.needsSurface|=requirements.needsSurface;
+        combined.needsDepth|=requirements.needsDepth;
+        combined.needsNormal|=requirements.needsNormal;
+        combined.needsMaterial|=requirements.needsMaterial;
+        combined.needsMotion|=requirements.needsMotion;
         combined.needsGeometry|=requirements.needsGeometry;
         combined.handlesTransparency|=requirements.handlesTransparency;
         combined.writesOutput|=requirements.writesOutput;
@@ -56,7 +60,7 @@ bool AdvancedRendering::UsesSurfacePipeline(const Renderer& renderer) const
 
 bool AdvancedRendering::NeedsSurface(const Renderer& renderer) const
 {
-    return GetRequirements(renderer).needsSurface;
+    return GetRequirements(renderer).RequiresDepth();
 }
 
 bool AdvancedRendering::PrepareCamera(RenderFrame& frame)

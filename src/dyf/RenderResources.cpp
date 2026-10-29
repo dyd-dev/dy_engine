@@ -19,15 +19,20 @@ RenderRequirements Renderer::Impl::CollectRequirements() const
         const auto requirements=extension->GetRequirements(owner);
         result.providesSurface|=requirements.providesSurface;
         result.needsSurface|=requirements.needsSurface;
+        result.needsDepth|=requirements.needsDepth;
+        result.needsNormal|=requirements.needsNormal;
+        result.needsMaterial|=requirements.needsMaterial;
+        result.needsMotion|=requirements.needsMotion;
         result.needsGeometry|=requirements.needsGeometry;
         result.handlesTransparency|=requirements.handlesTransparency;
         result.writesOutput|=requirements.writesOutput;
         result.providesLocalLights|=requirements.providesLocalLights;
         result.providesEnvironment|=requirements.providesEnvironment;
     }
-    if(UsesAdvancedRendering() && UsesGpuVisibility() && config.enableOcclusionCulling) // 고급 GPU 차폐 제거에는 surface 깊이가 필요하므로 요구를 추가한다.
-        result.needsSurface=true;
-    result.needsGeometry|=result.needsSurface;
+    if(UsesAdvancedRendering() && UsesGpuVisibility() && config.enableOcclusionCulling &&
+        GpuVisibility::SupportsOcclusion(*device)) // 지원되는 GPU 차폐 제거에는 선행 깊이만 추가한다.
+        result.needsDepth=true;
+    result.needsGeometry|=result.RequiresDepth();
     return result;
 }
 
@@ -53,7 +58,7 @@ bool Renderer::Impl::ValidateModules(const RenderRequirements& combined) const
             providers[i]=extension->GetName();
         }
     }
-    if(combined.needsSurface && !providers[0]) // 표면 자원을 요구하면서 공급 모듈이 없으면 프레임을 시작하지 않는다.
+    if(combined.RequiresDepth() && !providers[0]) // 깊이나 표면 자원을 요구하면서 공급 모듈이 없으면 프레임을 시작하지 않는다.
     {
         std::fputs("dyf: Render modules require a surface provider; register SurfaceLighting.\n",stderr);
         return false;
@@ -70,7 +75,7 @@ bool Renderer::Impl::AddExtensionPasses(RenderStage stage,RenderFrame& frame,RHI
         const auto oldDepth=frame.depth;
         const auto oldView=frame.camera.view,oldProjection=frame.camera.projection;
         depthPassRevisions.clear();
-        if(previous || frameOpaqueDepthComplete)
+        if(previous || frameOpaqueDepthComplete || frameDepthPrepassValid)
             for(uint32_t i=0;const auto* pass=graph.GetPass(i);++i)depthPassRevisions.push_back(pass->GetRevision());
         frame.opaqueDepthComplete=false;
         if(!extension->AddPasses(stage,frame,graph)) // 확장이 이 단계의 패스를 추가하지 못하면 모듈 이름/단계와 함께 실패를 전파한다.
@@ -82,7 +87,7 @@ bool Renderer::Impl::AddExtensionPasses(RenderStage stage,RenderFrame& frame,RHI
         const bool beforeMain=stage==RenderStage::BeforeOpaque || stage==RenderStage::OpaqueLighting;
         bool cpuChanged=!SameDepthCamera(oldView,oldProjection,frame.camera);
         bool changed=cpuChanged || oldDepth.texture!=frame.depth.texture || oldDepth.resource!=frame.depth.resource;
-        if(previous || frameOpaqueDepthComplete)
+        if(previous || frameOpaqueDepthComplete || frameDepthPrepassValid)
         {
             for(uint32_t i=0;i<depthPassRevisions.size();++i)
             {
@@ -99,7 +104,7 @@ bool Renderer::Impl::AddExtensionPasses(RenderStage stage,RenderFrame& frame,RHI
         }
         // New GPU passes registered after Main execute after it. Only CPU input
         // changes or edits of earlier passes can invalidate its captured prepass.
-        if(cpuChanged || (beforeMain && changed))frameOpaqueDepthComplete=false;
+        if(cpuChanged || (beforeMain && changed))frameOpaqueDepthComplete=frameDepthPrepassValid=false;
         const bool explicitOptIn=frame.opaqueDepthComplete;
         if(!explicitOptIn)frame.opaqueDepthComplete=previous && !changed;
         if(explicitOptIn && beforeMain)
@@ -141,7 +146,7 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
     const auto& scene=frame.scene;
     const auto& camera=frame.camera;
     frame.geometry.clear();
-    if(!frame.requirements.needsGeometry && !frame.requirements.needsSurface) return; // 지오메트리와 surface를 모두 필요로 하지 않으면 공유 draw 목록을 만들지 않는다.
+    if(!frame.requirements.RequiresGeometry()) return;
     frame.geometry.reserve(scene.GetEntityCount());
     const auto viewProjection=camera.projection*camera.view;
     const bool baseInstance=stockDrawInputs && UsesInstanceStream() && device->Supports(RHI::Feature::IndirectFirstInstance);

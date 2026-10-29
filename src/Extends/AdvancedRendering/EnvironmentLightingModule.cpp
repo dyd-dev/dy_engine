@@ -21,10 +21,11 @@ public:
         requirements.providesEnvironment=true;
         const auto& config=renderer.GetConfig();
         const auto& environment=config.lighting.environment;
-        requirements.needsSurface=config.lighting.enabled && !config.debugLodColor && !config.debugWireframe &&
+        requirements.needsNormal=config.lighting.enabled && !config.debugLodColor && !config.debugWireframe &&
             (environment.radiance.IsValid() || !environment.probes.empty()) &&
             (environment.diffuse || environment.specular);
-        requirements.needsGeometry=requirements.needsSurface;
+        requirements.needsMaterial=requirements.needsNormal && environment.specular;
+        requirements.needsGeometry=requirements.RequiresDepth();
         return requirements;
     }
 
