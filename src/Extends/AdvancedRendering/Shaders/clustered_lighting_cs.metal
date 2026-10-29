@@ -51,41 +51,62 @@ inline bool ClusterSpotOutside(ClusterLight light,float3 cellCenter,float3 cellE
 }
 kernel void clusteredLightingCompute(const device ClusterLight* clusterLights [[buffer(19)]],
     device uint* clusterList [[buffer(20)]],constant ClusterParameters& clusters [[buffer(21)]],
-    uint cell [[thread_position_in_grid]])
+    uint cell [[thread_position_in_grid]],uint lane [[thread_index_in_threadgroup]])
 {
+    threadgroup ClusterLight lightBatch[64];
+    threadgroup float4 lightBounds[64];
     uint total=clusters.dimensions.x*clusters.dimensions.y*clusters.dimensions.z;
-    if(cell>=total)return;
-    uint3 index=uint3(cell%clusters.dimensions.x,(cell/clusters.dimensions.x)%clusters.dimensions.y,
-        cell/(clusters.dimensions.x*clusters.dimensions.y));
-    float2 lower=float2(index.xy)/float2(clusters.dimensions.xy)*2-1;
-    float2 upper=float2(index.xy+uint2(1))/float2(clusters.dimensions.xy)*2-1;
-    float begin=float(index.z)/float(clusters.dimensions.z),end=float(index.z+1)/float(clusters.dimensions.z);
-    float nearDepth=clusters.counts.z!=0?clusters.depth.x*exp(clusters.depth.z*begin):mix(clusters.depth.x,clusters.depth.y,begin);
-    float farDepth=clusters.counts.z!=0?clusters.depth.x*exp(clusters.depth.z*end):mix(clusters.depth.x,clusters.depth.y,end);
+    bool validCell=cell<total,overflow=false;
     float3 minimum=float3(1e30f),maximum=float3(-1e30f);
-    for(uint corner=0;corner<8;++corner)
+    if(validCell)
     {
-        float2 xy=float2((corner&1u)!=0?upper.x:lower.x,(corner&2u)!=0?upper.y:lower.y);
-        float4 projected=clusters.inverseProjection*float4(xy,0,1);
-        float3 point=projected.xyz/projected.w;float distance=(corner&4u)!=0?farDepth:nearDepth;
-        if(clusters.counts.z!=0)point*=distance/max(-point.z,1e-20f);else point.z=-distance;
-        minimum=min(minimum,point);maximum=max(maximum,point);
-    }
-    float3 cellCenter=(minimum+maximum)*.5f,cellExtent=(maximum-minimum)*.5f;
-    uint base=cell*(clusters.dimensions.w+1u),count=0;
-    for(uint lightIndex=0;lightIndex<clusters.counts.x;++lightIndex)
-    {
-        ClusterLight light=clusterLights[lightIndex];
-        float3 center=(clusters.view*float4(light.positionRange.xyz,1)).xyz;
-        float radius=light.positionRange.w*clusters.depth.w;
-        float3 delta=center-clamp(center,minimum,maximum);
-        if(dot(delta,delta)<=radius*radius)
+        uint3 index=uint3(cell%clusters.dimensions.x,(cell/clusters.dimensions.x)%clusters.dimensions.y,
+            cell/(clusters.dimensions.x*clusters.dimensions.y));
+        float2 lower=float2(index.xy)/float2(clusters.dimensions.xy)*2-1;
+        float2 upper=float2(index.xy+uint2(1))/float2(clusters.dimensions.xy)*2-1;
+        float begin=float(index.z)/float(clusters.dimensions.z),end=float(index.z+1)/float(clusters.dimensions.z);
+        float nearDepth=clusters.counts.z!=0?clusters.depth.x*exp(clusters.depth.z*begin):mix(clusters.depth.x,clusters.depth.y,begin);
+        float farDepth=clusters.counts.z!=0?clusters.depth.x*exp(clusters.depth.z*end):mix(clusters.depth.x,clusters.depth.y,end);
+        for(uint corner=0;corner<8;++corner)
         {
-            if(light.coneShadow.y==3.f && ClusterSpotOutside(light,cellCenter,cellExtent,center,clusters))continue;
-            // 셀 용량을 넘으면 전체 광원 순회로 전환한다.
-            if(count==clusters.dimensions.w){clusterList[base]=0xffffffffu;return;}
-            clusterList[base+1u+count++]=lightIndex;
+            float2 xy=float2((corner&1u)!=0?upper.x:lower.x,(corner&2u)!=0?upper.y:lower.y);
+            float4 projected=clusters.inverseProjection*float4(xy,0,1);
+            float3 point=projected.xyz/projected.w;float distance=(corner&4u)!=0?farDepth:nearDepth;
+            if(clusters.counts.z!=0)point*=distance/max(-point.z,1e-20f);else point.z=-distance;
+            minimum=min(minimum,point);maximum=max(maximum,point);
         }
     }
-    clusterList[base]=count;
+    float3 cellCenter=(minimum+maximum)*.5f,cellExtent=(maximum-minimum)*.5f;
+    uint base=validCell?cell*(clusters.dimensions.w+1u):0u,count=0,first=0;
+    while(first<clusters.counts.x)
+    {
+        uint batchCount=min(64u,clusters.counts.x-first);
+        if(lane<batchCount)
+        {
+            ClusterLight light=clusterLights[first+lane];
+            lightBatch[lane]=light;
+            lightBounds[lane]=float4((clusters.view*float4(light.positionRange.xyz,1)).xyz,
+                light.positionRange.w*clusters.depth.w);
+        }
+        // Inactive/overflow cells still load their lane and reach both barriers.
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if(validCell && !overflow)
+            for(uint local=0;local<batchCount && !overflow;++local)
+            {
+                ClusterLight light=lightBatch[local];
+                float3 center=lightBounds[local].xyz;
+                float radius=lightBounds[local].w;
+                float3 delta=center-clamp(center,minimum,maximum);
+                if(dot(delta,delta)<=radius*radius)
+                {
+                    if(light.coneShadow.y==3.f && ClusterSpotOutside(light,cellCenter,cellExtent,center,clusters))continue;
+                    // Overflow retains the complete-light-list fallback.
+                    if(count==clusters.dimensions.w)overflow=true;
+                    else clusterList[base+1u+count++]=first+local;
+                }
+            }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        first+=batchCount;
+    }
+    if(validCell)clusterList[base]=overflow?0xffffffffu:count;
 }
