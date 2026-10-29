@@ -108,6 +108,7 @@ namespace dyf::Backends
         [[nodiscard]] VkPipelineStageFlags GetAcquireWaitStage(const VulkanTexture*,bool firstReference) const;
 		void CommitResourceStates();
         void CompleteTimestampResets();
+        void MarkTimestampsSubmitted(uint64_t serial) noexcept;
         void AllowPoolReuse() noexcept {m_poolReusable=true;}
         uint32_t m_maxComputeGroups[3]={};
 
@@ -173,6 +174,7 @@ namespace dyf::Backends
         float m_viewportBounds[2]={};
         struct QueryReset { VulkanTimestampQuery* query; uint32_t first, count; };
         std::vector<QueryReset> m_queryResets;
+        std::vector<std::pair<VulkanTimestampQuery*,uint32_t>> m_queryWrites;
 		bool m_supportsCompute = false;
 		VkCommandBuffer m_commandBuffer = VK_NULL_HANDLE;
 		VulkanPipeline* m_boundPipeline = nullptr;

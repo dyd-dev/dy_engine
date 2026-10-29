@@ -114,7 +114,8 @@ namespace dyf::RHI
 		[[nodiscard]] bool WaitIdle();
         [[nodiscard]] TimestampQueryHandle CreateTimestampQuery(const TimestampQueryDesc&);
         void DestroyTimestampQuery(TimestampQueryHandle);
-        // Returns false until all requested writes are available. Values are raw GPU ticks.
+        // Returns false until the latest submitted resets/writes for every requested query complete.
+        // Recording alone does not invalidate completed results. Values are raw GPU ticks.
         [[nodiscard]] bool ReadTimestamps(TimestampQueryHandle,uint32_t first,uint32_t count,uint64_t* ticks);
         [[nodiscard]] double GetTimestampPeriodNanoseconds() const {return GetTimestampPeriodNative();}
         [[nodiscard]] uint32_t GetTimestampValidBits() const {return GetTimestampValidBitsNative();}

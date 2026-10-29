@@ -87,6 +87,7 @@ namespace dyf::RHI
 		void BindIndexBuffer(BufferHandle buffer, Format format, uint32_t offset);
         // offset과 size는 4바이트 배수이며 파이프라인이 선언한 범위 안이어야 한다.
         // 입력 바이트는 기록할 때 복사하므로 호출 뒤 원본 저장소를 해제해도 된다.
+        // Graphics 상수는 BeginRendering/EndRendering 안에서, compute 상수는 그 밖에서 기록한다.
 		void SetInlineConstants(uint32_t offset, uint32_t size, const void* data);
 
 		void SetViewport(const Viewport& viewport);
@@ -194,17 +195,8 @@ namespace dyf::RHI
         friend class RecordedCommandList;
         static ICommandList* CreateRecorded();
         using StateMap=std::map<std::tuple<uintptr_t,uint32_t,uint32_t>,ResourceState>;
-        struct StateOperation
-        {
-            uintptr_t resource;
-            uint32_t mip,layer;
-            ResourceState before,after;
-            bool barrier;
-        };
-        std::vector<StateOperation> m_stateOperations;
-        Backend::StateTable<StateMap::key_type,ResourceState,Backend::SubresourceHash> m_recordedStates;
         Backend::StateTable<StateMap::key_type,CommandStateSummary,Backend::SubresourceHash> m_closedStates;
-        bool m_stateSummaryValid = false;
+        bool m_stateSummaryValid = true;
         std::unordered_set<ResourceSetHandle> m_requiredResourceSets;
         void RequireState(const void*,uint32_t mip,uint32_t layer,ResourceState);
         std::vector<std::function<bool(ICommandList&)>> m_commands;

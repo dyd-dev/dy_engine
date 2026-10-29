@@ -490,8 +490,8 @@ try
         for(uint32_t l=layer;l<layer+layers;++l)for(uint32_t m=mip;m<mip+mips;++m)
         {
             const auto key=std::make_tuple(object,m,l);
-            m_stateOperations.push_back({object,m,l,barrier.before,barrier.after,true});
-            m_recordedStates[key]=barrier.after;
+            auto& summary=m_closedStates.GetOrEmplace(key,barrier.before);
+            if(!summary.Append(barrier.before,barrier.after,true))m_stateSummaryValid=false;
         }
 
     }
@@ -517,12 +517,8 @@ try
     }
     const auto key=std::make_tuple(object,mip,layer);
     // 이 목록의 앞선 검사나 배리어가 같은 상태를 이미 보장하면 중복 검사만 합친다.
-    const auto* recorded=m_recordedStates.FindValue(key);
-    if(!recorded || *recorded!=state)
-    {
-        m_stateOperations.push_back({object,mip,layer,state,state,false});
-        m_recordedStates[key]=state;
-    }
+    auto& summary=m_closedStates.GetOrEmplace(key,state);
+    if(!summary.Append(state,state,false))m_stateSummaryValid=false;
     if(slot==recent.recentStates.size())
     {
         if(recent.recentStateCount<recent.recentStates.size()) slot=recent.recentStateCount++;
@@ -725,7 +721,8 @@ void ICommandList::SetInlineConstants(uint32_t offset, uint32_t size, const void
 try
 {
     if(!CanRecordCommands()) return;
-    if(!data || !size || !m_pipeline || offset%4 || size%4 || offset>m_pipeline->GetLayout().inlineConstantSize ||
+    if(!data || !size || !m_pipeline || (!m_pipeline->IsCompute() && !m_rendering) ||
+        offset%4 || size%4 || offset>m_pipeline->GetLayout().inlineConstantSize ||
         size>m_pipeline->GetLayout().inlineConstantSize-offset) { m_recordingFailed = true; return; }
     m_liveDeferred->inlineConstants.Write(offset,size);
     SetInlineConstantsNative(offset, size, data);
@@ -917,18 +914,7 @@ try
     const bool nativeClosed = CloseNative();
     m_recordingClosed = true;
     m_recordingFailed = m_recordingFailed || !nativeClosed;
-    m_closedStates.clear();
-    m_stateSummaryValid = false;
-    bool valid = true;
-    for(const auto& operation:m_stateOperations)
-    {
-        const auto key=std::make_tuple(operation.resource,operation.mip,operation.layer);
-        auto& summary=m_closedStates.GetOrEmplace(key,operation.before);
-        if(!summary.Append(operation.before,operation.after,operation.barrier))
-        {valid=false;break;}
-    }
-    m_stateSummaryValid = valid;
-    // Internal state mismatches remain submission errors, as before summarization.
+    // Recording maintains the summary; internal state mismatches remain submission errors.
     if(m_recordingFailed && m_owner)m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,"Close: command recording failed. Invalid commands will not be submitted.");
     FinishLiveRecording(m_recordingFailed?D::LiveOutcome::Failed:D::LiveOutcome::Observed,m_recordingFailed);
     return !m_recordingFailed;

@@ -156,7 +156,20 @@ namespace dyf::Backends
             std::fill_n(reset.query->initialized.begin()+reset.first,reset.count,uint8_t{1});
     }
     void VulkanCommandList::WriteTimestampNative(RHI::TimestampQueryHandle query,uint32_t index)
-    {vkCmdWriteTimestamp2(m_commandBuffer,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,static_cast<VulkanTimestampQuery*>(query)->pool,index);}
+    {
+        auto* native=static_cast<VulkanTimestampQuery*>(query);
+        m_queryWrites.emplace_back(native,index);
+        vkCmdWriteTimestamp2(m_commandBuffer,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,native->pool,index);
+    }
+    void VulkanCommandList::MarkTimestampsSubmitted(uint64_t serial) noexcept
+    {
+        for(const auto& reset:m_queryResets)
+        {
+            std::fill_n(reset.query->initialized.begin()+reset.first,reset.count,uint8_t{0});
+            std::fill_n(reset.query->completions.begin()+reset.first,reset.count,serial);
+        }
+        for(const auto& write:m_queryWrites)write.first->completions[write.second]=serial;
+    }
 	namespace
 	{
         constexpr VkPipelineStageFlags AcquireBarrierStage(RHI::ResourceState before,RHI::ResourceState after)

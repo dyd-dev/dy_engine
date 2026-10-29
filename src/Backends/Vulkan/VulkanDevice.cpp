@@ -205,8 +205,10 @@ namespace dyf::Backends
         bool ReadTimestamps(VulkanTimestampQuery& query,uint32_t first,uint32_t count,uint64_t* ticks)
         {
             CollectCompletedSubmissions();
-            if(m_submissionFaulted || !std::all_of(query.initialized.begin()+first,query.initialized.begin()+first+count,
-                [](uint8_t initialized) { return initialized!=0; })) return false;
+            if(m_submissionFaulted)return false;
+            for(uint32_t index=first;index<first+count;++index)
+                if(!query.initialized[index] || !query.completions[index] ||
+                    query.completions[index]>m_completedSubmission)return false;
             const VkResult result=vkGetQueryPoolResults(m_context.device,query.pool,first,count,
                 size_t(count)*sizeof(uint64_t),ticks,sizeof(uint64_t),VK_QUERY_RESULT_64_BIT);
             if(result==VK_ERROR_DEVICE_LOST) m_submissionFaulted=true;
@@ -1432,6 +1434,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		}
 
 		submission.serial=++m_lastSubmission;
+        for(VulkanCommandList* commandList:selected)commandList->MarkTimestampsSubmitted(submission.serial);
 		if (waitsForAcquire && m_retiredReleaseAcquired && !m_retiredReleaseSubmission)
 			m_retiredReleaseSubmission = submission.serial;
         m_submissions.push_back(std::move(submission));

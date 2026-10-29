@@ -775,9 +775,7 @@ bool IDevice::ResetCommandList(ICommandList* commands)
     DiscardLivePrepared(commands,Platform::LiveOutcome::Discarded);
     commands->m_commands.clear();
     commands->m_commandBytes.clear();
-    commands->m_stateOperations.clear();
-    commands->m_recordedStates.clear();
-    commands->m_closedStates.clear();commands->m_stateSummaryValid=false;
+    commands->m_closedStates.clear();commands->m_stateSummaryValid=true;
     commands->m_requiredResourceSets.clear();
     commands->m_liveDeferred->ClearRecentStates();
     commands->m_liveDeferred->inlineConstants.Reset(0);
@@ -828,8 +826,6 @@ void IDevice::DestroyCommandList(ICommandList* commands)
         };
         if(account(commands->m_commandBytes.capacity(),sizeof(uint8_t)) &&
             account(commands->m_commands.capacity(),sizeof(decltype(commands->m_commands)::value_type)) &&
-            account(commands->m_stateOperations.capacity(),sizeof(ICommandList::StateOperation)) &&
-            account(commands->m_recordedStates.StorageBytes(),1) &&
             account(commands->m_closedStates.StorageBytes(),1) &&
             account(commands->m_references.capacity(),sizeof(std::shared_ptr<void>)) &&
             account(commands->m_colorFormats.capacity(),sizeof(Format)) &&
@@ -843,8 +839,8 @@ void IDevice::DestroyCommandList(ICommandList* commands)
             Platform::RetireLiveObject(commands->m_liveDeferred->m_livePosition.commandList);
             commands->m_liveDeferred->m_livePosition={};
             commands->m_commands.clear();commands->m_commandBytes.clear();
-            commands->m_stateOperations.clear();commands->m_recordedStates.clear();commands->m_requiredResourceSets.clear();
-            commands->m_closedStates.clear();commands->m_stateSummaryValid=false;
+            commands->m_requiredResourceSets.clear();
+            commands->m_closedStates.clear();commands->m_stateSummaryValid=true;
             commands->m_liveDeferred->ClearRecentStates();
             commands->m_references.clear();commands->m_referenceHandles.clear();commands->m_sharedReferences.reset();
             commands->m_liveDeferred->ClearTrackedHandles();

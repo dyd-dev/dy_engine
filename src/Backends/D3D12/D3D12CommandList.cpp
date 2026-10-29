@@ -986,7 +986,7 @@ namespace dyf::Backends
         uint32_t size,
         const void* data)
     {
-        if (!CanRecord(m_internal))
+        if (!CanRecord(m_internal) || m_internal->pipeline == nullptr)
         {
             RejectRecording(m_internal);
             return;
