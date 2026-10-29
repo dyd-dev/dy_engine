@@ -254,7 +254,10 @@ namespace dyf::Platform
             }
             recordingScopeCount=0;
 			RHI::TimestampCalibration pair;
-			const bool calibrated = completion && device.GetTimestampCalibration(pair);
+			const bool hasScopes = std::any_of(gpuScopes.begin(),gpuScopes.end(),[&](const auto& scope) {
+                return scope.span.frame==frame && !scope.completion;
+            });
+			const bool calibrated = completion && hasScopes && device.GetTimestampCalibration(pair);
 			const auto now = LiveNowNs();
 			for(auto it = gpuScopes.begin(); it != gpuScopes.end();)
 			{

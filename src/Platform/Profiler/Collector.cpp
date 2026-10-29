@@ -2379,6 +2379,7 @@ namespace dyf::Platform
 		try
 		{
 			std::vector<std::pair<ControlRequest, std::shared_ptr<ControlSlot>>> work;
+            work.reserve(32); // Allocate before publishing any request as staged.
 			{ auto & s = S();
 			std::lock_guard<std::mutex> lock(s.mutex);
 			for(auto & r : s.requests)
@@ -2391,11 +2392,12 @@ namespace dyf::Platform
 				if((checkOwnerThread && slot->ownerThread != std::this_thread::get_id()) || !slot->handler || !Validate(slot->desc, r.requested))
 				{
 					r.state = ControlState::Rejected;
-					r.message = "Invalid type/range, unsupported control or owner thread";
+					try {r.message = "Invalid type/range, unsupported control or owner thread";}
+                    catch(...) {} // Diagnostic allocation must not strand requests already staged in this batch.
 					continue;
 				}
-				r.state = ControlState::Validated;
 				work.push_back({ { r.request, r.control, r.requested }, slot });
+				r.state = ControlState::Validated;
 				if(work.size() == 32) break;
 			}
 			}

@@ -348,7 +348,8 @@ namespace dyf::Backends
 
     // 누적된 D3D12 검증 오류는 stderr에, 나머지 메시지는 stdout에 출력한다.
     // enableValidation으로 켠 디버그 레이어는 빌드 구성과 무관하게 수집한다.
-    static void DumpInfoQueue(D3D12InternalState* internal, const char* where)
+    static void DumpInfoQueue(D3D12InternalState* internal, const char* where) noexcept
+    try
     {
         if (internal == nullptr || internal->infoQueue == nullptr) return;
         const UINT64 count = internal->infoQueue->GetNumStoredMessages();
@@ -368,6 +369,11 @@ namespace dyf::Backends
         if (FAILED(removedReason)) {
             std::cerr << "[D3D12] DEVICE REMOVED reason=0x" << std::hex << static_cast<unsigned>(removedReason) << std::dec << std::endl;
         }
+    }
+    catch(...)
+    {
+        if(internal && internal->infoQueue)internal->infoQueue->ClearStoredMessages();
+        std::fputs("[D3D12] Diagnostic output failed; accepted GPU work remains submitted.\n",stderr);
     }
 
     D3D12Device::D3D12Device()

@@ -248,7 +248,11 @@ struct Gui::Impl
         auto* texture = device.CreateTexture({static_cast<uint32_t>(width), static_cast<uint32_t>(height),
             1, 1, Format::R8G8B8A8_UNORM, TextureUsage::ShaderResource});
         if(!texture) return Fail("Font texture creation failed.");
+        const auto destroyTexture=[&](Texture* value) {device.DestroyTexture(value);};
+        std::unique_ptr<Texture,decltype(destroyTexture)> ownedTexture(texture,destroyTexture);
         auto* commands = device.AcquireCommandList();
+        const auto destroyCommands=[&](ICommandList* value) {device.DestroyCommandList(value);};
+        std::unique_ptr<ICommandList,decltype(destroyCommands)> ownedCommands(commands,destroyCommands);
         bool uploaded = false;
         if(commands)
         {
@@ -260,10 +264,9 @@ struct Gui::Impl
             barrier.after = ResourceState::ShaderResource;
             commands->ResourceBarrier(&barrier, 1);
             uploaded = uploaded && commands->Close() && device.Submit(&commands, 1);
-            device.DestroyCommandList(commands);
         }
-        if(!uploaded) { device.DestroyTexture(texture); return Fail("Font upload submission failed."); }
-        fontTexture = texture;
+        if(!uploaded) return Fail("Font upload submission failed.");
+        fontTexture = ownedTexture.release();
         fontAtlas = atlas;
         fontData = atlas->TexData;
         atlas->SetTexID(fontTextureId);

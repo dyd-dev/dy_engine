@@ -133,7 +133,8 @@ ResourceSetHandle ScreenSpaceLighting::DenoiseResources(PipelineHandle pipeline,
     for(uint32_t i=0;i<images.size();++i) bindings.push_back({i,0,nullptr,images[i],0,0,{}});
     bindings.push_back({12,0,m_frameBuffer,nullptr,0,sizeof(FrameGPU),{}});
     auto* set=m_device->CreateResourceSet({pipeline,bindings.data(),static_cast<uint32_t>(bindings.size())});
-    if(set) m_denoiseSets.push_back({images,pipeline,set,0});
+    if(set) try {m_denoiseSets.push_back({images,pipeline,set,0});}
+    catch(...) {m_device->DestroyResourceSet(set);throw;}
     return set;
 }
 
@@ -625,7 +626,8 @@ ResourceSetHandle ScreenSpaceLighting::ScreenResources(PipelineHandle pipeline,T
     bindings.push_back({12,0,m_frameBuffer,nullptr,0,sizeof(FrameGPU),{}});
     if(depthAware) bindings.push_back({9,0,nullptr,images[7],0,0,{}});
     auto* set=m_device->CreateResourceSet({pipeline,bindings.data(),static_cast<uint32_t>(bindings.size())});
-    if(set) m_screenSets.push_back({images,pipeline,set,0});
+    if(set) try {m_screenSets.push_back({images,pipeline,set,0});}
+    catch(...) {m_device->DestroyResourceSet(set);throw;}
     return set;
 }
 

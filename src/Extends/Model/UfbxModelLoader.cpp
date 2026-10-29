@@ -453,7 +453,8 @@ namespace dyf
 		{
 			auto* context = static_cast<UfbxExternalFileContext*>(user);
 			if(context == nullptr || stream == nullptr || path == nullptr || info == nullptr) return false;
-
+            bool opened=false;
+            try {
 			const size_t actualPathLength = pathLength == SIZE_MAX ? std::strlen(path) : pathLength;
 			const std::string pathString(path, actualPathLength);
 			const std::filesystem::path externalPath(pathString);
@@ -491,12 +492,17 @@ namespace dyf
 
 			if(!ufbx_open_file_ctx(stream, info->context, path, pathLength, nullptr, nullptr))
 				return false;
+            opened=true;
 			if(!alreadyAccounted)
 			{
-				context->sourceBytes += externalBytes;
 				context->accountedPaths.insert(canonicalPath);
+				context->sourceBytes += externalBytes;
 			}
 			return true;
+            } catch(...) {
+                if(opened) {if(stream->close_fn)stream->close_fn(stream->user);*stream={};}
+                return false; // Exceptions must not cross the SDK's C callback boundary.
+            }
 		}
 
 		[[nodiscard]] std::string ToString(ufbx_string value)

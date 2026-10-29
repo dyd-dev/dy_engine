@@ -857,6 +857,7 @@ namespace dyf::Backends
 		default: return;
 		}
 
+		m_impl->ownedStaticSamplers.reserve(desc.layout.bindingCount);
 		for(uint32_t index = 0; index < desc.layout.bindingCount; ++index)
 		{
 			const RHI::ResourceBindingLayout& binding = desc.layout.bindings[index];
