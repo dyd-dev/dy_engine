@@ -1,6 +1,6 @@
 struct Draw {float4x4 model;float4x4 previousMVP;float4x4 normalMatrix;float4 baseColor;float4 materialParams;uint4 flags;float4 alpha;};
 StructuredBuffer<Draw> draws:register(t11);
-cbuffer Frame:register(b12) {float4x4 view;float4x4 projection;float4x4 inverseProjection;float4x4 viewProjection;float4 size;float4 ao;float4 lighting;float4 options;uint4 outputs;};
+cbuffer Frame:register(b12) {float4x4 view;float4x4 projection;float4x4 inverseProjection;float4x4 viewProjection;float4 size;float4 ao;float4 lighting;float4 options;uint4 outputs;float4x4 inversePreviousProjection;};
 cbuffer Index:register(b15) {uint4 drawIndex;};
 Texture2D<float4> baseTexture:register(t0),materialTexture:register(t1),normalTexture:register(t2),aoTexture:register(t3),emissiveTexture:register(t4);
 SamplerState materialSampler:register(s8);
@@ -52,10 +52,13 @@ Output main(Input input,bool front:SV_IsFrontFace)
     if(needMaterial)values[outputs.y]=float4(max(base.rgb,0),saturate(mr.x));
     if(needMotion)
     {
-        bool valid=options.w>0.5 && input.previousClip.w>1e-5 && input.currentClip.w>1e-5;
+        float4 previousView=mul(inversePreviousProjection,input.previousClip);
+        // Match viewDepth without a homogeneous divide, which loses precision at distant perspective depths.
+        float previousDepth=-previousView.z;
+        bool valid=previousDepth>0.0 && options.w>0.5 && input.previousClip.w>1e-5 && input.currentClip.w>1e-5;
         float2 currentUV=input.currentClip.xy/input.currentClip.w*float2(0.5,-0.5)+0.5;
         float2 previousUV=valid?input.previousClip.xy/input.previousClip.w*float2(0.5,-0.5)+0.5:currentUV;
-        values[outputs.z]=float4(currentUV-previousUV,max(input.viewDepth,0.0),valid?input.previousClip.w:0.0);
+        values[outputs.z]=float4(currentUV-previousUV,max(input.viewDepth,0.0),valid?previousDepth:0.0);
     }
     output.normalRoughAO=values[0];output.albedoMetal=values[1];output.motionDepth=values[2];
     return output;

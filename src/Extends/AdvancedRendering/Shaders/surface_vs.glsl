@@ -10,7 +10,7 @@ layout(location=9) in mat4 instancePreviousMVP;
 layout(location=13) in vec4 color;
 struct Draw {mat4 model;mat4 previousMVP;mat4 normalMatrix;vec4 baseColor;vec4 materialParams;uvec4 flags;vec4 alpha;};
 layout(std430,set=0,binding=11) readonly buffer Draws {Draw draws[];};
-layout(set=0,binding=12) uniform Frame {mat4 view;mat4 projection;mat4 inverseProjection;mat4 viewProjection;vec4 size;vec4 ao;vec4 lighting;vec4 options;uvec4 outputs;} frame;
+layout(set=0,binding=12) uniform Frame {mat4 view;mat4 projection;mat4 inverseProjection;mat4 viewProjection;vec4 size;vec4 ao;vec4 lighting;vec4 options;uvec4 outputs;mat4 inversePreviousProjection;} frame;
 layout(push_constant) uniform Index {uvec4 index;};
 layout(location=0) out vec2 uv;
 layout(location=1) out vec3 worldNormal;

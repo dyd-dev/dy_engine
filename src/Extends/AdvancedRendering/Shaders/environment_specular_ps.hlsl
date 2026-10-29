@@ -138,7 +138,7 @@ float4 main(float4 fragment:SV_Position,float2 uv:TEXCOORD0):SV_Target
     if(surface.z<0)return 0;
     float4 world=mul(inverseViewProjection,float4(uv*float2(2,-2)+float2(-1,1),depth,1));
     float3 position=world.xyz/world.w;
-    float3 normal=DecodeNormal(surface.xy),view=normalize(cameraPosition.xyz-position);
+    float3 normal=DecodeNormal(surface.xy),view=normalize(cameraPosition.xyz-position*cameraPosition.w);
     float roughness=clamp(surface.z,0.01,1.0),nDotV=max(dot(normal,view),0.0);
     float3 reflection=reflect(-view,normal);
     float3 radiance=BlendProbeRadiance(position,reflection,roughness);

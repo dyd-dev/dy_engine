@@ -402,6 +402,27 @@ public:
         std::puts("PASS visible projective geometry survives GPU visibility, matching the direct analytic pixel.");
     }
 
+    void OrthographicSpecular()
+    {
+        // A plane under a directional light has the same BRDF at every pixel for parallel view rays.
+        for(uint32_t path=0;path<3;++path)
+        {
+            MaterialDesc material;material.baseColor={.5f,.5f,.5f,path==2?.75f:1.f};
+            material.metallicFactor=1;material.roughnessFactor=.25f;
+            if(path==2)material.alphaMode=MaterialAlphaMode::Blend;
+            Scene scene;Require(bool(scene.Add(Quad(),material)),"Orthographic specular plane failed.");
+            DirectionalLight light;light.direction={0,0,1};light.color={1,1,1};light.intensity=.05f;light.castShadow=false;
+            Require(bool(scene.Add(light)),"Orthographic specular light failed.");
+            auto config=Config(path!=0);config.lighting.shadows=false;
+            const auto image=Render(scene,("orthographic-specular-"+std::to_string(path)).c_str(),config);
+            const auto* center=image.pixels.data()+size_t(128)*image.rowPitch+128*4;
+            Require(center[0]>30 && center[0]<245,"Orthographic specular control must be visible and unsaturated.");
+            for(uint32_t x:{64u,96u,160u,192u})
+                Expect(image,x,128,{center[0],center[1],center[2],center[3]},"Orthographic view direction is constant across the plane",2);
+        }
+        std::puts("PASS orthographic specular: basic, advanced opaque and transparent plane pixels are spatially constant.");
+    }
+
     void NormalsAndInstancing()
     {
         Scene scene;const Math::float3 normal{.6f,0,.8f};
@@ -702,6 +723,17 @@ public:
             }
             std::printf("PASS Surface demand mask=%u actual outputs/MRT and stock MASK pixels.\n",demand);
         }
+        {
+            Scene temporal;Require(bool(temporal.Add(Quad(-.8f,.8f,-.8f,.8f,1.5f),Unlit())),"Orthographic motion fixture failed.");
+            probe->mask=4;probe->observed=false;
+            Render(temporal,"orthographic-motion-first",Config(true));
+            probe->MotionDepth(.5f,0);
+            // The Render helper calls SetConfig, which intentionally invalidates frame history.
+            Require(m_renderer->RenderToTexture(temporal,m_camera,m_target,m_targetState),"Orthographic motion history render failed.");
+            ++m_frames;
+            probe->MotionDepth(.5f,.5f);
+            std::puts("PASS orthographic Surface motion: current and previous linear depth are 0.5, independent of clip.w=1.");
+        }
         probe->active=false;
         {
             Platform::Window window{Size,Size,"dyf depth-only conformance"};
@@ -794,7 +826,7 @@ public:
     {
         VertexColors();Coverage(false);
         for(uint32_t layers:{1u,2u}){Coverage(true,layers);Transmission(layers);}
-        NearestDepthAlphaHoles();ProjectiveVisibility();NormalsAndInstancing();Bc5Normals();ImportedModel();SkinnedModel();
+        NearestDepthAlphaHoles();ProjectiveVisibility();OrthographicSpecular();NormalsAndInstancing();Bc5Normals();ImportedModel();SkinnedModel();
         Require(m_device->WaitIdle(),"Final GPU wait failed.");
         std::printf("INFO reactive storage=%s; direct half-value precision readback unavailable (ReadTexture supports RGBA8/BGRA8 only).\n",
             m_reactiveFormat==RHI::Format::R16_FLOAT?"R16_FLOAT":"RGBA16_FLOAT");

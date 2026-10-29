@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 struct SurfaceDraw {float4x4 model;float4x4 previousMVP;float4x4 normalMatrix;float4 baseColor;float4 materialParams;uint4 flags;float4 alpha;};
-struct SurfaceFrame {float4x4 view;float4x4 projection;float4x4 inverseProjection;float4x4 viewProjection;float4 size;float4 ao;float4 lighting;float4 options;uint4 outputs;};
+struct SurfaceFrame {float4x4 view;float4x4 projection;float4x4 inverseProjection;float4x4 viewProjection;float4 size;float4 ao;float4 lighting;float4 options;uint4 outputs;float4x4 inversePreviousProjection;};
 struct SurfaceInput {
     float3 position [[attribute(0)]];float3 normal [[attribute(1)]];float2 uv [[attribute(2)]];float4 tangent [[attribute(3)]];
     float3 previousPosition [[attribute(4)]];

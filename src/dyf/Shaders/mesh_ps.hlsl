@@ -774,7 +774,7 @@ float4 main(PSInput input, bool frontFace : SV_IsFrontFace) : SV_TARGET
     roughness=sqrt(sqrt(filteredAlphaSquared));
     if(alphaMode==1u) clip(base.a-asfloat(padding0)); // Mask 모드에서 cutoff보다 작은 픽셀을 버린다. 그 외 알파 모드는 이 잘라내기를 하지 않는다.
     if((padding1 & 4u)!=0u && !frontFace) normal=-normal; // 양면 재질의 뒷면이면 법선을 반대로 돌려 뒤쪽 표면 방향으로 조명한다.
-    float3 viewDir = normalize(lighting.cameraPosition.xyz - input.worldPosition);
+    float3 viewDir = normalize(lighting.cameraPosition.xyz - input.worldPosition * lighting.cameraPosition.w);
     DirectSurface directSurface=PrepareDirectSurface(normal,viewDir,albedo,metallic,roughness);
     float3 f0=directSurface.f0;
     float3 directLight = EvaluateLights(lighting, input.worldPosition, normal, viewDir, albedo, roughness,directSurface);

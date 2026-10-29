@@ -145,7 +145,7 @@ void main()
     vec4 albedo=texelFetch(sampler2D(albedoTexture,clampSampler),pixel,0);
     vec4 world=frame.inverseViewProjection*vec4(uv*vec2(2,-2)+vec2(-1,1),depth,1);
     vec3 position=world.xyz/world.w;
-    vec3 normal=DecodeNormal(surface.xy),view=normalize(frame.cameraPosition.xyz-position);
+    vec3 normal=DecodeNormal(surface.xy),view=normalize(frame.cameraPosition.xyz-position*frame.cameraPosition.w);
     float roughness=clamp(surface.z,0.01,1.0),nDotV=max(dot(normal,view),0.0);
     vec3 reflection=reflect(-view,normal);
     vec3 radiance=BlendProbeRadiance(position,reflection,roughness);

@@ -559,12 +559,13 @@ bool ScreenSpaceLighting::Prepare(IDevice& device,ICommandList& uploads,TextureH
     frame.view=camera.view;frame.projection=camera.projection;
     frame.viewProjection=camera.projection*camera.view;
     if(!Math::Inverse(camera.projection,frame.inverseProjection)) return fail();
+    frame.inversePreviousProjection=m_historyValid?m_previousInverseProjection:frame.inverseProjection;
     frame.size={float(width),float(height),1.f/width,1.f/height};
     frame.ao={settings.aoRadius,settings.aoStrength,0.025f,float(settings.frameIndex%1024)};
     frame.lighting={settings.rayDistance,settings.giStrength,settings.reflectionStrength,settings.thickness};
     frame.options={settings.ambientOcclusion?1.f:0.f,settings.diffuseGI?1.f:0.f,
         settings.reflections?1.f:0.f,m_historyValid?1.f:0.f};
-    static_assert(offsetof(FrameGPU,outputs)==320 && sizeof(FrameGPU)==336);
+    static_assert(offsetof(FrameGPU,outputs)==320 && offsetof(FrameGPU,inversePreviousProjection)==336 && sizeof(FrameGPU)==400);
     frame.outputs=SurfaceOutputLayout(settings.surfaceMask);
     if(!m_frameReady || std::memcmp(&frame,&m_uploadedFrame,sizeof(frame))!=0)
     {
@@ -942,6 +943,7 @@ void ScreenSpaceLighting::CommitFrame()
         if(m_imported[i]) m_states[i]=ResourceState::ShaderResource;
     if(m_depthPlaneHandle.IsValid()) m_depthPlaneState=ResourceState::ShaderResource;
     m_historyValid=true;
+    m_previousInverseProjection=m_uploadedFrame.inverseProjection;
     for(auto& effect:m_effectHistory)
     {
         if(!effect.pending) continue;

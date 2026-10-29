@@ -299,7 +299,7 @@ bool TransparentRendering::Prepare(IDevice& device,ICommandList& uploads,const C
     }
     FrameGPU frame={};frame.viewProjection=camera.projection*camera.view;frame.view=camera.view;
     if(!Math::Inverse(frame.viewProjection,frame.inverseViewProjection)) return false;
-    frame.camera={camera.position.x,camera.position.y,camera.position.z,0};frame.environment=lighting.constants;
+    frame.camera=CameraViewPosition(camera);frame.environment=lighting.constants;
     frame.specularColor={environment.specularColor.x*environment.specularIntensity,
         environment.specularColor.y*environment.specularIntensity,environment.specularColor.z*environment.specularIntensity,0};
     m_prefilter=lighting.prefilter;

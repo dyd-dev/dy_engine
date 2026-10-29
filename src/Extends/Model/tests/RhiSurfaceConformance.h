@@ -355,6 +355,19 @@ public:
             NativeRhiTests::Pixel(image,48,32,covered[bit],"selected Surface output has actual covered pixels",3);
         }
     }
+    void MotionDepth(float current,float previous)
+    {
+        Check(observed && (mask&4),"Motion observer did not execute.");
+        const auto image=rhi.Read(m_capture[2]);
+        const auto* pixel=image.pixels.data()+size_t(32)*image.rowPitch+32*4;
+        // Canvas copies alpha unchanged while encoding RGB with the sRGB transfer function.
+        const auto encoded=uint8_t(std::lround(255*(current<=.0031308f?12.92f*current:1.055f*std::pow(current,1.f/2.4f)-.055f)));
+        NativeRhiTests::Pixel(image,32,32,{0,0,encoded},"Current orthographic linear depth",2);
+        const int expectedAlpha=int(std::lround(255*previous));
+        if(std::abs(int(pixel[3])-expectedAlpha)>2)
+            std::fprintf(stderr,"Orthographic motion alpha=%u expected=%d current-depth-byte=%u\n",pixel[3],expectedAlpha,pixel[2]);
+        Check(std::abs(int(pixel[3])-expectedAlpha)<=2,"Previous orthographic depth must match history linear depth");
+    }
 };
 class DepthOnlyProvider final:public RenderExtension
 {

@@ -41,6 +41,22 @@ namespace dyf
             std::abs(Math::Dot(x,z))<1e-4f && std::abs(Math::Dot(y,z))<1e-4f;
     }
 
+    // Homogeneous eye: normalize(xyz - worldPosition*w) also handles parallel orthographic rays.
+    inline Math::float4 CameraViewPosition(const Camera& camera)
+    {
+        const auto& p=camera.projection;
+        if(p.m[3]==0 && p.m[7]==0 && p.m[11]==0 && p.m[15]!=0)
+        {
+            Math::float4x4 inverseView;
+            if(Math::Inverse(camera.view,inverseView))
+            {
+                const auto direction=Math::NormalizeOr(Math::TransformVector(inverseView,{0,0,1}),{0,0,1});
+                return {direction.x,direction.y,direction.z,0};
+            }
+        }
+        return {camera.position.x,camera.position.y,camera.position.z,1};
+    }
+
     // 재질의 셰이더 상수와 파이프라인 설정을 비교하며, ID와 이미지 정체성은 별도 키에서 비교한다.
     inline bool EqualMaterial(const MaterialDesc& a,const MaterialDesc& b)
     {

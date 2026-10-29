@@ -64,7 +64,7 @@ public:
     // xy는 팔면체 월드 법선, z는 지각적 거칠기(unlit은 음수), w는 원본 AO다.
     RHI::TextureHandle GetNormal() const { return m_textures[Normal]; }
     // xy = currentUV - previousUV, z = positive linear view depth,
-    // w = previousClip.w (>0 valid; invalid history is 0).
+    // w = previous positive linear view depth (>0 valid; invalid history is 0).
     // 카메라·오브젝트 이동과 이전 정점 버퍼의 변형을 함께 반영한다.
     RHI::TextureHandle GetMotion() const { return m_textures[Motion]; }
     RHI::TextureHandle GetAlbedoMetal() const { return m_textures[Albedo]; }
@@ -85,6 +85,7 @@ private:
         Math::float4x4 view,projection,inverseProjection,viewProjection;
         Math::float4 size,ao,lighting,options;
         std::array<uint32_t,4> outputs={};
+        Math::float4x4 inversePreviousProjection;
     };
     struct SurfaceSetKey
     {
@@ -175,6 +176,7 @@ private:
     uint32_t m_width=0,m_height=0;
     Settings m_settings;
     FrameGPU m_uploadedFrame={};
+    Math::float4x4 m_previousInverseProjection={};
     std::vector<DrawGPU> m_gpuDraws,m_gpuScratch;
     std::vector<SurfaceDraw> m_draws;
     std::vector<uint32_t> m_drawOrder;

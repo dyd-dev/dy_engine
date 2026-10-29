@@ -1,4 +1,5 @@
 #include "EnvironmentLighting.h"
+#include "SceneAlgorithms.h"
 #include "dyf/RHI/ResourceSet.h"
 #include <algorithm>
 #include <cmath>
@@ -657,7 +658,7 @@ bool EnvironmentLighting::Prepare(RHI::IDevice& device,RHI::ICommandList& upload
     backgroundView.m[12]=backgroundView.m[13]=backgroundView.m[14]=0;
     if(!Math::Inverse((backgroundProjection ? *backgroundProjection : camera.projection)*backgroundView,
         m_frame.backgroundRayToWorld)) return false;
-    m_frame.cameraPosition={camera.position.x,camera.position.y,camera.position.z,1};
+    m_frame.cameraPosition=CameraViewPosition(camera);
     m_frame.environment=m_data;
     m_frame.specularColor={environment.specularColor.x*environment.specularIntensity,
         environment.specularColor.y*environment.specularIntensity,environment.specularColor.z*environment.specularIntensity,0};

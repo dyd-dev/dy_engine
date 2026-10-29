@@ -11,7 +11,7 @@ layout(location=1) out vec4 albedoMetal;
 layout(location=2) out vec4 motionDepth;
 struct Draw {mat4 model;mat4 previousMVP;mat4 normalMatrix;vec4 baseColor;vec4 materialParams;uvec4 flags;vec4 alpha;};
 layout(std430,set=0,binding=11) readonly buffer Draws {Draw draws[];};
-layout(set=0,binding=12) uniform Frame {mat4 view;mat4 projection;mat4 inverseProjection;mat4 viewProjection;vec4 size;vec4 ao;vec4 lighting;vec4 options;uvec4 outputs;} frame;
+layout(set=0,binding=12) uniform Frame {mat4 view;mat4 projection;mat4 inverseProjection;mat4 viewProjection;vec4 size;vec4 ao;vec4 lighting;vec4 options;uvec4 outputs;mat4 inversePreviousProjection;} frame;
 layout(push_constant) uniform Index {uvec4 index;};
 layout(set=0,binding=0) uniform texture2D baseTexture;
 layout(set=0,binding=1) uniform texture2D materialTexture;
@@ -67,10 +67,13 @@ void main()
     if(needMaterial)values[frame.outputs.y]=vec4(max(base.rgb,vec3(0)),clamp(mr.x,0.0,1.0));
     if(needMotion)
     {
-        bool valid=frame.options.w>0.5 && previousClip.w>1e-5 && currentClip.w>1e-5;
+        vec4 previousView=frame.inversePreviousProjection*previousClip;
+        // Match viewDepth without a homogeneous divide, which loses precision at distant perspective depths.
+        float previousDepth=-previousView.z;
+        bool valid=previousDepth>0.0 && frame.options.w>0.5 && previousClip.w>1e-5 && currentClip.w>1e-5;
         vec2 currentUV=currentClip.xy/currentClip.w*vec2(0.5,-0.5)+0.5;
         vec2 previousUV=valid?previousClip.xy/previousClip.w*vec2(0.5,-0.5)+0.5:currentUV;
-        values[frame.outputs.z]=vec4(currentUV-previousUV,max(viewDepth,0.0),valid?previousClip.w:0.0);
+        values[frame.outputs.z]=vec4(currentUV-previousUV,max(viewDepth,0.0),valid?previousDepth:0.0);
     }
     normalRoughAO=values[0];albedoMetal=values[1];motionDepth=values[2];
 }

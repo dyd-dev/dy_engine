@@ -768,7 +768,7 @@ void main() {
     roughness=sqrt(sqrt(filteredAlphaSquared));
     if(alphaMode==1u && base.a<uintBitsToFloat(pushConstants.padding0)) discard; // Mask 모드에서 cutoff보다 작은 픽셀을 버린다. 그 외 알파 모드는 이 잘라내기를 하지 않는다.
     if((pushConstants.padding1 & 4u)!=0u && !gl_FrontFacing) normal=-normal; // 양면 재질의 뒷면이면 법선을 반대로 돌려 뒤쪽 표면 방향으로 조명한다.
-    vec3 viewDir = normalize(lighting.cameraPosition.xyz - fragWorldPosition);
+    vec3 viewDir = normalize(lighting.cameraPosition.xyz - fragWorldPosition * lighting.cameraPosition.w);
     DirectSurface directSurface=PrepareDirectSurface(normal,viewDir,albedo,metallic,roughness);
     vec3 f0=directSurface.f0;
     vec3 directLight = EvaluateLights(lighting, fragWorldPosition, normal, viewDir, albedo, roughness,directSurface);

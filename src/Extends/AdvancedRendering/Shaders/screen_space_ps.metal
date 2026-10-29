@@ -177,7 +177,7 @@ void indirectLighting(float2 p,thread float4& gi,thread float4& reflection,SS_CO
     }
     if(traceReflection)
     {
-        float3 v=normalize(-origin);
+        float3 v=abs(frame.projection[3][3])>1e-6?float3(0,0,1):normalize(-origin);
         float3 direction=reflect(-v,n);float2 hitUV;float distance,hitConfidence;
         if(trace(origin+n*0.06,direction,frame.lighting.x*2.0,32,hitUV,distance,hitConfidence,SS_INPUT))
         {

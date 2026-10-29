@@ -137,7 +137,7 @@ fragment float4 environmentSpecular(EnvironmentVertex input [[stage_in]],
     if(surface.z<0)return 0;
     const float4 world=frame.inverseViewProjection*float4(input.uv*float2(2,-2)+float2(-1,1),depth,1);
     const float3 position=world.xyz/world.w;
-    const float3 normal=DecodeEnvironmentNormal(surface.xy),view=normalize(frame.cameraPosition.xyz-position);
+    const float3 normal=DecodeEnvironmentNormal(surface.xy),view=normalize(frame.cameraPosition.xyz-position*frame.cameraPosition.w);
     const float roughness=clamp(surface.z,0.01f,1.0f),nDotV=max(dot(normal,view),0.0f);
     const float3 worldReflection=reflect(-view,normal);
     float3 radiance=BlendProbeRadiance(position,worldReflection,roughness,frame,prefilterTexture,probes,probePrefilterTexture,probeParameters,clampSampler,environmentLinearSampler);

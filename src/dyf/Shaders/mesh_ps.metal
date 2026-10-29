@@ -805,7 +805,7 @@ inline float4 RunFragmentShader(
     if(alphaMode==1u && base.a<as_type<float>(drawConstants.padding0)) discard_fragment(); // Mask 모드에서 cutoff보다 작은 픽셀을 버린다. 그 외 알파 모드는 이 잘라내기를 하지 않는다.
     if((drawConstants.padding1 & 4u)!=0u && !frontFace) normal=-normal; // 양면 재질의 뒷면이면 법선을 반대로 돌려 뒤쪽 표면 방향으로 조명한다.
     const float3 viewDirection =
-        normalize(lighting.cameraPosition.xyz - input.worldPosition);
+        normalize(lighting.cameraPosition.xyz - input.worldPosition * lighting.cameraPosition.w);
 
     const DirectSurface directSurface=PrepareDirectSurface(normal,viewDirection,albedo,metallic,roughness);
     const float3 f0=directSurface.f0;

@@ -597,7 +597,7 @@ void main()
     if((flags&(64u|128u))==0u)
     {
         geometricNormal=TransparentPixelNormalizeOr(worldNormal,vec3(0,0,1));n=geometricNormal;
-        v=TransparentPixelNormalizeOr(frame.camera.xyz-worldPosition,geometricNormal);
+        v=TransparentPixelNormalizeOr(frame.camera.xyz-worldPosition*frame.camera.w,geometricNormal);
         if((flags&4u)!=0u)
         {
             vec3 fallback=normalize(cross(abs(n.z)<.99?vec3(0,0,1):vec3(0,1,0),n));

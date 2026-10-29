@@ -200,7 +200,7 @@ void indirectLighting(vec2 p,out vec4 gi,out vec4 reflection)
     }
     if(traceReflection)
     {
-        vec3 v=normalize(-origin);
+        vec3 v=abs(frame.projection[3][3])>1e-6?vec3(0,0,1):normalize(-origin);
         vec3 direction=reflect(-v,n);vec2 hitUV;float distance,hitConfidence;
         if(trace(origin+n*0.06,direction,frame.lighting.x*2.0,32,hitUV,distance,hitConfidence))
         {

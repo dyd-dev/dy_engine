@@ -596,7 +596,7 @@ fragment TransparentOutput TRANSPARENT_FRAGMENT_ENTRY(TransparentVertex input [[
     if((flags&(64u|128u))==0u)
     {
         geometricNormal=TransparentPixelNormalizeOr(input.worldNormal,float3(0,0,1));n=geometricNormal;
-        v=TransparentPixelNormalizeOr(frame.camera.xyz-input.worldPosition,geometricNormal);
+        v=TransparentPixelNormalizeOr(frame.camera.xyz-input.worldPosition*frame.camera.w,geometricNormal);
         if((flags&4u)!=0u)
         {
             float3 fallback=normalize(cross(abs(n.z)<.99f?float3(0,0,1):float3(0,1,0),n));

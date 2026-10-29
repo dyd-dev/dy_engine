@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 struct SurfaceDraw {float4x4 model;float4x4 previousMVP;float4x4 normalMatrix;float4 baseColor;float4 materialParams;uint4 flags;float4 alpha;};
-struct SurfaceFrame {float4x4 view;float4x4 projection;float4x4 inverseProjection;float4x4 viewProjection;float4 size;float4 ao;float4 lighting;float4 options;uint4 outputs;};
+struct SurfaceFrame {float4x4 view;float4x4 projection;float4x4 inverseProjection;float4x4 viewProjection;float4 size;float4 ao;float4 lighting;float4 options;uint4 outputs;float4x4 inversePreviousProjection;};
 struct SurfaceOutput {float4 position [[position]];float2 uv;float3 worldNormal;float4 worldTangent;float4 currentClip;float4 previousClip;float viewDepth;float4 vertexColor;};
 struct SurfaceTargets {float4 normalRoughAO [[color(0)]];float4 albedoMetal [[color(1)]];float4 motionDepth [[color(2)]];};
 struct SurfaceTargets1 {float4 first [[color(0)]];};
@@ -55,10 +55,13 @@ static SurfaceValues SurfaceEvaluate(SurfaceOutput input,bool front,
     if(needMaterial)output.values[frame.outputs.y]=float4(max(base.rgb,0.0f),clamp(mr.x,0.0f,1.0f));
     if(needMotion)
     {
-        bool valid=frame.options.w>0.5f && input.previousClip.w>1e-5f && input.currentClip.w>1e-5f;
+        float4 previousView=frame.inversePreviousProjection*input.previousClip;
+        // Match viewDepth without a homogeneous divide, which loses precision at distant perspective depths.
+        float previousDepth=-previousView.z;
+        bool valid=previousDepth>0.0 && frame.options.w>0.5f && input.previousClip.w>1e-5f && input.currentClip.w>1e-5f;
         float2 currentUV=input.currentClip.xy/input.currentClip.w*float2(0.5f,-0.5f)+0.5f;
         float2 previousUV=valid?input.previousClip.xy/input.previousClip.w*float2(0.5f,-0.5f)+0.5f:currentUV;
-        output.values[frame.outputs.z]=float4(currentUV-previousUV,max(input.viewDepth,0.0f),valid?input.previousClip.w:0.0f);
+        output.values[frame.outputs.z]=float4(currentUV-previousUV,max(input.viewDepth,0.0f),valid?previousDepth:0.0f);
     }
     return output;
 }

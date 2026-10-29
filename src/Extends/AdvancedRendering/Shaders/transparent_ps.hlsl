@@ -590,7 +590,7 @@ Output main(Input input,bool frontFacing:SV_IsFrontFace)
     if((flags&(64u|128u))==0u)
     {
         geometricNormal=TransparentPixelNormalizeOr(input.worldNormal,float3(0,0,1));n=geometricNormal;
-        v=TransparentPixelNormalizeOr(camera.xyz-input.worldPosition,geometricNormal);
+        v=TransparentPixelNormalizeOr(camera.xyz-input.worldPosition*camera.w,geometricNormal);
         if((flags&4u)!=0u)
         {
             float3 fallback=normalize(cross(abs(n.z)<.99?float3(0,0,1):float3(0,1,0),n));
