@@ -123,6 +123,14 @@ namespace dyf::Backends
     {vkCmdWriteTimestamp2(m_commandBuffer,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,static_cast<VulkanTimestampQuery*>(query)->pool,index);}
 	namespace
 	{
+        constexpr VkPipelineStageFlags AcquireBarrierStage(RHI::ResourceState before,RHI::ResourceState after)
+        {
+            return before==RHI::ResourceState::Present && after==RHI::ResourceState::RenderTarget ?
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        }
+        static_assert(AcquireBarrierStage(RHI::ResourceState::Present,RHI::ResourceState::RenderTarget)==VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        static_assert(AcquireBarrierStage(RHI::ResourceState::Present,RHI::ResourceState::Present)==VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+        static_assert(AcquireBarrierStage(RHI::ResourceState::CopyDestination,RHI::ResourceState::RenderTarget)==VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
 		struct StateInfo
 		{
 			VkPipelineStageFlags2 stages = VK_PIPELINE_STAGE_2_NONE;
@@ -131,8 +139,7 @@ namespace dyf::Backends
 
 		StateInfo GetStateInfo(dyf::RHI::ResourceState state, bool supportsCompute)
 		{
-			// Include every supported shader stage without also waiting for vertex
-			// input, attachment output or depth/stencil tests on unrelated resources.
+			// Shader resources do not need to wait for unrelated attachment or vertex-input stages.
 			const VkPipelineStageFlags2 shaderStages = VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT |
 				VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
 				(supportsCompute ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_2_NONE);
@@ -448,15 +455,16 @@ namespace dyf::Backends
 				}
 				VkImageMemoryBarrier2 barrier{};
 				barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-                const bool acquireColor=texture->IsSwapchainImage() &&
-                    source.before==RHI::ResourceState::Present && source.after==RHI::ResourceState::RenderTarget;
-                // Chain the layout transition to a color-output acquire wait.
-				barrier.srcStageMask = acquireColor?VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT:before.stages;
-				barrier.srcAccessMask = acquireColor?VK_ACCESS_2_NONE:before.access;
+				barrier.srcStageMask = before.stages;
+				barrier.srcAccessMask = before.access;
 				barrier.dstStageMask = after.stages;
 				barrier.dstAccessMask = after.access;
 				barrier.oldLayout = texture->GetBarrierOldLayout(source.before);
 				barrier.newLayout = ToVulkanImageLayout(source.after);
+                // Chain the layout transition after a matching acquire wait, including its source stage.
+                if(texture->IsSwapchainImage() &&
+                    AcquireBarrierStage(source.before,source.after)==VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT)
+                    barrier.srcStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
 				barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 				barrier.image = texture->GetImage();
@@ -1201,31 +1209,6 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		}
 	}
 
-    VkPipelineStageFlags VulkanCommandList::GetSwapchainAcquireWaitStage(
-        VulkanTexture* image,bool firstReference) const
-    {
-        bool found=false;
-        const auto colorState=[](RHI::ResourceState state) {
-            return state==RHI::ResourceState::Present || state==RHI::ResourceState::RenderTarget;
-        };
-        for(const auto& operation:m_operations)
-        {
-            if(operation.texture!=image)continue;
-            if(!found && firstReference && (operation.kind!=OperationKind::TextureBarrier ||
-                operation.before!=RHI::ResourceState::Present || operation.after!=RHI::ResourceState::RenderTarget))
-                return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-            found=true;
-            if(operation.kind==OperationKind::TextureBarrier)
-            {
-                if(!colorState(operation.before) || !colorState(operation.after))
-                    return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-            }
-            else if(operation.kind!=OperationKind::TextureRequirement || operation.before!=RHI::ResourceState::RenderTarget)
-                return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-        }
-        return found?VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT:VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-    }
-
 	bool VulkanCommandList::ValidateDraw(
 		bool indexed,
 		uint32_t vertexCount,
@@ -1270,6 +1253,31 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		return std::find(m_inlineConstantCoverage.begin(), m_inlineConstantCoverage.end(), 0) ==
 			m_inlineConstantCoverage.end();
 	}
+
+    VkPipelineStageFlags VulkanCommandList::GetAcquireWaitStage(
+        const VulkanTexture* image,bool firstReference) const
+    {
+        bool found=false;
+        const auto colorState=[](RHI::ResourceState state) {
+            return state==RHI::ResourceState::Present || state==RHI::ResourceState::RenderTarget;
+        };
+        for(const auto& operation:m_operations)
+        {
+            if(operation.texture!=image)continue;
+            if(!found && firstReference && (operation.kind!=OperationKind::TextureBarrier ||
+                operation.before!=RHI::ResourceState::Present || operation.after!=RHI::ResourceState::RenderTarget))
+                return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            found=true;
+            if(operation.kind==OperationKind::TextureBarrier)
+            {
+                if(!colorState(operation.before) || !colorState(operation.after))
+                    return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            }
+            else if(operation.kind!=OperationKind::TextureRequirement || operation.before!=RHI::ResourceState::RenderTarget)
+                return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        }
+        return found?VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT:VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    }
 
 	bool VulkanCommandList::ValidateForSubmit(VulkanSubmissionState& state) const
 	{

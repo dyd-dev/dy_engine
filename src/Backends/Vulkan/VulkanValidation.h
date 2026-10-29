@@ -4,9 +4,22 @@
 #include "dyf/RHI/Pipeline.h"
 #include "dyf/RHI/Binding.h"
 #include "dyf/RHI/Texture.h"
+#include <algorithm>
 
 namespace dyf::Backends::VulkanValidation
 {
+    [[nodiscard]] inline uint32_t SelectSwapchainImageCount(
+        uint32_t requestedMinimum, uint32_t surfaceMinimum, uint32_t surfaceMaximum)
+    {
+        if(!requestedMinimum) return 0;
+        uint32_t imageCount = std::max(requestedMinimum, surfaceMinimum);
+        // The caller's minimum is required; only extra buffering may follow the surface limit.
+        if(surfaceMaximum && imageCount > surfaceMaximum) return 0;
+        imageCount = std::max(imageCount, 3u);
+        if(surfaceMaximum && imageCount > surfaceMaximum) imageCount = surfaceMaximum;
+        return imageCount;
+    }
+
     [[nodiscard]] inline bool MayWriteStencil(const RHI::DepthStencilState& state)
     {
         const auto changesValue = [](const RHI::StencilFaceState& face)

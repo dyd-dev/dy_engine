@@ -1,4 +1,5 @@
 #include "VulkanSwapchain.h"
+#include "VulkanValidation.h"
 #if !defined(__ANDROID__)
 #include <GLFW/glfw3.h>
 #else
@@ -88,13 +89,9 @@ bool VulkanSwapchain::Initialize(
         return false;
     }
 
-    uint32_t imageCount = std::max(requestedMinimumImageCount, swapchainSupport.capabilities.minImageCount);
-#if defined(__ANDROID__)
-    imageCount = std::max(imageCount, 3u);
-#endif
-    if (swapchainSupport.capabilities.maxImageCount > 0 && imageCount > swapchainSupport.capabilities.maxImageCount) {
-        imageCount = swapchainSupport.capabilities.maxImageCount;
-    }
+    uint32_t imageCount = VulkanValidation::SelectSwapchainImageCount(requestedMinimumImageCount,
+        swapchainSupport.capabilities.minImageCount, swapchainSupport.capabilities.maxImageCount);
+    if(!imageCount) return false;
     if((initialWidth && initialWidth != extent.width) || (initialHeight && initialHeight != extent.height))
         return false;
     const uint32_t minimumImageCount = imageCount;
