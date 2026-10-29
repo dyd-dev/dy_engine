@@ -15,7 +15,7 @@ public:
     {
         RenderRequirements requirements;
         if(!AdvancedModuleEnabled(renderer)) return requirements;
-        const auto& config=renderer.GetConfig();
+        const auto& config=renderer.GetAppliedConfig();
         const bool diagnostic=config.debugLodColor || config.debugWireframe;
         requirements.needsMotion=config.advanced.temporalAA &&
             config.advanced.surfaceDebugView==SurfaceDebugView::None && !diagnostic;
@@ -28,7 +28,7 @@ public:
     {
         m_recorded=false;
         if(!AdvancedModuleEnabled(frame.renderer)) return true;
-        const auto& config=frame.renderer.GetConfig();
+        const auto& config=frame.renderer.GetAppliedConfig();
         const auto& quality=config.advanced;
         TemporalPostProcess::Settings settings;
         settings.output=config.postProcess;
@@ -62,7 +62,7 @@ public:
             if(!reactive.resource.IsValid()) return AdvancedPassFailure("TAA reactive resource import failed.");
         }
         if(!m_post->AddPasses(graph,frame.color.texture,frame.color.resource,frame.motion.texture,frame.motion.resource,
-            frame.output.texture,frame.output.resource,frame.renderer.GetConfig().exposure,reactive.texture,reactive.resource))
+            frame.output.texture,frame.output.resource,frame.renderer.GetAppliedConfig().exposure,reactive.texture,reactive.resource))
             return AdvancedPassFailure("Temporal post-processing pass creation failed.");
         frame.outputWritten=true;m_recorded=true;
         return true;

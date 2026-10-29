@@ -108,7 +108,8 @@ namespace dyf
 			uint32_t width = image.GetWidth(), height = image.GetHeight();
 			const bool srgb = image.GetColorSpace() == ColorSpace::Srgb;
             result.format=srgb ? RHI::Format::R8G8B8A8_UNORM_SRGB : RHI::Format::R8G8B8A8_UNORM;
-            if(allowCompressed)
+            const auto* existing=m_textures[textureIndex].texture;
+            if(allowCompressed && (!existing || RHI::IsBlockCompressed(existing->GetDesc().format)))
                 if(const auto* dds=Detail::ImageDdsAccess::Get(image))
                 {
                     auto format=dds->format;

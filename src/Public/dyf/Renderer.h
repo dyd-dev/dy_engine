@@ -355,6 +355,7 @@ public:
     // 확장은 창 프레임 사이에 등록하며 렌더러가 소유하고 등록 순서대로 패스를 추가한다. unique_ptr를 넘기면 등록이 실패해도 호출자에게 소유권을 돌려주지 않는다.
     bool AddExtension(std::unique_ptr<RenderExtension>);
     // GetConfig는 아직 적용되지 않은 최신 요청을 우선 반환한다. GetAppliedConfig는 현재 Impl::config를 반환하므로 요청 실패·지연 상태를 구별할 수 있다.
+    // 확장 콜백에서 예약한 설정은 다음 Render 경계에 적용된다. 현재 프레임의 모듈 판단에는 GetAppliedConfig를 사용한다.
     [[nodiscard]] const RendererConfig& GetConfig() const;
     [[nodiscard]] const RendererConfig& GetAppliedConfig() const;
     bool SetConfig(const RendererConfig&);

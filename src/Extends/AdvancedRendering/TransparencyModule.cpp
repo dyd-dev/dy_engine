@@ -16,7 +16,7 @@ public:
     RenderRequirements GetRequirements(const Renderer& renderer) const override
     {
         RenderRequirements requirements;
-        const auto& config=renderer.GetConfig();
+        const auto& config=renderer.GetAppliedConfig();
         if(AdvancedModuleEnabled(renderer) && config.advanced.transparency && !config.debugWireframe)
         {
             requirements.needsGeometry=true;
@@ -34,7 +34,7 @@ public:
             return true;
         }
         if(!m_transparency) m_transparency=std::make_unique<TransparentRendering>();
-        const auto& config=frame.renderer.GetConfig();
+        const auto& config=frame.renderer.GetAppliedConfig();
         const auto& resources=frame.lighting.environment;
         const bool trusted=m_proof && m_proof->nativeFiltering && m_proof->frame==&frame &&
             m_proof->device==&frame.renderer.GetDevice() &&

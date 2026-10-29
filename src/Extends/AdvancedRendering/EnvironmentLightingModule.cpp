@@ -19,7 +19,7 @@ public:
         RenderRequirements requirements;
         if(!AdvancedModuleEnabled(renderer)) return requirements;
         requirements.providesEnvironment=true;
-        const auto& config=renderer.GetConfig();
+        const auto& config=renderer.GetAppliedConfig();
         const auto& environment=config.lighting.environment;
         requirements.needsNormal=config.lighting.enabled && !config.debugLodColor && !config.debugWireframe &&
             (environment.radiance.IsValid() || !environment.probes.empty()) &&
@@ -37,7 +37,7 @@ public:
         // 캡처는 고급 효과가 꺼진 상태에서도 원본 배경과 환경 입력을 준비한다.
         if(!advanced && !frame.environmentCapture) return true;
         if(!m_environment) m_environment=std::make_unique<EnvironmentLighting>();
-        const auto& config=frame.renderer.GetConfig();
+        const auto& config=frame.renderer.GetAppliedConfig();
         const auto& target=frame.color.texture->GetDesc();
         if(!m_environment->Prepare(frame.renderer.GetDevice(),uploads,config.lighting.environment,
             frame.camera,target.width,target.height,advanced && config.advanced.ambientOcclusion && !frame.lodDebug,
@@ -81,7 +81,7 @@ public:
         }
         else if(stage==RenderStage::Background)
         {
-            const auto& config=frame.renderer.GetConfig();
+            const auto& config=frame.renderer.GetAppliedConfig();
             const bool surfaceDebug=AdvancedModuleEnabled(frame.renderer) &&
                 config.advanced.surfaceDebugView!=SurfaceDebugView::None && !frame.wireframe;
             if(!surfaceDebug && m_environment->IsBackgroundEnabled() &&

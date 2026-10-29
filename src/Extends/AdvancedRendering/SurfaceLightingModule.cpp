@@ -18,7 +18,7 @@ public:
     {
         RenderRequirements requirements;
         if(!AdvancedModuleEnabled(renderer)) return requirements;
-        const auto& config=renderer.GetConfig();
+        const auto& config=renderer.GetAppliedConfig();
         const auto& quality=config.advanced;
         const bool diagnostic=config.debugLodColor || config.debugWireframe;
         const bool surfaceDebug=quality.surfaceDebugView!=SurfaceDebugView::None;
@@ -50,7 +50,7 @@ public:
             if(m_lighting) m_lighting->Invalidate();
             return true;
         }
-        const auto& config=frame.renderer.GetConfig();
+        const auto& config=frame.renderer.GetAppliedConfig();
         const auto& quality=config.advanced;
         ScreenSpaceLighting::Settings settings;
         settings.surfaceMask=frame.requirements.SurfaceOutputMask();
@@ -95,7 +95,7 @@ public:
             m_recorded=true;
             return true;
         }
-        const auto& quality=frame.renderer.GetConfig().advanced;
+        const auto& quality=frame.renderer.GetAppliedConfig().advanced;
         if(quality.surfaceDebugView!=SurfaceDebugView::None && !frame.wireframe)
         {
             const auto& projection=frame.camera.projection;

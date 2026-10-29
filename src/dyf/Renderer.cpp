@@ -654,6 +654,7 @@ bool Renderer::Impl::InitializeMesh(RHI::TextureHandle output,bool compositeAlph
 		(shadows && shadowVertexShader == nullptr) ||
 		(shadows && stockCoverage && !shadowFragmentShader)) return false; // 필수 셰이더 중 하나라도 생성되지 않았으면 파이프라인 준비를 중단한다.
     // 이 경로는 이전 형식의 파이프라인을 해제한 뒤 새로 만든다. 아래 생성이 실패하면 false를 반환하며 이미 성공한 자원은 Impl의 정리/다음 준비 경로가 맡는다.
+    meshColorFormat=RHI::Format::Unknown; // 부분 생성된 묶음은 이전 출력 형식의 캐시로 재사용할 수 없다.
     nativeDevice->DestroyPipeline(pipeline);pipeline=nullptr;
     for(auto& value:materialPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
     for(auto& value:depthPrepassPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}

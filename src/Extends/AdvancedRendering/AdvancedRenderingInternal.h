@@ -7,7 +7,7 @@ namespace dyf::Detail
 {
 inline bool AdvancedModuleEnabled(const Renderer& renderer)
 {
-    const auto& config=renderer.GetConfig();
+    const auto& config=renderer.GetAppliedConfig();
     return config.advanced.enabled && config.enableHdrRendering;
 }
 
