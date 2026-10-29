@@ -31,6 +31,8 @@ namespace dyf::Platform
 	struct WindowPlatformAccess;
 
 	// One window/event thread owns this facade. UIKit view work is dispatched to its main thread.
+	// Desktop GLFW stays initialized after the last Window; dyf destroys only its own windows.
+	// A GLFW host may terminate the shared runtime after all dyf windows are destroyed.
 	class Window
 	{
 	public:

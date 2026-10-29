@@ -98,8 +98,8 @@ namespace dyf::Platform
                 publishedOverflow.load(std::memory_order_acquire)>consumedOverflow.load(std::memory_order_relaxed);
         }
         // UIKit is the only producer. Full queues never overwrite unread slots.
-        // Keep the latest overflow event separately until the consumer resets its
-        // input state, preserving the old clear + Focus(false) + newest input path.
+        // Keep the latest overflow event until the consumer clears held input,
+        // restores the current layout focus and replays the newest pointer event.
         void QueueInput(const InputEvent& event) noexcept
         {
             const auto write=writeInput.load(std::memory_order_relaxed);
@@ -324,7 +324,9 @@ namespace dyf::Platform
                 InputEvent reset;
                 reset.type=InputEventType::Focus;
                 BroadcastInput(reset);
-                BroadcastInput(overflow.event);
+                reset.focused=state->layout.Read().focused;
+                BroadcastInput(reset);
+                if(overflow.event.type!=InputEventType::Focus)BroadcastInput(overflow.event);
                 state->consumerOverflow=overflow.epoch;
                 state->consumedOverflow.store(overflow.epoch,std::memory_order_release);
             }

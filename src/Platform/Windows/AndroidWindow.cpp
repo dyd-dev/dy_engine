@@ -14,11 +14,24 @@ namespace dyf::Platform
 	{
 		android_app* application = nullptr;
 		int32_t primaryPointerId = -1;
+        bool applicationFocused = false;
 		uint64_t surfaceGeneration = 0;
 		void (*previousAppCommand)(android_app*, int32_t) = nullptr;
 
 		void OnAppCommand(android_app* app, int32_t command)
 		{
+            if(app==application && (command==APP_CMD_GAINED_FOCUS || command==APP_CMD_LOST_FOCUS ||
+                command==APP_CMD_RESUME || command==APP_CMD_PAUSE ||
+                command==APP_CMD_INIT_WINDOW || command==APP_CMD_TERM_WINDOW))
+            {
+                if(command==APP_CMD_GAINED_FOCUS)applicationFocused=true;
+                if(command==APP_CMD_LOST_FOCUS)applicationFocused=false;
+                const bool focused=applicationFocused && app->activityState==APP_CMD_RESUME &&
+                    app->window && command!=APP_CMD_TERM_WINDOW;
+                if(!focused)primaryPointerId=-1;
+                InputEvent event;event.type=InputEventType::Focus;event.focused=focused;
+                for(auto* window:RegisteredWindows())WindowPlatformAccess::HandleInputEvent(*window,event);
+            }
 			if(app == application && (command == APP_CMD_INIT_WINDOW || command == APP_CMD_TERM_WINDOW))
 				++surfaceGeneration;
 			if(previousAppCommand) previousAppCommand(app, command);
@@ -125,7 +138,7 @@ namespace dyf::Platform
 
 				InputEvent event;
 				event.type = InputEventType::Focus;
-				event.focused = native != nullptr;
+				event.focused = HasFocus();
 				WindowPlatformAccess::HandleInputEvent(owner,event);
 			}
 
@@ -154,7 +167,7 @@ namespace dyf::Platform
 				const float scale = float(density) / float(ACONFIGURATION_DENSITY_MEDIUM);
 				return {scale, scale};
 			}
-			bool HasFocus() const override { return app ? app->activityState == APP_CMD_RESUME : GetNativeHandle().value != nullptr; }
+            bool HasFocus() const override { return app ? applicationFocused && app->activityState==APP_CMD_RESUME && GetNativeHandle().value : GetNativeHandle().value != nullptr; }
 			bool IsMinimized() const override { return !GetNativeHandle().value; }
 			void SetCursorMode(CursorMode) override {}
 			CursorMode GetCursorMode() const override { return CursorMode::Normal; }
@@ -183,6 +196,7 @@ namespace dyf::Platform
 		if(application && application->onInputEvent == OnInput) application->onInputEvent = nullptr;
 		if(application && application->onAppCmd == OnAppCommand) application->onAppCmd = previousAppCommand;
 		application = &app;
+        applicationFocused = false;
 		primaryPointerId = -1;
 		++surfaceGeneration;
 		previousAppCommand = application->onAppCmd;
