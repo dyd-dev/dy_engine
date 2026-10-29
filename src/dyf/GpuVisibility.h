@@ -109,7 +109,7 @@ private:
     RHI::ShaderHandle m_hizShader=nullptr,m_occlusionShader=nullptr;
     RHI::PipelineHandle m_hizPipeline=nullptr,m_occlusionPipeline=nullptr;
     RHI::ResourceSetHandle m_occlusionResources=nullptr;
-    std::vector<RHI::ResourceSetHandle> m_hizResources;
+    std::vector<RHI::ResourceSetHandle> m_hizResources; // One set for each output pair (mips 0/1, 2/3, ...).
     RHI::TextureHandle m_hiz=nullptr,m_hizDepth=nullptr; // m_hiz는 소유 깊이 피라미드이며 m_hizDepth는 연결된 외부 깊이 핸들이다. 외부 깊이는 파괴하지 않는다.
     RHI::BufferHandle m_occlusionFrame=nullptr;
     RHI::BufferHandle m_inputs=nullptr,m_batchData=nullptr,m_frame=nullptr;

@@ -7,6 +7,7 @@
 #include "dyf/RHI/Indirect.h"
 #include "dyf/RHI/Texture.h"
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -23,7 +24,7 @@ namespace
 {
 struct OcclusionLayouts
 {
-    std::array<RHI::ResourceBindingLayout,4> hiz;
+    std::array<RHI::ResourceBindingLayout,5> hiz;
     std::array<RHI::ResourceBindingLayout,9> occlusion;
     OcclusionLayouts()
     {
@@ -36,6 +37,7 @@ struct OcclusionLayouts
         hiz={{{0,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Compute,{}},
             {1,ResourceBindingType::StorageTexture,1,ShaderStageFlags::Compute,{}},
             {2,ResourceBindingType::StorageTexture,1,ShaderStageFlags::Compute,{}},
+            {3,ResourceBindingType::StorageTexture,1,ShaderStageFlags::Compute,{}},
             {8,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Compute,sampler}}};
         occlusion={{{0,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Compute,{}},
             {1,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Compute,{}},
@@ -317,6 +319,7 @@ void GpuVisibility::ReleaseOcclusion()
 bool GpuVisibility::SupportsOcclusion(const RHI::IDevice& device)
 {
     const OcclusionLayouts layouts;
+    // HiZ needs one previous mip and two output storage views in the same dispatch.
     return device.Supports(RHI::Feature::Compute) && device.Supports(RHI::Feature::IndirectDraw) &&
         device.Supports(layouts.HiZ()) && device.Supports(layouts.Occlusion());
 }
@@ -370,13 +373,16 @@ bool GpuVisibility::PrepareOcclusion(RHI::TextureHandle depth)
     m_hiz=m_device.CreateTexture(desc);
     if(!m_hiz || !CreateBuffer(m_occlusionFrame,sizeof(OcclusionFrame),0,BufferUsage::Constant,ResourceState::CopyDestination)) // HiZ 또는 가림 카메라 상수 버퍼 생성 실패 시 가림 전용 부분 자원을 모두 정리한다.
         {ReleaseOcclusion();return false;}
-    for(uint32_t level=0;level<desc.mipLevels;++level)
+    assert(desc.width && desc.height && (desc.width&(desc.width-1))==0 && (desc.height&(desc.height-1))==0);
+    for(uint32_t level=0;level<desc.mipLevels;level+=2)
     {
-        // 각 mip의 이전 레벨과 출력 레벨을 별도 subresource로 연결한다. 첫 단계의 실제 입력은 원본 depth이고 이후 단계는 앞 mip다.
+        // A dispatch writes a pair of mips. The odd tail binds its valid output
+        // twice, but operation.z=1 prevents every access through the second view.
         const TextureSubresourceRange previous={level?level-1:0,1,0,1},current={level,1,0,1};
+        const TextureSubresourceRange next={std::min(level+1,desc.mipLevels-1),1,0,1};
         const ResourceBinding bindings[]={{0,0,nullptr,depth,0,0,{0,1,0,1}},
-            {1,0,nullptr,m_hiz,0,0,previous},{2,0,nullptr,m_hiz,0,0,current}};
-        auto resources=m_device.CreateResourceSet({m_hizPipeline,bindings,3});
+            {1,0,nullptr,m_hiz,0,0,previous},{2,0,nullptr,m_hiz,0,0,current},{3,0,nullptr,m_hiz,0,0,next}};
+        auto resources=m_device.CreateResourceSet({m_hizPipeline,bindings,4});
         if(!resources) {ReleaseOcclusion();return false;} // 한 mip 바인딩이라도 실패하면 완성되지 않은 피라미드 묶음을 폐기한다.
         try {m_hizResources.push_back(resources);}
         // 벡터 확장 예외가 나면 아직 소유 목록에 들어가지 못한 방금 생성한 바인딩을 직접 파괴한 뒤 예외를 전달한다.
@@ -425,20 +431,25 @@ bool GpuVisibility::AddOcclusionPasses(RHI::RenderGraph& graph,RHI::TextureHandl
             if(!device->UpdateBuffer(*commands,constantBuffer,0,&constants,sizeof(constants))) // 가림 상수를 기록하지 못한 상태로 compute가 진행하지 않도록 실행 실패를 발생시킨다.
                 throw std::runtime_error("GPU occlusion camera upload failed");
         });
-    for(uint32_t level=0;level<hizDesc.mipLevels;++level)
+    assert(m_hizResources.size()==(hizDesc.mipLevels+1)/2);
+    for(uint32_t level=0;level<hizDesc.mipLevels;level+=2)
     {
-        // 첫 패스는 원본 4x4 깊이의 최댓값, 이후 패스는 이전 mip의 2x2 최댓값을 저장한다. 가장 먼 깊이도 앞에 있을 때만 확실한 가림을 판단한다.
+        // Keep a whole-HiZ UAV dependency between dispatches; only the second
+        // output inside each workgroup is reduced directly from shared memory.
         auto& pass=graph.AddPass(level?"GPU HiZ max reduction":"GPU HiZ depth reduction", RHI::RGRecordingMode::Independent);
         pass.Read(depthHandle,ResourceState::ShaderResource).Write(hiz,ResourceState::UnorderedAccess).SetPipeline(m_hizPipeline);
         if(level) pass.Read(hiz,ResourceState::UnorderedAccess); // 두 번째 mip부터는 앞 mip의 결과를 읽으므로 같은 HiZ의 읽기 의존성도 선언한다.
         const uint32_t width=std::max(1u,hizDesc.width>>level),height=std::max(1u,hizDesc.height>>level);
-        // 첫 단계는 축소 폭 4와 원본 깊이 입력 표시를, 이후는 축소 폭 2와 이전 mip 입력 표시를 전달한다.
-        const std::array<uint32_t,4> operation={level?2u:4u,level?1u:0u,0,0};
-        const auto pipeline=m_hizPipeline;const auto resources=m_hizResources[level];
-        pass.SetExecute([pipeline,resources,operation,width,height](ICommandList* commands) {
+        const uint32_t outputCount=std::min(2u,hizDesc.mipLevels-level);
+        const uint32_t groupsX=width/8+(width%8!=0),groupsY=height/8+(height%8!=0);
+        assert(outputCount==1 || (groupsX*4>=std::max(1u,width/2) && groupsY*4>=std::max(1u,height/2)));
+        // x/y retain the original footprint/input mode; z selects one or two outputs.
+        const std::array<uint32_t,4> operation={level?2u:4u,level?1u:0u,outputCount,0};
+        const auto pipeline=m_hizPipeline;const auto resources=m_hizResources[level/2];
+        pass.SetExecute([pipeline,resources,operation,groupsX,groupsY](ICommandList* commands) {
             commands->BindComputePipeline(pipeline);commands->BindResourceSet(resources);
             // 8x8 그룹 크기로 출력 셀을 모두 덮도록 올림 dispatch한다. 가장자리의 초과 스레드는 셰이더가 범위를 검사한다.
-            commands->SetInlineConstants(0,sizeof(operation),operation.data());commands->Dispatch(width/8+(width%8!=0),height/8+(height%8!=0),1);
+            commands->SetInlineConstants(0,sizeof(operation),operation.data());commands->Dispatch(groupsX,groupsY,1);
         });
     }
     const uint32_t baseInstance=m_device.Supports(Feature::IndirectFirstInstance)?1u:0u;
