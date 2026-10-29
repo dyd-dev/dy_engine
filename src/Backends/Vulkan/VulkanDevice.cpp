@@ -189,6 +189,7 @@ namespace dyf::Backends
         {
             if(m_context.device==VK_NULL_HANDLE) return false;
             const bool presented=PollPresent(true);
+            if(!presented)return false;
             const auto acquired=WaitForAcquisitions();
             if(acquired!=VK_SUCCESS)return false;
             const VkResult result=vkDeviceWaitIdle(m_context.device);
@@ -1017,7 +1018,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
     bool VulkanDevice::Impl::PollPresent(bool wait)
     {
         if(!m_presentWorker)return !m_submissionFaulted;
-        if(wait)m_presentWorker->Wait();
+        if(wait && !m_presentWorker->Wait())return false;
         PresentJob job{};PresentResult result{};
         if(m_presentWorker->Poll(job,result))return ApplyPresentResult(job,result);
         return !m_submissionFaulted;
@@ -1146,6 +1147,13 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			return unavailable("frame-state");
 		}
 
+        // Retry prerequisites before querying the driver; acquired/prefetched images can proceed during Present.
+        if(!m_swapchainNeedsRecreate && m_swapchain.GetHandle()!=VK_NULL_HANDLE && !m_imageAcquired && !m_prefetchedImage)
+        {
+            if(m_currentFrameSlot<m_frameSlots.size() && m_frameSlots[m_currentFrameSlot]!=VK_NULL_HANDLE)
+                return unavailable("frame-slot-fence");
+            if(m_presentWorker && m_presentWorker->Pending())return unavailable("presentation-host-call");
+        }
 		// Wayland may keep presenting successfully while scaling buffers from the
 		// previous window size. Check the required extent before acquiring another
 		// image instead of relying exclusively on WSI advisory/error return codes.
@@ -2442,9 +2450,11 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         m_prefetchedImage=false;
 		if (m_swapchain.GetHandle() != VK_NULL_HANDLE)
 		{
-            if(!m_owner.TryBeginSwapchainRetirement())return false;
+            // A replacement can also become out of date before its first present/reacquire proof.
+            const bool firstRetirement=m_retiredSwapchains.empty();
+            if(firstRetirement && !m_owner.TryBeginSwapchainRetirement())return false;
             try { m_recreationOldSwapchain = RetireSwapchainGeneration(); }
-            catch(...) { m_owner.CompleteSwapchainRetirement(); throw; }
+            catch(...) { if(firstRetirement)m_owner.CompleteSwapchainRetirement(); throw; }
 		}
 		return CreateSwapchain(m_swapchainDesc, m_recreationOldSwapchain);
 	}

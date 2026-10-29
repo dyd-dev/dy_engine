@@ -229,8 +229,8 @@ RHI::ShaderDesc Renderer::Impl::ShaderDescription(ShaderSlot slot,const RHI::Sha
 Renderer::Impl::FrameEnd::~FrameEnd()
 {
     if(!pending) return; // 열린 창 프레임이 없으면 복구 Present가 필요 없다.
-    try { (void)device.Present(); pending=false; }
-    catch(...) { /* ApplySettings retries recovery before changing output. */ }
+    try { (void)device.Present(); pending=device.HasActiveFrame(); }
+    catch(...) {pending=device.HasActiveFrame();} // ApplySettings retries any still-active frame.
 }
 // 먼저 이전 창 프레임을 복구한다. 파이프라인에 영향이 없는 설정은 config만 갱신하고, 영향이 있으면 임시 Impl을 준비한 뒤 성공 시 자원을 교환한다.
 bool Renderer::Impl::ApplySettings()
@@ -238,8 +238,8 @@ bool Renderer::Impl::ApplySettings()
     if(framePending) // 이전 호출이 프레임을 닫지 못했으면 설정 변경 전에 Present 복구를 시도한다.
     {
         const bool recovered=device->Present();
-        framePending=false;
-        if(!recovered) return RendererFailure("Canvas frame recovery failed."); // Present가 false이면 framePending은 지운 상태로 실패를 반환하며 새 설정 적용을 중단한다. pendingConfig와 셰이더 요청은 지우지 않는다.
+        framePending=device->HasActiveFrame();
+        if(!recovered) return RendererFailure("Canvas frame recovery failed."); // 재시도 가능한 프레임은 소유권과 예약 설정을 유지한다.
     }
     if(!pendingConfig && !shadersPending) return true; // 적용할 설정/셰이더 요청이 없으면 그대로 성공한다.
     const auto& nextConfig = pendingConfig ? *pendingConfig : config;

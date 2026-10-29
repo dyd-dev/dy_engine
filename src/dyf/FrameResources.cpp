@@ -27,12 +27,16 @@ bool Renderer::Impl::NeedsSurfacePass() const
 void Renderer::Impl::InvalidateFrameHistory(bool release)
 {
     frameHistoryValid=false;frameAmbientOcclusion=nullptr;
-    for(auto& extension:extensions) extension->InvalidateHistory(release);
     if(release) // 강한 해제 요청이면 가시성/조명 자원과 장면/행렬 이력을 함께 비운다.
     {
         gpuVisibility.reset();visibilityActive=false;visibilityKeys.clear();visibilityScene.reset();
         basicLighting.reset();basicEnvironment.reset();frameLighting={};
         historyScene.reset();previousModels.clear();pendingModels.clear();frameIndex=0;
+    }
+    for(auto& extension:extensions)
+    {
+        try {extension->InvalidateHistory(release);}
+        catch(...) {std::fputs("dyf: Render extension history invalidation failed.\n",stderr);}
     }
 }
 

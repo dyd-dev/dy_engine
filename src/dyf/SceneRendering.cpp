@@ -522,6 +522,10 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             static_cast<uint32_t>(frame.lists.size()), nullptr, 0}, completion);
         timing.cpuSubmitMilliseconds+=submitTimer.ElapsedMilliseconds();
         if(drawn) { // draw 제출에 성공했을 때만 이력·통계·쿼리 소유권을 확정한다.
+            // 제출된 상태는 이후 확장 콜백이 실패해도 되돌릴 수 없다.
+            if(config.enableHdrRendering) hdrState=RHI::ResourceState::ShaderResource;
+            depthStencilState=sampledDepth ? RHI::ResourceState::ShaderResource : RHI::ResourceState::DepthWrite;
+            shadowDepthState=shadowDepthTarget ? RHI::ResourceState::ShaderResource : RHI::ResourceState::Undefined;
             lightingReady=true;shadowReady=shadowMatrixBuffer!=nullptr;instanceReady=instanceBuffer!=nullptr;
             cpuInstanceReady=cpuInstanceBuffer!=nullptr;
             if(visibilityActive)gpuVisibility->CommitUploads();
@@ -558,12 +562,6 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             frameResources.committed=true;
         }
         if(!drawn)return RendererFailure("Scene draw submission failed."); // 기록/네이티브 준비/제출 중 어느 단계든 실패했으면 호출 실패다.
-        if(config.enableHdrRendering) hdrState=RHI::ResourceState::ShaderResource; // HDR을 쓴 경우 그래프의 최종 ShaderResource 상태를 저장한다.
-        // 그래프가 약속한 최종 자원 상태를 추적 값으로 남겨 다음 프레임 import의 시작 상태로 사용한다.
-        depthStencilState = sampledDepth ? RHI::ResourceState::ShaderResource : RHI::ResourceState::DepthWrite;
-        shadowDepthState = shadowDepthTarget != nullptr
-            ? RHI::ResourceState::ShaderResource
-            : RHI::ResourceState::Undefined;
         Platform::CpuTimer readbackTimer;
         if(readback && !CaptureFrame(*readback))return false; // 캡처 요청이 실패하면 이미 제출한 펜스는 남기고 Render는 false를 반환한다.
         if(readback) timing.cpuReadbackMilliseconds=readbackTimer.ElapsedMilliseconds(); // 실제로 CPU 캡처를 요청한 경우만 readback 시간을 기록한다.
@@ -572,7 +570,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             Platform::CpuTimer presentTimer;
             const bool presented=nativeDevice->Present();
             timing.cpuPresentMilliseconds=presentTimer.ElapsedMilliseconds();
-            framePending=false;
+            framePending=nativeDevice->HasActiveFrame();
             if(!presented) return RendererFailure("Scene presentation failed."); // 표시 실패는 draw 제출 성공과 별개로 호출 실패를 반환한다.
         }
         if(!m_environmentCapture)

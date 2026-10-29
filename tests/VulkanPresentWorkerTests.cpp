@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <cstdio>
+#include <chrono>
 
 #define CHECK(condition) do { if(!(condition)) { \
     std::fprintf(stderr,"CHECK failed at line %d: %s\n",__LINE__,#condition); \
@@ -22,13 +23,28 @@ namespace
         return -job.value;
     }
 #if defined(_WIN32)
-    unsigned sentMessages=0;
+    unsigned sentMessages=0,postedMessages=0;
+    dyf::Backends::VulkanPresentWorker<HWND,LRESULT>* reentrantWorker=nullptr;
+    bool reentrantWaitReturned=false;
     LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam)
     {
         if(message == WM_APP) {++sentMessages;return 73;}
+        if(message == WM_APP+1) {++postedMessages;return 0;}
+        if(message == WM_APP+2)
+        {
+            reentrantWorker->Wait();
+            reentrantWaitReturned=true;
+            return 73;
+        }
         return DefWindowProcW(window, message, wparam, lparam);
     }
     LRESULT SendToOwner(const HWND& window) noexcept { return SendMessageW(window, WM_APP, 0, 0); }
+    LRESULT SendReentrant(const HWND& window) noexcept
+    {
+        DWORD_PTR reply=0;
+        // Bound the negative control: the worker eventually unblocks even if its owner waits recursively.
+        return SendMessageTimeoutW(window,WM_APP+2,0,0,SMTO_BLOCK,200,&reply)?static_cast<LRESULT>(reply):0;
+    }
 #endif
 }
 
@@ -75,11 +91,45 @@ int main()
         CHECK(sentMessage.TrySubmit(window)); // Destruction also pumps sent messages while draining.
     }
     CHECK(sentMessages==2);
+    {
+        dyf::Backends::VulkanPresentWorker<HWND,LRESULT> polling(SendToOwner);
+        CHECK(PostMessageW(window,WM_APP+1,0,0));
+        CHECK(polling.TrySubmit(window));
+        HWND completedWindow{};LRESULT reply{};
+        bool observed=false;
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(500);
+        while(!(observed=polling.Poll(completedWindow,reply)) && std::chrono::steady_clock::now()<deadline)
+            std::this_thread::yield();
+        // Drain before reporting failure so the negative test cannot strand a blocked sender.
+        if(!observed) {polling.Wait();polling.Poll(completedWindow,reply);}
+        CHECK(completedWindow==window && reply==73 && sentMessages==3 && postedMessages==0);
+        if(!observed)
+        {
+            DestroyWindow(window);UnregisterClassW(type.lpszClassName,type.hInstance);
+            std::fputs("FAIL VulkanPresentWorker: Poll must service sent messages without Wait or an event loop\n",stderr);
+            return 1;
+        }
+    }
+    {
+        dyf::Backends::VulkanPresentWorker<HWND,LRESULT> reentrant(SendReentrant);
+        reentrantWorker=&reentrant;
+        CHECK(reentrant.TrySubmit(window));reentrant.Wait();
+        HWND completedWindow{};LRESULT reply{};
+        if(!reentrant.Poll(completedWindow,reply) || completedWindow!=window || reply!=73 || !reentrantWaitReturned)
+        {
+            reentrantWorker=nullptr;
+            DestroyWindow(window);UnregisterClassW(type.lpszClassName,type.hInstance);
+            std::fputs("FAIL VulkanPresentWorker: recursive owner Wait blocked the sent-message reply\n",stderr);
+            return 1;
+        }
+        reentrantWorker=nullptr;
+    }
     DestroyWindow(window);
     UnregisterClassW(type.lpszClassName, type.hInstance);
 #endif
     std::puts("PASS VulkanPresentWorker: immutable jobs, bounded ownership, failure result, wake/reuse, drain");
 #if defined(_WIN32)
-    std::puts("PASS VulkanPresentWorker: Win32 SendMessage");
+    std::puts("PASS VulkanPresentWorker: Win32 SendMessage through Wait and Poll; queued input remains deferred");
+    std::puts("PASS VulkanPresentWorker: recursive owner Wait does not block the sent-message reply");
 #endif
 }

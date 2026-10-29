@@ -280,7 +280,7 @@ bool Renderer::Impl::RenderCanvas(const Canvas& canvas, Image* readback)
     canvasFrame.Commit();
     if(readback && !CaptureFrame(*readback))return false; // 캡처를 요청했고 실패했으면 Present 전 실패로 반환한다.
     const bool presented=device->Present();
-    framePending=false;
+    framePending=device->HasActiveFrame();
     if(!presented) {std::fprintf(stderr,"dyf: Canvas presentation failed.\n");return false;} // Present 실패를 호출자에게 전달한다.
     DY_PROFILE_FRAME_MARK();
     return true;

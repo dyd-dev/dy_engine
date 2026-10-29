@@ -15,7 +15,8 @@ public:
     explicit VulkanPresentWorker(Execute execute) : m_execute(execute), m_thread([this] { Run(); }) {}
     ~VulkanPresentWorker()
     {
-        Wait();
+        // Destruction inside this worker's dispatched callback violates its lifetime.
+        if(!Wait())std::terminate();
         m_stop.store(true, std::memory_order_release);
         m_work.Signal();
         m_thread.join();
@@ -37,27 +38,42 @@ public:
     }
     bool Poll(Job& job, Result& result)
     {
+        if(m_pumpingSentMessages)return false;
+#if defined(_WIN32)
+        if(m_state.load(std::memory_order_acquire)==State::Running)PumpSentMessages();
+#endif
         if(!PeekResult(result)) return false;
         job = m_job;
         m_done.WaitFor(0);
         m_state.store(State::Idle, std::memory_order_release);
         return true;
     }
-    void Wait()
+    bool Wait()
     {
+        // The sender cannot finish until its callback returns to the outer pump.
+        if(m_pumpingSentMessages)return false;
         while(m_state.load(std::memory_order_acquire) == State::Running)
         {
 #if defined(_WIN32)
             // WSI can SendMessage to the window owner; do not dispatch queued app input reentrantly.
-            MSG message{};
-            PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+            PumpSentMessages();
             m_done.WaitFor(1000000);
 #else
             m_done.Wait();
 #endif
         }
+        return true;
     }
 private:
+#if defined(_WIN32)
+    void PumpSentMessages()
+    {
+        m_pumpingSentMessages=true;
+        MSG message{};
+        PeekMessageW(&message,nullptr,0,0,PM_NOREMOVE|PM_QS_SENDMESSAGE);
+        m_pumpingSentMessages=false;
+    }
+#endif
     enum class State { Idle, Running, Ready };
     void Run() noexcept
     {
@@ -75,6 +91,7 @@ private:
     Result m_result{};
     std::atomic<State> m_state{State::Idle};
     std::atomic<bool> m_stop{false};
+    bool m_pumpingSentMessages=false;
     Platform::WakeEvent m_work, m_done;
     std::thread m_thread;
 };

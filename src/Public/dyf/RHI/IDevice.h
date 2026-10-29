@@ -109,6 +109,8 @@ namespace dyf::RHI
         [[nodiscard]] bool IsLost() const;
         [[nodiscard]] const DeviceDesc& GetDesc() const { return m_desc; }
 		[[nodiscard]] bool CreateSwapchain(const SwapchainDesc& desc);
+        // Vulkan waits may dispatch Win32 sent messages. Their callbacks must not
+        // destroy/mutate this device; recursively waiting for the same Present returns false.
 		[[nodiscard]] bool WaitIdle();
         [[nodiscard]] TimestampQueryHandle CreateTimestampQuery(const TimestampQueryDesc&);
         void DestroyTimestampQuery(TimestampQueryHandle);
@@ -122,6 +124,8 @@ namespace dyf::RHI
 
         // 성공하면 Present까지 같은 backbuffer를 사용한다. 중간에 여러 번 Submit할 수 있다.
 		[[nodiscard]] bool BeginFrame();
+        // Owner-thread observation; false means no frame remains to present.
+        [[nodiscard]] bool HasActiveFrame() const noexcept {return m_frameActive;}
 		// Each acquired list is independent and may be recorded by one worker thread.
 		// Join recording before Submit/Reset/Destroy. Keep shared resources alive and
 		// immutable; serialize frame/swapchain lifetime changes with recording.
