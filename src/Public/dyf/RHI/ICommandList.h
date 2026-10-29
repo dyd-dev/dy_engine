@@ -14,6 +14,7 @@
 #include "Indirect.h"
 #include "Rendering.h"
 #include "Binding.h"
+#include "Backend/StateTable.h"
 
 namespace dyf { class ModelRenderer; }
 
@@ -30,6 +31,20 @@ namespace dyf::Platform
 
 namespace dyf::RHI
 {
+    struct CommandStateSummary
+    {
+            // A transition cycle can restore final without changing the initial requirement.
+            ResourceState initial, final;
+            bool writes = false;
+            constexpr explicit CommandStateSummary(ResourceState state) : initial(state), final(state) {}
+            constexpr bool Append(ResourceState before, ResourceState after, bool barrier)
+            {
+                if(final != before) return false;
+                if(barrier) { final = after; writes = true; }
+                return true;
+            }
+    };
+
 	struct DebugLabelColor { float r = 0.3f, g = 0.6f, b = 1.0f, a = 1.0f; };
 	class IDevice;
 	class ICommandList
@@ -176,7 +191,9 @@ namespace dyf::RHI
             bool barrier;
         };
         std::vector<StateOperation> m_stateOperations;
-        StateMap m_recordedStates;
+        Backend::StateTable<StateMap::key_type,ResourceState,Backend::SubresourceHash> m_recordedStates;
+        Backend::StateTable<StateMap::key_type,CommandStateSummary,Backend::SubresourceHash> m_closedStates;
+        bool m_stateSummaryValid = false;
         std::unordered_set<ResourceSetHandle> m_requiredResourceSets;
         void RequireState(const void*,uint32_t mip,uint32_t layer,ResourceState);
         std::vector<std::function<bool(ICommandList&)>> m_commands;

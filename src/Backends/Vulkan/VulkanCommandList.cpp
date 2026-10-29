@@ -445,8 +445,8 @@ namespace dyf::Backends
 					for (uint32_t mip = source.subresources.firstMipLevel;
 						mip < source.subresources.firstMipLevel + mipLevelCount; ++mip)
 					{
-						const auto prior = m_textureStates.find(TextureKey(texture, mip, layer));
-						if (prior != m_textureStates.end() && prior->second != source.before)
+						const auto* prior = m_textureStates.FindValue(TextureKey(texture, mip, layer));
+						if (prior && *prior != source.before)
 						{
 							Fail();
 							return;
@@ -1019,7 +1019,31 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
             Fail();
         }
 		m_closed = true;
-
+        m_closedBufferStates.clear();m_closedTextureStates.clear();
+        m_stateSummaryValid=false;
+        bool valid=true;
+        for(const auto& operation:m_operations)
+        {
+            const bool buffer=operation.kind==OperationKind::BufferBarrier ||
+                operation.kind==OperationKind::BufferRequirement || operation.kind==OperationKind::BufferWrite;
+            const bool write=operation.kind==OperationKind::BufferWrite || operation.kind==OperationKind::TextureWrite;
+            const bool barrier=operation.kind==OperationKind::BufferBarrier || operation.kind==OperationKind::TextureBarrier;
+            const auto required=write?RHI::ResourceState::CopyDestination:operation.before;
+            if(buffer)
+            {
+                auto summary=m_closedBufferStates.try_emplace(operation.buffer,required).first;
+                if(!summary->second.Append(required,operation.after,barrier))
+                {valid=false;break;}
+            }
+            else
+            {
+                const auto key=TextureKey(operation.texture,operation.mipLevel,operation.arrayLayer);
+                auto& summary=m_closedTextureStates.GetOrEmplace(key,required);
+                if(!summary.Append(required,operation.after,barrier))
+                {valid=false;break;}
+            }
+        }
+        m_stateSummaryValid=valid;
         return !m_failed;
     }
 
@@ -1162,8 +1186,8 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 			return false;
 		}
 		const auto key = TextureKey(texture, mipLevel, arrayLayer);
-		const auto found = m_textureStates.find(key);
-		if (found != m_textureStates.end()) return found->second == state;
+		const auto* found = m_textureStates.FindValue(key);
+		if (found) return *found == state;
 		Operation operation{};
 		operation.kind = OperationKind::TextureRequirement;
 		operation.texture = texture;
@@ -1171,7 +1195,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		operation.arrayLayer = arrayLayer;
 		operation.before = state;
 		m_operations.push_back(operation);
-		m_textureStates.emplace(key, state);
+		m_textureStates.GetOrEmplace(key, state);
 		return true;
 	}
 
@@ -1281,56 +1305,37 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 
 	bool VulkanCommandList::ValidateForSubmit(VulkanSubmissionState& state) const
 	{
-		if (m_failed) return false;
-		for (const Operation& operation : m_operations)
-		{
-			switch (operation.kind)
-			{
-			case OperationKind::BufferBarrier:
-			case OperationKind::BufferRequirement:
-			case OperationKind::BufferWrite:
-			{
-				const auto found = state.buffers.find(operation.buffer);
-				const dyf::RHI::ResourceState current = found == state.buffers.end()
-					? operation.buffer->GetState() : found->second;
-				const dyf::RHI::ResourceState required = operation.kind == OperationKind::BufferWrite
-					? dyf::RHI::ResourceState::CopyDestination : operation.before;
-				if (current != required) return false;
-				if (operation.kind == OperationKind::BufferBarrier) state.buffers[operation.buffer] = operation.after;
-				break;
-			}
-			case OperationKind::TextureBarrier:
-			case OperationKind::TextureRequirement:
-			case OperationKind::TextureWrite:
-			{
-				const auto key = TextureKey(operation.texture, operation.mipLevel, operation.arrayLayer);
-				const auto found = state.textureSubresources.find(key);
-				const dyf::RHI::ResourceState current = found == state.textureSubresources.end()
-					? operation.texture->GetState(operation.mipLevel, operation.arrayLayer)
-					: found->second;
-				const dyf::RHI::ResourceState required = operation.kind == OperationKind::TextureWrite
-					? dyf::RHI::ResourceState::CopyDestination : operation.before;
-				if (current != required) return false;
-				if (operation.kind == OperationKind::TextureBarrier) state.textureSubresources[key] = operation.after;
-				break;
-			}
-			}
-		}
+        if(!m_closed || m_failed || !m_stateSummaryValid)return false;
+        for(const auto& entry:m_closedBufferStates)
+        {
+            const auto found=state.buffers.find(entry.first);
+            const auto current=found==state.buffers.end()?entry.first->GetState():found->second;
+            if(current!=entry.second.initial)return false;
+            if(entry.second.writes)state.buffers[entry.first]=entry.second.final;
+        }
+        for(const auto& entry:m_closedTextureStates)
+        {
+            const auto& key=entry.first;
+            const auto found=state.textureSubresources.find(key);
+            const auto levels=key.first->GetDesc().mipLevels;
+            const auto current=found==state.textureSubresources.end()
+                ?key.first->GetState(key.second%levels,key.second/levels):found->second;
+            if(current!=entry.second.initial)return false;
+            if(entry.second.writes)state.textureSubresources[key]=entry.second.final;
+        }
 		return true;
 	}
 
 	void VulkanCommandList::CommitResourceStates()
 	{
-		for (const Operation& operation : m_operations)
-		{
-			if (operation.kind == OperationKind::BufferBarrier)
-			{
-				operation.buffer->SetState(operation.after);
-			}
-			else if (operation.kind == OperationKind::TextureBarrier)
-			{
-				operation.texture->SetState(operation.mipLevel, operation.arrayLayer, operation.after);
-			}
-		}
+        if(!m_closed || m_failed || !m_stateSummaryValid)return;
+        for(const auto& entry:m_closedBufferStates)
+            if(entry.second.writes)entry.first->SetState(entry.second.final);
+        for(const auto& entry:m_closedTextureStates)
+            if(entry.second.writes)
+            {
+                const auto levels=entry.first.first->GetDesc().mipLevels;
+                entry.first.first->SetState(entry.first.second%levels,entry.first.second/levels,entry.second.final);
+            }
 	}
 }

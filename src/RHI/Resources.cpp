@@ -777,6 +777,7 @@ bool IDevice::ResetCommandList(ICommandList* commands)
     commands->m_commandBytes.clear();
     commands->m_stateOperations.clear();
     commands->m_recordedStates.clear();
+    commands->m_closedStates.clear();commands->m_stateSummaryValid=false;
     commands->m_requiredResourceSets.clear();
     commands->m_liveDeferred->ClearRecentStates();
     commands->m_liveDeferred->inlineConstants.Reset(0);
@@ -827,6 +828,8 @@ void IDevice::DestroyCommandList(ICommandList* commands)
         if(account(commands->m_commandBytes.capacity(),sizeof(uint8_t)) &&
             account(commands->m_commands.capacity(),sizeof(decltype(commands->m_commands)::value_type)) &&
             account(commands->m_stateOperations.capacity(),sizeof(ICommandList::StateOperation)) &&
+            account(commands->m_recordedStates.StorageBytes(),1) &&
+            account(commands->m_closedStates.StorageBytes(),1) &&
             account(commands->m_references.capacity(),sizeof(std::shared_ptr<void>)) &&
             account(commands->m_colorFormats.capacity(),sizeof(Format)) &&
             bytes<=RecordingState::PayloadLimit-m_recording->commandBytes)
@@ -840,6 +843,7 @@ void IDevice::DestroyCommandList(ICommandList* commands)
             commands->m_liveDeferred->m_livePosition={};
             commands->m_commands.clear();commands->m_commandBytes.clear();
             commands->m_stateOperations.clear();commands->m_recordedStates.clear();commands->m_requiredResourceSets.clear();
+            commands->m_closedStates.clear();commands->m_stateSummaryValid=false;
             commands->m_liveDeferred->ClearRecentStates();
             commands->m_references.clear();commands->m_referenceHandles.clear();commands->m_sharedReferences.reset();
             commands->m_liveDeferred->ClearTrackedHandles();
@@ -972,34 +976,40 @@ bool IDevice::Submit(ICommandList** commands, uint32_t count)
     // Texture requirements commonly visit consecutive mip levels. Reuse the
     // previous map node or its successor before searching the full state map.
     // This cursor lives only in this validation loop; barriers remain in states.
-    auto lastOriginal=m_resourceStates.cend();
-    for(uint32_t i=0;i<count;++i)for(const auto& operation:commands[i]->m_stateOperations)
+    const auto originalEnd=m_resourceStates.cend();
+    auto lastOriginal=originalEnd;
+    const auto stateMismatch=[this]() {
+        ReportDiagnostic(DiagnosticSeverity::Error, "Submit: resource state mismatch. Barrier.before must match the current state (Undefined is not a wildcard); bound resources must still have the required state at draw/dispatch.");
+        return false;
+    };
+    for(uint32_t i=0;i<count;++i)
     {
-        const auto key=std::make_tuple(operation.resource,operation.mip,operation.layer);
-        const auto changed=states.find(key);
-        const ResourceState* current=nullptr;
-        if(changed!=states.end()) current=&changed->second;
-        else
+        if(!commands[i]->m_stateSummaryValid)return stateMismatch();
+        for(const auto& entry:commands[i]->m_closedStates)
         {
-            auto original=lastOriginal;
-            if(original==m_resourceStates.cend() || original->first!=key)
+            const auto& key=entry.first;
+            const auto& summary=entry.second;
+            const auto changed=states.find(key);
+            const ResourceState* current=nullptr;
+            if(changed!=states.end()) current=&changed->second;
+            else
             {
-                if(original!=m_resourceStates.cend())++original;
-                if(original==m_resourceStates.cend() || original->first!=key)
-                    original=m_resourceStates.find(key);
-                lastOriginal=original;
+                auto original=lastOriginal;
+                if(original==originalEnd || original->first!=key)
+                {
+                    if(original!=originalEnd)++original;
+                    if(original==originalEnd || original->first!=key)
+                        original=m_resourceStates.find(key);
+                    lastOriginal=original;
+                }
+                if(original!=originalEnd) current=&original->second;
             }
-            if(original!=m_resourceStates.cend()) current=&original->second;
-        }
-        if(!current || *current!=operation.before)
-        {
-            ReportDiagnostic(DiagnosticSeverity::Error, "Submit: resource state mismatch. Barrier.before must match the current state (Undefined is not a wildcard); bound resources must still have the required state at draw/dispatch.");
-            return false;
-        }
-        if(operation.barrier)
-        {
-            if(changed!=states.end()) changed->second=operation.after;
-            else states.emplace(key,operation.after);
+            if(!current || *current!=summary.initial)return stateMismatch();
+            if(summary.writes)
+            {
+                if(changed!=states.end()) changed->second=summary.final;
+                else states.emplace(key,summary.final);
+            }
         }
     }
     std::vector<ICommandList*> native(count);

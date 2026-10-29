@@ -23,6 +23,21 @@ Platform::LiveCommandRef ICommandList::GetLiveCommandPosition() const noexcept
 
 namespace
 {
+constexpr bool StateSummaryContracts()
+{
+    CommandStateSummary first(ResourceState::ShaderResource), second(ResourceState::VertexBuffer);
+    return first.Append(ResourceState::ShaderResource,ResourceState::ShaderResource,false) &&
+        first.Append(ResourceState::ShaderResource,ResourceState::CopyDestination,true) &&
+        second.Append(ResourceState::VertexBuffer,ResourceState::VertexBuffer,false) &&
+        first.Append(ResourceState::CopyDestination,ResourceState::CopyDestination,false) &&
+        first.Append(ResourceState::CopyDestination,ResourceState::ShaderResource,true) &&
+        first.initial==ResourceState::ShaderResource && first.final==first.initial && first.writes &&
+        second.initial==ResourceState::VertexBuffer && second.final==second.initial && !second.writes &&
+        !first.Append(ResourceState::CopyDestination,ResourceState::VertexBuffer,true) &&
+        !second.Append(ResourceState::CopyDestination,ResourceState::CopyDestination,false);
+}
+static_assert(StateSummaryContracts());
+
 #ifdef DY_LIVE_PROFILING_ENABLED
 constexpr size_t LiveEventBatchSize=128;
 constexpr size_t LiveLinkBatchSize=512;
@@ -436,8 +451,8 @@ try
     }
     const auto key=std::make_tuple(object,mip,layer);
     // 이 목록의 앞선 검사나 배리어가 같은 상태를 이미 보장하면 중복 검사만 합친다.
-    const auto recorded=m_recordedStates.find(key);
-    if(recorded==m_recordedStates.end() || recorded->second!=state)
+    const auto* recorded=m_recordedStates.FindValue(key);
+    if(!recorded || *recorded!=state)
     {
         m_stateOperations.push_back({object,mip,layer,state,state,false});
         m_recordedStates[key]=state;
@@ -817,6 +832,18 @@ try
     const bool nativeClosed = CloseNative();
     m_recordingClosed = true;
     m_recordingFailed = m_recordingFailed || !nativeClosed;
+    m_closedStates.clear();
+    m_stateSummaryValid = false;
+    bool valid = true;
+    for(const auto& operation:m_stateOperations)
+    {
+        const auto key=std::make_tuple(operation.resource,operation.mip,operation.layer);
+        auto& summary=m_closedStates.GetOrEmplace(key,operation.before);
+        if(!summary.Append(operation.before,operation.after,operation.barrier))
+        {valid=false;break;}
+    }
+    m_stateSummaryValid = valid;
+    // Internal state mismatches remain submission errors, as before summarization.
     if(m_recordingFailed && m_owner)m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,"Close: command recording failed. Invalid commands will not be submitted.");
     FinishLiveRecording(m_recordingFailed?D::LiveOutcome::Failed:D::LiveOutcome::Observed,m_recordingFailed);
     return !m_recordingFailed;
