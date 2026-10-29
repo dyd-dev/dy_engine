@@ -101,8 +101,10 @@ struct Renderer::Impl
     {
         RendererShadowConstants constants={};
         std::array<ShadowCasterVolume,128> casterVolumes={};
+        std::array<bool,128> dirtyViews={};
         uint32_t viewCount=0,columns=1,rows=1,resolution=1;
         float directionalDistance=0;
+        ShadowData() {dirtyViews.fill(true);}
     };
     // 재질 이미지의 해석 결과를 텍스처 핸들과 비트 플래그로 캐시한다. 빈 입력은 기본 대체 텍스처로 해석한다.
     struct SceneMaterialState
@@ -180,11 +182,19 @@ struct Renderer::Impl
     // 제출에 성공한 그림자 아틀라스의 재사용 기준과 이번 프레임 후보를 나눈다. Scene·Mesh 생존, 상수 바이트와 타깃 일치를 검사하며 GPU 완료 확인을 이 캐시로 대신하지 않는다.
     struct ShadowAtlasCache
     {
+        struct View
+        {
+            std::vector<uint8_t> bytes,pendingBytes;
+            std::vector<std::weak_ptr<const MeshData>> meshes,pendingMeshes;
+        };
         bool valid=false,pending=false,reused=false;
         RHI::TextureHandle target=nullptr;
         std::weak_ptr<Scene> scene;
         std::vector<uint8_t> bytes,pendingBytes;
         std::vector<std::weak_ptr<const MeshData>> meshes,pendingMeshes;
+        std::array<View,128> views;
+        std::vector<uint8_t> casterBytes;
+        std::vector<std::pair<size_t,size_t>> casterRanges;
     };
     // Image의 공유 원본을 보관하며 텍스처와 현재 RHI 상태를 함께 추적한다. 같은 픽셀 원본도 색 공간이 다르면 다른 해석이다.
     struct TextureSlot
@@ -290,7 +300,7 @@ struct Renderer::Impl
     bool UpdateLightingBuffer(const Scene&,const Camera&,RHI::IDevice*,RHI::ICommandList&);
     bool UpdateShadowBuffer(RHI::IDevice*,RHI::ICommandList&,const ShadowData&);
     void BuildShadows(ShadowData&,const Scene&,const Camera&,const std::vector<RendererDrawDesc>*);
-    bool ReuseShadowAtlas(const Scene&,const ShadowData&,const std::vector<RendererDrawDesc>*);
+    bool ReuseShadowAtlas(const Scene&,ShadowData&,const std::vector<RendererDrawDesc>*);
     void CommitShadowAtlas(const Scene&);
     bool ApplySettings();
     void SwapResources(Impl&);

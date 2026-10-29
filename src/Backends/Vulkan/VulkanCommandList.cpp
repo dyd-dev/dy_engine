@@ -732,8 +732,18 @@ namespace dyf::Backends
 		}
 		VkRenderingInfo rendering{};
 		rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
-		rendering.renderArea.offset = { 0, 0 };
-		rendering.renderArea.extent = { width, height };
+		rendering.renderArea.offset = { desc.renderArea.x, desc.renderArea.y };
+		rendering.renderArea.extent = { desc.renderArea.width, desc.renderArea.height };
+		if (!desc.renderArea.width && !desc.renderArea.height && !desc.renderArea.x && !desc.renderArea.y)
+			rendering.renderArea.extent = { width, height };
+		if (rendering.renderArea.offset.x < 0 || rendering.renderArea.offset.y < 0 ||
+			!rendering.renderArea.extent.width || !rendering.renderArea.extent.height ||
+			uint64_t(rendering.renderArea.offset.x) + rendering.renderArea.extent.width > width ||
+			uint64_t(rendering.renderArea.offset.y) + rendering.renderArea.extent.height > height)
+		{
+			Fail();
+			return;
+		}
 		rendering.layerCount = 1;
 		rendering.colorAttachmentCount = static_cast<uint32_t>(colorAttachments.size());
 		rendering.pColorAttachments = colorAttachments.empty() ? nullptr : colorAttachments.data();

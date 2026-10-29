@@ -455,6 +455,7 @@ bool MetalDevice::SupportsNative(RHI::Feature feature) const
         }
         return false;
     case RHI::Feature::TaskShader:
+    case RHI::Feature::RenderArea:
         return false;
     // 이 구현은 shader bias 인자를 추가하지 않으므로 sampler LOD bias는 지원하지 않는다.
     default: return false;

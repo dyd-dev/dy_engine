@@ -226,6 +226,7 @@ namespace dyf::Backends
         std::vector<D3D12Texture*> referencedSwapchainImages;
         RetainedObjects retainedObjects;
         std::vector<DiscardRequest> storeDiscardResources;
+        D3D12_RECT renderArea = {};
         std::vector<D3D12Operation> operations;
         std::map<uint32_t, D3D12_VERTEX_BUFFER_VIEW> vertexBufferViews;
         bool rendering = false;
@@ -568,7 +569,9 @@ namespace dyf::Backends
     void D3D12CommandList::BeginRenderingNative(const RHI::RenderingDesc& desc)
     {
         if (!CanRecord(m_internal) || m_internal->rendering ||
-            desc.colorAttachmentCount > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT)
+            desc.colorAttachmentCount > D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT ||
+            (desc.colorAttachmentCount && !desc.colorAttachments) ||
+            (!desc.colorAttachmentCount && !desc.depthStencilAttachment))
         {
             RejectRecording(m_internal);
             return;
@@ -602,6 +605,22 @@ namespace dyf::Backends
             }
         }
 
+        const auto* firstTexture = desc.colorAttachmentCount ? desc.colorAttachments[0].texture : desc.depthStencilAttachment->texture;
+        const uint32_t firstMip = desc.colorAttachmentCount ? desc.colorAttachments[0].mipLevel : desc.depthStencilAttachment->mipLevel;
+        const uint32_t width = std::max(1u, firstTexture->GetDesc().width >> firstMip);
+        const uint32_t height = std::max(1u, firstTexture->GetDesc().height >> firstMip);
+        auto area = desc.renderArea;
+        if (!area.width && !area.height && !area.x && !area.y) area = {0, 0, width, height};
+        const uint64_t right = uint64_t(area.x) + area.width;
+        const uint64_t bottom = uint64_t(area.y) + area.height;
+        if (area.x < 0 || area.y < 0 || !area.width || !area.height || right > width || bottom > height ||
+            right > uint64_t(std::numeric_limits<LONG>::max()) || bottom > uint64_t(std::numeric_limits<LONG>::max()))
+        {
+            RejectRecording(m_internal);
+            return;
+        }
+        m_internal->renderArea = {area.x, area.y, static_cast<LONG>(right), static_cast<LONG>(bottom)};
+
         std::array<D3D12_CPU_DESCRIPTOR_HANDLE,D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT> colorHandles={};
         for (uint32_t index = 0; index < desc.colorAttachmentCount; ++index)
         {
@@ -629,13 +648,15 @@ namespace dyf::Backends
             if (attachment.loadOp == RHI::LoadOp::Clear)
             {
                 m_internal->commandList->ClearRenderTargetView(
-                    handle, attachment.clearColor, 0, nullptr);
+                    handle, attachment.clearColor, 1, &m_internal->renderArea);
             }
             else if (attachment.loadOp == RHI::LoadOp::Discard)
             {
                 D3D12_DISCARD_REGION region = {};
                 region.FirstSubresource = subresource;
                 region.NumSubresources = 1;
+                region.NumRects = 1;
+                region.pRects = &m_internal->renderArea;
                 m_internal->commandList->DiscardResource(resource, &region);
             }
             if (attachment.storeOp == RHI::StoreOp::Discard)
@@ -675,8 +696,8 @@ namespace dyf::Backends
                     clearFlags,
                     attachment.clearDepth,
                     static_cast<UINT8>(attachment.clearStencil),
-                    0,
-                    nullptr);
+                    1,
+                    &m_internal->renderArea);
             }
             if (attachment.state == RHI::ResourceState::DepthWrite &&
                 attachment.depthLoadOp == RHI::LoadOp::Discard)
@@ -689,6 +710,8 @@ namespace dyf::Backends
                     texture->GetDesc().mipLevels,
                     texture->GetDesc().depthOrArraySize);
                 region.NumSubresources = 1;
+                region.NumRects = 1;
+                region.pRects = &m_internal->renderArea;
                 m_internal->commandList->DiscardResource(resource, &region);
             }
             if (attachment.state == RHI::ResourceState::DepthWrite &&
@@ -703,6 +726,8 @@ namespace dyf::Backends
                     texture->GetDesc().mipLevels,
                     texture->GetDesc().depthOrArraySize);
                 region.NumSubresources = 1;
+                region.NumRects = 1;
+                region.pRects = &m_internal->renderArea;
                 m_internal->commandList->DiscardResource(resource, &region);
             }
             if (attachment.state == RHI::ResourceState::DepthWrite &&
@@ -756,6 +781,8 @@ namespace dyf::Backends
             D3D12_DISCARD_REGION region = {};
             region.FirstSubresource = discard.subresource;
             region.NumSubresources = 1;
+            region.NumRects = 1;
+            region.pRects = &m_internal->renderArea;
             m_internal->commandList->DiscardResource(
                 discard.resource.Get(), &region);
         }

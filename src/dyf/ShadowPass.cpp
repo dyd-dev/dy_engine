@@ -230,6 +230,7 @@ bool Renderer::Impl::ShadowInstanceData::Build(const Scene& scene,const ShadowDa
     });
     for(uint32_t view=0;view<shadows.viewCount;++view)
     {
+        if(!shadows.dirtyViews[view])continue;
         const auto& projection=shadows.constants.lightViewProjectionMatrix[view];
         bool perspective=false;
         if(!ShadowSortProjection(projection,shadows.constants.viewProjectionParams[view],perspective))return false;
@@ -484,6 +485,7 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
     const bool baseInstance=stock && instanced;
     const bool cull=stock && config.enableFrustumCulling;
     const bool packed=shadowInstancesActive;
+    const bool partial=device->Supports(RHI::Feature::RenderArea);
     const auto instanceSource=packed ? shadowInstanceBuffer : instanceBuffer;
     const auto& casters=shadowCasterScratch;
 #ifdef DY_RENDERDOC_ENABLED
@@ -496,14 +498,16 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
 		depth.state = RHI::ResourceState::DepthWrite;
 		depth.depthLoadOp = RHI::LoadOp::Clear;
 		depth.depthStoreOp = RHI::StoreOp::Store;
-		commands.BeginRendering({nullptr, 0, &depth});
+        if(!partial)commands.BeginRendering({nullptr, 0, &depth});
 		RHI::PipelineHandle boundPipeline=nullptr;
 		RHI::ResourceSetHandle boundSet=nullptr;
         RHI::BufferHandle boundVertices=nullptr,boundIndices=nullptr;
         RHI::Format boundIndexFormat=RHI::Format::Unknown;
+        bool renderedTile=false;
 		// 그림자 뷰마다 아틀라스 타일 viewport/scissor를 설정한다. 같은 객체가 여러 뷰에 그려지면 통계에도 각 뷰 작업이 따로 누적된다.
 		for(uint32_t view = 0; view < shadows.viewCount; ++view)
 		{
+            if(!shadows.dirtyViews[view])continue;
             Platform::LiveId passBatch=0;
 			bool inlineConstantsValid=false;
             bool instanceStreamBound=false;
@@ -553,6 +557,21 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
             }
 			const uint32_t x = (view % shadows.columns) * shadows.resolution;
 			const uint32_t y = (view / shadows.columns) * shadows.resolution;
+            if(partial)
+            {
+                if(renderedTile)
+                {
+                    const RHI::ResourceBarrierDesc barrier={nullptr,shadowDepthTarget,RHI::ResourceState::DepthWrite,
+                        RHI::ResourceState::DepthWrite,{}};
+                    commands.ResourceBarrier(&barrier,1);
+                }
+                RHI::RenderingDesc rendering={nullptr,0,&depth};
+                rendering.renderArea={static_cast<int32_t>(x),static_cast<int32_t>(y),shadows.resolution,shadows.resolution};
+                commands.BeginRendering(rendering);
+                boundPipeline=nullptr;boundSet=nullptr;boundVertices=nullptr;boundIndices=nullptr;
+                boundIndexFormat=RHI::Format::Unknown;
+                renderedTile=true;
+            }
 			commands.SetViewport({static_cast<float>(x), static_cast<float>(y),
 				static_cast<float>(shadows.resolution), static_cast<float>(shadows.resolution), 0, 1});
 			commands.SetScissor({static_cast<int32_t>(x), static_cast<int32_t>(y), shadows.resolution, shadows.resolution});
@@ -689,8 +708,9 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
 				// 배치에 포함한 객체는 다음 draw에서 중복 기록하지 않는다.
 				drawIndex+=packed ? run : count;
 			}
+            if(partial)commands.EndRendering();
 		}
-		commands.EndRendering();
+        if(!partial)commands.EndRendering();
 
 	}
 #ifdef DY_RENDERDOC_ENABLED // RenderDoc 빌드에서 열린 Shadow 디버그 이벤트를 닫는다.

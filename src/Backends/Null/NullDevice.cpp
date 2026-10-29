@@ -679,6 +679,7 @@ bool NullDevice::SupportsNative(RHI::Feature feature) const
     case RHI::Feature::IndirectDraw:
     case RHI::Feature::IndirectFirstInstance:
     case RHI::Feature::IndirectTessellation:
+    case RHI::Feature::RenderArea:
     case RHI::Feature::MeshShader: return true;
     case RHI::Feature::TaskShader: return false;
     default: return false;

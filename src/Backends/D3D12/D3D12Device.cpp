@@ -551,6 +551,7 @@ bool D3D12Device::SupportsNative(RHI::Feature feature) const
         return m_internal && m_internal->dispatchSignature;
     case RHI::Feature::Compute:
     case RHI::Feature::Rasterization:
+    case RHI::Feature::RenderArea:
     case RHI::Feature::Tessellation:
     case RHI::Feature::DescriptorIndexing:
     case RHI::Feature::SamplerLodBias:

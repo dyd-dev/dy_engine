@@ -67,6 +67,19 @@ static_assert(IndirectArgumentsFit(40,40,20,0,20));
 static_assert(!IndirectArgumentsFit(40,44,20,0,20));
 static_assert(!IndirectArgumentsFit(40,40,20,0,16));
 
+constexpr bool RectContains(const Rect& bounds,const Rect& rect)
+{
+    return bounds.x>=0 && bounds.y>=0 && rect.x>=bounds.x && rect.y>=bounds.y &&
+        rect.width && rect.height &&
+        uint64_t(rect.x)+rect.width<=uint64_t(bounds.x)+bounds.width &&
+        uint64_t(rect.y)+rect.height<=uint64_t(bounds.y)+bounds.height;
+}
+static_assert(RectContains({0,0,64,64},{16,8,48,56}));
+static_assert(!RectContains({0,0,64,64},{16,8,49,56}));
+static_assert(!RectContains({0,0,64,64},{-1,0,1,1}));
+static_assert(!RectContains({0,0,64,64},{0,0,0,1}));
+static_assert(!RectContains({0,0,UINT32_MAX,UINT32_MAX},{INT32_MAX,0,UINT32_MAX,1}));
+
 #ifdef DY_LIVE_PROFILING_ENABLED
 constexpr size_t LiveEventBatchSize=128;
 constexpr size_t LiveLinkBatchSize=512;
@@ -586,6 +599,23 @@ try
             m_recordingFailed=true;return;
         }
     }
+    Rect renderArea=desc.renderArea;
+    if(!renderArea.width && !renderArea.height && !renderArea.x && !renderArea.y)
+        renderArea={0,0,width,height};
+    if(!RectContains({0,0,width,height},renderArea))
+    {
+        m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,
+            "BeginRendering: renderArea must be {} or a nonempty rectangle inside every attachment.");
+        m_recordingFailed=true;return;
+    }
+    const bool partialArea=renderArea.x!=0 || renderArea.y!=0 || renderArea.width!=width || renderArea.height!=height;
+    if(partialArea && !m_owner->Supports(Feature::RenderArea))
+    {
+        m_owner->ReportDiagnostic(IDevice::DiagnosticSeverity::Error,
+            "BeginRendering: partial rendering requires Feature::RenderArea.");
+        m_recordingFailed=true;return;
+    }
+    m_renderArea=partialArea?renderArea:Rect{};
     m_colorFormats.clear();
     for(uint32_t i=0;i<desc.colorAttachmentCount;++i)
         m_colorFormats.push_back(desc.colorAttachments[i].texture->GetDesc().format);
@@ -606,7 +636,7 @@ try
         depthCopy.clearStencil=0;
         nativeDepth=&depthCopy;
     }
-    BeginRenderingNative({colors.data(),desc.colorAttachmentCount,nativeDepth});
+    BeginRenderingNative({colors.data(),desc.colorAttachmentCount,nativeDepth,renderArea});
 }
 catch(...) { m_recordingFailed=true; throw; }
 
@@ -713,7 +743,8 @@ catch(...) { m_recordingFailed=true; throw; }
 void ICommandList::SetScissor(const Rect& rect) try
 {
     if(!CanRecordCommands())return;
-    if(!m_rendering || rect.x<0 || rect.y<0 || !rect.width || !rect.height) {m_recordingFailed=true;return;}
+    if(!m_rendering || rect.x<0 || rect.y<0 || !rect.width || !rect.height ||
+        (m_renderArea.width && !RectContains(m_renderArea,rect))) {m_recordingFailed=true;return;}
     SetScissorNative(rect);
 }
 catch(...) { m_recordingFailed=true; throw; }
@@ -1017,12 +1048,13 @@ class RecordedCommandList final : public ICommandList
         if(desc.colorAttachmentCount) colors.assign(desc.colorAttachments,desc.colorAttachments+desc.colorAttachmentCount);
         const bool hasDepth=desc.depthStencilAttachment!=nullptr;
         const DepthStencilAttachment depth=hasDepth?*desc.depthStencilAttachment:DepthStencilAttachment{};
-        m_commands.push_back([colors=std::move(colors),depth,hasDepth,pipeline](ICommandList& native) {
-            native.BeginRenderingNative({colors.data(),static_cast<uint32_t>(colors.size()),hasDepth?&depth:nullptr});
+        const Rect renderArea=desc.renderArea;
+        m_commands.push_back([colors=std::move(colors),depth,hasDepth,pipeline,renderArea](ICommandList& native) {
+            native.BeginRenderingNative({colors.data(),static_cast<uint32_t>(colors.size()),hasDepth?&depth:nullptr,renderArea});
             if(pipeline)native.BindGraphicsPipelineNative(pipeline);
             return true;
         });
-        RecordLiveCommand(D::LiveCommandKind::None,{desc.colorAttachmentCount},
+        RecordLiveCommand(D::LiveCommandKind::None,{desc.colorAttachmentCount,renderArea.x,renderArea.y,renderArea.width,renderArea.height},
             desc.colorAttachmentCount?static_cast<const void*>(desc.colorAttachments[0].texture):desc.depthStencilAttachment->texture,
             0,0,1,D::LiveEventKind::Command,false,"Begin rendering");
     }
@@ -1036,6 +1068,7 @@ class RecordedCommandList final : public ICommandList
         m_vertexBuffers.clear();
         m_indexBuffer=nullptr;
         m_viewport=m_scissor=false;
+        m_renderArea={};
         m_commands.push_back([](ICommandList& n){n.EndRenderingNative();return true;});
         RecordLiveCommand(D::LiveCommandKind::None,{},nullptr,0,0,1,D::LiveEventKind::Command,false,"End rendering");
     }

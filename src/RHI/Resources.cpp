@@ -791,6 +791,7 @@ bool IDevice::ResetCommandList(ICommandList* commands)
     commands->m_recordingClosed=commands->m_recordingFailed=false;
     commands->m_debugEventDepth=0;
     commands->m_rendering=commands->m_viewport=commands->m_scissor=false;
+    commands->m_renderArea={};
     commands->m_stencilAttachment=commands->m_stencilReference=false;
     commands->m_pipeline=nullptr;
     commands->m_indexBuffer=nullptr;

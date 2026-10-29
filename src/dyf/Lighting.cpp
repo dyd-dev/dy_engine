@@ -255,143 +255,108 @@ namespace
 }
 
 // 깊이 결과에 영향을 주는 현재 자료를 직렬화해 마지막 성공 캐시와 비교한다. true이면 기존 아틀라스를 다시 그리지 않아도 되는 후보 상태다.
-bool Renderer::Impl::ReuseShadowAtlas(const Scene& scene,const ShadowData& shadows,const std::vector<RendererDrawDesc>* draws)
+bool Renderer::Impl::ReuseShadowAtlas(const Scene& scene,ShadowData& shadows,const std::vector<RendererDrawDesc>* draws)
 {
     auto& cache=shadowAtlasCache;
-    // 이번 검사 결과부터 새로 시작한다. 이전 pending/reused가 남아 잘못 확정되는 것을 막는다.
-    cache.pending=false;
-    cache.reused=false;
-    // 방향광도 실제 광원 행렬과 차폐물이 같으면 재사용한다. 시점 행렬은 샘플링에만 쓰인다.
-    if(!config.lighting.reuseStaticShadows || (draws && !stockDrawInputs) || !UsesStockGeometry() || // 재사용 설정·기본 입력 규약·그림자 뷰·필수 자원 중 하나라도 맞지 않으면 캐시를 무효화한다.
-        !shadows.viewCount || !shadowPipeline || !shadowDepthTarget || !shadowMatrixBuffer)
+    cache.pending=false;cache.reused=false;shadows.dirtyViews.fill(true);
+    if(!config.lighting.reuseStaticShadows || (draws && !stockDrawInputs) || !UsesStockGeometry() ||
+        !shadows.viewCount || shadows.viewCount>cache.views.size() || !shadowPipeline || !shadowDepthTarget || !shadowMatrixBuffer)
     {
-        cache.valid=false;
-        return false;
+        cache.valid=false;return false;
     }
-
-    auto& bytes=cache.pendingBytes;
-    bytes.clear();cache.pendingMeshes.clear();
-    // 구조체 전체의 패딩을 비교하지 않고 결과에 필요한 초기화된 스칼라와 배열만 이어 붙인다. 패딩 차이로 불필요한 캐시 실패가 생기지 않게 한다.
+    auto* destination=&cache.pendingBytes;
+    destination->clear();
     const auto append=[&](const auto& value) {
         const auto* first=reinterpret_cast<const uint8_t*>(&value);
-        bytes.insert(bytes.end(),first,first+sizeof(value));
+        destination->insert(destination->end(),first,first+sizeof(value));
     };
-    const auto appendPosition=[&](const Math::float3& value) {
-        append(value.x);append(value.y);append(value.z);
-    };
-    // 그림자 선택·컬링·배치에 영향을 줄 설정과 실제 아틀라스 구조를 키에 넣는다.
+    const auto appendPosition=[&](const Math::float3& value) {append(value.x);append(value.y);append(value.z);};
     append(config.lighting.shadowQuality);append(config.enableFrustumCulling);append(config.enableInstancing);
-    append(config.lighting.shadowDistance);append(config.lighting.cascadeSplitLambda);
-    append(config.lighting.maxDirectionalShadowLights);append(config.lighting.maxPointShadowLights);
-    append(config.lighting.maxSpotShadowLights);
     append(shadows.viewCount);append(shadows.columns);append(shadows.rows);append(shadows.resolution);
-    // 카메라 자체보다 실제 광원 행렬과 타일 위치가 깊이 렌더 결과를 결정한다. 그 결과가 같으면 방향광도 재사용할 수 있다.
-    for(uint32_t i=0;i<shadows.viewCount;++i)
+    append(shadowArenaGeneration);
+    const bool sameAtlas=cache.valid && cache.target==shadowDepthTarget && !cache.scene.expired() &&
+        !cache.scene.owner_before(scene.m_lifetime) && !scene.m_lifetime.owner_before(cache.scene) &&
+        cache.bytes==cache.pendingBytes;
+    auto& casterBytes=cache.casterBytes;casterBytes.clear();
+    cache.casterRanges.assign(scene.GetEntityCount(),{});
+    destination=&casterBytes;
+    uint32_t previous=UINT32_MAX;
+    for(const auto& caster:shadowCasterScratch)
     {
-        append(shadows.constants.lightViewProjectionMatrix[i].m);
-        append(shadows.casterVolumes[i].count);
-        for(uint32_t plane=0;plane<shadows.casterVolumes[i].count;++plane)
-            append(shadows.casterVolumes[i].planes[plane]);
-        const auto& rect=shadows.constants.atlasRect[i];
-        append(rect.x);append(rect.y);append(rect.z);append(rect.w);
-    }
-    if(cache.bytes.size()<bytes.size() || !std::equal(bytes.begin(),bytes.end(),cache.bytes.begin()))
-    {
-        // An invalid cache may hold only the last observed view/config header.
-        // Defer caster proof until that header repeats; this frame draws shadows.
-        cache.valid=false;cache.pending=false;cache.reused=false;
-        cache.bytes=bytes;cache.meshes.clear();
-        return false;
-    }
-    // 비활성 지역 광원까지 선택 상태·위치·범위를 기록하되, 색과 양수 강도의 크기는 깊이를 바꾸지 않으므로 강도는 양수 여부만 비교한다.
-    const auto appendLight=[&](const auto& light) {
-        append(light.enabled);append(light.priority);append(light.castShadow);
-        const bool shadowVisible=light.shadowStrength>0;append(shadowVisible);
-        const bool emitsLight=light.intensity>0;append(emitsLight);
-        appendPosition(light.position);append(light.range);
-    };
-    append(scene.PointLights().size());
-    for(const auto& light:scene.PointLights())appendLight(light);
-    append(scene.SpotLights().size());
-    for(const auto& light:scene.SpotLights())
-    {
-        appendLight(light);appendPosition(light.direction);
-        append(light.innerConeRadians);append(light.outerConeRadians);
-    }
-
-    // 엔티티 순서대로 그림자 생성 여부와 실제 형상·재질·변환을 기록한다. 같은 개수만으로 동일 장면이라고 판단하지 않는다.
-    append(scene.GetEntityCount());
-    for(uint32_t i=0;i<scene.GetEntityCount();++i)
-    {
-        const auto entity=static_cast<EntityID>(i);
-        const bool casts=scene.GetEntityLighting(entity).castShadow;
-        append(casts);
-        if(!casts)continue; // 그림자를 만들지 않는 엔티티는 깊이 형상 키를 더 기록할 필요가 없다.
-        const auto meshId=scene.GetEntityMesh(entity);
-        const auto materialId=scene.GetEntityMaterial(entity);
-        append(meshId);append(materialId);
-        if(!IsValid(meshId) || !IsValid(materialId) || ToIndex(meshId)>=m_meshes.size() || // 유효하지 않은 메시/재질 참조는 ID까지만 기록하고 실제 자원 접근을 건너뛴다.
-            ToIndex(materialId)>=materialStates.size())continue;
-        const auto& mesh=m_meshes[ToIndex(meshId)];
-        append(mesh.prepared);
-        if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount)continue; // 그릴 수 있는 정점·인덱스와 개수가 없는 메시는 깊이 생성 자료에서 제외한다.
-        const auto& material=scene.Materials()[ToIndex(materialId)];
-        append(material.alphaMode);
-        if(UsesBlendedRendering(material))continue; // 블렌드·투과 재질은 이 그림자 깊이 캐스터 경로에 들어가지 않는다.
-        // GPU 핸들 주소 외에 원본 메시 소유권도 약한 참조로 기억한다. 파괴된 객체의 주소가 재사용되어도 다른 형상을 같은 캐시로 보지 않는다.
-        cache.pendingMeshes.push_back(mesh.source);
+        if(caster.entity==previous)continue;
+        previous=caster.entity;
+        const auto entity=static_cast<EntityID>(caster.entity);
+        const auto& mesh=m_meshes[caster.mesh];
+        const auto& material=scene.Materials()[caster.material];
+        const auto& state=materialStates[caster.material];
+        const size_t first=casterBytes.size();
+        append(caster.entity);append(caster.mesh);append(caster.material);
         append(reinterpret_cast<uintptr_t>(mesh.vertexBuffer));
-        if(draws) // 프레임별 외부 드로 입력이 있으면 변형 정점·변경 번호·현재 경계까지 캐시 키에 포함한다.
-        {
-            const auto& draw=(*draws)[i];
-            if(draw.vertexBuffer && !draw.geometryRevision) // 외부 버퍼 내용의 변경 번호가 없으면 같은 포인터여도 내용이 달라질 수 있어 재사용을 거부한다.
-            {
-                cache.valid=false;
-                return false;
-            }
-            append(reinterpret_cast<uintptr_t>(draw.vertexBuffer));
-            append(draw.geometryRevision);
-            // 같은 형상이라도 경계 변화가 캐스터 컬링 결과를 바꿀 수 있다.
-            append(draw.hasLocalBounds);
-            if(draw.hasLocalBounds) // 외부 드로가 경계를 제공하면 유효 여부도 캐시 키에 넣는다.
-            {
-                append(draw.localBounds.valid);
-                if(draw.localBounds.valid) // 유효 경계의 min/max는 캐스터 컬링 결과를 바꿀 수 있으므로 비교한다.
-                {
-                    appendPosition(draw.localBounds.min);
-                    appendPosition(draw.localBounds.max);
-                }
-            }
-        }
         append(reinterpret_cast<uintptr_t>(mesh.indexBuffer));append(mesh.indexCount);
-        append(scene.GetTransform(entity).m);
-        // 알파 마스크·양면 여부와 기본색 텍스처는 깊이에서 살아남는 픽셀을 바꾸므로 일반 색상과 달리 캐시 키에 포함한다.
+        append(caster.arena);append(caster.compact);append(caster.coverageFlags);
+        append(scene.GetTransform(entity).m);append(material.alphaMode);
         append(material.baseColor.w);append(material.alphaCutoff);append(material.doubleSided);
-        append(reinterpret_cast<uintptr_t>(materialStates[ToIndex(materialId)].textures[0]));
-        // 캐시 회수와 무관한 이미지 저장소 정체성·크기·색 공간으로 네이티브 핸들 주소 재사용을 구분한다.
+        append(reinterpret_cast<uintptr_t>(state.textures[0]));
         append(reinterpret_cast<uintptr_t>(Detail::ImageDdsAccess::Identity(material.baseColorTexture)));
         append(material.baseColorTexture.GetWidth());append(material.baseColorTexture.GetHeight());
         append(material.baseColorTexture.GetColorSpace());
+        if(draws)
+        {
+            const auto& draw=(*draws)[caster.entity];
+            if(draw.vertexBuffer && !draw.geometryRevision) {cache.valid=false;return false;}
+            append(reinterpret_cast<uintptr_t>(draw.vertexBuffer));append(draw.geometryRevision);
+            append(draw.hasLocalBounds);
+            if(draw.hasLocalBounds)
+            {
+                append(draw.localBounds.valid);
+                if(draw.localBounds.valid) {appendPosition(draw.localBounds.min);appendPosition(draw.localBounds.max);}
+            }
+        }
+        cache.casterRanges[caster.entity]={first,casterBytes.size()-first};
     }
-    // 현재 비교 자료를 완성했다는 표시다. 캐시 불일치여도 새로 그린 프레임이 성공하면 이 자료를 확정할 수 있다.
-    cache.pending=true;
-    if(!cache.valid || cache.target!=shadowDepthTarget || cache.scene.expired() || // 이전 캐시 유효성, 대상 텍스처, 장면 소유권, 직렬화 바이트, 메시 수가 모두 같아야 재사용을 계속 검토한다.
-        cache.scene.owner_before(scene.m_lifetime) || scene.m_lifetime.owner_before(cache.scene) ||
-        cache.bytes!=bytes || cache.meshes.size()!=cache.pendingMeshes.size())return false;
-    for(size_t i=0;i<cache.meshes.size();++i)
-        if(cache.meshes[i].expired() || cache.meshes[i].owner_before(cache.pendingMeshes[i]) || // 모든 메시 원본의 수명이 살아 있고 소유권 정체성도 같아야 핸들 주소 재사용 문제를 피할 수 있다.
-            cache.pendingMeshes[i].owner_before(cache.meshes[i]))return false;
-    cache.reused=true;
-    return true;
+    bool dirty=false;
+    for(uint32_t view=0;view<shadows.viewCount;++view)
+    {
+        auto& entry=cache.views[view];entry.pendingBytes.clear();entry.pendingMeshes.clear();
+        destination=&entry.pendingBytes;
+        append(shadows.constants.lightViewProjectionMatrix[view].m);
+        append(shadows.casterVolumes[view].count);
+        for(uint32_t plane=0;plane<shadows.casterVolumes[view].count;++plane)append(shadows.casterVolumes[view].planes[plane]);
+        const auto& rect=shadows.constants.atlasRect[view];append(rect.x);append(rect.y);append(rect.z);append(rect.w);
+        CollectShadowViewCasters(shadowCasterScratch,shadows,view,config.enableFrustumCulling,shadowViewScratch);
+        append(shadowViewScratch.size());
+        previous=UINT32_MAX;
+        for(uint32_t index:shadowViewScratch)
+        {
+            const auto& caster=shadowCasterScratch[index];
+            append(caster.entity);append(caster.firstIndex);append(caster.indexCount);
+            if(previous==caster.entity)continue;
+            previous=caster.entity;
+            const auto range=cache.casterRanges[caster.entity];
+            destination->insert(destination->end(),casterBytes.begin()+range.first,casterBytes.begin()+range.first+range.second);
+            entry.pendingMeshes.push_back(m_meshes[caster.mesh].source);
+        }
+        bool reusable=sameAtlas && entry.bytes==entry.pendingBytes && entry.meshes.size()==entry.pendingMeshes.size();
+        for(size_t i=0;reusable && i<entry.meshes.size();++i)
+            reusable=!entry.meshes[i].expired() && !entry.meshes[i].owner_before(entry.pendingMeshes[i]) &&
+                !entry.pendingMeshes[i].owner_before(entry.meshes[i]);
+        shadows.dirtyViews[view]=!reusable;dirty|=!reusable;
+    }
+    // Bounded LoadOp::Clear is an explicit backend contract; otherwise preserve the full redraw path.
+    if(dirty && !device->Supports(RHI::Feature::RenderArea))shadows.dirtyViews.fill(true);
+    cache.pending=true;cache.reused=!dirty;
+    return cache.reused;
 }
 
-// 상위 렌더링이 성공한 뒤 pending 키와 원본 수명 참조를 확정 캐시로 바꾼다. 이 함수 자체는 그림자를 그리거나 GPU 완료를 기다리지 않는다.
 void Renderer::Impl::CommitShadowAtlas(const Scene& scene)
 {
     auto& cache=shadowAtlasCache;
-    if(!cache.pending)return; // 이번 프레임에서 완성한 비교 자료가 없으면 기존 캐시를 교체하지 않는다.
-    // 큰 키 배열과 메시 참조 목록을 복사하지 않고 교체한다. 다음 프레임은 이 성공 자료와 비교한다.
-    cache.bytes.swap(cache.pendingBytes);cache.meshes.swap(cache.pendingMeshes);
+    if(!cache.pending)return;
+    cache.bytes.swap(cache.pendingBytes);
+    for(auto& view:cache.views)
+    {
+        view.bytes.swap(view.pendingBytes);view.meshes.swap(view.pendingMeshes);
+    }
     cache.scene=scene.m_lifetime;cache.target=shadowDepthTarget;
     cache.valid=true;cache.pending=false;
 }
@@ -550,9 +515,10 @@ void Renderer::Impl::BuildShadows(ShadowData& state,const Scene& scene,const Cam
                 const float previousStart=c<2?nearPlane:splits[c-2];
                 const float sliceNear=c==0?nearPlane:splits[c-1]-.1f*(splits[c-1]-previousStart);
                 const float sliceFar=splits[c];
-                const auto center=camera.position+forward*((sliceNear+sliceFar)*.5f);
+                const float receiverNear=c==0?std::min(0.f,sliceNear):sliceNear;
+                const auto center=camera.position+forward*((receiverNear+sliceFar)*.5f);
                 // 구간 깊이의 절반과 가장 넓은 면의 반폭·반높이를 세 변으로 하는 벡터 길이를 구해 카메라 구간 전체를 감싸는 구의 반경으로 쓴다. 카메라 회전만으로 이 반경은 변하지 않는다.
-                const float halfDepth=(sliceFar-sliceNear)*.5f;
+                const float halfDepth=(sliceFar-receiverNear)*.5f;
                 const float halfWidth=(orthographic?1.f:sliceFar)/projection.m[0];
                 const float halfHeight=(orthographic?1.f:sliceFar)/projection.m[5];
                 const float radius=std::sqrt(halfDepth*halfDepth+halfWidth*halfWidth+halfHeight*halfHeight);
@@ -566,7 +532,8 @@ void Renderer::Impl::BuildShadows(ShadowData& state,const Scene& scene,const Cam
                     const double filterRadius=std::max(double(config.lighting.shadowMaxFilterRadius),
                         double(constants.filterParams.z)+1)+2;
                     const double padding=2*double(shadowCascadeRadii[c])*filterRadius/state.resolution;
-                    state.casterVolumes[view].Build(camera,sliceNear,sliceFar,light.direction,padding);
+                    // Perspective fog also receives shadows between the camera and the first surface near plane.
+                    state.casterVolumes[view].Build(camera,receiverNear,sliceFar,light.direction,padding);
                 }
             }
             state.directionalDistance=farPlane;

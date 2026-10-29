@@ -132,6 +132,7 @@ namespace dyf::Backends
                 return (m_context.physicalInfo->graphicsQueue.queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
             case RHI::Feature::Rasterization:
             case RHI::Feature::IndirectDraw:
+            case RHI::Feature::RenderArea:
             case RHI::Feature::SamplerLodBias:
             case RHI::Feature::FractionalDepthBias: return true;
             case RHI::Feature::Tessellation:

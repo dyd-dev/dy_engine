@@ -215,6 +215,7 @@ namespace dyf::RHI
         uint64_t m_completion=0;
         uint64_t m_imageGeneration=0;
         bool m_rendering=false, m_viewport=false, m_scissor=false;
+        Rect m_renderArea = {};
         bool m_stencilAttachment=false,m_stencilReference=false;
         uint32_t m_debugEventDepth = 0;
         PipelineHandle m_pipeline=nullptr;

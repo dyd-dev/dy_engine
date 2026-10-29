@@ -564,6 +564,12 @@ namespace dyf::Backends
 			}
 		}
 
+		const auto& area = desc.renderArea;
+		const bool defaultArea = !area.x && !area.y && !area.width && !area.height;
+		if(!defaultArea && (area.x != 0 || area.y != 0 ||
+			area.width != m_impl->renderWidth || area.height != m_impl->renderHeight))
+			valid = false;
+
 		if(valid)
 		{
 #if !__has_feature(objc_arc)
