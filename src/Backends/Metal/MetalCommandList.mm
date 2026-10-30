@@ -83,7 +83,7 @@ namespace dyf::Backends
 			uint32_t arrayLayer = 0;
 		};
 
-		struct VertexBinding
+		struct MetalVertexBinding
 		{
 			MetalBuffer* buffer = nullptr;
 			uint32_t offset = 0;
@@ -106,7 +106,7 @@ namespace dyf::Backends
 		std::shared_ptr<std::shared_ptr<MetalUploadArena>> uploadCompletionLease;
 
 		std::vector<MetalOperation> operations;
-		std::unordered_map<uint32_t, VertexBinding> vertexBindings;
+		std::unordered_map<uint32_t, MetalVertexBinding> vertexBindings;
 		std::vector<RHI::Format> colorFormats;
 		std::vector<uint8_t> inlineConstants;
 

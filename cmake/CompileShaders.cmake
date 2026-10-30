@@ -233,6 +233,11 @@ function(dy_example_shader target stage source destination)
         set_property(TARGET "${target}" APPEND PROPERTY DY_EXAMPLE_COMPILED_SHADERS "${binary}")
     endif()
     if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
+        # The output rule lives in this example directory. Give the parent
+        # staging target a target-level dependency across directory scopes.
+        add_custom_target("${target}_${name}_compiled_shader" DEPENDS "${binary}")
+        set_property(TARGET "${target}" APPEND PROPERTY DY_EXAMPLE_SHADER_BUILD_TARGETS
+            "${target}_${name}_compiled_shader")
         set_property(TARGET "${target}" APPEND PROPERTY DY_EXAMPLE_SHADER_ASSETS
             "${binary}|${destination}")
         set_property(TARGET "${target}" APPEND PROPERTY DY_EXAMPLE_ASSET_FILES
