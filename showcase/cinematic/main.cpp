@@ -81,6 +81,12 @@ struct BenchmarkFrame
     dyf::RendererStatistics statistics;
 };
 
+struct BenchmarkHostAttempt
+{
+    uint64_t skipped = 0;
+    double skippedWorkMs = 0, waitEventsMs = 0, pollEventsMs = 0;
+};
+
 struct BenchmarkTrace
 {
     struct Diagnostic { uint32_t submission; const char* name; double milliseconds; };
@@ -303,6 +309,10 @@ int main(int argc, char** argv)
         bool benchmarkHud = false;
         bool benchmarkWsiTiming = false;
         bool benchmarkGpuTiming = false;
+        bool benchmarkHostTiming = false;
+        bool benchmarkNoEnvironmentLighting = false;
+        bool benchmarkHalfResolution = false;
+        uint32_t benchmarkScreenEffectsMask = 7;
         bool cpuCulling = false;
         auto profile = showcase::PlatformProfile::Automatic();
         uint32_t recordingWorkers = 0;
@@ -369,6 +379,10 @@ int main(int argc, char** argv)
                 "  --benchmark-cpu-zones    Optional CPU Shadow/MainForward/native replay/submit diagnostics (requires tracing)\n"
                 "  --benchmark-wsi-timing   Write native frame-tagged host timings to output.wsi.csv\n"
                 "  --benchmark-gpu-timing   Split completed GPU spans using existing upload/graph timestamps\n"
+                "  --benchmark-host-timing  Write skipped attempts and event waits to output.host.csv\n"
+                "  --benchmark-screen-effects-mask N  Diagnostic AO/GI/SSR bits, 0..7 (default 7)\n"
+                "  --benchmark-no-environment-lighting  Diagnostic: disable diffuse/specular IBL\n"
+                "  --benchmark-half-resolution  Diagnostic: halve render and window dimensions\n"
                 "  --profile MODE           auto (default), desktop, mobile; mobile uses 720p/512px textures\n"
                 "  --recording-workers N    CPU recording workers, 1..64 (desktop up to 4, mobile up to 2)\n"
                 "  --frames-in-flight N     Maximum GPU frames in flight, 1..4 (default 2)\n"
@@ -432,6 +446,19 @@ int main(int argc, char** argv)
             { benchmarkRequested = true; benchmarkWsiTiming = true; }
             else if(argument == "--benchmark-gpu-timing")
             { benchmarkRequested = true; benchmarkGpuTiming = true; }
+            else if(argument == "--benchmark-host-timing")
+            { benchmarkRequested = true; benchmarkHostTiming = true; }
+            else if(argument == "--benchmark-no-environment-lighting")
+            { benchmarkRequested = true; benchmarkNoEnvironmentLighting = true; }
+            else if(argument == "--benchmark-half-resolution")
+            { benchmarkRequested = true; benchmarkHalfResolution = true; }
+            else if(argument == "--benchmark-screen-effects-mask" && i + 1 < argc)
+            {
+                benchmarkRequested = true;
+                benchmarkScreenEffectsMask = benchmarkCount(argv[++i]);
+                if(benchmarkScreenEffectsMask > 7)
+                    throw std::runtime_error("Benchmark screen effects mask must be 0..7.");
+            }
             else if(argument == "--recording-workers" && i + 1 < argc)
             {
                 recordingWorkers = benchmarkCount(argv[++i]);
@@ -928,7 +955,8 @@ int main(int argc, char** argv)
             }
         }
 
-        const uint32_t renderWidth=profile.Width(),renderHeight=profile.Height();
+        const uint32_t renderWidth=profile.Width()/(benchmarkHalfResolution?2u:1u);
+        const uint32_t renderHeight=profile.Height()/(benchmarkHalfResolution?2u:1u);
         DY_EXAMPLE_WINDOW(window, renderWidth, renderHeight,night ? "dy_engine / Bistro Night - Space pause | R restart | Tab free camera" :
             "dy_engine / Cinematic Showcase - Space pause | R restart | Tab free camera");
 #ifdef DY_PROFILER_TRACING_ENABLED
@@ -978,6 +1006,11 @@ int main(int argc, char** argv)
         config.hdrRenderScale = 1.0f;
         config.advanced.enabled = true;
         config.advanced.temporalAA = false;
+        config.advanced.ambientOcclusion = (benchmarkScreenEffectsMask & 1u) != 0;
+        config.advanced.diffuseGI = (benchmarkScreenEffectsMask & 2u) != 0;
+        config.advanced.reflections = (benchmarkScreenEffectsMask & 4u) != 0;
+        if(benchmarkNoEnvironmentLighting)
+        {config.lighting.environment.diffuse=false;config.lighting.environment.specular=false;}
         config.advanced.transparencyLayers = glassLayers;
         if(legacyComparison)
         {
@@ -1171,6 +1204,9 @@ int main(int argc, char** argv)
             std::vector<BenchmarkFrame> measured;
             measured.reserve(benchmarkFrames);
             std::vector<std::pair<uint32_t,Platform::ProfilerTimingSnapshot>> windows;
+            std::vector<BenchmarkHostAttempt> hostAttempts;
+            if(benchmarkHostTiming) hostAttempts.reserve(benchmarkFrames);
+            BenchmarkHostAttempt pendingHost;
             uint64_t submitted = 0, lastSequence = renderer->GetProfilerTimingSnapshot().sequence;
             uint32_t unfocusedMeasuredSubmissions = 0;
             bool discardBoundaryWindow = true;
@@ -1185,7 +1221,9 @@ int main(int argc, char** argv)
             Platform::CpuTimer submissionIntervalTimer, measurementTimer;
             while(measured.size() < benchmarkFrames)
             {
+                const uint64_t pollStart=benchmarkHostTiming && submitted>=benchmarkWarmup?Platform::NowNs():0;
                 window.PollEvents();
+                if(pollStart) pendingHost.pollEventsMs+=Platform::Milliseconds(pollStart,Platform::NowNs());
                 if(nativeWindowChanged || window.GetHandle() != rendererWindow ||
                     window.GetSurfaceGeneration() != rendererSurfaceGeneration)
                     throw std::runtime_error("Benchmark native surface changed; restart the measurement on the new surface.");
@@ -1254,7 +1292,19 @@ int main(int argc, char** argv)
                 frame.wall = frameTimer.ElapsedMilliseconds();
                 frame.sceneTime = sceneTime;
                 const auto completion = renderer->GetLastRenderCompletion();
-                if(!completion || completion == previous) { waitForEvents(.001); continue; }
+                if(!completion || completion == previous)
+                {
+                    if(benchmarkHostTiming && submitted>=benchmarkWarmup)
+                    {
+                        ++pendingHost.skipped;
+                        pendingHost.skippedWorkMs+=frame.wall;
+                        const uint64_t waitStart=Platform::NowNs();
+                        waitForEvents(.001);
+                        pendingHost.waitEventsMs+=Platform::Milliseconds(waitStart,Platform::NowNs());
+                    }
+                    else waitForEvents(.001);
+                    continue;
+                }
                 ++submitted;
                 if(submitted==1)releaseCpuImageCache();
                 if(submitted <= benchmarkWarmup)
@@ -1267,6 +1317,7 @@ int main(int argc, char** argv)
                         std::fputs("Benchmark warm-up completed; recording measured submissions.\n",stderr);
                         submissionIntervalTimer.Reset();
                         measurementTimer.Reset();
+                        pendingHost={};
                     }
                     continue;
                 }
@@ -1279,6 +1330,7 @@ int main(int argc, char** argv)
                 frame.statistics = renderer->GetLastRenderStatistics();
                 if(!window.HasFocus()) ++unfocusedMeasuredSubmissions;
                 measured.push_back(frame);
+                if(benchmarkHostTiming) {hostAttempts.push_back(pendingHost);pendingHost={};}
                 if(capture)
                 {
                     if(!captured.IsValid())throw std::runtime_error("Benchmark image capture failed.");
@@ -1488,6 +1540,24 @@ int main(int argc, char** argv)
                 }
                 timingOutput.close();
                 if(!timingOutput)throw std::runtime_error("Cannot write WSI timing output: "+benchmarkOutput+".wsi.csv");
+            }
+            if(benchmarkHostTiming)
+            {
+                if(hostAttempts.size()!=measured.size())throw std::runtime_error("Host timing row count mismatch.");
+                std::ofstream hostOutput(benchmarkOutput+".host.csv");
+                hostOutput.imbue(std::locale::classic());
+                hostOutput << "# Each row ends with one successful measured submission; poll includes its successful attempt.\n"
+                    << "# Durations are host wall times. Result collection after the preceding submission is outside these scopes.\n"
+                    << "index,skipped_attempts,skipped_work_ms,wait_events_ms,poll_events_ms\n"
+                    << std::setprecision(10);
+                for(size_t i=0;i<hostAttempts.size();++i)
+                {
+                    const auto& attempt=hostAttempts[i];
+                    hostOutput << i+1 << ',' << attempt.skipped << ',' << attempt.skippedWorkMs << ','
+                        << attempt.waitEventsMs << ',' << attempt.pollEventsMs << '\n';
+                }
+                hostOutput.close();
+                if(!hostOutput)throw std::runtime_error("Cannot write host timing output: "+benchmarkOutput+".host.csv");
             }
             std::fprintf(stderr,"Benchmark CSV written: %s (%zu measured submissions, %zu interior profiler windows, %llu GPU samples).\n",
                 benchmarkOutput.c_str(),measured.size(),windows.size(),static_cast<unsigned long long>(gpuCount));

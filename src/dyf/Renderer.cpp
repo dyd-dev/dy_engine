@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -563,6 +564,9 @@ bool Renderer::Impl::Initialize()
 	swapchainDesc.window=windowHandle;
     swapchainDesc.format = RHI::DefaultSwapchainFormat;
 	swapchainDesc.minimumImageCount = 2;
+	if(const char* minimumImages = std::getenv("DYF_DIAG_SWAPCHAIN_MIN_IMAGES");
+	    minimumImages != nullptr && std::strcmp(minimumImages, "4") == 0)
+	    swapchainDesc.minimumImageCount = 4;
 	swapchainDesc.allowReadback = config.allowReadback;
 	swapchainDesc.presentMode = config.vsync ? RHI::PresentMode::Fifo : RHI::PresentMode::Immediate;
 	if(!nativeDevice->CreateSwapchain(swapchainDesc)) return false; // 요청한 창 출력 생성이 실패하면 초기화를 중단한다.

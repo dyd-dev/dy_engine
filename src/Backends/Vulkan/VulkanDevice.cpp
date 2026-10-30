@@ -1051,10 +1051,32 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
             if(reset!=VK_SUCCESS)return preparation(reset);
         }
         preparation(VK_SUCCESS);
+        const bool traceGpuCompletion=Platform::HasFrameTimingSink() && !prefetch;
+        const auto recordPriorGpuCompletion = [&](const char* event) {
+            if(!traceGpuCompletion)return;
+            int32_t state=0; // 0: collected, 1: signaled, 2: pending, -1: unexpected status.
+            for(auto it=m_submissions.rbegin();it!=m_submissions.rend();++it)
+                if(it->frameSlot<m_frameSlots.size())
+                {
+                    const auto status=vkGetFenceStatus(m_context.device,it->fence);
+                    state=status==VK_SUCCESS?1:status==VK_NOT_READY?2:-1;
+                    break;
+                }
+            const auto at=Platform::NowNs();
+            RecordWsi(frame,event,at,at,state);
+        };
+        recordPriorGpuCompletion("Vulkan prior GPU completion before acquire");
         const auto started=WsiTimingStart();
         const auto result=vkAcquireNextImageKHR(m_context.device,m_swapchain.GetHandle(),timeout,
             m_imageAvailableSemaphores[slot],fence,&image);
         RecordWsi(frame,prefetch?"Vulkan prefetch acquire":"Vulkan acquire",started,static_cast<int32_t>(result));
+        if(started && (result==VK_SUCCESS || result==VK_SUBOPTIMAL_KHR))
+        {
+            const auto at=Platform::NowNs();
+            RecordWsi(frame,prefetch?"Vulkan prefetched image index":"Vulkan acquired image index",
+                at,at,static_cast<int32_t>(image));
+        }
+        recordPriorGpuCompletion("Vulkan prior GPU completion after acquire");
         if(fence!=VK_NULL_HANDLE && (result==VK_SUCCESS || result==VK_SUBOPTIMAL_KHR))
             m_acquireFencePending[slot]=1;
         return result;
@@ -1109,8 +1131,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 	{
 		if (m_context.device == VK_NULL_HANDLE || m_submissionFaulted) return false;
         const auto frameStarted=WsiTimingStart();
+		const uint64_t attemptedFrame=m_frameReady?m_wsiFrame:m_wsiFrame+1;
 		const auto unavailable = [&](const char* reason) {
 			if (m_submissionFaulted) return false;
+			RecordWsi(attemptedFrame,reason,frameStarted);
 			const auto now = std::chrono::steady_clock::now();
 			if (m_frameUnavailableSince == std::chrono::steady_clock::time_point{})
 				m_frameUnavailableSince = now;
