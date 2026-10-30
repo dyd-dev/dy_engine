@@ -2,6 +2,7 @@
 #include "VulkanDevice.h"
 #include "../../Platform/Profiler/RhiProfiler.h"
 #include "VulkanQuery.h"
+#include "VulkanPresentWorker.h"
 #include <cstdio>
 
 #include "dyf/RHI/Buffer.h"
@@ -26,14 +27,20 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <stdexcept>
 #include <utility>
 #include <vector>
+
+#if defined(__linux__) && defined(DY_PROFILER_TRACING_ENABLED)
+#include <time.h>
+#endif
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -107,7 +114,13 @@ namespace dyf::Backends
         }
 
 
-		bool IsLost() const {return m_submissionFaulted || (m_commandPools && m_commandPools->IsDeviceLost());}
+		bool IsLost() const
+        {
+            PresentResult result{};
+            return m_submissionFaulted || (m_commandPools && m_commandPools->IsDeviceLost()) ||
+                (m_presentWorker && m_presentWorker->PeekResult(result) &&
+                    result.status!=VK_SUCCESS && result.status!=VK_SUBOPTIMAL_KHR && result.status!=VK_ERROR_OUT_OF_DATE_KHR);
+        }
         bool Supports(RHI::Feature feature) const
         {
             if(!m_context.physicalInfo) return false;
@@ -119,6 +132,7 @@ namespace dyf::Backends
                 return (m_context.physicalInfo->graphicsQueue.queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
             case RHI::Feature::Rasterization:
             case RHI::Feature::IndirectDraw:
+            case RHI::Feature::RenderArea:
             case RHI::Feature::SamplerLodBias:
             case RHI::Feature::FractionalDepthBias: return true;
             case RHI::Feature::Tessellation:
@@ -144,37 +158,57 @@ namespace dyf::Backends
         }
         VkResult WaitForShutdown()
         {
+            PollPresent(true);
+            m_presentWorker.reset();
             if(m_context.device==VK_NULL_HANDLE)return VK_SUCCESS;
+            const auto acquired=WaitForAcquisitions();
+            if(acquired!=VK_SUCCESS)return acquired;
             const auto idle=vkDeviceWaitIdle(m_context.device);
             if(idle!=VK_SUCCESS || !m_presentFencesEnabled)return idle;
+            return WaitForPresentations();
+        }
+        VkResult WaitForPresentations()
+        {
             constexpr uint64_t timeout=1000000000ull;
-            if(!m_presentFences.empty())
-            {
-                const auto result=vkWaitForFences(m_context.device,static_cast<uint32_t>(m_presentFences.size()),m_presentFences.data(),VK_TRUE,timeout);
-                if(result!=VK_SUCCESS)return result;
-            }
-            for(const auto& generation:m_retiredSwapchains)
-                if(!generation.presentFences.empty())
+            for(size_t i=0;i<m_presentFences.size();++i)
+                if(m_presentFencePending[i])
                 {
-                    const auto result=vkWaitForFences(m_context.device,static_cast<uint32_t>(generation.presentFences.size()),generation.presentFences.data(),VK_TRUE,timeout);
+                    const auto result=vkWaitForFences(m_context.device,1,&m_presentFences[i],VK_TRUE,timeout);
                     if(result!=VK_SUCCESS)return result;
                 }
+            for(const auto& generation:m_retiredSwapchains)
+                for(size_t i=0;i<generation.presentFences.size();++i)
+                    if(generation.presentFencePending[i])
+                    {
+                        const auto result=vkWaitForFences(m_context.device,1,&generation.presentFences[i],VK_TRUE,timeout);
+                        if(result!=VK_SUCCESS)return result;
+                    }
             return VK_SUCCESS;
         }
         bool WaitIdle()
         {
             if(m_context.device==VK_NULL_HANDLE) return false;
+            const bool presented=PollPresent(true);
+            if(!presented)return false;
+            const auto acquired=WaitForAcquisitions();
+            if(acquired!=VK_SUCCESS)return false;
             const VkResult result=vkDeviceWaitIdle(m_context.device);
             if(result==VK_ERROR_DEVICE_LOST) m_submissionFaulted=true;
             if(result!=VK_SUCCESS) return false;
+            // CreateSwapchain uses WaitIdle before destroying the old presentation semaphores.
+            const auto presentation=WaitForPresentations();
+            if(presentation==VK_ERROR_DEVICE_LOST)m_submissionFaulted=true;
+            if(presentation!=VK_SUCCESS)return false;
             CollectCompletedSubmissions();
-            return !m_submissionFaulted;
+            return presented && !m_submissionFaulted;
         }
         bool ReadTimestamps(VulkanTimestampQuery& query,uint32_t first,uint32_t count,uint64_t* ticks)
         {
             CollectCompletedSubmissions();
-            if(m_submissionFaulted || !std::all_of(query.initialized.begin()+first,query.initialized.begin()+first+count,
-                [](uint8_t initialized) { return initialized!=0; })) return false;
+            if(m_submissionFaulted)return false;
+            for(uint32_t index=first;index<first+count;++index)
+                if(!query.initialized[index] || !query.completions[index] ||
+                    query.completions[index]>m_completedSubmission)return false;
             const VkResult result=vkGetQueryPoolResults(m_context.device,query.pool,first,count,
                 size_t(count)*sizeof(uint64_t),ticks,sizeof(uint64_t),VK_QUERY_RESULT_64_BIT);
             if(result==VK_ERROR_DEVICE_LOST) m_submissionFaulted=true;
@@ -205,7 +239,11 @@ namespace dyf::Backends
             return false;
 #endif
         }
-        void ClearSwapchain() { DestroyCurrentSwapchain(); DestroyRetiredSwapchains(); m_hasSwapchainDesc = false; }
+		void ClearSwapchain()
+        {
+            DestroyCurrentSwapchain();DestroyRetiredSwapchains();m_hasSwapchainDesc=false;
+            m_imageAcquired=false;m_frameReady=false;m_presentPending=false;
+        }
 
 		int Initialize(const void* windowHandle, const dyf::RHI::DeviceDesc& desc);
 		bool CreateSwapchain(const dyf::RHI::SwapchainDesc& desc, VkSwapchainKHR oldSwapchain = VK_NULL_HANDLE);
@@ -269,11 +307,46 @@ namespace dyf::Backends
 		bool RecreateSwapchain();
 		VkSwapchainKHR RetireSwapchainGeneration();
 		void UpdateBackBuffers();
+		bool AcquireSubmissionFence(VkFence& fence);
+		void RecycleSubmissionFence(VkFence fence);
 		void CollectCompletedSubmissions();
 		void DestroySwapchainSyncObjects();
 		void DestroyCurrentSwapchain();
         void DestroyRetiredSwapchains(bool completedOnly=false);
 		void DestroyDeviceResources();
+        struct PresentJob
+        {
+            VkQueue queue=VK_NULL_HANDLE;
+            VkSwapchainKHR swapchain=VK_NULL_HANDLE;
+            VkSemaphore waitSemaphore=VK_NULL_HANDLE;
+            VkFence fence=VK_NULL_HANDLE;
+            uint32_t imageIndex=0;
+            bool acquireSuboptimal=false;
+            uint64_t frame=0;
+            bool timed=false;
+        };
+        struct PresentResult
+        {
+            VkResult status=VK_SUCCESS;
+            double wallMilliseconds=0,cpuMilliseconds=-1;
+            uint64_t beginNs=0,endNs=0;
+        };
+        using PresentWorker=VulkanPresentWorker<PresentJob,PresentResult>;
+        static PresentResult CallPresent(const PresentJob&) noexcept;
+        void ConfigurePresentWorker(RHI::PresentMode mode);
+        bool PollPresent(bool wait=false);
+        bool ApplyPresentResult(const PresentJob&,const PresentResult&);
+        VkResult AcquireImage(uint32_t slot,uint64_t timeout,uint32_t& image,bool prefetch=false);
+        VkResult WaitForAcquisitions(uint64_t timeout=1000000000ull);
+        void TryPrefetchImage();
+        static uint64_t WsiTimingStart() noexcept
+        {return Platform::HasFrameTimingSink()?Platform::NowNs():0;}
+        void RecordWsi(uint64_t frame,const char* name,uint64_t begin,uint64_t end,int32_t result=0) noexcept
+        {if(begin)Platform::PublishFrameTiming({reinterpret_cast<uintptr_t>(this),frame,name,begin,end,result});}
+        void RecordWsi(uint64_t frame,const char* name,uint64_t begin,int32_t result=0) noexcept
+        {if(begin)RecordWsi(frame,name,begin,Platform::NowNs(),result);}
+        uint64_t m_wsiFrame=0;
+        bool m_prefetchEnabled=true;
 
 		VulkanContext m_context;
 		std::shared_ptr<VulkanUploadPool> m_uploadPool;
@@ -284,10 +357,20 @@ namespace dyf::Backends
         bool m_surfaceMaintenanceEnabled=false;
         bool m_presentFencesEnabled=false;
         bool m_swapchainPresented=false;
+        bool m_presentConfigured=false;
+        std::unique_ptr<PresentWorker> m_presentWorker;
+        bool m_prefetchedImage=false,m_prefetchedSuboptimal=false;
+        uint32_t m_prefetchedImageIndex=0,m_prefetchedFrameSlot=0;
+        uint64_t m_prefetchSuccess=0,m_prefetchNotReady=0,m_prefetchTimeout=0;
+        uint64_t m_prefetchSlotBusy=0,m_prefetchAcquireFenceBusy=0,m_prefetchCalls=0;
+        double m_prefetchWallMilliseconds=0,m_prefetchMaxMilliseconds=0;
 
 		std::vector<VkSemaphore> m_imageAvailableSemaphores;
 		std::vector<VkSemaphore> m_renderFinishedSemaphores;
         std::vector<VkFence> m_presentFences;
+        std::vector<uint8_t> m_presentFencePending;
+        std::vector<VkFence> m_acquireFences;
+        std::vector<uint8_t> m_acquireFencePending;
 		std::vector<VkFence> m_frameSlots;
 		std::vector<VkFence> m_imagesInFlight;
 
@@ -301,6 +384,9 @@ namespace dyf::Backends
 			uint32_t imageIndex = std::numeric_limits<uint32_t>::max();
 		};
 		std::vector<SubmissionRecord> m_submissions;
+        // Only completed fences detached from submission/frame/image ownership enter this pool.
+        std::array<VkFence,16> m_availableSubmissionFences{};
+        size_t m_availableSubmissionFenceCount=0;
 		std::vector<std::unique_ptr<VulkanCommandList, VulkanObjectDeleter>> m_acquiredCommandLists;
 		struct ReadbackResources
 		{
@@ -327,6 +413,8 @@ namespace dyf::Backends
 			std::vector<VkSemaphore> imageAvailableSemaphores;
 			std::vector<VkSemaphore> renderFinishedSemaphores;
             std::vector<VkFence> presentFences;
+            std::vector<uint8_t> presentFencePending;
+            std::vector<VkFence> acquireFences;
             bool presented=false;
 			std::vector<std::unique_ptr<VulkanTexture, VulkanObjectDeleter>> backBuffers;
 		};
@@ -433,6 +521,7 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
         case RHI::Limit::InlineConstantBytes: return limits.maxPushConstantsSize;
         case RHI::Limit::Texture2DDimension: return limits.maxImageDimension2D;
         case RHI::Limit::TextureArrayLayers: return limits.maxImageArrayLayers;
+        case RHI::Limit::BufferUpdateAlignment: return 1;
         case RHI::Limit::UniformBufferOffsetAlignment: return limits.minUniformBufferOffsetAlignment;
         case RHI::Limit::StorageBufferOffsetAlignment: return limits.minStorageBufferOffsetAlignment;
         case RHI::Limit::UniformBufferBytes: return limits.maxUniformBufferRange;
@@ -506,6 +595,25 @@ void VulkanDevice::DestroySwapchainNative() { m_impl->ClearSwapchain(); }
             if(resources>limits.maxPerStageResources)return false;
         }
         return true;
+    }
+
+    bool VulkanDevice::SupportsLinearFiltering(RHI::Format format) const noexcept
+    {
+        const auto& context=m_impl->Context();
+        const auto nativeFormat=ToVulkanFormat(format);
+        if(!context.physicalDevice || nativeFormat==VK_FORMAT_UNDEFINED) return false;
+        VkFormatProperties properties{};
+        vkGetPhysicalDeviceFormatProperties(context.physicalDevice,nativeFormat,&properties);
+        constexpr VkFormatFeatureFlags required=VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT|
+            VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+        return (properties.optimalTilingFeatures&required)==required;
+    }
+
+    bool VulkanDevice::SupportsDdsCompression(RHI::Format format) const noexcept
+    {
+        const auto& context=m_impl->Context();
+        return RHI::IsBlockCompressed(format) && context.physicalInfo &&
+            context.physicalInfo->features.textureCompressionBC && SupportsLinearFiltering(format);
     }
 
     bool VulkanDevice::SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc& desc) const
@@ -703,6 +811,15 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 	VulkanDevice::Impl::~Impl()
 	{
+        PollPresent(true);
+        m_presentWorker.reset();
+        std::fprintf(stderr,"[Vulkan] Prefetch totals: success=%llu notReady=%llu timeout=%llu slotBusy=%llu acquireFenceBusy=%llu.\n",
+            static_cast<unsigned long long>(m_prefetchSuccess),static_cast<unsigned long long>(m_prefetchNotReady),
+            static_cast<unsigned long long>(m_prefetchTimeout),static_cast<unsigned long long>(m_prefetchSlotBusy),
+            static_cast<unsigned long long>(m_prefetchAcquireFenceBusy));
+        std::fprintf(stderr,"[Vulkan] Prefetch host time: calls=%llu mean=%.6f ms max=%.6f ms.\n",
+            static_cast<unsigned long long>(m_prefetchCalls),m_prefetchCalls?m_prefetchWallMilliseconds/m_prefetchCalls:0,
+            m_prefetchMaxMilliseconds);
 		DestroyDeviceResources();
 	}
 
@@ -734,6 +851,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 	bool VulkanDevice::Impl::CreateSwapchain(const dyf::RHI::SwapchainDesc& desc, VkSwapchainKHR oldSwapchain)
 	{
+        if(!PollPresent(true))return false;
         if(m_windowHandle && m_windowHandle!=desc.window) return false;
         m_windowHandle=const_cast<void*>(desc.window);
         if(!m_windowHandle) return false;
@@ -796,6 +914,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			if (oldSwapchainRetired) m_recreationOldSwapchain = VK_NULL_HANDLE;
 
 			UpdateBackBuffers();
+			ConfigurePresentWorker(desc.presentMode);
 			if (!CreateSwapchainSyncObjects())
 			{
 				DestroyCurrentSwapchain();
@@ -835,11 +954,187 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		return true;
 	}
 
+    void VulkanDevice::Impl::ConfigurePresentWorker(RHI::PresentMode mode)
+    {
+#if defined(_WIN32)
+        // Win32 Immediate prefetch can block even with timeout=0, delaying the current Present.
+        m_prefetchEnabled=mode!=RHI::PresentMode::Immediate;
+#else
+        (void)mode;
+        m_prefetchEnabled=true;
+#endif
+        if(const auto* setting=std::getenv("DY_VULKAN_PREFETCH"))
+            m_prefetchEnabled=std::strcmp(setting,"0")!=0;
+        std::fprintf(stderr,"[Vulkan] Next-image prefetch: %s.\n",m_prefetchEnabled?"on":"off");
+        if(m_presentConfigured)return;
+        m_presentConfigured=true;
+        bool supported=false;
+#if defined(_WIN32)
+        supported=true;
+#elif defined(__linux__) && !defined(__ANDROID__)
+        supported=glfwGetPlatform()==GLFW_PLATFORM_WAYLAND;
+#endif
+        if(supported && m_owner.GetDesc().maxFramesInFlight>1 && m_context.presentQueue!=m_context.graphicsQueue)
+        {
+            try {m_presentWorker=std::make_unique<PresentWorker>(CallPresent);}
+            catch(const std::exception&) {m_presentWorker.reset();}
+        }
+        std::fprintf(stderr,"[Vulkan] Present: %s; graphicsQueue=%p presentQueue=%p.\n",
+            m_presentWorker?"asynchronous worker":"synchronous",static_cast<void*>(m_context.graphicsQueue),
+            static_cast<void*>(m_context.presentQueue));
+    }
+
+    VulkanDevice::Impl::PresentResult VulkanDevice::Impl::CallPresent(const PresentJob& job) noexcept
+    {
+        VkPresentInfoKHR info{};info.sType=VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        info.waitSemaphoreCount=1;info.pWaitSemaphores=&job.waitSemaphore;
+        info.swapchainCount=1;info.pSwapchains=&job.swapchain;info.pImageIndices=&job.imageIndex;
+        VkSwapchainPresentFenceInfoEXT fence{};
+        if(job.fence!=VK_NULL_HANDLE)
+        {
+            fence.sType=VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT;
+            fence.swapchainCount=1;fence.pFences=&job.fence;info.pNext=&fence;
+        }
+        PresentResult result{};
+#ifdef DY_PROFILER_TRACING_ENABLED
+        Platform::CpuTimer wall;
+#if defined(__linux__)
+        timespec begin{},end{};
+        const bool hasBegin=clock_gettime(CLOCK_THREAD_CPUTIME_ID,&begin)==0;
+#endif
+#endif
+        if(job.timed)result.beginNs=Platform::NowNs();
+        result.status=vkQueuePresentKHR(job.queue,&info);
+        if(job.timed)result.endNs=Platform::NowNs();
+#ifdef DY_PROFILER_TRACING_ENABLED
+#if defined(__linux__)
+        const bool hasEnd=clock_gettime(CLOCK_THREAD_CPUTIME_ID,&end)==0;
+#endif
+        result.wallMilliseconds=wall.ElapsedMilliseconds();
+#if defined(__linux__)
+        if(hasBegin && hasEnd)result.cpuMilliseconds=1000.0*double(end.tv_sec-begin.tv_sec)+double(end.tv_nsec-begin.tv_nsec)/1e6;
+#endif
+#endif
+        return result;
+    }
+
+    bool VulkanDevice::Impl::PollPresent(bool wait)
+    {
+        if(!m_presentWorker)return !m_submissionFaulted;
+        if(wait && !m_presentWorker->Wait())return false;
+        PresentJob job{};PresentResult result{};
+        if(m_presentWorker->Poll(job,result))return ApplyPresentResult(job,result);
+        return !m_submissionFaulted;
+    }
+
+    VkResult VulkanDevice::Impl::AcquireImage(uint32_t slot,uint64_t timeout,uint32_t& image,bool prefetch)
+    {
+        assert(!m_presentWorker || !m_presentWorker->Pending());
+        const auto frame=m_wsiFrame+(prefetch?0:1);
+        const auto prepared=WsiTimingStart();
+        const auto preparation=[&](VkResult result) {
+            RecordWsi(frame,prefetch?"Vulkan prefetch prepare":"Vulkan acquire prepare",prepared,static_cast<int32_t>(result));
+            return result;
+        };
+        VkFence fence=VK_NULL_HANDLE;
+        if(!m_acquireFences.empty())
+        {
+            fence=m_acquireFences[slot];
+            if(m_acquireFencePending[slot])
+            {
+                const auto status=vkGetFenceStatus(m_context.device,fence);
+                if(prefetch && status==VK_NOT_READY)++m_prefetchAcquireFenceBusy;
+                if(status!=VK_SUCCESS)return preparation(status);
+                m_acquireFencePending[slot]=0;
+            }
+            const auto reset=vkResetFences(m_context.device,1,&fence);
+            if(reset!=VK_SUCCESS)return preparation(reset);
+        }
+        preparation(VK_SUCCESS);
+        const bool traceGpuCompletion=Platform::HasFrameTimingSink() && !prefetch;
+        const auto recordPriorGpuCompletion = [&](const char* event) {
+            if(!traceGpuCompletion)return;
+            int32_t state=0; // 0: collected, 1: signaled, 2: pending, -1: unexpected status.
+            for(auto it=m_submissions.rbegin();it!=m_submissions.rend();++it)
+                if(it->frameSlot<m_frameSlots.size())
+                {
+                    const auto status=vkGetFenceStatus(m_context.device,it->fence);
+                    state=status==VK_SUCCESS?1:status==VK_NOT_READY?2:-1;
+                    break;
+                }
+            const auto at=Platform::NowNs();
+            RecordWsi(frame,event,at,at,state);
+        };
+        recordPriorGpuCompletion("Vulkan prior GPU completion before acquire");
+        const auto started=WsiTimingStart();
+        const auto result=vkAcquireNextImageKHR(m_context.device,m_swapchain.GetHandle(),timeout,
+            m_imageAvailableSemaphores[slot],fence,&image);
+        RecordWsi(frame,prefetch?"Vulkan prefetch acquire":"Vulkan acquire",started,static_cast<int32_t>(result));
+        if(started && (result==VK_SUCCESS || result==VK_SUBOPTIMAL_KHR))
+        {
+            const auto at=Platform::NowNs();
+            RecordWsi(frame,prefetch?"Vulkan prefetched image index":"Vulkan acquired image index",
+                at,at,static_cast<int32_t>(image));
+        }
+        recordPriorGpuCompletion("Vulkan prior GPU completion after acquire");
+        if(fence!=VK_NULL_HANDLE && (result==VK_SUCCESS || result==VK_SUBOPTIMAL_KHR))
+            m_acquireFencePending[slot]=1;
+        return result;
+    }
+
+    VkResult VulkanDevice::Impl::WaitForAcquisitions(uint64_t timeout)
+    {
+        for(size_t i=0;i<m_acquireFences.size();++i)
+            if(m_acquireFencePending[i])
+            {
+                const auto result=vkWaitForFences(m_context.device,1,&m_acquireFences[i],VK_TRUE,timeout);
+                if(result!=VK_SUCCESS)
+                {if(result==VK_ERROR_DEVICE_LOST)m_submissionFaulted=true;return result;}
+                m_acquireFencePending[i]=0;
+            }
+        return VK_SUCCESS;
+    }
+
+    void VulkanDevice::Impl::TryPrefetchImage()
+    {
+        if(!m_prefetchEnabled || !m_presentWorker || m_prefetchedImage || m_swapchainNeedsRecreate)return;
+        // SUBOPTIMAL may be a permanent advisory; only an actual change blocks prefetch.
+        if(m_recreateAfterPresent)
+        {
+            bool changed=false;VulkanSwapchain::InitializationStatus status;
+            if(!m_swapchain.IsSurfaceConfigurationChanged(m_context,m_windowHandle,changed,status) || changed)return;
+        }
+        CollectCompletedSubmissions();
+        const uint32_t slot=(m_currentFrameSlot+1)%m_owner.GetDesc().maxFramesInFlight;
+        if(m_submissionFaulted || slot==m_currentFrameSlot)return;
+        if(m_frameSlots[slot]!=VK_NULL_HANDLE){++m_prefetchSlotBusy;return;}
+        uint32_t image=0;
+        const auto started=std::chrono::steady_clock::now();
+        const auto result=AcquireImage(slot,0,image,true);
+        const double elapsed=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-started).count();
+        ++m_prefetchCalls;m_prefetchWallMilliseconds+=elapsed;
+        m_prefetchMaxMilliseconds=std::max(m_prefetchMaxMilliseconds,elapsed);
+        if(result==VK_SUCCESS || result==VK_SUBOPTIMAL_KHR)
+        {
+            ++m_prefetchSuccess;
+            m_prefetchedImage=true;m_prefetchedImageIndex=image;m_prefetchedFrameSlot=slot;
+            m_prefetchedSuboptimal=result==VK_SUBOPTIMAL_KHR;
+        }
+        else if(result==VK_NOT_READY)++m_prefetchNotReady;
+        else if(result==VK_TIMEOUT)++m_prefetchTimeout;
+        else if(result==VK_ERROR_OUT_OF_DATE_KHR)m_swapchainNeedsRecreate=true;
+        else if(result!=VK_NOT_READY && result!=VK_TIMEOUT)
+        {m_submissionFaulted=true;LogVulkanFailure("vkAcquireNextImageKHR(prefetch)",result);}
+    }
+
 	bool VulkanDevice::Impl::BeginFrame()
 	{
 		if (m_context.device == VK_NULL_HANDLE || m_submissionFaulted) return false;
+        const auto frameStarted=WsiTimingStart();
+		const uint64_t attemptedFrame=m_frameReady?m_wsiFrame:m_wsiFrame+1;
 		const auto unavailable = [&](const char* reason) {
 			if (m_submissionFaulted) return false;
+			RecordWsi(attemptedFrame,reason,frameStarted);
 			const auto now = std::chrono::steady_clock::now();
 			if (m_frameUnavailableSince == std::chrono::steady_clock::time_point{})
 				m_frameUnavailableSince = now;
@@ -855,6 +1150,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			return false;
 		};
 		const auto available = [&] {
+            RecordWsi(m_wsiFrame,"Vulkan frame ready",frameStarted);
 			m_frameUnavailableSince = {};
 			m_frameUnavailableWarned = false;
 			return true;
@@ -878,6 +1174,13 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			return unavailable("frame-state");
 		}
 
+        // Retry prerequisites before querying the driver; acquired/prefetched images can proceed during Present.
+        if(!m_swapchainNeedsRecreate && m_swapchain.GetHandle()!=VK_NULL_HANDLE && !m_imageAcquired && !m_prefetchedImage)
+        {
+            if(m_currentFrameSlot<m_frameSlots.size() && m_frameSlots[m_currentFrameSlot]!=VK_NULL_HANDLE)
+                return unavailable("frame-slot-fence");
+            if(m_presentWorker && m_presentWorker->Pending())return unavailable("presentation-host-call");
+        }
 		// Wayland may keep presenting successfully while scaling buffers from the
 		// previous window size. Check the required extent before acquiring another
 		// image instead of relying exclusively on WSI advisory/error return codes.
@@ -895,7 +1198,15 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 		if (m_swapchainNeedsRecreate)
 		{
-			if (!m_submissions.empty() || m_imageAcquired || !RecreateSwapchain())
+            if(m_presentWorker && !m_frameReady && !m_presentPending && (m_prefetchedImage || m_imageAcquired))
+            {
+                const auto acquired=WaitForAcquisitions(0);
+                if(acquired==VK_TIMEOUT)return unavailable("prefetch-acquire-fence");
+                if(acquired!=VK_SUCCESS) {m_submissionFaulted=true;return false;}
+                // Retire signaled, unused acquire semaphores with this generation.
+                m_prefetchedImage=false;m_imageAcquired=false;
+            }
+			if (m_imageAcquired || !RecreateSwapchain())
 				return unavailable("swapchain-recreate");
 		}
 		if (m_swapchain.GetHandle() == VK_NULL_HANDLE || m_currentFrameSlot >= m_frameSlots.size() ||
@@ -905,18 +1216,23 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 				m_frameSlots[m_currentFrameSlot] != VK_NULL_HANDLE ? "frame-slot-fence" : "swapchain-unavailable");
 		}
 
+        if(m_prefetchedImage)
+        {
+            assert(m_prefetchedFrameSlot==m_currentFrameSlot && !m_imageAcquired);
+            m_currentImageIndex=m_prefetchedImageIndex;
+            m_recreateAfterPresent=m_prefetchedSuboptimal;
+            m_imageAcquired=true;m_prefetchedImage=false;
+            if(!m_retiredSwapchains.empty() && m_currentImageIndex==m_retiredReleaseImage)
+                m_retiredReleaseAcquired=true;
+        }
 		if (!m_imageAcquired)
 		{
+            // Acquire and Present on the same swapchain must never overlap on the host.
+            if(m_presentWorker && m_presentWorker->Pending())return unavailable("presentation-host-call");
 			// Allow WSI to wait for the compositor's buffer release without an
 			// unbounded wait that would prevent the window loop handling input.
 			constexpr uint64_t acquireTimeoutNanoseconds = 16000000ull;
-			const VkResult result = vkAcquireNextImageKHR(
-				m_context.device,
-				m_swapchain.GetHandle(),
-				acquireTimeoutNanoseconds,
-				m_imageAvailableSemaphores[m_currentFrameSlot],
-				VK_NULL_HANDLE,
-				&m_currentImageIndex);
+			const VkResult result=AcquireImage(m_currentFrameSlot,acquireTimeoutNanoseconds,m_currentImageIndex);
 			if (result == VK_ERROR_OUT_OF_DATE_KHR)
 			{
 				m_swapchainNeedsRecreate = true;
@@ -956,6 +1272,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 		m_backBuffer = m_backBuffers[m_currentImageIndex].get();
 		m_frameReady = true;
+        ++m_wsiFrame;
         // RHI의 backbuffer 시작 상태 Present를 최초 Vulkan 이미지의 Undefined 레이아웃에 대응시킨다.
         if(m_backBuffers[m_currentImageIndex]->GetBarrierOldLayout(RHI::ResourceState::Present)==VK_IMAGE_LAYOUT_UNDEFINED)
         {
@@ -979,7 +1296,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 	dyf::RHI::ICommandList* VulkanDevice::Impl::AcquireCommandList(RHI::Detail::UploadPolicy policy)
 	{
-		CollectCompletedSubmissions();
+        // BeginFrame and the RHI preparation batch already collected completions.
 		if (m_context.device == VK_NULL_HANDLE || m_submissionFaulted) return nullptr;
 		try
 		{
@@ -1046,12 +1363,19 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			activeBackBuffer = m_backBuffers[m_currentImageIndex].get();
 		}
 		bool frameSubmission = false;
-		for (VulkanCommandList* commandList : selected)
+		uint32_t firstSwapchainCommand=count;
+        VkPipelineStageFlags acquireWaitStage=VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+		for (uint32_t i=0;i<count;++i)
 		{
+			auto* commandList=selected[i];
 			if (!commandList->IsValid()) return false;
 			for (VulkanTexture* image : commandList->GetReferencedSwapchainImages())
 			{
 				if (activeBackBuffer == nullptr || image != activeBackBuffer) return false;
+                const bool firstReference=!frameSubmission;
+                if(firstReference)firstSwapchainCommand=i;
+                if(!m_presentPending && acquireWaitStage!=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT)
+                    acquireWaitStage=commandList->GetAcquireWaitStage(image,firstReference);
 				frameSubmission = true;
 			}
 		}
@@ -1080,25 +1404,43 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		SubmissionRecord submission{};
 		submission.commandLists = std::move(consumed);
 		m_submissions.reserve(m_submissions.size() + 1);
-		VkFenceCreateInfo fenceInfo{};
-		fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-		if (vkCreateFence(m_context.device, &fenceInfo, nullptr, &submission.fence) != VK_SUCCESS) return false;
+        if(!AcquireSubmissionFence(submission.fence))return false;
 
-		const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-		VkSubmitInfo submitInfo{};
-		submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-		submitInfo.commandBufferCount = count;
-		submitInfo.pCommandBuffers = nativeCommandBuffers.data();
+		const VkPipelineStageFlags waitStage = acquireWaitStage;
+		VkSubmitInfo submitInfos[2]{};
+		submitInfos[0].sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+		submitInfos[0].commandBufferCount = count;
+		submitInfos[0].pCommandBuffers = nativeCommandBuffers.data();
+        uint32_t submitCount=1;
 		const bool waitsForAcquire = frameSubmission && !m_presentPending;
 		if (waitsForAcquire)
 		{
-			submitInfo.waitSemaphoreCount = 1;
-			submitInfo.pWaitSemaphores = &m_imageAvailableSemaphores[m_currentFrameSlot];
-			submitInfo.pWaitDstStageMask = &waitStage;
+            auto* imageSubmit=&submitInfos[0];
+            if(firstSwapchainCommand>0)
+            {
+                // Prefix command lists never touch the acquired image. Keep
+                // their work and timestamps outside the semaphore wait batch.
+                submitInfos[1]=submitInfos[0];
+                submitInfos[0].commandBufferCount=firstSwapchainCommand;
+                imageSubmit=&submitInfos[1];submitCount=2;
+                imageSubmit->commandBufferCount=count-firstSwapchainCommand;
+                imageSubmit->pCommandBuffers=nativeCommandBuffers.data()+firstSwapchainCommand;
+            }
+			imageSubmit->waitSemaphoreCount = 1;
+			imageSubmit->pWaitSemaphores = &m_imageAvailableSemaphores[m_currentFrameSlot];
+			imageSubmit->pWaitDstStageMask = &waitStage;
             // 표시 신호는 Present의 마지막 제출에서만 보낸다.
 		}
 
-		const VkResult result = vkQueueSubmit(m_context.graphicsQueue, 1, &submitInfo, submission.fence);
+#ifdef DY_PROFILER_TRACING_ENABLED
+        Platform::CpuTimer queueSubmitTimer;
+#endif
+        const auto submitStarted=WsiTimingStart();
+		const VkResult result = vkQueueSubmit(m_context.graphicsQueue, submitCount, submitInfos, submission.fence);
+        RecordWsi(m_wsiFrame,"Vulkan queue submit",submitStarted,static_cast<int32_t>(result));
+#ifdef DY_PROFILER_TRACING_ENABLED
+        Platform::PublishValue("Vulkan queue submit ms",queueSubmitTimer.ElapsedMilliseconds(),true);
+#endif
 		if (result != VK_SUCCESS)
 		{
             m_submissionFaulted = true;
@@ -1117,6 +1459,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		}
 
 		submission.serial=++m_lastSubmission;
+        for(VulkanCommandList* commandList:selected)commandList->MarkTimestampsSubmitted(submission.serial);
 		if (waitsForAcquire && m_retiredReleaseAcquired && !m_retiredReleaseSubmission)
 			m_retiredReleaseSubmission = submission.serial;
         m_submissions.push_back(std::move(submission));
@@ -1126,16 +1469,16 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
     bool VulkanDevice::Impl::Present()
     {
         if(!m_frameReady || !m_imageAcquired || m_swapchain.GetHandle()==VK_NULL_HANDLE || m_submissionFaulted)return false;
+        const auto joinStarted=WsiTimingStart();
+        const bool joined=PollPresent(true);
+        RecordWsi(m_wsiFrame,"Vulkan previous present join",joinStarted,joined?0:-1);
+        if(!joined)return false;
         // 모든 이미지 작업 뒤에서 한 번만 표시 세마포어를 신호한다.
         SubmissionRecord completion{};
         m_submissions.reserve(m_submissions.size()+1);
-        VkFenceCreateInfo fenceInfo{};
-        fenceInfo.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        const VkResult fenceCreated=vkCreateFence(m_context.device,&fenceInfo,nullptr,&completion.fence);
-        if(fenceCreated!=VK_SUCCESS)
+        if(!AcquireSubmissionFence(completion.fence))
         {
             m_submissionFaulted=true;
-            LogVulkanFailure("vkCreateFence(Present)",fenceCreated);
             return false;
         }
         const VkPipelineStageFlags waitStage=VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
@@ -1150,7 +1493,15 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         }
         submit.signalSemaphoreCount=1;
         submit.pSignalSemaphores=&m_renderFinishedSemaphores[m_currentImageIndex];
+#ifdef DY_PROFILER_TRACING_ENABLED
+        Platform::CpuTimer presentSubmitTimer;
+#endif
+        const auto presentSubmitStarted=WsiTimingStart();
         const VkResult submitted=vkQueueSubmit(m_context.graphicsQueue,1,&submit,completion.fence);
+        RecordWsi(m_wsiFrame,"Vulkan present submit",presentSubmitStarted,static_cast<int32_t>(submitted));
+#ifdef DY_PROFILER_TRACING_ENABLED
+        Platform::PublishValue("Vulkan present submit ms",presentSubmitTimer.ElapsedMilliseconds(),true);
+#endif
         if(submitted!=VK_SUCCESS)
         {
             m_submissionFaulted=true;
@@ -1167,16 +1518,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         m_imagesInFlight[m_currentImageIndex]=completion.fence;
         m_submissions.push_back(std::move(completion));
 
-        VkSwapchainKHR swapchain=m_swapchain.GetHandle();
-        VkPresentInfoKHR info{};
-        info.sType=VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-        info.waitSemaphoreCount=1;
-        info.pWaitSemaphores=&m_renderFinishedSemaphores[m_currentImageIndex];
-        info.swapchainCount=1;
-        info.pSwapchains=&swapchain;
-        info.pImageIndices=&m_currentImageIndex;
-        VkSwapchainPresentFenceInfoEXT presentFence{};
-        presentFence.sType=VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT;
+        PresentJob job{};
+        job.frame=m_wsiFrame;job.timed=Platform::HasFrameTimingSink();
+        job.queue=m_context.presentQueue;job.swapchain=m_swapchain.GetHandle();job.imageIndex=m_currentImageIndex;
+        job.waitSemaphore=m_renderFinishedSemaphores[m_currentImageIndex];job.acquireSuboptimal=m_recreateAfterPresent;
         if(m_presentFencesEnabled)
         {
             const auto reset=vkResetFences(m_context.device,1,&m_presentFences[m_currentImageIndex]);
@@ -1186,25 +1531,52 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
                 LogVulkanFailure("vkResetFences(presentation)",reset);
                 return false;
             }
-            presentFence.swapchainCount=1;
-            presentFence.pFences=&m_presentFences[m_currentImageIndex];
-            info.pNext=&presentFence;
+            job.fence=m_presentFences[m_currentImageIndex];
+            m_presentFencePending[m_currentImageIndex]=1;
         }
+        // Prefetch after graphics submission, before the worker owns this swapchain.
+        // BeginFrame can then record/submit the next image while host Present runs.
+        TryPrefetchImage();
         m_swapchainPresented=true;
-        const VkResult result=vkQueuePresentKHR(m_context.presentQueue,&info);
-		if ((result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) && !m_retiredSwapchains.empty() &&
-			m_retiredReleaseImage == UINT32_MAX)
-			m_retiredReleaseImage = m_currentImageIndex;
+        PresentResult result{};
+        if(m_presentWorker)
+        {
+            const bool queued=m_presentWorker->TrySubmit(job);
+            assert(queued);
+            if(!queued)
+            {
+                if(job.fence)m_presentFencePending[job.imageIndex]=0;
+                m_submissionFaulted=true;return false;
+            }
+        }
+        else result=CallPresent(job);
         m_presentPending=false;
         m_frameReady=false;
         m_imageAcquired=false;
         m_currentFrameSlot=(m_currentFrameSlot+1)%m_owner.GetDesc().maxFramesInFlight;
-        const bool recreateRequestedByAcquire=m_recreateAfterPresent;
         m_recreateAfterPresent=false;
+        return (m_presentWorker || ApplyPresentResult(job,result)) && !m_submissionFaulted;
+    }
+
+    bool VulkanDevice::Impl::ApplyPresentResult(const PresentJob& job,const PresentResult& completed)
+    {
+        RecordWsi(job.frame,"Vulkan queue present",completed.beginNs,completed.endNs,static_cast<int32_t>(completed.status));
+#ifdef DY_PROFILER_TRACING_ENABLED
+        // External trace sinks remain on the owner thread, including worker results.
+        Platform::PublishValue("Vulkan queue present ms",completed.wallMilliseconds,true);
+        if(completed.cpuMilliseconds>=0)Platform::PublishValue("Vulkan queue present CPU ms",completed.cpuMilliseconds,true);
+#endif
+        const auto result=completed.status;
+        if(job.swapchain!=m_swapchain.GetHandle()) {m_submissionFaulted=true;return false;}
+        // OOM leaves the presentation unqueued; its reset fence will never signal.
+        if(job.fence && (result==VK_ERROR_OUT_OF_HOST_MEMORY || result==VK_ERROR_OUT_OF_DEVICE_MEMORY))
+            m_presentFencePending[job.imageIndex]=0;
+        if((result==VK_SUCCESS || result==VK_SUBOPTIMAL_KHR) && !m_retiredSwapchains.empty() &&
+            m_retiredReleaseImage==UINT32_MAX)m_retiredReleaseImage=job.imageIndex;
         if(result==VK_SUCCESS || result==VK_SUBOPTIMAL_KHR || result==VK_ERROR_OUT_OF_DATE_KHR)
         {
             if(result==VK_ERROR_OUT_OF_DATE_KHR) m_swapchainNeedsRecreate=true;
-            else if(result==VK_SUBOPTIMAL_KHR || recreateRequestedByAcquire)
+            else if(result==VK_SUBOPTIMAL_KHR || job.acquireSuboptimal)
             {
                 // SUBOPTIMAL images remain usable. An unchanged advisory must not
                 // create an endless chain of swapchains awaiting presentation completion.
@@ -1216,15 +1588,15 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
                     m_swapchainNeedsRecreate=true;
                     if(!status.retryLater) return ReportSwapchainFailure(status);
                 }
-                else m_swapchainNeedsRecreate=changed && (m_presentFencesEnabled || m_retiredSwapchains.empty());
+                else m_swapchainNeedsRecreate|=changed && (m_presentFencesEnabled || m_retiredSwapchains.empty());
             }
             // 크기 변경으로 표시가 생략되어도 프레임은 정상 종료되었다.
             // 다음 BeginFrame이 재생성을 진행하며 준비되지 않은 동안은 프레임을 건너뛴다.
             return true;
         }
         // acquire의 SUBOPTIMAL 신호가 뒤따른 present의 실제 실패를 가리지 않게 한다.
-        if(result==VK_ERROR_DEVICE_LOST)m_submissionFaulted=true;
-        else m_swapchainNeedsRecreate=true;
+        // Deferred failures must remain visible after their mailbox result is consumed.
+        m_submissionFaulted=true;
         LogVulkanFailure("vkQueuePresentKHR",result);
         return false;
     }
@@ -1758,20 +2130,22 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 	bool VulkanDevice::Impl::CreateLogicalDevice()
 	{
 		if(!m_context.physicalInfo) return false;
-		const float priority = 1.0f;
+		const float priorities[] = {1.0f,1.0f};
 		VkDeviceQueueCreateInfo queueInfo{};
 		queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
 		queueInfo.queueFamilyIndex = m_context.queueIndices.graphicsFamily;
-		queueInfo.queueCount = 1;
-		queueInfo.pQueuePriorities = &priority;
+		queueInfo.queueCount = m_context.physicalInfo->graphicsQueue.queueCount>1 ? 2u : 1u;
+		queueInfo.pQueuePriorities = priorities;
 
 		const auto& supported=m_context.physicalInfo->features;
 		VkPhysicalDeviceFeatures enabled{};
 		enabled.samplerAnisotropy = supported.samplerAnisotropy;
+        enabled.textureCompressionBC = supported.textureCompressionBC;
 		enabled.fillModeNonSolid = supported.fillModeNonSolid;
 		enabled.depthBiasClamp = supported.depthBiasClamp;
 		enabled.tessellationShader = supported.tessellationShader;
 		enabled.drawIndirectFirstInstance = supported.drawIndirectFirstInstance;
+        enabled.multiDrawIndirect = supported.multiDrawIndirect;
         enabled.independentBlend=supported.independentBlend;
         enabled.vertexPipelineStoresAndAtomics=supported.vertexPipelineStoresAndAtomics;
         enabled.fragmentStoresAndAtomics=supported.fragmentStoresAndAtomics;
@@ -1900,7 +2274,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
             ? "Swapchain retirement: presentation fences enabled."
             : "Swapchain retirement: presentation fences unavailable; replacement waits for image reacquisition.");
 		vkGetDeviceQueue(m_context.device, m_context.queueIndices.graphicsFamily, 0, &m_context.graphicsQueue);
-		vkGetDeviceQueue(m_context.device, m_context.queueIndices.presentFamily, 0, &m_context.presentQueue);
+		vkGetDeviceQueue(m_context.device, m_context.queueIndices.presentFamily, queueInfo.queueCount-1, &m_context.presentQueue);
         if(calibrationFunction)
             m_context.getCalibratedTimestamps = reinterpret_cast<PFN_vkGetCalibratedTimestampsEXT>(
                 vkGetDeviceProcAddr(m_context.device, calibrationFunction));
@@ -1924,6 +2298,18 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		m_imageAvailableSemaphores.assign(m_owner.GetDesc().maxFramesInFlight, VK_NULL_HANDLE);
 		m_renderFinishedSemaphores.assign(m_swapchain.GetImageCount(), VK_NULL_HANDLE);
 		m_imagesInFlight.assign(m_swapchain.GetImageCount(), VK_NULL_HANDLE);
+        if(m_presentWorker)
+        {
+            m_acquireFences.assign(m_owner.GetDesc().maxFramesInFlight,VK_NULL_HANDLE);
+            m_acquireFencePending.assign(m_acquireFences.size(),0);
+            VkFenceCreateInfo fence{};fence.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+            for(auto& handle:m_acquireFences)
+            {
+                const auto result=vkCreateFence(m_context.device,&fence,nullptr,&handle);
+                if(result!=VK_SUCCESS)
+                {m_submissionFaulted=true;LogVulkanFailure("vkCreateFence(acquire)",result);DestroySwapchainSyncObjects();return false;}
+            }
+        }
 		VkSemaphoreCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 		const auto createSemaphores = [&](std::vector<VkSemaphore>& semaphores, const char* operation)
@@ -1946,6 +2332,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         if(m_presentFencesEnabled)
         {
             m_presentFences.assign(m_swapchain.GetImageCount(),VK_NULL_HANDLE);
+            m_presentFencePending.assign(m_presentFences.size(),0);
             VkFenceCreateInfo fence{};
             fence.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
             fence.flags=VK_FENCE_CREATE_SIGNALED_BIT;
@@ -1990,8 +2377,54 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		m_backBuffer = m_backBuffers.front().get();
 	}
 
+    bool VulkanDevice::Impl::AcquireSubmissionFence(VkFence& fence)
+    {
+        assert(fence==VK_NULL_HANDLE);
+        assert(m_availableSubmissionFenceCount<=m_availableSubmissionFences.size());
+        if(m_availableSubmissionFenceCount)
+        {
+            fence=std::exchange(m_availableSubmissionFences[--m_availableSubmissionFenceCount],VK_NULL_HANDLE);
+            assert(fence!=VK_NULL_HANDLE);
+            const VkResult result=vkResetFences(m_context.device,1,&fence);
+            if(result==VK_SUCCESS)return true;
+            // This fence is detached and was completed before entering the pool.
+            vkDestroyFence(m_context.device,fence,nullptr);
+            fence=VK_NULL_HANDLE;
+            m_submissionFaulted=true;
+            if(m_commandPools)m_commandPools->DisableReuse();
+            LogVulkanFailure("vkResetFences(submission)",result);
+            return false;
+        }
+        VkFenceCreateInfo info{};
+        info.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        const VkResult result=vkCreateFence(m_context.device,&info,nullptr,&fence);
+        if(result==VK_SUCCESS)return true;
+        if(result==VK_ERROR_DEVICE_LOST)
+        {
+            m_submissionFaulted=true;
+            if(m_commandPools)m_commandPools->DisableReuse();
+        }
+        LogVulkanFailure("vkCreateFence(submission)",result);
+        return false;
+    }
+
+    void VulkanDevice::Impl::RecycleSubmissionFence(VkFence fence)
+    {
+        assert(fence!=VK_NULL_HANDLE);
+        assert(std::none_of(m_submissions.begin(),m_submissions.end(),
+            [fence](const auto& submission) {return submission.fence==fence;}));
+        assert(std::find(m_frameSlots.begin(),m_frameSlots.end(),fence)==m_frameSlots.end());
+        assert(std::find(m_imagesInFlight.begin(),m_imagesInFlight.end(),fence)==m_imagesInFlight.end());
+        assert(std::find(m_availableSubmissionFences.begin(),m_availableSubmissionFences.end(),fence)==m_availableSubmissionFences.end());
+        assert(m_availableSubmissionFenceCount<=m_availableSubmissionFences.size());
+        if(m_availableSubmissionFenceCount<m_availableSubmissionFences.size())
+            m_availableSubmissionFences[m_availableSubmissionFenceCount++]=fence;
+        else vkDestroyFence(m_context.device,fence,nullptr);
+    }
+
 	void VulkanDevice::Impl::CollectCompletedSubmissions()
 	{
+        if(!PollPresent())return;
         if(m_commandPools && m_commandPools->IsDeviceLost())m_submissionFaulted=true;
 		if (m_context.device == VK_NULL_HANDLE || m_submissionFaulted) return;
 		for (size_t i = 0; i < m_submissions.size();)
@@ -2022,8 +2455,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
                 commands->AllowPoolReuse();
             }
 			m_completedSubmission=std::max(m_completedSubmission,submission.serial);
-            vkDestroyFence(m_context.device, submission.fence, nullptr);
+            const VkFence fence=std::exchange(submission.fence,VK_NULL_HANDLE);
 			m_submissions.erase(m_submissions.begin() + static_cast<std::ptrdiff_t>(i));
+            RecycleSubmissionFence(fence);
 		}
         DestroyRetiredSwapchains(true);
 		// Without presentation fences, reacquisition remains the completion proof.
@@ -2034,14 +2468,21 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 
 	bool VulkanDevice::Impl::RecreateSwapchain()
 	{
+        if(!PollPresent(true))return false;
+        if(WaitForAcquisitions(0)!=VK_SUCCESS)return false;
 		if (!m_hasSwapchainDesc || m_context.device == VK_NULL_HANDLE || m_submissionFaulted) return false;
 		CollectCompletedSubmissions();
-		if (m_submissionFaulted || !m_submissions.empty() || m_frameReady || m_imageAcquired || m_presentPending) return false;
+		if (m_submissionFaulted || m_frameReady || m_imageAcquired || m_presentPending) return false;
+        // Uploads may precede every BeginFrame; drain this exceptional path to avoid resize starvation.
+        if(!m_submissions.empty() && !WaitIdle())return false;
+        m_prefetchedImage=false;
 		if (m_swapchain.GetHandle() != VK_NULL_HANDLE)
 		{
-            if(!m_owner.TryBeginSwapchainRetirement())return false;
+            // A replacement can also become out of date before its first present/reacquire proof.
+            const bool firstRetirement=m_retiredSwapchains.empty();
+            if(firstRetirement && !m_owner.TryBeginSwapchainRetirement())return false;
             try { m_recreationOldSwapchain = RetireSwapchainGeneration(); }
-            catch(...) { m_owner.CompleteSwapchainRetirement(); throw; }
+            catch(...) { if(firstRetirement)m_owner.CompleteSwapchainRetirement(); throw; }
 		}
 		return CreateSwapchain(m_swapchainDesc, m_recreationOldSwapchain);
 	}
@@ -2055,6 +2496,9 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		generation.imageAvailableSemaphores = std::move(m_imageAvailableSemaphores);
 		generation.renderFinishedSemaphores = std::move(m_renderFinishedSemaphores);
         generation.presentFences=std::move(m_presentFences);
+        generation.presentFencePending=std::move(m_presentFencePending);
+        generation.acquireFences=std::move(m_acquireFences);
+        m_acquireFencePending.clear();
         generation.presented=m_swapchainPresented;
 		generation.backBuffers = std::move(m_backBuffers);
 		m_backBuffer = nullptr;
@@ -2079,15 +2523,23 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			}
             for(VkFence fence:m_presentFences)
                 if(fence!=VK_NULL_HANDLE)vkDestroyFence(m_context.device,fence,nullptr);
+            for(VkFence fence:m_acquireFences)
+                if(fence!=VK_NULL_HANDLE)vkDestroyFence(m_context.device,fence,nullptr);
 		}
 		m_imageAvailableSemaphores.clear();
 		m_renderFinishedSemaphores.clear();
         m_presentFences.clear();
+        m_presentFencePending.clear();
+        m_acquireFences.clear();m_acquireFencePending.clear();
 		m_imagesInFlight.clear();
 	}
 
 	void VulkanDevice::Impl::DestroyCurrentSwapchain()
 	{
+        PollPresent(true);
+        const auto acquired=WaitForAcquisitions();
+        if(acquired!=VK_SUCCESS && acquired!=VK_ERROR_DEVICE_LOST)return;
+        m_prefetchedImage=false;
 		DestroySwapchainSyncObjects();
 		m_backBuffer = nullptr;
 		m_backBuffers.clear();
@@ -2108,8 +2560,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
                 {
                     if(!m_presentFencesEnabled) {++i;continue;}
                     bool ready=true;
-                    for(VkFence fence:generation.presentFences)
+                    for(size_t fenceIndex=0;fenceIndex<generation.presentFences.size();++fenceIndex)
                     {
+                        if(!generation.presentFencePending[fenceIndex])continue;
+                        const VkFence fence=generation.presentFences[fenceIndex];
                         const auto status=vkGetFenceStatus(m_context.device,fence);
                         if(status==VK_NOT_READY) {ready=false;break;}
                         if(status!=VK_SUCCESS)
@@ -2133,6 +2587,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			generation.backBuffers.clear();
             for(VkFence fence:generation.presentFences)
                 vkDestroyFence(m_context.device,fence,nullptr);
+            for(VkFence fence:generation.acquireFences)
+                vkDestroyFence(m_context.device,fence,nullptr);
 			generation.swapchain.Cleanup(m_context.device);
             m_retiredSwapchains.erase(m_retiredSwapchains.begin()+static_cast<std::ptrdiff_t>(i));
 		}
@@ -2150,6 +2606,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         if(m_commandPools)m_commandPools->DisableReuse();
 		if (m_context.device != VK_NULL_HANDLE)
 		{
+			std::fill(m_frameSlots.begin(),m_frameSlots.end(),VK_NULL_HANDLE);
+			std::fill(m_imagesInFlight.begin(),m_imagesInFlight.end(),VK_NULL_HANDLE);
 			// 소유 장치의 소멸자가 큐 완료 또는 실제 DEVICE_LOST를 확인한 뒤에만 호출된다.
             // Public resources (including queries) were already released. Retire
             // native records without publishing query initialization during teardown.
@@ -2158,6 +2616,13 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 				if (submission.fence != VK_NULL_HANDLE) vkDestroyFence(m_context.device, submission.fence, nullptr);
 			}
 			m_submissions.clear();
+            for(size_t i=0;i<m_availableSubmissionFenceCount;++i)
+            {
+                assert(m_availableSubmissionFences[i]!=VK_NULL_HANDLE);
+                vkDestroyFence(m_context.device,m_availableSubmissionFences[i],nullptr);
+                m_availableSubmissionFences[i]=VK_NULL_HANDLE;
+            }
+            m_availableSubmissionFenceCount=0;
 		}
 		m_acquiredCommandLists.clear();
         m_commandPools.reset();
@@ -2165,7 +2630,6 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		// Drop cached native pages while VkDevice still exists.
 		m_uploadPool.reset();
 		m_failedReadback.reset();
-		std::fill(m_frameSlots.begin(), m_frameSlots.end(), VK_NULL_HANDLE);
 
 		for (dyf::RHI::ResourceSetHandle resourceSet : m_resourceSets)
 			VulkanObjectDeleter{}(static_cast<VulkanResourceSet*>(resourceSet));

@@ -18,7 +18,7 @@ void main(uint3 thread:SV_DispatchThreadID)
     float2 margin=sphere.w*sqrt(projection.xy*projection.xy+1);
     bool inside=position.z+sphere.w>=projection.z && position.z-sphere.w<=projection.w &&
         all(abs(position.xy)*projection.xy<=position.z+margin);
-    if(controls.y==1 && !inside) return;
+    if(!inside) return;
     uint slot;InterlockedAdd(arguments[1],1,slot);
     visibleIds[slot]=id;
 }

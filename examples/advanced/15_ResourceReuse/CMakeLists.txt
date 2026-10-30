@@ -1,23 +1,25 @@
 cmake_minimum_required(VERSION 3.20)
 project(AdvancedResourceReuse LANGUAGES CXX)
-get_filename_component(engine_default "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
-set(DY_ENGINE_SOURCE_DIR "${engine_default}" CACHE PATH "dy_engine source directory.")
+
 if(NOT TARGET dy_engine)
-    add_subdirectory("${DY_ENGINE_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/dy_engine" EXCLUDE_FROM_ALL)
+    find_path(DY_ENGINE_INCLUDE_DIR dyf/RHI.h REQUIRED)
+    find_library(DY_ENGINE_LIBRARY NAMES dy_engine REQUIRED)
+    add_library(dy_engine STATIC IMPORTED)
+    set_target_properties(dy_engine PROPERTIES
+        IMPORTED_LOCATION "${DY_ENGINE_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${DY_ENGINE_INCLUDE_DIR}"
+        INTERFACE_LINK_LIBRARIES "${DY_ENGINE_LINK_LIBRARIES}")
 endif()
-include("${DY_ENGINE_SOURCE_DIR}/cmake/CompileShaders.cmake")
+
 add_executable(AdvancedResourceReuse main.cpp)
+target_compile_features(AdvancedResourceReuse PRIVATE cxx_std_17)
 target_link_libraries(AdvancedResourceReuse PRIVATE dy_engine)
-set(shader_dir "${CMAKE_CURRENT_SOURCE_DIR}/Shaders")
-dy_compile_shader(AdvancedResourceReuse vertex vert
-    GLSL "${shader_dir}/canvas_vs.glsl"
-    HLSL "${shader_dir}/canvas_vs.hlsl"
-    METAL "${shader_dir}/canvas.metal"
-    METAL_ENTRY canvasVertex
-    INCLUDE_DIRS "${shader_dir}")
-dy_compile_shader(AdvancedResourceReuse fragment frag
-    GLSL "${shader_dir}/canvas_ps.glsl"
-    HLSL "${shader_dir}/canvas_ps.hlsl"
-    METAL "${shader_dir}/canvas.metal"
-    METAL_ENTRY canvasFragment
-    INCLUDE_DIRS "${shader_dir}")
+target_compile_definitions(AdvancedResourceReuse PRIVATE "$<$<BOOL:${USE_METAL}>:DY_EXAMPLE_METAL>")
+
+include("${CMAKE_CURRENT_LIST_DIR}/../../../cmake/CompileShaders.cmake" OPTIONAL)
+if(COMMAND dy_example_shader)
+    dy_example_shader(AdvancedResourceReuse vert Shaders/canvas_vs.glsl Shaders/vertex.bin
+        HLSL Shaders/canvas_vs.hlsl METAL Shaders/canvas.metal METAL_ENTRY canvasVertex)
+    dy_example_shader(AdvancedResourceReuse frag Shaders/canvas_ps.glsl Shaders/fragment.bin
+        HLSL Shaders/canvas_ps.hlsl METAL Shaders/canvas.metal METAL_ENTRY canvasFragment)
+endif()

@@ -8,7 +8,7 @@
 
 // 정점·픽셀 단계가 공유하는 192바이트 draw 상수다. 행렬 뒤의 재질 필드도 생략하지 않아 CPU와 같은 위치에서 읽는다.
 // 표면에 수직인 방향(법선)의 Y축 반전 여부를 padding1에 넣는다.
-// padding0은 알파 임곗값 비트, padding1은 알파 모드·양면·법선 Y 반전·unlit 비트, padding2는 재질 번호다. 실제 재질 판정은 픽셀 단계가 맡는다.
+// padding0은 알파 임곗값 비트, padding1은 알파 모드·양면·법선 Y 반전·unlit·반전 변환 면 방향 보정 비트, padding2는 재질 번호다. 실제 재질 판정은 픽셀 단계가 맡는다.
 cbuffer DrawConstants : register(
     b10,
     space0)
@@ -45,14 +45,15 @@ cbuffer ShadowMatrix : register(
 #endif
 
 // 표면을 따라가는 방향(접선)을 정점 속성으로 받는다.
-// 한 정점은 위치·법선·UV·접선을 가지며, 인스턴싱이면 4~7번 입력에 모델 행렬의 네 열이 추가된다.
+// 한 정점은 위치·법선·UV·접선·색상의 64바이트 배치다. 색상은 8번 입력, 인스턴싱 모델 행렬의 네 열은 4~7번 입력을 쓴다.
 struct VSInput
 {
     float3 position : TEXCOORD0;
     float3 normal : TEXCOORD1;
     float2 uv : TEXCOORD2;
     float4 tangent : TEXCOORD3;
-#if RENDERER_INSTANCING // 인스턴싱 빌드에서만 물체별 행렬 입력을 사용하며, 일반 경로는 draw 상수의 모델 행렬을 쓴다.
+    float4 color : TEXCOORD8;
+#if RENDERER_INSTANCING
     float4 model0 : TEXCOORD4;
     float4 model1 : TEXCOORD5;
     float4 model2 : TEXCOORD6;
@@ -68,7 +69,8 @@ struct VSOutput
     float3 worldPosition : TEXCOORD1;
     float3 worldNormal : TEXCOORD2;
     float4 worldTangent : TEXCOORD3;
-#if RENDERER_ENABLE_SHADOWS // 그림자 사용 빌드에서만 공유 그림자 자료와 광원 공간 입출력을 포함한다.
+    float4 color : TEXCOORD5;
+#if RENDERER_ENABLE_SHADOWS
     float4 lightSpacePosition : TEXCOORD4;
 #endif
 };
@@ -126,6 +128,7 @@ VSOutput main(VSInput input)
     VSOutput output;
     output.position = clipPosition;
     output.uv = input.uv;
+    output.color = input.color;
     output.worldPosition = worldPosition.xyz;
     output.worldNormal = MeshNormalizeOr(mul(normalMatrix, input.normal), float3(0,0,1));
     float3 tangent = mul((float3x3)world, input.tangent.xyz);

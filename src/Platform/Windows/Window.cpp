@@ -129,7 +129,10 @@ namespace dyf::Platform
 	}
 
 	bool Window::IsRunning() const { return m_backend && m_backend->IsRunning(); }
-	void Window::RequestClose() const { if(m_backend) m_backend->RequestClose(); }
+	void Window::RequestClose() const
+	{
+		if(m_backend) m_backend->RequestClose();
+	}
 	bool Window::CancelClose() const { return m_backend && m_backend->CancelClose(); }
 	void Window::SetTitle(const char* title) const { if(m_backend) m_backend->SetTitle(title); }
 	void Window::Restore() const { if(m_backend) m_backend->Restore(); }
@@ -154,6 +157,7 @@ namespace dyf::Platform
 	bool Window::SetRawMouseMotion(bool value) { return m_backend ? m_backend->SetRawMouseMotion(value) : !value; }
 	bool Window::IsRawMouseMotionEnabled() const { return m_backend && m_backend->IsRawMouseMotionEnabled(); }
 	NativeWindowHandle Window::GetNativeHandle() const { return m_backend ? m_backend->GetNativeHandle() : NativeWindowHandle{}; }
+	uint64_t Window::GetSurfaceGeneration() const { return m_backend ? m_backend->GetSurfaceGeneration() : 0; }
 	void* Window::GetHandle() const { return GetNativeHandle().value; }
 
 	GLFWwindow* GetGlfwWindow(const Window& window) noexcept

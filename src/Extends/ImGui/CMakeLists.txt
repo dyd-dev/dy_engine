@@ -1,6 +1,6 @@
 FetchContent_Declare(imgui
     GIT_REPOSITORY "https://github.com/ocornut/imgui.git"
-    GIT_TAG "3912b3d9a9c1b3f17431aebafd86d2f40ee6e59c" # v1.92.5-docking
+    GIT_TAG "2a1b69f05748ad909f03acf4533447cac1331611" # v1.92.6-docking
 )
 FetchContent_MakeAvailable(imgui)
 
@@ -11,16 +11,10 @@ add_library(dy_imgui STATIC
     "${imgui_SOURCE_DIR}/imgui_tables.cpp"
     "${imgui_SOURCE_DIR}/imgui_widgets.cpp"
     "${imgui_SOURCE_DIR}/imgui_demo.cpp"
-    "${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp"
 )
 add_library(dyf::ImGui ALIAS dy_imgui)
-target_link_libraries(dy_imgui PUBLIC dy_engine PRIVATE glfw)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    find_package(X11 REQUIRED)
-    target_link_libraries(dy_imgui PRIVATE X11::X11)
-endif()
+target_link_libraries(dy_imgui PUBLIC dy_engine)
 target_include_directories(dy_imgui PUBLIC "${imgui_SOURCE_DIR}")
-target_compile_definitions(dy_imgui PRIVATE GLFW_INCLUDE_NONE)
 
 # Keep the Canvas color/vertex ABI and all three native shader sources in one place.
 include(CompileShaders)

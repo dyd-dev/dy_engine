@@ -18,7 +18,8 @@ struct SpatialProbe {float4 positionIntensity,boxMinFade,boxMaxMip;float4 sh[9];
 inline float ProbeVisibility(float3 position,device const SpatialProbe& probe,uint index,
     texture2d_array<float> image,uint count)
 {
-    return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,count+index,image);
+    return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,
+        count+index,image);
 }
 inline float ProbeWeight(float3 position,device const SpatialProbe& probe,thread float& coverage)
 {

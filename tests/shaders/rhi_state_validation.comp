@@ -1,0 +1,12 @@
+#version 450
+layout(local_size_x=1,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0) uniform texture2D sampledImage;
+layout(set=0,binding=1) uniform sampler imageSampler;
+layout(std430,set=0,binding=2) writeonly buffer Output { vec4 value; } outputData;
+
+void main()
+{
+    outputData.value=textureLod(sampler2D(sampledImage,imageSampler),vec2(0.5),0.0)
+        +textureLod(sampler2D(sampledImage,imageSampler),vec2(0.5),1.0)
+        +textureLod(sampler2D(sampledImage,imageSampler),vec2(0.5),2.0);
+}

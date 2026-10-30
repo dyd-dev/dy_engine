@@ -20,8 +20,9 @@ vec3 OutputWhiteBalance(vec3 color)
 vec3 OutputColorGrade(vec3 color)
 {
     if(settings.gainEnabled.w<.5)return color; // 색보정이 꺼져 있으면 gain·lift·감마·대비·채도를 생략한다.
-    color=pow(clamp(color*settings.gainEnabled.rgb+settings.liftSaturation.rgb,vec3(0),vec3(1)),
-        vec3(1)/max(settings.gammaSharpen.rgb,vec3(.01)));
+    color=clamp(color*settings.gainEnabled.rgb+settings.liftSaturation.rgb,vec3(0),vec3(1));
+    if(any(notEqual(settings.gammaSharpen.rgb,vec3(1))))
+        color=pow(color,vec3(1)/max(settings.gammaSharpen.rgb,vec3(.01)));
     color=(color-vec3(.18))*settings.whiteContrast.w+vec3(.18);
     float luminance=dot(color,vec3(.2126,.7152,.0722));
     return clamp(mix(vec3(luminance),color,settings.liftSaturation.w),vec3(0),vec3(1));
