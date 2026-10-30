@@ -27,7 +27,7 @@ kernel void cullObjects(constant Frame& frame [[buffer(15)]],device const float4
     visibleIds[slot]=id;
 }
 struct Output {float4 position [[position]];float3 color;};
-vertex Output vertexMain(uint vertex [[vertex_id]],uint instance [[instance_id]],
+vertex Output vertexMain(uint vertexIndex [[vertex_id]],uint instance [[instance_id]],
     constant Frame& frame [[buffer(15)]],device const float4* bounds [[buffer(0)]],
     device const uint* visibleIds [[buffer(1)]])
 {
@@ -35,7 +35,7 @@ vertex Output vertexMain(uint vertex [[vertex_id]],uint instance [[instance_id]]
     const uint id=visibleIds[instance];
     float4 sphere=bounds[id];const float phase=.37f*float(id);
     sphere.xy+=.25f*float2(sin(frame.camera.w+phase),cos(frame.camera.w*.8f+phase));
-    float3 position=sphere.xyz-frame.camera.xyz;position.xy+=vertices[vertex]*sphere.w;
+    float3 position=sphere.xyz-frame.camera.xyz;position.xy+=vertices[vertexIndex]*sphere.w;
     const float depth=frame.projection.w/(frame.projection.w-frame.projection.z);
     const float3 color=float3(.15f,.35f,.65f)+float3(.75f,.55f,.3f)*fract(float(id)*float3(.13f,.37f,.07f));
     return {float4(position.xy*frame.projection.xy,depth*(position.z-frame.projection.z),position.z),color};
