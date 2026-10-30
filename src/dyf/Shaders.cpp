@@ -1,4 +1,7 @@
 #include "RendererInternal.h"
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #if defined(ENABLE_METAL) // Metal 빌드의 라이브러리 바이트 헤더를 포함한다.
 #include "StockMetalLibrary.h"
 #include "BindlessMetalLibrary.h"
@@ -34,6 +37,10 @@
 #include "StockNoAreaDepthPrepassFragmentNoShadows.h"
 #include "BindlessNoAreaDepthPrepassFragment.h"
 #include "BindlessNoAreaDepthPrepassFragmentNoShadows.h"
+#endif
+#if defined(ENABLE_VULKAN)
+#include "StockNoAreaDepthPrepassFragmentGatherPcf.h"
+#include "BindlessNoAreaDepthPrepassFragmentGatherPcf.h"
 #endif
 
 namespace dyf
@@ -78,6 +85,16 @@ RHI::ShaderDesc Renderer::Impl::DefaultNoAreaFragment(bool shadows,bool bindless
     constexpr const char* entry="main";
 #endif
 #if defined(ENABLE_METAL) || defined(ENABLE_D3D12) || defined(ENABLE_VULKAN)
+#if defined(ENABLE_VULKAN)
+    if(shadows && depthPrepass)
+        if(const char* setting=std::getenv("DYF_DIAG_GATHER_PCF");setting && std::strcmp(setting,"1")==0)
+        {
+            std::fprintf(stderr,"[Renderer] MainForward gather-PCF diagnostic shader active (%s).\n",bindless?"bindless":"stock");
+            return bindless
+                ? RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kBindlessNoAreaDepthPrepassFragmentGatherPcf,kBindlessNoAreaDepthPrepassFragmentGatherPcfSize}
+                : RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kStockNoAreaDepthPrepassFragmentGatherPcf,kStockNoAreaDepthPrepassFragmentGatherPcfSize};
+        }
+#endif
     if(depthPrepass)
     {
         if(bindless)

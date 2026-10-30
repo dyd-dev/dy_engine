@@ -1,4 +1,7 @@
 #version 450
+#ifndef SURFACE_FULL_OUTPUTS
+#define SURFACE_FULL_OUTPUTS 0
+#endif
 layout(location=0) in vec2 uv;
 layout(location=1) in vec3 worldNormal;
 layout(location=2) in vec4 worldTangent;
@@ -28,7 +31,11 @@ vec2 octEncode(vec3 n)
 void main()
 {
     Draw draw=draws[index.x];uint flags=draw.flags.x;
+#if SURFACE_FULL_OUTPUTS
+    const bool needNormal=true,needMaterial=true,needMotion=true;
+#else
     bool needNormal=(frame.outputs.w&1u)!=0u,needMaterial=(frame.outputs.w&2u)!=0u,needMotion=(frame.outputs.w&4u)!=0u;
+#endif
     vec4 base=draw.baseColor*vertexColor;
     if((needMaterial || draw.flags.y==1u) && (flags&1u)!=0u)base*=texture(sampler2D(baseTexture,materialSampler),uv);
     if((flags&64u)!=0u)base.rgb=draw.baseColor.rgb;
@@ -55,16 +62,31 @@ void main()
         roughness=sqrt(sqrt(filteredAlphaSquared));
     }
     if(draw.flags.y==1u && base.a<draw.alpha.x)discard;
+#if !SURFACE_FULL_OUTPUTS
     vec4 values[3]=vec4[3](vec4(0),vec4(0),vec4(0));
+#endif
     if(needNormal)
     {
         if(draw.flags.z!=0u && !gl_FrontFacing)n=-n;
         float authoredAO=1.0;
         if((flags&8u)!=0u)authoredAO=mix(1.0,texture(sampler2D(aoTexture,materialSampler),uv).r,draw.materialParams.w);
         // 음수 거칠기는 조명을 받지 않는 재질 표식이며 법선·AO·모션은 보존한다.
-        values[frame.outputs.x]=vec4(octEncode(n),draw.alpha.z>.5?-1.0:roughness,clamp(authoredAO,0.0,1.0));
+        vec4 normalValue=vec4(octEncode(n),draw.alpha.z>.5?-1.0:roughness,clamp(authoredAO,0.0,1.0));
+#if SURFACE_FULL_OUTPUTS
+        normalRoughAO=normalValue;
+#else
+        values[frame.outputs.x]=normalValue;
+#endif
     }
-    if(needMaterial)values[frame.outputs.y]=vec4(max(base.rgb,vec3(0)),clamp(mr.x,0.0,1.0));
+    if(needMaterial)
+    {
+        vec4 materialValue=vec4(max(base.rgb,vec3(0)),clamp(mr.x,0.0,1.0));
+#if SURFACE_FULL_OUTPUTS
+        albedoMetal=materialValue;
+#else
+        values[frame.outputs.y]=materialValue;
+#endif
+    }
     if(needMotion)
     {
         vec4 previousView=frame.inversePreviousProjection*previousClip;
@@ -73,7 +95,14 @@ void main()
         bool valid=previousDepth>0.0 && frame.options.w>0.5 && previousClip.w>1e-5 && currentClip.w>1e-5;
         vec2 currentUV=currentClip.xy/currentClip.w*vec2(0.5,-0.5)+0.5;
         vec2 previousUV=valid?previousClip.xy/previousClip.w*vec2(0.5,-0.5)+0.5:currentUV;
-        values[frame.outputs.z]=vec4(currentUV-previousUV,max(viewDepth,0.0),valid?previousDepth:0.0);
+        vec4 motionValue=vec4(currentUV-previousUV,max(viewDepth,0.0),valid?previousDepth:0.0);
+#if SURFACE_FULL_OUTPUTS
+        motionDepth=motionValue;
+#else
+        values[frame.outputs.z]=motionValue;
+#endif
     }
+#if !SURFACE_FULL_OUTPUTS
     normalRoughAO=values[0];albedoMetal=values[1];motionDepth=values[2];
+#endif
 }

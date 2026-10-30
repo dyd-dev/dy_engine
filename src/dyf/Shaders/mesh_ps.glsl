@@ -11,6 +11,9 @@
 #ifndef RENDERER_ENABLE_AREA_LIGHTS
 #define RENDERER_ENABLE_AREA_LIGHTS 1
 #endif
+#ifndef RENDERER_PCF_GATHER
+#define RENDERER_PCF_GATHER 0
+#endif
 #if RENDERER_DEPTH_PREPASS
 layout(early_fragment_tests) in;
 #endif
@@ -313,6 +316,13 @@ layout(set=0,binding=RENDERER_BINDING_SHADOW_MATRIX) uniform ShadowMatrix {
 
 // 한 그림자 시점의 가시율을 구한다. 0~1 깊이와 위아래를 뒤집은 UV를 아틀라스 영역에 넣고, 같은 표면이 자기 그림자로 판정되는 오차를 줄이도록 표면 기울기 기반 bias를 수신 깊이에서 뺀다.
 // 광원 크기가 있으면 PCSS로 반그림자를, 없으면 고정 텍셀 반경 PCF로 가시 표본 비율을 구한다. strength는 최종 어두워지는 양만 조절한다.
+#if RENDERER_PCF_GATHER
+float CountShadowGather(vec2 coordinate,float receiver,vec4 mask)
+{
+    vec4 depths=textureGather(sampler2D(shadowMap,shadowSampler),coordinate,0);
+    return dot(vec4(lessThanEqual(vec4(receiver),depths)),mask);
+}
+#endif
 float SampleShadowView(int index,vec3 worldPosition,vec3 normal,vec3 lightDir,float strength,float sourceRadius,int pointBase)
 {
     vec4 clip=shadowMatrix.lightViewProjectionMatrix[index]*vec4(worldPosition,1.0);
@@ -322,7 +332,12 @@ float SampleShadowView(int index,vec3 worldPosition,vec3 normal,vec3 lightDir,fl
     uv.y=1.0-uv.y;
     if(uv.x<0.0||uv.y<0.0||uv.x>1.0||uv.y>1.0||ndc.z<0.0||ndc.z>1.0)return 1.0; // 그림자 시점의 UV 또는 0~1 깊이 범위 밖이면 완전 가시로 둔다.
     vec4 tile=shadowMatrix.atlasRect[index];
+#if RENDERER_PCF_GATHER
+    ivec2 atlasSize=textureSize(sampler2D(shadowMap,shadowSampler),0);
+    vec2 texel=1.0/vec2(atlasSize);
+#else
     vec2 texel=1.0/vec2(textureSize(sampler2D(shadowMap,shadowSampler),0));
+#endif
     vec2 minUv=tile.xy+texel*.5;
     vec2 maxUv=tile.xy+tile.zw-texel*.5;
     vec2 localUv=uv;
@@ -335,6 +350,29 @@ float SampleShadowView(int index,vec3 worldPosition,vec3 normal,vec3 lightDir,fl
     float radius=min(lighting.shadowParams.w,shadowMatrix.filterParams.z);
     int extent=int(ceil(radius));
     float visible=0.0,samples=float((2*extent+1)*(2*extent+1));
+#if RENDERER_PCF_GATHER
+    ivec2 center=ivec2(floor(uv*vec2(atlasSize)));
+    ivec2 tileMin=ivec2(floor(minUv*vec2(atlasSize)));
+    ivec2 tileMax=ivec2(floor(maxUv*vec2(atlasSize)));
+    if(extent==2 && all(greaterThanEqual(center-ivec2(2),tileMin)) &&
+        all(lessThanEqual(center+ivec2(2),tileMax)))
+    {
+        // Nine 2x2 gathers cover the original 5x5 point-sampled filter.
+        const vec4 full=vec4(1),left=vec4(1,0,0,1),bottom=vec4(0,0,1,1),corner=vec4(0,0,0,1);
+        vec2 origin=uv-vec2(1.5)*texel;
+        vec2 step2=2.0*texel;
+        visible+=CountShadowGather(origin,receiver,full);
+        visible+=CountShadowGather(origin+vec2(step2.x,0),receiver,full);
+        visible+=CountShadowGather(origin+vec2(2*step2.x,0),receiver,left);
+        visible+=CountShadowGather(origin+vec2(0,step2.y),receiver,full);
+        visible+=CountShadowGather(origin+step2,receiver,full);
+        visible+=CountShadowGather(origin+vec2(2*step2.x,step2.y),receiver,left);
+        visible+=CountShadowGather(origin+vec2(0,2*step2.y),receiver,bottom);
+        visible+=CountShadowGather(origin+vec2(step2.x,2*step2.y),receiver,bottom);
+        visible+=CountShadowGather(origin+2*step2,receiver,corner);
+    }
+    else
+#endif
     for(int y=-extent;y<=extent;++y)for(int x=-extent;x<=extent;++x)
     {
         vec2 sampleUv=clamp(uv+vec2(x,y)*texel,minUv,maxUv);

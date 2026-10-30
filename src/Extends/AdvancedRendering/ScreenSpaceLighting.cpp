@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <cstdio>
 #include <limits>
@@ -19,6 +20,7 @@
 #elif defined(ENABLE_VULKAN) || defined(ENABLE_D3D12)
 #include "SurfaceVertex.h"
 #include "SurfaceFragment.h"
+#include "SurfaceFullFragment.h"
 #include "ScreenSpaceVertex.h"
 #include "ScreenSpaceFragment.h"
 #include "ScreenSpaceLightingFragment.h"
@@ -227,12 +229,14 @@ void ScreenSpaceLighting::Reset()
         m_device->DestroyPipeline(m_screenPipeline);m_device->DestroyPipeline(m_lightingPipeline);
         m_device->DestroyPipeline(m_debugPipeline);
         for(auto* shader:m_shaders) m_device->DestroyShader(shader);
+        m_device->DestroyShader(m_fullSurfaceShader);
         for(auto* shader:m_compactSurfaceShaders) m_device->DestroyShader(shader);
         for(auto* shader:m_denoiseShaders) m_device->DestroyShader(shader);
         for(auto* pipeline:m_denoisePipelines) m_device->DestroyPipeline(pipeline);
         m_device->DestroyBuffer(m_frameBuffer);m_device->DestroyBuffer(m_drawBuffer);
     }
     m_textures={};m_states={};m_handles={};m_imported={};m_shaders={};m_surfacePipelines={};
+    m_fullSurfaceShader=nullptr;
     m_compactSurfaceShaders={};
     m_screenPipeline=m_lightingPipeline=nullptr;m_frameBuffer=m_drawBuffer=nullptr;
     m_debugPipeline=nullptr;m_debugFormat=Format::Unknown;
@@ -270,6 +274,17 @@ bool ScreenSpaceLighting::CreatePipelines(uint32_t surfaceMask)
     for(uint32_t i=0;i<m_shaders.size();++i)
         if(!m_shaders[i] && !(m_shaders[i]=m_device->CreateShader(shaders[i]))) return false;
     auto* surfaceFragment=m_shaders[1];
+#if defined(ENABLE_VULKAN) || defined(ENABLE_D3D12)
+    if(surfaceMask==7)
+        if(const char* setting=std::getenv("DYF_DIAG_SURFACE_FULL_SHADER");setting && std::strcmp(setting,"1")==0)
+        {
+            if(!m_fullSurfaceShader)
+                m_fullSurfaceShader=m_device->CreateShader({ShaderStage::Fragment,"main",kSurfaceFullFragment,kSurfaceFullFragmentSize});
+            if(!m_fullSurfaceShader)return false;
+            surfaceFragment=m_fullSurfaceShader;
+            std::fputs("[Surface] Full-output diagnostic shader active.\n",stderr);
+        }
+#endif
 #if defined(ENABLE_METAL)
     if(colorCount<3)
     {

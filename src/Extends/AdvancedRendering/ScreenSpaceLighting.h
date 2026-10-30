@@ -166,6 +166,7 @@ private:
     RHI::RGResourceHandle m_frameHandle,m_drawHandle,m_depthHandle;
     GraphResources m_graph;
     std::array<RHI::ShaderHandle,6> m_shaders={};
+    RHI::ShaderHandle m_fullSurfaceShader=nullptr;
     std::array<RHI::PipelineHandle,32> m_surfacePipelines={};
     std::array<RHI::ShaderHandle,3> m_compactSurfaceShaders={};
     RHI::PipelineHandle m_screenPipeline=nullptr,m_lightingPipeline=nullptr;

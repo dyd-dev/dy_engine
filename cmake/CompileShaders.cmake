@@ -612,6 +612,17 @@ macro(dy_build_stock_shaders)
             endforeach()
         endforeach()
 
+        if(DY_BACKEND_NORMALIZED STREQUAL "VULKAN")
+            dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.glsl" frag
+                StockNoAreaDepthPrepassFragmentGatherPcf kStockNoAreaDepthPrepassFragmentGatherPcf
+                -DRENDERER_ENABLE_AREA_LIGHTS=0 -DRENDERER_ENABLE_SHADOWS=1 -DRENDERER_BINDLESS=0
+                -DRENDERER_DEPTH_PREPASS=1 -DRENDERER_PCF_GATHER=1)
+            dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.glsl" frag
+                BindlessNoAreaDepthPrepassFragmentGatherPcf kBindlessNoAreaDepthPrepassFragmentGatherPcf
+                -DRENDERER_ENABLE_AREA_LIGHTS=0 -DRENDERER_ENABLE_SHADOWS=1 -DRENDERER_BINDLESS=1
+                -DRENDERER_DEPTH_PREPASS=1 -DRENDERER_PCF_GATHER=1)
+        endif()
+
         if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
             dy_embed_stock_metal_library(GpuVisibilityCompute kGpuVisibilityCompute gpu_visibility)
             dy_embed_stock_metal_library(GpuOcclusionCompute kGpuOcclusionCompute gpu_visibility -DGPU_VISIBILITY_OCCLUSION=1)
