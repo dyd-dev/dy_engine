@@ -4,18 +4,66 @@
 #include "GpuVisibility.h"
 #include "SceneAlgorithms.h"
 #include <algorithm>
+#include <cassert>
 #include <cmath>
+#include <cstring>
 #include <map>
 #include <tuple>
 #include <unordered_map>
 
 namespace dyf
 {
+// 스칼라·텍스처 핸들·플래그 해시로 후보를 좁힌 뒤 전체 동등성을 확인해 대표 재질을 공유한다. 해시 충돌만으로 합치지 않는다.
+namespace
+{
+template<class States>
+class MaterialCanonicalizer
+{
+    const Scene& m_scene;
+    const States& m_states;
+    std::vector<uint32_t> m_representatives;
+    struct Candidate {uint32_t material,next;};
+    std::vector<Candidate> m_candidates;
+    std::unordered_map<size_t,uint32_t> m_buckets;
+public:
+    MaterialCanonicalizer(const Scene& scene,const States& states)
+        :m_scene(scene),m_states(states),m_representatives(scene.Materials().size(),UINT32_MAX)
+    {
+        const auto capacity=std::min(scene.Materials().size(),size_t(scene.GetEntityCount()));
+        m_candidates.reserve(capacity);m_buckets.reserve(capacity);
+    }
+    uint32_t operator()(uint32_t index)
+    {
+        if(m_representatives[index]!=UINT32_MAX)return m_representatives[index];
+        const auto& material=m_scene.Materials()[index];
+        const auto& state=m_states[index];
+        size_t hash=MaterialScalarHash(material);
+        const auto combine=[&](size_t value) {hash^=value+size_t{0x9e3779b9}+(hash<<6)+(hash>>2);};
+        combine(std::hash<uint32_t>{}(state.textureFlags));
+        for(const auto texture:state.textures)combine(std::hash<RHI::TextureHandle>{}(texture));
+        // Chain colliding representatives in contiguous storage instead of
+        // allocating a separate vector for every distinct material hash.
+        auto& first=m_buckets.try_emplace(hash,UINT32_MAX).first->second;
+        for(auto entry=first;entry!=UINT32_MAX;entry=m_candidates[entry].next)
+        {
+            const auto candidate=m_candidates[entry].material;
+            const auto& representative=m_states[candidate];
+            if(state.textureFlags==representative.textureFlags && state.textures==representative.textures &&
+                EqualMaterial(material,m_scene.Materials()[candidate]))
+                return m_representatives[index]=candidate;
+        }
+        m_candidates.push_back({index,first});
+        first=static_cast<uint32_t>(m_candidates.size()-1);
+        return m_representatives[index]=index;
+    }
+};
+}
+
 // 설정 요청뿐 아니라 인스턴싱·표준 셰이더·Compute·IndirectDraw 지원을 함께 검사한다. 환경 캡처는 이 경로에서 제외한다.
 bool Renderer::Impl::UsesGpuVisibility() const
 {
     return config.enableGpuCulling && config.enableInstancing && UsesStockGeometry() &&
-        !m_environmentCapture && device->Supports(RHI::Feature::Compute) &&
+        shaderSources.bytes[MeshFragment].empty() && !m_environmentCapture && device->Supports(RHI::Feature::Compute) &&
         device->Supports(RHI::Feature::IndirectDraw);
 }
 
@@ -25,37 +73,16 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
 {
     visibilityActive=false;visibilityDraws.clear();
     if(!UsesGpuVisibility() || !stockDrawInputs) return true; // 장치/설정/입력 계약이 맞지 않으면 GPU 경로만 생략하고 CPU 렌더는 계속할 수 있다.
+    if(!PrepareMainIndirectGeometry(scene,device))return false;
     // 같은 메시·동등 재질·현재/이전 정점 버퍼·그림자 수신·반전 여부인 객체만 같은 그룹으로 묶는다. 재질 ID가 달라도 실제 내용이 같으면 대표 재질로 통합할 수 있다.
-    using Key=std::tuple<uint32_t,uint32_t,uintptr_t,uintptr_t,bool,bool>;
+    using Key=std::tuple<uint32_t,uint32_t,uint32_t,uintptr_t,uintptr_t,bool,bool,bool>;
     std::map<Key,std::array<uint32_t,4>> groups;
     std::vector<GpuVisibility::Batch> batches;
     std::vector<GpuVisibility::Instance> inputs;
     std::vector<uint64_t> keys;
     inputs.reserve(scene.GetEntityCount());keys.reserve(scene.GetEntityCount());
-    std::vector<uint32_t> canonicalMaterials(scene.Materials().size(),UINT32_MAX);
-    std::unordered_map<size_t,std::vector<uint32_t>> materialBuckets;
-    materialBuckets.reserve(std::min(scene.Materials().size(),static_cast<size_t>(scene.GetEntityCount())));
-    // 스칼라·텍스처 핸들·플래그 해시로 후보를 좁힌 뒤 전체 동등성을 확인해 첫 동등 재질을 대표로 사용하며, 해시 충돌만으로 합치지 않는다.
-    const auto canonicalMaterial=[&](uint32_t index) {
-        if(canonicalMaterials[index]!=UINT32_MAX)return canonicalMaterials[index]; // 이미 대표 재질을 찾은 입력이면 같은 결과를 재사용한다.
-        const auto& material=scene.Materials()[index];
-        const auto& state=materialStates[index];
-        size_t hash=MaterialScalarHash(material);
-        const auto combine=[&](size_t value) {hash^=value+size_t{0x9e3779b9}+(hash<<6)+(hash>>2);};
-        combine(std::hash<uint32_t>{}(state.textureFlags));
-        for(const auto texture:state.textures)combine(std::hash<RHI::TextureHandle>{}(texture));
-        auto& candidates=materialBuckets[hash];
-        for(const auto candidate:candidates)
-        {
-            const auto& representative=materialStates[candidate];
-            if(state.textureFlags==representative.textureFlags && state.textures==representative.textures && // 텍스처와 스칼라 재질이 실제로 같으면 앞선 대표 재질을 재사용한다.
-                EqualMaterial(material,scene.Materials()[candidate]))
-                return canonicalMaterials[index]=candidate;
-        }
-        candidates.push_back(index);
-        return canonicalMaterials[index]=index;
-    };
-    // 객체 ID 순서로 후보를 수집한다. 알파 Blend는 GPU 불투명 배치에서 빼고 Forward의 투명 정렬 경로 또는 별도 투명 패스가 처리한다.
+    MaterialCanonicalizer canonicalMaterial(scene,materialStates);
+    // 객체 ID 순서로 후보를 수집하고 Blend·투과 표면은 Forward 정렬 또는 별도 투명 패스에 남긴다.
     for(uint32_t i=0;i<scene.GetEntityCount();++i)
     {
         const auto entity=static_cast<EntityID>(i);
@@ -68,13 +95,10 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
         const uint32_t materialIndex=canonicalMaterial(sourceMaterialIndex);
         const auto& mesh=m_meshes[meshIndex];
         if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount || // GPU 메시가 준비되지 않았거나 Blend 재질이면 이 불투명 간접 경로에서 제외한다.
-            scene.Materials()[materialIndex].alphaMode==MaterialAlphaMode::Blend) continue;
+            UsesBlendedRendering(scene.Materials()[materialIndex])) continue;
         const auto* input=draws ? &(*draws)[i] : nullptr;
         const auto vertex=input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer;
         const auto previous=input && input->previousVertexBuffer ? input->previousVertexBuffer : vertex;
-        const Key key{meshIndex,materialIndex,reinterpret_cast<uintptr_t>(vertex),
-            reinterpret_cast<uintptr_t>(previous),scene.GetEntityLighting(entity).receiveShadow,
-            Math::Determinant3x3(scene.GetTransform(entity))<0};
         // 외부 변형 정점 버퍼에는 원본 LOD의 적합성을 가정하지 않고 기본 단계만 쓴다. 원본 메시 경로만 준비된 LOD를 최대 네 단계까지 펼친다.
         uint32_t levels=1;
         if(!input || !input->vertexBuffer) // 외부 정점 교체가 없는 원본 메시만 준비된 LOD 목록을 사용한다.
@@ -83,6 +107,11 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
                 if(!lod.ready || !lod.buffer || levels==4) break; // 준비되지 않은 LOD 또는 네 단계 상한에 도달하면 확장을 멈춘다.
                 ++levels;
             }
+        // Explicit source-buffer overrides still disable source LODs. Matching
+        // effective buffer pointers must not reuse a group's shorter batch array.
+        const Key key{meshIndex,materialIndex,levels,reinterpret_cast<uintptr_t>(vertex),
+            reinterpret_cast<uintptr_t>(previous),scene.GetEntityLighting(entity).receiveShadow,
+            Math::Determinant3x3(scene.GetTransform(entity))<0,!input || input->deformationHistoryValid};
         auto found=groups.find(key);
         if(found==groups.end()) // 새 호환성 그룹을 처음 만나면 LOD별 간접 배치와 대표 draw를 만든다.
         {
@@ -93,6 +122,12 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
                 ids[level]=static_cast<uint32_t>(batches.size());
                 GpuVisibility::Batch batch;
                 batch.indexCount=level ? mesh.lods[level-1].count : mesh.indexCount;
+                const auto indices=MainIndirectIndexBuffer(mesh,level,scene.Materials()[materialIndex],input);
+                if(indices==mesh.indirectIndexBuffer && mesh.indirectIndexReady)
+                {
+                    batch.firstIndex=mesh.indirectFirstIndices[level];
+                    assert(uint64_t(batch.firstIndex)+batch.indexCount<=indices->GetDesc().size/sizeof(uint32_t));
+                }
                 batches.push_back(batch);visibilityDraws.push_back({i,meshIndex,materialIndex,level});
             }
             found=groups.emplace(key,ids).first;
@@ -114,7 +149,10 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
             columnMax=std::max(columnMax,column);rowMax=std::max(rowMax,row);
         }
         const float scale=std::sqrt(columnMax*rowMax);
-        if(bounds.valid && std::isfinite(scale)) // 유효한 경계와 유한 스케일이 있을 때만 가시성 판정용 구를 만든다.
+        // 유효한 경계·유한 스케일·affine 변환에만 월드 구를 만들어 보수적인 가시성 판정을 허용한다.
+        // A sphere in world xyz cannot bound a varying homogeneous w. Unknown
+        // projective transforms stay visible and use level zero in the shader.
+        if(bounds.valid && std::isfinite(scale) && IsAffineTransform(value.model))
         {
             const auto center=Math::TransformPoint(value.model,(bounds.min+bounds.max)*.5f);
             const float radius=Math::Length((bounds.max-bounds.min)*.5f)*scale;
@@ -149,6 +187,7 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
     GpuVisibility::Settings settings;
     settings.camera=camera;settings.width=width;settings.height=height;
     settings.pixelError=config.lodPixelError;settings.hysteresis=config.lodHysteresis;
+    settings.screenSize=config.lodScreenSize;
     settings.frustum=config.enableFrustumCulling;settings.lod=config.enableLod;
     const std::weak_ptr<Scene> owner=scene.m_lifetime;
     settings.resetHistory=keys!=visibilityKeys || visibilityScene.expired() ||
@@ -156,5 +195,106 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
     if(!gpuVisibility->Prepare(inputs,batches,settings) || !gpuVisibility->RecordUploads(uploads)) return false; // 자원 준비 또는 업로드 기록 실패면 visibilityActive를 켜지 않는다.
     // 준비와 업로드 기록이 성공한 뒤에만 이번 경로를 active로 표시한다. 이 시점은 아직 GPU compute나 draw 완료 시점이 아니다.
     visibilityKeys=std::move(keys);visibilityScene=owner;visibilityActive=true;return true;
+}
+
+bool Renderer::Impl::PrepareCpuBatches(const Scene& scene,const Camera& camera,RHI::ICommandList& uploads,
+    const std::vector<RendererDrawDesc>* draws,bool motion)
+{
+    // Custom fragment pipelines may blend even nominally opaque materials.
+    // Keep their submission order on the legacy path rather than globally sorting.
+    cpuBatchesActive=!visibilityActive && stockDrawInputs && UsesInstanceStream() &&
+        shaderSources.bytes[MeshFragment].empty();
+    cpuDrawInputs.clear();cpuDraws.clear();cpuInstanceScratch.clear();cpuInstanceEntities.clear();cpuCulledEntities=0;
+    cpuBatchIndices.clear();
+    if(!cpuBatchesActive)return true;
+    // Unique meshes cannot instance. Keep their existing draw path without sorting or repacking.
+    cpuMeshCounts.assign(m_meshes.size(),0);
+    bool repeated=false;
+    for(uint32_t i=0;i<scene.GetEntityCount();++i)
+    {
+        const auto entity=static_cast<EntityID>(i);
+        const auto mesh=scene.GetEntityMesh(entity);
+        const auto material=scene.GetEntityMaterial(entity);
+        if(IsValid(mesh) && ToIndex(mesh)<cpuMeshCounts.size() && IsValid(material) &&
+            ToIndex(material)<scene.Materials().size() && !UsesBlendedRendering(scene.Materials()[ToIndex(material)]) &&
+            ++cpuMeshCounts[ToIndex(mesh)]>1) {repeated=true;break;}
+    }
+    if(!repeated) {cpuBatchesActive=false;return true;}
+    cpuBatchIndices.assign(scene.GetEntityCount(),UINT32_MAX);
+    cpuDrawInputs.reserve(scene.GetEntityCount());
+    MaterialCanonicalizer canonicalMaterial(scene,materialStates);
+    const CameraFrustum frustum(camera);
+    for(uint32_t i=0;i<scene.GetEntityCount();++i)
+    {
+        const auto entity=static_cast<EntityID>(i);
+        const auto meshId=scene.GetEntityMesh(entity);
+        const auto materialId=scene.GetEntityMaterial(entity);
+        if(!IsValid(meshId) || !IsValid(materialId))continue;
+        const auto meshIndex=ToIndex(meshId),materialIndex=ToIndex(materialId);
+        if(meshIndex>=m_meshes.size() || materialIndex>=materialStates.size() ||
+            UsesBlendedRendering(scene.Materials()[materialIndex]))continue;
+        const auto& mesh=m_meshes[meshIndex];
+        if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount)continue;
+        const auto* input=draws ? &(*draws)[i] : nullptr;
+        const auto& bounds=input && input->hasLocalBounds ? input->localBounds : mesh.bounds;
+        const auto& world=scene.GetTransform(entity);
+        if(config.enableFrustumCulling && frustum.Outside(bounds,world)) {++cpuCulledEntities;continue;}
+        const auto vertex=input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer;
+        const auto previous=input && input->previousVertexBuffer ? input->previousVertexBuffer : vertex;
+        const auto level=std::min<uint32_t>(EntityLod(i),mesh.lods.size());
+        CpuDrawKey key{meshIndex,canonicalMaterial(materialIndex),level,reinterpret_cast<uintptr_t>(vertex),
+            reinterpret_cast<uintptr_t>(previous),scene.GetEntityLighting(entity).receiveShadow,
+            Math::Determinant3x3(world)<0,!input || input->deformationHistoryValid};
+        cpuDrawInputs.push_back({key,i});
+    }
+    std::sort(cpuDrawInputs.begin(),cpuDrawInputs.end(),[](const CpuDrawInput& a,const CpuDrawInput& b) {
+        return a.key!=b.key ? a.key<b.key : a.entity<b.entity;
+    });
+    constexpr uint32_t stride=2*sizeof(Math::float4x4);
+    if(cpuDrawInputs.size()>UINT32_MAX/stride)return false;
+    cpuInstanceScratch.reserve(cpuDrawInputs.size()*2);cpuInstanceEntities.reserve(cpuDrawInputs.size());
+    const auto viewProjection=motion ? camera.projection*camera.view : Math::float4x4{};
+    for(size_t i=0;i<cpuDrawInputs.size();++i)
+    {
+        const auto& input=cpuDrawInputs[i];
+        if(!i || input.key!=cpuDrawInputs[i-1].key)
+        {
+            cpuBatchIndices[input.entity]=static_cast<uint32_t>(cpuDraws.size());
+            cpuDraws.push_back({input.entity,std::get<0>(input.key),std::get<1>(input.key),std::get<2>(input.key),
+                static_cast<uint32_t>(i),0});
+        }
+        ++cpuDraws.back().instanceCount;
+        const auto& world=scene.GetTransform(static_cast<EntityID>(input.entity));
+        cpuInstanceScratch.push_back(world);
+        Math::float4x4 previous={};
+        if(motion)previous=frameHistoryValid && input.entity<previousModels.size()
+            ? previousViewProjection*previousModels[input.entity] : viewProjection*world;
+        if(draws && !(*draws)[input.entity].deformationHistoryValid)previous={};
+        cpuInstanceScratch.push_back(previous);cpuInstanceEntities.push_back(input.entity);
+    }
+    if(cpuInstanceScratch.empty())return true;
+    const auto bytes=static_cast<uint32_t>(cpuInstanceScratch.size()*sizeof(Math::float4x4));
+    if(!cpuInstanceBuffer || cpuInstanceBuffer->GetDesc().size<bytes)
+    {
+        const uint64_t capacity=std::min<uint64_t>(UINT32_MAX/stride*stride,
+            std::max<uint64_t>(bytes,cpuInstanceBuffer ? uint64_t(cpuInstanceBuffer->GetDesc().size)*2 : stride*64));
+        cpuInstanceBuffer=device->CreateBuffer({static_cast<uint32_t>(capacity),stride,
+            RHI::BufferUsage::Vertex,RHI::ResourceState::CopyDestination});
+        cpuInstanceReady=false;
+    }
+    if(!cpuInstanceBuffer)return false;
+    if(config.enableIncrementalTransformUploads && cpuInstanceReady && cpuInstanceBytes.size()==cpuInstanceScratch.size() &&
+        std::memcmp(cpuInstanceBytes.data(),cpuInstanceScratch.data(),bytes)==0)return true;
+    if(cpuInstanceReady)
+    {
+        const RHI::ResourceBarrierDesc before={cpuInstanceBuffer,nullptr,RHI::ResourceState::VertexBuffer,
+            RHI::ResourceState::CopyDestination,{}};
+        uploads.ResourceBarrier(&before,1);
+    }
+    if(!device->UpdateBuffer(uploads,cpuInstanceBuffer,0,cpuInstanceScratch.data(),bytes))return false;
+    const RHI::ResourceBarrierDesc after={cpuInstanceBuffer,nullptr,RHI::ResourceState::CopyDestination,
+        RHI::ResourceState::VertexBuffer,{}};
+    uploads.ResourceBarrier(&after,1);
+    return true;
 }
 }

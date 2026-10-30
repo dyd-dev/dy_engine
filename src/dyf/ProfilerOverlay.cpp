@@ -2,6 +2,7 @@
 #include "dyf/Canvas.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/Platform/Profiler.h"
+#include "../Platform/Windows/WindowBackend.h"
 #include <algorithm>
 #include <cstdio>
 #include <cmath>
@@ -92,11 +93,28 @@ void Renderer::Impl::RecordProfilerFrame(Platform::ProfilerTimingSample sample,u
 	m_entities=entities;
 }
 // 크기에 맞춰 요약/확장 HUD를 구성해 반환한다. 실제 GPU 출력은 일반 Canvas 경로가 수행한다.
-Canvas Renderer::Impl::BuildProfilerOverlay(uint32_t width,uint32_t height,bool expanded) const
+Canvas Renderer::Impl::BuildProfilerOverlay(uint32_t width,uint32_t height,bool expanded)
 {
 	Canvas canvas(width,height);
 	if(width<160 || height<100) return canvas; // HUD를 놓기 어려운 크기이면 빈 Canvas를 반환한다.
 	const float panelWidth=std::max(200.f,std::min(920.f,float(width)-20));
+    expanded=profilerHudExpanded.value_or(expanded);
+    const auto buttonFor=[&](bool details) {
+        return Rectangle{10+(details?panelWidth:std::min(panelWidth,650.f))-100,10,100,28};
+    };
+    const auto pressedButton=buttonFor(expanded);
+    for(const auto* window:Platform::RegisteredWindows())
+    {
+        if(window->GetHandle()!=windowHandle || !window->HasFocus() ||
+            !window->GetInput().WasPressed(Platform::MouseButton::Left)) continue;
+        const auto size=window->GetSize();
+        if(size.width<=0 || size.height<=0) continue;
+        const auto pointer=window->GetInput().GetCursorPosition();
+        const float x=float(pointer.x)*width/size.width, y=float(pointer.y)*height/size.height;
+        if(x>=pressedButton.x && y>=pressedButton.y && x<pressedButton.x+pressedButton.width &&
+            y<pressedButton.y+pressedButton.height) profilerHudExpanded=expanded=!expanded;
+        break;
+    }
 	// 패널이 넓으면 GPU 패스 목록을 두 열로 놓고 좁으면 한 열로 놓는다.
 	const uint32_t columns=panelWidth>=780 ? 2 : 1;
 	const uint32_t rows=(static_cast<uint32_t>(m_profiler.GetSnapshot().gpuPasses.size())+columns-1)/columns;
@@ -107,7 +125,12 @@ Canvas Renderer::Impl::BuildProfilerOverlay(uint32_t width,uint32_t height,bool 
 	// FPS와 프레임 평균/최댓값은 집계 스냅샷에서 가져온다. 현재 Draw 호출 하나의 시간과 혼동하지 않는다.
 	std::snprintf(line,sizeof(line),"FPS %.1f  FRAME %.2f MS  MAX %.2f",m_profiler.GetSnapshot().fps,
 		m_profiler.GetSnapshot().frameAverageMilliseconds,m_profiler.GetSnapshot().frameMaximumMilliseconds);
+    const auto modeButton=buttonFor(expanded);
+    canvas.SetClipRect({18,18,std::max(0.f,modeButton.x-26),16});
 	Text(canvas,line,18,18);
+    canvas.ResetClipRect();
+    canvas.FillRect(modeButton,{.08f,.15f,.20f,1});
+    Text(canvas,expanded?"DEFAULT":"DETAILS",modeButton.x+8,modeButton.y+7,{.6f,.85f,1,1},2);
 	if(m_profiler.GetSnapshot().hasGpuFrame) // 유효한 GPU 표본이 있을 때만 시간을 숫자로 표시한다.
 		std::snprintf(line,sizeof(line),"CPU WORK %.2f MS  GPU SPAN %.2f MS",m_profiler.GetSnapshot().cpuRenderAverageMilliseconds,m_profiler.GetSnapshot().gpuFrameAverageMilliseconds);
 	else std::snprintf(line,sizeof(line),"CPU WORK %.2f MS  GPU %s",m_profiler.GetSnapshot().cpuRenderAverageMilliseconds,

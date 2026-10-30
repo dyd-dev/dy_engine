@@ -12,11 +12,13 @@ layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec2 inUv;
 layout(location = 3) in vec4 inTangent;
+layout(location = 8) in vec4 inColor;
 
 layout(location = 0) out vec2 fragUv;
 layout(location = 1) out vec3 fragWorldPosition;
 layout(location = 2) out vec3 fragNormal;
 layout(location = 3) out vec4 fragTangent;
+layout(location = 5) out vec4 fragColor;
 #if RENDERER_ENABLE_SHADOWS
 layout(location = 4) out vec4 fragLightSpacePosition;
 #endif
@@ -64,6 +66,7 @@ void main()
     vec4 worldPosition = world * vec4(inPosition, 1.0);
     gl_Position = drawConstants.viewProjectionMatrix * worldPosition;
     fragUv = inUv;
+    fragColor = inColor;
     fragWorldPosition = worldPosition.xyz;
     vec3 fallbackNormal = SkinNormalizeOr(SkinColumn(modelNormal, 2).xyz, vec3(0,0,1));
     fragNormal = SkinNormalizeOr(mat3(modelNormal) * skinnedNormal, fallbackNormal);

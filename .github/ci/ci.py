@@ -105,8 +105,7 @@ class Report:
 def desktop_build(root, build, platform_name, api, config, report, env):
     options = ['cmake', '-S', str(root), '-B', str(build),
                '-DDY_BUILD_EXAMPLES=ON', '-DDY_EXTEND_MODEL=ON',
-               '-DDY_EXTEND_ADVANCED_RENDERING=ON', '-DDY_EXTEND_IMGUI=ON',
-               '-DDY_SHOWCASE_SCENE=', '-DDY_SHOWCASE_ENVIRONMENT=']
+               '-DDY_EXTEND_ADVANCED_RENDERING=ON', '-DDY_EXTEND_IMGUI=ON']
     if platform_name == 'windows':
         options += ['-G', 'Visual Studio 17 2022', '-A', 'x64',
                     '-DUSE_D3D12=' + ('ON' if api == 'd3d12' else 'OFF'),
@@ -117,7 +116,7 @@ def desktop_build(root, build, platform_name, api, config, report, env):
             options += ['-DDY_LINUX_WINDOW_SYSTEM=X11']
     report.command('configure', options, root, env=env)
     report.command('build', ['cmake', '--build', str(build), '--config', config,
-                            '--target', 'dyf_examples', '--parallel', '4'], root, env=env)
+                            '--parallel', '4'], root, env=env)
     report.add('build', 'PASS', platform_name + ' ' + api + ' ' + config)
 
 
@@ -148,7 +147,6 @@ def mobile_build(root, build, platform_name, config, report, env):
         wrapper = ([str(root / 'android/gradlew.bat')] if os.name == 'nt'
                    else ['bash', str(root / 'android/gradlew')])
         report.command('android-' + config, [*wrapper, '--no-daemon', '--stacktrace',
-                       '-PDY_SHOWCASE_SCENE=', '-PDY_SHOWCASE_ENVIRONMENT=',
                        ':app:assemble' + config], root / 'android', timeout=4800, env=env)
         packages = list((root / 'android/app/build/outputs/apk' / config.lower()).glob('*.apk'))
         if len(packages) != 1:
@@ -169,8 +167,7 @@ def mobile_build(root, build, platform_name, config, report, env):
                            '-B', str(root / 'build' / f'ios-{sdk}-arm64-{config}'), '-G', 'Ninja',
                            '-DCMAKE_SYSTEM_NAME=iOS', '-DCMAKE_OSX_SYSROOT=' + sdk_root,
                            '-DCMAKE_OSX_ARCHITECTURES=arm64', '-DCMAKE_BUILD_TYPE=' + config,
-                           '-DCMAKE_OSX_DEPLOYMENT_TARGET=' + deployment[1].strip(),
-                           '-DDY_SHOWCASE_SCENE=', '-DDY_SHOWCASE_ENVIRONMENT='], root, env=env)
+                           '-DCMAKE_OSX_DEPLOYMENT_TARGET=' + deployment[1].strip()], root, env=env)
         derived = build / 'DerivedData'
         report.command('ios-' + config, [tool('xcodebuild', env), '-project', str(project),
                        '-scheme', 'Examples', '-configuration', config, '-sdk', 'iphonesimulator',

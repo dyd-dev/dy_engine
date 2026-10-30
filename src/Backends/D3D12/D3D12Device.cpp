@@ -1,6 +1,5 @@
-#include "../../Platform/Profiler/CollectorInternal.h"
 #include "D3D12Device.h"
-#include "../../Platform/Profiler/RhiProfiler.h"
+#include "dyf/RHI/Backend/Observation.h"
 #include "D3D12Buffer.h"
 #include "D3D12CommandList.h"
 #include "D3D12PipelineState.h"
@@ -78,6 +77,7 @@ namespace dyf::Backends
         std::vector<uint64_t> frames;
         std::vector<D3D12SubmissionRecord> submissions;
         std::vector<std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>> activeCommandLists;
+        std::shared_ptr<D3D12CommandPoolCache> commandPool;
         // Keep diagnostic work alive if native submission succeeds but its
         // completion signal fails. Device teardown drains the queue.
         std::vector<ComPtr<ID3D12Object>> readbackResources;
@@ -159,7 +159,9 @@ namespace dyf::Backends
                     submissions.end(),
                     [completedValue](const D3D12SubmissionRecord& submission)
                     {
-                        return submission.completionValue <= completedValue;
+                        if(submission.completionValue>completedValue)return false;
+                        for(const auto& commands:submission.commandLists)commands->AllowPoolReuse();
+                        return true;
                     }),
                 submissions.end());
             return true;
@@ -232,11 +234,10 @@ namespace dyf::Backends
         commands->ResourceBarrier(1, &barrier);
         const CD3DX12_TEXTURE_COPY_LOCATION source(resource, 0u);
         const CD3DX12_TEXTURE_COPY_LOCATION destination(buffer.Get(), footprint);
-        {
-            RHI::LiveRhiScope copy(Platform::LiveEventKind::CpuWork,Platform::LiveStage::NativeTranslate,"Readback: record texture copy");
-            copy.event.resource=Platform::FindLiveObject(texture);copy.event.bytes=bytes;copy.event.operations=1;
-            commands->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
-        }
+        RHI::Backend::ReadbackTrace observed(texture,bytes);
+        observed.Copy();
+        commands->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        observed.Finish();
         std::swap(barrier.Transition.StateBefore, barrier.Transition.StateAfter);
         commands->ResourceBarrier(1, &barrier);
         if(FAILED(commands->Close())) return false;
@@ -248,16 +249,10 @@ namespace dyf::Backends
         m_internal->readbackResources.emplace_back(commands.Get());
         m_internal->readbackResources.emplace_back(fence.Get());
         ID3D12CommandList* native = commands.Get();
-        const auto liveSubmission=Platform::IsLiveCollectorEnabled()?Platform::AllocateLiveId():0;
-        {
-            RHI::LiveRhiScope submit(Platform::LiveEventKind::CpuWork,Platform::LiveStage::Submit,"Readback: native submission");
-            submit.event.resource=Platform::FindLiveObject(texture);submit.event.submission=liveSubmission;submit.event.operations=1;
-            m_internal->commandQueue->ExecuteCommandLists(1, &native);submit.event.outcome=Platform::LiveOutcome::Submitted;
-        }
-        if(liveSubmission)Platform::SetLiveGpuCoverage(Platform::GetLiveContext().frame,false);
-        RHI::LiveRhiScope wait(Platform::LiveEventKind::Wait,Platform::LiveStage::Submit,"Readback: fence wait");
-        wait.event.resource=Platform::FindLiveObject(texture);wait.event.submission=liveSubmission;wait.event.operations=1;
-        wait.event.outcome=Platform::LiveOutcome::Failed;
+        observed.Submit();
+        m_internal->commandQueue->ExecuteCommandLists(1, &native);
+        observed.Finish();
+        observed.Wait();
         if(FAILED(m_internal->commandQueue->Signal(fence.Get(), 1)) ||
             FAILED(fence->SetEventOnCompletion(1, event.handle)) ||
             WaitForSingleObject(event.handle, INFINITE) != WAIT_OBJECT_0 ||
@@ -266,8 +261,7 @@ namespace dyf::Backends
             m_internal->submissionFaulted = true;
             return false;
         }
-        wait.event.outcome=Platform::LiveOutcome::Completed;wait.Finish();
-        RHI::RecordLiveReadbackCompletion(liveSubmission,Platform::FindLiveObject(texture));
+        observed.Finish();
         m_internal->readbackResources.resize(retirementBase);
         void* mapped = nullptr;
         const D3D12_RANGE range{0, static_cast<SIZE_T>(storageBytes)};
@@ -353,8 +347,9 @@ namespace dyf::Backends
     }
 
     // 누적된 D3D12 검증 오류는 stderr에, 나머지 메시지는 stdout에 출력한다.
-    // (디버그 레이어가 켜진 디버그 빌드에서만 메시지가 쌓인다.)
-    static void DumpInfoQueue(D3D12InternalState* internal, const char* where)
+    // enableValidation으로 켠 디버그 레이어는 빌드 구성과 무관하게 수집한다.
+    static void DumpInfoQueue(D3D12InternalState* internal, const char* where) noexcept
+    try
     {
         if (internal == nullptr || internal->infoQueue == nullptr) return;
         const UINT64 count = internal->infoQueue->GetNumStoredMessages();
@@ -374,6 +369,11 @@ namespace dyf::Backends
         if (FAILED(removedReason)) {
             std::cerr << "[D3D12] DEVICE REMOVED reason=0x" << std::hex << static_cast<unsigned>(removedReason) << std::dec << std::endl;
         }
+    }
+    catch(...)
+    {
+        if(internal && internal->infoQueue)internal->infoQueue->ClearStoredMessages();
+        std::fputs("[D3D12] Diagnostic output failed; accepted GPU work remains submitted.\n",stderr);
     }
 
     D3D12Device::D3D12Device()
@@ -441,14 +441,12 @@ namespace dyf::Backends
         m_internal->resourceBindingTier = options.ResourceBindingTier;
         m_internal->resourceBindingFeatureLevel = featureLevels.MaxSupportedFeatureLevel;
         
-#if defined(_DEBUG)
-        if (SUCCEEDED(m_internal->device.As(&m_internal->infoQueue))) {
+        if (desc.enableValidation && SUCCEEDED(m_internal->device.As(&m_internal->infoQueue))) {
             // break 하지 않고 메시지를 모아 DumpInfoQueue 가 stdout 으로 덤프한다.
             m_internal->infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, FALSE);
             m_internal->infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, FALSE);
             m_internal->infoQueue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, FALSE);
         }
-#endif
 
         // 2. 커맨드 큐 생성
         D3D12_COMMAND_QUEUE_DESC queueDesc = {};
@@ -559,6 +557,7 @@ bool D3D12Device::SupportsNative(RHI::Feature feature) const
         return m_internal && m_internal->dispatchSignature;
     case RHI::Feature::Compute:
     case RHI::Feature::Rasterization:
+    case RHI::Feature::RenderArea:
     case RHI::Feature::Tessellation:
     case RHI::Feature::DescriptorIndexing:
     case RHI::Feature::SamplerLodBias:
@@ -593,6 +592,8 @@ uint64_t D3D12Device::GetLimitNative(RHI::Limit limit) const
         return D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;
     case RHI::Limit::TextureArrayLayers:
         return D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION;
+    case RHI::Limit::BufferUpdateAlignment:
+        return 1;
     case RHI::Limit::UniformBufferOffsetAlignment:
         return D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
     case RHI::Limit::StorageBufferOffsetAlignment:
@@ -1026,11 +1027,13 @@ void D3D12Device::DestroySwapchainNative()
         if (!m_internal->uploadPool)
             m_internal->uploadPool = MakeD3D12UploadPool(m_internal->device.Get());
         if (!m_internal->InitializeIndirectSignatures()) return nullptr;
+        if (!m_internal->commandPool)
+            m_internal->commandPool=std::make_shared<D3D12CommandPoolCache>(m_internal->device.Get());
 
         auto commandList = std::unique_ptr<D3D12CommandList, D3D12ObjectDeleter>(
             new D3D12CommandList(m_internal->device.Get(), m_internal->uploadPool,
                 m_internal->drawSignature.Get(), m_internal->drawIndexedSignature.Get(),
-                m_internal->dispatchSignature.Get(),{reusePages,suballocate}));
+                m_internal->dispatchSignature.Get(),{reusePages,suballocate},m_internal->commandPool));
         if (commandList->GetNativeList() == nullptr) return nullptr;
         return m_internal->activeCommandLists.emplace_back(std::move(commandList)).get();
     }
@@ -1059,19 +1062,8 @@ void D3D12Device::DestroySwapchainNative()
             m_internal->commandQueue != nullptr && m_internal->fence != nullptr;
         for (uint32_t index = 0; index < count; ++index)
         {
-            if (cmdLists[index] == nullptr) return false;
-            if (std::find(cmdLists, cmdLists + index, cmdLists[index]) != cmdLists + index)
-                return false;
-
-            const auto owned = m_internal->FindActiveCommandList(cmdLists[index]);
-            if (owned == m_internal->activeCommandLists.end()) return false;
-
-            D3D12CommandList* commandList = owned->get();
-            if (!commandList->IsClosed() ||
-                commandList->GetNativeList() == nullptr)
-            {
-                return false;
-            }
+            // Common preparation owns and closes each unique native replay list.
+            auto* commandList = static_cast<D3D12CommandList*>(cmdLists[index]);
 
             for (D3D12Texture* image : commandList->GetReferencedSwapchainImages())
             {
@@ -1087,18 +1079,6 @@ void D3D12Device::DestroySwapchainNative()
                 static_cast<ID3D12CommandList*>(commandList->GetNativeList()));
         }
 
-        D3D12SubmissionState resourceStates = {};
-        if (submissionValid)
-        {
-            for (D3D12CommandList* commandList : submittedCommandLists)
-            {
-                if (!commandList->ValidateForSubmit(resourceStates))
-                {
-                    submissionValid = false;
-                    break;
-                }
-            }
-        }
         if (!submissionValid)
         {
             for (D3D12CommandList* commandList : submittedCommandLists)
@@ -1470,6 +1450,32 @@ void D3D12Device::DestroySwapchainNative()
         return ToSamplerFilter(desc, filter);
     }
 
+    bool D3D12Device::SupportsDdsCompression(RHI::Format format) const noexcept
+    {
+        if(!m_internal || !m_internal->device || !RHI::IsBlockCompressed(format)) return false;
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT support = {};
+        support.Format = static_cast<DXGI_FORMAT>(D3D12Texture::ToDxgiFormat(format));
+        const auto required = static_cast<D3D12_FORMAT_SUPPORT1>(D3D12_FORMAT_SUPPORT1_TEXTURE2D |
+            D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE | D3D12_FORMAT_SUPPORT1_MIP);
+        return support.Format != DXGI_FORMAT_UNKNOWN &&
+            SUCCEEDED(m_internal->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+                &support, sizeof(support))) && (support.Support1 & required) == required;
+    }
+
+    bool D3D12Device::SupportsLinearFiltering(RHI::Format format) const noexcept
+    {
+        if(!m_internal || !m_internal->device ||
+            (format!=RHI::Format::R32G32B32A32_FLOAT && format!=RHI::Format::R16_FLOAT))return false;
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT support={};
+        support.Format=format==RHI::Format::R16_FLOAT?DXGI_FORMAT_R16_FLOAT:DXGI_FORMAT_R32G32B32A32_FLOAT;
+        // SHADER_SAMPLE permits filtering; without it only point sampling is legal.
+        // https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_format_support1
+        const auto required=static_cast<D3D12_FORMAT_SUPPORT1>(D3D12_FORMAT_SUPPORT1_TEXTURE2D |
+            D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE | D3D12_FORMAT_SUPPORT1_MIP);
+        return SUCCEEDED(m_internal->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
+            &support,sizeof(support))) && (support.Support1&required)==required;
+    }
+
     bool D3D12Device::SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc& desc) const
     {
         if(!m_internal || !m_internal->device ||
@@ -1523,6 +1529,12 @@ void D3D12Device::DestroySwapchainNative()
         {
             return nullptr;
         }
+        // D3D12 requires block-aligned base dimensions; smaller mip levels remain valid.
+        // Rejection lets optional DDS preservation fall back to the decoded image.
+        if(RHI::IsBlockCompressed(desc.format) &&
+            (desc.usage != RHI::TextureUsage::ShaderResource ||
+                desc.width % 4u != 0 || desc.height % 4u != 0 || !SupportsDdsCompression(desc.format)))
+            return nullptr;
         const bool depthFormat = desc.format == RHI::Format::D32_FLOAT ||
             desc.format == RHI::Format::D24_UNORM_S8_UINT;
         if (depthFormat != D3D12Validation::HasUsage(
@@ -2613,13 +2625,8 @@ void D3D12Device::DestroySwapchainNative()
         uint32_t size)
     {
         if (m_internal == nullptr) return false;
-        auto* d3dCommandList = dynamic_cast<D3D12CommandList*>(&commandList);
-        auto* d3dBuffer = dynamic_cast<D3D12Buffer*>(buffer);
-        const auto owned = m_internal->FindActiveCommandList(d3dCommandList);
-        return d3dCommandList != nullptr && d3dBuffer != nullptr &&
-            owned != m_internal->activeCommandLists.end() &&
-            d3dCommandList->RecordBufferUpload(
-                d3dBuffer, offset, data, size);
+        return static_cast<D3D12CommandList&>(commandList).RecordBufferUpload(
+            static_cast<D3D12Buffer*>(buffer), offset, data, size);
     }
 
     bool D3D12Device::UpdateTextureNative(
@@ -2633,13 +2640,8 @@ void D3D12Device::DestroySwapchainNative()
         uint32_t slicePitch)
     {
         if (m_internal == nullptr) return false;
-        auto* d3dCommandList = dynamic_cast<D3D12CommandList*>(&commandList);
-        auto* d3dTexture = dynamic_cast<D3D12Texture*>(texture);
-        const auto owned = m_internal->FindActiveCommandList(d3dCommandList);
-        return d3dCommandList != nullptr && d3dTexture != nullptr &&
-            owned != m_internal->activeCommandLists.end() &&
-            d3dCommandList->RecordTextureUpload(
-                d3dTexture,
+        return static_cast<D3D12CommandList&>(commandList).RecordTextureUpload(
+                static_cast<D3D12Texture*>(texture),
                 mipLevel,
                 arrayLayer,
                 data,

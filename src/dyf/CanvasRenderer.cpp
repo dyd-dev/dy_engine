@@ -1,6 +1,7 @@
 #include "../Platform/Profiler/CollectorInternal.h"
 #include "dyf/Image.h"
 #include "RendererInternal.h"
+#include "ImageDds.h"
 #include "dyf/Platform/Profiler.h"
 #include "dyf/Canvas.h"
 
@@ -90,10 +91,11 @@ bool Renderer::Impl::InitializeCanvas(RHI::Format format)
     return canvasPipeline!=nullptr;
 }
 // 이미지와 정점 버퍼를 확보한 뒤 각 Draw의 viewport·clip으로 명령을 기록한다. 제출과 Present는 호출자가 수행한다.
-bool Renderer::Impl::RecordCanvas(const Canvas& canvas, RHI::ICommandList& commandList, RHI::TextureHandle target, bool overlay, bool graphManagedTarget)
+bool Renderer::Impl::PrepareCanvas(const Canvas& canvas,RHI::ICommandList& commandList,
+    RHI::TextureHandle target,CanvasRecording& prepared)
 {
 #if defined(DY_LIVE_PROFILING_ENABLED) || defined(DY_PROFILER_TRACING_ENABLED) // 관측 또는 추적 빌드에서만 CPU 기록 구간을 포함한다.
-    Platform::CpuScope cpuScope(Platform::LiveStage::Record,"Canvas recording");
+    Platform::CpuScope cpuScope(Platform::LiveStage::CpuPrepare,"Canvas resources");
 #endif
     using namespace RHI;
     if(!canvas.IsValid()) {std::fprintf(stderr,"dyf: Invalid canvas dimensions.\n");return false;} // Canvas 크기가 0이면 진단하고 기록을 실패시킨다.
@@ -104,7 +106,7 @@ bool Renderer::Impl::RecordCanvas(const Canvas& canvas, RHI::ICommandList& comma
     const auto resolve=[&](const Image& image)->uint32_t {
         for(uint32_t i=0;i<canvasImages.size();++i) {
             auto& cached=canvasImages[i];
-            if((config.enableCanvasImageCache||cached.used) && cached.source.GetPixels().data()==image.GetPixels().data() && // 캐시 허용 또는 이번 프레임 내 재사용이고 이미지 정체성이 같으면 기존 슬롯을 쓴다.
+            if((config.enableCanvasImageCache||cached.used) && Detail::ImageDdsAccess::Identity(cached.source)==Detail::ImageDdsAccess::Identity(image) && // 캐시 허용 또는 이번 프레임 내 재사용이고 이미지 정체성이 같으면 기존 슬롯을 쓴다.
                 cached.source.GetColorSpace()==image.GetColorSpace() &&
                 cached.source.GetWidth()==image.GetWidth() && cached.source.GetHeight()==image.GetHeight()) {
                 cached.used=true;return i;
@@ -130,10 +132,10 @@ bool Renderer::Impl::RecordCanvas(const Canvas& canvas, RHI::ICommandList& comma
     };
     if(resolve(canvasWhite)==UINT32_MAX)return false; // 기본 흰색 이미지조차 준비하지 못하면 기록을 중단한다.
     // 각 Draw의 실제 이미지 또는 단색용 흰색 이미지를 resolve로 준비하고 캐시 인덱스를 저장한다. 뒤의 그리기 순회는 이 인덱스로 텍스처와 리소스 세트를 찾아 쓴다.
-    canvasDrawImages.clear();canvasDrawImages.reserve(canvas.draws.size());
+    prepared.images.clear();prepared.images.reserve(canvas.draws.size());
     for(const auto& draw:canvas.draws) {
         const auto index=resolve(draw.image.IsValid()?draw.image:canvasWhite);
-        if(index==UINT32_MAX)return false;canvasDrawImages.push_back(index); // Draw에 필요한 이미지가 실패하면 제출하지 않는다.
+        if(index==UINT32_MAX)return false;prepared.images.push_back(index); // Draw에 필요한 이미지가 실패하면 제출하지 않는다.
     }
     if(!canvas.vertices.empty()) // 정점이 있을 때만 버퍼를 확보하고 업로드한다.
     {
@@ -156,6 +158,24 @@ bool Renderer::Impl::RecordCanvas(const Canvas& canvas, RHI::ICommandList& comma
         const ResourceBarrierDesc barrier{vertexBuffer,nullptr,ResourceState::CopyDestination,ResourceState::VertexBuffer,{}};commandList.ResourceBarrier(&barrier,1);
         slot.ready=true;
     }
+    prepared.vertices=vertexBuffer;
+    return true;
+}
+
+bool Renderer::Impl::RecordCanvas(const Canvas& canvas,RHI::ICommandList& commandList,RHI::TextureHandle target,
+    bool overlay,bool graphManagedTarget,const CanvasRecording* prepared)
+{
+    using namespace RHI;
+    if(!prepared)
+    {
+        if(!PrepareCanvas(canvas,commandList,target,preparedCanvases[0]))return false;
+        prepared=&preparedCanvases[0];
+    }
+#if defined(DY_LIVE_PROFILING_ENABLED) || defined(DY_PROFILER_TRACING_ENABLED)
+    Platform::CpuScope cpuScope(Platform::LiveStage::Record,"Canvas recording");
+#endif
+    const auto vertexBuffer=prepared->vertices;
+    const auto& canvasDrawImages=prepared->images;
     {
         // 그래프가 타깃 상태를 관리하지 않을 때만 Present에서 RenderTarget으로 직접 전이한다.
         const ResourceBarrierDesc before{nullptr,target,ResourceState::Present,ResourceState::RenderTarget,{}};
@@ -207,11 +227,10 @@ bool Renderer::Impl::RecordCanvas(const Canvas& canvas, RHI::ICommandList& comma
                 if(!scissor.width || !scissor.height) continue; // 정수 픽셀로 바꾼 뒤 면적이 없으면 건너뛴다.
                 // Canvas와 배치·정점 버퍼의 관계를 관측 이벤트에 연결한다. 이 메타데이터가 그리기 결과를 대신하지 않는다.
                 auto batchContext=Platform::GetLiveContext();batchContext.object=canvas.liveId;
-                if(Platform::IsLiveCollectorEnabled()){ // 배치는 집계하고 자원 관계는 상세 캡처 때만 기록한다.
+                if(Platform::IsLiveCollectorEnabled()){ // 수집이 켜져 있을 때만 배치와 자원 관계를 기록한다.
                     const bool detail=Platform::IsLiveDetailEnabled(batchContext.frame);
-                    batchContext.batch=detail?Platform::GetLiveBatchPath(liveId,{canvas.liveId,(std::uint64_t(draw.first)<<32)|count}):0;
-                    Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Data;batch.first=draw.first;batch.elements=count;batch.bytes=std::uint64_t(count)*sizeof(Canvas::Vertex);batch.stride=sizeof(Canvas::Vertex);batch.resource=detail?Platform::FindLiveObject(vertexBuffer):0;batch.reason=splitReason;Platform::RecordLiveEvent(batch);
-                    if(detail)Platform::RecordLiveLink({canvas.liveId,batch.id});
+                    if(detail){const auto canvasBatch=Platform::GetLiveBatchId(liveId,canvas.liveId);batchContext.batch=Platform::GetLiveBatchId(canvasBatch,(std::uint64_t(draw.first)<<32)|count);}
+                    Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Data;batch.first=draw.first;batch.elements=count;batch.bytes=std::uint64_t(count)*sizeof(Canvas::Vertex);batch.stride=sizeof(Canvas::Vertex);batch.resource=detail?Platform::FindLiveObject(vertexBuffer):0;batch.reason=splitReason;Platform::RecordLiveEvent(batch);if(detail)Platform::RecordLiveLink({canvas.liveId,batch.id});
                 }
                 Platform::LiveContextScope linkedBatch(batchContext);
                 commandList.SetViewport({v.x,v.y,v.width,v.height,0,1});
@@ -262,7 +281,7 @@ bool Renderer::Impl::RenderCanvas(const Canvas& canvas, Image* readback)
     canvasFrame.Commit();
     if(readback && !CaptureFrame(*readback))return false; // 캡처를 요청했고 실패했으면 Present 전 실패로 반환한다.
     const bool presented=device->Present();
-    framePending=false;
+    framePending=device->HasActiveFrame();
     if(!presented) {std::fprintf(stderr,"dyf: Canvas presentation failed.\n");return false;} // Present 실패를 호출자에게 전달한다.
     DY_PROFILE_FRAME_MARK();
     return true;

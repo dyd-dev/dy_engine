@@ -1,23 +1,27 @@
 cmake_minimum_required(VERSION 3.20)
 project(AdvancedClusteredLighting LANGUAGES CXX)
-get_filename_component(engine_default "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
-set(DY_ENGINE_SOURCE_DIR "${engine_default}" CACHE PATH "dy_engine source directory.")
+
 if(NOT TARGET dy_engine)
-    add_subdirectory("${DY_ENGINE_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/dy_engine" EXCLUDE_FROM_ALL)
+    find_path(DY_ENGINE_INCLUDE_DIR dyf/RHI.h REQUIRED)
+    find_library(DY_ENGINE_LIBRARY NAMES dy_engine REQUIRED)
+    add_library(dy_engine STATIC IMPORTED)
+    set_target_properties(dy_engine PROPERTIES
+        IMPORTED_LOCATION "${DY_ENGINE_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${DY_ENGINE_INCLUDE_DIR}"
+        INTERFACE_LINK_LIBRARIES "${DY_ENGINE_LINK_LIBRARIES}")
 endif()
-include("${DY_ENGINE_SOURCE_DIR}/cmake/CompileShaders.cmake")
+
 add_executable(AdvancedClusteredLighting main.cpp)
+target_compile_features(AdvancedClusteredLighting PRIVATE cxx_std_17)
 target_link_libraries(AdvancedClusteredLighting PRIVATE dy_engine)
-set(shader_dir "${CMAKE_CURRENT_SOURCE_DIR}/Shaders")
-dy_compile_shader(AdvancedClusteredLighting vertex vert
-    GLSL "${shader_dir}/vertex.glsl" HLSL "${shader_dir}/vertex.hlsl"
-    METAL "${shader_dir}/vertex.metal" METAL_ENTRY vertexMain
-    INCLUDE_DIRS "${shader_dir}")
-dy_compile_shader(AdvancedClusteredLighting cluster comp
-    GLSL "${shader_dir}/cluster.glsl" HLSL "${shader_dir}/cluster.hlsl"
-    METAL "${shader_dir}/cluster.metal" METAL_ENTRY computeMain
-    INCLUDE_DIRS "${shader_dir}")
-dy_compile_shader(AdvancedClusteredLighting lighting frag
-    GLSL "${shader_dir}/lighting.glsl" HLSL "${shader_dir}/lighting.hlsl"
-    METAL "${shader_dir}/lighting.metal" METAL_ENTRY fragmentMain
-    INCLUDE_DIRS "${shader_dir}")
+target_compile_definitions(AdvancedClusteredLighting PRIVATE "$<$<BOOL:${USE_METAL}>:DY_EXAMPLE_METAL>")
+
+include("${CMAKE_CURRENT_LIST_DIR}/../../../cmake/CompileShaders.cmake" OPTIONAL)
+if(COMMAND dy_example_shader)
+    dy_example_shader(AdvancedClusteredLighting vert Shaders/vertex.glsl Shaders/vertex.bin
+        HLSL Shaders/vertex.hlsl METAL Shaders/vertex.metal METAL_ENTRY vertexMain)
+    dy_example_shader(AdvancedClusteredLighting comp Shaders/cluster.glsl Shaders/cluster.bin
+        HLSL Shaders/cluster.hlsl METAL Shaders/cluster.metal METAL_ENTRY computeMain)
+    dy_example_shader(AdvancedClusteredLighting frag Shaders/lighting.glsl Shaders/lighting.bin
+        HLSL Shaders/lighting.hlsl METAL Shaders/lighting.metal METAL_ENTRY fragmentMain)
+endif()

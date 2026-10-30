@@ -5,10 +5,14 @@
 
 namespace dyf
 {
-// 세 버퍼만 이 객체가 소유한다. 장치가 살아 있는 동안 소멸되어야 파괴 요청을 할 수 있다.
+// 중립 버퍼와 빈 프로브 배열을 소유한다. 장치가 살아 있는 동안 소멸되어야 파괴 요청을 할 수 있다.
 BasicEnvironmentResources::~BasicEnvironmentResources()
 {
-    if(m_device) for(auto buffer:m_buffers) m_device->DestroyBuffer(buffer); // 장치가 지정되었던 경우에만 보유 버퍼를 정리한다.
+    if(m_device)
+    {
+        for(auto buffer:m_buffers) m_device->DestroyBuffer(buffer);
+        m_device->DestroyTexture(m_emptyProbeArray);
+    }
 }
 
 // 초기화 순서는 CPU의 0 값 준비 → 버퍼 생성 → 복사 기록 → 셰이더가 읽을 상태로 전환이다.
@@ -33,6 +37,23 @@ bool BasicEnvironmentResources::Prepare(RHI::IDevice& device,RHI::ICommandList& 
         const RHI::ResourceBarrierDesc ready={m_buffers[i],nullptr,RHI::ResourceState::CopyDestination,state,{}};
         uploads.ResourceBarrier(&ready,1);
     }
+    // Array shaders require an array view even when the probe count is zero.
+    // A two-layer neutral texture has the matching dimensional contract on all backends.
+    device.DestroyTexture(m_emptyProbeArray);
+    RHI::TextureDesc texture;
+    texture.width=texture.height=1;texture.depthOrArraySize=2;
+    texture.format=RHI::Format::R8G8B8A8_UNORM;texture.usage=RHI::TextureUsage::ShaderResource;
+    m_emptyProbeArray=device.CreateTexture(texture);
+    if(!m_emptyProbeArray) return false;
+    const RHI::ResourceBarrierDesc writable={nullptr,m_emptyProbeArray,
+        RHI::ResourceState::Undefined,RHI::ResourceState::CopyDestination,{}};
+    uploads.ResourceBarrier(&writable,1);
+    const uint8_t black[4]={0,0,0,0};
+    for(uint32_t layer=0;layer<2;++layer)
+        if(!device.UpdateTexture(uploads,m_emptyProbeArray,0,layer,black,sizeof(black),4,4)) return false;
+    const RHI::ResourceBarrierDesc readable={nullptr,m_emptyProbeArray,
+        RHI::ResourceState::CopyDestination,RHI::ResourceState::ShaderResource,{}};
+    uploads.ResourceBarrier(&readable,1);
     return true;
 }
 
@@ -42,7 +63,7 @@ RenderEnvironmentResources BasicEnvironmentResources::GetResources(RHI::TextureH
     RenderEnvironmentResources resources;
     resources.constantBuffer=m_buffers[0];
     resources.probeData=m_buffers[1];resources.probeParameters=m_buffers[2];
-    resources.prefilter=resources.probePrefilter=black; // 전역·지역 반사 사전 필터 입력을 모두 같은 검은 텍스처로 채운다.
+    resources.prefilter=black;resources.probePrefilter=m_emptyProbeArray;
     resources.diffuse.texture=resources.specular.texture=black;
     return resources;
 }

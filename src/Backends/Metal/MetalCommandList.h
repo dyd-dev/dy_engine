@@ -1,9 +1,7 @@
 #pragma once
 
 #include <cstdint>
-#include <map>
 #include <memory>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -17,19 +15,17 @@ namespace dyf::Backends
 	struct MetalObjectDeleter;
 	struct MetalUploadPage;
 
-	struct MetalSubmissionState
-	{
-		std::unordered_map<MetalBuffer*, RHI::ResourceState> buffers;
-		std::map<std::pair<MetalTexture*, uint32_t>, RHI::ResourceState> textureSubresources;
-	};
-
 	class MetalCommandList final : public RHI::ICommandList
 	{
 	public:
 		explicit MetalCommandList(void* commandQueue,
 			std::shared_ptr<MetalDetail::UploadPagePool<MetalUploadPage>> uploadPool = {});
+
+	protected:
         bool ReplayNative(const std::vector<std::function<bool(ICommandList&)>>& commands) override;
         void GlobalBarrierNative() override;
+        void CopyBufferNative(RHI::BufferHandle source, uint32_t sourceOffset,
+            RHI::BufferHandle destination, uint32_t destinationOffset, uint32_t size) override;
 
 		void ResourceBarrierNative(
 			const RHI::ResourceBarrierDesc* barriers,
@@ -71,7 +67,7 @@ namespace dyf::Backends
 			int32_t vertexOffset,
 			uint32_t firstInstance) override;
 		void DrawIndirectNative(RHI::BufferHandle arguments, uint32_t offset) override;
-		void DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset) override;
+		void DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset, uint32_t drawCount, uint32_t stride) override;
 		void DispatchMeshNative(
 			uint32_t threadGroupCountX,
 			uint32_t threadGroupCountY,
@@ -100,10 +96,10 @@ namespace dyf::Backends
 			uint32_t rowPitch,
 			uint32_t slicePitch);
 
-		[[nodiscard]] bool ValidateForSubmit(MetalSubmissionState& state) const;
 		void CommitResourceStates();
 
 	private:
+		friend class MetalDevice;
 		friend struct MetalObjectDeleter;
 
 		~MetalCommandList() override;

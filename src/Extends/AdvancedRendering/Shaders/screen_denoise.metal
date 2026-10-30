@@ -42,12 +42,14 @@ DenoiseOutput DnTemporal(int2 pixel,DN_CONTEXT)
     float4 motion=DnLoad(motionImage,fullPixel),surface=DnLoad(normalImage,fullPixel),current=DnFinite(DnLoad(sourceImage,pixel));
     output.guide=float4(max(motion.z,0.0f),surface.xy,clamp(surface.z,0.0f,1.0f));
     if(motion.z<=0) {output.color=0;output.moments=0;output.guide=0;return output;}
-    float mean=0,second=0;
+    float currentLog=DnLog(current.rgb),mean=0,second=0;
     for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x)
     {
-        float l=DnLog(DnFinite(DnLoad(sourceImage,pixel+int2(x,y))).rgb);mean+=l/9;second+=l*l/9;
+        float l=currentLog;
+        if(x!=0 || y!=0)l=DnLog(DnFinite(DnLoad(sourceImage,pixel+int2(x,y))).rgb);
+        mean+=l/9;second+=l*l/9;
     }
-    float variance=max(second-mean*mean,0.0f),currentLog=DnLog(current.rgb);
+    float variance=max(second-mean*mean,0.0f);
     float4 oldColor=0,oldMoments=0;float accepted=0;
     float2 currentUV=(float2(fullPixel)+.5f)*frame.size.zw,previousUV=currentUV-motion.xy;
     int2 dimensions=int2(sourceImage.get_width(),sourceImage.get_height());
@@ -92,11 +94,19 @@ float4 DnSpatial(int2 pixel,DN_CONTEXT)
     float3 n=DnNormal(guide.gb);float4 sum=0;float total=0;int step=int(operation.w+.5f);
     for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x)
     {
-        int2 q=pixel+int2(x,y)*step;float4 g=DnLoad(guideImage,q);if(g.r<=0)continue;
-        float4 color=DnFinite(DnLoad(sourceImage,q));float weight=float((x==0?2:1)*(y==0?2:1));
+        bool centerTap=x==0 && y==0;
+        int2 q=pixel+int2(x,y)*step;float4 g=guide;
+        if(!centerTap)g=DnLoad(guideImage,q);
+        if(g.r<=0)continue;
+        float4 color=center;float3 sampleNormal=n;float sampleLog=centerLog;
+        if(!centerTap)
+        {
+            color=DnFinite(DnLoad(sourceImage,q));sampleNormal=DnNormal(g.gb);sampleLog=DnLog(color.rgb);
+        }
+        float weight=float((x==0?2:1)*(y==0?2:1));
         weight*=exp(-abs(g.r-guide.r)/max(.01f,guide.r*.01f*float(step)));
-        weight*=pow(max(dot(n,DnNormal(g.gb)),0.0f),32.0f)*exp(-abs(g.a-guide.a)*16);
-        weight*=exp(-abs(DnLog(color.rgb)-centerLog)/max(4*sigma,.001f));
+        weight*=pow(max(dot(n,sampleNormal),0.0f),32.0f)*exp(-abs(g.a-guide.a)*16);
+        weight*=exp(-abs(sampleLog-centerLog)/max(4*sigma,.001f));
         if(operation.y>.5f)weight*=exp(-abs(color.a-center.a)*4);
         sum+=color*weight;total+=weight;
     }
