@@ -15,13 +15,12 @@ invariant gl_Position;
 #endif
 
 // 표면에 수직인 방향(법선)과 표면을 따라가는 방향(접선)을 정점 속성으로 받는다.
-// 한 정점은 위치·법선·UV·접선·색상의 64바이트 배치다. 색상은 8번 입력, 인스턴싱 모델 행렬의 네 열은 4~7번 입력을 쓴다.
+// 한 정점은 위치·법선·UV·접선을 가지며, 인스턴싱이면 4~7번 입력에 모델 행렬의 네 열이 추가된다.
 layout(location = 0) in vec3 inPosition;
 layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec2 inUv;
 layout(location = 3) in vec4 inTangent;
-layout(location = 8) in vec4 inColor;
-#if RENDERER_INSTANCING
+#if RENDERER_INSTANCING // 인스턴싱 빌드에서만 물체별 행렬 입력을 사용하며, 일반 경로는 draw 상수의 모델 행렬을 쓴다.
 layout(location = 4) in mat4 instanceModel;
 #endif
 
@@ -30,13 +29,12 @@ layout(location = 0) out vec2 fragUv;
 layout(location = 1) out vec3 fragWorldPosition;
 layout(location = 2) out vec3 fragNormal;
 layout(location = 3) out vec4 fragTangent;
-layout(location = 5) out vec4 fragColor;
-#if RENDERER_ENABLE_SHADOWS
+#if RENDERER_ENABLE_SHADOWS // 그림자 사용 빌드에서만 공유 그림자 자료와 광원 공간 입출력을 포함한다.
 layout(location = 4) out vec4 fragLightSpacePosition;
 #endif
 
 // 정점·픽셀 단계가 공유하는 192바이트 draw 상수다. 행렬 뒤의 재질 필드도 생략하지 않아 CPU와 같은 위치에서 읽는다.
-// padding0은 알파 임곗값의 비트, padding1은 알파 모드·양면·법선 Y 반전·unlit·반전 변환 면 방향 보정 비트, padding2는 재질 번호다. 실제 재질 판정은 픽셀 단계가 한다.
+// padding0은 알파 임곗값의 비트, padding1은 알파 모드·양면·법선 Y 반전·unlit 비트, padding2는 재질 번호다. 실제 재질 판정은 픽셀 단계가 한다.
 layout(push_constant) uniform DrawConstants
 {
     mat4 viewProjectionMatrix;
@@ -118,7 +116,6 @@ void main()
     precise vec4 clipPosition = drawConstants.viewProjectionMatrix * worldPosition;
     gl_Position = clipPosition;
     fragUv = inUv;
-    fragColor = inColor;
     fragWorldPosition = worldPosition.xyz;
     fragNormal = MeshNormalizeOr(mat3(normalMatrix) * inNormal, vec3(0,0,1));
     vec3 tangent = mat3(world) * inTangent.xyz;

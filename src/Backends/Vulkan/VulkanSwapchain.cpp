@@ -1,5 +1,4 @@
 #include "VulkanSwapchain.h"
-#include "VulkanValidation.h"
 #if !defined(__ANDROID__)
 #include <GLFW/glfw3.h>
 #else
@@ -46,14 +45,14 @@ VulkanSwapchain& VulkanSwapchain::operator=(VulkanSwapchain&& other) noexcept
     m_swapchain = other.m_swapchain;
     m_swapchainImageFormat = other.m_swapchainImageFormat;
     m_swapchainExtent = other.m_swapchainExtent;
-    m_surfaceTransform = other.m_surfaceTransform;
+    m_preTransform = other.m_preTransform;
     m_swapchainImages = std::move(other.m_swapchainImages);
     m_swapchainImageViews = std::move(other.m_swapchainImageViews);
 
     other.m_swapchain = VK_NULL_HANDLE;
     other.m_swapchainImageFormat = VK_FORMAT_UNDEFINED;
     other.m_swapchainExtent = {};
-    other.m_surfaceTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    other.m_preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     return *this;
 }
 
@@ -89,14 +88,37 @@ bool VulkanSwapchain::Initialize(
         return false;
     }
 
-    uint32_t imageCount = VulkanValidation::SelectSwapchainImageCount(requestedMinimumImageCount,
-        swapchainSupport.capabilities.minImageCount, swapchainSupport.capabilities.maxImageCount);
-    if(!imageCount) return false;
+    uint32_t imageCount = std::max(requestedMinimumImageCount, swapchainSupport.capabilities.minImageCount);
+#if defined(__ANDROID__)
+    imageCount = std::max(imageCount, 3u);
+#endif
+    if (swapchainSupport.capabilities.maxImageCount > 0 && imageCount > swapchainSupport.capabilities.maxImageCount) {
+        imageCount = swapchainSupport.capabilities.maxImageCount;
+    }
     if((initialWidth && initialWidth != extent.width) || (initialHeight && initialHeight != extent.height))
         return false;
     const uint32_t minimumImageCount = imageCount;
 
-    if ((swapchainSupport.capabilities.supportedCompositeAlpha & requestedCompositeAlpha) == 0) return false;
+    VkCompositeAlphaFlagBitsKHR compositeAlpha = requestedCompositeAlpha;
+    if ((swapchainSupport.capabilities.supportedCompositeAlpha & compositeAlpha) == 0) {
+        if (swapchainSupport.capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) {
+            compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+        } else if (swapchainSupport.capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) {
+            compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        } else {
+            for (VkCompositeAlphaFlagBitsKHR flag : {
+                VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+                VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+                VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR})
+            {
+                if (swapchainSupport.capabilities.supportedCompositeAlpha & flag) {
+                    compositeAlpha = flag;
+                    break;
+                }
+            }
+        }
+    }
     VkSwapchainCreateInfoKHR createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
     createInfo.surface = context.surface;
@@ -123,7 +145,7 @@ bool VulkanSwapchain::Initialize(
     createInfo.preTransform = (swapchainSupport.capabilities.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
         ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
         : swapchainSupport.capabilities.currentTransform;
-    createInfo.compositeAlpha = requestedCompositeAlpha;
+    createInfo.compositeAlpha = compositeAlpha;
     createInfo.presentMode = requestedPresentMode;
     createInfo.clipped = allowReadback ? VK_FALSE : VK_TRUE;
     createInfo.oldSwapchain = oldSwapchain;
@@ -160,7 +182,7 @@ bool VulkanSwapchain::Initialize(
     m_swapchainImageViews = std::move(imageViews);
     m_swapchainImageFormat = requestedFormat;
     m_swapchainExtent = extent;
-    m_surfaceTransform = swapchainSupport.capabilities.currentTransform;
+    m_preTransform = createInfo.preTransform;
     pending.handle = VK_NULL_HANDLE;
     return true;
 }
@@ -178,7 +200,7 @@ void VulkanSwapchain::Cleanup(VkDevice device) {
     }
     m_swapchainImageFormat = VK_FORMAT_UNDEFINED;
     m_swapchainExtent = {};
-    m_surfaceTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    m_preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
 }
 
 bool VulkanSwapchain::IsSurfaceConfigurationChanged(
@@ -195,7 +217,7 @@ bool VulkanSwapchain::IsSurfaceConfigurationChanged(
     VkExtent2D extent{};
     if (!ChooseSwapExtent(capabilities, windowHandle, extent, status)) return false;
     changed = extent.width != m_swapchainExtent.width || extent.height != m_swapchainExtent.height ||
-        capabilities.currentTransform != m_surfaceTransform;
+        capabilities.currentTransform != m_preTransform;
     return true;
 }
 

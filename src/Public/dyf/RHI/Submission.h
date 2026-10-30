@@ -4,8 +4,6 @@ namespace dyf::RHI
 {
 class IDevice;
 class ICommandList;
-// A token expires with its originating device. Never use it with a later device,
-// even if an allocator reuses the same address; bool only tests for an empty token.
 struct FenceHandle
 {
     explicit operator bool() const {return m_device && m_value;}

@@ -24,7 +24,6 @@ public:
         float aoRadius=1.2f, aoStrength=1.0f, rayDistance=12.0f;
         float giStrength=1.0f, reflectionStrength=1.0f, thickness=0.25f;
         uint32_t frameIndex=0,aoFrameIndex=0;
-        uint32_t surfaceMask=7; // normal/roughness/AO, albedo/metal, motion/linear-depth
     };
     struct GraphResources
     {
@@ -64,7 +63,7 @@ public:
     // xy는 팔면체 월드 법선, z는 지각적 거칠기(unlit은 음수), w는 원본 AO다.
     RHI::TextureHandle GetNormal() const { return m_textures[Normal]; }
     // xy = currentUV - previousUV, z = positive linear view depth,
-    // w = previous positive linear view depth (>0 valid; invalid history is 0).
+    // w = previousClip.w (>0 valid; invalid history is 0).
     // 카메라·오브젝트 이동과 이전 정점 버퍼의 변형을 함께 반영한다.
     RHI::TextureHandle GetMotion() const { return m_textures[Motion]; }
     RHI::TextureHandle GetAlbedoMetal() const { return m_textures[Albedo]; }
@@ -84,8 +83,6 @@ private:
     {
         Math::float4x4 view,projection,inverseProjection,viewProjection;
         Math::float4 size,ao,lighting,options;
-        std::array<uint32_t,4> outputs={};
-        Math::float4x4 inversePreviousProjection;
     };
     struct SurfaceSetKey
     {
@@ -106,7 +103,7 @@ private:
     };
     struct ScreenSet
     {
-        std::array<RHI::TextureHandle,8> textures={};
+        std::array<RHI::TextureHandle,7> textures={};
         RHI::PipelineHandle pipeline=nullptr;
         RHI::ResourceSetHandle set=nullptr;
         uint32_t unusedFrames=0;
@@ -131,33 +128,23 @@ private:
         RHI::ResourceSetHandle set=nullptr;
         uint32_t unusedFrames=0;
     };
-    bool CreatePipelines(uint32_t surfaceMask);
-    void PrepareDepthPlane(bool enabled);
+    bool CreatePipelines();
     bool CreateDenoisePipelines();
     bool PrepareDenoise(uint32_t effect,bool enabled);
     void ReleaseDenoise(uint32_t effect);
     RHI::ResourceSetHandle DenoiseResources(RHI::PipelineHandle,const std::array<RHI::TextureHandle,6>&);
     bool AddDenoise(RHI::RenderGraph&,uint32_t effect,RHI::TextureHandle raw,RHI::RGResourceHandle rawGraph,
-        RHI::TextureHandle& filtered,RHI::RGResourceHandle& filteredGraph,
-        RHI::TextureHandle& guide,RHI::RGResourceHandle& guideGraph);
+        RHI::TextureHandle& filtered,RHI::RGResourceHandle& filteredGraph);
     bool Upload(RHI::ICommandList&,RHI::BufferHandle&,bool& ready,
         const void*,uint32_t,uint32_t,RHI::BufferUsage,RHI::ResourceState,uint32_t capacityBytes=0);
     RHI::ResourceSetHandle SurfaceResources(const SurfaceDraw&,RHI::PipelineHandle);
     RHI::ResourceSetHandle ScreenResources(RHI::PipelineHandle,RHI::TextureHandle source,
-        RHI::TextureHandle hdr,RHI::TextureHandle environment,RHI::TextureHandle reflection,
-        RHI::TextureHandle guide=nullptr);
+        RHI::TextureHandle hdr,RHI::TextureHandle environment,RHI::TextureHandle reflection);
     void DrawScreen(RHI::ICommandList&,RHI::PipelineHandle,RHI::ResourceSetHandle,
         RHI::TextureHandle output,const std::array<float,4>&);
     void DestroySets();
     RHI::IDevice* m_device=nullptr;
     RHI::TextureHandle m_depth=nullptr;
-    RHI::TextureHandle m_depthPlane=nullptr;
-    RHI::ResourceState m_depthPlaneState=RHI::ResourceState::Undefined;
-    RHI::RGResourceHandle m_depthPlaneHandle;
-    RHI::ShaderHandle m_depthCopyShader=nullptr;
-    RHI::PipelineHandle m_depthCopyPipeline=nullptr;
-    RHI::ResourceSetHandle m_depthCopySet=nullptr;
-    bool m_depthPlaneAttempted=false,m_depthPlaneActive=false;
     RHI::TextureHandle m_whiteAO=nullptr,m_colorOutput=nullptr;
     std::array<RHI::TextureHandle,ImageCount> m_textures={};
     std::array<RHI::ResourceState,ImageCount> m_states={};
@@ -166,9 +153,7 @@ private:
     RHI::RGResourceHandle m_frameHandle,m_drawHandle,m_depthHandle;
     GraphResources m_graph;
     std::array<RHI::ShaderHandle,6> m_shaders={};
-    RHI::ShaderHandle m_fullSurfaceShader=nullptr;
-    std::array<RHI::PipelineHandle,32> m_surfacePipelines={};
-    std::array<RHI::ShaderHandle,3> m_compactSurfaceShaders={};
+    std::array<RHI::PipelineHandle,4> m_surfacePipelines={};
     RHI::PipelineHandle m_screenPipeline=nullptr,m_lightingPipeline=nullptr;
     RHI::PipelineHandle m_debugPipeline=nullptr;
     RHI::Format m_debugFormat=RHI::Format::Unknown;
@@ -177,11 +162,8 @@ private:
     uint32_t m_width=0,m_height=0;
     Settings m_settings;
     FrameGPU m_uploadedFrame={};
-    Math::float4x4 m_previousInverseProjection={};
     std::vector<DrawGPU> m_gpuDraws,m_gpuScratch;
     std::vector<SurfaceDraw> m_draws;
-    std::vector<uint32_t> m_drawOrder;
-    std::vector<double> m_drawDepths;
     std::vector<RHI::ResourceSetHandle> m_drawSets;
     std::vector<ScreenSet> m_screenSets;
     std::unordered_map<SurfaceSetKey,RHI::ResourceSetHandle,SurfaceSetHash> m_surfaceSets;

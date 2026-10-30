@@ -16,7 +16,6 @@ struct FontGlyph
 class Font
 {
 public:
-    // Load trusted application fonts only; stb_truetype is not a bounds-checked parser for untrusted files.
     static std::unique_ptr<Font> Load(const std::string& path, float pixelHeight = 16,
         uint32_t atlasWidth = 1024, uint32_t atlasHeight = 1024);
     ~Font();

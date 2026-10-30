@@ -2,7 +2,7 @@
 
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/Pipeline.h"
-#include "dyf/RHI/ResourceSet.h"
+#include "ResourceSet.h"
 #include "dyf/RHI/Shader.h"
 #include "dyf/RHI/Texture.h"
 #include <algorithm>
@@ -54,7 +54,6 @@ namespace dyf::RHI
     	case RHI::Format::R32G32B32A32_FLOAT:
     		return 16;
     	case RHI::Format::R16_UINT:
-        case RHI::Format::R16_FLOAT:
     		return 2;
     	default:
     		return 0;
@@ -93,7 +92,6 @@ namespace dyf::RHI
     	case RHI::ResourceState::Undefined:
     	case RHI::ResourceState::Common:
     	case RHI::ResourceState::CopyDestination:
-        case RHI::ResourceState::CopySource:
     		return true;
     	case RHI::ResourceState::VertexBuffer:
     		return HasUsage(desc.usage, RHI::BufferUsage::Vertex);

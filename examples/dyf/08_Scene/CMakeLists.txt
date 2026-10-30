@@ -1,16 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
 project(DyfScene LANGUAGES CXX)
 
+get_filename_component(engine_default "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
+set(DY_ENGINE_SOURCE_DIR "${engine_default}" CACHE PATH "dy_engine source directory.")
 if(NOT TARGET dy_engine)
-    find_path(DY_ENGINE_INCLUDE_DIR dyf/RHI.h REQUIRED)
-    find_library(DY_ENGINE_LIBRARY NAMES dy_engine REQUIRED)
-    add_library(dy_engine STATIC IMPORTED)
-    set_target_properties(dy_engine PROPERTIES
-        IMPORTED_LOCATION "${DY_ENGINE_LIBRARY}"
-        INTERFACE_INCLUDE_DIRECTORIES "${DY_ENGINE_INCLUDE_DIR}"
-        INTERFACE_LINK_LIBRARIES "${DY_ENGINE_LINK_LIBRARIES}")
+    add_subdirectory("${DY_ENGINE_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/dy_engine" EXCLUDE_FROM_ALL)
 endif()
 
 add_executable(DyfScene main.cpp)
-target_compile_features(DyfScene PRIVATE cxx_std_17)
 target_link_libraries(DyfScene PRIVATE dy_engine)

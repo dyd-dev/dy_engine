@@ -1,6 +1,5 @@
 #include "EnvironmentLighting.h"
-#include "SceneAlgorithms.h"
-#include "dyf/RHI/ResourceSet.h"
+#include "RHI/ResourceSet.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -313,7 +312,6 @@ void EnvironmentLighting::Reset()
         m_device->DestroyBuffer(m_probeData);m_device->DestroyBuffer(m_probeParameters);
     }
     m_device=nullptr;m_source={};m_diffuseSource={};m_description={};m_data={};m_irradiance={};m_frame={};
-    m_prefilterMaxMagnitude=0;m_prefilterFinite=false;m_linearFiltering=false;
     m_radiance=m_prefilter=m_brdf=m_white=m_specular=nullptr;m_constants=m_frameBuffer=nullptr;
     m_blackSpecular=nullptr;
     m_constantBytes.clear();m_frameBytes.clear();
@@ -347,16 +345,6 @@ bool EnvironmentLighting::BuildEnvironment(RHI::ICommandList& commands,const Hdr
         prefilter=PrefilterRadiance(source,width,height,0,preparationThreads);
     }
     else {radiance[0]={0,0,0,1};prefilter={{0,0,0,1}};}
-    double prefilterMaxMagnitude=0;
-    bool prefilterFinite=true;
-    // Inspect the uploaded mip data once, including programmatically supplied HDR.
-    for(const auto& level:prefilter) for(size_t pixel=0;pixel<level.size();pixel+=4)
-        for(size_t channel=0;channel<3;++channel)
-        {
-            const double value=level[pixel+channel];
-            if(!std::isfinite(value)) prefilterFinite=false;
-            else prefilterMaxMagnitude=std::max(prefilterMaxMagnitude,std::abs(value));
-        }
     {
         constexpr uint32_t lutSize=128,lutSamples=128;
         brdf[0].resize(lutSize*lutSize*4);
@@ -413,7 +401,6 @@ bool EnvironmentLighting::BuildEnvironment(RHI::ICommandList& commands,const Hdr
     for(auto* texture:{m_radiance,m_prefilter,m_brdf,m_white}) m_device->DestroyTexture(texture);
     m_radiance=pending[0];m_prefilter=pending[1];m_brdf=pending[2];m_white=pending[3];
     m_source=source;m_diffuseSource=diffuseSource.IsValid() ? diffuseSource : source;m_irradiance=irradiance;
-    m_prefilterMaxMagnitude=prefilterMaxMagnitude;m_prefilterFinite=prefilterFinite;
     return true;
 }
 
@@ -469,14 +456,6 @@ bool EnvironmentLighting::BuildProbes(RHI::ICommandList& commands,const std::vec
             cache.width=width;cache.height=height;cache.maxReflectionResolution=probe.maxReflectionResolution;
             cache.sh=IntegrateDiffuse(diffuse);
             cache.prefilter=PrefilterRadiance(probe.radiance,width,height,probe.maxReflectionResolution,preparationThreads);
-            cache.prefilterFinite=true;
-            for(const auto& level:cache.prefilter) for(size_t pixel=0;pixel<level.size();pixel+=4)
-                for(size_t channel=0;channel<3;++channel)
-                {
-                    const double value=level[pixel+channel];
-                    if(!std::isfinite(value)) cache.prefilterFinite=false;
-                    else cache.prefilterMaxMagnitude=std::max(cache.prefilterMaxMagnitude,std::abs(value));
-                }
             cache.moments=VisibilityMoments(probe.visibility,width,height,cache.distanceScale);
             if(cache.moments.empty()) return false;
             pending.push_back(m_probeCache.size());m_probeCache.push_back(std::move(cache));
@@ -539,7 +518,6 @@ bool EnvironmentLighting::Prepare(RHI::IDevice& device,RHI::ICommandList& upload
 {
     using namespace RHI;
     if(m_device && m_device!=&device) Reset();
-    if(!m_device) m_linearFiltering=device.Supports(Format::R32G32B32A32_FLOAT,RHI::FormatFeature::LinearFiltering);
     m_device=&device;m_prepared=false;m_specularRecorded=m_diffuseRecorded=false;
     if(!width || !height || !std::isfinite(environment.intensity) || environment.intensity<0 ||
         !std::isfinite(environment.rotationRadians)) return false;
@@ -629,24 +607,7 @@ bool EnvironmentLighting::Prepare(RHI::IDevice& device,RHI::ICommandList& upload
         const auto& cache=m_probeCache[m_probeIndices[i]];
         data.sh[0].w=cache.distanceScale>0 ? 1.f : 0.f;data.sh[1].w=cache.distanceScale;
     }
-    // Keep headroom for signed bilinear/trilinear intermediates and intensity scaling.
-    const double safeMagnitude=double(std::numeric_limits<float>::max())/16.0;
-    const bool finiteFallback=m_prefilterFinite && m_prefilterMaxMagnitude<=safeMagnitude &&
-        m_prefilterMaxMagnitude*double(environment.intensity)<=safeMagnitude;
-    // Native filtering has a narrower conservative range than shader FP32.
-    // Eight signed terms of magnitude 2^28 leave headroom below 2^32.
-    constexpr double hardwareMagnitude=268435456.0;
-    bool hardwareFiltering=m_linearFiltering && finiteFallback && m_prefilterMaxMagnitude<=hardwareMagnitude &&
-        environment.probes.size()<=16777216u;
-    for(size_t i=0;i<environment.probes.size() && hardwareFiltering;++i)
-    {
-        const auto& cache=m_probeCache[m_probeIndices[i]];
-        hardwareFiltering=cache.prefilterFinite && cache.prefilterMaxMagnitude<=hardwareMagnitude &&
-            cache.prefilterMaxMagnitude*double(environment.probes[i].intensity)<=safeMagnitude;
-    }
-    // x=count, y=finite fallback skip, z=native HDR, w=reserved.
-    const std::array<uint32_t,4> probeParameters={m_active?static_cast<uint32_t>(environment.probes.size()):0u,
-        finiteFallback?1u:0u,hardwareFiltering?1u:0u,0u};
+    const std::array<uint32_t,4> probeParameters={m_active?static_cast<uint32_t>(environment.probes.size()):0u,0,0,0};
     if(!UploadConstants(uploads,m_probeData,m_probeReady,m_probeBytes,probeData.data(),
         static_cast<uint32_t>(probeData.size()*sizeof(ProbeGPU)),BufferUsage::Storage) ||
         !UploadConstants(uploads,m_probeParameters,m_probeParametersReady,m_probeParameterBytes,
@@ -658,16 +619,13 @@ bool EnvironmentLighting::Prepare(RHI::IDevice& device,RHI::ICommandList& upload
     backgroundView.m[12]=backgroundView.m[13]=backgroundView.m[14]=0;
     if(!Math::Inverse((backgroundProjection ? *backgroundProjection : camera.projection)*backgroundView,
         m_frame.backgroundRayToWorld)) return false;
-    m_frame.cameraPosition=CameraViewPosition(camera);
+    m_frame.cameraPosition={camera.position.x,camera.position.y,camera.position.z,1};
     m_frame.environment=m_data;
     m_frame.specularColor={environment.specularColor.x*environment.specularIntensity,
         environment.specularColor.y*environment.specularIntensity,environment.specularColor.z*environment.specularIntensity,0};
-    if(!UploadConstants(uploads,m_constants,m_constantsReady,m_constantBytes,&m_data,sizeof(m_data))) return false;
-    // Neutral environment bindings remain available without uploading a camera
-    // buffer that only the environment's own GPU passes consume.
-    const bool needsGpuPass=m_diffuseEnabled || m_specularEnabled || IsBackgroundEnabled();
-    if(needsGpuPass && (!UploadConstants(uploads,m_frameBuffer,m_frameReady,m_frameBytes,&m_frame,sizeof(m_frame)) ||
-        !CreatePipelines())) return false;
+    if(!UploadConstants(uploads,m_constants,m_constantsReady,m_constantBytes,&m_data,sizeof(m_data)) ||
+        !UploadConstants(uploads,m_frameBuffer,m_frameReady,m_frameBytes,&m_frame,sizeof(m_frame))) return false;
+    if((m_diffuseEnabled || m_specularEnabled || IsBackgroundEnabled()) && !CreatePipelines()) return false;
     m_prepared=true;return true;
 }
 
@@ -706,9 +664,6 @@ bool EnvironmentLighting::CreatePipelines()
     bindings.push_back({8,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Fragment,nearest});
     bindings.push_back({9,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Fragment,{}});
     bindings.push_back({10,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Fragment,aoSampler});
-    auto environmentLinear=linear;
-    if(m_linearFiltering) environmentLinear.minFilter=environmentLinear.magFilter=environmentLinear.mipFilter=SamplerFilter::Linear;
-    bindings.push_back({15,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Fragment,environmentLinear});
     bindings.push_back({22,ResourceBindingType::ReadOnlyStorageBuffer,1,ShaderStageFlags::Fragment,{}});
     bindings.push_back({23,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Fragment,{}});
     bindings.push_back({24,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Fragment,{}});
@@ -794,14 +749,6 @@ bool EnvironmentLighting::AddDiffuse(RHI::RenderGraph& graph,RHI::RGResourceHand
     m_diffuseRecorded=true;return true;
 }
 
-bool EnvironmentLighting::UsesNativeFiltering() const noexcept
-{
-    uint32_t flag=0;
-    if(m_probeParameterBytes.size()>=3*sizeof(uint32_t))
-        std::memcpy(&flag,m_probeParameterBytes.data()+2*sizeof(uint32_t),sizeof(flag));
-    return flag==1u;
-}
-
 bool EnvironmentLighting::AddSpecular(RHI::RenderGraph& graph,RHI::RGResourceHandle depth,RHI::TextureHandle depthTexture,
     RHI::RGResourceHandle normal,RHI::TextureHandle normalTexture,RHI::RGResourceHandle albedo,RHI::TextureHandle albedoTexture,
     RHI::RGResourceHandle ao,RHI::TextureHandle aoTexture)
@@ -817,8 +764,7 @@ bool EnvironmentLighting::AddSpecular(RHI::RenderGraph& graph,RHI::RGResourceHan
         {22,0,m_probeData,nullptr,0,m_probeData->GetDesc().size,{}},{23,0,nullptr,m_probePrefilter,0,0,{}},
         {24,0,m_probeParameters,nullptr,0,16,{}}};
     if(!UpdateSet(*m_device,m_specularPipeline,m_specularSet,bindings)) return false;
-    auto& pass=graph.AddPass(UsesNativeFiltering()?"EnvironmentSpecular Native filter":"EnvironmentSpecular",
-        RHI::RGRecordingMode::Independent);
+    auto& pass=graph.AddPass("EnvironmentSpecular", RHI::RGRecordingMode::Independent);
     ReadProbes(graph,pass);
     pass.Read(depth,ResourceState::ShaderResource).Read(normal,ResourceState::ShaderResource)
         .Read(albedo,ResourceState::ShaderResource).Write(m_specularHandle,ResourceState::RenderTarget);

@@ -48,7 +48,6 @@ struct MeshVertex
     float3 normal [[attribute(1)]];
     float2 uv [[attribute(2)]];
     float4 tangent [[attribute(3)]];
-    float4 color [[attribute(8)]];
 };
 
 struct RasterData
@@ -58,7 +57,6 @@ struct RasterData
     float3 worldPosition [[user(locn1)]];
     float3 worldNormal [[user(locn2)]];
     float4 worldTangent [[user(locn3)]];
-    float4 color [[user(locn5)]];
 #if RENDERER_ENABLE_SHADOWS
     float4 lightSpacePosition [[user(locn4)]];
 #endif
@@ -90,7 +88,6 @@ vertex RasterData RENDERER_VERTEX_ENTRY(
     RasterData output;
     output.position = drawConstants.viewProjectionMatrix * worldPosition;
     output.uv = input.uv;
-    output.color = input.color;
     output.worldPosition = worldPosition.xyz;
     const float3 fallbackNormal = SkinNormalizeOr(SkinColumn(modelNormal, 2).xyz, float3(0,0,1));
     output.worldNormal = SkinNormalizeOr(normalMatrix * skinnedNormal, fallbackNormal);

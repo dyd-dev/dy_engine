@@ -7,7 +7,7 @@
 #include "dyf/RHI/Texture.h"
 #include "dyf/RHI/Readback.h"
 #include "dyf/RHI/RenderGraph.h"
-#include "dyf/RHI/ResourceSet.h"
+#include "../RHI/ResourceSet.h"
 #include <cmath>
 #include <cstring>
 

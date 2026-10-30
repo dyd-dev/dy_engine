@@ -1,16 +1,21 @@
 cmake_minimum_required(VERSION 3.20)
 project(DyfMeshMaterial LANGUAGES CXX)
 
+get_filename_component(engine_default "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
+set(DY_ENGINE_SOURCE_DIR "${engine_default}" CACHE PATH "dy_engine source directory.")
 if(NOT TARGET dy_engine)
-    find_path(DY_ENGINE_INCLUDE_DIR dyf/RHI.h REQUIRED)
-    find_library(DY_ENGINE_LIBRARY NAMES dy_engine REQUIRED)
-    add_library(dy_engine STATIC IMPORTED)
-    set_target_properties(dy_engine PROPERTIES
-        IMPORTED_LOCATION "${DY_ENGINE_LIBRARY}"
-        INTERFACE_INCLUDE_DIRECTORIES "${DY_ENGINE_INCLUDE_DIR}"
-        INTERFACE_LINK_LIBRARIES "${DY_ENGINE_LINK_LIBRARIES}")
+    add_subdirectory("${DY_ENGINE_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/dy_engine" EXCLUDE_FROM_ALL)
 endif()
 
 add_executable(DyfMeshMaterial main.cpp)
-target_compile_features(DyfMeshMaterial PRIVATE cxx_std_17)
 target_link_libraries(DyfMeshMaterial PRIVATE dy_engine)
+
+# main.cpp의 상대 경로를 실행 파일의 작업 폴더에서 사용할 수 있도록 복사한다.
+if(NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+add_custom_command(TARGET DyfMeshMaterial POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:DyfMeshMaterial>/Assets"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/Assets/Default_albedo.jpg" "$<TARGET_FILE_DIR:DyfMeshMaterial>/Assets/Default_albedo.jpg"
+    VERBATIM)
+set_target_properties(DyfMeshMaterial PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:DyfMeshMaterial>")
+endif()

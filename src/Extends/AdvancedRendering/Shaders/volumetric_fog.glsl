@@ -105,15 +105,17 @@ float Visibility(int type,int lightIndex,vec3 position,vec3 toLight)
     }
     return visibility;
 }
-struct DirectionalRayCache {vec3 direction[4];vec3 radiance[4];uint mask;};
-vec3 Incident(vec3 position,vec3 ray,DirectionalRayCache directional)
+vec3 Incident(vec3 position,vec3 ray)
 {
     vec3 radiance=vec3(0);
     if(lights.counts.w<.5) return radiance;
-    for(int i=0;i<4;++i)
+    for(int i=0;i<clamp(int(lights.counts.x+.5),0,4);++i)
     {
-        if((directional.mask&(1u<<uint(i)))==0u)continue;
-        radiance+=directional.radiance[i]*Visibility(1,i,position,directional.direction[i]);
+        vec3 direction=lights.directional[i].directionIntensity.xyz;
+        if(dot(direction,direction)<1e-12) continue;
+        vec3 l=normalize(direction);
+        radiance+=max(lights.directional[i].color.rgb,vec3(0))*max(lights.directional[i].directionIntensity.w,0)*
+            Phase(dot(ray,l))*Visibility(1,i,position,l);
     }
     for(int i=0;i<clamp(int(lights.counts.y+.5),0,16);++i)
     {
@@ -148,28 +150,13 @@ vec4 Integrate(vec2 coordinate,float depth)
     distance=min(distance,frame.fog.w);
     float dt=distance/float(frame.options.x),transmission=1;
     vec3 scattering=vec3(0);
-    // Four ray-local entries cache direction/phase; shadow visibility stays per sample.
-    DirectionalRayCache directional;directional.mask=0u;
-    int directionalCount=frame.options.x>0u && frame.fog.x>0 && !(lights.counts.w<.5)?
-        clamp(int(lights.counts.x+.5),0,4):0;
-    for(int lightIndex=0;lightIndex<4;++lightIndex)
-    {
-        directional.direction[lightIndex]=vec3(0);directional.radiance[lightIndex]=vec3(0);
-        if(lightIndex>=directionalCount)continue;
-        vec3 direction=lights.directional[lightIndex].directionIntensity.xyz;
-        if(dot(direction,direction)<1e-12)continue;
-        vec3 l=normalize(direction);directional.direction[lightIndex]=l;
-        directional.radiance[lightIndex]=max(lights.directional[lightIndex].color.rgb,vec3(0))*
-            max(lights.directional[lightIndex].directionIntensity.w,0)*Phase(dot(ray,l));
-        directional.mask|=1u<<uint(lightIndex);
-    }
     // 13 예제의 중점 적분과 Beer–Lambert 투과율을 실제 깊이·광원으로 평가한다.
     for(uint i=0;i<frame.options.x && frame.fog.x>0;++i)
     {
         vec3 position=origin+ray*((float(i)+.5)*dt);
         float density=frame.fog.x*exp(-max(position.z-frame.fog.z,0)*frame.fog.y);
         float stepTransmission=exp(-density*dt);
-        scattering+=transmission*(1-stepTransmission)*frame.scattering.rgb*Incident(position,ray,directional);
+        scattering+=transmission*(1-stepTransmission)*frame.scattering.rgb*Incident(position,ray);
         transmission*=stepTransmission;
     }
     return vec4(clamp(scattering,vec3(0),vec3(65504)),clamp(transmission,0,1));

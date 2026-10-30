@@ -66,7 +66,6 @@ private:
     RHI::ResourceState m_fogState=RHI::ResourceState::Undefined,m_colorState=RHI::ResourceState::Undefined;
     RHI::RGResourceHandle m_colorHandle;
     Settings m_settings;
-    Frame m_uploadedFrame={},m_pendingFrame={};
     std::vector<CachedSet> m_sets;
     uint64_t m_cacheFrame=0;
     uint32_t m_width=0,m_height=0;

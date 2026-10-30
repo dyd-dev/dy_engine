@@ -31,7 +31,6 @@ namespace dyf::Backends
         friend class MetalDevice;
         friend struct MetalObjectDeleter;
 
-        static bool SupportsDdsCompression(void* device, RHI::Format) noexcept;
         explicit MetalTexture(const RHI::TextureDesc& desc);
         ~MetalTexture() override;
         void SetBackBuffer(void* texture, const RHI::TextureDesc& desc);

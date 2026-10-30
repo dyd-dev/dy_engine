@@ -8,11 +8,6 @@
 
 namespace dyf::Platform
 {
-    struct LiveFrameKey
-    {
-        std::uint64_t device=0, source=0, frame=0;
-    };
-
 	struct ProfilerTimingSample
 	{
 		double frameMilliseconds = 0.0;
@@ -66,9 +61,6 @@ namespace dyf::Platform
 		std::vector<ProfilerPassTiming> gpuPasses;
 		// Resource gauges are sampled at the same publication boundary.
 		std::array<std::uint64_t,3> liveResources={};
-        // Original frame of the latest completed GPU sample in this aggregate; zero when unavailable.
-        // Other averaged samples may come from earlier frames. This is not a presentation timestamp.
-        LiveFrameKey latestGpuFrame;
 	};
 
 	class Profiler final
@@ -85,7 +77,7 @@ namespace dyf::Platform
 		[[nodiscard]] bool AddSample(const ProfilerTimingSample& sample);
 		[[nodiscard]] const ProfilerTimingSnapshot& GetSnapshot() const noexcept;
 		// Called once per completed GPU frame, independently of the CPU publication cadence.
-		void AddGpuSample(double frameMilliseconds, const std::vector<ProfilerPassTiming>& passes, LiveFrameKey frame={});
+		void AddGpuSample(double frameMilliseconds, const std::vector<ProfilerPassTiming>& passes);
 		void Reset();
 
 	private:
@@ -120,21 +112,6 @@ namespace dyf::Platform
 		std::uint32_t line;
 	};
 
-    struct FrameTimingEvent
-    {
-        std::uint64_t source=0,frame=0;
-        // Borrowed for the callback; frame identifies the originating work, not delivery time.
-        const char* name=nullptr;
-        std::uint64_t beginNs=0,endNs=0;
-        std::int32_t result=0;
-    };
-
-    struct GpuTimingSample
-    {
-        LiveFrameKey frame;
-        double frameMilliseconds=0,uploadToGraphMilliseconds=0,graphMilliseconds=0;
-    };
-
 	// An optional adapter observes existing measurements. Its callbacks and context
 	// must remain alive until all instrumented work has stopped and it is detached.
 	struct TraceSink
@@ -145,16 +122,10 @@ namespace dyf::Platform
 		void (*value)(const char*, double, bool) noexcept = nullptr;
 		void (*frameSample)(const ProfilerTimingSample&) noexcept = nullptr;
 		void (*snapshot)(const ProfilerTimingSnapshot&) noexcept = nullptr;
-        // Opt-in native timings remain available without the full tracing build.
-        void (*frameTiming)(const FrameTimingEvent&) noexcept = nullptr;
-        void (*gpuTiming)(const GpuTimingSample&) noexcept = nullptr;
 	};
 
 	const TraceSink* SetTraceSink(const TraceSink*) noexcept;
 	void RemoveTraceSink(const TraceSink*) noexcept;
-    bool HasFrameTimingSink() noexcept;
-    void PublishFrameTiming(const FrameTimingEvent&) noexcept;
-    void PublishGpuTiming(const GpuTimingSample&) noexcept;
 
 	class TraceZone final
 	{

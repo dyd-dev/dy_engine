@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -149,11 +148,6 @@ namespace dyf::RHI
             ResourceState finalState = ResourceState::Undefined;
             RGResourceHandle handle;
         };
-        struct ResourceUse
-        {
-            uint32_t index;
-            ResourceState state;
-        };
         RGResourceHandle Import(const std::string& name, BufferHandle buffer, TextureHandle texture,
             ResourceState initialState, ResourceState finalState);
         bool RequireResource(ICommandList* commands, const Resource& resource, ResourceState state) const;
@@ -170,8 +164,6 @@ namespace dyf::RHI
         std::vector<RGDependency> m_dependencies;
         std::vector<std::vector<ResourceBarrierDesc>> m_passBarriers;
         std::vector<ResourceBarrierDesc> m_finalBarriers;
-        std::vector<ResourceUse> m_passUses;
-        std::vector<std::size_t> m_passUseOffsets;
         std::vector<uint64_t> m_compiledRevisions;
         bool m_compiled = false;
         TimestampQueryHandle m_timestampQuery = nullptr;

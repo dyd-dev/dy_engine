@@ -4,29 +4,21 @@ DY_SKIN_INLINE float4x4 SkinIdentity() {
     return SkinColumns(float4(1,0,0,0), float4(0,1,0,0), float4(0,0,1,0), float4(0,0,0,1));
 }
 
-DY_SKIN_INLINE bool TrySkinNormalMatrix(float4x4 matrix, DY_SKIN_OUT(float4x4, normalMatrix)) {
-    normalMatrix = SkinIdentity();
+DY_SKIN_INLINE float4x4 SkinNormalMatrix(float4x4 matrix, float4x4 fallback) {
     float3 a = SkinColumn(matrix, 0).xyz;
     float3 b = SkinColumn(matrix, 1).xyz;
     float3 c = SkinColumn(matrix, 2).xyz;
     float scale = max(max(max(abs(a.x),abs(a.y)),abs(a.z)),
         max(max(max(abs(b.x),abs(b.y)),abs(b.z)),max(max(abs(c.x),abs(c.y)),abs(c.z))));
-    if (scale == 0.0) return false;
+    if (scale == 0.0) return fallback;
     a /= scale; b /= scale; c /= scale;
     float determinant = dot(a, cross(b,c));
-    if (determinant == 0.0) return false;
+    if (determinant == 0.0) return fallback;
     // Only directions consume this matrix; retain inverse-transpose orientation
     // without its common positive magnitude. Weighted joint fallbacks stay intact.
     float orientation = determinant < 0.0 ? -1.0 : 1.0;
-    normalMatrix = SkinColumns(float4(cross(b,c)*orientation,0), float4(cross(c,a)*orientation,0),
+    return SkinColumns(float4(cross(b,c)*orientation,0), float4(cross(c,a)*orientation,0),
         float4(cross(a,b)*orientation,0), float4(0,0,0,1));
-    return true;
-}
-
-DY_SKIN_INLINE float4x4 SkinNormalMatrix(float4x4 matrix, float4x4 fallback) {
-    float4x4 normalMatrix;
-    if (TrySkinNormalMatrix(matrix,normalMatrix)) return normalMatrix;
-    return fallback;
 }
 
 DY_SKIN_INLINE float3 SkinNormalizeOr(float3 value, float3 fallback) {
@@ -68,6 +60,7 @@ DY_SKIN_INLINE void LoadSkinning(DY_SKIN_PARAMETERS uint vertexIndex, uint influ
     if (total <= 0.000001) return;
     float4 weights = influence.weights / total;
     float4x4 linearSkin = SkinIdentity() * 0.0;
+    float4x4 normalFallback = SkinIdentity() * 0.0;
     float4 reference = float4(0,0,0,1);
     float4 real = float4(0,0,0,0), dual = float4(0,0,0,0);
     float3 scale = float3(0,0,0);
@@ -77,6 +70,7 @@ DY_SKIN_INLINE void LoadSkinning(DY_SKIN_PARAMETERS uint vertexIndex, uint influ
         if (weight <= 0.0) continue;
         SkinJointMatrices joint = DY_SKIN_JOINT(paletteOffset + influence.joints[component]);
         linearSkin += joint.positionMatrix * weight;
+        normalFallback += joint.normalMatrix * weight;
         if (influence.dqBlendWeight > 0.0) {
             if (!haveReference) { reference=joint.dqReal; haveReference=true; }
             float signCorrection = dot(reference,joint.dqReal)<0.0 ? -1.0 : 1.0;
@@ -90,14 +84,5 @@ DY_SKIN_INLINE void LoadSkinning(DY_SKIN_PARAMETERS uint vertexIndex, uint influ
         float4x4 dqMatrix = DualQuaternionMatrix(real,dual,scale);
         matrix += (dqMatrix-linearSkin) * clamp(influence.dqBlendWeight,0.0,1.0);
     }
-    if (!TrySkinNormalMatrix(matrix,normalMatrix)) {
-        // Joint normal matrices are only needed for a singular blended matrix.
-        // Preserve the original weighted fallback and component order there.
-        normalMatrix = SkinIdentity() * 0.0;
-        for (uint component=0u; component<4u; ++component) {
-            float weight = weights[component];
-            if (weight <= 0.0) continue;
-            normalMatrix += DY_SKIN_JOINT(paletteOffset + influence.joints[component]).normalMatrix * weight;
-        }
-    }
+    normalMatrix = SkinNormalMatrix(matrix,normalFallback);
 }

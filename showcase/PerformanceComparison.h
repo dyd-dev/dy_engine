@@ -6,7 +6,6 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
-#include <limits>
 #include <map>
 #include <string>
 
@@ -18,8 +17,6 @@ namespace showcase
 class PerformanceComparison
 {
 public:
-    enum class CapturePhase { Idle, Warmup, Measuring };
-
     bool Begin(bool candidate, const std::string& conditions, const char* label)
     {
         if(candidate && (!m_hasBaseline || conditions != m_conditions))
@@ -44,19 +41,6 @@ public:
 
     bool IsRunning() const { return m_running; }
     bool HasBaseline() const { return m_hasBaseline; }
-    bool HasCandidate() const { return m_hasCandidate; }
-    // Completed, weighted capture totals. Check HasBaseline/HasCandidate first.
-    // GPU timing uses frame/pass sample counts; legacy main/shadow averages are
-    // unavailable because their source sample counts are not published.
-    const dyf::Platform::ProfilerTimingSnapshot& GetBaselineTiming() const { return m_timingA; }
-    const dyf::Platform::ProfilerTimingSnapshot& GetCandidateTiming() const { return m_timingB; }
-    CapturePhase GetCapturePhase() const
-    {
-        return !m_running ? CapturePhase::Idle : m_measuring ? CapturePhase::Measuring : CapturePhase::Warmup;
-    }
-    bool IsCandidateCapture() const { return m_running && m_candidate; }
-    double GetPhaseElapsedSeconds() const { return m_elapsed; }
-    uint32_t GetPhaseFrameCount() const { return m_frames; }
     void Cancel(const char* reason)
     {
         if(m_running) std::fprintf(stderr, "Comparison cancelled: %s\n", reason);
@@ -114,10 +98,7 @@ public:
             m_current.record += timing.cpuRecordAverageMilliseconds * count;
             m_current.submit += timing.cpuSubmitAverageMilliseconds * count;
             m_current.present += timing.cpuPresentAverageMilliseconds * count;
-            m_current.readback += timing.cpuReadbackAverageMilliseconds * count;
             m_current.maximum = std::max(m_current.maximum, timing.frameMaximumMilliseconds);
-            m_current.gpuTimingSupported |= timing.gpuTimingSupported;
-            m_current.liveResources = timing.liveResources;
             if(timing.hasGpuFrame && timing.gpuFrameSampleCount)
             {
                 m_current.gpuSamples += timing.gpuFrameSampleCount;
@@ -132,18 +113,8 @@ public:
         }
         if(m_elapsed < 3 || m_frames < 30 || !m_current.samples) return;
         m_running = false;
-        if(m_candidate)
-        {
-            m_resultB = m_current;
-            m_timingB = ToTiming(m_current);
-            m_hasCandidate = true;
-        }
-        else
-        {
-            m_resultA = m_current;
-            m_timingA = ToTiming(m_current);
-            m_hasBaseline = true;
-        }
+        if(m_candidate) { m_resultB = m_current; m_hasCandidate = true; }
+        else { m_resultA = m_current; m_hasBaseline = true; }
         Print(m_candidate ? 'B' : 'A', m_current);
         if(m_hasBaseline && m_hasCandidate)
         {
@@ -192,40 +163,11 @@ private:
     {
         uint64_t samples = 0, gpuSamples = 0, drawFrames = 0, visibleCountFrames = 0, gpuVisibilityFrames = 0;
         double frame = 0, cpu = 0, gpu = 0, maximum = 0;
-        double acquire = 0, prepare = 0, record = 0, submit = 0, present = 0, readback = 0;
+        double acquire = 0, prepare = 0, record = 0, submit = 0, present = 0;
         double draws = 0, instances = 0, triangles = 0, shadowDraws = 0;
-        bool gpuTimingSupported = false;
-        std::array<uint64_t, 3> liveResources{};
         std::map<std::string, std::pair<double, uint64_t>> passes;
     };
     static double Mean(double total, uint64_t count) { return count ? total / double(count) : 0; }
-    static dyf::Platform::ProfilerTimingSnapshot ToTiming(const Result& result)
-    {
-        dyf::Platform::ProfilerTimingSnapshot timing;
-        const auto count = [](uint64_t value) {
-            return static_cast<uint32_t>(std::min<uint64_t>(value, std::numeric_limits<uint32_t>::max()));
-        };
-        timing.frameCount = count(result.samples);
-        timing.frameAverageMilliseconds = Mean(result.frame, result.samples);
-        timing.frameMaximumMilliseconds = result.maximum;
-        timing.fps = timing.frameAverageMilliseconds > 0 ? 1000 / timing.frameAverageMilliseconds : 0;
-        timing.sampleWindowMilliseconds = result.frame;
-        timing.cpuRenderAverageMilliseconds = Mean(result.cpu, result.samples);
-        timing.cpuAcquireAverageMilliseconds = Mean(result.acquire, result.samples);
-        timing.cpuPrepareAverageMilliseconds = Mean(result.prepare, result.samples);
-        timing.cpuRecordAverageMilliseconds = Mean(result.record, result.samples);
-        timing.cpuSubmitAverageMilliseconds = Mean(result.submit, result.samples);
-        timing.cpuPresentAverageMilliseconds = Mean(result.present, result.samples);
-        timing.cpuReadbackAverageMilliseconds = Mean(result.readback, result.samples);
-        timing.gpuFrameAverageMilliseconds = Mean(result.gpu, result.gpuSamples);
-        timing.gpuFrameSampleCount = count(result.gpuSamples);
-        timing.hasGpuFrame = result.gpuSamples != 0;
-        timing.gpuTimingSupported = result.gpuTimingSupported;
-        timing.liveResources = result.liveResources; // Last gauge, not an accumulated count.
-        for(const auto& [name, total] : result.passes)
-            timing.gpuPasses.push_back({name, Mean(total.first, total.second), count(total.second)});
-        return timing;
-    }
     void Print(char name, const Result& result) const
     {
         std::fprintf(stderr, "Comparison %c [%s]\nConditions: %s\n", name, m_label.c_str(), m_conditions.c_str());
@@ -292,6 +234,5 @@ private:
     uint64_t m_lastSequence = 0;
     std::string m_conditions, m_label;
     Result m_current, m_resultA, m_resultB;
-    dyf::Platform::ProfilerTimingSnapshot m_timingA, m_timingB;
 };
 }

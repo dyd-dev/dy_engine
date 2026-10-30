@@ -90,11 +90,17 @@ namespace dyf::Platform::Detail
 			{
 				(Value(values), ...);
 			}
-			void Byte(std::uint8_t value)
+			std::uint8_t* Append(std::size_t bytes)
 			{
-				if(data.size() == LiveTransferLimit - sizeof(PacketHeader)) throw std::length_error("Live payload exceeds 64 MiB");
-				data.push_back(value);
+#if defined(DY_LIVE_TEST_CLOCK) && !defined(DY_LIVE_COST_TIMING)
+				RecordTestWireWrite();
+#endif
+				if(bytes > LiveTransferLimit - sizeof(PacketHeader) - data.size()) throw std::length_error("Live payload exceeds 64 MiB");
+				const auto offset = data.size();
+				data.resize(offset + bytes);
+				return data.data() + offset;
 			}
+			void Byte(std::uint8_t value) { *Append(1) = value; }
 			template<class T> void Value(const T & v)
 			{
 				if constexpr(std::is_same_v<T, bool>) Byte(v ? 1 : 0);
@@ -103,7 +109,8 @@ namespace dyf::Platform::Detail
 				{
 					using U = std::make_unsigned_t<T>;
 					auto bits = static_cast<U>(v);
-					for(std::size_t i = 0; i < sizeof(T); ++i) Byte(std::uint8_t(bits >>(i * 8)));
+					auto* output = Append(sizeof(T));
+					for(std::size_t i = 0; i < sizeof(T); ++i) output[i] = std::uint8_t(bits >>(i * 8));
 				}
 				else if constexpr(std::is_floating_point_v<T>)
 				{
@@ -118,7 +125,7 @@ namespace dyf::Platform::Detail
 			{
 				Allocate(v.size());
 				Value(std::uint32_t(v.size()));
-				for(unsigned char c : v) Byte(c);
+				if(!v.empty()) std::memcpy(Append(v.size()), v.data(), v.size());
 			}
 			template<class T> void Value(const std::vector<T> & v)
 			{
@@ -133,7 +140,7 @@ namespace dyf::Platform::Detail
 			}
 			template<std::size_t N> void Value(const char(& v) [N])
 			{
-				for(char x : v) Byte(std::uint8_t(x));
+				std::memcpy(Append(N), v, N);
 			}
 			void Value(const ControlValue & v)
 			{
@@ -272,18 +279,32 @@ namespace dyf::Platform::Detail
 		return std::move(writer.data);
 	}
 
-	std::vector<std::uint8_t> EncodeBoundedSnapshot(LiveSnapshot & snapshot)
+	namespace
 	{
+	std::vector<std::uint8_t> EncodeBoundedSnapshotImpl(const LiveSnapshot & input, LiveSnapshot * writable)
+	{
+		std::optional<LiveSnapshot> copy;
+		const LiveSnapshot * value = &input;
 		for(unsigned step = 0; step < 10; ++step)
 		{
 			try
 			{
-				return EncodeSnapshot(snapshot);
+				return EncodeSnapshot(*value);
 			}
 			catch(const std::length_error &)
 			{
-				snapshot.loss.transferTruncated = true;
+				if(!writable)
+				{
+#ifdef DY_LIVE_TEST_CLOCK
+					RecordTestBoundedSnapshotCopy();
+#endif
+					copy.emplace(input);
+					writable = &*copy;
+					value = writable;
+				}
+				writable->loss.transferTruncated = true;
 			}
+			auto & snapshot = *writable;
 			if(step == 0) for(auto & source : snapshot.sources)
 			{
 				snapshot.loss.events += source.flow.events.size();
@@ -408,7 +429,18 @@ namespace dyf::Platform::Detail
 			}
 		}
 
-		return EncodeSnapshot(snapshot);
+		return EncodeSnapshot(*value);
+	}
+	}
+
+	std::vector<std::uint8_t> EncodeBoundedSnapshot(LiveSnapshot & snapshot)
+	{
+		return EncodeBoundedSnapshotImpl(snapshot, &snapshot);
+	}
+
+	std::vector<std::uint8_t> EncodeBoundedSnapshot(const LiveSnapshot & snapshot)
+	{
+		return EncodeBoundedSnapshotImpl(snapshot, nullptr);
 	}
 
 	bool DecodeSnapshot(const std::vector<std::uint8_t> & data, LiveSnapshot & s, std::string & error)
@@ -466,8 +498,8 @@ namespace dyf::Platform::Detail
 			const auto & comparison = source.comparisonEvidence;
 			const auto & capture = source.capture;
 			const auto & captured = capture.summary;
-			if((capture.available && (!source.captureRequest || captured.captureRequest != source.captureRequest ||
-				!captured.key.frame || captured.key.device != source.device || captured.key.source != source.source ||
+			if((capture.available && (!source.captureRequest || !captured.captureRequest || !captured.key.frame ||
+				captured.key.device != source.device || captured.key.source != source.source ||
 				captured.endNs < captured.beginNs || captured.endNs > value.producerTimeNs || capture.flow.key != captured.key)) ||
 				capture.objects.size() > 128 || capture.flow.events.size() > 2048 || capture.flow.links.size() > 4096 ||
 				capture.flow.gpuSpans.size() > 128 || (!capture.available && (!capture.flow.events.empty() ||
@@ -476,17 +508,14 @@ namespace dyf::Platform::Detail
 				error = "Invalid requested frame capture";
 				return false;
 			}
-			for(const auto & event : capture.flow.events) if(event.context.frame != captured.key ||
-				event.context.appliedRevision != captured.appliedRevision)
+			for(const auto & event : capture.flow.events) if(event.context.frame != captured.key || event.context.appliedRevision != captured.appliedRevision)
 			{
 				error = "Mismatched captured event/revision";
 				return false;
 			}
-			for(const auto & span : capture.flow.gpuSpans) if(span.frame != captured.key ||
-				span.appliedRevision != captured.appliedRevision ||
+			for(const auto & span : capture.flow.gpuSpans) if(span.frame != captured.key || span.appliedRevision != captured.appliedRevision ||
 				(span.hasQueueInterval && (!span.gpuClockDomain || span.endGpuNs < span.beginGpuNs)) ||
-				(span.hasCpuInterval && (value.clock.cpu != LiveCpuClock::QueryPerformanceCounter ||
-				!value.clock.frequency || span.endCpuNs < span.beginCpuNs)))
+				(span.hasCpuInterval && (value.clock.cpu != LiveCpuClock::QueryPerformanceCounter || !value.clock.frequency || span.endCpuNs < span.beginCpuNs)))
 			{
 				error = "Invalid captured GPU interval/domain/revision";
 				return false;
@@ -561,10 +590,12 @@ namespace dyf::Platform::Detail
 		writer.Value(request);
 		return std::move(writer.data);
 	}
+
 	bool DecodeFrameCapture(const std::vector<std::uint8_t> & data, FrameCaptureRequest & request, std::string & error)
 	{
 		return Decode(data, request, error) && request.request && request.device && request.source;
 	}
+
 	std::vector<std::uint8_t> EncodeAck(const ControlAck & r)
 	{
 		Writer writer;

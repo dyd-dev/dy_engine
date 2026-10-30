@@ -73,10 +73,5 @@ namespace dyf::RHI
 		const ColorAttachment* colorAttachments = nullptr;
 		uint32_t colorAttachmentCount = 0;
 		const DepthStencilAttachment* depthStencilAttachment = nullptr;
-		// {} selects the full attachment. Otherwise both extents must be nonzero
-		// and contained in every attachment; partial areas require Feature::RenderArea.
-		// Load/store operations and draws preserve pixels outside this area.
-		// A scissor in a partial area must be wholly contained in it.
-		Rect renderArea = {};
 	};
 }

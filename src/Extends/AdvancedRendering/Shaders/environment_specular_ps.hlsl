@@ -8,7 +8,6 @@ Texture2D<float4> brdfTexture : register(t5);
 SamplerState environmentSampler : register(s7);
 SamplerState clampSampler : register(s8);
 SamplerState aoSampler : register(s10);
-SamplerState environmentLinearSampler:register(s15);
 cbuffer FrameConstants : register(b9)
 {
     column_major float4x4 inverseViewProjection;
@@ -38,11 +37,7 @@ float4 LinearFloatTexture(Texture2D<float4> image,float2 coordinate,uint mip,boo
     int2 size=int2(width,height);
     float2 pixel=coordinate*size-0.5,weight=frac(pixel);
     int2 low=int2(floor(pixel)),high=low+1;
-    if(repeatU)
-    {
-        int2 wrappedX=DyWrapBilinearX(low.x,high.x,size.x);
-        low.x=wrappedX.x;high.x=wrappedX.y;
-    }
+    if(repeatU) {low.x=(low.x%size.x+size.x)%size.x;high.x=(high.x%size.x+size.x)%size.x;}
     else {low.x=clamp(low.x,0,size.x-1);high.x=clamp(high.x,0,size.x-1);}
     low.y=clamp(low.y,0,size.y-1);high.y=clamp(high.y,0,size.y-1);
     return lerp(lerp(image.Load(int3(low,mip)),image.Load(int3(high.x,low.y,mip)),weight.x),
@@ -77,27 +72,18 @@ float3 SpatialMip(float2 coordinate,int mip,int layer)
     uint width,height,layers,levels;probePrefilterTexture.GetDimensions(uint(mip),width,height,layers,levels);
     int2 dimensions=int2(width,height);float2 pixel=coordinate*float2(dimensions)-.5,w=frac(pixel);
     int2 a=int2(floor(pixel)),b=a+1;
-    int2 wrappedX=DyWrapBilinearX(a.x,b.x,dimensions.x);
-    a.x=wrappedX.x;b.x=wrappedX.y;
+    a.x=(a.x%dimensions.x+dimensions.x)%dimensions.x;b.x=(b.x%dimensions.x+dimensions.x)%dimensions.x;
     a.y=clamp(a.y,0,dimensions.y-1);b.y=clamp(b.y,0,dimensions.y-1);
     return lerp(lerp(probePrefilterTexture.Load(int4(a,layer,mip)),probePrefilterTexture.Load(int4(b.x,a.y,layer,mip)),w.x),
         lerp(probePrefilterTexture.Load(int4(a.x,b.y,layer,mip)),probePrefilterTexture.Load(int4(b,layer,mip)),w.x),w.y).rgb;
-}
-bool NativeEnvironmentSample(float2 coordinate,float mip,float maximumMip,uint enabled)
-{
-    return enabled==1u && all(coordinate>=0) && all(coordinate<=1)
-        && mip>=0 && mip<=maximumMip && maximumMip<=32;
 }
 float ProbeVisibility(float3 position,SpatialProbe probe,uint index)
 {
     return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,
         probeParameters.x+index,probePrefilterTexture);
 }
-float3 BlendProbeRadiance(float3 position,float3 direction,float roughness)
+float3 BlendProbeRadiance(float3 fallback,float3 position,float3 direction,float roughness)
 {
-    float mip=roughness*settings.w;
-    uint lo=uint(floor(mip)),hi=min(lo+1,uint(settings.w));
-    float2 envUV=EnvironmentUV(ProbeDirection(position,direction));
     float3 sum=0;float weights=0,coverage=0;
     for(uint i=0;i<probeParameters.x;++i)
     {
@@ -108,25 +94,10 @@ float3 BlendProbeRadiance(float3 position,float3 direction,float roughness)
         float3 d=BoxDirection(position,direction,probe.positionIntensity.xyz,probe.boxMinFade.xyz,probe.boxMaxMip.xyz);
         float2 coordinate=float2(atan2(d.y,d.x)*.15915494309189535+.5,acos(clamp(d.z,-1,1))*.3183098861837907);
         float mip=roughness*probe.boxMaxMip.w;int lo=int(floor(mip)),hi=min(lo+1,int(probe.boxMaxMip.w));
-        float3 sampledRadiance;
-        if(NativeEnvironmentSample(coordinate,mip,probe.boxMaxMip.w,probeParameters.z))
-            sampledRadiance=probePrefilterTexture.SampleLevel(environmentLinearSampler,float3(coordinate,float(i)),mip).rgb;
-        else sampledRadiance=lerp(SpatialMip(coordinate,lo,int(i)),SpatialMip(coordinate,hi,int(i)),frac(mip));
-        sum+=sampledRadiance*
+        sum+=lerp(SpatialMip(coordinate,lo,int(i)),SpatialMip(coordinate,hi,int(i)),frac(mip))*
             probe.positionIntensity.w*(weight*ProbeVisibility(position,probe,i));
         weights+=weight;coverage+=edge;
     }
-    if(probeParameters.y!=0u && weights>0 && coverage>=1 && all(isfinite(envUV)) && isfinite(mip))
-    {
-        float3 local=sum/weights;
-        if(all(abs(local)<=2.1267646e37))return local;
-    }
-    float3 fallback;
-    if(NativeEnvironmentSample(envUV,mip,settings.w,probeParameters.z))
-        fallback=prefilterTexture.SampleLevel(environmentLinearSampler,envUV,mip).rgb;
-    else fallback=lerp(LinearFloatTexture(prefilterTexture,envUV,lo,true),
-        LinearFloatTexture(prefilterTexture,envUV,hi,true),frac(mip)).rgb;
-    fallback*=settings.y;
     return weights>0?lerp(fallback,sum/weights,saturate(coverage)):fallback;
 }
 float4 main(float4 fragment:SV_Position,float2 uv:TEXCOORD0):SV_Target
@@ -138,10 +109,14 @@ float4 main(float4 fragment:SV_Position,float2 uv:TEXCOORD0):SV_Target
     if(surface.z<0)return 0;
     float4 world=mul(inverseViewProjection,float4(uv*float2(2,-2)+float2(-1,1),depth,1));
     float3 position=world.xyz/world.w;
-    float3 normal=DecodeNormal(surface.xy),view=normalize(cameraPosition.xyz-position*cameraPosition.w);
+    float3 normal=DecodeNormal(surface.xy),view=normalize(cameraPosition.xyz-position);
     float roughness=clamp(surface.z,0.01,1.0),nDotV=max(dot(normal,view),0.0);
+    float mip=roughness*settings.w;
+    uint lo=uint(floor(mip)),hi=min(lo+1,uint(settings.w));
     float3 reflection=reflect(-view,normal);
-    float3 radiance=BlendProbeRadiance(position,reflection,roughness);
+    float2 envUV=EnvironmentUV(ProbeDirection(position,reflection));
+    float3 radiance=lerp(LinearFloatTexture(prefilterTexture,envUV,lo,true),LinearFloatTexture(prefilterTexture,envUV,hi,true),frac(mip)).rgb;
+    radiance=BlendProbeRadiance(radiance*settings.y,position,reflection,roughness);
     float2 brdf=LinearFloatTexture(brdfTexture,float2(nDotV,roughness),0,false).rg;
     float3 f0=lerp(0.04,albedo.rgb,saturate(albedo.a));
     float ao=saturate(surface.w);

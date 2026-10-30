@@ -42,11 +42,10 @@ namespace dyf
 
     RHI::ShaderDesc GetModelComputeShader()
     {
-#if defined(DY_MODEL_SHADERS_METAL)
-        return {RHI::ShaderStage::Compute, "modelSkinningCompute", kModelMetalLibrary, kModelMetalLibrarySize};
-#elif defined(DY_MODEL_SHADERS_COMPUTE)
+#if defined(DY_MODEL_SHADERS_COMPUTE)
         return {RHI::ShaderStage::Compute, "main", kModelComputeShader, kModelComputeShaderSize};
 #else
+        // 기존 Compute 스키닝 지원 범위는 Vulkan이며 나머지 백엔드는 정점 셰이더를 쓴다.
         return {};
 #endif
     }

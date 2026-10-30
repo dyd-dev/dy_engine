@@ -1,6 +1,5 @@
 #include <dyf/Extends/Model/Model.h>
 #include "ModelLoader.h"
-#include "ModelSkinning.h"
 
 #include <algorithm>
 #include <atomic>
@@ -12,7 +11,6 @@
 #include <fstream>
 #include <future>
 #include <limits>
-#include <map>
 
 #include <dyf/Extends/Model/ModelScene.h>
 
@@ -75,35 +73,24 @@ namespace dyf
 			return bounds;
 		}
 
-		[[nodiscard]] bool BuildModelSceneTransform(const ModelAsset& asset, const ModelSceneDesc& desc,
-			Math::float4x4& outTransform)
+		[[nodiscard]] Math::float4x4 BuildModelSceneTransform(const ModelAsset& asset, const ModelSceneDesc& desc)
 		{
 			Math::float4x4 transform = Math::Translation(desc.position) * desc.transform;
 			if(desc.normalize && asset.hasBounds)
 			{
-				if(!std::isfinite(asset.boundsLargestAxis) || asset.boundsLargestAxis < 0.0f
-					|| !std::isfinite(desc.normalizedSize)) return false;
-				// A valid extent has no source-unit cutoff. Normalize tiny assets
-				// as well, rejecting only scales that float matrices cannot represent.
-				const double requestedScale = asset.boundsLargestAxis > 0.0f
-					? double(desc.normalizedSize) / asset.boundsLargestAxis : 1.0;
-				if(!std::isfinite(requestedScale)
-					|| std::abs(requestedScale) > std::numeric_limits<float>::max()) return false;
-				const float scale = static_cast<float>(requestedScale);
-				if(requestedScale != 0.0 && scale == 0.0f) return false;
+				const float scale = asset.boundsLargestAxis > 0.0001f
+					? desc.normalizedSize / asset.boundsLargestAxis
+					: 1.0f;
 				transform = transform * Math::Scaling(scale) * Math::Translation(Math::float3(
 					-asset.boundsCenter.x,
 					-asset.boundsCenter.y,
 					-asset.boundsCenter.z));
 			}
-			outTransform = transform * asset.assetTransform;
-			for(float value : outTransform.m) if(!std::isfinite(value)) return false;
-			return true;
+			return transform * asset.assetTransform;
 		}
 
         bool LoadExternalImage(const std::string& path, Image& image,
-            const ModelLoadOptions& options, ModelLoadBudget& budget,
-            uint64_t temporaryDecodeLimit=UINT64_MAX)
+            const ModelLoadOptions& options, ModelLoadBudget& budget)
         {
             std::error_code error;
             const auto size=std::filesystem::file_size(path,error);
@@ -115,10 +102,8 @@ namespace dyf
             if(!file.read(reinterpret_cast<char*>(encoded.data()),static_cast<std::streamsize>(encoded.size())))
                 return ReportModelError(path,"failed to read external image");
             bool exceeded=false;
-            const uint64_t decodeLimit=temporaryDecodeLimit==UINT64_MAX
-                ? options.maxDecodedBytes-budget.DecodedBytes() : temporaryDecodeLimit;
             if(!LoadImage(encoded.data(),encoded.size(),image,
-                decodeLimit,options.maxTextureDimension,&exceeded))
+                options.maxDecodedBytes-budget.DecodedBytes(),&exceeded))
                 return ReportModelError(path,exceeded ? "external image pixels exceed maxDecodedBytes" : "failed to decode external image");
             if(!budget.AddBytes(image.GetPixels().size(),1,"external image pixels")) return false;
             image.SetSourcePath(path);
@@ -223,7 +208,6 @@ namespace dyf
 			key += "|maxParserInputBytes=" + std::to_string(options.maxParserInputBytes);
 			key += "|maxParserBytes=" + std::to_string(options.maxParserBytes);
 			key += "|maxDecodedBytes=" + std::to_string(options.maxDecodedBytes);
-			key += "|maxTextureDimension=" + std::to_string(options.maxTextureDimension);
 			key += "|maxTextures=" + std::to_string(options.maxTextures);
 			key += "|maxMorphTargetsPerMesh=" + std::to_string(options.maxMorphTargetsPerMesh);
 			key += "|maxNodes=" + std::to_string(options.maxNodes);
@@ -240,11 +224,7 @@ namespace dyf
 			key += "|fbxBakeRate=" + floatIdentity(options.fbxBakeRate);
 			key += "|fbxConstantTrackTolerance=" + floatIdentity(options.fbxConstantTrackTolerance);
 			key += "|fbxSpecularTextureIsOrm=" + std::to_string(options.fbxSpecularTextureIsOrm);
-			key += "|fbxSpecularTextureHasOcclusion=" + std::to_string(options.fbxSpecularTextureHasOcclusion);
-			key += "|fbxBumpTextureIsNormalMap=" + std::to_string(options.fbxBumpTextureIsNormalMap);
-			key += "|allowMaterialFallbacks=" + std::to_string(options.allowMaterialFallbacks);
 			key += "|fbxBaseColorTextureHasOpacity=" + std::to_string(options.fbxBaseColorTextureHasOpacity);
-			key += "|fbxBaseColorAlphaMode=" + std::to_string(options.fbxBaseColorAlphaMode ? int(*options.fbxBaseColorAlphaMode) : -1);
 			key += "|normalMapYSign=" + floatIdentity(options.normalMapYSign);
 			key += "|importLights=" + std::to_string(options.importLights);
 			key += "|materialOverrides=" + std::to_string(options.materialOverrides.size());
@@ -259,10 +239,6 @@ namespace dyf
 				key += "|distance=" + floatIdentity(value.attenuationDistance);
 				key += "|roughness=" + floatIdentity(value.roughnessFactor);
 				key += "|metallic=" + floatIdentity(value.metallicFactor);
-				key += "|alphaMode=" + std::to_string(value.alphaMode ? int(*value.alphaMode) : -1);
-				key += "|doubleSided=" + std::to_string(value.doubleSided ? int(*value.doubleSided) : -1);
-				key += "|fbxFallbackTextureUvSet=" + (value.fbxFallbackTextureUvSet
-					? std::to_string(value.fbxFallbackTextureUvSet->size()) + ":" + *value.fbxFallbackTextureUvSet : "unset");
 				key += "|baseColor=" + floatIdentity(value.baseColor.x) + "," + floatIdentity(value.baseColor.y)
 					+ "," + floatIdentity(value.baseColor.z) + "," + floatIdentity(value.baseColor.w);
 				for(size_t slot = 0; slot < value.texturePaths.size(); ++slot)
@@ -338,10 +314,11 @@ namespace dyf
 		return true;
 	}
 
-	bool Detail::BuildSkinTransform(
+	bool SkinVertex(
+		const Vertex& source,
 		const SkinInfluence& influence,
 		const std::vector<SkinJointMatrices>& palette,
-		SkinTransform& outTransform, Math::float4x4* fallbackNormalMatrix)
+		Vertex& outVertex)
 	{
 		if(!std::isfinite(influence.dqBlendWeight)
 			|| influence.dqBlendWeight < 0.0f
@@ -356,12 +333,12 @@ namespace dyf
 		}
 		if(totalWeight <= 1.0e-6f)
 		{
-			outTransform.copySource = true;
+			outVertex = source;
 			return true;
 		}
 
 		Math::float4x4 linearMatrix = {};
-		if(fallbackNormalMatrix) *fallbackNormalMatrix = {};
+		Math::float4x4 fallbackNormalMatrix = {};
 		const bool useDualQuaternion = influence.dqBlendWeight > 0.0f;
 		Math::quat referenceReal = Math::quat::Identity();
 		bool hasReference = false;
@@ -377,7 +354,7 @@ namespace dyf
 			for(size_t matrixIndex = 0u; matrixIndex < 16u; ++matrixIndex)
 			{
 				linearMatrix.m[matrixIndex] += joint.positionMatrix.m[matrixIndex] * weight;
-				if(fallbackNormalMatrix) fallbackNormalMatrix->m[matrixIndex] += joint.normalMatrix.m[matrixIndex] * weight;
+				fallbackNormalMatrix.m[matrixIndex] += joint.normalMatrix.m[matrixIndex] * weight;
 			}
 
 			if(useDualQuaternion)
@@ -428,50 +405,12 @@ namespace dyf
 					+ (dqMatrix.m[matrixIndex] - linearMatrix.m[matrixIndex]) * influence.dqBlendWeight;
 			}
 		}
-		outTransform.matrix = finalMatrix;
-		outTransform.copySource = false;
-		return true;
-	}
-
-	bool Detail::BuildSkinTransformGroups(const std::vector<SkinInfluence>& influences,
-		std::vector<uint32_t>& representatives, std::vector<uint32_t>& vertexGroups)
-	{
-		representatives.clear();
-		vertexGroups.clear();
-		if(influences.size() > UINT32_MAX) return false;
-		std::map<std::array<uint8_t, sizeof(SkinInfluence)>, uint32_t> groups;
-		vertexGroups.reserve(influences.size());
-		for(size_t vertex = 0; vertex < influences.size(); ++vertex)
-		{
-			std::array<uint8_t, sizeof(SkinInfluence)> key;
-			std::memcpy(key.data(), &influences[vertex], key.size());
-			const auto [entry, inserted] = groups.emplace(key, static_cast<uint32_t>(representatives.size()));
-			if(inserted) representatives.push_back(static_cast<uint32_t>(vertex));
-			vertexGroups.push_back(entry->second);
-		}
-		return true;
-	}
-
-	static bool SkinVertexImpl(
-		const Vertex& source,
-		const SkinInfluence& influence,
-		const std::vector<SkinJointMatrices>& palette,
-		Vertex& outVertex, bool positionOnly)
-	{
-		Detail::SkinTransform transform;
-		Math::float4x4 fallbackNormalMatrix = {};
-		if(!Detail::BuildSkinTransform(influence, palette, transform,
-			positionOnly ? nullptr : &fallbackNormalMatrix)) return false;
-		outVertex = source;
-		if(transform.copySource) return true;
-		const auto& finalMatrix = transform.matrix;
-		outVertex.position = Detail::ApplySkinTransform(transform, source.position);
-		if(positionOnly)
-			return std::isfinite(outVertex.position.x) && std::isfinite(outVertex.position.y)
-				&& std::isfinite(outVertex.position.z);
 		Math::float4x4 finalNormalMatrix = {};
 		if(!Math::InverseTranspose(finalMatrix, finalNormalMatrix))
 			finalNormalMatrix = fallbackNormalMatrix;
+
+		outVertex = source;
+		outVertex.position = Math::TransformPoint(finalMatrix, source.position);
 		outVertex.normal = NormalizeOr(
 			Math::TransformVector(finalNormalMatrix, source.normal),
 			Math::float3(0.0f, 0.0f, 1.0f));
@@ -489,21 +428,6 @@ namespace dyf
 		return std::isfinite(outVertex.position.x) && std::isfinite(outVertex.position.y)
 			&& std::isfinite(outVertex.position.z) && std::isfinite(outVertex.normal.x)
 			&& std::isfinite(outVertex.normal.y) && std::isfinite(outVertex.normal.z);
-	}
-
-	bool SkinVertex(const Vertex& source, const SkinInfluence& influence,
-		const std::vector<SkinJointMatrices>& palette, Vertex& outVertex)
-	{
-		return SkinVertexImpl(source, influence, palette, outVertex, false);
-	}
-
-	bool Detail::SkinPosition(const Vertex& source, const SkinInfluence& influence,
-		const std::vector<SkinJointMatrices>& palette, Math::float3& outPosition)
-	{
-		Vertex output;
-		if(!SkinVertexImpl(source, influence, palette, output, true)) return false;
-		outPosition = output.position;
-		return true;
 	}
 
 	bool LoadModelAsset(
@@ -557,7 +481,6 @@ namespace dyf
 			std::string path;
 			ColorSpace colorSpace;
 			uint64_t decodedBytes;
-			uint64_t temporaryDecodeLimit;
 		};
 		std::vector<ImageJob> imageJobs;
 		imageJobs.reserve(model.textures.size());
@@ -570,15 +493,12 @@ namespace dyf
 				if(ufbxTexturesDecoded) return false;
 				const std::string& imagePath = texture.GetSourcePath();
 				uint32_t width = 0, height = 0;
-				if(imagePath.empty() || !GetImageDimensions(imagePath, width, height,options.maxTextureDimension))
+				if(imagePath.empty() || !GetImageDimensions(imagePath, width, height))
 					return ReportModelError(path, "failed to read external image dimensions: " + imagePath);
-				// Reserve retained pixels, not discarded full-resolution pixels. With
-				// resizing, a separate ceiling still bounds the decoder's source RGBA.
-				const uint64_t retainedBytes=uint64_t(width)*height*4;
-				const uint64_t temporaryLimit=options.maxTextureDimension
-					? options.maxDecodedBytes-budget.DecodedBytes() : retainedBytes;
+				// Reserve every image before launching any decoder. Only this thread
+				// mutates the model budget; workers each receive a separate byte limit.
 				if(!budget.AddBytes(width, uint64_t(height) * 4, "external image pixels")) return false;
-				imageJobs.push_back({index,imagePath,texture.GetColorSpace(),retainedBytes,temporaryLimit});
+				imageJobs.push_back({index, imagePath, texture.GetColorSpace(), uint64_t(width) * height * 4});
 			}
 		}
 		if(!imageJobs.empty())
@@ -599,7 +519,7 @@ namespace dyf
 						Image decoded;
 						// LoadExternalImage reads immutable encoded bytes, checks their
 						// dimensions again before decoding, and enforces this reservation.
-						if(!LoadExternalImage(job.path,decoded,localOptions,localBudget,job.temporaryDecodeLimit))
+						if(!LoadExternalImage(job.path, decoded, localOptions, localBudget))
 						{
 							failed.store(true, std::memory_order_relaxed);
 							return false;
@@ -616,10 +536,7 @@ namespace dyf
 					throw;
 				}
 			};
-			// Resizing keeps only small outputs, so do not overlap several large
-			// PNG/JPEG decode temporaries outside their retained-pixel reservations.
-			const size_t decodeThreads=options.maxTextureDimension ? 1u : options.textureDecodeThreadCount;
-			const size_t workerCount = std::min<size_t>(decodeThreads,imageJobs.size());
+			const size_t workerCount = std::min<size_t>(options.textureDecodeThreadCount, imageJobs.size());
 			std::vector<std::future<bool>> workers;
 			workers.reserve(workerCount);
 			std::exception_ptr exception;
@@ -669,13 +586,10 @@ namespace dyf
 		asset.nodes = std::move(model.nodes);
 		asset.skins = std::move(model.skins);
 		asset.animations = std::move(model.animations);
-		asset.cameras = std::move(model.cameras);
 		asset.directionalLights = std::move(model.directionalLights);
 		asset.pointLights = std::move(model.pointLights);
 		asset.spotLights = std::move(model.spotLights);
 		asset.assetTransform = model.assetTransform;
-		asset.sourceToYUp = model.sourceToYUp;
-		asset.sourceUnitMeters = model.sourceUnitMeters;
 		asset.hasBounds = bounds.valid;
 		if(bounds.valid)
 		{
@@ -729,9 +643,7 @@ namespace dyf
 			|| std::any_of(asset->meshes.begin(), asset->meshes.end(), [](const ModelAssetMesh& mesh) {
 				return mesh.nodeIndex != UINT32_MAX || !mesh.morphTargets.empty();
 			});
-		Math::float4x4 transform;
-		if(!BuildModelSceneTransform(*asset, desc, transform))
-			return ReportModelError(desc.path, "model transform or normalization exceeds the finite float range");
+		const Math::float4x4 transform = BuildModelSceneTransform(*asset, desc);
 
 		ModelInstanceID instanceId = ModelInstanceID::Invalid;
 		if(animatedModel)

@@ -16,7 +16,6 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -69,9 +68,8 @@ namespace
             return RendererFailure("Texture preparation requires at least one thread.");
         // 상태 전환 방향마다 서로 다른 기준을 적용해 잦은 전환을 막는 방식(히스테리시스)의 폭을 검사한다.
         if(!std::isfinite(desc.lodPixelError) || desc.lodPixelError<=0 || // LOD 픽셀 오차는 유한한 양수, 히스테리시스 폭은 유한한 0 이상 0.5 미만이어야 한다.
-            !std::isfinite(desc.lodScreenSize) || desc.lodScreenSize<=0 || desc.lodScreenSize>1 ||
             !std::isfinite(desc.lodHysteresis) || desc.lodHysteresis<0 || desc.lodHysteresis>=0.5f)
-            return RendererFailure("LOD requires positive pixel error, screen size in (0, 1], and hysteresis in [0, 0.5).");
+            return RendererFailure("LOD requires positive pixel error and hysteresis in [0, 0.5).");
         if(desc.lighting.shadowQuality > ShadowQuality::High) // 정의된 그림자 품질 열거 범위 밖의 값은 거부한다.
             return RendererFailure("Invalid shadow configuration.");
         if(desc.lighting.shadowBlockerSamples<1 || desc.lighting.shadowBlockerSamples>32 || // 표본 수가 1..32 밖이거나 필터 반경이 음수/비유한 값이면 실패한다.
@@ -170,9 +168,8 @@ bool Renderer::Impl::AddExtension(std::unique_ptr<RenderExtension> extension)
 // 셰이더 바이트·진입점·추가 바인딩을 내용으로 비교한다. sampler의 float는 비트 표현을 비교해 복사된 기본 NaN도 동일한 설정으로 인정한다.
 bool Renderer::Impl::ShaderSources::operator==(const ShaderSources& other) const
 {
-    if(bytes!=other.bytes || entries!=other.entries || additionalConstantBytes!=other.additionalConstantBytes ||
-        stockShadowCoverage!=other.stockShadowCoverage ||
-        vertexBindings.size()!=other.vertexBindings.size()) return false; // 바이트·진입점·추가 상수 크기·기본 그림자 커버리지 계약·바인딩 개수 중 하나라도 다르면 다른 셰이더 설정이다.
+    if(bytes!=other.bytes || entries!=other.entries || additionalConstantBytes!=other.additionalConstantBytes || // 바이트·진입점·추가 상수 크기·바인딩 개수 중 하나라도 다르면 다른 셰이더 설정이다.
+        vertexBindings.size()!=other.vertexBindings.size()) return false;
     const auto sameFloat=[](float left,float right) {return std::memcmp(&left,&right,sizeof(float))==0;};
     for(size_t i=0;i<vertexBindings.size();++i)
     {
@@ -201,7 +198,6 @@ bool Renderer::Impl::SetShaders(const RendererShaderDesc& desc)
         ShaderSources next;
         next.vertexBindings = desc.vertexBindings;
         next.additionalConstantBytes = desc.additionalConstantBytes;
-        next.stockShadowCoverage = desc.stockShadowCoverage;
         for(size_t i=0;i<inputs.size();++i)
         {
             const auto& shader=inputs[i];
@@ -230,8 +226,8 @@ RHI::ShaderDesc Renderer::Impl::ShaderDescription(ShaderSlot slot,const RHI::Sha
 Renderer::Impl::FrameEnd::~FrameEnd()
 {
     if(!pending) return; // 열린 창 프레임이 없으면 복구 Present가 필요 없다.
-    try { (void)device.Present(); pending=device.HasActiveFrame(); }
-    catch(...) {pending=device.HasActiveFrame();} // ApplySettings retries any still-active frame.
+    try { (void)device.Present(); pending=false; }
+    catch(...) { /* ApplySettings retries recovery before changing output. */ }
 }
 // 먼저 이전 창 프레임을 복구한다. 파이프라인에 영향이 없는 설정은 config만 갱신하고, 영향이 있으면 임시 Impl을 준비한 뒤 성공 시 자원을 교환한다.
 bool Renderer::Impl::ApplySettings()
@@ -239,8 +235,8 @@ bool Renderer::Impl::ApplySettings()
     if(framePending) // 이전 호출이 프레임을 닫지 못했으면 설정 변경 전에 Present 복구를 시도한다.
     {
         const bool recovered=device->Present();
-        framePending=device->HasActiveFrame();
-        if(!recovered) return RendererFailure("Canvas frame recovery failed."); // 재시도 가능한 프레임은 소유권과 예약 설정을 유지한다.
+        framePending=false;
+        if(!recovered) return RendererFailure("Canvas frame recovery failed."); // Present가 false이면 framePending은 지운 상태로 실패를 반환하며 새 설정 적용을 중단한다. pendingConfig와 셰이더 요청은 지우지 않는다.
     }
     if(!pendingConfig && !shadersPending) return true; // 적용할 설정/셰이더 요청이 없으면 그대로 성공한다.
     const auto& nextConfig = pendingConfig ? *pendingConfig : config;
@@ -298,9 +294,6 @@ void Renderer::Impl::SwapResources(Impl& other)
     swap(materialStates,other.materialStates);
     swap(vertexShader,other.vertexShader);
     swap(fragmentShader,other.fragmentShader);
-    swap(depthPrepassFragmentShader,other.depthPrepassFragmentShader);
-    swap(noAreaFragmentShader,other.noAreaFragmentShader);
-    swap(noAreaDepthPrepassFragmentShader,other.noAreaDepthPrepassFragmentShader);
     swap(shadowVertexShader,other.shadowVertexShader);
     swap(shadowFragmentShader,other.shadowFragmentShader);
     swap(canvasVertexShader,other.canvasVertexShader);
@@ -309,20 +302,16 @@ void Renderer::Impl::SwapResources(Impl& other)
     swap(toneFragmentShader,other.toneFragmentShader);
     swap(pipeline,other.pipeline);
     swap(materialPipelines,other.materialPipelines);
-    swap(depthPrepassPipelines,other.depthPrepassPipelines);
-    swap(noAreaMaterialPipelines,other.noAreaMaterialPipelines);
-    swap(noAreaDepthPrepassPipelines,other.noAreaDepthPrepassPipelines);
     swap(wireframePipelines,other.wireframePipelines);
     swap(mainEntityOrder,other.mainEntityOrder);
     swap(shadowPipeline,other.shadowPipeline);
     swap(shadowMaterialPipelines,other.shadowMaterialPipelines);
-    swap(compactShadowPipelines,other.compactShadowPipelines);
     swap(canvasPipeline,other.canvasPipeline);
     swap(canvasWhite,other.canvasWhite);
     swap(canvasImages,other.canvasImages);
     swap(canvasVertices,other.canvasVertices);
     swap(canvasPendingVertices,other.canvasPendingVertices);
-    swap(preparedCanvases,other.preparedCanvases);
+    swap(canvasDrawImages,other.canvasDrawImages);
     swap(canvasVertexCursor,other.canvasVertexCursor);
     swap(tonePipeline,other.tonePipeline);
     swap(toneSet,other.toneSet);
@@ -362,26 +351,12 @@ void Renderer::Impl::SwapResources(Impl& other)
     swap(gpuVisibility,other.gpuVisibility);swap(visibilityDraws,other.visibilityDraws);
     swap(visibilityKeys,other.visibilityKeys);swap(visibilityScene,other.visibilityScene);
     swap(visibilityActive,other.visibilityActive);
-    swap(cpuDrawInputs,other.cpuDrawInputs);swap(cpuDraws,other.cpuDraws);
-    swap(cpuBatchIndices,other.cpuBatchIndices);swap(cpuInstanceEntities,other.cpuInstanceEntities);
-    swap(cpuMeshCounts,other.cpuMeshCounts);
-    swap(cpuInstanceScratch,other.cpuInstanceScratch);swap(cpuInstanceBytes,other.cpuInstanceBytes);
-    swap(cpuInstanceBuffer,other.cpuInstanceBuffer);swap(cpuInstanceReady,other.cpuInstanceReady);
-    swap(cpuBatchesActive,other.cpuBatchesActive);swap(cpuCulledEntities,other.cpuCulledEntities);
     swap(mainSetScratch,other.mainSetScratch);
     swap(shadowSetScratch,other.shadowSetScratch);
     swap(mainBindingScratch,other.mainBindingScratch);
     swap(mainCombinedBindingScratch,other.mainCombinedBindingScratch);
     swap(shadowBindingScratch,other.shadowBindingScratch);
-    swap(shadowCasterScratch,other.shadowCasterScratch);
-    swap(shadowViewScratch,other.shadowViewScratch);
-    swap(shadowInstances,other.shadowInstances);
-    swap(shadowInstanceBytes,other.shadowInstanceBytes);
-    swap(shadowInstanceBuffer,other.shadowInstanceBuffer);
-    swap(shadowInstanceReady,other.shadowInstanceReady);
-    swap(shadowInstancesActive,other.shadowInstancesActive);
-    swap(shadowArgumentsBuffer,other.shadowArgumentsBuffer);swap(shadowArgumentsReady,other.shadowArgumentsReady);
-    swap(shadowIndirectActive,other.shadowIndirectActive);swap(shadowArgumentBytes,other.shadowArgumentBytes);
+    swap(shadowBoundsScratch,other.shadowBoundsScratch);
 
 }
 
@@ -542,7 +517,6 @@ RendererShaderDesc Renderer::Impl::GetShaders() const
         if(!source.bytes[i].empty()) *output[i] = {stages[i], source.entries[i].c_str(), source.bytes[i].data(), source.bytes[i].size()}; // 사용자 교체 슬롯만 포인터 설명을 채우며 나머지는 빈 기본값을 남긴다.
     desc.vertexBindings = source.vertexBindings;
     desc.additionalConstantBytes = source.additionalConstantBytes;
-    desc.stockShadowCoverage = source.stockShadowCoverage;
     return desc;
 }
 
@@ -564,9 +538,6 @@ bool Renderer::Impl::Initialize()
 	swapchainDesc.window=windowHandle;
     swapchainDesc.format = RHI::DefaultSwapchainFormat;
 	swapchainDesc.minimumImageCount = 2;
-	if(const char* minimumImages = std::getenv("DYF_DIAG_SWAPCHAIN_MIN_IMAGES");
-	    minimumImages != nullptr && std::strcmp(minimumImages, "4") == 0)
-	    swapchainDesc.minimumImageCount = 4;
 	swapchainDesc.allowReadback = config.allowReadback;
 	swapchainDesc.presentMode = config.vsync ? RHI::PresentMode::Fifo : RHI::PresentMode::Immediate;
 	if(!nativeDevice->CreateSwapchain(swapchainDesc)) return false; // 요청한 창 출력 생성이 실패하면 초기화를 중단한다.
@@ -591,28 +562,19 @@ bool Renderer::Impl::UsesInstanceStream() const { return config.enableInstancing
 RHI::PipelineHandle Renderer::Impl::MaterialPipeline(const MaterialDesc& material,bool mirrored) const
 {
     if(!shaderSources.bytes[MeshFragment].empty()) return pipeline; // 사용자 fragment는 기본 공통 파이프라인 경로를 사용한다.
-    if(wireframeActive && !UsesBlendedRendering(material)) // 와이어프레임 진단 중 불투명/마스크 재질이면 전용 선 파이프라인을 고른다.
+    if(wireframeActive && material.alphaMode!=MaterialAlphaMode::Blend) // 와이어프레임 진단 중 불투명/마스크 재질이면 전용 선 파이프라인을 고른다.
         return wireframePipelines[(material.doubleSided ? 1u : 0u) | (mirrored ? 2u : 0u)];
-    const uint32_t variant=(UsesBlendedRendering(material) ? 2u : 0u) |
+    const uint32_t variant=(material.alphaMode==MaterialAlphaMode::Blend ? 2u : 0u) |
         (material.doubleSided ? 1u : 0u) | (mirrored ? 4u : 0u);
-    if(frameNoAreaLights && stockDrawInputs && UsesStockGeometry() && !wireframeActive)
-    {
-        const auto selected=frameOpaqueDepthComplete && !UsesBlendedRendering(material)
-            ? noAreaDepthPrepassPipelines[variant] : noAreaMaterialPipelines[variant];
-        if(selected)return selected;
-    }
-    if(frameOpaqueDepthComplete && !UsesBlendedRendering(material))
-        return depthPrepassPipelines[variant];
     return variant ? materialPipelines[variant-1] : pipeline;
 }
 // 요청값과 실제 레이아웃 지원 여부를 함께 확인한다. 토글 true만으로 bindless 경로 사용을 단정하지 않는다.
 bool Renderer::Impl::UsesBindlessMaterials() const
 {return config.enableBindlessMaterials&&SupportsBindlessMaterials();}
-// 사용자 fragment는 기본 레이아웃을 유지하고, 표준 fragment의 실제 MeshLayout 지원 여부를 RHI에 질의한다.
+// 사용자 fragment는 기본 레이아웃을 유지하고 고급 경로도 bindless 최적화에서 제외하며, 표준 fragment의 실제 MeshLayout 지원 여부만 RHI에 질의한다.
 bool Renderer::Impl::SupportsBindlessMaterials() const
 {
-    // 사용자 Fragment는 기본 레이아웃 계약을 유지한다. 기본 셰이더의 최적화 가능 여부는 RHI에 묻는다.
-    if(!shaderSources.bytes[MeshFragment].empty()) return false;
+    if(!shaderSources.bytes[MeshFragment].empty() || UsesAdvancedRendering()) return false;
     std::vector<RHI::ResourceBindingLayout> bindings;
     return device->Supports(MeshLayout(true, bindings));
 }
@@ -631,43 +593,21 @@ bool Renderer::Impl::InitializeMesh(RHI::TextureHandle output,bool compositeAlph
 
 	if(!vertexShader) vertexShader = nativeDevice->CreateShader(ShaderDescription(MeshVertex,stockShaders.meshVertex)); // 정점 셰이더가 아직 없을 때만 기본/교체 설명으로 생성한다.
 	if(!fragmentShader) fragmentShader = nativeDevice->CreateShader(ShaderDescription(MeshFragment,stockShaders.meshFragment)); // fragment 셰이더가 아직 없을 때만 생성한다.
-    const bool depthPrepass=UsesStockGeometry() && UsesAdvancedRendering();
-    if(depthPrepass && !depthPrepassFragmentShader)
-        depthPrepassFragmentShader=nativeDevice->CreateShader(DefaultDepthPrepassFragment(shadows,UsesBindlessMaterials()));
-    if(UsesStockGeometry())
-    {
-        if(!noAreaFragmentShader)
-        {
-            const auto desc=DefaultNoAreaFragment(shadows,UsesBindlessMaterials(),false);
-            if(desc.binary && desc.binarySize)noAreaFragmentShader=nativeDevice->CreateShader(desc);
-        }
-        if(depthPrepass && !noAreaDepthPrepassFragmentShader)
-        {
-            const auto desc=DefaultNoAreaFragment(shadows,UsesBindlessMaterials(),true);
-            if(desc.binary && desc.binarySize)noAreaDepthPrepassFragmentShader=nativeDevice->CreateShader(desc);
-        }
-    }
 	if(shadows && !shadowVertexShader) // 그림자를 사용하면서 그림자 정점 셰이더가 없을 때 생성한다.
 	{
 		shadowVertexShader = nativeDevice->CreateShader(ShaderDescription(ShadowVertex,stockShaders.shadowVertex));
 	}
-	const bool stockCoverage=shaderSources.bytes[ShadowVertex].empty() || shaderSources.stockShadowCoverage;
-	if(shadows && stockCoverage && !shadowFragmentShader)
+	if(shadows && shaderSources.bytes[ShadowVertex].empty() && !shadowFragmentShader) // 기본 그림자 정점 경로라면 알파 마스크 판정용 기본 fragment도 준비한다.
 		shadowFragmentShader = nativeDevice->CreateShader(DefaultShadowFragment());
-	if(vertexShader == nullptr || fragmentShader == nullptr || (depthPrepass && !depthPrepassFragmentShader) ||
+	if(vertexShader == nullptr || fragmentShader == nullptr || // 필수 셰이더 중 하나라도 생성되지 않았으면 파이프라인 준비를 중단한다.
 		(shadows && shadowVertexShader == nullptr) ||
-		(shadows && stockCoverage && !shadowFragmentShader)) return false; // 필수 셰이더 중 하나라도 생성되지 않았으면 파이프라인 준비를 중단한다.
+		(shadows && shaderSources.bytes[ShadowVertex].empty() && !shadowFragmentShader)) return false;
     // 이 경로는 이전 형식의 파이프라인을 해제한 뒤 새로 만든다. 아래 생성이 실패하면 false를 반환하며 이미 성공한 자원은 Impl의 정리/다음 준비 경로가 맡는다.
-    meshColorFormat=RHI::Format::Unknown; // 부분 생성된 묶음은 이전 출력 형식의 캐시로 재사용할 수 없다.
     nativeDevice->DestroyPipeline(pipeline);pipeline=nullptr;
     for(auto& value:materialPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
-    for(auto& value:depthPrepassPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
-    for(auto& value:noAreaMaterialPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
-    for(auto& value:noAreaDepthPrepassPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
     for(auto& value:wireframePipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
     nativeDevice->DestroyPipeline(shadowPipeline);shadowPipeline=nullptr;
     for(auto& value:shadowMaterialPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
-    for(auto& value:compactShadowPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
 	if(!BuildPipelineStates(nativeDevice,colorFormat,compositeAlpha)) return false; // 재질·그림자 파이프라인 묶음 생성 실패를 그대로 전파한다.
     meshColorFormat=colorFormat;
     meshCompositeAlpha=compositeAlpha;
@@ -694,16 +634,12 @@ void Renderer::Impl::Shutdown()
     // 이하 반복문은 생성된 비어 있지 않은 핸들만 타입에 맞는 Destroy 함수로 정리한다. Scene 원본 소유권을 삭제하는 작업은 아니다.
     for(auto* texture:{depthStencilTarget,shadowDepthTarget,hdrTarget})if(texture)device->DestroyTexture(texture); // 메인 깊이·그림자 깊이·HDR 중간 출력 중 실제 생성된 텍스처만 해제한다.
     for(auto* texture:defaultMaterialTextures)if(texture)device->DestroyTexture(texture); // 생성된 기본 대체 텍스처만 해제한다.
-    for(auto* buffer:{lightingBuffer,shadowMatrixBuffer,instanceBuffer,materialIndexBuffer,cpuInstanceBuffer,shadowInstanceBuffer,shadowArgumentsBuffer})if(buffer)device->DestroyBuffer(buffer); // 존재하는 프레임 상수/인스턴스/재질 인덱스 버퍼만 해제한다.
+    for(auto* buffer:{lightingBuffer,shadowMatrixBuffer,instanceBuffer,materialIndexBuffer})if(buffer)device->DestroyBuffer(buffer); // 존재하는 프레임 상수/인스턴스/재질 인덱스 버퍼만 해제한다.
     for(auto* value:{pipeline,shadowPipeline,canvasPipeline,tonePipeline})if(value)device->DestroyPipeline(value); // 생성된 메인·그림자·Canvas·톤 매핑 파이프라인만 해제한다.
     for(auto* value:materialPipelines)if(value)device->DestroyPipeline(value); // 생성된 재질 변형 파이프라인만 해제한다.
-    for(auto* value:depthPrepassPipelines)if(value)device->DestroyPipeline(value);
-    for(auto* value:noAreaMaterialPipelines)if(value)device->DestroyPipeline(value);
-    for(auto* value:noAreaDepthPrepassPipelines)if(value)device->DestroyPipeline(value);
     for(auto* value:wireframePipelines)if(value)device->DestroyPipeline(value); // 생성된 와이어프레임 변형만 해제한다.
     for(auto* value:shadowMaterialPipelines)if(value)device->DestroyPipeline(value); // 생성된 그림자 재질 변형만 해제한다.
-    for(auto* value:compactShadowPipelines)if(value)device->DestroyPipeline(value);
-    for(auto* shader:{vertexShader,fragmentShader,depthPrepassFragmentShader,noAreaFragmentShader,noAreaDepthPrepassFragmentShader,shadowVertexShader,shadowFragmentShader,canvasVertexShader,canvasFragmentShader,toneVertexShader,toneFragmentShader})
+    for(auto* shader:{vertexShader,fragmentShader,shadowVertexShader,shadowFragmentShader,canvasVertexShader,canvasFragmentShader,toneVertexShader,toneFragmentShader})
         if(shader)device->DestroyShader(shader); // 실제로 존재하는 셰이더 핸들만 장치에 반환한다.
 }
 

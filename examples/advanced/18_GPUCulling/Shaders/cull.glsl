@@ -19,7 +19,7 @@ void main()
     vec2 margin=sphere.w*sqrt(frame.projection.xy*frame.projection.xy+vec2(1));
     bool inside=position.z+sphere.w>=frame.projection.z && position.z-sphere.w<=frame.projection.w &&
         all(lessThanEqual(abs(position.xy)*frame.projection.xy,vec2(position.z)+margin));
-    if(!inside) return;
+    if(frame.controls.y==1u && !inside) return;
     uint slot=atomicAdd(arguments[1],1u);
     visibleIds[slot]=id;
 }

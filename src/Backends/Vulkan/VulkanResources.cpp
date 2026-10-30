@@ -25,7 +25,7 @@ namespace dyf::Backends
 
 		VkBufferUsageFlags ToBufferUsage(dyf::RHI::BufferUsage usage)
 		{
-			VkBufferUsageFlags result = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+			VkBufferUsageFlags result = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 			if (VulkanValidation::HasUsage(usage, dyf::RHI::BufferUsage::Vertex)) result |= VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
 			if (VulkanValidation::HasUsage(usage, dyf::RHI::BufferUsage::Index)) result |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
 			if (VulkanValidation::HasUsage(usage, dyf::RHI::BufferUsage::Constant)) result |= VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
@@ -78,13 +78,7 @@ namespace dyf::Backends
 		case dyf::RHI::Format::B8G8R8A8_UNORM: return VK_FORMAT_B8G8R8A8_UNORM;
 		case dyf::RHI::Format::R8G8B8A8_UNORM_SRGB: return VK_FORMAT_R8G8B8A8_SRGB;
 		case dyf::RHI::Format::B8G8R8A8_UNORM_SRGB: return VK_FORMAT_B8G8R8A8_SRGB;
-        case dyf::RHI::Format::BC1_UNORM: return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
-        case dyf::RHI::Format::BC1_UNORM_SRGB: return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
-        case dyf::RHI::Format::BC3_UNORM: return VK_FORMAT_BC3_UNORM_BLOCK;
-        case dyf::RHI::Format::BC3_UNORM_SRGB: return VK_FORMAT_BC3_SRGB_BLOCK;
-        case dyf::RHI::Format::BC5_UNORM: return VK_FORMAT_BC5_UNORM_BLOCK;
 		case dyf::RHI::Format::R16G16B16A16_FLOAT: return VK_FORMAT_R16G16B16A16_SFLOAT;
-        case dyf::RHI::Format::R16_FLOAT: return VK_FORMAT_R16_SFLOAT;
 		case dyf::RHI::Format::R32G32_FLOAT: return VK_FORMAT_R32G32_SFLOAT;
 		case dyf::RHI::Format::R32_FLOAT: return VK_FORMAT_R32_SFLOAT;
 		case dyf::RHI::Format::R32G32B32_FLOAT: return VK_FORMAT_R32G32B32_SFLOAT;
@@ -106,7 +100,6 @@ namespace dyf::Backends
 		case VK_FORMAT_R8G8B8A8_SRGB: return dyf::RHI::Format::R8G8B8A8_UNORM_SRGB;
 		case VK_FORMAT_B8G8R8A8_SRGB: return dyf::RHI::Format::B8G8R8A8_UNORM_SRGB;
 		case VK_FORMAT_R16G16B16A16_SFLOAT: return dyf::RHI::Format::R16G16B16A16_FLOAT;
-        case VK_FORMAT_R16_SFLOAT: return dyf::RHI::Format::R16_FLOAT;
 		case VK_FORMAT_R32_SFLOAT: return dyf::RHI::Format::R32_FLOAT;
 		case VK_FORMAT_R32G32B32A32_SFLOAT: return dyf::RHI::Format::R32G32B32A32_FLOAT;
 		default: return dyf::RHI::Format::Unknown;
@@ -385,7 +378,7 @@ namespace dyf::Backends
 		VkImageViewCreateInfo info{};
 		info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
 		info.image = m_image;
-		info.viewType = GetDesc().depthOrArraySize > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+		info.viewType = arrayLayerCount > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
 		info.format = ToVulkanFormat(GetDesc().format);
 		info.subresourceRange.aspectMask = aspectMask;
 		info.subresourceRange.baseMipLevel = resolved.firstMipLevel;

@@ -19,14 +19,7 @@ namespace dyf::RHI
 		R32_UINT,
 		R16_UINT,
 		D32_FLOAT_S8_UINT,
-		R32_FLOAT,
-        // 4x4 blocks; sampled 2D textures only. Native support is backend dependent.
-        BC1_UNORM,
-        BC1_UNORM_SRGB,
-        BC3_UNORM,
-        BC3_UNORM_SRGB,
-        R16_FLOAT,
-        BC5_UNORM
+		R32_FLOAT
 	};
 
 	[[nodiscard]] inline constexpr bool HasStencil(Format format)
@@ -37,20 +30,7 @@ namespace dyf::RHI
 	// sRGB(하드웨어 감마) 포맷인지. 셰이더 수동 감마 vs 하드웨어 감마 분기에 사용.
 	[[nodiscard]] inline constexpr bool IsSrgbFormat(Format format)
 	{
-		return format == Format::R8G8B8A8_UNORM_SRGB || format == Format::B8G8R8A8_UNORM_SRGB ||
-            format == Format::BC1_UNORM_SRGB || format == Format::BC3_UNORM_SRGB;
+		return format == Format::R8G8B8A8_UNORM_SRGB || format == Format::B8G8R8A8_UNORM_SRGB;
 	}
-
-    [[nodiscard]] inline constexpr bool IsBlockCompressed(Format format)
-    {
-        return format == Format::BC1_UNORM || format == Format::BC1_UNORM_SRGB ||
-            format == Format::BC3_UNORM || format == Format::BC3_UNORM_SRGB || format == Format::BC5_UNORM;
-    }
-
-    [[nodiscard]] inline constexpr uint32_t CompressedBlockBytes(Format format)
-    {
-        return format == Format::BC1_UNORM || format == Format::BC1_UNORM_SRGB ? 8u :
-            format == Format::BC3_UNORM || format == Format::BC3_UNORM_SRGB || format == Format::BC5_UNORM ? 16u : 0u;
-    }
 
 }

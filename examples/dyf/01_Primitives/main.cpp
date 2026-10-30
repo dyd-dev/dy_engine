@@ -5,8 +5,10 @@ int main()
 	const uint32_t width = 640, height = 480;
 
 	dyf::Platform::Window window(width, height, "dyf / Primitives");
+	if(!window.GetHandle()) return 1;
 	
 	auto renderer = dyf::Renderer::Create(window.GetHandle());
+	if(!renderer) return 1;
 
 	dyf::Math::float4 color = {};
 
@@ -33,7 +35,7 @@ int main()
 		window.PollEvents();
 		if(!window.IsRunning()) break;
 		
-		renderer->Render(canvas);
+		if(!renderer->Render(canvas)) return 1;
 	}
 	return 0;
 }

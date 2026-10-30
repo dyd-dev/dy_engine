@@ -60,13 +60,7 @@ namespace dyf::Backends
         case RHI::Format::B8G8R8A8_UNORM: return DXGI_FORMAT_B8G8R8A8_UNORM;
         case RHI::Format::R8G8B8A8_UNORM_SRGB: return DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
         case RHI::Format::B8G8R8A8_UNORM_SRGB: return DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
-        case RHI::Format::BC1_UNORM: return DXGI_FORMAT_BC1_UNORM;
-        case RHI::Format::BC1_UNORM_SRGB: return DXGI_FORMAT_BC1_UNORM_SRGB;
-        case RHI::Format::BC3_UNORM: return DXGI_FORMAT_BC3_UNORM;
-        case RHI::Format::BC3_UNORM_SRGB: return DXGI_FORMAT_BC3_UNORM_SRGB;
-        case RHI::Format::BC5_UNORM: return DXGI_FORMAT_BC5_UNORM;
         case RHI::Format::R16G16B16A16_FLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
-        case RHI::Format::R16_FLOAT: return DXGI_FORMAT_R16_FLOAT;
         case RHI::Format::R32G32_FLOAT: return DXGI_FORMAT_R32G32_FLOAT;
         case RHI::Format::R32_FLOAT: return DXGI_FORMAT_R32_FLOAT;
         case RHI::Format::R32G32B32_FLOAT: return DXGI_FORMAT_R32G32B32_FLOAT;
@@ -103,10 +97,6 @@ namespace dyf::Backends
         {
             return;
         }
-
-        if(RHI::IsBlockCompressed(desc.format) &&
-            (desc.usage != RHI::TextureUsage::ShaderResource || desc.width % 4u != 0 || desc.height % 4u != 0))
-            return;
 
         D3D12_HEAP_PROPERTIES heapProperties = {};
         heapProperties.Type = D3D12_HEAP_TYPE_DEFAULT;

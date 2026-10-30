@@ -17,9 +17,8 @@ float3 OutputWhiteBalance(float3 color)
 float3 OutputColorGrade(float3 color)
 {
     if(gainEnabled.w<.5)return color; // 색보정이 꺼져 있으면 gain·lift·감마·대비·채도를 생략한다.
-    color=clamp(color*gainEnabled.rgb+liftSaturation.rgb,float3(0,0,0),float3(1,1,1));
-    if(any(gammaSharpen.rgb!=float3(1,1,1)))
-        color=pow(color,float3(1,1,1)/max(gammaSharpen.rgb,float3(.01,.01,.01)));
+    color=pow(clamp(color*gainEnabled.rgb+liftSaturation.rgb,float3(0,0,0),float3(1,1,1)),
+        float3(1,1,1)/max(gammaSharpen.rgb,float3(.01,.01,.01)));
     color=(color-float3(.18,.18,.18))*whiteContrast.w+float3(.18,.18,.18);
     float luminance=dot(color,float3(.2126,.7152,.0722));
     return clamp(lerp(float3(luminance,luminance,luminance),color,liftSaturation.w),float3(0,0,0),float3(1,1,1));

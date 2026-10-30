@@ -4,23 +4,19 @@ get_filename_component(engine_default "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 set(DY_ENGINE_SOURCE_DIR "${engine_default}" CACHE PATH "dy_engine source directory.")
 get_filename_component(asset_default "${DY_ENGINE_SOURCE_DIR}/../assets" ABSOLUTE)
 set(DY_ASSET_ROOT "${asset_default}" CACHE PATH "Showcase asset directory.")
-option(DY_SHOWCASE_ARENA_ONLY "Build only Arena when Showcase is enabled." OFF)
 set(DY_DENSE_ARENA_ASSETS "${DY_ASSET_ROOT}/kenney_tiny-dungeon" CACHE PATH "Extracted Kenney Tiny Dungeon CC0 asset directory.")
-set(DY_SHOWCASE_BISTRO_EXTERIOR_SCENE "${DY_ASSET_ROOT}/Bistro_v5_2/BistroExterior.fbx" CACHE FILEPATH "Bistro exterior preset scene.")
-set(DY_SHOWCASE_BISTRO_WINE_SCENE "${DY_ASSET_ROOT}/Bistro_v5_2/BistroInterior_Wine.fbx" CACHE FILEPATH "Bistro Wine interior preset scene.")
-set(DY_SHOWCASE_SCENE "${DY_SHOWCASE_BISTRO_EXTERIOR_SCENE}" CACHE FILEPATH "Default external glTF, GLB, FBX or OBJ environment.")
+set(DY_SHOWCASE_SCENE "${DY_ASSET_ROOT}/Bistro_v5_2/BistroExterior.fbx" CACHE FILEPATH "Default external glTF, GLB, FBX or OBJ environment.")
 set(DY_SHOWCASE_ENVIRONMENT "${DY_ASSET_ROOT}/Bistro_v5_2/san_giuseppe_bridge_4k.hdr" CACHE FILEPATH "Default external equirectangular HDR sky (.hdr).")
 set(DY_SHOWCASE_EMERALD_SCENE "${DY_ASSET_ROOT}/EmeraldSquare_v4_1/EmeraldSquare_Day.fbx" CACHE FILEPATH "Original Emerald Square daytime FBX.")
 set(DY_SHOWCASE_EMERALD_ENVIRONMENT "${DY_ASSET_ROOT}/EmeraldSquare_v4_1/symmetrical_garden_4k.hdr" CACHE FILEPATH "Original Emerald Square daytime HDR environment.")
 set(DY_SHOWCASE_KNIGHT_ACTOR "${DY_ASSET_ROOT}/Intel_Animated_Knight/pkg_e_knight_anim/Exports/FBX/Knight_USD_002.fbx" CACHE FILEPATH "Original Intel animated Knight FBX, selected with --actor knight.")
-set(DY_SHOWCASE_COMPARISON_SCENE "" CACHE FILEPATH "Optional local scene for comparison with the legacy-renderer branch.")
-include("${CMAKE_CURRENT_LIST_DIR}/ShowcaseAssets.cmake")
+set(DY_SHOWCASE_COMPARISON_SCENE "${DY_ASSET_ROOT}/main_sponza/NewSponza_Main_glTF_003.gltf" CACHE FILEPATH "Original Sponza for comparison with the legacy-renderer branch.")
 
 function(dyf_configure_showcase target output_name)
     get_target_property(mobile_entry ${target} DY_EXAMPLE_ENTRY)
     set_target_properties(${target} PROPERTIES
         OUTPUT_NAME "${output_name}"
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/showcase"
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
         FOLDER "Showcase")
     if(DY_ENABLE_TRACY)
         target_link_libraries(${target} PRIVATE dyf::Tracy)
@@ -45,21 +41,17 @@ function(dyf_configure_showcase target output_name)
         set(asset_definitions DY_DENSE_ARENA_ASSETS)
         set(asset_base "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/arena")
     elseif(target STREQUAL "ShowcaseCinematic")
-        dyf_prepare_cinematic_assets()
         set(DY_SHOWCASE_DEFAULT_SCENE "${DY_SHOWCASE_SCENE}")
         set(DY_SHOWCASE_DEFAULT_ENVIRONMENT "${DY_SHOWCASE_ENVIRONMENT}")
         set(DY_SHOWCASE_COMPARISON_CAMERA "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/cinematic/SponzaComparison.camera.csv")
         set(asset_definitions
             DY_SHOWCASE_DEFAULT_SCENE DY_SHOWCASE_DEFAULT_ENVIRONMENT
-            DY_SHOWCASE_BISTRO_EXTERIOR_SCENE DY_SHOWCASE_BISTRO_WINE_SCENE
             DY_SHOWCASE_EMERALD_SCENE DY_SHOWCASE_EMERALD_ENVIRONMENT
             DY_SHOWCASE_KNIGHT_ACTOR DY_SHOWCASE_COMPARISON_SCENE
             DY_SHOWCASE_COMPARISON_CAMERA)
         set(asset_base "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/cinematic")
     endif()
 
-    get_filename_component(knight_runtime_package
-        "${DY_ASSET_ROOT}/Intel_Animated_Knight/pkg_e_knight_anim" ABSOLUTE)
     # Assets stay beside their original external buffers and textures.
     foreach(definition IN LISTS asset_definitions)
         if("${${definition}}" STREQUAL "" AND
@@ -67,14 +59,22 @@ function(dyf_configure_showcase target output_name)
                 NOT definition STREQUAL "DY_SHOWCASE_COMPARISON_SCENE")
             continue()
         endif()
-        if("${${definition}}" STREQUAL "")
+        if(definition STREQUAL "DY_DENSE_ARENA_ASSETS" AND "${${definition}}" STREQUAL "")
             set(asset "")
         else()
             get_filename_component(asset "${${definition}}" ABSOLUTE BASE_DIR "${asset_base}")
         endif()
-        if(definition MATCHES "^DY_SHOWCASE_" AND NOT "${asset}" STREQUAL "")
+        if(definition STREQUAL "DY_SHOWCASE_KNIGHT_ACTOR")
             if(NOT EXISTS "${asset}" OR IS_DIRECTORY "${asset}")
-                message(FATAL_ERROR "${definition} must name an existing file: ${asset}")
+                continue()
+            endif()
+        elseif(definition STREQUAL "DY_SHOWCASE_DEFAULT_SCENE")
+            if(NOT EXISTS "${asset}" OR IS_DIRECTORY "${asset}")
+                message(FATAL_ERROR "DY_SHOWCASE_SCENE must name an existing file: ${asset}")
+            endif()
+        elseif(definition STREQUAL "DY_SHOWCASE_DEFAULT_ENVIRONMENT")
+            if(NOT EXISTS "${asset}" OR IS_DIRECTORY "${asset}")
+                message(FATAL_ERROR "DY_SHOWCASE_ENVIRONMENT must name an existing .hdr file: ${asset}")
             endif()
         endif()
         if(mobile_entry)
@@ -96,20 +96,7 @@ function(dyf_configure_showcase target output_name)
                 endif()
                 string(SHA256 asset_group "${asset_directory}")
                 string(SUBSTRING "${asset_group}" 0 12 asset_group)
-                if(definition STREQUAL "DY_SHOWCASE_KNIGHT_ACTOR" AND
-                        asset STREQUAL "${knight_runtime_package}/Exports/FBX/Knight_USD_002.fbx")
-                    # The standard FBX is self-contained; its explicit material
-                    # overrides resolve Textures beside Exports. Authoring scenes,
-                    # USD and Alembic exports are not runtime dependencies.
-                    dy_example_asset_file(${target} "${asset}"
-                        "Assets/${asset_group}/Exports/FBX/Knight_USD_002.fbx")
-                    dy_example_assets(${target} "${asset_directory}/Textures"
-                        "Assets/${asset_group}/Textures")
-                    dy_example_asset_file(${target} "${asset_directory}/credits_license.txt"
-                        "Assets/${asset_group}/credits_license.txt")
-                else()
-                    dy_example_assets(${target} "${asset_directory}" "Assets/${asset_group}")
-                endif()
+                dy_example_assets(${target} "${asset_directory}" "Assets/${asset_group}")
                 file(RELATIVE_PATH asset_relative "${asset_directory}" "${asset}")
                 if(asset_relative STREQUAL "")
                     set(asset "Assets/${asset_group}")
@@ -138,9 +125,6 @@ if(NOT TARGET dy_engine)
 endif()
 
 add_subdirectory(arena targets/arena)
-if(DY_SHOWCASE_ARENA_ONLY)
-    return()
-endif()
 if(TARGET dyf::AdvancedRendering)
     add_subdirectory(culling targets/culling)
     if(TARGET dyf::Model)

@@ -37,8 +37,6 @@ namespace dyf::RHI
 		return left;
 	}
 
-    // Shader views preserve the resource dimension: a subset of a 2D array is
-    // still a 2D-array view, including a range selecting exactly one layer.
 	struct TextureSubresourceRange
 	{
 		uint32_t firstMipLevel = 0;

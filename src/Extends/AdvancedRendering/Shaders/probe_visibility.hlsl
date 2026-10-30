@@ -1,14 +1,5 @@
 #ifndef DY_PROBE_VISIBILITY_INCLUDED
 #define DY_PROBE_VISIBILITY_INCLUDED
-int2 DyWrapBilinearX(int low,int high,int width)
-{
-    if(width>0 && (width&(width-1))==0)
-    {
-        int mask=width-1;
-        return int2(low&mask,high&mask);
-    }
-    return int2((low%width+width)%width,(high%width+width)%width);
-}
 float SpatialProbeVisibility(float3 position,float3 probePosition,float valid,float scale,uint layer,
     Texture2DArray<float4> image)
 {
@@ -19,12 +10,9 @@ float SpatialProbeVisibility(float3 position,float3 probePosition,float valid,fl
     float2 coordinate=float2(atan2(direction.y,direction.x)*.15915494309189535+.5,
         acos(clamp(direction.z,-1,1))*.3183098861837907);
     uint width,height,layers,levels;image.GetDimensions(0,width,height,layers,levels);
-    int2 dimensions=int2(width,height);
-    // Keep FP32 weights: native sub-texel quantization can change moment variance sharply.
-    float2 pixel=coordinate*float2(dimensions)-.5,w=frac(pixel);
+    int2 dimensions=int2(width,height);float2 pixel=coordinate*float2(dimensions)-.5,w=frac(pixel);
     int2 a=int2(floor(pixel)),b=a+1;
-    int2 wrappedX=DyWrapBilinearX(a.x,b.x,dimensions.x);
-    a.x=wrappedX.x;b.x=wrappedX.y;
+    a.x=(a.x%dimensions.x+dimensions.x)%dimensions.x;b.x=(b.x%dimensions.x+dimensions.x)%dimensions.x;
     a.y=clamp(a.y,0,dimensions.y-1);b.y=clamp(b.y,0,dimensions.y-1);
     float2 moments=lerp(lerp(image.Load(int4(a,layer,0)),image.Load(int4(b.x,a.y,layer,0)),w.x),
         lerp(image.Load(int4(a.x,b.y,layer,0)),image.Load(int4(b,layer,0)),w.x),w.y).rg;

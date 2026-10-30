@@ -98,17 +98,10 @@ float DyShadowPcss(int index,int pointBase,float2 coordinate,float receiverNdc,f
     searchRadius=min(searchRadius,maximumRadius);
     int blockerCount=clamp(int(DY_SHADOW_FILTER.x+.5),1,32);
     float blockerSum=0,blockers=0;
-    // Paired taps share the direction and radius; keep their accumulation order.
-    for(int sampleIndex=0;sampleIndex<blockerCount;sampleIndex+=2)
+    for(int sampleIndex=0;sampleIndex<blockerCount;++sampleIndex)
     {
-        float2 offset=DyShadowDiskOffset(sampleIndex,blockerCount);
-        float depth=DyShadowDepthTap(index,pointBase,coordinate+offset*searchRadius,shadowData,shadowImage);
+        float depth=DyShadowDepthTap(index,pointBase,coordinate+DyShadowDiskOffset(sampleIndex,blockerCount)*searchRadius,shadowData,shadowImage);
         if(depth<receiver){blockerSum+=depth;blockers+=1;} // 수신점보다 가까운 깊이만 차폐물 평균에 포함한다.
-        if(sampleIndex+1<blockerCount)
-        {
-            depth=DyShadowDepthTap(index,pointBase,coordinate+(-offset)*searchRadius,shadowData,shadowImage);
-            if(depth<receiver){blockerSum+=depth;blockers+=1;} // 수신점보다 가까운 깊이만 차폐물 평균에 포함한다.
-        }
     }
     if(blockers==0)return 1; // 탐색 표본에 앞쪽 차폐물이 없으면 완전 가시로 반환한다.
     // 차폐물 평균 거리보다 수신점이 멀수록 반그림자가 넓어진다. 원근 투영에서는 차폐물·수신점 거리에 맞춰 다시 나눈다.
@@ -118,16 +111,10 @@ float DyShadowPcss(int index,int pointBase,float2 coordinate,float receiverNdc,f
     float2 filterRadius=max(min(penumbra*projection.xy,maximumRadius),min(texel*.5,maximumRadius));
     int filterCount=clamp(int(DY_SHADOW_FILTER.y+.5),1,32);
     float visible=0;
-    for(int sampleIndex=0;sampleIndex<filterCount;sampleIndex+=2)
+    for(int sampleIndex=0;sampleIndex<filterCount;++sampleIndex)
     {
-        float2 offset=DyShadowDiskOffset(sampleIndex,filterCount);
-        float depth=DyShadowDepthTap(index,pointBase,coordinate+offset*filterRadius,shadowData,shadowImage);
+        float depth=DyShadowDepthTap(index,pointBase,coordinate+DyShadowDiskOffset(sampleIndex,filterCount)*filterRadius,shadowData,shadowImage);
         visible+=receiver<=depth?1:0;
-        if(sampleIndex+1<filterCount)
-        {
-            depth=DyShadowDepthTap(index,pointBase,coordinate+(-offset)*filterRadius,shadowData,shadowImage);
-            visible+=receiver<=depth?1:0;
-        }
     }
     return visible/float(filterCount);
 }

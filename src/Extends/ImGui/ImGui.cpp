@@ -1,5 +1,5 @@
+#include "../../Platform/Windows/WindowBackend.h"
 #include "dyf/Extends/ImGui/ImGui.h"
-#include "dyf/Platform/Input.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/ICommandList.h"
@@ -9,12 +9,11 @@
 #include "dyf/RHI/Shader.h"
 #include "dyf/RHI/Texture.h"
 #include "imgui.h"
+#include "backends/imgui_impl_glfw.h"
 #include "GuiVertex.h"
 #include "GuiFragment.h"
 #include <algorithm>
 #include <array>
-#include <cfloat>
-#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <unordered_map>
@@ -30,82 +29,14 @@ uint64_t nextTextureId = 2;
 struct Vertex { float x, y, u, v, r, g, b, a; };
 static_assert(sizeof(Vertex) == 32 && (sizeof(ImDrawIdx) == 2 || sizeof(ImDrawIdx) == 4));
 bool Fail(const char* message) { std::fprintf(stderr, "dyf::Gui: %s\n", message); return false; }
-
-ImGuiKey TranslateKey(Platform::Key key)
-{
-    using Platform::Key;
-    const auto value = static_cast<int>(key);
-    if(key >= Key::A && key <= Key::Z)
-        return static_cast<ImGuiKey>(ImGuiKey_A + value - static_cast<int>(Key::A));
-    if(key >= Key::Num0 && key <= Key::Num9)
-        return static_cast<ImGuiKey>(ImGuiKey_0 + value - static_cast<int>(Key::Num0));
-    if(key >= Key::F1 && key <= Key::F24)
-        return static_cast<ImGuiKey>(ImGuiKey_F1 + value - static_cast<int>(Key::F1));
-    if(key >= Key::Keypad0 && key <= Key::Keypad9)
-        return static_cast<ImGuiKey>(ImGuiKey_Keypad0 + value - static_cast<int>(Key::Keypad0));
-    switch(key)
-    {
-    case Key::Tab: return ImGuiKey_Tab;
-    case Key::Left: return ImGuiKey_LeftArrow;
-    case Key::Right: return ImGuiKey_RightArrow;
-    case Key::Up: return ImGuiKey_UpArrow;
-    case Key::Down: return ImGuiKey_DownArrow;
-    case Key::PageUp: return ImGuiKey_PageUp;
-    case Key::PageDown: return ImGuiKey_PageDown;
-    case Key::Home: return ImGuiKey_Home;
-    case Key::End: return ImGuiKey_End;
-    case Key::Insert: return ImGuiKey_Insert;
-    case Key::Delete: return ImGuiKey_Delete;
-    case Key::Backspace: return ImGuiKey_Backspace;
-    case Key::Space: return ImGuiKey_Space;
-    case Key::Enter: return ImGuiKey_Enter;
-    case Key::Escape: return ImGuiKey_Escape;
-    case Key::Apostrophe: return ImGuiKey_Apostrophe;
-    case Key::Comma: return ImGuiKey_Comma;
-    case Key::Minus: return ImGuiKey_Minus;
-    case Key::Period: return ImGuiKey_Period;
-    case Key::Slash: return ImGuiKey_Slash;
-    case Key::Semicolon: return ImGuiKey_Semicolon;
-    case Key::Equal: return ImGuiKey_Equal;
-    case Key::LeftBracket: return ImGuiKey_LeftBracket;
-    case Key::Backslash: return ImGuiKey_Backslash;
-    case Key::RightBracket: return ImGuiKey_RightBracket;
-    case Key::GraveAccent: return ImGuiKey_GraveAccent;
-    case Key::CapsLock: return ImGuiKey_CapsLock;
-    case Key::ScrollLock: return ImGuiKey_ScrollLock;
-    case Key::NumLock: return ImGuiKey_NumLock;
-    case Key::PrintScreen: return ImGuiKey_PrintScreen;
-    case Key::Pause: return ImGuiKey_Pause;
-    case Key::KeypadDecimal: return ImGuiKey_KeypadDecimal;
-    case Key::KeypadDivide: return ImGuiKey_KeypadDivide;
-    case Key::KeypadMultiply: return ImGuiKey_KeypadMultiply;
-    case Key::KeypadSubtract: return ImGuiKey_KeypadSubtract;
-    case Key::KeypadAdd: return ImGuiKey_KeypadAdd;
-    case Key::KeypadEnter: return ImGuiKey_KeypadEnter;
-    case Key::KeypadEqual: return ImGuiKey_KeypadEqual;
-    case Key::LeftShift: return ImGuiKey_LeftShift;
-    case Key::LeftControl: return ImGuiKey_LeftCtrl;
-    case Key::LeftAlt: return ImGuiKey_LeftAlt;
-    case Key::LeftSuper: return ImGuiKey_LeftSuper;
-    case Key::RightShift: return ImGuiKey_RightShift;
-    case Key::RightControl: return ImGuiKey_RightCtrl;
-    case Key::RightAlt: return ImGuiKey_RightAlt;
-    case Key::RightSuper: return ImGuiKey_RightSuper;
-    case Key::Menu: return ImGuiKey_Menu;
-    default: return ImGuiKey_None;
-    }
-}
 }
 
 struct Gui::Impl
 {
-    Impl(Platform::Window& owner, RHI::IDevice& value) : window(owner), device(value) {}
-    Platform::Window& window;
+    explicit Impl(RHI::IDevice& value) : device(value) {}
     RHI::IDevice& device;
     ImGuiContext* context = nullptr;
-    bool frameStarted = false, drawReady = false;
-    std::chrono::steady_clock::time_point previousFrame{};
-    std::array<bool, 8> modifiers{};
+    bool platformReady = false, frameStarted = false, drawReady = false;
     RHI::TextureHandle fontTexture = nullptr;
     ImFontAtlas* fontAtlas = nullptr;
     ImTextureData* fontData = nullptr;
@@ -116,104 +47,6 @@ struct Gui::Impl
     std::unordered_map<uint64_t, RegisteredTexture> textures;
     RHI::Format format = RHI::Format::Unknown;
     GuiStats stats;
-
-    void UpdateModifiers(ImGuiIO& io)
-    {
-        io.AddKeyEvent(ImGuiMod_Shift, modifiers[0] || modifiers[4]);
-        io.AddKeyEvent(ImGuiMod_Ctrl, modifiers[1] || modifiers[5]);
-        io.AddKeyEvent(ImGuiMod_Alt, modifiers[2] || modifiers[6]);
-        io.AddKeyEvent(ImGuiMod_Super, modifiers[3] || modifiers[7]);
-    }
-
-    void UpdatePlatform()
-    {
-        using namespace Platform;
-        auto& io = ImGui::GetIO();
-        const auto size = window.GetSize();
-        const auto framebuffer = window.GetFramebufferSize();
-        io.DisplaySize = ImVec2(static_cast<float>(std::max(size.width, 0)),
-            static_cast<float>(std::max(size.height, 0)));
-        io.DisplayFramebufferScale = ImVec2(
-            size.width > 0 && framebuffer.width > 0 ? float(framebuffer.width) / size.width : 1.f,
-            size.height > 0 && framebuffer.height > 0 ? float(framebuffer.height) / size.height : 1.f);
-        const auto now = std::chrono::steady_clock::now();
-        io.DeltaTime = previousFrame == std::chrono::steady_clock::time_point{} ? 1.f / 60.f :
-            std::max(std::chrono::duration<float>(now - previousFrame).count(), 0.000001f);
-        previousFrame = now;
-
-        const auto& input = window.GetInput();
-        const auto kind = window.GetNativeHandle().kind;
-        io.AddMouseSourceEvent(kind == NativeWindowKind::UIKit || kind == NativeWindowKind::Android ?
-            ImGuiMouseSource_TouchScreen : ImGuiMouseSource_Mouse);
-        const bool mouseAvailable = window.GetCursorMode() != CursorMode::Locked;
-        if(!mouseAvailable) io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
-        // Replay the original event order so a short press/release and modifier
-        // chord between two render frames survive the immutable Input snapshot.
-        for(const auto& event : input.GetEvents())
-        {
-            switch(event.type)
-            {
-            case InputEventType::Key:
-            {
-                if(event.action == InputAction::Repeat) break; // ImGui owns key repeat.
-                const bool down = event.action == InputAction::Press;
-                const auto key = static_cast<Key>(event.code);
-                if(key >= Key::LeftShift && key <= Key::RightSuper)
-                {
-                    modifiers[event.code - static_cast<int>(Key::LeftShift)] = down;
-                    UpdateModifiers(io);
-                }
-                const auto translated = TranslateKey(key);
-                if(translated != ImGuiKey_None)
-                {
-                    io.AddKeyEvent(translated, down);
-                    io.SetKeyEventNativeData(translated, event.code, event.scancode);
-                }
-                break;
-            }
-            case InputEventType::MouseButton:
-                if(event.code >= 0 && event.code < ImGuiMouseButton_COUNT)
-                    io.AddMouseButtonEvent(event.code, event.action == InputAction::Press);
-                break;
-            case InputEventType::Cursor:
-                if(mouseAvailable) io.AddMousePosEvent(static_cast<float>(event.x), static_cast<float>(event.y));
-                break;
-            case InputEventType::Scroll:
-                io.AddMouseWheelEvent(static_cast<float>(event.x), static_cast<float>(event.y));
-                break;
-            case InputEventType::Text:
-                io.AddInputCharacter(event.codepoint);
-                break;
-            case InputEventType::Focus:
-                io.AddFocusEvent(event.focused);
-                if(!event.focused)
-                {
-                    modifiers.fill(false);
-                    UpdateModifiers(io);
-                }
-                break;
-            }
-        }
-
-        // Reconcile held inputs when the application skipped GUI frames (for
-        // example while a scene owned the window). Add*Event deduplicates states.
-        const bool focused = window.HasFocus();
-        io.AddFocusEvent(focused);
-        for(std::size_t index = 0; index < modifiers.size(); ++index)
-            modifiers[index] = focused && input.IsDown(static_cast<Key>(static_cast<int>(Key::LeftShift) + index));
-        UpdateModifiers(io);
-        for(int code = static_cast<int>(Key::Space); code <= static_cast<int>(Key::Menu); ++code)
-        {
-            const auto key = static_cast<Key>(code);
-            const auto translated = TranslateKey(key);
-            if(translated != ImGuiKey_None) io.AddKeyEvent(translated, focused && input.IsDown(key));
-        }
-        for(int button = 0; button < ImGuiMouseButton_COUNT; ++button)
-            io.AddMouseButtonEvent(button, focused && input.IsDown(static_cast<MouseButton>(button)));
-        const auto cursor = input.GetCursorPosition();
-        if(focused && mouseAvailable) io.AddMousePosEvent(static_cast<float>(cursor.x), static_cast<float>(cursor.y));
-        else io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
-    }
 
     RHI::ResourceSetHandle CreateTextureSet(RHI::TextureHandle texture)
     {
@@ -248,11 +81,7 @@ struct Gui::Impl
         auto* texture = device.CreateTexture({static_cast<uint32_t>(width), static_cast<uint32_t>(height),
             1, 1, Format::R8G8B8A8_UNORM, TextureUsage::ShaderResource});
         if(!texture) return Fail("Font texture creation failed.");
-        const auto destroyTexture=[&](Texture* value) {device.DestroyTexture(value);};
-        std::unique_ptr<Texture,decltype(destroyTexture)> ownedTexture(texture,destroyTexture);
         auto* commands = device.AcquireCommandList();
-        const auto destroyCommands=[&](ICommandList* value) {device.DestroyCommandList(value);};
-        std::unique_ptr<ICommandList,decltype(destroyCommands)> ownedCommands(commands,destroyCommands);
         bool uploaded = false;
         if(commands)
         {
@@ -264,9 +93,10 @@ struct Gui::Impl
             barrier.after = ResourceState::ShaderResource;
             commands->ResourceBarrier(&barrier, 1);
             uploaded = uploaded && commands->Close() && device.Submit(&commands, 1);
+            device.DestroyCommandList(commands);
         }
-        if(!uploaded) return Fail("Font upload submission failed.");
-        fontTexture = ownedTexture.release();
+        if(!uploaded) { device.DestroyTexture(texture); return Fail("Font upload submission failed."); }
+        fontTexture = texture;
         fontAtlas = atlas;
         fontData = atlas->TexData;
         atlas->SetTexID(fontTextureId);
@@ -318,24 +148,23 @@ struct Gui::Impl
     }
 };
 
-Gui::Gui(Platform::Window& window, RHI::IDevice& device) : impl(new Impl(window, device)) {}
+Gui::Gui(RHI::IDevice& device) : impl(new Impl(device)) {}
 
 std::unique_ptr<Gui> Gui::Create(Platform::Window& window, RHI::IDevice& device)
 {
     if(activeContext || ImGui::GetCurrentContext()) { Fail("Only one Gui/ImGui context is supported."); return nullptr; }
-    if(!window.GetNativeHandle().value) { Fail("A valid Window is required."); return nullptr; }
+    if(!dyf::Platform::GetGlfwWindow(window)) { Fail("A valid Window is required."); return nullptr; }
     IMGUI_CHECKVERSION();
-    std::unique_ptr<Gui> gui(new Gui(window, device));
+    std::unique_ptr<Gui> gui(new Gui(device));
     gui->impl->context = ImGui::CreateContext();
     if(!gui->impl->context) return nullptr;
     activeContext = gui->impl->context;
     auto& io = ImGui::GetIO();
-    io.BackendPlatformName = "dyf_window";
-    io.BackendPlatformUserData = gui->impl.get();
     io.BackendRendererName = "dyf_rhi";
     io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    ImGui::GetMainViewport()->PlatformHandle = &window;
+    gui->impl->platformReady = ImGui_ImplGlfw_InitForOther(dyf::Platform::GetGlfwWindow(window), true);
+    if(!gui->impl->platformReady) { Fail("GLFW backend initialization failed."); return nullptr; }
     return gui;
 }
 
@@ -347,9 +176,7 @@ Gui::~Gui()
         auto* previous = ImGui::GetCurrentContext();
         ImGui::SetCurrentContext(state.context);
         if(state.frameStarted) ImGui::EndFrame();
-        ImGui::GetIO().BackendPlatformName = nullptr;
-        ImGui::GetIO().BackendPlatformUserData = nullptr;
-        ImGui::GetMainViewport()->PlatformHandle = nullptr;
+        if(state.platformReady) ImGui_ImplGlfw_Shutdown();
         ImGui::DestroyContext(state.context);
         activeContext = nullptr;
         ImGui::SetCurrentContext(previous == state.context ? nullptr : previous);
@@ -371,7 +198,7 @@ bool Gui::BeginFrame()
     state.drawReady = false;
     state.stats = {0, 0, 0, 0, state.stats.atlasBytes};
     if(!state.InitializeFont()) return false;
-    state.UpdatePlatform();
+    ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
     state.frameStarted = true;
     return true;
@@ -403,8 +230,7 @@ bool Gui::Record(RHI::ICommandList& commands, RHI::TextureHandle target)
         data->TotalVtxCount < 0 || data->TotalIdxCount <= 0) return Fail("Invalid ImGui geometry dimensions.");
     const uint64_t vertexBytes = uint64_t(data->TotalVtxCount) * sizeof(Vertex);
     const uint64_t indexBytes = uint64_t(data->TotalIdxCount) * sizeof(ImDrawIdx);
-    const uint64_t indexUploadBytes=(indexBytes+3)&~uint64_t(3);
-    if(vertexBytes > UINT32_MAX || indexUploadBytes > UINT32_MAX) return Fail("ImGui geometry exceeds RHI buffer limits.");
+    if(vertexBytes > UINT32_MAX || indexBytes > UINT32_MAX) return Fail("ImGui geometry exceeds RHI buffer limits.");
     const float clipWidth = std::min(width, static_cast<float>(target->GetDesc().width));
     const float clipHeight = std::min(height, static_cast<float>(target->GetDesc().height));
     if(clipWidth > INT32_MAX || clipHeight > INT32_MAX) return Fail("Target exceeds signed scissor coordinates.");
@@ -446,17 +272,16 @@ bool Gui::Record(RHI::ICommandList& commands, RHI::TextureHandle target)
         }
         indices.insert(indices.end(), list->IdxBuffer.begin(), list->IdxBuffer.end());
     }
-    indices.resize(static_cast<size_t>(indexUploadBytes/sizeof(ImDrawIdx)),0);
     const auto destroyBuffer = [&state](Buffer* buffer) { state.device.DestroyBuffer(buffer); };
     std::unique_ptr<Buffer, decltype(destroyBuffer)> vertexBuffer(state.device.CreateBuffer(
         {static_cast<uint32_t>(vertexBytes), sizeof(Vertex), BufferUsage::Vertex, ResourceState::CopyDestination}), destroyBuffer);
     std::unique_ptr<Buffer, decltype(destroyBuffer)> indexBuffer(state.device.CreateBuffer(
-        {static_cast<uint32_t>(indexUploadBytes), sizeof(ImDrawIdx), BufferUsage::Index, ResourceState::CopyDestination}), destroyBuffer);
+        {static_cast<uint32_t>(indexBytes), sizeof(ImDrawIdx), BufferUsage::Index, ResourceState::CopyDestination}), destroyBuffer);
     auto* vb = vertexBuffer.get();
     auto* ib = indexBuffer.get();
     if(!vb || !ib) return Fail("Geometry buffer creation failed.");
     if(!state.device.UpdateBuffer(commands, vb, 0, vertices.data(), static_cast<uint32_t>(vertexBytes)) ||
-        !state.device.UpdateBuffer(commands, ib, 0, indices.data(), static_cast<uint32_t>(indexUploadBytes)))
+        !state.device.UpdateBuffer(commands, ib, 0, indices.data(), static_cast<uint32_t>(indexBytes)))
         return Fail("Geometry upload recording failed.");
     const ResourceBarrierDesc barriers[] = {{vb, nullptr, ResourceState::CopyDestination, ResourceState::VertexBuffer, {}},
         {ib, nullptr, ResourceState::CopyDestination, ResourceState::IndexBuffer, {}},
@@ -503,7 +328,7 @@ bool Gui::Record(RHI::ICommandList& commands, RHI::TextureHandle target)
     commands.ResourceBarrier(&after, 1);
     state.stats.vertices = static_cast<uint32_t>(data->TotalVtxCount);
     state.stats.indices = static_cast<uint32_t>(data->TotalIdxCount);
-    state.stats.uploadBytes = vertexBytes + indexUploadBytes;
+    state.stats.uploadBytes = vertexBytes + indexBytes;
     return true;
 }
 

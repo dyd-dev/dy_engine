@@ -1,77 +1,76 @@
+#include "dyf/RHI/IDevice.h"
 #include "dyf/Platform/Window.h"
 #include "dyf/RHI.h"
-#include <cstdio>
-#include <string>
-#include <utility>
+#include "generate.h"
+#include "vertex.h"
+#include "fragment.h"
 
-#include <fstream>
-#include <iterator>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <iostream>
 #include <memory>
-#include <vector>
+#include <stdexcept>
+#include <string_view>
 
 using namespace dyf::RHI;
 
-int main()
+int main(int argc, char** argv) try
 {
-    // 예제 폴더에서 실행한다. 컴파일러가 포함된 엔진은 GLSL을 컴파일하고, 그 외에는 .bin을 읽는다.
-    const auto loadShader = [](dyf::RHI::ShaderStage stage, const char* sourcePath, const char* binaryPath)
-    {
-        bool compile = dyf::RHI::IsShaderCompilerAvailable();
-        const char* path = compile ? sourcePath : binaryPath;
-        std::ifstream file(path, std::ios::binary);
-        if(!file && compile)
-        {
-            compile = false;
-            path = binaryPath;
-            file.open(path, std::ios::binary);
-        }
-        if(!file) { std::fprintf(stderr, "Cannot open shader: %s\n", path); return std::vector<uint8_t>{}; }
-        const std::string data{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
-        if(!compile) return std::vector<uint8_t>(data.begin(), data.end());
-        auto result = dyf::RHI::CompileShader({stage, data, "main", sourcePath});
-        if(!result.diagnostics.empty()) std::fprintf(stderr, "%s\n", result.diagnostics.c_str());
-        return std::move(result.binary);
+    const auto check = [](bool ok, const char* message) {
+        if(!ok) throw std::runtime_error(message);
     };
-
-    const auto generateBinary = loadShader(dyf::RHI::ShaderStage::Compute, "Shaders/generate.glsl", "Shaders/generate.bin");
-#ifdef DY_EXAMPLE_METAL
-    const char* generateEntry="generateArguments";
-#else
-    const char* generateEntry="main";
-#endif
-    const auto vertexBinary = loadShader(dyf::RHI::ShaderStage::Vertex, "Shaders/vertex.glsl", "Shaders/vertex.bin");
-#ifdef DY_EXAMPLE_METAL
-    const char* vertexEntry="vertexMain";
-#else
-    const char* vertexEntry="main";
-#endif
-    const auto fragmentBinary = loadShader(dyf::RHI::ShaderStage::Fragment, "Shaders/fragment.glsl", "Shaders/fragment.bin");
-#ifdef DY_EXAMPLE_METAL
-    const char* fragmentEntry="fragmentMain";
-#else
-    const char* fragmentEntry="main";
-#endif
-    if(generateBinary.empty() || vertexBinary.empty() || fragmentBinary.empty()) return 1;
+    uint32_t frameLimit = 0;
+    bool validation = false;
+    for(int i = 1; i < argc; ++i)
+    {
+        const std::string_view argument(argv[i]);
+        if(argument == "--help")
+        {
+            std::cout << "AdvancedIndirectDrawing [--frames N] [--validation]\n"
+                "GPU compute generates both draw argument structures; no CPU readback.\n"
+                "Left cyan: DrawIndirect. Right orange: DrawIndexedIndirect.\n"
+                "DispatchIndirect launches the generator from an uploaded {1,1,1} argument.\n"
+                "Instance counts vary between 0 and 64. Escape closes the window.\n"
+                "Exit codes: success 0, error 1, unsupported device 77.\n";
+            return 0;
+        }
+        if(argument == "--validation") validation = true;
+        else if(argument == "--frames" && i + 1 < argc)
+        {
+            const std::string_view value(argv[++i]);
+            const auto result = std::from_chars(value.data(), value.data() + value.size(), frameLimit);
+            check(result.ec == std::errc{} && result.ptr == value.data() + value.size(),
+                "--frames requires an unsigned 32-bit integer (0 = unlimited).");
+        }
+        else throw std::runtime_error("Unknown or incomplete argument; use --help.");
+    }
 
     dyf::Platform::Window window(1000, 650, "Advanced / GPU-generated indirect drawing");
-    
-    std::unique_ptr<IDevice> owner(IDevice::Create({}));
-    
+    check(window.GetHandle() != nullptr, "Window creation failed.");
+    DeviceDesc deviceDesc;
+    deviceDesc.enableValidation = validation;
+    std::unique_ptr<IDevice> owner(IDevice::Create(deviceDesc));
+    check(bool(owner), "Device creation failed.");
     auto& device = *owner;
+    if(!device.Supports(Feature::Rasterization) || !device.Supports(Feature::Compute) ||
+        !device.Supports(Feature::IndirectDraw) || !device.Supports(Feature::IndirectDispatch))
+    {
+        std::cout << "UNSUPPORTED: requires rasterization, compute, indirect drawing and indirect dispatch.\n";
+        return 77;
+    }
     dyf::RHI::ResourceScope resources(device);
     SwapchainDesc swapchain;
     swapchain.window = window.GetHandle();
     swapchain.format = DefaultSwapchainFormat;
-    (void)device.CreateSwapchain(swapchain);
+    check(device.CreateSwapchain(swapchain), "Swapchain creation failed.");
 
     auto* cs = resources.Keep(device.CreateShader({ShaderStage::Compute,
-        generateEntry, generateBinary.data(), generateBinary.size()}));
+        ShaderData::generateEntryPoint, ShaderData::generate, ShaderData::generateSize}));
     auto* vs = resources.Keep(device.CreateShader({ShaderStage::Vertex,
-        vertexEntry, vertexBinary.data(), vertexBinary.size()}));
+        ShaderData::vertexEntryPoint, ShaderData::vertex, ShaderData::vertexSize}));
     auto* fs = resources.Keep(device.CreateShader({ShaderStage::Fragment,
-        fragmentEntry, fragmentBinary.data(), fragmentBinary.size()}));
+        ShaderData::fragmentEntryPoint, ShaderData::fragment, ShaderData::fragmentSize}));
 
     // Compute writes all 9 words: DrawIndirectArguments, then DrawIndexedIndirectArguments.
     constexpr uint32_t indexedOffset = sizeof(DrawIndirectArguments);
@@ -112,15 +111,18 @@ int main()
     graphicsDesc.layout = {nullptr, 0, 16, ShaderStageFlags::Vertex, 15};
     auto* graphics = resources.Keep(device.CreateGraphicsPipeline(graphicsDesc));
 
+    std::cout << "Left cyan: DrawIndirect | right orange: DrawIndexedIndirect\n"
+        "GPU-generated instance counts: 0..64; CPU does not read the argument buffer.\n";
     const auto start = std::chrono::steady_clock::now();
     uint32_t frame = 0;
-    while(window.IsRunning())
+    while(window.IsRunning() && (!frameLimit || frame < frameLimit))
     {
         window.PollEvents();
-        if(!window.IsRunning()) break;
+        if(!window.IsRunning() || window.GetInput().WasPressed(dyf::Platform::Key::Escape)) break;
         if(!device.BeginFrame())
         {
-            
+            check(!device.IsLost(), "Device lost during BeginFrame.");
+            window.WaitEvents(0.001);
             continue;
         }
         dyf::RHI::ResourceScope frameResources(device);
@@ -128,8 +130,10 @@ int main()
         if(frame == 0)
         {
             const DispatchIndirectArguments dispatch{1, 1, 1};
-            (void)device.UpdateBuffer(*commands, dispatchArguments, 0, &dispatch, sizeof(dispatch));
-            (void)device.UpdateBuffer(*commands, indexBuffer, 0, indices, sizeof(indices));
+            check(device.UpdateBuffer(*commands, dispatchArguments, 0, &dispatch, sizeof(dispatch)),
+                "Dispatch argument upload failed.");
+            check(device.UpdateBuffer(*commands, indexBuffer, 0, indices, sizeof(indices)),
+                "Index upload failed.");
             const ResourceBarrierDesc ready[] = {
                 {dispatchArguments, nullptr, ResourceState::CopyDestination, ResourceState::IndirectArgument, {}},
                 {indexBuffer, nullptr, ResourceState::CopyDestination, ResourceState::IndexBuffer, {}}
@@ -152,7 +156,7 @@ int main()
         commands->ResourceBarrier(&generated, 1);
 
         auto* target = device.GetBackBuffer();
-        
+        check(target != nullptr, "Backbuffer unavailable.");
         const auto& extent = target->GetDesc();
         const ResourceBarrierDesc begin{nullptr, target,
             ResourceState::Present, ResourceState::RenderTarget, {}};
@@ -183,11 +187,16 @@ int main()
         const ResourceBarrierDesc end{nullptr, target,
             ResourceState::RenderTarget, ResourceState::Present, {}};
         commands->ResourceBarrier(&end, 1);
-        (void)commands->Close();
-        (void)device.Submit(&commands, 1);
-        (void)device.Present();
+        check(commands->Close(), "Indirect command recording failed.");
+        check(device.Submit(&commands, 1), "Indirect submission failed.");
+        check(device.Present(), "Present failed.");
         ++frame;
     }
-    (void)device.WaitIdle();
+    check(device.WaitIdle(), "WaitIdle failed.");
     return 0;
+}
+catch(const std::exception& error)
+{
+    std::cerr << error.what() << '\n';
+    return 1;
 }

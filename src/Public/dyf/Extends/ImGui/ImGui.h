@@ -17,10 +17,8 @@ struct GuiStats
 
 // Link dy_imgui (or dyf::ImGui) and include <imgui.h> for the widget API.
 // One Gui/context on the window thread. Window and device must outlive Gui.
-// Creates its own current ImGui context and reads Window's ordered Input events.
-// Works with desktop and native mobile windows without replacing their callbacks.
-// Input provides committed text; native clipboard, IME and soft-keyboard control
-// are not exposed by Window. The application retains control of the OS cursor.
+// Creates its own current ImGui context and chains the Window's GLFW callbacks;
+// do not replace those callbacks while Gui is alive. Destruction restores them.
 // Add fonts/glyph ranges before the first BeginFrame. That call submits the
 // one-time atlas upload. Fonts and atlas are immutable afterwards (legacy mode).
 // Docking may be enabled by the application; secondary OS viewports are unsupported.
@@ -52,7 +50,7 @@ public:
     [[nodiscard]] const GuiStats& GetStats() const;
 
 private:
-    Gui(Platform::Window&, RHI::IDevice&);
+    explicit Gui(RHI::IDevice&);
     struct Impl;
     std::unique_ptr<Impl> impl;
 };

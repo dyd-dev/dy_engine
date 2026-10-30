@@ -7,7 +7,7 @@
 #include "dyf/RHI/Pipeline.h"
 #include "dyf/RHI/Shader.h"
 #include "dyf/RHI/Texture.h"
-#include "dyf/RHI/ResourceSet.h"
+#include "RHI/ResourceSet.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>

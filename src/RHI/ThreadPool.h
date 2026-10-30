@@ -1,15 +1,19 @@
 #pragma once
 
+#include <condition_variable>
 #include <cstdint>
-#include <memory>
+#include <deque>
+#include <functional>
+#include <future>
+#include <mutex>
 #include <thread>
 #include <vector>
 
 namespace dyf::RHI
 {
-// Internal workers for CPU command recording. ParallelFor joins all its items
-// and delivers their exceptions before returning. The owner must keep the pool
-// alive while another thread calls it. Idle workers park in native wake objects.
+// Internal workers for CPU command recording. Tasks finish before destruction.
+// A task's exception is delivered by its future.
+// The owner must keep the pool alive while other threads enqueue or wait.
 // Destruction must run on an external owner thread, never inside one of its tasks.
 class ThreadPool final
 {
@@ -19,28 +23,20 @@ public:
     ThreadPool(const ThreadPool&) = delete;
     ThreadPool& operator=(const ThreadPool&) = delete;
 
-    // Reuses one job slot per worker; no queued closures or futures per item.
-    // Calls from pool workers run serially, including calls into another pool.
-    // Concurrent external batches are serialized. Returns after every item finishes.
-    template<class Task>
-    void ParallelFor(uint32_t count, const Task& task)
-    {
-        RunBatch(count, &task, [](const void* context, uint32_t index) {
-            (*static_cast<const Task*>(context))(index);
-        });
-    }
+    [[nodiscard]] std::future<void> Enqueue(std::function<void()> task);
+    // Waits for the entire pool to become idle; task exceptions remain in futures.
+    // Calling WaitAll from one of this pool's workers is rejected.
+    void WaitAll();
     [[nodiscard]] uint32_t GetThreadCount() const { return static_cast<uint32_t>(m_workers.size()); }
     [[nodiscard]] bool IsWorkerThread() const;
 
 private:
-    struct Batch;
-    struct Storage;
-    using BatchTask = void(*)(const void*, uint32_t);
-    void WorkerLoop(uint32_t index);
-    void RunBatch(uint32_t count, const void* context, BatchTask task);
-    void ExecuteBatch(Batch& batch, uint32_t worker);
-    void StopWorkers();
-    std::unique_ptr<Storage> m_storage;
+    void WorkerLoop();
     std::vector<std::thread> m_workers;
+    std::deque<std::packaged_task<void()>> m_tasks;
+    std::mutex m_mutex;
+    std::condition_variable m_ready, m_idle;
+    size_t m_active = 0;
+    bool m_stopping = false;
 };
 }

@@ -1,24 +1,26 @@
 cmake_minimum_required(VERSION 3.20)
 project(DyfModelAnim LANGUAGES CXX)
 
+get_filename_component(engine_default "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
+set(DY_ENGINE_SOURCE_DIR "${engine_default}" CACHE PATH "dy_engine source directory.")
 if(NOT TARGET dy_engine)
-    find_path(DY_ENGINE_INCLUDE_DIR dyf/RHI.h REQUIRED)
-    find_library(DY_ENGINE_LIBRARY NAMES dy_engine REQUIRED)
-    add_library(dy_engine STATIC IMPORTED)
-    set_target_properties(dy_engine PROPERTIES
-        IMPORTED_LOCATION "${DY_ENGINE_LIBRARY}"
-        INTERFACE_INCLUDE_DIRECTORIES "${DY_ENGINE_INCLUDE_DIR}"
-        INTERFACE_LINK_LIBRARIES "${DY_ENGINE_LINK_LIBRARIES}")
+    option(DY_EXTEND_MODEL "Build the optional Model extension." ON)
+    add_subdirectory("${DY_ENGINE_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/dy_engine" EXCLUDE_FROM_ALL)
 endif()
 
 if(NOT TARGET dyf::Model)
-    find_library(DY_MODEL_LIBRARY NAMES dy_extend_model REQUIRED)
-    add_library(dyf::Model STATIC IMPORTED)
-    set_target_properties(dyf::Model PROPERTIES
-        IMPORTED_LOCATION "${DY_MODEL_LIBRARY}"
-        INTERFACE_LINK_LIBRARIES "dy_engine;${DY_MODEL_LINK_LIBRARIES}")
+    message(FATAL_ERROR "07_ModelAnim requires DY_EXTEND_MODEL=ON.")
 endif()
 
 add_executable(DyfModelAnim main.cpp)
-target_compile_features(DyfModelAnim PRIVATE cxx_std_17)
 target_link_libraries(DyfModelAnim PRIVATE dyf::Model)
+
+# main.cpp의 상대 경로를 실행 파일의 작업 폴더에서 사용할 수 있도록 복사한다.
+if(NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+add_custom_command(TARGET DyfModelAnim POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:DyfModelAnim>/Models"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/Models/Fox.glb" "$<TARGET_FILE_DIR:DyfModelAnim>/Models/Fox.glb"
+    VERBATIM)
+set_target_properties(DyfModelAnim PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY "$<TARGET_FILE_DIR:DyfModelAnim>")
+endif()

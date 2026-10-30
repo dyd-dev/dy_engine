@@ -5,8 +5,7 @@
 #include "dyf/RHI/IDevice.h"
 #include "dyf/RHI/ICommandList.h"
 #include <deque>
-#include <array>
-#include <atomic>
+#include <mutex>
 #include <optional>
 #include <utility>
 
@@ -27,19 +26,16 @@ namespace dyf::Platform
 			RHI::TimestampQueryHandle query = nullptr, start = nullptr;
 			RHI::FenceHandle completion;
 			std::vector<std::string> passes;
-            LiveFrameKey frame;
 		};
 
 		RHI::TimestampQueryHandle AcquireQuery(std::uint32_t count);
-		void SubmitGpuSample(GpuSample&&, LiveFrameKey frame={});
+		void SubmitGpuSample(GpuSample&&);
 		void PollGpuSamples();
 		bool RecordFrame(ProfilerTimingSample);
 		const ProfilerTimingSnapshot& GetSnapshot() const noexcept { return snapshot; }
 		void AddAcquireWait(double milliseconds) noexcept { pendingAcquireMilliseconds += milliseconds; }
 		double TakeAcquireWait() noexcept;
 		void ResetGpuQueries() noexcept;
-        // Owner-only boundary before graph callbacks; workers borrow unique slots.
-        void PrepareGpuScopes(std::uint32_t count) noexcept;
 		std::size_t PendingGpuSamples() const noexcept { return pending.size(); }
 
 		class GpuScope final
@@ -55,7 +51,6 @@ namespace dyf::Platform
 			RHI::ICommandList& commands;
 			RHI::TimestampQueryHandle query = nullptr;
 			LiveGpuSpan span;
-            std::uint32_t slot=UINT32_MAX;
 		};
 
 		void SubmitGpuScopes(RHI::FenceHandle, LiveFrameKey) noexcept;
@@ -82,14 +77,6 @@ namespace dyf::Platform
 		std::vector<GpuScopeSample> gpuScopes;
 		std::vector<RHI::TimestampQueryHandle> freeScopeQueries;
 		std::uint32_t scopeQueryCount = 0;
-        struct RecordingGpuScope
-        {
-            RHI::TimestampQueryHandle query=nullptr;
-            LiveGpuSpan span;
-            bool recorded=false;
-        };
-        std::array<RecordingGpuScope,16> recordingScopes;
-        std::uint32_t recordingScopeCount=0;
-        std::atomic<std::uint32_t> nextRecordingScope{0};
+		std::mutex gpuMutex;
 	};
 }

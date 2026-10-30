@@ -22,84 +22,34 @@ namespace dyf
 {
 	namespace
 	{
-		[[nodiscard]] bool GenerateFlatFrames(ModelMesh& mesh)
-		{
-			// glTF requires flat normals when NORMAL is absent. Separate triangle
-			// corners so frame generation cannot average across a shared edge.
-			const auto sourceIndices = mesh.mesh.indices;
-			auto expand = [&](auto& values) {
-				if(values.empty()) return;
-				const auto source = std::move(values);
-				values.clear();
-				values.reserve(sourceIndices.size());
-				for(uint32_t index : sourceIndices) values.push_back(source[index]);
-			};
-			expand(mesh.mesh.vertices);
-			expand(mesh.skinInfluences);
-			for(auto& target : mesh.morphTargets) expand(target.positionDeltas);
-			for(size_t index = 0; index < mesh.mesh.indices.size(); ++index)
-				mesh.mesh.indices[index] = static_cast<uint32_t>(index);
-			if(!CalculateTangents(mesh.mesh, true)) return false;
-			for(auto& target : mesh.morphTargets)
-			{
-				MeshData deformed = mesh.mesh;
-				for(size_t index = 0; index < deformed.vertices.size(); ++index)
-					if(!target.positionDeltas.empty()) deformed.vertices[index].position =
-						deformed.vertices[index].position + target.positionDeltas[index];
-				if(!CalculateTangents(deformed, true)) return false;
-				target.normalDeltas.resize(deformed.vertices.size());
-				target.tangentDeltas.resize(deformed.vertices.size());
-				for(size_t index = 0; index < deformed.vertices.size(); ++index)
-				{
-					target.normalDeltas[index] = deformed.vertices[index].normal - mesh.mesh.vertices[index].normal;
-					const auto& before = mesh.mesh.vertices[index].tangent;
-					const auto& after = deformed.vertices[index].tangent;
-					target.tangentDeltas[index] = Math::float3(after.x-before.x, after.y-before.y, after.z-before.z);
-				}
-			}
-			return true;
-		}
-
 		void SetTexturePath(ModelMaterialInfo& material, MaterialTextureKind kind, std::string path)
 		{
 			const uint32_t index = static_cast<uint32_t>(kind);
 			material.texturePaths[index] = std::move(path);
 			material.hasTexture[index] = !material.texturePaths[index].empty();
 		}
-		[[nodiscard]] bool ApplyGltfMaterialTexture(
+		void ApplyGltfMaterialTexture(
 			const std::filesystem::path& basePath,
 			const fastgltf::Asset& gltf,
 			const fastgltf::TextureInfo& textureInfo,
 			ModelMaterialInfo& material,
 			MaterialTextureKind kind,
-			const std::string& filepath, const ModelLoadOptions& options)
+			const std::string& filepath)
 		{
-			if(textureInfo.transform && (textureInfo.transform->rotation != 0 ||
-				textureInfo.transform->uvOffset.x() != 0 || textureInfo.transform->uvOffset.y() != 0 ||
-				textureInfo.transform->uvScale.x() != 1 || textureInfo.transform->uvScale.y() != 1))
-				if(!AllowMaterialFallback(filepath, options, "glTF nonidentity KHR_texture_transform is unsupported; using untransformed UVs")) return false;
 			const size_t texCoordIndex = textureInfo.transform != nullptr
 				&& textureInfo.transform->texCoordIndex.has_value()
 				? textureInfo.transform->texCoordIndex.value()
 				: textureInfo.texCoordIndex;
 			if(texCoordIndex != 0u)
 			{
-				return AllowMaterialFallback(filepath, options,
-					"glTF texture references an unsupported texture coordinate set; texture disabled");
+				ReportModelWarning(
+					filepath,
+					"texture references an unsupported texture coordinate set; texture disabled");
+				return;
 			}
-			if(textureInfo.textureIndex >= gltf.textures.size()) return false;
+			if(textureInfo.textureIndex >= gltf.textures.size()) return;
 			const fastgltf::Texture& texture = gltf.textures[textureInfo.textureIndex];
-			if(!texture.imageIndex.has_value() || texture.imageIndex.value() >= gltf.images.size())
-				return AllowMaterialFallback(filepath, options, "glTF texture has no supported core image; texture disabled");
-			if(texture.samplerIndex.has_value())
-			{
-				if(*texture.samplerIndex >= gltf.samplers.size()) return false;
-				const auto& sampler = gltf.samplers[*texture.samplerIndex];
-				if(sampler.wrapS != fastgltf::Wrap::Repeat || sampler.wrapT != fastgltf::Wrap::Repeat ||
-					(sampler.magFilter.has_value() && *sampler.magFilter != fastgltf::Filter::Linear) ||
-					(sampler.minFilter.has_value() && *sampler.minFilter != fastgltf::Filter::LinearMipMapLinear))
-					if(!AllowMaterialFallback(filepath, options, "glTF texture sampler requires unsupported wrapping/filtering; using repeat/trilinear")) return false;
-			}
+			if(!texture.imageIndex.has_value() || texture.imageIndex.value() >= gltf.images.size()) return;
 
 			const size_t imageIndex = texture.imageIndex.value();
 			const uint32_t slot = static_cast<uint32_t>(kind);
@@ -108,7 +58,6 @@ namespace dyf
 			const fastgltf::Image& image = gltf.images[imageIndex];
 			if(const auto* filePath = std::get_if<fastgltf::sources::URI>(&image.data))
 				SetTexturePath(material, kind, (basePath / filePath->uri.fspath()).string());
-			return true;
 		}
 
 		[[nodiscard]] bool LoadGltfTextureAssets(
@@ -116,7 +65,6 @@ namespace dyf
 			const std::filesystem::path& basePath,
 			const fastgltf::Asset& gltf,
 			uint64_t maxDecodedBytes,
-			uint32_t maxTextureDimension,
 			ModelData& outModel,
 			uint64_t& outDecodedBytes)
 		{
@@ -175,8 +123,7 @@ namespace dyf
 						? maxDecodedBytes - outDecodedBytes
 						: 0u;
 					bool limitExceeded = false;
-					if(!LoadImage(reinterpret_cast<const uint8_t*>(encodedBytes.data()),encodedBytes.size(),
-                        textureAsset,remainingBytes,maxTextureDimension,&limitExceeded))
+					if(!LoadImage(reinterpret_cast<const uint8_t*>(encodedBytes.data()), encodedBytes.size(), textureAsset, remainingBytes, &limitExceeded))
 					{
 						return ReportModelError(
 							filepath,
@@ -511,8 +458,7 @@ namespace dyf
 			if(!budget.CheckNodes(gltf.nodes.size())
 				|| !budget.AddBytes(gltf.nodes.size(), sizeof(ModelNode), "nodes")
 				|| !budget.AddBytes(gltf.materials.size(), sizeof(ModelMaterialInfo), "materials")) return false;
-			for(const auto& node : gltf.nodes)
-				if(node.cameraIndex.has_value() && !budget.AddBytes(1u, sizeof(ModelCamera), "source cameras")) return false;
+
 			for(const fastgltf::Skin& skin : gltf.skins)
 			{
 				if(!budget.CheckJoints(skin.joints.size())
@@ -600,18 +546,7 @@ namespace dyf
 					if(shared && !countedGeometry.emplace(std::make_pair(*node.meshIndex, primitiveIndex), true).second)
 						continue;
 					if(position->accessorIndex >= gltf.accessors.size()) return false;
-					const uint64_t sourceVertexCount = gltf.accessors[position->accessorIndex].count;
-					uint64_t indexCount = sourceVertexCount;
-					if(primitive.indicesAccessor.has_value())
-					{
-						if(primitive.indicesAccessor.value() >= gltf.accessors.size()) return false;
-						indexCount = gltf.accessors[primitive.indicesAccessor.value()].count;
-					}
-					const bool flatNormals = primitive.findAttribute("NORMAL") == primitive.attributes.end();
-					// The source arrays are decoded before corner expansion, including
-					// unreferenced vertices. Bound those allocations as well as the result.
-					const uint64_t vertexCount = flatNormals ? std::max(indexCount, sourceVertexCount) : sourceVertexCount;
-					if(vertexCount > UINT32_MAX) return ReportModelError(filepath, "glTF vertex count exceeds the supported index range");
+					const uint64_t vertexCount = gltf.accessors[position->accessorIndex].count;
 					if(!budget.AddBytes(vertexCount, sizeof(Vertex), "vertices")) return false;
 					if(!budget.AddBytes(primitive.targets.size(), sizeof(MorphTarget) + sizeof(float), "morph targets"))
 						return false;
@@ -619,13 +554,18 @@ namespace dyf
 					{
 						for(const fastgltf::Attribute& attribute : target)
 						{
-							if(attribute.name == "POSITION" || (!flatNormals && (attribute.name == "NORMAL" || attribute.name == "TANGENT")))
+							if(attribute.name == "POSITION" || attribute.name == "NORMAL" || attribute.name == "TANGENT")
 								if(!budget.AddBytes(vertexCount, sizeof(Math::float3), "morph target deltas")) return false;
 						}
-						if(flatNormals && !budget.AddBytes(vertexCount, sizeof(Math::float3) * 2u, "generated morph frame deltas")) return false;
 					}
 					if(node.skinIndex.has_value()
 						&& !budget.AddBytes(vertexCount, sizeof(SkinInfluence), "skin influences")) return false;
+					uint64_t indexCount = vertexCount;
+					if(primitive.indicesAccessor.has_value())
+					{
+						if(primitive.indicesAccessor.value() >= gltf.accessors.size()) return false;
+						indexCount = gltf.accessors[primitive.indicesAccessor.value()].count;
+					}
 					if(!budget.AddBytes(indexCount, sizeof(uint32_t), "indices")) return false;
 				}
 			}
@@ -763,8 +703,7 @@ namespace dyf
 				| fastgltf::Extensions::KHR_materials_transmission
 				| fastgltf::Extensions::KHR_materials_volume
 				| fastgltf::Extensions::KHR_materials_emissive_strength
-				| fastgltf::Extensions::KHR_materials_unlit
-				| fastgltf::Extensions::KHR_texture_transform;
+				| fastgltf::Extensions::KHR_materials_unlit;
 			{
 				fastgltf::Parser metadataParser(materialExtensions);
 				auto metadataAsset = metadataParser.loadGltf(
@@ -809,14 +748,6 @@ namespace dyf
 
 			outModel = {};
 			fastgltf::Asset& gltf = asset.get();
-			for(const auto& extension : gltf.extensionsUsed)
-			{
-				const std::string name(extension);
-				if((name.rfind("KHR_materials_", 0) == 0 || name.rfind("EXT_materials_", 0) == 0) &&
-					name != "KHR_materials_ior" && name != "KHR_materials_transmission" &&
-					name != "KHR_materials_volume" && name != "KHR_materials_emissive_strength" && name != "KHR_materials_unlit")
-					if(!AllowMaterialFallback(filepath, options, "glTF material extension is unsupported: " + name)) return false;
-			}
 			if(gltf.images.size() > options.maxTextures)
 			{
 				return ReportModelError(
@@ -829,7 +760,6 @@ namespace dyf
 				basePath,
 				gltf,
 				options.maxDecodedBytes,
-				options.maxTextureDimension,
 				outModel,
 				decodedImageBytes)) return false;
 			ModelLoadOptions geometryOptions = options;
@@ -865,8 +795,8 @@ namespace dyf
 				if(source.transmission != nullptr)
 				{
 					material.material.transmissionFactor = static_cast<float>(source.transmission->transmissionFactor);
-					if(source.transmission->transmissionTexture.has_value() &&
-						!AllowMaterialFallback(filepath, options, "glTF transmission texture is unsupported; using transmissionFactor")) return false;
+					if(source.transmission->transmissionTexture.has_value())
+						ReportModelWarning(filepath, "glTF transmission texture is unsupported; using transmissionFactor");
 				}
 				if(source.volume != nullptr)
 				{
@@ -875,34 +805,37 @@ namespace dyf
 						source.volume->attenuationColor[1], source.volume->attenuationColor[2]);
 					material.material.attenuationDistance = std::isfinite(source.volume->attenuationDistance)
 						? static_cast<float>(source.volume->attenuationDistance) : 0.0f;
-					if(source.volume->thicknessTexture.has_value() &&
-						!AllowMaterialFallback(filepath, options, "glTF thickness texture is unsupported; using thicknessFactor")) return false;
+					if(source.volume->thicknessTexture.has_value())
+						ReportModelWarning(filepath, "glTF thickness texture is unsupported; using thicknessFactor");
 				}
-				// Alpha describes surface coverage independently of optical transmission.
-				// Preserve the authored alpha mode and sidedness; the renderer routes transmission separately.
-				if(source.pbrData.baseColorTexture.has_value() && !ApplyGltfMaterialTexture(
+				if(!material.material.unlit && material.material.transmissionFactor > 0.0f)
+				{
+					material.material.alphaMode = MaterialAlphaMode::Blend;
+					material.material.doubleSided = true;
+				}
+				if(source.pbrData.baseColorTexture.has_value()) ApplyGltfMaterialTexture(
 					basePath, gltf, source.pbrData.baseColorTexture.value(), material,
-					MaterialTextureKind::BaseColor, filepath, options)) return false;
-				if(source.pbrData.metallicRoughnessTexture.has_value() && !ApplyGltfMaterialTexture(
+					MaterialTextureKind::BaseColor, filepath);
+				if(source.pbrData.metallicRoughnessTexture.has_value()) ApplyGltfMaterialTexture(
 					basePath, gltf, source.pbrData.metallicRoughnessTexture.value(), material,
-					MaterialTextureKind::MetallicRoughness, filepath, options)) return false;
+					MaterialTextureKind::MetallicRoughness, filepath);
 				if(source.normalTexture.has_value())
 				{
-					if(!ApplyGltfMaterialTexture(
+					ApplyGltfMaterialTexture(
 						basePath, gltf, source.normalTexture.value(), material,
-						MaterialTextureKind::Normal, filepath, options)) return false;
+						MaterialTextureKind::Normal, filepath);
 					material.material.normalScale = static_cast<float>(source.normalTexture->scale);
 				}
 				if(source.occlusionTexture.has_value())
 				{
-					if(!ApplyGltfMaterialTexture(
+					ApplyGltfMaterialTexture(
 						basePath, gltf, source.occlusionTexture.value(), material,
-						MaterialTextureKind::Occlusion, filepath, options)) return false;
+						MaterialTextureKind::Occlusion, filepath);
 					material.material.occlusionStrength = static_cast<float>(source.occlusionTexture->strength);
 				}
-				if(source.emissiveTexture.has_value() && !ApplyGltfMaterialTexture(
+				if(source.emissiveTexture.has_value()) ApplyGltfMaterialTexture(
 					basePath, gltf, source.emissiveTexture.value(), material,
-					MaterialTextureKind::Emissive, filepath, options)) return false;
+					MaterialTextureKind::Emissive, filepath);
 				outModel.materials.push_back(std::move(material));
 			}
 			const uint32_t defaultMaterialIndex = EnsureDefaultMaterial(outModel);
@@ -926,31 +859,6 @@ namespace dyf
 					return ReportModelError(
 						filepath,
 						"glTF node contains non-finite transform values");
-				}
-				if(source.cameraIndex.has_value())
-				{
-					if(*source.cameraIndex >= gltf.cameras.size()) return false;
-					ModelCamera camera;
-					camera.nodeIndex = static_cast<uint32_t>(nodeIndex);
-					const auto& sourceCamera = gltf.cameras[*source.cameraIndex].camera;
-					if(const auto* perspective = std::get_if<fastgltf::Camera::Perspective>(&sourceCamera))
-					{
-						camera.verticalFovRadians = static_cast<float>(perspective->yfov);
-						camera.nearPlane = static_cast<float>(perspective->znear);
-						camera.farPlane = perspective->zfar.has_value()
-							? static_cast<float>(*perspective->zfar) : std::numeric_limits<float>::infinity();
-						if(perspective->aspectRatio.has_value()) camera.aspect = static_cast<float>(*perspective->aspectRatio);
-					}
-					else
-					{
-						const auto& orthographic = std::get<fastgltf::Camera::Orthographic>(sourceCamera);
-						camera.perspective = false;
-						camera.nearPlane = static_cast<float>(orthographic.znear);
-						camera.farPlane = static_cast<float>(orthographic.zfar);
-						camera.orthographicHeight = static_cast<float>(2.0 * orthographic.ymag);
-						camera.aspect = static_cast<float>(orthographic.xmag / orthographic.ymag);
-					}
-					outModel.cameras.push_back(camera);
 				}
 				if(source.meshIndex.has_value())
 				{
@@ -1308,10 +1216,6 @@ namespace dyf
 							? static_cast<uint32_t>(primitive.materialIndex.value())
 							: defaultMaterialIndex;
 						if(mesh.materialIndex >= outModel.materials.size()) return false;
-						if(primitive.findAttribute("TEXCOORD_0") == primitive.attributes.end() &&
-							std::any_of(outModel.materials[mesh.materialIndex].hasTexture.begin(),
-								outModel.materials[mesh.materialIndex].hasTexture.end(), [](bool value) { return value; }) &&
-							!AllowMaterialFallback(filepath, options, "glTF textured primitive has no supported TEXCOORD_0; using zero UVs")) return false;
 						if(localGeometry)
 						{
 							mesh.nodeIndex = static_cast<uint32_t>(nodeIndex);
@@ -1371,31 +1275,6 @@ namespace dyf
 						}
 
 						const Math::float4x4 modelVertexMatrix = ToFloat4x4(vertexMatrix);
-						if(const auto* colorAttr = primitive.findAttribute("COLOR_0"); colorAttr != primitive.attributes.end())
-						{
-							if(colorAttr->accessorIndex >= gltf.accessors.size()) return false;
-							const auto& colorAccessor = gltf.accessors[colorAttr->accessorIndex];
-							const bool validComponents = colorAccessor.componentType == fastgltf::ComponentType::Float ||
-								(colorAccessor.normalized && (colorAccessor.componentType == fastgltf::ComponentType::UnsignedByte ||
-									colorAccessor.componentType == fastgltf::ComponentType::UnsignedShort));
-							if(colorAccessor.count != posAccessor.count || !validComponents ||
-								(colorAccessor.type != fastgltf::AccessorType::Vec3 && colorAccessor.type != fastgltf::AccessorType::Vec4))
-								return ReportModelError(filepath, "glTF COLOR_0 must be a matching VEC3/VEC4 float or normalized unsigned byte/short accessor");
-							bool invalidColor = false;
-							auto storeColor = [&](size_t vertex, const Math::float4& color) {
-								if(!std::isfinite(color.x) || !std::isfinite(color.y) || !std::isfinite(color.z) || !std::isfinite(color.w))
-									invalidColor = true;
-								else mesh.mesh.vertices[vertex].color = color;
-							};
-							// Vertex colors are linear multipliers, unlike sRGB base-color texture RGB.
-							if(colorAccessor.type == fastgltf::AccessorType::Vec3)
-								fastgltf::iterateAccessorWithIndex<fastgltf::math::fvec3>(gltf, colorAccessor,
-									[&](const auto& value, size_t vertex) { storeColor(vertex, {value.x(),value.y(),value.z(),1.0f}); });
-							else
-								fastgltf::iterateAccessorWithIndex<fastgltf::math::fvec4>(gltf, colorAccessor,
-									[&](const auto& value, size_t vertex) { storeColor(vertex, {value.x(),value.y(),value.z(),value.w()}); });
-							if(invalidColor) return ReportModelError(filepath, "glTF COLOR_0 contains non-finite values");
-						}
 						const auto* normalAttr = primitive.findAttribute("NORMAL");
 						const bool hasNormalAttribute = normalAttr != primitive.attributes.end();
 						if(hasNormalAttribute)
@@ -1440,7 +1319,7 @@ namespace dyf
 						}
 
 						const auto* tangentAttr = primitive.findAttribute("TANGENT");
-						if(hasNormalAttribute && tangentAttr != primitive.attributes.end())
+						if(tangentAttr != primitive.attributes.end())
 						{
 							if(tangentAttr->accessorIndex >= gltf.accessors.size()) return false;
 							const fastgltf::Accessor& tangentAccessor = gltf.accessors[tangentAttr->accessorIndex];
@@ -1638,8 +1517,8 @@ namespace dyf
 									"glTF morph target contains non-finite deltas");
 							};
 							if(!loadDeltas("POSITION", modelVertexMatrix, target.positionDeltas)
-								|| (hasNormalAttribute && (!loadDeltas("NORMAL", morphNormalMatrix, target.normalDeltas)
-									|| !loadDeltas("TANGENT", modelVertexMatrix, target.tangentDeltas)))) return false;
+								|| !loadDeltas("NORMAL", morphNormalMatrix, target.normalDeltas)
+								|| !loadDeltas("TANGENT", modelVertexMatrix, target.tangentDeltas)) return false;
 							if(target.positionDeltas.empty() && target.normalDeltas.empty() && target.tangentDeltas.empty())
 							{
 								return ReportModelError(
@@ -1679,8 +1558,8 @@ namespace dyf
 						if(Math::Determinant3x3(modelVertexMatrix) < 0.0f)
 							for(size_t index = 0; index < mesh.mesh.indices.size(); index += 3)
 								std::swap(mesh.mesh.indices[index + 1], mesh.mesh.indices[index + 2]);
-						if((!hasNormalAttribute && !GenerateFlatFrames(mesh))
-							|| (hasNormalAttribute && tangentAttr == primitive.attributes.end() && !CalculateTangents(mesh.mesh)))
+						if(tangentAttr == primitive.attributes.end()
+							&& !CalculateTangents(mesh.mesh, !hasNormalAttribute))
 							return ReportModelError(filepath, "glTF generated normal or tangent is non-finite");
 						if(shareGeometry) sharedGeometry.emplace(geometryKey, static_cast<uint32_t>(outModel.meshes.size()));
 						outModel.meshes.push_back(std::move(mesh));

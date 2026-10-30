@@ -24,21 +24,15 @@ option(DY_ENABLE_SIMD "Enable dy::Math SIMD code paths when supported by the tar
 option(DY_ENABLE_TRACY "Embed Tracy profiling instrumentation in engine applications." ON)
 option(DY_ENABLE_LIVE_PROFILING "Collect live execution diagnostics in engine applications." OFF)
 option(DY_ENABLE_RENDERDOC "Enable RenderDoc capture controls and D3D12 debug events and markers." OFF)
-option(DY_BUILD_CONFORMANCE_TESTS "Build model and rendering contract checks." OFF)
 
 # Optional extensions.
 option(DY_EXTEND_MODEL "Build the optional Model extension." OFF)
 option(DY_EXTEND_IMGUI "Build the optional Dear ImGui extension." OFF)
 option(DY_EXTEND_ADVANCED_RENDERING "Build the optional AdvancedRendering extension." OFF)
 
-# Examples and Showcase.
+# Examples.
 if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
     option(DY_BUILD_EXAMPLES "Build the self-contained dyf and RHI examples." OFF)
-    option(DY_BUILD_SHOWCASE "Build the presentation scenes and prepare their assets." "${DY_BUILD_EXAMPLES}")
-endif()
-if(DY_BUILD_SHOWCASE)
-    set(DY_EXTEND_MODEL ON CACHE BOOL "Build the optional Model extension." FORCE)
-    set(DY_EXTEND_ADVANCED_RENDERING ON CACHE BOOL "Build the optional AdvancedRendering extension." FORCE)
 endif()
 
 # Platform and dependency settings.
@@ -62,4 +56,8 @@ if(DY_ENABLE_RENDERDOC)
     if(USE_D3D12 AND NOT MSVC)
         message(FATAL_ERROR "DY_ENABLE_RENDERDOC with D3D12 requires MSVC for WinPixEventRuntime debug events and markers.")
     endif()
+endif()
+if(DY_EXTEND_IMGUI
+   AND NOT (WIN32 OR CMAKE_SYSTEM_NAME MATCHES "^(Linux|Darwin)$"))
+    message(FATAL_ERROR "The ImGui extension requires a GLFW desktop window backend.")
 endif()

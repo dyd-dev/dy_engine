@@ -289,14 +289,13 @@ namespace dyf::RHI
 		friend class IDevice;
 		friend class ICommandList;
 		// 공통 draw 검증용 생성 시점의 선언. 호출자 descriptor 메모리를 참조하지 않는다.
-		std::vector<VertexBufferLayout> m_vertexBuffers;
+		std::vector<uint32_t> m_requiredVertexBindings;
 		std::vector<Format> m_colorFormats;
 		Format m_depthStencilFormat = Format::Unknown;
 		PrimitiveTopology m_topology = PrimitiveTopology::Undefined;
 		PipelineLayoutDesc m_layout = {};
         bool m_compute=false;
         bool m_mesh=false;
-        bool m_usesStencil=false,m_requiresDepthWrite=false;
 		std::vector<ResourceBindingLayout> m_bindings;
 	};
 }

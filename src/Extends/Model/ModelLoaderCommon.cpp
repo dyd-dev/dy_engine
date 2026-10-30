@@ -24,9 +24,7 @@ namespace dyf
 		SkinInfluence result;
 		double total = 0.0;
 		for(const auto& value : values) total += value.second;
-		// These finite nonnegative source weights are ratios. Their authored
-		// magnitude must not decide whether a vertex is skinned at all.
-		if(total == 0.0) return result;
+		if(total <= 1.0e-6f) return result;
 		for(size_t index = 0; index < values.size(); ++index)
 		{
 			result.jointIndices[index] = values[index].first;

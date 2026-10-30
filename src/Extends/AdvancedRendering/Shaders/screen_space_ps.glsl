@@ -1,16 +1,4 @@
 #version 450
-#ifndef SCREEN_DEPTH_COPY
-#define SCREEN_DEPTH_COPY 0
-#endif
-#if SCREEN_DEPTH_COPY
-layout(location=0) out float result;
-layout(set=0,binding=1) uniform texture2D motionImage;
-layout(set=0,binding=7) uniform sampler linearSampler;
-void main()
-{
-    result=texelFetch(sampler2D(motionImage,linearSampler),ivec2(gl_FragCoord.xy),0).z;
-}
-#else
 #ifndef SCREEN_SPACE_LIGHTING
 #define SCREEN_SPACE_LIGHTING 0
 #endif
@@ -24,7 +12,6 @@ layout(set=0,binding=4) uniform texture2D environmentImage;
 layout(set=0,binding=5) uniform texture2D sourceImage;
 layout(set=0,binding=6) uniform texture2D reflectionImage;
 layout(set=0,binding=7) uniform sampler linearSampler;
-layout(set=0,binding=9) uniform texture2D depthImage;
 layout(set=0,binding=12) uniform Frame {mat4 view;mat4 projection;mat4 inverseProjection;mat4 viewProjection;vec4 size;vec4 ao;vec4 lighting;vec4 options;} frame;
 layout(push_constant) uniform Pass {vec4 operation;};
 const float PI=3.14159265359;
@@ -42,7 +29,7 @@ vec3 decodeWorldNormal(vec2 packed)
 }
 vec3 normalWorld(vec2 p) {return decodeWorldNormal(geometry(normalImage,p).xy);}
 vec3 normalView(vec2 p) {return normalize(mat3(frame.view)*normalWorld(p));}
-float depthAt(vec2 p) {return operation.z>0.5?geometry(depthImage,p).r:geometry(motionImage,p).z;}
+float depthAt(vec2 p) {return geometry(motionImage,p).z;}
 vec2 halfSurfaceUV(vec2 p)
 {
     // A half-resolution texel represents an actual 2x2 full-resolution
@@ -53,8 +40,7 @@ vec2 halfSurfaceUV(vec2 p)
     for(int y=0;y<2;++y)for(int x=0;x<2;++x)
     {
         ivec2 pixel=min(base+ivec2(x,y),dimensions-1);
-        float depth=operation.z>0.5?texelFetch(sampler2D(depthImage,linearSampler),pixel,0).r:
-            texelFetch(sampler2D(motionImage,linearSampler),pixel,0).z;
+        float depth=texelFetch(sampler2D(motionImage,linearSampler),pixel,0).z;
         if(depth>0.0 && depth<nearest) {nearest=depth;selected=pixel;}
     }
     return (vec2(selected)+0.5)*frame.size.zw;
@@ -70,13 +56,6 @@ vec2 project(vec3 p)
 {
     vec4 clip=frame.projection*vec4(p,1);
     return clip.xy/max(clip.w,1e-5)*vec2(0.5,-0.5)+0.5;
-}
-vec2 projectRay(vec3 p,bool sparseProjection)
-{
-    if(!sparseProjection)return project(p);
-    vec2 clip=vec2(frame.projection[0].x*p.x+frame.projection[2].x*p.z,
-        frame.projection[1].y*p.y+frame.projection[2].y*p.z);
-    return clip/max(-p.z,1e-5)*vec2(0.5,-0.5)+0.5;
 }
 bool onScreen(vec2 p) {return all(greaterThan(p,vec2(0.001))) && all(lessThan(p,vec2(0.999)));}
 float randomAngle(vec2 p,float frameIndex)
@@ -130,9 +109,6 @@ vec4 bilateralAO(vec2 p)
 }
 bool trace(vec3 origin,vec3 direction,float distanceLimit,int steps,out vec2 hitUV,out float hitDistance,out float hitConfidence)
 {
-    // Bound every origin + direction * distance before removing zero products.
-    bool sparseProjection=operation.y>0.5 && all(lessThanEqual(abs(origin),vec3(1e10))) &&
-        all(lessThanEqual(abs(direction),vec3(2))) && distanceLimit>=0 && distanceLimit<=1e10;
     float previousDistance=0.08,previousDelta=-1.0;
     hitUV=vec2(0);hitDistance=0.0;hitConfidence=0.0;
     for(int i=1;i<=steps;++i)
@@ -140,32 +116,26 @@ bool trace(vec3 origin,vec3 direction,float distanceLimit,int steps,out vec2 hit
         float f=float(i)/float(steps),distance=0.08+distanceLimit*f*f;
         vec3 candidate=origin+direction*distance;
         if(candidate.z>=-0.03)break;
-        vec2 q=projectRay(candidate,sparseProjection);if(!onScreen(q))break;
+        vec2 q=project(candidate);if(!onScreen(q))break;
         float depth=depthAt(q),delta=-candidate.z-depth;
         if(depth>0.0 && delta>=0.0 && previousDelta<0.0)
         {
             float lo=previousDistance,hi=distance;
-            // Keep the exact depth sample belonging to the current upper endpoint.
-            vec2 hiUV=q;float hiDepth=depth;
             for(int refine=0;refine<5;++refine)
             {
-                float mid=(lo+hi)*0.5;vec3 test=origin+direction*mid;vec2 testUV=projectRay(test,sparseProjection);
+                float mid=(lo+hi)*0.5;vec3 test=origin+direction*mid;vec2 testUV=project(test);
                 float testDepth=depthAt(testUV);
-                if(testDepth>0.0 && -test.z>testDepth) {hi=mid;hiUV=testUV;hiDepth=testDepth;}else lo=mid;
+                if(testDepth>0.0 && -test.z>testDepth)hi=mid;else lo=mid;
             }
-            vec3 hit=origin+direction*hi;hitUV=hiUV;hitDistance=hi;
-            float gap=-hit.z-hiDepth;
-            if(gap>=0.0 && gap<frame.lighting.w)
+            vec3 hit=origin+direction*hi;hitUV=project(hit);hitDistance=hi;
+            float gap=-hit.z-depthAt(hitUV);
+            float facing=dot(normalView(hitUV),-direction);
+            if(gap>=0.0 && gap<frame.lighting.w && facing>0.05)
             {
-                // Rejected depth crossings do not need a normal fetch or decode.
-                float facing=dot(normalView(hitUV),-direction);
-                if(facing>0.05)
-                {
-                    float edge=min(min(hitUV.x,1.0-hitUV.x),min(hitUV.y,1.0-hitUV.y));
-                    hitConfidence=(1.0-smoothstep(frame.lighting.w*0.5,frame.lighting.w,gap))
-                        *smoothstep(0.05,0.25,facing)*smoothstep(0.0,0.08,edge);
-                    return true;
-                }
+                float edge=min(min(hitUV.x,1.0-hitUV.x),min(hitUV.y,1.0-hitUV.y));
+                hitConfidence=(1.0-smoothstep(frame.lighting.w*0.5,frame.lighting.w,gap))
+                    *smoothstep(0.05,0.25,facing)*smoothstep(0.0,0.08,edge);
+                return true;
             }
         }
         previousDistance=distance;previousDelta=depth>0.0?delta:-1.0;
@@ -176,17 +146,12 @@ void indirectLighting(vec2 p,out vec4 gi,out vec4 reflection)
 {
     p=halfSurfaceUV(p);
     gi=vec4(0);reflection=vec4(0);float depth=depthAt(p);if(depth<=0.0)return;
-    vec4 surface=geometry(normalImage,p);
+    vec3 origin=reconstruct(p,depth),n=normalView(p),v=normalize(-origin);
+    vec4 material=geometry(albedoImage,p),surface=geometry(normalImage,p);
     if(surface.z<0)return;
-    vec4 material=geometry(albedoImage,p);
-    float roughness=surface.z;
-    bool traceGI=frame.options.y>0.5 && operation.w<0.5 && material.a<0.99;
-    bool traceReflection=frame.options.z>0.5 && operation.w>0.5 && roughness<0.85;
-    if(!traceGI && !traceReflection)return;
-    vec3 origin=reconstruct(p,depth),n=normalize(mat3(frame.view)*decodeWorldNormal(surface.xy));
-    if(traceGI)
+    mat3 tbn=basis(n);float angle=randomAngle(p,frame.ao.w);
+    if(frame.options.y>0.5 && operation.w<0.5 && material.a<0.99)
     {
-        mat3 tbn=basis(n);float angle=randomAngle(p,frame.ao.w);
         vec3 radiance=vec3(0);
         for(int ray=0;ray<4;++ray)
         {
@@ -198,9 +163,9 @@ void indirectLighting(vec2 p,out vec4 gi,out vec4 reflection)
         }
         gi=vec4(clamp(radiance*0.25*material.rgb*(1.0-material.a)*surface.w*frame.lighting.y,vec3(0),vec3(65504)),1);
     }
-    if(traceReflection)
+    float roughness=surface.z;
+    if(frame.options.z>0.5 && operation.w>0.5 && roughness<0.85)
     {
-        vec3 v=abs(frame.projection[3][3])>1e-6?vec3(0,0,1):normalize(-origin);
         vec3 direction=reflect(-v,n);vec2 hitUV;float distance,hitConfidence;
         if(trace(origin+n*0.06,direction,frame.lighting.x*2.0,32,hitUV,distance,hitConfidence))
         {
@@ -231,27 +196,10 @@ vec4 composite(vec2 p)
     for(int y=0;y<2;++y)for(int x=0;x<2;++x)
     {
         vec2 q=clamp((base+vec2(x,y)+0.5)/dimensions,vec2(0),vec2(1));
-        float sampleDepth=0.0;vec3 sampleNormal=vec3(0);
-        bool guided=false;
-        if(operation.w>0.5)
-        {
-            // The current denoise guide stores the same representative depth and packed normal.
-            vec4 guide=geometry(albedoImage,q);
-            if(guide.r>0.0)
-            {
-                sampleDepth=guide.r;
-                sampleNormal=normalize(mat3(frame.view)*decodeWorldNormal(guide.gb));
-                guided=true;
-            }
-        }
-        if(!guided)
-        {
-            vec2 surfaceUV=halfSurfaceUV(q);
-            sampleDepth=depthAt(surfaceUV);if(sampleDepth<=0.0)continue;
-            sampleNormal=normalView(surfaceUV);
-        }
+        vec2 surfaceUV=halfSurfaceUV(q);
+        float sampleDepth=depthAt(surfaceUV);if(sampleDepth<=0.0)continue;
         float weight=(x==0?1.0-fraction.x:fraction.x)*(y==0?1.0-fraction.y:fraction.y)
-            *exp(-abs(depth-sampleDepth)/max(0.05,depth*0.02))*pow(max(dot(n,sampleNormal),0.0),16.0);
+            *exp(-abs(depth-sampleDepth)/max(0.05,depth*0.02))*pow(max(dot(n,normalView(surfaceUV)),0.0),16.0);
         if(frame.options.y>0.5)gi+=texture(sampler2D(sourceImage,linearSampler),q).rgb*weight;
         if(frame.options.z>0.5)reflection+=texture(sampler2D(reflectionImage,linearSampler),q)*weight;
         total+=weight;
@@ -271,4 +219,3 @@ void main()
     else result=composite(uv);
 #endif
 }
-#endif

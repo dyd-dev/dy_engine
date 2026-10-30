@@ -19,7 +19,8 @@ namespace dyf::Platform
 	{
 		mutable std::mutex mutex;
 		ProfilerClientState state = ProfilerClientState::Disconnected;
-		std::string error, captureError;
+		std::string error;
+		std::string captureError;
 		std::shared_ptr<const LiveSnapshot> snapshot;
 		std::uint64_t delivered = 0;
 		std::deque<ControlRequest> outbound;
@@ -52,8 +53,8 @@ namespace dyf::Platform
 			state = ProfilerClientState::Disconnected;
 			outbound.clear();
 			captures.clear();
-			captureError.clear();
 			localRequests.clear();
+			captureError.clear();
 			snapshot.reset();
 			delivered = 0;
 		}
@@ -100,10 +101,10 @@ namespace dyf::Platform
 					return false;
 				}
 			}
-			for(const auto& request : captureRequests)
+			for(const auto & request : captureRequests)
 			{
-				const auto payload=Detail::EncodeFrameCapture(request);
-				if(!Detail::SendPacket(pipe,Detail::PacketKind::FrameCapture,payload,stop))
+				const auto payload = Detail::EncodeFrameCapture(request);
+				if(!Detail::SendPacket(pipe, Detail::PacketKind::FrameCapture, payload, stop))
 				{
 					Fail("Frame capture request write failed");
 					return false;
@@ -296,6 +297,7 @@ namespace dyf::Platform
 		while(impl->localRequests.size() > 256) impl->localRequests.erase(impl->localRequests.begin());
 		return id;
 	}
+
 	LiveId ProfilerClient::RequestFrameCapture(LiveId device, LiveId source)
 	{
 		if(!impl || !device || !source) return 0;
@@ -306,8 +308,8 @@ namespace dyf::Platform
 			impl->error = "Request ID space exhausted";
 			return 0;
 		}
-		const auto request=impl->nextRequest++;
-		impl->captures.push_back({request,device,source});
+		const auto request = impl->nextRequest++;
+		impl->captures.push_back({request, device, source});
 		impl->captureError.clear();
 		return request;
 	}

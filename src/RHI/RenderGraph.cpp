@@ -6,7 +6,6 @@
 #include "Validation.h"
 #include "../Platform/Profiler/RhiProfiler.h"
 
-#include <algorithm>
 #include <atomic>
 
 namespace dyf::RHI
@@ -25,7 +24,7 @@ namespace dyf::RHI
         {
             return state == ResourceState::ShaderResource || state == ResourceState::VertexBuffer ||
                 state == ResourceState::IndexBuffer || state == ResourceState::ConstantBuffer ||
-                state == ResourceState::IndirectArgument || state == ResourceState::CopySource ||
+                state == ResourceState::IndirectArgument ||
                 state == ResourceState::DepthRead || state == ResourceState::UnorderedAccess;
         }
 
@@ -155,23 +154,11 @@ namespace dyf::RHI
             return resource.handle;
         }
         const RGResourceHandle handle{nextResourceId.fetch_add(1, std::memory_order_relaxed)};
-        const auto resourceCount=m_resources.size();
-        try
-        {
-            m_resources.push_back({buffer, texture, initialState, finalState, handle});
-            m_resourceIndices.emplace(handle.id, static_cast<uint32_t>(resourceCount));
-            m_resourceNameToHandle.emplace(name, handle);
-            if(buffer)m_bufferHandles.emplace(buffer,handle);
-            else m_textureHandles.emplace(texture,handle);
-        }
-        catch(...)
-        {
-            m_resourceIndices.erase(handle.id);
-            m_resourceNameToHandle.erase(name);
-            if(buffer)m_bufferHandles.erase(buffer);else m_textureHandles.erase(texture);
-            if(m_resources.size()>resourceCount)m_resources.pop_back();
-            throw;
-        }
+        m_resourceIndices.emplace(handle.id, static_cast<uint32_t>(m_resources.size()));
+        m_resources.push_back({buffer, texture, initialState, finalState, handle});
+        m_resourceNameToHandle.emplace(name, handle);
+        if(buffer)m_bufferHandles.emplace(buffer,handle);
+        else m_textureHandles.emplace(texture,handle);
         m_compiled = false;
         return handle;
     }
@@ -194,34 +181,13 @@ namespace dyf::RHI
         m_dependencies.clear();
         m_passBarriers.clear();
         m_finalBarriers.clear();
-        m_passUses.clear();
-        m_passUseOffsets.clear();
         const uint32_t passCount = static_cast<uint32_t>(m_passes.size());
         const uint32_t noPass = UINT32_MAX;
-        size_t bindingCount = 0;
-        for(const auto& pass : m_passes)
-            bindingCount += pass->GetReads().size() + pass->GetWrites().size();
-        m_executionOrder.reserve(passCount);
-        m_compiledRevisions.reserve(passCount);
-        m_passUses.reserve(bindingCount);
-        m_passUseOffsets.reserve(size_t(passCount) + 1);
-        m_passUseOffsets.push_back(0);
         std::vector<std::vector<uint32_t>> edges(passCount);
-        const auto addDependency=[&](uint32_t before,uint32_t after) {
-            auto& outgoing=edges[before];
-            // Destination passes are visited in order; a repeated edge is
-            // always the last one, even when several resources establish it.
-            if(outgoing.empty() || outgoing.back()!=after)outgoing.push_back(after);
-        };
         std::vector<uint32_t> lastWriter(m_resources.size(), noPass);
         std::vector<std::vector<uint32_t>> readers(m_resources.size());
         std::vector<ResourceState> states;
-        states.reserve(m_resources.size());
         for(const auto& resource : m_resources) states.push_back(resource.initialState);
-        struct Use { ResourceState state = ResourceState::Undefined; bool write = false; };
-        std::vector<Use> uses(m_resources.size());
-        std::vector<uint32_t> usedIndices;
-        usedIndices.reserve(m_resources.size());
         m_passBarriers.resize(passCount);
         uint32_t lastGlobal = noPass;
 
@@ -229,14 +195,15 @@ namespace dyf::RHI
         for(uint32_t pass = 0; pass < passCount; ++pass)
         {
             if(!m_passes[pass]->HasExecuteCallback()) return Fail("every pass needs an execute callback.");
-            if(lastGlobal != noPass) addDependency(lastGlobal,pass);
+            if(lastGlobal != noPass) edges[lastGlobal].push_back(pass);
             if(m_passes[pass]->HasGlobalBarrier())
             {
                 const uint32_t first = lastGlobal == noPass ? 0 : lastGlobal + 1;
-                for(uint32_t previous = first; previous < pass; ++previous) addDependency(previous,pass);
+                for(uint32_t previous = first; previous < pass; ++previous) edges[previous].push_back(pass);
                 lastGlobal = pass;
             }
-            usedIndices.clear();
+            struct Use { ResourceState state; bool write; };
+            std::map<uint32_t, Use> uses;
             const auto collect = [&](const std::vector<RGResourceBinding>& bindings, bool write) {
                 for(const auto& binding : bindings)
                 {
@@ -246,12 +213,7 @@ namespace dyf::RHI
                     const auto& resource = m_resources[found->second];
                     if(!(resource.buffer ? IsBufferStateAllowed(resource.buffer->GetDesc(), binding.state) :
                         IsTextureStateAllowed(resource.texture->GetDesc(), binding.state))) return false;
-                    auto& use = uses[found->second];
-                    if(use.state == ResourceState::Undefined)
-                    {
-                        use = {binding.state, write};
-                        usedIndices.push_back(found->second);
-                    }
+                    auto& use = uses.emplace(found->second, Use{binding.state, write}).first->second;
                     if(use.state != binding.state) return false;
                     use.write |= write;
                 }
@@ -260,18 +222,13 @@ namespace dyf::RHI
             if(!collect(m_passes[pass]->GetReads(), false) || !collect(m_passes[pass]->GetWrites(), true))
                 return Fail("invalid resource handle, read/write state, resource usage or conflicting states in one pass.");
 
-            // Preserve the resource-index order of barriers without allocating
-            // a tree node for every resource binding in every pass.
-            std::sort(usedIndices.begin(), usedIndices.end());
-            for(uint32_t index : usedIndices)
+            for(const auto& [index, use] : uses)
             {
-                const auto use = uses[index];
-                m_passUses.push_back({index, use.state});
-                if(lastWriter[index] != noPass) addDependency(lastWriter[index],pass);
+                if(lastWriter[index] != noPass) edges[lastWriter[index]].push_back(pass);
                 // Read/read의 상태가 달라도 layout/state 전환에는 실행 순서가 필요하다.
                 if(use.write || states[index] != use.state)
                 {
-                    for(uint32_t reader : readers[index]) addDependency(reader,pass);
+                    for(uint32_t reader : readers[index]) edges[reader].push_back(pass);
                     readers[index].clear();
                 }
                 if(use.write) lastWriter[index] = pass;
@@ -281,9 +238,7 @@ namespace dyf::RHI
                 if(states[index] != use.state || CanWrite(use.state))
                     m_passBarriers[pass].push_back({resource.buffer, resource.texture, states[index], use.state, {}});
                 states[index] = use.state;
-                uses[index] = {};
             }
-            m_passUseOffsets.push_back(m_passUses.size());
         }
         for(uint32_t index = 0; index < m_resources.size(); ++index)
         {
@@ -379,11 +334,7 @@ namespace dyf::RHI
             const auto linkResource=[&](const RGResourceBinding& binding,bool write)
             {
                 const auto& resource=m_resources[m_resourceIndices.at(binding.handle.id)];
-#ifdef DY_LIVE_PROFILING_ENABLED
-                const auto id=commands->m_liveDeferred->FindObject(resource.buffer?static_cast<const void*>(resource.buffer):resource.texture);
-#else
                 const auto id=Platform::FindLiveObject(resource.buffer?static_cast<const void*>(resource.buffer):resource.texture);
-#endif
                 commands->RecordLiveResourceLink(write?eventId:id,write?id:eventId);
             };
             if(eventId)
@@ -393,12 +344,10 @@ namespace dyf::RHI
             }
         }
 
-        // Compile resolves aliases and duplicate declarations to one resource use.
-        for(size_t index = m_passUseOffsets[pass]; index < m_passUseOffsets[pass + 1]; ++index)
-        {
-            const auto& use = m_passUses[index];
-            if(!RequireResource(commands, m_resources[use.index], use.state)) return false;
-        }
+        for(const auto& binding : m_passes[pass]->GetReads())
+            if(!RequireResource(commands, m_resources[m_resourceIndices.at(binding.handle.id)], binding.state)) return false;
+        for(const auto& binding : m_passes[pass]->GetWrites())
+            if(!RequireResource(commands, m_resources[m_resourceIndices.at(binding.handle.id)], binding.state)) return false;
         if(m_timestampQuery) commands->WriteTimestamp(m_timestampQuery,3+2*pass);
         return commands->CanRecordCommands();
     }
@@ -505,9 +454,7 @@ namespace dyf::RHI
             ordered.clear();
             for(uint32_t pass : stage.passIndices)
                 if(m_passes[pass]->GetRecordingMode()!=RGRecordingMode::Independent) ordered.push_back(pass);
-            // Ordered callbacks may prepare owner-local CPU/GPU state. Only
-            // explicitly Independent callbacks opt into worker-thread recording.
-            device->RecordParallel(static_cast<uint32_t>(ordered.size()), 1,
+            device->RecordParallel(static_cast<uint32_t>(ordered.size()), effectiveThreads,
                 [&](uint32_t index) { record(ordered[index]); });
             for(uint32_t pass : ordered) if(!recorded[pass]) return false;
         }
@@ -518,8 +465,6 @@ namespace dyf::RHI
             static_cast<uint32_t>(recording.lists.size()), effectiveThreads)) return false;
         if(live)for(const auto& dependency:m_dependencies)
             passes[dependency.after]->RecordLiveResourceLink(passEvents[dependency.before],passEvents[dependency.after]);
-        if(live)for(auto* list:recording.lists)
-            list->FlushLiveDeferred(list->m_liveDeferred->m_liveContext);
         commandLists.swap(recording.lists);
         liveFrame.SetOutcome(Platform::LiveOutcome::Observed);
         return true;
@@ -539,8 +484,6 @@ namespace dyf::RHI
         m_dependencies.clear();
         m_passBarriers.clear();
         m_finalBarriers.clear();
-        m_passUses.clear();
-        m_passUseOffsets.clear();
         m_compiled = false;
         m_timestampQuery=nullptr;
     }

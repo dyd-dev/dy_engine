@@ -9,7 +9,7 @@ kernel void generateArguments(constant float4& settings [[buffer(15)]], device u
 }
 
 struct Output { float4 position [[position]]; float3 color; };
-vertex Output vertexMain(uint vertexIndex [[vertex_id]], uint instance [[instance_id]],
+vertex Output vertexMain(uint vertex [[vertex_id]], uint instance [[instance_id]],
     constant float4& display [[buffer(15)]])
 {
     const float2 vertices[3] = {float2(-0.075f, -0.065f), float2(0.075f, -0.065f), float2(0.0f, 0.08f)};
@@ -17,6 +17,6 @@ vertex Output vertexMain(uint vertexIndex [[vertex_id]], uint instance [[instanc
         (float(instance / 8) - 3.5f) * 0.20f);
     float3 color = mix(float3(0.12f, 0.80f, 0.95f), float3(1.0f, 0.46f, 0.12f), display.z)
         * (0.65f + 0.35f * float(instance % 8) / 7.0f);
-    return {float4((center + vertices[vertexIndex]) * display.xy, 0.0f, 1.0f), color};
+    return {float4((center + vertices[vertex]) * display.xy, 0.0f, 1.0f), color};
 }
 fragment float4 fragmentMain(Output input [[stage_in]]) { return float4(input.color, 1.0f); }

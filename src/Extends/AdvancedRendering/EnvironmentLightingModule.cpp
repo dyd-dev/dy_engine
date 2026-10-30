@@ -9,7 +9,6 @@ namespace
 class EnvironmentLightingModule final : public RenderExtension
 {
 public:
-    explicit EnvironmentLightingModule(std::shared_ptr<EnvironmentFilteringProof> proof):m_proof(std::move(proof)) {}
     const char* GetName() const override { return "EnvironmentLighting"; }
 
     RenderPreparation GetPreparationStage() const override { return RenderPreparation::Lighting; }
@@ -19,25 +18,23 @@ public:
         RenderRequirements requirements;
         if(!AdvancedModuleEnabled(renderer)) return requirements;
         requirements.providesEnvironment=true;
-        const auto& config=renderer.GetAppliedConfig();
+        const auto& config=renderer.GetConfig();
         const auto& environment=config.lighting.environment;
-        requirements.needsNormal=config.lighting.enabled && !config.debugLodColor && !config.debugWireframe &&
+        requirements.needsSurface=config.lighting.enabled && !config.debugLodColor && !config.debugWireframe &&
             (environment.radiance.IsValid() || !environment.probes.empty()) &&
             (environment.diffuse || environment.specular);
-        requirements.needsMaterial=requirements.needsNormal && environment.specular;
-        requirements.needsGeometry=requirements.RequiresDepth();
+        requirements.needsGeometry=requirements.needsSurface;
         return requirements;
     }
 
     bool Prepare(RenderFrame& frame,RHI::ICommandList& uploads) override
     {
         m_prepared=false;
-        if(m_proof) *m_proof={};
         const bool advanced=AdvancedModuleEnabled(frame.renderer);
         // 캡처는 고급 효과가 꺼진 상태에서도 원본 배경과 환경 입력을 준비한다.
         if(!advanced && !frame.environmentCapture) return true;
         if(!m_environment) m_environment=std::make_unique<EnvironmentLighting>();
-        const auto& config=frame.renderer.GetAppliedConfig();
+        const auto& config=frame.renderer.GetConfig();
         const auto& target=frame.color.texture->GetDesc();
         if(!m_environment->Prepare(frame.renderer.GetDevice(),uploads,config.lighting.environment,
             frame.camera,target.width,target.height,advanced && config.advanced.ambientOcclusion && !frame.lodDebug,
@@ -47,13 +44,11 @@ public:
         resources.constants=m_environment->GetCPUConstants();
         resources.constantBuffer=m_environment->GetConstants();
         resources.prefilter=m_environment->GetPrefilter();
-        resources.brdf=m_environment->GetBRDF();
         resources.probeData=m_environment->GetProbeData();
         resources.probePrefilter=m_environment->GetProbePrefilter();
         resources.probeParameters=m_environment->GetProbeParameters();
         resources.diffuse={m_environment->GetDiffuse(),{}};
         resources.specular={m_environment->GetSpecular(),{}};
-        if(m_proof) *m_proof={&frame,&frame.renderer.GetDevice(),resources,m_environment->UsesNativeFiltering()};
         m_prepared=true;
         return true;
     }
@@ -81,7 +76,7 @@ public:
         }
         else if(stage==RenderStage::Background)
         {
-            const auto& config=frame.renderer.GetAppliedConfig();
+            const auto& config=frame.renderer.GetConfig();
             const bool surfaceDebug=AdvancedModuleEnabled(frame.renderer) &&
                 config.advanced.surfaceDebugView!=SurfaceDebugView::None && !frame.wireframe;
             if(!surfaceDebug && m_environment->IsBackgroundEnabled() &&
@@ -96,12 +91,10 @@ public:
     {
         if(m_prepared) m_environment->CommitFrame();
         m_prepared=false;
-        if(m_proof) *m_proof={};
     }
 
     void InvalidateHistory(bool release) override
     {
-        if(m_proof) *m_proof={};
         if(release)
         {
             m_environment.reset();
@@ -110,14 +103,13 @@ public:
     }
 
 private:
-    std::shared_ptr<EnvironmentFilteringProof> m_proof;
     std::unique_ptr<EnvironmentLighting> m_environment;
     bool m_prepared=false;
 };
 }
 
-std::unique_ptr<RenderExtension> CreateEnvironmentLightingModule(std::shared_ptr<EnvironmentFilteringProof> proof)
+std::unique_ptr<RenderExtension> CreateEnvironmentLightingModule()
 {
-    return std::make_unique<EnvironmentLightingModule>(std::move(proof));
+    return std::make_unique<EnvironmentLightingModule>();
 }
 }

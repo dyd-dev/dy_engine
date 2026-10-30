@@ -84,7 +84,12 @@ bool Renderer::Impl::UpdateLightingBuffer(
 		light != nullptr && light->castShadow;
 	const float shadowStrength = shadowsEnabled ? light->shadowStrength : 0.0f;
 
-	constants.cameraPosition = CameraViewPosition(camera);
+	// float4의 xyz는 위치 또는 방향이고 w에는 그림자 강도·활성 여부 같은 별도 의미를 함께 담는다. 좌표의 동차 w로 해석하면 안 된다.
+	constants.cameraPosition = Math::float4(
+		camera.position.x,
+		camera.position.y,
+		camera.position.z,
+		shadowsEnabled ? shadowStrength : 0.0f);
 	constants.directionalLightDirection = Math::float4(
 		lightDirection.x,
 		lightDirection.y,
@@ -206,13 +211,12 @@ bool Renderer::Impl::UpdateLightingBuffer(
 
         if(!config.lighting.enabled) { constants.lightCounts = {}; constants.areaLightCounts = {}; } // 조명 전체가 꺼지면 광원 개수를 0으로 만들어 평가를 생략한다. 재질 기본색·발광 처리는 셰이더에 남는다.
 
-        constants.shadowLight = {1,0,shadowStrength,constants.directionalLightDirection.w};
+        constants.shadowLight = {1,0,constants.cameraPosition.w,constants.directionalLightDirection.w};
 
     const auto* first=reinterpret_cast<const uint8_t*>(&constants);
     // 이번 상수의 CPU 바이트를 임시 캐시에 복사한다. 여기서 lightingBytes를 교체하지 않아 제출 실패가 기존 성공 캐시를 덮지 않는다.
     pendingLightingBytes.assign(first,first+sizeof(constants));
-    const bool noAreaLights=constants.areaLightCounts.x==0.0f && constants.areaLightCounts.y==0.0f;
-    if(lightingReady && pendingLightingBytes==lightingBytes) {frameNoAreaLights=noAreaLights;return true;} // 직전 성공 업로드와 값이 완전히 같으면 기존 상수 버퍼를 그대로 읽는다.
+    if(lightingReady && pendingLightingBytes==lightingBytes)return true; // 직전 성공 업로드와 값이 완전히 같으면 기존 상수 버퍼를 그대로 읽는다.
 	if(lightingReady) { const RHI::ResourceBarrierDesc barrier={lightingBuffer,nullptr,RHI::ResourceState::ConstantBuffer,RHI::ResourceState::CopyDestination,{}}; commandList.ResourceBarrier(&barrier,1); } // 기존 상수 버퍼를 다시 갱신할 때만 복사 대상 상태로 전환한다.
 	if(!device->UpdateBuffer( // CPU 상수를 GPU 버퍼에 복사하는 명령 기록에 실패하면 false를 반환한다.
 			commandList,
@@ -229,7 +233,6 @@ bool Renderer::Impl::UpdateLightingBuffer(
 		{}
 	};
 	commandList.ResourceBarrier(&after, 1);
-	frameNoAreaLights=noAreaLights;
 	return true;
 }
 

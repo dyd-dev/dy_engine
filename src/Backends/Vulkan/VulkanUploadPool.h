@@ -1,5 +1,5 @@
 #pragma once
-#include "dyf/RHI/Backend/UploadMemory.h"
+#include "../../RHI/UploadMemory.h"
 #ifdef DY_LIVE_PROFILING_ENABLED
 #include "../../Platform/Profiler/CollectorInternal.h"
 #endif

@@ -17,18 +17,13 @@ std::unique_ptr<RenderExtension> CreateAdvancedRenderingModule(AdvancedRenderMod
     return nullptr;
 }
 
-namespace
-{
-std::array<std::unique_ptr<RenderExtension>,6> CreatePresetModules()
-{
-    auto proof=std::make_shared<Detail::EnvironmentFilteringProof>();
-    return {Detail::CreateEnvironmentLightingModule(proof),Detail::CreateClusteredLightingModule(),
-        Detail::CreateSurfaceLightingModule(),Detail::CreateFogModule(),Detail::CreateTransparencyModule(proof),
-        Detail::CreatePostProcessModule()};
-}
-}
-
-AdvancedRendering::AdvancedRendering():m_modules(CreatePresetModules()) {}
+AdvancedRendering::AdvancedRendering():m_modules{
+    CreateAdvancedRenderingModule(AdvancedRenderModule::EnvironmentLighting),
+    CreateAdvancedRenderingModule(AdvancedRenderModule::ClusteredLighting),
+    CreateAdvancedRenderingModule(AdvancedRenderModule::SurfaceLighting),
+    CreateAdvancedRenderingModule(AdvancedRenderModule::VolumetricFog),
+    CreateAdvancedRenderingModule(AdvancedRenderModule::Transparency),
+    CreateAdvancedRenderingModule(AdvancedRenderModule::PostProcess)} {}
 
 AdvancedRendering::~AdvancedRendering()=default;
 
@@ -40,10 +35,6 @@ RenderRequirements AdvancedRendering::GetRequirements(const Renderer& renderer) 
         const auto requirements=module->GetRequirements(renderer);
         combined.providesSurface|=requirements.providesSurface;
         combined.needsSurface|=requirements.needsSurface;
-        combined.needsDepth|=requirements.needsDepth;
-        combined.needsNormal|=requirements.needsNormal;
-        combined.needsMaterial|=requirements.needsMaterial;
-        combined.needsMotion|=requirements.needsMotion;
         combined.needsGeometry|=requirements.needsGeometry;
         combined.handlesTransparency|=requirements.handlesTransparency;
         combined.writesOutput|=requirements.writesOutput;
@@ -60,7 +51,7 @@ bool AdvancedRendering::UsesSurfacePipeline(const Renderer& renderer) const
 
 bool AdvancedRendering::NeedsSurface(const Renderer& renderer) const
 {
-    return GetRequirements(renderer).RequiresDepth();
+    return GetRequirements(renderer).needsSurface;
 }
 
 bool AdvancedRendering::PrepareCamera(RenderFrame& frame)

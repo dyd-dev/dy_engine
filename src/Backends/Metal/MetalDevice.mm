@@ -10,13 +10,12 @@
 #include "dyf/RHI/Readback.h"
 
 #include <algorithm>
-#include <atomic>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 #import <CoreGraphics/CoreGraphics.h>
@@ -44,34 +43,6 @@ namespace dyf::Backends
 
     namespace
     {
-        void* RetainDrawable(id<CAMetalDrawable> drawable)
-        {
-#if __has_feature(objc_arc)
-            return (__bridge_retained void*)drawable;
-#else
-            [drawable retain];
-            return (__bridge void*)drawable;
-#endif
-        }
-
-        id<CAMetalDrawable> TakeRetainedDrawable(void* drawable)
-        {
-#if __has_feature(objc_arc)
-            return (__bridge_transfer id<CAMetalDrawable>)drawable;
-#else
-            return (__bridge id<CAMetalDrawable>)drawable;
-#endif
-        }
-
-        void ReleaseRetainedDrawable(void* drawable)
-        {
-            id<CAMetalDrawable> released = TakeRetainedDrawable(drawable);
-#if !__has_feature(objc_arc)
-            [released release];
-#endif
-            (void)released;
-        }
-
         void DetachWindowLayer(CAMetalLayer* layer)
         {
             if(layer == nil) return;
@@ -137,12 +108,10 @@ namespace dyf::Backends
         MetalTexture* backBufferTex = nullptr;
 
         dispatch_queue_t drawableQueue = nullptr;
-        static_assert(std::atomic<void*>::is_always_lock_free && std::atomic<bool>::is_always_lock_free,
-            "Metal drawable mailboxes require lock-free pointers and flags.");
-        // The mailbox owns one retained drawable until the caller exchanges it.
-        std::atomic<void*> readyDrawable{nullptr};
-        std::atomic<bool> drawableRequestPending{false};
-        std::atomic<bool> stoppingDrawableAcquisition{false};
+        std::mutex drawableMutex;
+        id<CAMetalDrawable> readyDrawable = nil;
+        bool drawableRequestPending = false;
+        bool stoppingDrawableAcquisition = false;
 
         std::vector<uint64_t> frameSlots;
         std::vector<std::unique_ptr<MetalCommandList, MetalObjectDeleter>> activeCommandLists;
@@ -163,59 +132,45 @@ namespace dyf::Backends
         uint64_t frameLastSubmissionValue = 0;
         bool asyncWorkFailed = false;
 
-        void RequestDrawable(CGSize size, CGFloat scale, CGRect bounds)
+        void RequestDrawable()
         {
-            if(stoppingDrawableAcquisition.load(std::memory_order_acquire) ||
-                readyDrawable.load(std::memory_order_acquire) != nullptr ||
-                drawableQueue == nullptr || metalLayer == nil) return;
-            bool pending = false;
-            if(!drawableRequestPending.compare_exchange_strong(pending, true,
-                std::memory_order_acq_rel, std::memory_order_relaxed)) return;
-            // A preceding producer may have filled the mailbox just before its
-            // pending=false publication. Recheck after acquiring that handoff.
-            if(stoppingDrawableAcquisition.load(std::memory_order_acquire) ||
-                readyDrawable.load(std::memory_order_acquire) != nullptr)
+            CAMetalLayer* layerToRequest = nil;
+            dispatch_queue_t queue = nullptr;
             {
-                drawableRequestPending.store(false, std::memory_order_release);
-                return;
-            }
-            CAMetalLayer* layerToRequest = metalLayer;
-            dispatch_queue_t queue = drawableQueue;
+                std::unique_lock<std::mutex> lock(
+                    drawableMutex, std::try_to_lock);
+                if(!lock.owns_lock()) return;
+                if(stoppingDrawableAcquisition || drawableRequestPending ||
+                    readyDrawable != nil || drawableQueue == nullptr || metalLayer == nil)
+                {
+                    return;
+                }
+
+                drawableRequestPending = true;
+                layerToRequest = metalLayer;
+                queue = drawableQueue;
 #if !__has_feature(objc_arc)
-            [layerToRequest retain];
+                [layerToRequest retain];
 #endif
+            }
+
             dispatch_async(queue, ^{
                 @autoreleasepool
                 {
-                    @try
+                    id<CAMetalDrawable> drawable = nil;
                     {
-                        if(!stoppingDrawableAcquisition.load(std::memory_order_acquire))
+                        std::lock_guard<std::mutex> lock(drawableMutex);
+                        if(!stoppingDrawableAcquisition)
+                            drawable = [layerToRequest nextDrawable];
+                        if(!stoppingDrawableAcquisition && drawable != nil && readyDrawable == nil)
                         {
-                            // Only this serial producer mutates runtime layer
-                            // configuration or calls nextDrawable. UIKit reads
-                            // its layout separately and never waits here on RHI.
-                            layerToRequest.contentsScale = scale;
-#if !TARGET_OS_IOS
-                            layerToRequest.frame = bounds;
+#if !__has_feature(objc_arc)
+                            [drawable retain];
 #endif
-                            layerToRequest.drawableSize = size;
-                            id<CAMetalDrawable> drawable = [layerToRequest nextDrawable];
-                            if(drawable != nil && !stoppingDrawableAcquisition.load(std::memory_order_acquire))
-                            {
-                                void* retained = RetainDrawable(drawable);
-                                void* empty = nullptr;
-                                if(!readyDrawable.compare_exchange_strong(empty, retained,
-                                    std::memory_order_release, std::memory_order_relaxed))
-                                    ReleaseRetainedDrawable(retained);
-                            }
+                            readyDrawable = drawable;
                         }
+                        drawableRequestPending = false;
                     }
-                    @catch(NSException* exception)
-                    {
-                        const char* reason = exception.reason.UTF8String;
-                        std::fprintf(stderr, "Metal drawable acquisition failed: %s\n", reason ? reason : "unknown native exception");
-                    }
-                    drawableRequestPending.store(false, std::memory_order_release);
 #if !__has_feature(objc_arc)
                     [layerToRequest release];
 #endif
@@ -225,11 +180,20 @@ namespace dyf::Backends
 
         void StopDrawableAcquisition()
         {
-            stoppingDrawableAcquisition.store(true, std::memory_order_release);
+            {
+                std::lock_guard<std::mutex> lock(drawableMutex);
+                stoppingDrawableAcquisition = true;
+            }
+
             if(drawableQueue != nullptr)
                 dispatch_sync(drawableQueue, ^{});
-            ReleaseRetainedDrawable(readyDrawable.exchange(nullptr, std::memory_order_acq_rel));
-            drawableRequestPending.store(false, std::memory_order_release);
+
+            std::lock_guard<std::mutex> lock(drawableMutex);
+#if !__has_feature(objc_arc)
+            [readyDrawable release];
+#endif
+            readyDrawable = nil;
+            drawableRequestPending = false;
         }
 
         void ClearCurrentDrawable()
@@ -455,7 +419,6 @@ bool MetalDevice::SupportsNative(RHI::Feature feature) const
         }
         return false;
     case RHI::Feature::TaskShader:
-    case RHI::Feature::RenderArea:
         return false;
     // 이 구현은 shader bias 인자를 추가하지 않으므로 sampler LOD bias는 지원하지 않는다.
     default: return false;
@@ -490,8 +453,6 @@ uint64_t MetalDevice::GetLimitNative(RHI::Limit limit) const
         // Apple의 arrayLength 명세와 모든 지원 GPU family 표의 실제 한도다.
         // https://developer.apple.com/documentation/metal/mtltexture/arraylength
         return 2048;
-    case RHI::Limit::BufferUpdateAlignment:
-        return MetalValidation::BufferUpdateAlignment;
     case RHI::Limit::UniformBufferOffsetAlignment:
         // Apple GPU의 constant 정렬은 4B, Mac2의 정렬은 32B다. 장치 family를 확인한다.
         if(@available(macOS 11.0, *))
@@ -521,30 +482,6 @@ bool MetalDevice::SupportsPipelineLayoutNative(const RHI::PipelineLayoutDesc& de
 bool MetalDevice::SupportsSamplerNative(const RHI::SamplerDesc& desc) const
 {
     return m_impl && m_impl->device != nil && MetalPipeline::SupportsSampler(desc);
-}
-
-bool MetalDevice::SupportsDdsCompression(RHI::Format format) const noexcept
-{
-    return m_impl && MetalTexture::SupportsDdsCompression((__bridge void*)m_impl->device, format);
-}
-
-bool MetalDevice::SupportsLinearFiltering(RHI::Format format) const noexcept
-{
-    if(!m_impl || m_impl->device==nil)return false;
-    // R16Float supports sampling/filtering on all Metal GPU families; unlike RGBA32Float,
-    // it does not require the optional 32-bit filtering feature.
-    // https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf
-    if(format==RHI::Format::R16_FLOAT)return true;
-    if(format!=RHI::Format::R32G32B32A32_FLOAT)return false;
-    // Older SDKs cannot name this optional query; older runtimes retain manual filtering.
-    // https://developer.apple.com/documentation/metal/mtldevice/supports32bitfloatfiltering
-#if (TARGET_OS_OSX && defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 110000) || \
-    ((TARGET_OS_IOS || TARGET_OS_MACCATALYST) && defined(__IPHONE_OS_VERSION_MAX_ALLOWED) && __IPHONE_OS_VERSION_MAX_ALLOWED >= 140000)
-    if(@available(macOS 11.0, iOS 14.0, macCatalyst 14.0, *))
-        if([m_impl->device respondsToSelector:@selector(supports32BitFloatFiltering)])
-            return [m_impl->device supports32BitFloatFiltering];
-#endif
-    return false;
 }
 
 bool MetalDevice::SupportsGraphicsPipelineNative(const RHI::GraphicsPipelineDesc& desc) const
@@ -582,7 +519,7 @@ void MetalDevice::DestroySwapchainNative()
 #endif
     m_impl->metalLayer = nil;
     m_impl->drawableQueue = nullptr;
-    m_impl->stoppingDrawableAcquisition.store(false, std::memory_order_release);
+    m_impl->stoppingDrawableAcquisition = false;
     m_impl->frameActive = false;
     m_impl->frameLastSubmissionValue = 0;
 }
@@ -740,7 +677,7 @@ void MetalDevice::DestroySwapchainNative()
         m_impl->allowReadback = desc.allowReadback;
         m_impl->backBufferTex = backBuffer.release();
         m_impl->drawableQueue = drawableQueue;
-        m_impl->RequestDrawable(layer.drawableSize, layer.contentsScale, contentView.bounds);
+        m_impl->RequestDrawable();
         if(layer.maximumDrawableCount > desc.minimumImageCount)
         {
             char message[160];
@@ -754,41 +691,48 @@ void MetalDevice::DestroySwapchainNative()
 
     bool MetalDevice::BeginFrameNative()
     {
-#if !TARGET_OS_IOS
-        if(![NSThread isMainThread]) return false;
+#if TARGET_OS_IOS
+        if(![NSThread isMainThread])
+        {
+            __block bool ready = false;
+            dispatch_sync(dispatch_get_main_queue(), ^{ ready = BeginFrameNative(); });
+            return ready;
+        }
+        if(UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return false;
 #endif
-        // Native-list retirement can reenter the common device resource lock.
-        // Keep it on the caller that owns that lock, rather than dispatching it
-        // synchronously to UIKit while the application worker waits for UIKit.
         m_impl->CollectCompletedSubmissions();
         if(m_impl->asyncWorkFailed ||
             m_impl->metalLayer == nil ||
             m_impl->backBufferTex == nullptr || m_impl->frameSlots.empty() ||
-            m_impl->windowHandle == nullptr)
+            m_impl->windowHandle == nullptr || ![NSThread isMainThread])
         {
             return false;
         }
-        const bool frameAlreadyActive = m_impl->frameActive;
-        if(!frameAlreadyActive && m_impl->frameSlots[m_impl->nextFrameSlot] > m_impl->completedSubmissionValue)
+		if(m_impl->frameActive)
+		{
+			return m_impl->currentDrawable != nil &&
+				m_impl->backBufferTex->GetNativeTexture() != nullptr;
+		}
+
+#if TARGET_OS_IOS
+        UIView* contentView = (__bridge UIView*)m_impl->windowHandle;
+#else
+        NSWindow* window = (__bridge NSWindow*)m_impl->windowHandle;
+        NSView* contentView = window.contentView;
+#endif
+        if(contentView == nil) return false;
+
+        if(m_impl->frameSlots[m_impl->nextFrameSlot] > m_impl->completedSubmissionValue)
             return false;
 
+        id<CAMetalDrawable> drawable = nil;
         uint32_t expectedWidth = 0;
         uint32_t expectedHeight = 0;
-        CGSize requestedSize = {};
-        CGRect requestedBounds = {};
-        CGFloat requestedScale = 1;
-        const auto updateDrawableSize = [&]() -> bool {
-#if TARGET_OS_IOS
-            if(UIApplication.sharedApplication.applicationState != UIApplicationStateActive) return false;
-#endif
-            if(frameAlreadyActive) return true;
-#if TARGET_OS_IOS
-            UIView* contentView = (__bridge UIView*)m_impl->windowHandle;
-#else
-            NSWindow* window = (__bridge NSWindow*)m_impl->windowHandle;
-            NSView* contentView = window.contentView;
-#endif
-            if(contentView == nil) return false;
+        {
+            std::unique_lock<std::mutex> lock(
+                m_impl->drawableMutex, std::try_to_lock);
+            if(!lock.owns_lock()) return false;
+
 #if TARGET_OS_IOS
             const CGFloat scale = contentView.contentScaleFactor;
 #else
@@ -799,39 +743,25 @@ void MetalDevice::DestroySwapchainNative()
             const CGSize drawableSize = CGSizeMake(
                 bounds.size.width * scale,
                 bounds.size.height * scale);
-            if(!std::isfinite(drawableSize.width) || !std::isfinite(drawableSize.height) ||
-                drawableSize.width <= 0.0 || drawableSize.height <= 0.0 ||
-                drawableSize.width > UINT32_MAX || drawableSize.height > UINT32_MAX)
+            m_impl->metalLayer.contentsScale = scale;
+#if !TARGET_OS_IOS
+            m_impl->metalLayer.frame = bounds;
+#endif
+            m_impl->metalLayer.drawableSize = drawableSize;
+            if(m_impl->metalLayer.drawableSize.width <= 0.0 ||
+                m_impl->metalLayer.drawableSize.height <= 0.0)
             {
                 return false;
             }
-            requestedSize = drawableSize;
-            requestedBounds = bounds;
-            requestedScale = scale;
-            expectedWidth = static_cast<uint32_t>(drawableSize.width);
-            expectedHeight = static_cast<uint32_t>(drawableSize.height);
-            return true;
-        };
-        bool drawableSizeReady = false;
-#if TARGET_OS_IOS
-        if(![NSThread isMainThread])
-        {
-            __block bool ready = false;
-            // Only UIKit layout reads cross to the main thread.
-            // This block must not retire commands or call common RHI methods.
-            dispatch_sync(dispatch_get_main_queue(), ^{ ready = updateDrawableSize(); });
-            drawableSizeReady = ready;
-        }
-        else
-#endif
-            drawableSizeReady = updateDrawableSize();
-        if(!drawableSizeReady) return false;
-        if(frameAlreadyActive)
-            return m_impl->currentDrawable != nil && m_impl->backBufferTex->GetNativeTexture() != nullptr;
 
-        id<CAMetalDrawable> drawable = TakeRetainedDrawable(
-            m_impl->readyDrawable.exchange(nullptr, std::memory_order_acq_rel));
-        m_impl->RequestDrawable(requestedSize, requestedScale, requestedBounds);
+            expectedWidth = static_cast<uint32_t>(
+                m_impl->metalLayer.drawableSize.width);
+            expectedHeight = static_cast<uint32_t>(
+                m_impl->metalLayer.drawableSize.height);
+            drawable = m_impl->readyDrawable;
+            m_impl->readyDrawable = nil;
+        }
+        m_impl->RequestDrawable();
         if(drawable == nil)
         {
             return false;
@@ -950,6 +880,11 @@ void MetalDevice::DestroySwapchainNative()
             return false;
         }
 
+		MetalSubmissionState resourceStates = {};
+		for(MetalCommandList* commandList : submittedCommandLists)
+		{
+			if(!commandList->ValidateForSubmit(resourceStates)) return false;
+		}
         m_impl->submissions.emplace_back();
         Impl::Submission& submission = m_impl->submissions.back();
         submission.value = m_impl->nextSubmissionValue++;
@@ -1051,6 +986,22 @@ void MetalDevice::DestroySwapchainNative()
     RHI::PipelineHandle MetalDevice::CreateGraphicsPipelineNative(
         const RHI::GraphicsPipelineDesc& desc)
     {
+		const auto ownsShader = [this](RHI::ShaderHandle shader)
+		{
+			return std::find_if(
+				m_impl->liveShaders.begin(), m_impl->liveShaders.end(),
+				[shader](const std::unique_ptr<MetalShader, MetalObjectDeleter>& candidate)
+				{
+					return static_cast<RHI::ShaderHandle>(candidate.get()) == shader;
+				}) != m_impl->liveShaders.end();
+		};
+		if(!ownsShader(desc.vertexShader) ||
+			(desc.hullShader != nullptr && !ownsShader(desc.hullShader)) ||
+			(desc.domainShader != nullptr && !ownsShader(desc.domainShader)) ||
+			(desc.fragmentShader != nullptr && !ownsShader(desc.fragmentShader)))
+		{
+			return nullptr;
+		}
         auto pipeline = std::unique_ptr<MetalPipeline, MetalObjectDeleter>(
             new MetalPipeline(desc, (__bridge void*)m_impl->device));
 		if(pipeline->GetNativePipeline() == nullptr ||
@@ -1065,6 +1016,20 @@ void MetalDevice::DestroySwapchainNative()
     RHI::PipelineHandle MetalDevice::CreateMeshPipelineNative(
         const RHI::MeshPipelineDesc& desc)
     {
+		const auto ownsShader = [this](RHI::ShaderHandle shader)
+		{
+			return std::find_if(
+				m_impl->liveShaders.begin(), m_impl->liveShaders.end(),
+				[shader](const std::unique_ptr<MetalShader, MetalObjectDeleter>& candidate)
+				{
+					return static_cast<RHI::ShaderHandle>(candidate.get()) == shader;
+				}) != m_impl->liveShaders.end();
+		};
+		if(!ownsShader(desc.meshShader) ||
+			(desc.fragmentShader != nullptr && !ownsShader(desc.fragmentShader)))
+		{
+			return nullptr;
+		}
         auto pipeline = std::unique_ptr<MetalPipeline, MetalObjectDeleter>(
             new MetalPipeline(desc, (__bridge void*)m_impl->device));
 		if(pipeline->GetNativePipeline() == nullptr ||
@@ -1078,9 +1043,53 @@ void MetalDevice::DestroySwapchainNative()
 	RHI::ResourceSetHandle MetalDevice::CreateResourceSetNative(
 		const RHI::ResourceSetDesc& desc)
 	{
+		const auto pipelineIt = std::find_if(
+			m_impl->livePipelines.begin(), m_impl->livePipelines.end(),
+			[requested = desc.pipeline](
+				const std::unique_ptr<MetalPipeline, MetalObjectDeleter>& candidate)
+			{
+				return static_cast<RHI::PipelineHandle>(candidate.get()) == requested;
+			});
+		if(pipelineIt == m_impl->livePipelines.end() ||
+			(desc.bindingCount != 0 && desc.bindings == nullptr))
+		{
+			return nullptr;
+		}
+
 		uint32_t textureBindingCount = 0;
 		for(uint32_t index = 0; index < desc.bindingCount; ++index)
-			if(desc.bindings[index].texture != nullptr) ++textureBindingCount;
+		{
+			const RHI::ResourceBinding& binding = desc.bindings[index];
+			if(binding.buffer != nullptr)
+			{
+				const auto bufferIt = std::find_if(
+					m_impl->liveBuffers.begin(), m_impl->liveBuffers.end(),
+					[requested = binding.buffer](
+						const std::unique_ptr<MetalBuffer, MetalObjectDeleter>& candidate)
+					{
+						return static_cast<RHI::BufferHandle>(candidate.get()) == requested;
+					});
+				if(bufferIt == m_impl->liveBuffers.end() ||
+					(*bufferIt)->GetNativeBuffer() == nullptr)
+					return nullptr;
+			}
+			if(binding.texture != nullptr)
+			{
+				const auto textureIt = std::find_if(
+					m_impl->liveTextures.begin(), m_impl->liveTextures.end(),
+					[requested = binding.texture](
+						const std::unique_ptr<MetalTexture, MetalObjectDeleter>& candidate)
+					{
+						return static_cast<RHI::TextureHandle>(candidate.get()) == requested;
+					});
+				if(textureIt == m_impl->liveTextures.end() ||
+					(*textureIt)->GetNativeTexture() == nullptr)
+					return nullptr;
+				++textureBindingCount;
+			}
+		}
+		// The validator dereferences handles; check live ownership first.
+		if(!MetalValidation::ValidateResourceSetDesc(desc)) return nullptr;
 		auto resourceSet = std::unique_ptr<MetalResourceSet, MetalObjectDeleter>(
 			new MetalResourceSet(desc));
 		if(resourceSet->GetTextureBindings().size() != textureBindingCount) return nullptr;
@@ -1136,8 +1145,23 @@ void MetalDevice::DestroySwapchainNative()
 		const void* data,
 		uint32_t size)
     {
-		return static_cast<MetalCommandList&>(commandList).RecordBufferUpdate(
-			static_cast<MetalBuffer*>(buffer), offset, data, size);
+		const auto ownedCommandList = std::find_if(
+			m_impl->activeCommandLists.begin(), m_impl->activeCommandLists.end(),
+			[requested = &commandList](
+				const std::unique_ptr<MetalCommandList, MetalObjectDeleter>& candidate)
+			{
+				return static_cast<RHI::ICommandList*>(candidate.get()) == requested;
+			});
+		const auto ownedBuffer = std::find_if(
+			m_impl->liveBuffers.begin(), m_impl->liveBuffers.end(),
+			[buffer](const std::unique_ptr<MetalBuffer, MetalObjectDeleter>& candidate)
+			{
+				return static_cast<RHI::BufferHandle>(candidate.get()) == buffer;
+			});
+		return ownedCommandList != m_impl->activeCommandLists.end() &&
+			ownedBuffer != m_impl->liveBuffers.end() &&
+			(*ownedCommandList)->RecordBufferUpdate(
+				ownedBuffer->get(), offset, data, size);
     }
 
 	bool MetalDevice::UpdateTextureNative(
@@ -1150,9 +1174,29 @@ void MetalDevice::DestroySwapchainNative()
 		uint32_t rowPitch,
 		uint32_t slicePitch)
     {
-		return static_cast<MetalCommandList&>(commandList).RecordTextureUpdate(
-			static_cast<MetalTexture*>(texture), mipLevel, arrayLayer,
-			data, dataSize, rowPitch, slicePitch);
+		const auto ownedCommandList = std::find_if(
+			m_impl->activeCommandLists.begin(), m_impl->activeCommandLists.end(),
+			[requested = &commandList](
+				const std::unique_ptr<MetalCommandList, MetalObjectDeleter>& candidate)
+			{
+				return static_cast<RHI::ICommandList*>(candidate.get()) == requested;
+			});
+		const auto ownedTexture = std::find_if(
+			m_impl->liveTextures.begin(), m_impl->liveTextures.end(),
+			[texture](const std::unique_ptr<MetalTexture, MetalObjectDeleter>& candidate)
+			{
+				return static_cast<RHI::TextureHandle>(candidate.get()) == texture;
+			});
+		return ownedCommandList != m_impl->activeCommandLists.end() &&
+			ownedTexture != m_impl->liveTextures.end() &&
+			(*ownedCommandList)->RecordTextureUpdate(
+				ownedTexture->get(),
+				mipLevel,
+				arrayLayer,
+				data,
+				dataSize,
+				rowPitch,
+				slicePitch);
     }
 
     RHI::TextureHandle MetalDevice::GetBackBufferNative()

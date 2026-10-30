@@ -25,17 +25,12 @@ namespace dyf
 		float ty = 0.0f;
 		float tz = 0.0f;
 		float tw = 1.0f;
-		float cr = 1.0f;
-		float cg = 1.0f;
-		float cb = 1.0f;
-		float ca = 1.0f;
 	};
-	static_assert(sizeof(RendererVertex) == 64 && offsetof(RendererVertex, cr) == 48);
 
 	// 카메라·환경·기본 조명과 고정 용량 광원 배열을 float4 단위로 전달한다. 실제 선택한 광원 수는 같은 구조체의 lightCounts와 areaLightCounts에 담는다.
 	struct RendererLightingConstants
 	{
-		Math::float4 cameraPosition; // homogeneous eye: position/w=1, orthographic view direction/w=0
+		Math::float4 cameraPosition;
 		Math::float4 directionalLightDirection;
 		Math::float4 directionalLightColor;
 		Math::float4 ambientColor;
@@ -125,8 +120,6 @@ namespace dyf
 	static_assert(sizeof(RendererShadowConstants) == 13024u);
 
 	// 한 Draw의 카메라/모델 행렬과 재질 상수다. 인스턴싱 경로는 개별 모델 정보 일부를 별도 버퍼에서 공급한다.
-    inline constexpr uint32_t RendererTextureFlagBc5Normal=256u;
-    static_assert((RendererTextureFlagBc5Normal&255u)==0,"BC5 must not overlap stock texture/debug flags or transparent unlit.");
 	struct DrawConstants
 	{
 		Math::float4x4 viewProjectionMatrix;

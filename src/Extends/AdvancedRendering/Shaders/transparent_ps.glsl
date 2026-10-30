@@ -1,44 +1,10 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-#ifndef TRANSPARENT_DEPTH_ONLY
-#define TRANSPARENT_DEPTH_ONLY 0
-#endif
-float TransparentCoverage(float alpha,uint mode,float cutoff)
-{
-    // Alpha describes whether a surface exists; optical transmission is independent.
-    if(mode==1u)return alpha<cutoff?0.0:1.0;
-    return mode==2u?clamp(alpha,0.0,1.0):1.0;
-}
-#if TRANSPARENT_DEPTH_ONLY
-layout(location=0) in vec2 uv;
-layout(location=4) in vec4 vertexColor;
-struct Draw {mat4 model;mat4 normalMatrix;vec4 baseColor;vec4 emissive;vec4 material;vec4 optics;vec4 attenuation;uvec4 flags;};
-layout(std430,set=0,binding=11) readonly buffer Draws {Draw draws[];};
-layout(push_constant) uniform Index {uvec4 index;};
-layout(set=0,binding=0) uniform texture2D baseTexture;
-layout(set=0,binding=6) uniform texture2D depthTexture;
-layout(set=0,binding=8) uniform sampler materialSampler;
-layout(set=0,binding=10) uniform sampler pointSampler;
-void main()
-{
-    vec2 uvDx=dFdx(uv),uvDy=dFdy(uv);
-    Draw draw=draws[index.x];float alpha=draw.baseColor.a*vertexColor.a;
-    if((draw.flags.x&1u)!=0u)
-        alpha*=textureGrad(sampler2D(baseTexture,materialSampler),uv,uvDx,uvDy).a;
-    if(gl_FragCoord.z>texelFetch(sampler2D(depthTexture,pointSampler),ivec2(gl_FragCoord.xy),0).r ||
-        TransparentCoverage(alpha,draw.flags.w,draw.attenuation.w)<=0.0)discard;
-}
-#else
-#ifndef RENDERER_ENABLE_AREA_LIGHTS
-#define RENDERER_ENABLE_AREA_LIGHTS 1
-#endif
 #include "probe_visibility.glsl"
-layout(early_fragment_tests) in;
 layout(location=0) in vec2 uv;
 layout(location=1) in vec3 worldPosition;
 layout(location=2) in vec3 worldNormal;
 layout(location=3) in vec4 worldTangent;
-layout(location=4) in vec4 vertexColor;
 layout(location=0) out vec4 outputColor;
 layout(location=1) out vec4 reactive;
 struct Draw {mat4 model;mat4 normalMatrix;vec4 baseColor;vec4 emissive;vec4 material;vec4 optics;vec4 attenuation;uvec4 flags;};
@@ -60,7 +26,6 @@ layout(set=0,binding=28) uniform texture2D nearestDepthTexture;
 layout(set=0,binding=8) uniform sampler materialSampler;
 layout(set=0,binding=9) uniform sampler screenSampler;
 layout(set=0,binding=10) uniform sampler pointSampler;
-layout(set=0,binding=15) uniform sampler environmentLinearSampler;
 struct Directional {vec4 directionIntensity;vec4 color;};
 struct Point {vec4 positionRange;vec4 colorIntensity;};
 struct Spot {vec4 positionRange;vec4 directionOuterCos;vec4 colorIntensity;vec4 cone;};
@@ -76,7 +41,6 @@ layout(set=0,binding=16) uniform ShadowMatrix {
     vec4 directionalSplits[4];mat4 cameraView;vec4 filterParams;
     vec4 viewProjectionParams[128];vec4 softShadowParams;
 } shadowMatrix;
-layout(set=0,binding=17) uniform texture2D brdfTexture;
 const float PI=3.14159265359;
 vec3 TransparentPixelNormalizeOr(vec3 value,vec3 fallback)
 {
@@ -178,27 +142,7 @@ float Visibility(int type,int lightIndex,vec3 position,vec3 normal,vec3 lightDir
     }
     return visibility;
 }
-vec3 Fresnel(float cosine,vec3 f0)
-{
-    float base=clamp(1-cosine,0,1),base2=base*base,base5=(base2*base2)*base;
-    return f0+(1-f0)*base5;
-}
-vec3 FresnelRoughness(float cosine,vec3 f0,float roughness)
-{
-    float base=clamp(1-cosine,0,1),base2=base*base,base5=(base2*base2)*base;
-    return f0+(max(vec3(1-roughness),f0)-f0)*base5;
-}
-vec2 TransparentIntegratedBRDF(float nv,float roughness)
-{
-    ivec2 size=textureSize(sampler2D(brdfTexture,pointSampler),0);
-    vec2 pixel=vec2(nv,roughness)*vec2(size)-.5,w=fract(pixel);
-    ivec2 a=ivec2(floor(pixel)),b=a+1;
-    a=clamp(a,ivec2(0),size-1);b=clamp(b,ivec2(0),size-1);
-    return mix(mix(texelFetch(sampler2D(brdfTexture,pointSampler),a,0).rg,
-        texelFetch(sampler2D(brdfTexture,pointSampler),ivec2(b.x,a.y),0).rg,w.x),
-        mix(texelFetch(sampler2D(brdfTexture,pointSampler),ivec2(a.x,b.y),0).rg,
-        texelFetch(sampler2D(brdfTexture,pointSampler),b,0).rg,w.x),w.y);
-}
+vec3 Fresnel(float cosine,vec3 f0) {return f0+(1-f0)*pow(clamp(1-cosine,0,1),5);}
 vec2 EnvUV(vec3 d)
 {
     float c=cos(frame.settings.z),s=sin(frame.settings.z);d.xy=mat2(c,-s,s,c)*d.xy;
@@ -208,8 +152,7 @@ vec3 EnvMip(vec2 coordinate,int mip)
 {
     ivec2 size=textureSize(sampler2D(prefilterTexture,pointSampler),mip);
     vec2 pixel=coordinate*vec2(size)-.5,w=fract(pixel);ivec2 a=ivec2(floor(pixel)),b=a+1;
-    ivec2 wrappedX=DyWrapBilinearX(a.x,b.x,size.x);
-    a.x=wrappedX.x;b.x=wrappedX.y;
+    a.x=(a.x%size.x+size.x)%size.x;b.x=(b.x%size.x+size.x)%size.x;
     a.y=clamp(a.y,0,size.y-1);b.y=clamp(b.y,0,size.y-1);
     return mix(mix(texelFetch(sampler2D(prefilterTexture,pointSampler),a,mip),texelFetch(sampler2D(prefilterTexture,pointSampler),ivec2(b.x,a.y),mip),w.x),
         mix(texelFetch(sampler2D(prefilterTexture,pointSampler),ivec2(a.x,b.y),mip),texelFetch(sampler2D(prefilterTexture,pointSampler),b,mip),w.x),w.y).rgb;
@@ -235,90 +178,37 @@ vec3 SpatialMip(vec2 coordinate,int mip,int layer)
 {
     ivec2 dimensions=textureSize(sampler2DArray(probePrefilterTexture,pointSampler),mip).xy;
     vec2 pixel=coordinate*vec2(dimensions)-.5,w=fract(pixel);ivec2 a=ivec2(floor(pixel)),b=a+1;
-    ivec2 wrappedX=DyWrapBilinearX(a.x,b.x,dimensions.x);
-    a.x=wrappedX.x;b.x=wrappedX.y;
+    a.x=(a.x%dimensions.x+dimensions.x)%dimensions.x;b.x=(b.x%dimensions.x+dimensions.x)%dimensions.x;
     a.y=clamp(a.y,0,dimensions.y-1);b.y=clamp(b.y,0,dimensions.y-1);
     return mix(mix(texelFetch(sampler2DArray(probePrefilterTexture,pointSampler),ivec3(a,layer),mip),
         texelFetch(sampler2DArray(probePrefilterTexture,pointSampler),ivec3(b.x,a.y,layer),mip),w.x),
         mix(texelFetch(sampler2DArray(probePrefilterTexture,pointSampler),ivec3(a.x,b.y,layer),mip),
         texelFetch(sampler2DArray(probePrefilterTexture,pointSampler),ivec3(b,layer),mip),w.x),w.y).rgb;
 }
-bool NativeEnvironmentSample(vec2 coordinate,float mip,float maximumMip,uint enabled)
-{
-    return index.z==1u && enabled==1u && all(greaterThanEqual(coordinate,vec2(0))) && all(lessThanEqual(coordinate,vec2(1)))
-        && mip>=0 && mip<=maximumMip && maximumMip<=32;
-}
-float ProbeVisibility(vec3 position,SpatialProbe probe,uint probeIndex)
+float ProbeVisibility(vec3 position,SpatialProbe probe,uint index)
 {
     return SpatialProbeVisibility(position,probe.positionIntensity.xyz,probe.sh[0].w,probe.sh[1].w,
-        probeParameters.x+probeIndex,probePrefilterTexture,pointSampler);
+        probeParameters.x+index,probePrefilterTexture,pointSampler);
 }
-struct ProbeBlendCache
-{
-    vec4 weights,edges,weightedVisibility;
-};
-vec3 ProbeFactorsUncached(vec3 position,uint probeIndex)
-{
-    float edge;float weight=ProbeWeight(position,probes[probeIndex],edge);
-    float weightedVisibility=0;
-    if(!(weight<=0))weightedVisibility=weight*ProbeVisibility(position,probes[probeIndex],probeIndex);
-    return vec3(weight,edge,weightedVisibility);
-}
-ProbeBlendCache PrepareProbeBlendCache(vec3 position,bool needed)
-{
-    vec3 p0=vec3(0),p1=vec3(0),p2=vec3(0),p3=vec3(0);
-    if(needed)
-    {
-        if(probeParameters.x>0u)p0=ProbeFactorsUncached(position,0u);
-        if(probeParameters.x>1u)p1=ProbeFactorsUncached(position,1u);
-        if(probeParameters.x>2u)p2=ProbeFactorsUncached(position,2u);
-        if(probeParameters.x>3u)p3=ProbeFactorsUncached(position,3u);
-    }
-    ProbeBlendCache cache;
-    cache.weights=vec4(p0.x,p1.x,p2.x,p3.x);
-    cache.edges=vec4(p0.y,p1.y,p2.y,p3.y);
-    cache.weightedVisibility=vec4(p0.z,p1.z,p2.z,p3.z);
-    return cache;
-}
-vec3 ProbeFactors(vec3 position,uint probeIndex,ProbeBlendCache cache)
-{
-    if(probeIndex<4u)
-        return vec3(cache.weights[probeIndex],cache.edges[probeIndex],cache.weightedVisibility[probeIndex]);
-    return ProbeFactorsUncached(position,probeIndex);
-}
-vec3 Radiance(vec3 position,vec3 d,float roughness,ProbeBlendCache cache)
+vec3 Radiance(vec3 position,vec3 d,float roughness)
 {
     float mip=roughness*frame.settings.w;int lo=int(floor(mip)),hi=min(lo+1,int(frame.settings.w));
     vec2 coordinate=EnvUV(ProbeDirection(position,d));
+    vec3 fallback=mix(EnvMip(coordinate,lo),EnvMip(coordinate,hi),fract(mip))*frame.settings.y;
     vec3 sum=vec3(0);float weights=0,coverage=0;
     for(uint i=0u;i<probeParameters.x;++i)
     {
-        vec3 factors=ProbeFactors(position,i,cache);float weight=factors.x,edge=factors.y;if(weight<=0)continue;
+        float edge;float weight=ProbeWeight(position,probes[i],edge);if(weight<=0)continue;
         vec3 direction=BoxDirection(position,d,probes[i].positionIntensity.xyz,probes[i].boxMinFade.xyz,probes[i].boxMaxMip.xyz);
         vec2 localUV=vec2(atan(direction.y,direction.x)*.15915494309189535+.5,acos(clamp(direction.z,-1,1))*.3183098861837907);
         float localMip=roughness*probes[i].boxMaxMip.w;int a=int(floor(localMip)),b=min(a+1,int(probes[i].boxMaxMip.w));
-        vec3 sampledRadiance;
-        if(NativeEnvironmentSample(localUV,localMip,probes[i].boxMaxMip.w,probeParameters.z))
-            sampledRadiance=textureLod(sampler2DArray(probePrefilterTexture,environmentLinearSampler),vec3(localUV,float(i)),localMip).rgb;
-        else sampledRadiance=mix(SpatialMip(localUV,a,int(i)),SpatialMip(localUV,b,int(i)),fract(localMip));
-        sum+=sampledRadiance*probes[i].positionIntensity.w*
-            factors.z;
+        sum+=mix(SpatialMip(localUV,a,int(i)),SpatialMip(localUV,b,int(i)),fract(localMip))*probes[i].positionIntensity.w*
+            (weight*ProbeVisibility(position,probes[i],i));
         weights+=weight;coverage+=edge;
     }
-    if(probeParameters.y!=0u && weights>0 && coverage>=1 &&
-        !any(isnan(coordinate)) && !any(isinf(coordinate)) && !isnan(mip) && !isinf(mip))
-    {
-        vec3 local=sum/weights;
-        if(all(lessThanEqual(abs(local),vec3(2.1267646e37))))return local;
-    }
-    vec3 fallback;
-    if(NativeEnvironmentSample(coordinate,mip,frame.settings.w,probeParameters.z))
-        fallback=textureLod(sampler2D(prefilterTexture,environmentLinearSampler),coordinate,mip).rgb;
-    else fallback=mix(EnvMip(coordinate,lo),EnvMip(coordinate,hi),fract(mip));
-    fallback*=frame.settings.y;
     return weights>0?mix(fallback,sum/weights,clamp(coverage,0,1)):fallback;
 }
-vec3 Irradiance(vec3 position,vec3 n,ProbeBlendCache cache)
+vec3 Irradiance(vec3 position,vec3 n)
 {
     vec3 worldNormal=n;
     float c=cos(frame.settings.z),s=sin(frame.settings.z);n.xy=mat2(c,-s,s,c)*n.xy;
@@ -329,33 +219,20 @@ vec3 Irradiance(vec3 position,vec3 n,ProbeBlendCache cache)
     vec3 sum=vec3(0);float weights=0,coverage=0;
     for(uint i=0u;i<probeParameters.x;++i)
     {
-        vec3 factors=ProbeFactors(position,i,cache);float weight=factors.x,edge=factors.y;if(weight<=0)continue;
-        sum+=ProbeIrradiance(probes[i],worldNormal)*factors.z;
+        float edge;float weight=ProbeWeight(position,probes[i],edge);if(weight<=0)continue;
+        sum+=ProbeIrradiance(probes[i],worldNormal)*(weight*ProbeVisibility(position,probes[i],i));
         weights+=weight;coverage+=edge;
     }
     if(weights>0)irradiance=mix(irradiance,sum/weights,clamp(coverage,0,1));
     return max(irradiance,vec3(0))/PI;
 }
-struct DirectSurface
+vec3 Direct(vec3 n,vec3 v,vec3 l,vec3 energy,vec3 albedo,vec3 f0,float roughness,float diffuse)
 {
-    float nv,alphaSquared,k,viewGeometry;
-};
-DirectSurface PrepareDirectSurface(vec3 n,vec3 v,float roughness)
-{
-    DirectSurface surface;
-    surface.nv=max(dot(n,v),.001);
-    float alpha=roughness*roughness;surface.alphaSquared=alpha*alpha;
-    surface.k=pow(roughness+1,2)*.125;
-    surface.viewGeometry=surface.nv/(surface.nv*(1-surface.k)+surface.k);
-    return surface;
-}
-vec3 Direct(vec3 n,vec3 v,vec3 l,vec3 energy,vec3 albedo,vec3 f0,DirectSurface surface,float diffuse)
-{
-    float nl=max(dot(n,l),0),nv=surface.nv;if(nl<=0 || dot(v+l,v+l)<1e-8)return vec3(0);
-    vec3 h=normalize(v+l);float nh=clamp(dot(n,h),0,1),a2=surface.alphaSquared;
+    float nl=max(dot(n,l),0),nv=max(dot(n,v),.001);if(nl<=0 || dot(v+l,v+l)<1e-8)return vec3(0);
+    vec3 h=normalize(v+l);float nh=clamp(dot(n,h),0,1),a=roughness*roughness,a2=a*a;
     vec3 crossNH=cross(n,h);float denominator=dot(crossNH,crossNH)+nh*nh*a2;
-    float d=a2/(PI*denominator*denominator);float k=surface.k;
-    float g=surface.viewGeometry*nl/(nl*(1-k)+k);vec3 f=Fresnel(max(dot(h,v),0),f0);
+    float d=a2/(PI*denominator*denominator);float k=pow(roughness+1,2)*.125;
+    float g=nv/(nv*(1-k)+k)*nl/(nl*(1-k)+k);vec3 f=Fresnel(max(dot(h,v),0),f0);
     return ((1-f)*albedo*(diffuse/PI)+d*g*f/max(4*nv*nl,.0001))*energy*nl;
 }
 float Falloff(float distance,float range)
@@ -363,192 +240,76 @@ float Falloff(float distance,float range)
     if(range<=0 || distance>=range)return 0;float x=distance/range;
     return pow(max(1-x*x*x*x,0),2)/max(distance*distance,.0001);
 }
-#if RENDERER_ENABLE_AREA_LIGHTS
 // LTC 적분과 표 배치는 Heitz 외 SIGGRAPH 2016 및 Assets/ltc/LICENSE를 따른다.
 float LtcEdgeIntegral(vec3 a,vec3 b)
 {
     vec3 edge=cross(a,b);
-    float sineSquared=dot(edge,edge),cosine=clamp(dot(a,b),-1.0,1.0);
-    float threshold=.25*cosine;
-    float angleOverSine;
-    if(cosine>=.5 && sineSquared<=threshold*threshold)
-    {
-        // For r<=1/4, the next term of atan(r)/r is <=r^12/13<4.59e-9.
-        // This bounds truncation below float precision without assuming unit-vector identities.
-        // Squared sine avoids taking a square root only to square it again.
-        float invCosine=1.0/cosine,z=(sineSquared*invCosine)*invCosine;
-        float p=1.0+z*(-1.0/3.0+z*(1.0/5.0+z*(-1.0/7.0+z*(1.0/9.0-z/11.0))));
-        angleOverSine=p*invCosine;
-        if(sineSquared<=1e-24)
-        {
-            float sine=length(edge);
-            if(sine<1e-12)angleOverSine*=sine/1e-12;
-        }
-    }
-    else
-    {
-        float sine=length(edge);
-        angleOverSine=atan(sine,cosine)/max(sine,1e-12);
-    }
-    return edge.z*angleOverSine*0.15915494309189535;
+    float sine=length(edge),cosine=clamp(dot(a,b),-1.0,1.0);
+    return edge.z*(atan(sine,cosine)/max(sine,1e-12))*0.15915494309189535;
 }
-vec3 LtcProject(vec3 offset,vec3 tangent,vec3 bitangent,vec3 normal)
+vec3 LtcTransform(vec3 offset,vec3 tangent,vec3 bitangent,vec3 normal,vec4 inverseMatrix)
 {
-    return vec3(dot(offset,tangent),dot(offset,bitangent),dot(offset,normal));
-}
-vec3 LtcTransform(vec3 local,vec4 inverseMatrix)
-{
+    vec3 local=vec3(dot(offset,tangent),dot(offset,bitangent),dot(offset,normal));
     return vec3(inverseMatrix.x*local.x+inverseMatrix.z*local.z,local.y,
         inverseMatrix.y*local.x+inverseMatrix.w*local.z);
 }
-struct LtcSurface
+float LtcPolygonIntegral(vec3 normal,vec3 viewDir,vec3 position,
+    vec4 inverseMatrix,vec3 points[16],int count)
 {
-    vec3 normal,tangent,bitangent;
-    vec4 inverseMatrix;
-    vec3 specularWeight,diffuseWeight;
-};
-LtcSurface PrepareLtcSurface(vec3 normal,vec3 viewDir,vec3 f0,float diffuseFactor,float roughness)
-{
-    LtcSurface surface;
-    surface.normal=normal;
-    surface.tangent=viewDir-normal*dot(normal,viewDir);
-    if(dot(surface.tangent,surface.tangent)<1e-8)
-        surface.tangent=cross(abs(normal.z)<.999?vec3(0,0,1):vec3(0,1,0),normal);
-    surface.tangent=normalize(surface.tangent);
-    surface.bitangent=cross(normal,surface.tangent);
-    float ndotv=clamp(dot(normal,viewDir),0.0,1.0);
-    vec2 coordinate=(vec2(clamp(roughness,0.0,1.0),sqrt(1-ndotv))*63.0+.5)/64.0;
-    surface.inverseMatrix=textureLod(sampler2D(ltcMatrixTexture,materialSampler),coordinate,0);
-    vec4 amplitude=textureLod(sampler2D(ltcAmplitudeTexture,materialSampler),coordinate,0);
-    surface.specularWeight=f0*max(amplitude.x,0.0)+(vec3(1)-f0)*max(amplitude.y,0.0);
-    surface.diffuseWeight=(vec3(1)-Fresnel(ndotv,f0))*diffuseFactor;
-    return surface;
-}
-// Nearest-float cos/sin of the original float(corner) * float(pi/8) angles.
-const vec2 LtcDiscDirections[16]=vec2[16](
-    vec2(1,0),
-    vec2(.9238795042,.3826834559),
-    vec2(.7071067691,.7071067691),
-    vec2(.3826834261,.9238795042),
-    vec2(-4.371138829e-8,1),
-    vec2(-.3826835155,.9238795042),
-    vec2(-.7071067691,.7071067691),
-    vec2(-.9238796234,.3826832771),
-    vec2(-1,-8.742277657e-8),
-    vec2(-.9238795042,-.3826834261),
-    vec2(-.7071066499,-.7071068883),
-    vec2(-.3826831281,-.9238796830),
-    vec2(1.192488064e-8,-1),
-    vec2(.3826836050,-.9238794446),
-    vec2(.7071070075,-.7071065307),
-    vec2(.9238795638,-.3826834261)
-);
-vec3 LtcCorner(vec3 center,vec3 axisX,vec3 axisY,int corner,int count)
-{
-    if(count==4)
-    {
-        if(corner==0)return center-axisX-axisY;
-        if(corner==1)return center+axisX-axisY;
-        if(corner==2)return center+axisX+axisY;
-        return center-axisX+axisY;
-    }
-    vec2 direction=LtcDiscDirections[corner];
-    return center+(axisX*direction.x+axisY*direction.y);
-}
-void LtcAppendPoint(vec3 point,inout vec3 first,inout vec3 last,inout bool haveVertex,inout float sum)
-{
-    float squared=dot(point,point);
-    if(squared<=1e-20)return;
-    point*=inversesqrt(squared);
-    if(haveVertex)sum+=LtcEdgeIntegral(last,point);else {first=point;haveVertex=true;}
-    last=point;
-}
-float LtcUnclippedIntegral(vec3 center,vec3 axisX,vec3 axisY,int count)
-{
-    vec3 first=LtcCorner(center,axisX,axisY,0,count);
-    first*=inversesqrt(dot(first,first));
-    vec3 previous=first;float sum=0;
-    for(int edge=1;edge<count;++edge)
-    {
-        vec3 current=LtcCorner(center,axisX,axisY,edge,count);
-        current*=inversesqrt(dot(current,current));
-        sum+=LtcEdgeIntegral(previous,current);
-        previous=current;
-    }
-    sum+=LtcEdgeIntegral(previous,first);
-    return clamp(abs(sum),0.0,1.0);
-}
-float LtcPolygonIntegral(vec4 inverseMatrix,vec3 center,vec3 axisX,vec3 axisY,int count)
-{
-    vec3 transformedCenter=LtcTransform(center,inverseMatrix);
-    vec3 transformedX=LtcTransform(axisX,inverseMatrix);
-    vec3 transformedY=LtcTransform(axisY,inverseMatrix);
-    vec3 magnitude=abs(transformedCenter)+abs(transformedX)+abs(transformedY);
-    float radius=count==4?abs(transformedX.z)+abs(transformedY.z):
-        sqrt(transformedX.z*transformedX.z+transformedY.z*transformedY.z);
-    float lower=transformedCenter.z-radius,margin=1e-5*max(1.0,magnitude.z);
-    // Positive z bounds the squared length away from the clipping path's zero guard.
-    // The magnitude limit also keeps reconstructed coordinates and squared lengths finite.
-    if(all(lessThanEqual(magnitude,vec3(1e18))) && !isnan(lower) && !isinf(lower) && !isnan(margin) && !isinf(margin) && lower>margin+1e-10)
-        return LtcUnclippedIntegral(transformedCenter,transformedX,transformedY,count);
-    vec3 previous=LtcCorner(transformedCenter,transformedX,transformedY,count-1,count);
+    vec3 tangent=viewDir-normal*dot(normal,viewDir);
+    if(dot(tangent,tangent)<1e-8)
+        tangent=cross(abs(normal.z)<.999?vec3(0,0,1):vec3(0,1,0),normal);
+    tangent=normalize(tangent);
+    vec3 bitangent=cross(normal,tangent);
+    vec3 previous=LtcTransform(points[count-1]-position,tangent,bitangent,normal,inverseMatrix);
     vec3 first=vec3(0),last=vec3(0);bool haveVertex=false;float sum=0;
     for(int edge=0;edge<count;++edge)
     {
-        vec3 current=LtcCorner(transformedCenter,transformedX,transformedY,edge,count);
+        vec3 current=LtcTransform(points[edge]-position,tangent,bitangent,normal,inverseMatrix);
         bool previousInside=previous.z>=0,currentInside=current.z>=0;
         // z=0 반구로 다각형을 자르되 정점 배열 대신 경계 순서대로 적분한다.
-        if(previousInside!=currentInside)
+        for(int candidate=0;candidate<2;++candidate)
         {
-            vec3 point=mix(previous,current,clamp(previous.z/(previous.z-current.z),0.0,1.0));
-            point.z=0;
-            LtcAppendPoint(point,first,last,haveVertex,sum);
+            vec3 point;
+            if(candidate==0)
+            {
+                if(previousInside==currentInside)continue;
+                point=mix(previous,current,clamp(previous.z/(previous.z-current.z),0.0,1.0));
+                point.z=0;
+            }
+            else
+            {
+                if(!currentInside)continue;
+                point=current;
+            }
+            float squared=dot(point,point);
+            if(squared<=1e-20)continue;
+            point*=inversesqrt(squared);
+            if(haveVertex)sum+=LtcEdgeIntegral(last,point);else {first=point;haveVertex=true;}
+            last=point;
         }
-        if(currentInside)LtcAppendPoint(current,first,last,haveVertex,sum);
         previous=current;
     }
     if(haveVertex)sum+=LtcEdgeIntegral(last,first);
     return clamp(abs(sum),0.0,1.0);
 }
-bool LtcBelowHorizon(LtcSurface surface,vec3 position,vec3 center,vec3 axisX,vec3 axisY,
-    float tangentCoefficient,float normalCoefficient,bool disc)
+vec3 EvaluateLtcPolygon(vec3 normal,vec3 viewDir,vec3 position,vec3 points[16],int count,
+    vec3 albedo,vec3 f0,float diffuseFactor,float roughness,vec3 radiance)
 {
-    vec3 row=tangentCoefficient*surface.tangent+normalCoefficient*surface.normal;
-    float centerZ=dot(center-position,row),x=dot(axisX,row),y=dot(axisY,row);
-    float radius=disc?sqrt(x*x+y*y):abs(x)+abs(y);
-    // Include uncancelled world coordinates and both basis terms in the rounding allowance.
-    vec3 magnitude=abs(center)+abs(position)+abs(axisX)+abs(axisY);
-    float scale=abs(tangentCoefficient)*dot(magnitude,abs(surface.tangent))+
-        abs(normalCoefficient)*dot(magnitude,abs(surface.normal));
-    float bound=centerZ+radius,margin=1e-5*max(1.0,scale);
-    return !isnan(bound) && !isinf(bound) && !isnan(margin) && !isinf(margin) && bound < -margin;
-}
-uint LtcIntegralMask(LtcSurface surface,vec3 albedo,vec3 position,vec3 center,
-    vec3 axisX,vec3 axisY,bool disc)
-{
-    uint mask=0u;
-    if(any(notEqual(surface.specularWeight,vec3(0))) &&
-        !LtcBelowHorizon(surface,position,center,axisX,axisY,surface.inverseMatrix.y,surface.inverseMatrix.w,disc))
-        mask|=1u;
-    if(any(notEqual(surface.diffuseWeight*albedo,vec3(0))) &&
-        !LtcBelowHorizon(surface,position,center,axisX,axisY,0.0,1.0,disc))
-        mask|=2u;
-    return mask;
-}
-vec3 EvaluateLtcPolygon(LtcSurface surface,vec3 position,vec3 center,vec3 axisX,vec3 axisY,int count,uint integralMask,
-    vec3 albedo,vec3 radiance)
-{
-    // Both integrals share the surface-basis projection and retain their own inverse map.
-    vec3 localCenter=LtcProject(center-position,surface.tangent,surface.bitangent,surface.normal);
-    vec3 localX=LtcProject(axisX,surface.tangent,surface.bitangent,surface.normal);
-    vec3 localY=LtcProject(axisY,surface.tangent,surface.bitangent,surface.normal);
-    float specular=0,diffuse=0;
-    if((integralMask&1u)!=0u)specular=LtcPolygonIntegral(surface.inverseMatrix,localCenter,localX,localY,count);
-    if((integralMask&2u)!=0u)diffuse=LtcPolygonIntegral(vec4(1,0,0,1),localCenter,localX,localY,count);
+    float ndotv=clamp(dot(normal,viewDir),0.0,1.0);
+    if(ndotv<=0)return vec3(0);
+    vec2 coordinate=(vec2(clamp(roughness,0.0,1.0),sqrt(1-ndotv))*63.0+.5)/64.0;
+    vec4 inverseMatrix=textureLod(sampler2D(ltcMatrixTexture,materialSampler),coordinate,0);
+    vec4 amplitude=textureLod(sampler2D(ltcAmplitudeTexture,materialSampler),coordinate,0);
+    float specular=LtcPolygonIntegral(normal,viewDir,position,inverseMatrix,points,count);
+    float diffuse=LtcPolygonIntegral(normal,viewDir,position,vec4(1,0,0,1),points,count);
+    vec3 specularWeight=f0*max(amplitude.x,0.0)+(vec3(1)-f0)*max(amplitude.y,0.0);
+    vec3 diffuseWeight=(vec3(1)-Fresnel(ndotv,f0))*diffuseFactor;
     // 정규화된 cosine 적분이므로 diffuse에 1/pi나 거리 감쇠를 다시 곱하지 않는다.
-    return radiance*(surface.specularWeight*specular+surface.diffuseWeight*albedo*diffuse);
+    return radiance*(specularWeight*specular+diffuseWeight*albedo*diffuse);
 }
-vec3 EvaluateRectAreaLight(RendererRectAreaLight light,LtcSurface surface,vec3 albedo,vec3 worldPosition)
+vec3 EvaluateRectAreaLight(RendererRectAreaLight light,vec3 normal,vec3 viewDir,
+    vec3 albedo,vec3 f0,float diffuseFactor,float roughness,vec3 worldPosition)
 {
     vec3 direction=normalize(light.directionWidth.xyz);
     if(light.directionWidth.w<=0 || light.upHeight.w<=0 || dot(direction,worldPosition-light.positionIntensity.xyz)<=0)
@@ -556,29 +317,31 @@ vec3 EvaluateRectAreaLight(RendererRectAreaLight light,LtcSurface surface,vec3 a
     vec3 right=normalize(cross(direction,light.upHeight.xyz));
     vec3 up=normalize(cross(right,direction));
     vec3 x=right*(light.directionWidth.w*.5),y=up*(light.upHeight.w*.5),center=light.positionIntensity.xyz;
-    uint integralMask=LtcIntegralMask(surface,albedo,worldPosition,center,x,y,false);
-    if(integralMask==0u)return vec3(0);
-    return EvaluateLtcPolygon(surface,worldPosition,center,x,y,4,integralMask,albedo,
+    vec3 points[16];
+    points[0]=center-x-y;points[1]=center+x-y;points[2]=center+x+y;points[3]=center-x+y;
+    return EvaluateLtcPolygon(normal,viewDir,worldPosition,points,4,albedo,f0,diffuseFactor,roughness,
         light.color.rgb*max(light.positionIntensity.w,0.0));
 }
-vec3 EvaluateDiscAreaLight(RendererDiscAreaLight light,LtcSurface surface,vec3 albedo,vec3 worldPosition)
+vec3 EvaluateDiscAreaLight(RendererDiscAreaLight light,vec3 normal,vec3 viewDir,
+    vec3 albedo,vec3 f0,float diffuseFactor,float roughness,vec3 worldPosition)
 {
     vec3 direction=normalize(light.directionRadius.xyz);
     if(light.directionRadius.w<=0 || dot(direction,worldPosition-light.positionIntensity.xyz)<=0)return vec3(0);
     vec3 right=normalize(cross(direction,light.up.xyz));
     vec3 up=normalize(cross(right,direction));
-    vec3 x=right*light.directionRadius.w,y=up*light.directionRadius.w;
-    uint integralMask=LtcIntegralMask(surface,albedo,worldPosition,light.positionIntensity.xyz,x,y,true);
-    if(integralMask==0u)return vec3(0);
-    return EvaluateLtcPolygon(surface,worldPosition,light.positionIntensity.xyz,x,y,16,integralMask,albedo,
+    vec3 points[16];
+    // 원판 경계를 16각형으로 근사한 뒤 면 전체를 LTC로 적분한다.
+    for(int corner=0;corner<16;++corner)
+    {
+        float angle=float(corner)*0.39269908169872415;
+        points[corner]=light.positionIntensity.xyz+(right*cos(angle)+up*sin(angle))*light.directionRadius.w;
+    }
+    return EvaluateLtcPolygon(normal,viewDir,worldPosition,points,16,albedo,f0,diffuseFactor,roughness,
         light.color.rgb*max(light.positionIntensity.w,0.0));
 }
-#endif
 
 void main()
 {
-    // Preserve material gradients while all lanes still participate.
-    vec2 uvDx=dFdx(uv),uvDy=dFdy(uv);
     vec2 screenUV=gl_FragCoord.xy*frame.screen.xy;
     float opaqueDepth=texelFetch(sampler2D(depthTexture,pointSampler),ivec2(gl_FragCoord.xy),0).r;
     bool excludedLayer=false;
@@ -590,44 +353,39 @@ void main()
         bool frontLayer=max(currentBits,nearestBits)-min(currentBits,nearestBits)<=1u;
         excludedLayer=index.y==1u?frontLayer:!frontLayer;
     }
-    Draw draw=draws[index.x];uint flags=draw.flags.x;
-    vec3 geometricNormal=vec3(0,0,1),n=geometricNormal,v=geometricNormal;
-    float normalVariance=0;
-    // These flags are uniform for the draw; debug/unlit materials need no normal footprint.
-    if((flags&(64u|128u))==0u)
-    {
-        geometricNormal=TransparentPixelNormalizeOr(worldNormal,vec3(0,0,1));n=geometricNormal;
-        v=TransparentPixelNormalizeOr(frame.camera.xyz-worldPosition*frame.camera.w,geometricNormal);
-        if((flags&4u)!=0u)
-        {
-            vec3 fallback=normalize(cross(abs(n.z)<.99?vec3(0,0,1):vec3(0,1,0),n));
-            vec3 t=TransparentPixelNormalizeOr(worldTangent.xyz-n*dot(n,worldTangent.xyz),fallback),b=cross(n,t)*worldTangent.w;
-            vec3 mapped=texture(sampler2D(normalTexture,materialSampler),uv).xyz*2-1;
-            if((flags&256u)!=0u)mapped.z=sqrt(max(0.0,1.0-dot(mapped.xy,mapped.xy)));
-            mapped.xy*=draw.material.z;mapped.y*=(draw.emissive.w<0?-1.0:1.0);
-            n=TransparentPixelNormalizeOr(mat3(t,b,n)*mapped,n);
-        }
-        // Keep mapped-normal derivatives before discard or visible-side selection.
-        vec3 normalDx=dFdx(n),normalDy=dFdy(n);
-        normalVariance=0.25*(dot(normalDx,normalDx)+dot(normalDy,normalDy));
-    }
-    if(gl_FragCoord.z>opaqueDepth || excludedLayer)discard;
-    vec4 base=draw.baseColor*vertexColor;
-    if((flags&1u)!=0u)base*=textureGrad(sampler2D(baseTexture,materialSampler),uv,uvDx,uvDy);
-    float coverage=TransparentCoverage(base.a,draw.flags.w,draw.attenuation.w);
-    if(coverage<=0.0)discard;
-    vec2 mr=draw.material.xy;if((flags&2u)!=0u)mr*=textureGrad(sampler2D(materialTexture,materialSampler),uv,uvDx,uvDy).bg;
+    Draw draw=draws[index.x];uint flags=draw.flags.x;vec4 base=draw.baseColor;
+    if((flags&1u)!=0u)base*=texture(sampler2D(baseTexture,materialSampler),uv);
+    vec2 mr=draw.material.xy;if((flags&2u)!=0u)mr*=texture(sampler2D(materialTexture,materialSampler),uv).bg;
     float metal=clamp(mr.x,0,1),rough=clamp(mr.y,.04,1),transmission=clamp(draw.optics.x,0,1)*(1-metal);
     if((flags&64u)!=0u)
     {
+        if(gl_FragCoord.z>opaqueDepth || excludedLayer)discard;
+        float coverage=mix(clamp(base.a,0,1),1,transmission);
         outputColor=vec4(draw.baseColor.rgb*coverage,coverage);reactive=vec4(coverage);return;
     }
     if((flags&128u)!=0u)
     {
+        if(gl_FragCoord.z>opaqueDepth || excludedLayer)discard;
+        float coverage=clamp(base.a,0,1);
         outputColor=vec4(clamp(base.rgb,vec3(0),vec3(65504))*coverage,coverage);reactive=vec4(coverage);return;
     }
+    vec3 geometricNormal=TransparentPixelNormalizeOr(worldNormal,vec3(0,0,1)),n=geometricNormal;
+    vec3 v=TransparentPixelNormalizeOr(frame.camera.xyz-worldPosition,geometricNormal);
+    if((flags&4u)!=0u)
+    {
+        vec3 fallback=normalize(cross(abs(n.z)<.99?vec3(0,0,1):vec3(0,1,0),n));
+        vec3 t=TransparentPixelNormalizeOr(worldTangent.xyz-n*dot(n,worldTangent.xyz),fallback),b=cross(n,t)*worldTangent.w;
+        vec3 mapped=texture(sampler2D(normalTexture,materialSampler),uv).xyz*2-1;
+        mapped.xy*=draw.material.z;mapped.y*=(draw.emissive.w<0?-1.0:1.0);
+        n=TransparentPixelNormalizeOr(mat3(t,b,n)*mapped,n);
+    }
+    // Filter the GGX lobe by the pixel's normal footprint. Evaluate derivatives
+    // before discarding helper lanes or selecting a visible dielectric side.
+    vec3 normalDx=dFdx(n),normalDy=dFdy(n);
+    float normalVariance=0.25*(dot(normalDx,normalDx)+dot(normalDy,normalDy));
     float filteredAlphaSquared=min(1.0,rough*rough*rough*rough+min(2.0*normalVariance,0.18));
     float specularRoughness=sqrt(sqrt(filteredAlphaSquared));
+    if(gl_FragCoord.z>opaqueDepth || excludedLayer)discard;
     if(transmission>0)
     {
         // This pass models a thin wall with explicit thickness, not two traced
@@ -642,39 +400,14 @@ void main()
     bool totalInternalReflection=transmission>0 && dot(transmissionRay,transmissionRay)<1e-6;
     vec3 f0=totalInternalReflection?vec3(1):mix(vec3(dielectric),base.rgb,metal),f=Fresnel(nv,f0);
     float ao=1;if((flags&8u)!=0u)ao=mix(1,texture(sampler2D(aoTexture,materialSampler),uv).r,draw.material.w);
-    vec3 diffuseWeight=(1-FresnelRoughness(nv,f0,specularRoughness))*base.rgb*(1-metal)*(1-transmission);
-    ProbeBlendCache probeCache=PrepareProbeBlendCache(worldPosition,
-        any(notEqual(diffuseWeight,vec3(0))) || (uint(frame.screen.w+.5)&2u)!=0u ||
-        (transmission>0 && !totalInternalReflection));
-    vec3 lit=vec3(0);
-    if(any(notEqual(diffuseWeight,vec3(0))))lit=diffuseWeight*Irradiance(worldPosition,n,probeCache)*ao;
-    if((uint(frame.screen.w+.5)&2u)!=0u)
-    {
-        vec2 brdf=TransparentIntegratedBRDF(nv,specularRoughness);
-        lit+=Radiance(worldPosition,reflect(-v,n),specularRoughness,probeCache)*(f0*brdf.x+brdf.y)*ao*frame.specularColor.rgb;
-    }
-    vec3 refracted=vec3(0);
-    if(transmission>0 && !totalInternalReflection)
-    {
-        vec3 ray=transmissionRay;
-        float path=draw.optics.z/max(abs(dot(n,ray)),.1);vec4 exitClip=frame.viewProjection*vec4(worldPosition+ray*path,1);
-        vec2 target=exitClip.xy/max(exitClip.w,1e-5)*vec2(.5,-.5)+.5;
-        float exitDepth=exitClip.z/max(exitClip.w,1e-5);
-        bool onScreen=exitClip.w>0 && exitDepth>=0 && exitDepth<=1 &&
-            all(greaterThanEqual(target,vec2(0))) && all(lessThanEqual(target,vec2(1)));
-        if(onScreen && textureLod(sampler2D(depthTexture,pointSampler),target,0).r<exitDepth)target=screenUV;
-        refracted=onScreen?textureLod(sampler2D(opaqueTexture,screenSampler),target,0).rgb:Radiance(worldPosition,ray,rough,probeCache);
-        vec3 absorption=draw.optics.w>0?pow(clamp(draw.attenuation.rgb,vec3(.0001),vec3(1)),vec3(path/draw.optics.w)):vec3(1);
-        refracted*=absorption*base.rgb*(1-f)*transmission;
-    }
-    DirectSurface directSurface=PrepareDirectSurface(n,v,specularRoughness);
+    vec3 lit=(1-f)*base.rgb*(1-metal)*(1-transmission)*Irradiance(worldPosition,n)*ao;
+    if((uint(frame.screen.w+.5)&2u)!=0u)lit+=Radiance(worldPosition,reflect(-v,n),specularRoughness)*f*frame.specularColor.rgb;
     for(int i=0;i<clamp(int(lights.counts.x+.5),0,4);++i)
     {
         vec3 l=normalize(lights.directional[i].directionIntensity.xyz);
-        if(dot(n,l)<=0.0)continue;
         float visibility=Visibility(1,i,worldPosition,n,l,flags);
         lit+=Direct(n,v,l,lights.directional[i].color.rgb*lights.directional[i].directionIntensity.w*visibility,
-            base.rgb,f0,directSurface,(1-metal)*(1-transmission));
+            base.rgb,f0,specularRoughness,(1-metal)*(1-transmission));
     }
     uint clusterBase=ClusterBase(worldPosition),listed=0xffffffffu;
     if(clusterBase!=0xffffffffu)listed=clusterList[clusterBase];
@@ -686,33 +419,35 @@ void main()
         vec3 delta=light.positionRange.xyz-worldPosition;float distance=length(delta);
         if(distance<=1e-4 || distance>=light.positionRange.w)continue;
         vec3 l=delta/distance;
-        if(dot(n,l)<=0.0)continue;
         int type=int(light.coneShadow.y+.5),shadowIndex=int(light.coneShadow.z);
         float cone=1;
         if(type==3)cone=smoothstep(light.directionOuterCos.w,max(light.coneShadow.x,light.directionOuterCos.w+1e-4),
             dot(-l,light.directionOuterCos.xyz));
-        if(cone<=0.0)continue;
-        vec3 incidentIlluminance=light.colorIntensity.rgb*light.colorIntensity.w*Falloff(distance,light.positionRange.w)*cone;
         float visibility=shadowIndex>=0?Visibility(type,shadowIndex,worldPosition,n,l,flags):1;
-        lit+=Direct(n,v,l,incidentIlluminance*visibility,
-            base.rgb,f0,directSurface,(1-metal)*(1-transmission));
+        lit+=Direct(n,v,l,light.colorIntensity.rgb*light.colorIntensity.w*Falloff(distance,light.positionRange.w)*cone*visibility,
+            base.rgb,f0,specularRoughness,(1-metal)*(1-transmission));
     }
-#if RENDERER_ENABLE_AREA_LIGHTS
-    int rectAreaCount=clamp(int(lights.areaCounts.x+.5),0,4);
-    int discAreaCount=clamp(int(lights.areaCounts.y+.5),0,4);
-    if(dot(n,v)>0.0 && rectAreaCount+discAreaCount>0)
+    for(int i=0;i<clamp(int(lights.areaCounts.x+.5),0,4);++i)
+        lit+=EvaluateRectAreaLight(lights.rectAreaLights[i],n,v,base.rgb,f0,(1-metal)*(1-transmission),specularRoughness,worldPosition);
+    for(int i=0;i<clamp(int(lights.areaCounts.y+.5),0,4);++i)
+        lit+=EvaluateDiscAreaLight(lights.discAreaLights[i],n,v,base.rgb,f0,(1-metal)*(1-transmission),specularRoughness,worldPosition);
+    vec3 refracted=vec3(0);
+    if(transmission>0 && !totalInternalReflection)
     {
-        // Prepare fragment invariants once without loop-carried lazy initialization.
-        LtcSurface surface=PrepareLtcSurface(n,v,f0,(1-metal)*(1-transmission),specularRoughness);
-        for(int i=0;i<rectAreaCount;++i)
-            lit+=EvaluateRectAreaLight(lights.rectAreaLights[i],surface,base.rgb,worldPosition);
-        for(int i=0;i<discAreaCount;++i)
-            lit+=EvaluateDiscAreaLight(lights.discAreaLights[i],surface,base.rgb,worldPosition);
+        vec3 ray=transmissionRay;
+        float path=draw.optics.z/max(abs(dot(n,ray)),.1);vec4 exitClip=frame.viewProjection*vec4(worldPosition+ray*path,1);
+        vec2 target=exitClip.xy/max(exitClip.w,1e-5)*vec2(.5,-.5)+.5;
+        float exitDepth=exitClip.z/max(exitClip.w,1e-5);
+        bool onScreen=exitClip.w>0 && exitDepth>=0 && exitDepth<=1 &&
+            all(greaterThanEqual(target,vec2(0))) && all(lessThanEqual(target,vec2(1)));
+        if(onScreen && textureLod(sampler2D(depthTexture,pointSampler),target,0).r<exitDepth)target=screenUV;
+        refracted=onScreen?textureLod(sampler2D(opaqueTexture,screenSampler),target,0).rgb:Radiance(worldPosition,ray,rough);
+        vec3 absorption=draw.optics.w>0?pow(clamp(draw.attenuation.rgb,vec3(.0001),vec3(1)),vec3(path/draw.optics.w)):vec3(1);
+        refracted*=absorption*base.rgb*(1-f)*transmission;
     }
-#endif
     vec3 emissive=draw.emissive.rgb;if((flags&16u)!=0u)emissive*=texture(sampler2D(emissiveTexture,materialSampler),uv).rgb;
+    float coverage=mix(clamp(base.a,0,1),1,transmission);
     vec3 color=lights.counts.w>.5?lit+refracted+emissive:base.rgb+emissive;
     outputColor=vec4(clamp(color,vec3(0),vec3(65504))*coverage,coverage);
     reactive=vec4(coverage);
 }
-#endif

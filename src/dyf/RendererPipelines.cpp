@@ -60,18 +60,19 @@ RHI::PipelineLayoutDesc Renderer::Impl::MeshLayout(bool bindless, std::vector<RH
             {7u,RHI::ResourceBindingType::SampledTexture,1,RHI::ShaderStageFlags::Fragment,{}},
             {8u,RHI::ResourceBindingType::StaticSampler,1,RHI::ShaderStageFlags::Fragment,materialSampler}
         };
+        if(shaderSources.bytes[MeshFragment].empty()) // 기본 fragment의 일반 경로에 주변 형상에 가려 주변광이 덜 닿는 정도를 나타내는 값(AO)의 텍스처와 환경광 입력을 추가한다.
+        {
+            auto screenSampler=shadowSampler;
+            screenSampler.minFilter=screenSampler.magFilter=RHI::SamplerFilter::Linear;
+            bindings.push_back({16u,RHI::ResourceBindingType::SampledTexture,1,RHI::ShaderStageFlags::Fragment,{}});
+            bindings.push_back({13u,RHI::ResourceBindingType::SampledTexture,1,RHI::ShaderStageFlags::Fragment,{}});
+            bindings.push_back({17u,RHI::ResourceBindingType::SampledTexture,1,RHI::ShaderStageFlags::Fragment,{}});
+            bindings.push_back({14u,RHI::ResourceBindingType::ConstantBuffer,1,RHI::ShaderStageFlags::Fragment,{}});
+            bindings.push_back({15u,RHI::ResourceBindingType::StaticSampler,1,RHI::ShaderStageFlags::Fragment,screenSampler});
+        }
     }
-    if(shaderSources.bytes[MeshFragment].empty()) // 기본 fragment에만 AO·환경광·지역광 목록과 면적광 LUT 입력을 선언한다.
+    if(shaderSources.bytes[MeshFragment].empty()) // 기본 fragment에만 지역광 목록과 면적광 LUT 입력을 선언한다.
     {
-        // The material array occupies t0..t18 in HLSL/Metal. Environment
-        // textures use separate slots in the paged stock path on every backend.
-        auto screenSampler=shadowSampler;
-        screenSampler.minFilter=screenSampler.magFilter=RHI::SamplerFilter::Linear;
-        bindings.push_back({bindless ? 22u : 16u,RHI::ResourceBindingType::SampledTexture,1,RHI::ShaderStageFlags::Fragment,{}});
-        bindings.push_back({bindless ? 23u : 13u,RHI::ResourceBindingType::SampledTexture,1,RHI::ShaderStageFlags::Fragment,{}});
-        bindings.push_back({bindless ? 24u : 17u,RHI::ResourceBindingType::SampledTexture,1,RHI::ShaderStageFlags::Fragment,{}});
-        bindings.push_back({14u,RHI::ResourceBindingType::ConstantBuffer,1,RHI::ShaderStageFlags::Fragment,{}});
-        bindings.push_back({15u,RHI::ResourceBindingType::StaticSampler,1,RHI::ShaderStageFlags::Fragment,screenSampler});
         bindings.push_back({19,RHI::ResourceBindingType::ReadOnlyStorageBuffer,1,RHI::ShaderStageFlags::Fragment,{}});
         bindings.push_back({20,RHI::ResourceBindingType::ReadOnlyStorageBuffer,1,RHI::ShaderStageFlags::Fragment,{}});
         bindings.push_back({21,RHI::ResourceBindingType::ConstantBuffer,1,RHI::ShaderStageFlags::Fragment,{}});
@@ -102,12 +103,11 @@ bool Renderer::Impl::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorF
 		static_cast<uint32_t>(sizeof(RendererVertex)),
 		RHI::VertexStepMode::Vertex
 	};
-	const std::array<RHI::VertexAttribute, 5> vertexAttributes = {{
+	const std::array<RHI::VertexAttribute, 4> vertexAttributes = {{
 		{ 0, 0, RHI::Format::R32G32B32_FLOAT, static_cast<uint32_t>(offsetof(RendererVertex, px)) },
 		{ 1, 0, RHI::Format::R32G32B32_FLOAT, static_cast<uint32_t>(offsetof(RendererVertex, nx)) },
 		{ 2, 0, RHI::Format::R32G32_FLOAT, static_cast<uint32_t>(offsetof(RendererVertex, u)) },
-		{ 3, 0, RHI::Format::R32G32B32A32_FLOAT, static_cast<uint32_t>(offsetof(RendererVertex, tx)) },
-		{ 8, 0, RHI::Format::R32G32B32A32_FLOAT, static_cast<uint32_t>(offsetof(RendererVertex, cr)) }
+		{ 3, 0, RHI::Format::R32G32B32A32_FLOAT, static_cast<uint32_t>(offsetof(RendererVertex, tx)) }
 	}};
 
     std::vector<RHI::VertexBufferLayout> vertexBuffers={vertexBuffer};
@@ -164,62 +164,6 @@ bool Renderer::Impl::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorF
         }
     }
 
-    if(noAreaFragmentShader && UsesStockGeometry())
-    {
-        desc.fragmentShader=noAreaFragmentShader;
-        for(uint32_t variant=0;variant<noAreaMaterialPipelines.size();++variant)
-        {
-            const bool transparent=(variant&2u)!=0;
-            colorAttachment.blend.enabled=transparent;
-            desc.raster.cullMode=(variant&1u) ? RHI::CullMode::None : RHI::CullMode::Back;
-            desc.raster.frontFace=(variant&4u) ? RHI::FrontFace::Clockwise : RHI::FrontFace::CounterClockwise;
-            desc.depthStencil.depthWriteEnabled=!transparent;
-            noAreaMaterialPipelines[variant]=device->CreateGraphicsPipeline(desc);
-            if(!noAreaMaterialPipelines[variant])
-            {
-                for(auto& value:noAreaMaterialPipelines) {device->DestroyPipeline(value);value=nullptr;}
-                break;
-            }
-        }
-        desc.fragmentShader=fragmentShader;
-    }
-
-    if(depthPrepassFragmentShader && UsesStockGeometry() && UsesAdvancedRendering())
-    {
-        desc.fragmentShader=depthPrepassFragmentShader;
-        desc.depthStencil.depthWriteEnabled=false;
-        desc.depthStencil.depthCompareOp=RHI::CompareOp::LessEqual;
-        colorAttachment.blend.enabled=false;
-        for(uint32_t variant=0;variant<depthPrepassPipelines.size();++variant)
-        {
-            if(variant&2u)continue;
-            desc.raster.cullMode=(variant&1u) ? RHI::CullMode::None : RHI::CullMode::Back;
-            desc.raster.frontFace=(variant&4u) ? RHI::FrontFace::Clockwise : RHI::FrontFace::CounterClockwise;
-            depthPrepassPipelines[variant]=device->CreateGraphicsPipeline(desc);
-            if(!depthPrepassPipelines[variant])return false;
-        }
-        desc.fragmentShader=fragmentShader;
-    }
-    if(noAreaDepthPrepassFragmentShader && UsesStockGeometry() && UsesAdvancedRendering())
-    {
-        desc.fragmentShader=noAreaDepthPrepassFragmentShader;
-        desc.depthStencil.depthWriteEnabled=false;
-        desc.depthStencil.depthCompareOp=RHI::CompareOp::LessEqual;
-        colorAttachment.blend.enabled=false;
-        for(uint32_t variant=0;variant<noAreaDepthPrepassPipelines.size();++variant)
-        {
-            if(variant&2u)continue;
-            desc.raster.cullMode=(variant&1u) ? RHI::CullMode::None : RHI::CullMode::Back;
-            desc.raster.frontFace=(variant&4u) ? RHI::FrontFace::Clockwise : RHI::FrontFace::CounterClockwise;
-            noAreaDepthPrepassPipelines[variant]=device->CreateGraphicsPipeline(desc);
-            if(!noAreaDepthPrepassPipelines[variant])
-            {
-                for(auto& value:noAreaDepthPrepassPipelines) {device->DestroyPipeline(value);value=nullptr;}
-                break;
-            }
-        }
-        desc.fragmentShader=fragmentShader;
-    }
     if(config.debugWireframe && UsesAdvancedRendering()) // 고급 HDR 진단 경로에서만 와이어프레임 파이프라인을 만든다.
     {
         if(!device->Supports(RHI::Feature::Wireframe)) return false; // 장치가 선 렌더를 지원하지 않으면 요청 경로를 실패 처리한다.
@@ -259,12 +203,6 @@ bool Renderer::Impl::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorF
 		shadowBindings.push_back({8u,RHI::ResourceBindingType::StaticSampler,1,RHI::ShaderStageFlags::Fragment,sampler});
 	}
 	RHI::GraphicsPipelineDesc shadowDesc = {};
-	auto shadowAttributes=attributes;
-	for(auto& attribute:shadowAttributes)if(attribute.location==8 && shaderSources.bytes[ShadowVertex].empty())
-	{
-		attribute.format=RHI::Format::R32_FLOAT;
-		attribute.offset=static_cast<uint32_t>(offsetof(RendererVertex,ca));
-	}
 	shadowDesc.vertexShader = shadowVertexShader;
 	shadowDesc.topology = RHI::PrimitiveTopology::TriangleList;
 	shadowDesc.vertexBuffers = vertexBuffers.data();
@@ -283,21 +221,9 @@ bool Renderer::Impl::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorF
 	shadowDesc.depthStencil.depthTestEnabled = true;
 	shadowDesc.depthStencil.depthWriteEnabled = true;
 	shadowDesc.depthStencil.depthCompareOp = RHI::CompareOp::Less;
-    auto compactVertexBuffers=vertexBuffers;
-    compactVertexBuffers[0].stride=sizeof(CompactShadowVertex);
-    std::vector<RHI::VertexAttribute> compactAttributes={
-        {0,0,RHI::Format::R32G32B32_FLOAT,static_cast<uint32_t>(offsetof(CompactShadowVertex,px))},
-        {2,0,RHI::Format::R32G32_FLOAT,static_cast<uint32_t>(offsetof(CompactShadowVertex,u))},
-        {8,0,RHI::Format::R32_FLOAT,static_cast<uint32_t>(offsetof(CompactShadowVertex,alpha))}};
-    for(const auto& attribute:attributes)if(attribute.binding==1)compactAttributes.push_back(attribute);
-    // 기본 그림자는 일반/압축 정점마다 양면·알파 커버리지·반전의 여덟 조합을 만든다. 사용자 경로는 한 공통 조합을 사용한다.
-    for(uint32_t compact=0;compact<(stockShadow?2u:1u);++compact)
+    // 기본 그림자는 양면·알파 커버리지·반전의 여덟 조합을 만든다. 사용자 경로는 한 공통 조합을 사용하고 현재 셰이더 계약을 유지한다.
     for(uint32_t variant=0;variant<(stockShadow?8u:1u);++variant)
     {
-        shadowDesc.vertexBuffers=compact ? compactVertexBuffers.data() : vertexBuffers.data();
-        shadowDesc.vertexBufferCount=static_cast<uint32_t>(vertexBuffers.size());
-        shadowDesc.vertexAttributes=compact ? compactAttributes.data() : shadowAttributes.data();
-        shadowDesc.vertexAttributeCount=static_cast<uint32_t>(compact ? compactAttributes.size() : shadowAttributes.size());
         // 표준 그림자 경로에서는 불투명 변형이 깊이만 기록하고 알파 마스크 변형만 fragment를 사용한다. 사용자 경로에서는 shadowFragmentShader가 있으면 그 fragment와 바인딩을 유지한다.
         const bool coverage=stockShadow ? (variant&2u)!=0 : shadowFragmentShader!=nullptr;
         shadowDesc.fragmentShader=coverage ? shadowFragmentShader : nullptr;
@@ -307,7 +233,7 @@ bool Renderer::Impl::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorF
         shadowDesc.layout={selectedBindings.data(),static_cast<uint32_t>(selectedBindings.size()),
             static_cast<uint32_t>(sizeof(DrawConstants))+shaderSources.additionalConstantBytes,
             coverage ? RHI::ShaderStageFlags::Vertex|RHI::ShaderStageFlags::Fragment : RHI::ShaderStageFlags::Vertex,10u};
-        auto& selected=compact ? compactShadowPipelines[variant] : variant ? shadowMaterialPipelines[variant-1] : shadowPipeline;
+        auto& selected=variant ? shadowMaterialPipelines[variant-1] : shadowPipeline;
         selected=device->CreateGraphicsPipeline(shadowDesc);
         if(!selected) return false; // 선택한 그림자 변형 생성 실패면 전체 준비를 실패로 돌린다.
     }

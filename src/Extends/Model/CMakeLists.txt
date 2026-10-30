@@ -47,21 +47,3 @@ set_source_files_properties("${ufbx_SOURCE_DIR}/ufbx.c" PROPERTIES LANGUAGE CXX)
 
 # Generated model shaders.
 include("${CMAKE_CURRENT_SOURCE_DIR}/Shaders/ShaderAssets.cmake")
-
-if(DY_BUILD_CONFORMANCE_TESTS)
-    add_executable(ModelConformanceTests tests/ModelConformanceTests.cpp)
-    target_link_libraries(ModelConformanceTests PRIVATE dyf::Model)
-    target_include_directories(ModelConformanceTests PRIVATE "${ufbx_SOURCE_DIR}")
-    set_target_properties(ModelConformanceTests PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/examples")
-    add_test(NAME ModelConformance COMMAND ModelConformanceTests)
-    if(TARGET dyf::AdvancedRendering)
-        add_executable(RenderingConformanceTests tests/RenderingConformanceTests.cpp)
-        target_link_libraries(RenderingConformanceTests PRIVATE dyf::Model dyf::AdvancedRendering)
-        target_include_directories(RenderingConformanceTests PRIVATE
-            "${stb_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/src")
-        set_target_properties(RenderingConformanceTests PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/examples")
-        add_test(NAME RenderingCPUConformance COMMAND RenderingConformanceTests --cpu-only)
-    endif()
-endif()

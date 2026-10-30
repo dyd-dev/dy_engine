@@ -117,12 +117,6 @@ bool ClusteredLighting::Prepare(IDevice& device,ICommandList& uploads,const Scen
     // 일반 카메라는 단위 회전이며, 직접 편집한 비직교 뷰는 Frobenius 상계로 반경을 넓힌다.
     const float radiusScale=rigid?1.001f:std::sqrt(squaredScale);
     volume=volume && camera.view.m[3]==0 && camera.view.m[7]==0 && camera.view.m[11]==0 && camera.view.m[15]==1;
-    // The grid is a fixed storage/work budget, independent of scene light
-    // count. Exceeding device capacity uses the complete light list instead
-    // of switching grid size at an estimated performance break-even point.
-    const uint64_t volumeListBytes=uint64_t{m_data.dimensions[0]}*m_data.dimensions[1]*m_data.dimensions[2]*
-        (m_data.dimensions[3]+1)*sizeof(uint32_t);
-    volume=volume && volumeListBytes<=maximumBytes;
     m_data.depth={volume?nearDepth:.1f,volume?farDepth:100.f,volume?std::log(farDepth/nearDepth):std::log(1000.f),radiusScale};
     m_data.counts={static_cast<uint32_t>(lights.size()),volume?1u:0u,perspective?1u:0u,0};
     if(lights.empty()) lights.emplace_back();
@@ -130,7 +124,8 @@ bool ClusteredLighting::Prepare(IDevice& device,ICommandList& uploads,const Scen
         sizeof(RendererClusterLight),BufferUsage::Storage,ResourceState::ShaderResource) ||
         !Upload(uploads,m_constants,m_constantsReady,m_constantBytes,&m_data,sizeof(m_data),sizeof(m_data),
         BufferUsage::Constant,ResourceState::ConstantBuffer)) return false;
-    const uint32_t listBytes=volume?static_cast<uint32_t>(volumeListBytes):sizeof(uint32_t);
+    const uint32_t clusterCount=m_data.dimensions[0]*m_data.dimensions[1]*m_data.dimensions[2];
+    const uint32_t listBytes=volume?clusterCount*(m_data.dimensions[3]+1)*sizeof(uint32_t):sizeof(uint32_t);
     if(listBytes>maximumBytes) {std::fputs("dyf: Cluster light lists exceed the device storage-buffer limit.\n",stderr);return false;}
     if(!m_list || m_list->GetDesc().size!=listBytes)
     {

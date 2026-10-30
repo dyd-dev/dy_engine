@@ -33,8 +33,7 @@ namespace dyf::RHI
 		DepthRead,
 		DepthWrite,
 		Present,
-		IndirectArgument,
-		CopySource
+		IndirectArgument
 	};
 
 	enum class ShaderStageFlags : uint32_t

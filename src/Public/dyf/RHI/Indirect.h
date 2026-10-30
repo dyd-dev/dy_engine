@@ -4,9 +4,8 @@
 
 namespace dyf::RHI
 {
-    // GPU-visible argument layouts. Commands consume these structures at 4-byte
-    // aligned offsets in a BufferUsage::Indirect buffer. Indexed multidraw uses
-    // a 4-byte aligned stride at least sizeof(DrawIndexedIndirectArguments).
+    // GPU-visible argument layouts. An indirect command consumes exactly one
+    // structure at a 4-byte aligned byte offset in a BufferUsage::Indirect buffer.
     // firstInstance must be zero unless Feature::IndirectFirstInstance is supported.
     // Argument values may be GPU-written; the RHI does not read them back to validate.
     struct DrawIndirectArguments

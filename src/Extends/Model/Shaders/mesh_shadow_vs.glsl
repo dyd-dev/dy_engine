@@ -5,10 +5,6 @@
 #include "Skinning.glsl"
 
 layout(location = 0) in vec3 inPosition;
-layout(location = 2) in vec2 inUv;
-layout(location = 8) in vec4 inColor;
-layout(location = 0) out vec2 shadowUv;
-layout(location = 1) out float shadowAlpha;
 
 layout(push_constant) uniform DrawConstants
 {
@@ -43,5 +39,4 @@ void main()
     mat4 skin, skinNormal;
     LoadSkinning(gl_VertexIndex, drawConstants.influenceOffset, drawConstants.paletteOffset, skin, skinNormal);
     gl_Position = shadowMatrix.lightViewProjectionMatrix[drawConstants.padding2] * drawConstants.modelMatrix * skin * vec4(inPosition, 1.0);
-    shadowUv=inUv;shadowAlpha=inColor.a;
 }

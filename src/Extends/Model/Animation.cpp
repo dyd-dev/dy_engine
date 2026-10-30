@@ -1,5 +1,4 @@
 #include <dyf/Extends/Model/Animation.h>
-#include "AnimationSampling.h"
 
 #include <algorithm>
 #include <cmath>
@@ -91,16 +90,13 @@ namespace dyf
 			const std::vector<Vec3Key>& keys,
 			AnimationInterpolation interpolation,
 			float time,
-			Math::float3& outValue,bool validateKeys)
+			Math::float3& outValue)
 		{
 			if(keys.empty()) return true;
-			if(validateKeys)
-			{
-				if(!HasValidTimes(keys)) return false;
-				for(const Vec3Key& key : keys)
-					if(!IsFinite(key.value) || (interpolation == AnimationInterpolation::CubicSpline
-						&& (!IsFinite(key.inTangent) || !IsFinite(key.outTangent)))) return false;
-			}
+			if(!HasValidTimes(keys)) return false;
+			for(const Vec3Key& key : keys)
+				if(!IsFinite(key.value) || (interpolation == AnimationInterpolation::CubicSpline
+					&& (!IsFinite(key.inTangent) || !IsFinite(key.outTangent)))) return false;
 			if(keys.size() == 1 || time <= keys.front().time)
 			{
 				outValue = keys.front().value;
@@ -140,16 +136,13 @@ namespace dyf
 			const std::vector<QuatKey>& keys,
 			AnimationInterpolation interpolation,
 			float time,
-			Math::quat& outValue,bool validateKeys)
+			Math::quat& outValue)
 		{
 			if(keys.empty()) return true;
-			if(validateKeys)
-			{
-				if(!HasValidTimes(keys)) return false;
-				for(const QuatKey& key : keys)
-					if(!IsFinite(key.value) || (interpolation == AnimationInterpolation::CubicSpline
-						&& (!IsFinite(key.inTangent) || !IsFinite(key.outTangent)))) return false;
-			}
+			if(!HasValidTimes(keys)) return false;
+			for(const QuatKey& key : keys)
+				if(!IsFinite(key.value) || (interpolation == AnimationInterpolation::CubicSpline
+					&& (!IsFinite(key.inTangent) || !IsFinite(key.outTangent)))) return false;
 			if(keys.size() == 1 || time <= keys.front().time)
 			{
 				outValue = Math::Normalize(keys.front().value);
@@ -191,17 +184,14 @@ namespace dyf
 			const std::vector<FloatKey>& keys,
 			AnimationInterpolation interpolation,
 			float time,
-			float& outValue,bool validateKeys)
+			float& outValue)
 		{
 			if(keys.empty()) return true;
-			if(validateKeys)
+			if(!HasValidTimes(keys)) return false;
+			for(const FloatKey& key : keys)
 			{
-				if(!HasValidTimes(keys)) return false;
-				for(const FloatKey& key : keys)
-				{
-					if(!std::isfinite(key.time) || !std::isfinite(key.inTangent)
-						|| !std::isfinite(key.value) || !std::isfinite(key.outTangent)) return false;
-				}
+				if(!std::isfinite(key.time) || !std::isfinite(key.inTangent)
+					|| !std::isfinite(key.value) || !std::isfinite(key.outTangent)) return false;
 			}
 			if(keys.size() == 1u || time <= keys.front().time)
 			{
@@ -243,27 +233,19 @@ namespace dyf
 			* Math::Scaling(transform.scale);
 	}
 
-	namespace
-	{
-	bool SampleNodeTracks(const AnimationClip& clip,float time,std::vector<NodeTransform>& pose,bool validateKeys)
+	bool SampleAnimationClip(const AnimationClip& clip, float time, std::vector<NodeTransform>& pose)
 	{
 		if(!std::isfinite(time)) return false;
 		for(const NodeAnimationTrack& track : clip.tracks)
 		{
 			if(track.nodeIndex >= pose.size()) return false;
 			NodeTransform sampled = pose[track.nodeIndex];
-			if(!SampleVec3Keys(track.translations, track.translationInterpolation, time, sampled.translation,validateKeys)) return false;
-			if(!SampleQuatKeys(track.rotations, track.rotationInterpolation, time, sampled.rotation,validateKeys)) return false;
-			if(!SampleVec3Keys(track.scales, track.scaleInterpolation, time, sampled.scale,validateKeys)) return false;
+			if(!SampleVec3Keys(track.translations, track.translationInterpolation, time, sampled.translation)) return false;
+			if(!SampleQuatKeys(track.rotations, track.rotationInterpolation, time, sampled.rotation)) return false;
+			if(!SampleVec3Keys(track.scales, track.scaleInterpolation, time, sampled.scale)) return false;
 			pose[track.nodeIndex] = sampled;
 		}
 		return true;
-	}
-	}
-
-	bool SampleAnimationClip(const AnimationClip& clip,float time,std::vector<NodeTransform>& pose)
-	{
-		return SampleNodeTracks(clip,time,pose,true);
 	}
 
 	bool BuildGlobalNodeMatrices(
@@ -271,24 +253,12 @@ namespace dyf
 		const std::vector<NodeTransform>& localPose,
 		std::vector<Math::float4x4>& outGlobal)
 	{
-		Detail::NodeHierarchyScratch scratch;
-		return Detail::BuildGlobalNodeMatricesWithScratch(nodes,localPose,outGlobal,scratch,false);
-	}
-
-	bool Detail::BuildGlobalNodeMatricesWithScratch(
-		const std::vector<ModelNode>& nodes,
-		const std::vector<NodeTransform>& localPose,
-		std::vector<Math::float4x4>& outGlobal,
-		NodeHierarchyScratch& scratch,bool captureOrder)
-	{
-		if(nodes.size() != localPose.size() || nodes.size() > UINT32_MAX) return false;
+		if(nodes.size() != localPose.size()) return false;
 		outGlobal.resize(nodes.size());
-		auto& visitState=scratch.visitState;
-		auto& nodeStack=scratch.stack;
-		visitState.assign(nodes.size(),0u);
-		nodeStack.clear();scratch.order.clear();
+		// 계층 순회에 필요한 임시 메모리는 이 계산 안에서만 사용한다.
+		std::vector<uint8_t> visitState(nodes.size(), 0u);
+		std::vector<uint32_t> nodeStack;
 		nodeStack.reserve(nodes.size());
-		if(captureOrder)scratch.order.reserve(nodes.size());
 
 		for(uint32_t startNode = 0u; startNode < nodes.size(); ++startNode)
 		{
@@ -320,63 +290,28 @@ namespace dyf
 					? outGlobal[static_cast<uint32_t>(parentIndex)] * local
 					: local;
 				visitState[nodeIndex] = 2u;
-				if(captureOrder)scratch.order.push_back(nodeIndex);
 				nodeStack.pop_back();
 			}
 		}
 		return true;
 	}
 
-	bool Detail::BuildGlobalNodeMatricesValidatedOrder(
-		const std::vector<ModelNode>& nodes,
-		const std::vector<NodeTransform>& localPose,
-		std::vector<Math::float4x4>& outGlobal,
-		const std::vector<uint32_t>& order)
-	{
-		if(nodes.size()!=localPose.size() || nodes.size()!=order.size() || nodes.size()>UINT32_MAX)return false;
-		outGlobal.resize(nodes.size());
-		for(const uint32_t nodeIndex:order)
-		{
-			if(nodeIndex>=nodes.size())return false;
-			const int32_t parentIndex=nodes[nodeIndex].parentIndex;
-			const Math::float4x4 local=ComposeTransform(localPose[nodeIndex]);
-			outGlobal[nodeIndex]=parentIndex>=0
-				? outGlobal[static_cast<uint32_t>(parentIndex)]*local : local;
-		}
-		return true;
-	}
-
-	namespace
-	{
-	bool SampleClip(
+	bool SampleAnimationClip(
 		const AnimationClip& clip,
 		float time,
 		std::vector<NodeTransform>& pose,
-		std::vector<std::vector<float>>& morphWeights,bool validateKeys)
+		std::vector<std::vector<float>>& morphWeights)
 	{
-		if(!SampleNodeTracks(clip,time,pose,validateKeys)) return false;
+		if(!SampleAnimationClip(clip, time, pose)) return false;
 		for(const MorphWeightTrack& track : clip.morphTracks)
 		{
 			if(track.nodeIndex >= morphWeights.size()
 				|| track.targetIndex >= morphWeights[track.nodeIndex].size()) return false;
 			float sampled = morphWeights[track.nodeIndex][track.targetIndex];
-			if(!SampleFloatKeys(track.weights, track.interpolation, time, sampled,validateKeys)) return false;
+			if(!SampleFloatKeys(track.weights, track.interpolation, time, sampled)) return false;
 			morphWeights[track.nodeIndex][track.targetIndex] = sampled;
 		}
 		return true;
-	}
-	}
-
-	bool SampleAnimationClip(const AnimationClip& clip,float time,std::vector<NodeTransform>& pose,
-		std::vector<std::vector<float>>& morphWeights)
-	{
-		return SampleClip(clip,time,pose,morphWeights,true);
-	}
-
-	bool Detail::SampleAnimationClipValidatedKeys(const AnimationClip& clip,float time,std::vector<NodeTransform>& pose,
-		std::vector<std::vector<float>>& morphWeights)
-	{
-		return SampleClip(clip,time,pose,morphWeights,false);
 	}
 
 	bool BuildSkinPalette(

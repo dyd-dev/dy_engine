@@ -2,14 +2,9 @@ plugins {
     id 'com.android.application'
 }
 
-def cmakeArguments = ([DY_BUILD_EXAMPLES: 'OFF'] + providers.gradlePropertiesPrefixedBy('DY_').get()).collect { key, value ->
-    "-D${key}=${value}".toString()
-}
-def androidAbis = providers.gradleProperty('DY_ANDROID_ABIS').orElse('arm64-v8a,x86_64')
-        .get().split(',').collect { it.trim() }
-if (!androidAbis || androidAbis.any { !(it in ['arm64-v8a', 'x86_64']) }) {
-    throw new GradleException('DY_ANDROID_ABIS must contain arm64-v8a and/or x86_64, separated by commas.')
-}
+def cmakeArguments = project.properties.findAll { key, value ->
+    key.startsWith('DY_')
+}.collect { key, value -> "-D${key}=${value}".toString() }
 
 android {
     namespace 'com.dyengine.app'
@@ -26,14 +21,15 @@ android {
 
         externalNativeBuild {
             cmake {
-                arguments "-DANDROID_STL=c++_shared"
+                arguments "-DANDROID_STL=c++_shared",
+                          "-DDY_BUILD_EXAMPLES=OFF"
                 arguments(*cmakeArguments)
                 targets 'dy_engine_app'
-                abiFilters.addAll(androidAbis)
+                abiFilters 'arm64-v8a', 'x86_64'
             }
         }
         ndk {
-            abiFilters.addAll(androidAbis)
+            abiFilters 'arm64-v8a', 'x86_64'
         }
     }
 

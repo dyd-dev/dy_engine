@@ -62,20 +62,14 @@ void main()
     int step=int(operation.w+.5);
     for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x)
     {
-        bool centerTap=x==0 && y==0;
-        ivec2 q=pixel+ivec2(x,y)*step;vec4 g=guide;
-        if(!centerTap)g=Load(guideImage,q);
+        ivec2 q=pixel+ivec2(x,y)*step;vec4 g=Load(guideImage,q);
         if(g.r<=0)continue;
-        vec4 color=center;vec3 sampleNormal=n;float sampleLog=centerLog;
-        if(!centerTap)
-        {
-            color=FiniteColor(Load(sourceImage,q));sampleNormal=Normal(g.gb);sampleLog=LogLuminance(color.rgb);
-        }
+        vec4 color=FiniteColor(Load(sourceImage,q));
         float weight=float((x==0?2:1)*(y==0?2:1));
         weight*=exp(-abs(g.r-guide.r)/max(.01,guide.r*.01*float(step)));
-        weight*=pow(max(dot(n,sampleNormal),0),32);
+        weight*=pow(max(dot(n,Normal(g.gb)),0),32);
         weight*=exp(-abs(g.a-guide.a)*16);
-        weight*=exp(-abs(sampleLog-centerLog)/max(4*sigma,.001));
+        weight*=exp(-abs(LogLuminance(color.rgb)-centerLog)/max(4*sigma,.001));
         if(operation.y>.5)weight*=exp(-abs(color.a-center.a)*4);
         sum+=color*weight;total+=weight;
     }
@@ -85,14 +79,13 @@ void main()
     vec4 current=FiniteColor(Load(sourceImage,pixel));
     outputGuide=vec4(max(motion.z,0),surface.xy,clamp(surface.z,0,1));
     if(motion.z<=0) {outputColor=vec4(0);outputMoments=vec4(0);outputGuide=vec4(0);return;}
-    float currentLog=LogLuminance(current.rgb),mean=0,second=0;
+    float mean=0,second=0;
     for(int y=-1;y<=1;++y)for(int x=-1;x<=1;++x)
     {
-        float l=currentLog;
-        if(x!=0 || y!=0)l=LogLuminance(FiniteColor(Load(sourceImage,pixel+ivec2(x,y))).rgb);
+        float l=LogLuminance(FiniteColor(Load(sourceImage,pixel+ivec2(x,y))).rgb);
         mean+=l/9;second+=l*l/9;
     }
-    float variance=max(second-mean*mean,0);
+    float variance=max(second-mean*mean,0),currentLog=LogLuminance(current.rgb);
     vec4 oldColor=vec4(0),oldMoments=vec4(0);float accepted=0;
     // 이 이력은 이전 지터 격자에 저장되므로 TAA의 지터 차를 다시 빼지 않는다.
     vec2 currentUV=(vec2(fullPixel)+.5)*frame.size.zw,previousUV=currentUV-motion.xy;

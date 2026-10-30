@@ -17,7 +17,7 @@ public:
     bool Prepare(RenderFrame& frame,RHI::ICommandList& uploads) override
     {
         m_prepared=false;
-        const auto& config=frame.renderer.GetAppliedConfig();
+        const auto& config=frame.renderer.GetConfig();
         if(!AdvancedModuleEnabled(frame.renderer) || !config.advanced.fog.enabled ||
             !config.lighting.enabled || frame.lodDebug) return true;
         if(!m_fog) m_fog=std::make_unique<VolumetricFog>();

@@ -1,12 +1,9 @@
 #include "RendererInternal.h"
-#include "SceneAlgorithms.h"
 #include "DrawCommands.h"
-#include "BasicEnvironmentResources.h"
 #include "dyf/Scene.h"
 #include "dyf/RHI/Buffer.h"
-#include "dyf/RHI/ResourceSet.h"
+#include "../RHI/ResourceSet.h"
 #include <algorithm>
-#include <array>
 #include <functional>
 #include <vector>
 
@@ -72,18 +69,6 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
 	if(UsesBindlessMaterials()) // 설정과 장치 지원을 통과한 경우만 텍스처 페이지 경로를 사용한다.
 	{
 		if(materialStates.empty()) {materialIndexBuffer=nullptr;materialIndexReady=false;return true;} // 재질이 없으면 재질 인덱스 버퍼 연결을 비우고 준비를 생략한다.
-        const RenderEnvironmentResources* environment=&frameLighting.environment;
-        RenderEnvironmentResources neutralEnvironment;
-        const bool advanced=UsesAdvancedRendering();
-        if(!advanced)
-        {
-            // Legacy basic paging did not consume environment/AO resources.
-            // Neutral inputs preserve that result, including custom providers.
-            if(!basicEnvironment)return false;
-            neutralEnvironment=basicEnvironment->GetResources(defaultMaterialTextures[2]);
-            environment=&neutralEnvironment;
-        }
-        if(!environment->constantBuffer)return false;
 		// 클러스터 조명 슬롯 앞의 19개 텍스처 단위로 재질을 묶는다.
         if(materialPages.empty())materialPages.emplace_back(); // 첫 페이지가 없으면 임시 저장소를 하나 마련한다.
         for(auto& page:materialPages) {page.textures.clear();page.materials.clear();}
@@ -135,23 +120,6 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
             materialIndexRecorded=true;
         }
 		sets.assign(draws ? scene.GetEntityCount() : materialStates.size(), nullptr);
-        // Build stable per-material entity chains once. A page may contain many
-        // materials sharing the same textures, so scanning every entity and then
-        // searching page.materials makes custom geometry preparation quadratic.
-        std::vector<uint32_t> firstEntity,nextEntity;
-        if(draws)
-        {
-            firstEntity.assign(materialStates.size(),UINT32_MAX);
-            nextEntity.resize(scene.GetEntityCount());
-            for(uint32_t remaining=scene.GetEntityCount();remaining;--remaining)
-            {
-                const uint32_t entity=remaining-1;
-                const auto material=ToIndex(scene.GetEntityMaterial(static_cast<EntityID>(entity)));
-                if(material>=firstEntity.size())continue;
-                nextEntity[entity]=firstEntity[material];
-                firstEntity[material]=entity;
-            }
-        }
 		// 페이지마다 텍스처 배열·조명·재질 인덱스·지역광·면적광 입력을 묶는다. 비어 있는 배열 슬롯은 페이지 첫 텍스처로 채워 유효 핸들을 유지한다.
 		for(uint32_t pageIndex=0;pageIndex<pageCount;++pageIndex)
         {
@@ -167,10 +135,6 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
             bindings.push_back({21,0,frameLighting.clusterConstants.buffer,nullptr,0,sizeof(RendererClusterConstants),{}});
             bindings.push_back({26,0,nullptr,frameLighting.areaMatrix.texture ? frameLighting.areaMatrix.texture : defaultMaterialTextures[2],0,0,{}});
             bindings.push_back({27,0,nullptr,frameLighting.areaAmplitude.texture ? frameLighting.areaAmplitude.texture : defaultMaterialTextures[2],0,0,{}});
-            bindings.push_back({22,0,nullptr,advanced && frameAmbientOcclusion ? frameAmbientOcclusion : defaultMaterialTextures[0],0,0,{}});
-            bindings.push_back({23,0,nullptr,environment->specular.texture,0,0,{}});
-            bindings.push_back({24,0,nullptr,environment->diffuse.texture,0,0,{}});
-            bindings.push_back({14,0,environment->constantBuffer,nullptr,0,sizeof(RenderEnvironmentConstants),{}});
 			if(shadowsEnabled) // 활성 그림자 타깃과 상수를 bindless 전용 슬롯에 추가한다.
 			{
 				bindings.push_back({28, 0, nullptr, shadowDepthTarget, 0, 0, {}});
@@ -179,9 +143,10 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
 			}
 			if(draws) // 객체별 추가 정점 자원이 있으면 페이지 바인딩에 합쳐 객체별 세트를 만든다.
 			{
-				for(const auto material:page.materials)
-				for(uint32_t entity=firstEntity[material];entity!=UINT32_MAX;entity=nextEntity[entity])
+				for(uint32_t entity = 0; entity < scene.GetEntityCount(); ++entity)
 				{
+					const auto material = ToIndex(scene.GetEntityMaterial(static_cast<EntityID>(entity)));
+					if(std::find(page.materials.begin(), page.materials.end(), material) == page.materials.end()) continue; // 현재 페이지에 이 재질이 없으면 이 페이지의 객체별 세트 생성에서 제외한다. 해당 재질이 속한 페이지의 반복에서 처리한다.
 					auto& combined=mainCombinedBindingScratch;combined.assign(bindings.begin(),bindings.end());
 					const auto& extra = (*draws)[entity].vertexResources;
 					combined.insert(combined.end(), extra.begin(), extra.end());
@@ -194,27 +159,10 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
 			}
 			else
 			{
-				std::array<RHI::PipelineHandle,4> pagePipelines={};
-				std::array<RHI::ResourceSetHandle,4> pageSets={};
-				uint32_t pageSetCount=0;
 				for(auto index : page.materials)
 				{
-					const auto selectedPipeline=MaterialPipeline(scene.Materials()[index]);
-					RHI::ResourceSetHandle selectedSet=nullptr;
-					if(config.enableResourceSetCache)
-						for(uint32_t slot=0;slot<pageSetCount;++slot)
-							if(pagePipelines[slot]==selectedPipeline) {selectedSet=pageSets[slot];break;}
-					if(!selectedSet)
-					{
-						selectedSet=CachedResourceSet(selectedPipeline,bindings,mainSets);
-						if(!selectedSet) return false;
-						if(config.enableResourceSetCache && pageSetCount<pagePipelines.size())
-						{
-							pagePipelines[pageSetCount]=selectedPipeline;
-							pageSets[pageSetCount++]=selectedSet;
-						}
-					}
-					sets[index]=selectedSet;
+					sets[index] = CachedResourceSet(MaterialPipeline(scene.Materials()[index]),bindings,mainSets);
+					if(!sets[index]) return false; // 재질별 공유 세트 생성 실패도 호출부로 전달한다.
 				}
 			}
 		}
@@ -229,7 +177,7 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
 		const auto materialIndex = draws
 			? ToIndex(scene.GetEntityMaterial(static_cast<EntityID>(setIndex))) : setIndex;
 		if(materialIndex >= materialStates.size()) continue; // 유효 범위 밖 재질이면 세트를 연결하지 않는다.
-		if(separateTransparency && UsesBlendedRendering(scene.Materials()[materialIndex])) // 별도 투명 처리 또는 캡처/선 진단 경로에서는 블렌드·투과 재질의 메인 세트를 만들지 않는다.
+		if(separateTransparency && scene.Materials()[materialIndex].alphaMode==MaterialAlphaMode::Blend) // 별도 투명 처리 또는 캡처/선 진단 경로에서는 Blend의 메인 세트를 만들지 않는다.
 		{
 			sets[setIndex]=nullptr;
 			continue;

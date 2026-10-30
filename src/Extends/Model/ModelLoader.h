@@ -8,7 +8,6 @@
 #include <string>
 
 #include <dyf/Extends/Model/Model.h>
-#include "../../dyf/ImageDds.h"
 
 namespace dyf
 {
@@ -43,8 +42,6 @@ namespace dyf
 	void ReportModelWarning(
 		const std::string& path,
 		const std::string& message);
-	[[nodiscard]] bool AllowMaterialFallback(
-		const std::string& path, const ModelLoadOptions& options, const std::string& message);
 	[[nodiscard]] Math::float3 BuildFallbackTangent(const Math::float3& normal);
 	[[nodiscard]] bool CalculateTangents(MeshData& data, bool generateMissingNormals = false);
 	[[nodiscard]] uint32_t EnsureDefaultMaterial(ModelData& model);

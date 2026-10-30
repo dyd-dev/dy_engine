@@ -1,10 +1,8 @@
 #include "../Platform/Profiler/CollectorInternal.h"
 #include "RendererInternal.h"
-#include "SceneAlgorithms.h"
 #include "dyf/Scene.h"
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/ICommandList.h"
-#include <algorithm>
 
 namespace dyf
 {
@@ -15,14 +13,7 @@ bool Renderer::Impl::UpdateInstanceBuffer(const Scene& scene,RHI::ICommandList& 
     pendingInstanceScene=scene.m_lifetime;
     pendingInstanceRevision=scene.m_transformRevision;
     pendingInstanceCount=scene.GetEntityCount();
-    // 직접/그림자 경로가 사용할 때만 공용 인스턴스 버퍼를 준비한다. 압축 배치만 쓰는 프레임은 불필요한 업로드를 생략한다.
-    const bool separateTransparency=m_environmentCapture || wireframeActive || UsesSeparateTransparency();
-    const bool legacyDraws=(!visibilityActive && !cpuBatchesActive) || (!separateTransparency &&
-        std::any_of(scene.Materials().begin(),scene.Materials().end(),[](const MaterialDesc& material) {
-            return UsesBlendedRendering(material);
-        }));
-    const bool shadows=config.lighting.enabled && config.lighting.direct && config.lighting.shadows;
-    if(!UsesInstanceStream() || !pendingInstanceCount || (!legacyDraws && !shadows)) {
+    if(!UsesInstanceStream() || !pendingInstanceCount) { // 인스턴스 스트림을 쓰지 않거나 객체가 없으면 버퍼 연결을 비우고 업로드를 생략한다.
         instanceBuffer=nullptr;instanceReady=false;return true;
     }
     // GPU 가시 목록과 같은 128바이트 간격을 사용한다. 기본 셰이더는 앞 행렬만 읽는다.
@@ -50,6 +41,7 @@ bool Renderer::Impl::UpdateInstanceBuffer(const Scene& scene,RHI::ICommandList& 
             if(!instanceRanges.empty() && instanceRanges.back().first+instanceRanges.back().count==i) // 직전 변경 구간 바로 다음 객체라면 구간을 늘려 연속 복사로 합친다.
                 ++instanceRanges.back().count;
             else instanceRanges.push_back({i,1});
+            if(instanceRanges.size()>32) {full=true;fullReason=Platform::LiveSplitReason::DirtyRangeLimit;break;} // 조각난 구간이 32개를 넘으면 명령 수를 줄이도록 전체 업로드로 전환한다.
         }
     }
     if(full) { // 전체 업로드라면 모든 객체를 덮는 하나의 구간으로 바꾼다.
@@ -86,7 +78,6 @@ bool Renderer::Impl::UpdateInstanceBuffer(const Scene& scene,RHI::ICommandList& 
 void Renderer::Impl::CommitFrameData()
 {
     instanceScene=pendingInstanceScene;instanceRevision=pendingInstanceRevision;instanceCount=pendingInstanceCount;
-    if(cpuBatchesActive)cpuInstanceBytes.swap(cpuInstanceScratch);
     lightingBytes.swap(pendingLightingBytes);
     if(config.lighting.enabled && config.lighting.direct && config.lighting.shadows)shadowBytes.swap(pendingShadowBytes); // 그림자 기능이 실제 활성일 때만 이번 그림자 상수 바이트를 재사용 기준으로 확정한다.
 }

@@ -23,7 +23,7 @@ public:
     bool Prepare(RenderFrame& frame,RHI::ICommandList& uploads) override
     {
         m_prepared=false;
-        const auto& config=frame.renderer.GetAppliedConfig();
+        const auto& config=frame.renderer.GetConfig();
         if(!m_areaLighting.Prepare(frame.renderer.GetDevice(),uploads)) return false;
         const bool active=config.lighting.enabled && config.lighting.direct && !frame.lodDebug;
         if(!m_lighting.Prepare(frame.renderer.GetDevice(),uploads,frame.scene,frame.camera,

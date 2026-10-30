@@ -18,7 +18,7 @@ void main()
 {
     uint vertex=gl_GlobalInvocationID.x;
     if(vertex>=dispatchData.vertexCount) return;
-    uint base=vertex*16;
+    uint base=vertex*12;
     mat4 skin,normalSkin;
     LoadSkinning(vertex,dispatchData.influenceOffset,dispatchData.paletteOffset,skin,normalSkin);
     vec3 position=vec3(sourceVertices.values[base],sourceVertices.values[base+1],sourceVertices.values[base+2]);
@@ -37,5 +37,4 @@ void main()
     skinnedVertices.values[base+6]=sourceVertices.values[base+6];
     skinnedVertices.values[base+7]=sourceVertices.values[base+7];
     skinnedVertices.values[base+11]=sourceVertices.values[base+11]*(determinant(mat3(skin))<0 ? -1 : 1);
-    for(uint i=12;i<16;++i)skinnedVertices.values[base+i]=sourceVertices.values[base+i];
 }

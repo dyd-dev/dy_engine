@@ -1,7 +1,5 @@
 #include "AdvancedRenderingInternal.h"
 #include "ScreenSpaceLighting.h"
-#include "DepthPrepassValidation.h"
-#include "GpuVisibility.h"
 #include "dyf/Camera.h"
 #include <cmath>
 
@@ -18,7 +16,7 @@ public:
     {
         RenderRequirements requirements;
         if(!AdvancedModuleEnabled(renderer)) return requirements;
-        const auto& config=renderer.GetAppliedConfig();
+        const auto& config=renderer.GetConfig();
         const auto& quality=config.advanced;
         const bool diagnostic=config.debugLodColor || config.debugWireframe;
         const bool surfaceDebug=quality.surfaceDebugView!=SurfaceDebugView::None;
@@ -29,15 +27,11 @@ public:
         {
             const auto& device=renderer.GetDevice();
             const bool occlusion=config.enableGpuCulling && config.enableInstancing && config.enableOcclusionCulling &&
-                GpuVisibility::SupportsOcclusion(device);
-            const bool lighting=config.lighting.enabled;
-            requirements.needsDepth=occlusion;
-            requirements.needsNormal=lighting && (quality.ambientOcclusion || quality.diffuseGI || quality.reflections);
-            requirements.needsMaterial=lighting && (quality.diffuseGI || quality.reflections);
-            // Screen effects use Motion.z as their exact positive linear depth.
-            requirements.needsMotion=requirements.needsNormal;
+                device.Supports(RHI::Feature::Compute) && device.Supports(RHI::Feature::IndirectDraw);
+            requirements.needsSurface|=occlusion || (config.lighting.enabled &&
+                (quality.ambientOcclusion || quality.diffuseGI || quality.reflections));
         }
-        requirements.needsGeometry=requirements.RequiresDepth();
+        requirements.needsGeometry=requirements.needsSurface;
         return requirements;
     }
 
@@ -45,15 +39,14 @@ public:
     {
         m_prepared=m_recorded=false;
         if(!AdvancedModuleEnabled(frame.renderer)) return true;
-        if(!frame.requirements.RequiresDepth())
+        if(!frame.requirements.needsSurface)
         {
             if(m_lighting) m_lighting->Invalidate();
             return true;
         }
-        const auto& config=frame.renderer.GetAppliedConfig();
+        const auto& config=frame.renderer.GetConfig();
         const auto& quality=config.advanced;
         ScreenSpaceLighting::Settings settings;
-        settings.surfaceMask=frame.requirements.SurfaceOutputMask();
         settings.frustumCulling=config.enableFrustumCulling;
         settings.ambientOcclusion=config.lighting.enabled && quality.ambientOcclusion && !frame.lodDebug;
         settings.diffuseGI=config.lighting.enabled && quality.diffuseGI && !frame.lodDebug;
@@ -66,9 +59,6 @@ public:
         if(!m_lighting) m_lighting=std::make_unique<ScreenSpaceLighting>();
         if(!m_lighting->Prepare(frame.renderer.GetDevice(),uploads,frame.depth.texture,
             frame.camera,frame.geometry,settings)) return false;
-        m_depthGeometry.Capture(frame.geometry);
-        m_depthView=frame.camera.view;m_depthProjection=frame.camera.projection;
-        m_depthTexture=frame.depth.texture;
         frame.ao.texture=m_lighting->GetAO();
         m_prepared=true;
         return true;
@@ -76,17 +66,15 @@ public:
 
     bool AddPasses(RenderStage stage,RenderFrame& frame,RHI::RenderGraph& graph) override
     {
-        if(!AdvancedModuleEnabled(frame.renderer) || frame.outputWritten || !frame.requirements.RequiresDepth()) return true;
+        if(!AdvancedModuleEnabled(frame.renderer) || frame.outputWritten || !frame.requirements.needsSurface) return true;
         if(stage!=RenderStage::BeforeOpaque && stage!=RenderStage::AfterOpaque) return true;
         if(!m_prepared || !m_lighting) return AdvancedPassFailure("Surface lighting resources were not prepared.");
         if(stage==RenderStage::BeforeOpaque)
         {
             if(!m_lighting->Import(graph) || !m_lighting->AddSurface(graph,frame.depth.resource,
-                frame.visibleInstances.resource,frame.indirectArguments.resource) ||
+                frame.gpuVisibility?frame.visibleInstances.resource:RHI::RGResourceHandle{},
+                frame.gpuVisibility?frame.indirectArguments.resource:RHI::RGResourceHandle{}) ||
                 !m_lighting->AddAO(graph)) return AdvancedPassFailure("Surface/AO pass creation failed.");
-            frame.opaqueDepthComplete=m_depthTexture==frame.depth.texture &&
-                SameDepthCamera(m_depthView,m_depthProjection,frame.camera) &&
-                m_depthGeometry.Matches(frame.geometry);
             const auto& surface=m_lighting->GetGraphResources();
             frame.normal={m_lighting->GetNormal(),surface.normal};
             frame.albedo={m_lighting->GetAlbedoMetal(),surface.albedo};
@@ -95,7 +83,7 @@ public:
             m_recorded=true;
             return true;
         }
-        const auto& quality=frame.renderer.GetAppliedConfig().advanced;
+        const auto& quality=frame.renderer.GetConfig().advanced;
         if(quality.surfaceDebugView!=SurfaceDebugView::None && !frame.wireframe)
         {
             const auto& projection=frame.camera.projection;
@@ -128,9 +116,6 @@ public:
 
 private:
     std::unique_ptr<ScreenSpaceLighting> m_lighting;
-    DepthGeometrySnapshot m_depthGeometry;
-    Math::float4x4 m_depthView,m_depthProjection;
-    RHI::TextureHandle m_depthTexture=nullptr;
     bool m_prepared=false,m_recorded=false;
 };
 }

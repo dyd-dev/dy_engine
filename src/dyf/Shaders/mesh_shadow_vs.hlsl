@@ -41,23 +41,21 @@ struct ShadowOutput
 {
     float4 position : SV_POSITION;
     float2 uv : TEXCOORD0;
-    float alpha : TEXCOORD1;
 };
 
 #if RENDERER_INSTANCING // 인스턴싱 빌드에서만 물체별 행렬 입력을 사용하며, 일반 경로는 draw 상수의 모델 행렬을 쓴다.
-// 위치·UV와 8번 입력의 정점 알파를 사용한다. 법선·접선·조명은 그림자 깊이 생성에 사용하지 않는다.
+// 위치와 UV만 필요하다. 표면에 수직인 방향(법선)·표면을 따라가는 방향(접선)·조명은 그림자 깊이 생성에 사용하지 않는다.
 struct ShadowVertex
 {
     float3 position : TEXCOORD0;
     float2 uv : TEXCOORD2;
-    float alpha : TEXCOORD8;
     float4 model0 : TEXCOORD4;
     float4 model1 : TEXCOORD5;
     float4 model2 : TEXCOORD6;
     float4 model3 : TEXCOORD7;
 };
 
-// UV·정점 알파는 그대로 넘기고, 모델 행렬로 월드 위치를 만든 뒤 padding2가 가리키는 광원 행렬을 곱한다. 깊이 저장은 이후 래스터·깊이 단계가 맡는다.
+// UV는 그대로 넘기고, 모델 행렬로 월드 위치를 만든 뒤 padding2가 가리키는 광원 행렬을 곱한다. 깊이 저장은 이후 래스터·깊이 단계가 맡는다.
 ShadowOutput main(ShadowVertex input)
 {
     // CPU 인스턴스 버퍼의 네 열을 HLSL 행 생성자로 받으므로 transpose를 거쳐 모델 행렬을 복원한다.
@@ -65,16 +63,15 @@ ShadowOutput main(ShadowVertex input)
     ShadowOutput output;
     output.position=mul(lightViewProjectionMatrix[padding2], mul(world, float4(input.position, 1.0)));
     output.uv=input.uv;
-    output.alpha=input.alpha;
     return output;
 }
 #else
-ShadowOutput main(float3 position : TEXCOORD0, float2 uv : TEXCOORD2, float alpha : TEXCOORD8)
+// UV는 그대로 넘기고, 모델 행렬로 월드 위치를 만든 뒤 padding2가 가리키는 광원 행렬을 곱한다. 깊이 저장은 이후 래스터·깊이 단계가 맡는다.
+ShadowOutput main(float3 position : TEXCOORD0, float2 uv : TEXCOORD2)
 {
     ShadowOutput output;
     output.position=mul(lightViewProjectionMatrix[padding2], mul(modelMatrix, float4(position, 1.0)));
     output.uv=uv;
-    output.alpha=alpha;
     return output;
 }
 #endif

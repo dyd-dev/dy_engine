@@ -5,7 +5,7 @@ struct Output {float4 position:SV_Position;float3 color:COLOR0;};
 Output main(uint vertex:SV_VertexID,uint instance:SV_InstanceID)
 {
     const float2 vertices[3]={float2(-.8,-.6),float2(.8,-.6),float2(0,.95)};
-    uint id=visibleIds[instance];
+    uint id=controls.z!=0?visibleIds[instance]:controls.w;
     float4 sphere=bounds[id];float phase=.37*float(id);
     sphere.xy+=.25*float2(sin(camera.w+phase),cos(camera.w*.8+phase));
     float3 position=sphere.xyz-camera.xyz;

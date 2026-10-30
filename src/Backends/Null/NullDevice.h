@@ -10,7 +10,6 @@ namespace dyf::Backends
 		NullDevice();
 		~NullDevice() override;
 
-	protected:
 		void DestroySwapchainNative() override;
         bool WaitIdleNative() override;
         bool IsLostNative() const override;

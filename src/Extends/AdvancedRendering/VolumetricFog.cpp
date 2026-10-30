@@ -9,7 +9,6 @@
 #include "dyf/RHI/Texture.h"
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #if defined(ENABLE_METAL) || defined(ENABLE_D3D12) || defined(ENABLE_VULKAN)
 #include "TemporalVertex.h"
 #include "VolumetricFogFragment.h"
@@ -114,25 +113,21 @@ bool VolumetricFog::Prepare(RHI::IDevice& device,RHI::ICommandList& uploads,cons
     if(!m_frame) m_frame=device.CreateBuffer({sizeof(Frame),0,BufferUsage::Constant,ResourceState::CopyDestination});
     if(!m_noShadow) m_noShadow=device.CreateBuffer({sizeof(RendererShadowConstants),0,BufferUsage::Constant,ResourceState::CopyDestination});
     if(!m_frame || !m_noShadow) return false;
-    Frame frame{};static_assert(sizeof(Frame)==208);
+    Frame frame;static_assert(sizeof(Frame)==208);
     if(!Math::Inverse(camera.projection*camera.view,frame.inverseViewProjection)) return false;
     frame.view=camera.view;frame.camera={camera.position.x,camera.position.y,camera.position.z,0};
     frame.size={float(width),float(height),1.f/width,1.f/height};
     frame.fog={settings.density,settings.heightFalloff,settings.baseHeight,settings.maxDistance};
     frame.scattering={settings.albedo.x,settings.albedo.y,settings.albedo.z,settings.anisotropy};
     frame.options={settings.steps,std::abs(camera.projection.m[15])<1e-6f?1u:0u,0,0};
-    if(!m_uploadReady || std::memcmp(&frame,&m_uploadedFrame,sizeof(frame))!=0)
+    if(m_uploadReady)
     {
-        if(m_uploadReady)
-        {
-            const ResourceBarrierDesc barrier={m_frame,nullptr,ResourceState::ConstantBuffer,ResourceState::CopyDestination,{}};
-            uploads.ResourceBarrier(&barrier,1);
-        }
-        if(!device.UpdateBuffer(uploads,m_frame,0,&frame,sizeof(frame))) return false;
-        const ResourceBarrierDesc ready={m_frame,nullptr,ResourceState::CopyDestination,ResourceState::ConstantBuffer,{}};
-        uploads.ResourceBarrier(&ready,1);
-        m_pendingFrame=frame;m_uploadPending=true;
+        const ResourceBarrierDesc barrier={m_frame,nullptr,ResourceState::ConstantBuffer,ResourceState::CopyDestination,{}};
+        uploads.ResourceBarrier(&barrier,1);
     }
+    if(!device.UpdateBuffer(uploads,m_frame,0,&frame,sizeof(frame))) return false;
+    const ResourceBarrierDesc ready={m_frame,nullptr,ResourceState::CopyDestination,ResourceState::ConstantBuffer,{}};
+    uploads.ResourceBarrier(&ready,1);
     if(!m_uploadReady)
     {
         // 뷰 개수가 모두 0이므로 비활성 그림자 경로는 바인딩된 깊이를 샘플하지 않는다.
@@ -141,7 +136,7 @@ bool VolumetricFog::Prepare(RHI::IDevice& device,RHI::ICommandList& uploads,cons
         const ResourceBarrierDesc barrier={m_noShadow,nullptr,ResourceState::CopyDestination,ResourceState::ConstantBuffer,{}};
         uploads.ResourceBarrier(&barrier,1);
     }
-    m_width=width;m_height=height;m_prepared=true;++m_cacheFrame;
+    m_width=width;m_height=height;m_uploadPending=true;m_prepared=true;++m_cacheFrame;
     const uint64_t retained=std::max(2u,device.GetDesc().maxFramesInFlight);
     m_sets.erase(std::remove_if(m_sets.begin(),m_sets.end(),[&](const CachedSet& set) {
         if(m_cacheFrame-set.used<=retained) return false;
@@ -215,7 +210,7 @@ bool VolumetricFog::AddPasses(RHI::RenderGraph& graph,RHI::TextureHandle hdr,RHI
 
 void VolumetricFog::CommitUploads()
 {
-    if(m_uploadPending) {m_uploadedFrame=m_pendingFrame;m_uploadReady=true;m_uploadPending=false;}
+    if(m_uploadPending) {m_uploadReady=true;m_uploadPending=false;}
 }
 
 void VolumetricFog::CommitFrame()

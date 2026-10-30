@@ -7,8 +7,10 @@ int main()
 	const uint32_t width = 640, height = 480;
 
 	dyf::Platform::Window window(width, height, "dyf / Image");
+	if(!window.GetHandle()) return 1;
 	
 	auto renderer = dyf::Renderer::Create(window.GetHandle());
+	if(!renderer) return 1;
 
 	dyf::Canvas canvas(width,height);
 	
@@ -16,7 +18,7 @@ int main()
 	canvas.Clear(color);
 	
 	dyf::Image image;
-	dyf::LoadImage(DY_EXAMPLE_IMAGE, image);
+	if(!dyf::LoadImage(DY_EXAMPLE_IMAGE, image)) return 1;
 
 	dyf::Rectangle dest;
 	canvas.Image(image, dest = {40,70,240,240});
@@ -27,7 +29,7 @@ int main()
 		window.PollEvents();
 		if(!window.IsRunning()) break;
 		
-		renderer->Render(canvas);
+		if(!renderer->Render(canvas)) return 1;
 	}
 	return 0;
 }

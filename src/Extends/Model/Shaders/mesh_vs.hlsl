@@ -48,7 +48,6 @@ struct VSInput
     float3 normal : TEXCOORD1;
     float2 uv : TEXCOORD2;
     float4 tangent : TEXCOORD3;
-    float4 color : TEXCOORD8;
 };
 
 struct VSOutput
@@ -58,7 +57,6 @@ struct VSOutput
     float3 worldPosition : TEXCOORD1;
     float3 worldNormal : TEXCOORD2;
     float4 worldTangent : TEXCOORD3;
-    float4 color : TEXCOORD5;
 #if RENDERER_ENABLE_SHADOWS
     float4 lightSpacePosition : TEXCOORD4;
 #endif
@@ -79,7 +77,6 @@ VSOutput main(VSInput input, uint vertexId : SV_VertexID)
     VSOutput output;
     output.position = mul(viewProjectionMatrix, worldPosition);
     output.uv = input.uv;
-    output.color = input.color;
     output.worldPosition = worldPosition.xyz;
     const float3 fallbackNormal = SkinNormalizeOr(SkinColumn(modelNormal, 2).xyz, float3(0,0,1));
     output.worldNormal = SkinNormalizeOr(mul((float3x3)modelNormal, skinnedNormal), fallbackNormal);

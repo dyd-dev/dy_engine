@@ -13,16 +13,15 @@ cbuffer DrawConstants : register(b10,space0)
     float4 baseColor;
     float4 materialParams;
 };
-// 반전 변환의 면 방향을 보정하고, Mask 재질만 정점·텍스처 알파와 임곗값을 검사한다.
-void main(float2 uv : TEXCOORD0, float vertexAlpha : TEXCOORD1, bool frontFace : SV_IsFrontFace)
+// 면 방향을 먼저 검사한다. 알파 모드 하위 2비트가 Mask(1)일 때만 텍스처 알파와 임곗값을 검사한다.
+void main(float2 uv : TEXCOORD0, bool frontFace : SV_IsFrontFace)
 {
-    bool front=frontFace!=((padding1 & 32u)!=0u);
-    if((padding1 & 4u)==0u && !front) discard;
-    if((padding1 & 3u)==1u)
+    if((padding1 & 4u)==0u && !frontFace) discard; // 양면 비트가 꺼진 재질의 뒷면은 그림자 깊이에도 남기지 않는다.
+    if((padding1 & 3u)==1u) // Mask 재질만 잘라내기 검사를 수행한다. Opaque·Blend의 분류와 제출 정책은 호출측이 결정한다.
     {
-        float alpha=baseColor.a*vertexAlpha;
-        if((textureFlags & 1u)!=0u) alpha*=baseColorTexture.Sample(materialSampler,uv).a;
-        // 임곗값보다 작은 알파만 버리며 같은 값은 남긴다.
+        float alpha=baseColor.a;
+        if((textureFlags & 1u)!=0u) alpha*=baseColorTexture.Sample(materialSampler,uv).a; // 기본색 이미지가 있는 재질만 이미지의 알파를 곱한다.
+        // clip은 alpha-cutoff가 음수일 때 픽셀을 버린다. 임곗값과 같은 알파는 남는다.
         clip(alpha-asfloat(padding0));
     }
 }

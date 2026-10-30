@@ -23,7 +23,7 @@ layout(std430,set=0,binding=4) buffer History {uint history[];};
 // planes는 정규화된 절두체 6면, depthRow는 시점 앞쪽 거리를 구하는 행이다.
 // 상태 전환 방향마다 서로 다른 기준을 적용해 잦은 전환을 막는 방식(히스테리시스)의 폭을 projection에 담는다.
 // projection은 픽셀 배율·허용 오차·히스테리시스 폭·원근 여부, counts는 물체 수·배치 수·절두체 검사·LOD 사용 순서다.
-layout(std140,set=0,binding=5) uniform Frame {vec4 planes[6];vec4 depthRow,projection,lodScreenSizes;uvec4 counts;} frame;
+layout(std140,set=0,binding=5) uniform Frame {vec4 planes[6];vec4 depthRow,projection;uvec4 counts;} frame;
 layout(push_constant) uniform Operation {uvec4 values;} operation;
 #if GPU_VISIBILITY_OCCLUSION // 가림 빌드에서만 Hi-Z 자원·판정 함수·제거 조건을 포함한다.
 layout(set=0,binding=6) uniform texture2D hizImage;
@@ -79,8 +79,7 @@ void main()
             // 간접 인수는 uint 5개씩: indexCount, instanceCount, firstIndex, vertexOffset, firstInstance다. 선택 패스가 두 번째 칸의 개수만 증가시킨다.
             Batch batch=batches[id];uint offset=id*5;
             arguments[offset]=batch.indexCount;arguments[offset+1]=0;
-            arguments[offset+2]=batch.firstIndex;arguments[offset+3]=uint(batch.vertexOffset);
-            arguments[offset+4]=operation.values.w!=0?batch.instanceOffset:0;
+            arguments[offset+2]=batch.firstIndex;arguments[offset+3]=uint(batch.vertexOffset);arguments[offset+4]=0;
         }
         if(operation.values.z!=0 && id<frame.counts.x) history[id]=0; // 이력 재설정 요청이 있고 물체 인덱스가 유효할 때만 LOD를 0으로 되돌린다.
         return;
@@ -105,18 +104,16 @@ void main()
         float depth=dot(frame.depthRow,vec4(value.centerRadius.xyz,1));
         bool perspective=frame.projection.w>.5;
         float pixels=frame.projection.x*(perspective?1/max(depth-value.centerRadius.w,.001):1);
-        float screenSize=2.0*value.centerRadius.w*pixels;
         // 픽셀 배율이 유한한 0 이상일 때만 LOD를 낮추며, 원근 투영에서는 경계 구 전체가 카메라 앞에 있어야 한다.
-        if((!perspective || depth>value.centerRadius.w+.001) && Finite(pixels) && pixels>=0 && Finite(screenSize))
+        if((!perspective || depth>value.centerRadius.w+.001) && Finite(pixels) && pixels>=0)
         {
             uint previous=min(history[id],value.metadata.x-1);
             for(uint level=1;level<value.metadata.x;++level)
             {
                 float error=value.lodErrors[level]*pixels;
                 // 이전 LOD보다 거칠게 바꿀 때는 더 엄격한 한도, 되돌아올 때는 느슨한 한도를 써 경계에서 LOD가 왕복하는 현상을 줄인다.
-                float transition=level>previous?1-frame.projection.z:1+frame.projection.z;
-                float limit=frame.projection.y*transition;
-                if(!Finite(error) || error<0 || error>limit || screenSize>frame.lodScreenSizes[level-1]*transition) break; // 화면 크기와 오차 기준을 모두 만족하는 축약 단계만 허용한다.
+                float limit=frame.projection.y*(level>previous?1-frame.projection.z:1+frame.projection.z);
+                if(!Finite(error) || error<0 || error>limit) break; // LOD 오차가 비유한값·음수이거나 허용 픽셀 한도를 넘으면 더 거친 단계 탐색을 멈춘다.
                 selected=level;
             }
         }

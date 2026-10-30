@@ -1,5 +1,4 @@
 #include "ModelLoader.h"
-#include "../../dyf/SceneAlgorithms.h"
 
 #include <algorithm>
 #include <cctype>
@@ -20,12 +19,6 @@ namespace dyf
 	{
 		std::fprintf(stderr, "[Model] %s: %s\n", path.c_str(), message.c_str());
 	}
-	bool AllowMaterialFallback(const std::string& path, const ModelLoadOptions& options, const std::string& message)
-	{
-		if(!options.allowMaterialFallbacks) return ReportModelError(path, message + "; allowMaterialFallbacks is false");
-		ReportModelWarning(path, message);
-		return true;
-	}
 }
 
 namespace dyf
@@ -39,12 +32,6 @@ namespace dyf
     bool LoadModel(const std::string& path, ModelData& outModel, const ModelLoadOptions& options, uint64_t& decodedBytes)
     {
         decodedBytes=0;
-		if(options.fbxBaseColorAlphaMode && *options.fbxBaseColorAlphaMode != MaterialAlphaMode::Opaque &&
-			*options.fbxBaseColorAlphaMode != MaterialAlphaMode::Mask && *options.fbxBaseColorAlphaMode != MaterialAlphaMode::Blend)
-		{
-			outModel = {};
-			return ReportModelError(path, "fbxBaseColorAlphaMode is invalid");
-		}
 		if(options.normalMapYSign != 1.0f && options.normalMapYSign != -1.0f)
 		{
 			outModel = {};
@@ -52,12 +39,6 @@ namespace dyf
 		}
 		for(const ModelMaterialOverride& value : options.materialOverrides)
 		{
-			if(value.alphaMode && *value.alphaMode != MaterialAlphaMode::Opaque &&
-				*value.alphaMode != MaterialAlphaMode::Mask && *value.alphaMode != MaterialAlphaMode::Blend)
-			{
-				outModel = {};
-				return ReportModelError(path, "material override alphaMode is invalid: " + value.name);
-			}
 			const bool preserveBaseColor = value.baseColor.x == -1.0f && value.baseColor.y == -1.0f
 				&& value.baseColor.z == -1.0f && value.baseColor.w == -1.0f;
 			const bool validBaseColor = std::isfinite(value.baseColor.x) && value.baseColor.x >= 0.0f && value.baseColor.x <= 1.0f
@@ -154,16 +135,10 @@ namespace dyf
 				}
 				if(!value.roughnessTexturePath.empty())
 					material.roughnessTexturePath = overridePath(value.roughnessTexturePath);
-				if(value.alphaMode) material.material.alphaMode = *value.alphaMode;
-				if(value.doubleSided) material.material.doubleSided = *value.doubleSided;
-			}
-			if(!material.material.unlit && !UsesBlendedRendering(material.material) && material.material.indexOfRefraction != 1.5f)
-			{
-				if(!AllowMaterialFallback(path, options, "opaque material IOR other than 1.5 is unsupported: " + material.name))
+				if(value.transmissionFactor > 0.0f)
 				{
-					outModel = {};
-					decodedBytes = 0;
-					return false;
+					material.material.alphaMode = MaterialAlphaMode::Blend;
+					material.material.doubleSided = true;
 				}
 			}
 		}

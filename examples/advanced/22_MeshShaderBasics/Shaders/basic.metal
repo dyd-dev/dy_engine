@@ -25,7 +25,10 @@ void meshMain(
         float3(0.0f, 0.0f, 1.0f)
     };
 
-    output.set_vertex(tid, VertexOut{ float4(positions[tid], 0.0f, 1.0f), float4(colors[tid], 1.0f) });
+    if (tid < 3)
+    {
+        output.set_vertex(tid, VertexOut{ float4(positions[tid], 0.0f, 1.0f), float4(colors[tid], 1.0f) });
+    }
 
     if (tid == 0)
     {
