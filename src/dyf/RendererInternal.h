@@ -185,7 +185,6 @@ struct Renderer::Impl
         struct View
         {
             std::vector<uint8_t> bytes,pendingBytes;
-            std::vector<std::weak_ptr<const MeshData>> meshes,pendingMeshes;
         };
         bool valid=false,pending=false,reused=false;
         RHI::TextureHandle target=nullptr;
@@ -193,8 +192,8 @@ struct Renderer::Impl
         std::vector<uint8_t> bytes,pendingBytes;
         std::vector<std::weak_ptr<const MeshData>> meshes,pendingMeshes;
         std::array<View,128> views;
-        std::vector<uint8_t> casterBytes;
-        std::vector<std::pair<size_t,size_t>> casterRanges;
+        std::vector<uint8_t> casterBytes,pendingCasterBytes,casterDirty;
+        std::vector<std::pair<size_t,size_t>> casterRanges,pendingCasterRanges;
     };
     // Image의 공유 원본을 보관하며 텍스처와 현재 RHI 상태를 함께 추적한다. 같은 픽셀 원본도 색 공간이 다르면 다른 해석이다.
     struct TextureSlot

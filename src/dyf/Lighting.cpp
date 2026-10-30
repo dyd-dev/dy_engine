@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
+#include <stdexcept>
 #include <limits>
 namespace dyf
 {
@@ -276,8 +278,10 @@ bool Renderer::Impl::ReuseShadowAtlas(const Scene& scene,ShadowData& shadows,con
     auto* destination=&cache.pendingBytes;
     destination->clear();
     const auto append=[&](const auto& value) {
-        const auto* first=reinterpret_cast<const uint8_t*>(&value);
-        destination->insert(destination->end(),first,first+sizeof(value));
+        const auto oldSize=destination->size();
+        if(sizeof(value)>destination->max_size()-oldSize) throw std::length_error("Shadow signature exceeds vector capacity");
+        destination->resize(oldSize+sizeof(value));
+        std::memcpy(destination->data()+oldSize,&value,sizeof(value));
     };
     const auto appendPosition=[&](const Math::float3& value) {append(value.x);append(value.y);append(value.z);};
     append(config.lighting.shadowQuality);append(config.enableFrustumCulling);append(config.enableInstancing);
@@ -286,8 +290,10 @@ bool Renderer::Impl::ReuseShadowAtlas(const Scene& scene,ShadowData& shadows,con
     const bool sameAtlas=cache.valid && cache.target==shadowDepthTarget && !cache.scene.expired() &&
         !cache.scene.owner_before(scene.m_lifetime) && !scene.m_lifetime.owner_before(cache.scene) &&
         cache.bytes==cache.pendingBytes;
-    auto& casterBytes=cache.casterBytes;casterBytes.clear();
-    cache.casterRanges.assign(scene.GetEntityCount(),{});
+    auto& casterBytes=cache.pendingCasterBytes;casterBytes.clear();
+    cache.pendingCasterRanges.assign(scene.GetEntityCount(),{});
+    cache.pendingMeshes.assign(scene.GetEntityCount(),{});
+    cache.casterDirty.assign(scene.GetEntityCount(),true);
     destination=&casterBytes;
     uint32_t previous=UINT32_MAX;
     for(const auto& caster:shadowCasterScratch)
@@ -321,12 +327,22 @@ bool Renderer::Impl::ReuseShadowAtlas(const Scene& scene,ShadowData& shadows,con
                 if(draw.localBounds.valid) {appendPosition(draw.localBounds.min);appendPosition(draw.localBounds.max);}
             }
         }
-        cache.casterRanges[caster.entity]={first,casterBytes.size()-first};
+        const size_t size=casterBytes.size()-first;
+        cache.pendingCasterRanges[caster.entity]={first,size};
+        cache.pendingMeshes[caster.entity]=mesh.source;
+        if(sameAtlas && caster.entity<cache.casterRanges.size() && caster.entity<cache.meshes.size())
+        {
+            const auto range=cache.casterRanges[caster.entity];
+            const auto& owner=cache.meshes[caster.entity];
+            cache.casterDirty[caster.entity]=range.second!=size ||
+                !std::equal(casterBytes.begin()+first,casterBytes.end(),cache.casterBytes.begin()+range.first) ||
+                owner.expired() || owner.owner_before(mesh.source) || mesh.source.owner_before(owner);
+        }
     }
     bool dirty=false;
     for(uint32_t view=0;view<shadows.viewCount;++view)
     {
-        auto& entry=cache.views[view];entry.pendingBytes.clear();entry.pendingMeshes.clear();
+        auto& entry=cache.views[view];entry.pendingBytes.clear();
         destination=&entry.pendingBytes;
         append(shadows.constants.lightViewProjectionMatrix[view].m);
         append(shadows.casterVolumes[view].count);
@@ -334,21 +350,14 @@ bool Renderer::Impl::ReuseShadowAtlas(const Scene& scene,ShadowData& shadows,con
         const auto& rect=shadows.constants.atlasRect[view];append(rect.x);append(rect.y);append(rect.z);append(rect.w);
         CollectShadowViewCasters(shadowCasterScratch,shadows,view,config.enableFrustumCulling,shadowViewScratch);
         append(shadowViewScratch.size());
-        previous=UINT32_MAX;
+        bool reusable=sameAtlas;
         for(uint32_t index:shadowViewScratch)
         {
             const auto& caster=shadowCasterScratch[index];
             append(caster.entity);append(caster.firstIndex);append(caster.indexCount);
-            if(previous==caster.entity)continue;
-            previous=caster.entity;
-            const auto range=cache.casterRanges[caster.entity];
-            destination->insert(destination->end(),casterBytes.begin()+range.first,casterBytes.begin()+range.first+range.second);
-            entry.pendingMeshes.push_back(m_meshes[caster.mesh].source);
+            reusable&=!cache.casterDirty[caster.entity];
         }
-        bool reusable=sameAtlas && entry.bytes==entry.pendingBytes && entry.meshes.size()==entry.pendingMeshes.size();
-        for(size_t i=0;reusable && i<entry.meshes.size();++i)
-            reusable=!entry.meshes[i].expired() && !entry.meshes[i].owner_before(entry.pendingMeshes[i]) &&
-                !entry.pendingMeshes[i].owner_before(entry.meshes[i]);
+        reusable=reusable && entry.bytes==entry.pendingBytes;
         shadows.dirtyViews[view]=!reusable;dirty|=!reusable;
     }
     // Bounded LoadOp::Clear is an explicit backend contract; otherwise preserve the full redraw path.
@@ -362,10 +371,10 @@ void Renderer::Impl::CommitShadowAtlas(const Scene& scene)
     auto& cache=shadowAtlasCache;
     if(!cache.pending)return;
     cache.bytes.swap(cache.pendingBytes);
-    for(auto& view:cache.views)
-    {
-        view.bytes.swap(view.pendingBytes);view.meshes.swap(view.pendingMeshes);
-    }
+    cache.casterBytes.swap(cache.pendingCasterBytes);
+    cache.casterRanges.swap(cache.pendingCasterRanges);
+    cache.meshes.swap(cache.pendingMeshes);
+    for(auto& view:cache.views)view.bytes.swap(view.pendingBytes);
     cache.scene=scene.m_lifetime;cache.target=shadowDepthTarget;
     cache.valid=true;cache.pending=false;
 }
