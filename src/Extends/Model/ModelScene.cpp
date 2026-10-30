@@ -5,6 +5,9 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <unordered_map>
+#include <unordered_set>
+#include "AnimationSampling.h"
 
 namespace dyf
 {
@@ -124,6 +127,8 @@ namespace dyf
 		}
 		m_jointPaletteMatrices.clear();
         m_entitySkinPaletteOffsets.assign(GetEntityCount(), UINT32_MAX);
+        // Bindings may arrive through CreateModelInstance or mutable instance edits.
+        m_entityHasMorphTargets.assign(GetEntityCount(), false);
         m_entityMorphedMeshes.resize(GetEntityCount());
 		for(MeshData& morphedMesh : this->m_entityMorphedMeshes)
 		{
@@ -132,11 +137,30 @@ namespace dyf
 		}
 
 		std::vector<SkinJointMatrices> skinPalette;
+		std::unordered_map<uint64_t, uint32_t> paletteOffsets;
+		// Keys cannot change while this synchronous update samples the instances.
+		// Keep validation local to this call so edits before the next update are seen.
+		std::unordered_set<const AnimationClip*> sampledClips;
+		Detail::NodeHierarchyScratch hierarchyScratch;
+		std::unordered_map<const ModelAsset*,std::vector<uint32_t>> nodeOrders;
+		std::vector<uint8_t> assetUses;
+		if(m_modelInstances.size()>1 && !m_modelAssets.empty())
+		{
+			assetUses.assign(m_modelAssets.size(),0u);
+			for(const auto& instance:m_modelInstances)
+				if(IsValidModelAsset(instance.assetId))
+				{
+					auto& uses=assetUses[ToIndex(instance.assetId)];
+					if(uses<2u)++uses;
+				}
+		}
 		for(size_t instanceIndex = 0; instanceIndex < m_modelInstances.size(); ++instanceIndex)
 		{
+			paletteOffsets.clear();
 			ModelInstance& instance = m_modelInstances[instanceIndex];
 			const ModelInstanceID instanceId = static_cast<ModelInstanceID>(instanceIndex);
 			const ModelAsset* asset = TryGetModelAsset(instance.assetId);
+			const bool sharedAsset=asset && !assetUses.empty() && assetUses[ToIndex(instance.assetId)]>1u;
 			const std::vector<ModelNode>& nodes = asset != nullptr ? asset->nodes : instance.nodes;
 			const std::vector<ModelSkin>& skins = asset != nullptr ? asset->skins : instance.skins;
 			const std::vector<AnimationClip>& clips = asset != nullptr ? asset->animations : instance.clips;
@@ -156,7 +180,13 @@ namespace dyf
 				if(instance.playback.playing)
 				{
 					const float advance = deltaSeconds * instance.playback.speed;
-					instance.playback.time += advance;
+					const float nextTime = instance.playback.time + advance;
+					if(!std::isfinite(advance) || !std::isfinite(nextTime))
+					{
+						fail(instanceId, EntityID::Invalid, "animation time exceeds the finite range");
+						continue;
+					}
+					instance.playback.time = nextTime;
 					if(instance.playback.loop && duration > 0.0f)
 					{
 						instance.playback.time = std::fmod(instance.playback.time, duration);
@@ -174,15 +204,16 @@ namespace dyf
 						instance.playback.time = clamped;
 					}
 				}
-				if(!SampleAnimationClip(
-					clip,
-					instance.playback.time,
-					instance.localPose,
-					instance.nodeMorphWeights))
+				const bool knownKeys=sharedAsset && sampledClips.count(&clip)!=0;
+				const bool sampled=knownKeys
+					? Detail::SampleAnimationClipValidatedKeys(clip,instance.playback.time,instance.localPose,instance.nodeMorphWeights)
+					: SampleAnimationClip(clip,instance.playback.time,instance.localPose,instance.nodeMorphWeights);
+				if(!sampled)
 				{
 					fail(instanceId, EntityID::Invalid, "invalid animation clip");
 					continue;
 				}
+				if(sharedAsset && !knownKeys)sampledClips.insert(&clip);
 			}
 
 			for(auto entry = m_morphOverrides.lower_bound({instanceId, 0u, 0u});
@@ -193,7 +224,18 @@ namespace dyf
 					instance.nodeMorphWeights[node][target] = entry->second;
 			}
 
-			if(!BuildGlobalNodeMatrices(nodes, instance.localPose, instance.globalPose))
+			bool validHierarchy=false;
+			const auto knownOrder=sharedAsset ? nodeOrders.find(asset) : nodeOrders.end();
+			if(knownOrder!=nodeOrders.end())
+				validHierarchy=Detail::BuildGlobalNodeMatricesValidatedOrder(
+					nodes,instance.localPose,instance.globalPose,knownOrder->second);
+			else
+			{
+				validHierarchy=Detail::BuildGlobalNodeMatricesWithScratch(
+					nodes,instance.localPose,instance.globalPose,hierarchyScratch,sharedAsset);
+				if(validHierarchy && sharedAsset)nodeOrders.emplace(asset,std::move(hierarchyScratch.order));
+			}
+			if(!validHierarchy)
 			{
 				fail(instanceId, EntityID::Invalid, "invalid node hierarchy");
 				continue;
@@ -217,6 +259,7 @@ namespace dyf
 						continue;
 					}
 					const ModelAssetMesh& assetMesh = asset->meshes[binding.assetMeshIndex];
+                    m_entityHasMorphTargets[ToIndex(binding.entity)] = !assetMesh.morphTargets.empty();
 					if(!assetMesh.morphTargets.empty())
 					{
 						const std::vector<float>& weights = instance.nodeMorphWeights[binding.nodeIndex];
@@ -254,16 +297,13 @@ namespace dyf
 					continue;
 				}
 
-				// 이번 갱신에서 앞서 처리한 바인딩의 팔레트만 공유한다.
-				const auto cachedPalette = std::find_if(
-					instance.bindings.begin(), current,
-					[&binding](const ModelEntityBinding& entry) {
-						return entry.nodeIndex == binding.nodeIndex && entry.skinIndex == binding.skinIndex
-							&& entry.paletteOffset != UINT32_MAX;
-					});
-				if(cachedPalette != current)
+				// Only successful palettes from this instance/update are reusable.
+				// Exact node/skin keys avoid scanning the binding prefix for every mesh.
+				const uint64_t paletteKey = (uint64_t(binding.nodeIndex) << 32) | binding.skinIndex;
+				const auto cachedPalette = paletteOffsets.find(paletteKey);
+				if(cachedPalette != paletteOffsets.end())
 				{
-					binding.paletteOffset = cachedPalette->paletteOffset;
+					binding.paletteOffset = cachedPalette->second;
 					this->m_entitySkinPaletteOffsets[ToIndex(binding.entity)] = binding.paletteOffset;
 					continue;
 				}
@@ -277,12 +317,20 @@ namespace dyf
 					fail(instanceId, binding.entity, "invalid joint palette");
 					continue;
 				}
-				binding.paletteOffset = static_cast<uint32_t>(m_jointPaletteMatrices.size());
-				this->m_entitySkinPaletteOffsets[ToIndex(binding.entity)] = binding.paletteOffset;
+				if(m_jointPaletteMatrices.size() >= UINT32_MAX
+					|| skinPalette.size() > UINT32_MAX - m_jointPaletteMatrices.size())
+				{
+					fail(instanceId, binding.entity, "joint palette exceeds the supported offset range");
+					continue;
+				}
+				const uint32_t paletteOffset = static_cast<uint32_t>(m_jointPaletteMatrices.size());
 				m_jointPaletteMatrices.insert(
 					m_jointPaletteMatrices.end(),
 					skinPalette.begin(),
 					skinPalette.end());
+				if(instance.bindings.size() > 1u) paletteOffsets.emplace(paletteKey, paletteOffset);
+				binding.paletteOffset = paletteOffset;
+				this->m_entitySkinPaletteOffsets[ToIndex(binding.entity)] = paletteOffset;
 			}
 		}
 		return success;

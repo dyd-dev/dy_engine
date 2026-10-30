@@ -24,6 +24,20 @@ namespace dyf::Platform
 		traceSink.compare_exchange_strong(sink, nullptr);
 	}
 
+    bool HasFrameTimingSink() noexcept
+    {
+        const auto* sink=traceSink.load();
+        return sink && sink->frameTiming;
+    }
+    void PublishFrameTiming(const FrameTimingEvent& event) noexcept
+    {
+        if(const auto* sink=traceSink.load();sink && sink->frameTiming)sink->frameTiming(event);
+    }
+    void PublishGpuTiming(const GpuTimingSample& sample) noexcept
+    {
+        if(const auto* sink=traceSink.load();sink && sink->gpuTiming)sink->gpuTiming(sample);
+    }
+
 	TraceZone::TraceZone(const SourceLocation& location) noexcept
 	{
 #ifdef DY_PROFILER_TRACING_ENABLED
@@ -148,6 +162,7 @@ namespace dyf::Platform
 		double m_gpuFrameSumMilliseconds = 0.0;
 		uint32_t m_gpuFrameCount = 0;
 		std::vector<ProfilerPassTiming> m_gpuPassSums;
+        LiveFrameKey m_latestGpuFrame;
 		uint64_t m_sequence = 0;
 	};
 
@@ -217,6 +232,7 @@ namespace dyf::Platform
 		snapshot.cpuReadbackAverageMilliseconds = impl->m_cpuStageSums[5] / impl->m_frameCount;
 		snapshot.hasGpuFrame = impl->m_gpuFrameCount > 0;
 		snapshot.gpuFrameSampleCount = impl->m_gpuFrameCount;
+        snapshot.latestGpuFrame=impl->m_latestGpuFrame;
 		if(snapshot.hasGpuFrame)
 			snapshot.gpuFrameAverageMilliseconds = impl->m_gpuFrameSumMilliseconds / impl->m_gpuFrameCount;
 		snapshot.gpuPasses = impl->m_gpuPassSums;
@@ -232,15 +248,26 @@ namespace dyf::Platform
 		return true;
 	}
 
-	void Profiler::AddGpuSample(double frameMilliseconds, const std::vector<ProfilerPassTiming>& passes)
+	void Profiler::AddGpuSample(double frameMilliseconds, const std::vector<ProfilerPassTiming>& passes, LiveFrameKey frame)
 	{
 		if(std::isfinite(frameMilliseconds) && frameMilliseconds >= 0.0)
 		{
 			impl->m_gpuFrameSumMilliseconds += frameMilliseconds;
 			++impl->m_gpuFrameCount;
+            impl->m_latestGpuFrame=frame;
 		}
+		double shadowMilliseconds = 0.0;
+		bool hasShadow = false, validShadow = true;
 		for(const auto& pass : passes)
 		{
+			const bool shadow = pass.name == "Shadow" || pass.name.compare(0, 12, "Shadow view ") == 0;
+			if(shadow)
+			{
+				hasShadow = true;
+				if(std::isfinite(pass.averageMilliseconds) && pass.averageMilliseconds >= 0.0)
+					shadowMilliseconds += pass.averageMilliseconds;
+				else validShadow = false;
+			}
 			if(!std::isfinite(pass.averageMilliseconds) || pass.averageMilliseconds < 0.0)
 				continue;
 			auto found = std::find_if(impl->m_gpuPassSums.begin(), impl->m_gpuPassSums.end(),
@@ -252,16 +279,19 @@ namespace dyf::Platform
 			}
 			found->averageMilliseconds += pass.averageMilliseconds;
 			++found->sampleCount;
+            impl->m_latestGpuFrame=frame;
 			if(pass.name == "MainForward")
 			{
 				impl->m_gpuMainSumMilliseconds += pass.averageMilliseconds;
 				++impl->m_gpuMainCount;
 			}
-			if(pass.name == "Shadow")
-			{
-				impl->m_gpuShadowSumMilliseconds += pass.averageMilliseconds;
-				++impl->m_gpuShadowCount;
-			}
+		}
+		// One GPU-frame sample may contain several atlas views. Average their sum
+		// across frames, rather than treating each view as a separate frame sample.
+		if(hasShadow && validShadow && std::isfinite(shadowMilliseconds))
+		{
+			impl->m_gpuShadowSumMilliseconds += shadowMilliseconds;
+			++impl->m_gpuShadowCount;
 		}
 	}
 
@@ -279,5 +309,6 @@ namespace dyf::Platform
 		impl->m_gpuFrameSumMilliseconds = 0.0;
 		impl->m_gpuFrameCount = 0;
 		impl->m_gpuPassSums.clear();
+        impl->m_latestGpuFrame={};
 	}
 }

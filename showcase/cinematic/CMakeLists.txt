@@ -27,3 +27,9 @@ endif()
 add_executable(ShowcaseCinematic main.cpp)
 target_link_libraries(ShowcaseCinematic PRIVATE dyf::Model dyf::AdvancedRendering)
 dyf_configure_showcase(ShowcaseCinematic showcase)
+set_property(TARGET ShowcaseCinematic APPEND PROPERTY DY_EXAMPLE_PRESETS
+    "ShowcaseBistroExterior|exterior"
+    "ShowcaseBistroNight|night"
+    "ShowcaseBistroWine|interior"
+    "ShowcaseEmerald|emerald"
+    "ShowcaseKnight|exterior|--actor|knight|--comparison-mode|skinning")

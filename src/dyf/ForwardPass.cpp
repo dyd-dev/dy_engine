@@ -1,4 +1,5 @@
 #include "../Platform/Profiler/CollectorInternal.h"
+#include "../Platform/Profiler/RhiProfiler.h"
 #include "RendererInternal.h"
 #include "DrawCommands.h"
 #include "GpuVisibility.h"
@@ -7,23 +8,22 @@
 #include "dyf/Scene.h"
 #include "dyf/RHI/Buffer.h"
 #include "dyf/RHI/Texture.h"
-#include "../RHI/ResourceSet.h"
+#include "dyf/RHI/ResourceSet.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 
 namespace dyf
 {
-// 재질 세트 준비→색/깊이 렌더 시작→CPU 순서/투명 정렬→GPU 간접 배치→CPU 직접 배치→렌더 종료 순서다.
-bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
-	RHI::ICommandList& commands, const std::vector<RendererDrawDesc>* draws,
-	RHI::TextureHandle output)
+// Owner preparation keeps descriptor allocation and index uploads outside workers.
+bool Renderer::Impl::PrepareMainPassResources(const Scene& scene,RHI::ICommandList& commands,
+    const std::vector<RendererDrawDesc>* draws)
 {
-// 라이브/트레이싱 빌드에서 CPU Record를 계측하며, 아래 GPU scope는 별도의 타임스탬프 기록과 후속 수집을 연결한다.
 #if defined(DY_LIVE_PROFILING_ENABLED) || defined(DY_PROFILER_TRACING_ENABLED)
-    Platform::CpuScope cpuScope(Platform::LiveStage::Record,"RendererMainForward");
+    Platform::CpuScope cpuScope(Platform::LiveStage::CpuPrepare,"Main material resources");
 #endif
-    Platform::FrameProfiler::GpuScope liveGpu(m_profiler,commands,Platform::LiveGpuScope::RendererMainForward,liveId);
 	auto& materialSets=mainSetScratch;
     // 재질 세트 준비 중 교체한 인덱스 버퍼의 소유권을 보호한다. 준비 실패면 새 버퍼를 버리고 이전 핸들/ready를 복구한다.
     struct MaterialBufferTransaction {
@@ -40,10 +40,75 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
         }
     } materialTransaction(*this);
 	if(!CreateMaterialResourceSets(scene, commands, draws, materialSets)) return false; // 필수 재질 세트 준비 실패면 버퍼 보호 객체가 이전 소유권을 복원한다.
+    mainMirroredSetScratch.assign(materialSets.size(),nullptr);
+    const auto prepareMirroredSet=[&](uint32_t material,uint32_t setIndex)
+    {
+        if(material>=scene.Materials().size() || setIndex>=materialSets.size() ||
+            !materialSets[setIndex] || mainMirroredSetScratch[setIndex])return true;
+        auto* base=materialSets[setIndex];
+        const auto selectedPipeline=MaterialPipeline(scene.Materials()[material],true);
+        auto* resolved=base;
+        if(base->GetPipeline()!=selectedPipeline)
+        {
+            mainBindingScratch.assign(base->GetBindings(),base->GetBindings()+base->GetBindingCount());
+            resolved=CachedResourceSet(selectedPipeline,mainBindingScratch,mainSets);
+        }
+        if(!resolved)return false;
+        mainMirroredSetScratch[setIndex]=resolved;
+        return true;
+    };
+    const bool batched=visibilityActive || cpuBatchesActive;
+    if(batched)
+    {
+        // Batches use canonical material IDs, which may differ from the source
+        // entity's ID. Prepare that exact slot, including mirrored instances.
+        const auto& batches=visibilityActive ? visibilityDraws : cpuDraws;
+        for(const auto& batch:batches)
+            if(Math::Determinant3x3(scene.GetTransform(static_cast<EntityID>(batch.entity)))<0 &&
+                !prepareMirroredSet(batch.material,batch.material))return false;
+    }
+    for(uint32_t index=0;index<scene.GetEntityCount();++index)
+    {
+        const auto entity=static_cast<EntityID>(index);
+        const auto material=ToIndex(scene.GetEntityMaterial(entity));
+        const auto setIndex=draws && !stockDrawInputs ? index : material;
+        if(material>=scene.Materials().size() || setIndex>=materialSets.size() ||
+            !materialSets[setIndex] || mainMirroredSetScratch[setIndex])continue;
+        // The batch loop owns opaque draws. Only legacy/transparent draws need
+        // per-entity checks, avoiding repeated determinants for shared batches.
+        if(batched && !UsesBlendedRendering(scene.Materials()[material]))continue;
+        if(Math::Determinant3x3(scene.GetTransform(entity))<0 &&
+            !prepareMirroredSet(material,setIndex))return false;
+    }
     // 재질 세트 준비 성공을 확정한다. 여기의 committed는 버퍼 교체 책임의 확정이며 전체 프레임 GPU 완료를 뜻하지 않는다.
     materialTransaction.committed=true;
+    return true;
+}
+
+// The owner prepares sets and upload commands before any worker records this pass.
+bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
+    RHI::ICommandList& commands,const std::vector<RendererDrawDesc>* draws,RHI::TextureHandle output)
+{
+#if defined(DY_LIVE_PROFILING_ENABLED) || defined(DY_PROFILER_TRACING_ENABLED)
+    Platform::CpuScope cpuScope(Platform::LiveStage::Record,"RendererMainForward");
+#endif
+    Platform::FrameProfiler::GpuScope liveGpu(m_profiler,commands,Platform::LiveGpuScope::RendererMainForward,liveId);
+    Platform::LiveId passBatch=0,instanceId=0,batchInstanceId=0,argumentsId=0;
+    const auto prepareLiveBatch=[&] {
+        if(passBatch)return;
+        passBatch=Platform::GetLiveBatchId(Platform::GetLiveBatchId(liveId,scene.m_liveId),1);
+        instanceId=Platform::FindLiveObject(instanceBuffer);
+        if(visibilityActive)
+        {
+            batchInstanceId=Platform::FindLiveObject(gpuVisibility->GetInstanceBuffer());
+            argumentsId=Platform::FindLiveObject(gpuVisibility->GetArgumentsBuffer());
+        }
+        else if(cpuBatchesActive)batchInstanceId=Platform::FindLiveObject(cpuInstanceBuffer);
+    };
+    const auto& materialSets=mainSetScratch;
 	auto* target = config.enableHdrRendering ? hdrTarget : output;
 	const auto viewProjection = camera.projection * camera.view;
+	const CameraFrustum frustum(camera);
 #ifdef DY_RENDERDOC_ENABLED // RenderDoc 표식 지원을 포함한 빌드에서만 디버그 이벤트 시작을 기록한다.
 	commands.BeginDebugEvent("MainForward");
 #endif
@@ -83,7 +148,8 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 	RHI::DepthStencilAttachment depth;
 	depth.texture = depthStencilTarget;
 	depth.state = RHI::ResourceState::DepthWrite;
-	depth.depthLoadOp = NeedsSurfacePass() ? RHI::LoadOp::Load : RHI::LoadOp::Clear;
+    // Solid wireframe prepasses share the same proof; a request alone cannot preserve stale depth.
+	depth.depthLoadOp = frameDepthPrepassValid ? RHI::LoadOp::Load : RHI::LoadOp::Clear;
 	depth.depthStoreOp = UsesAdvancedRendering() || m_environmentCapture ? RHI::StoreOp::Store : RHI::StoreOp::Discard;
 	if(RHI::HasStencil(depthStencilTarget->GetDesc().format)) // 깊이 형식에 stencil이 있으면 이 패스에서 쓰지 않는 stencil의 load/store를 Discard로 지정한다.
 	{
@@ -97,19 +163,20 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
     // 표준 입력, 인스턴스 스트림, 기본 fragment 재질 묶기, 별도 투명 처리 여부를 분리한다. 하나의 최적화 토글이 모든 경로를 결정하지 않는다.
     const bool stock=stockDrawInputs;
     const bool instanced=UsesInstanceStream();
+    const bool baseInstance=stock && instanced && device->Supports(RHI::Feature::IndirectFirstInstance);
 	const bool batchBindings = shaderSources.bytes[MeshFragment].empty();
 	const bool separateTransparency=m_environmentCapture || wireframeActive || UsesSeparateTransparency();
 	// 유효한 재질 ID를 통해 Blend 여부를 판단한다. 무효 재질을 배열에 바로 접근하지 않는다.
 	const auto blended=[&](uint32_t index) {
 		const auto material=scene.GetEntityMaterial(static_cast<EntityID>(index));
 		return IsValid(material) && ToIndex(material)<scene.Materials().size() &&
-			scene.Materials()[ToIndex(material)].alphaMode==MaterialAlphaMode::Blend;
+			UsesBlendedRendering(scene.Materials()[ToIndex(material)]);
 	};
 	// CPU가 직접 그릴 객체 순서를 만든다. GPU 가시성 경로의 불투명 객체는 간접 배치로 처리하므로 이 목록에서 제외한다.
 	mainEntityOrder.clear();
 	mainEntityOrder.reserve(scene.GetEntityCount());
 	for(uint32_t i=0;i<scene.GetEntityCount();++i)
-		if((!separateTransparency || !blended(i)) && (!visibilityActive || blended(i))) mainEntityOrder.push_back(i); // 별도 처리할 Blend와 GPU 간접 처리할 불투명을 CPU 직접 목록에서 제외한다.
+		if((!separateTransparency || !blended(i)) && ((!visibilityActive && !cpuBatchesActive) || blended(i))) mainEntityOrder.push_back(i); // 별도 투명 패스와 GPU/CPU 압축 불투명 배치가 처리할 객체는 직접 목록에서 제외한다.
 	if(batchBindings && !separateTransparency) // 기본 재질을 이 패스에서 직접 합성할 때만 투명 정렬을 수행한다.
 	{
 		// 불투명을 먼저 두고 투명 부분만 뒤에서 앞으로 정렬한다. 같은 키의 상대 순서를 보존하여 불필요한 순서 변화를 줄인다.
@@ -128,35 +195,119 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 			const float z=Math::TransformPoint(camera.view,center).z;
 			return std::isfinite(z) ? z : 0.0f;
 		};
-		std::stable_sort(transparent,mainEntityOrder.end(),[&](uint32_t a,uint32_t b) {return distance(a)<distance(b);});
+        // Evaluate the same sort key once per transparent entity rather than
+        // repeating both transforms for every comparison. Stable ties retain
+        // the incoming entity order, including the finite-zero fallback.
+        mainTransparentScratch.clear();
+        const auto count=static_cast<size_t>(mainEntityOrder.end()-transparent);
+        if(count>1)
+        {
+            mainTransparentScratch.reserve(count);
+            for(auto entry=transparent;entry!=mainEntityOrder.end();++entry)
+                mainTransparentScratch.push_back({*entry,distance(*entry)});
+            std::stable_sort(mainTransparentScratch.begin(),mainTransparentScratch.end(),
+                [](const TransparentSortEntry& a,const TransparentSortEntry& b) {return a.depth<b.depth;});
+            auto output=transparent;
+            for(const auto& entry:mainTransparentScratch)*output++=entry.entity;
+        }
 	}
 	RHI::ResourceSetHandle boundMaterial = nullptr;
 	RHI::PipelineHandle boundPipeline=pipeline;
-	if(visibilityActive) // GPU 가시성 준비가 성공한 프레임이면 간접 배치를 먼저 기록한다.
+    const bool reuseInlineConstants=stock && instanced && shaderSources.bytes[MeshFragment].empty();
+    constexpr uint32_t inlineTailOffset=offsetof(DrawConstants,textureFlags);
+    constexpr uint32_t inlineTailSize=sizeof(DrawConstants)-inlineTailOffset;
+    std::array<std::byte,inlineTailSize> inlineTail={};
+    bool inlineConstantsValid=false;
+    const auto writeConstants=[&](const DrawConstants& constants) {
+        if(!reuseInlineConstants)
+        {
+            commands.SetInlineConstants(0,sizeof(constants),&constants);
+            return;
+        }
+        const auto* tail=reinterpret_cast<const std::byte*>(&constants)+inlineTailOffset;
+        // VP is fixed for this pass; stock instanced shaders ignore modelMatrix.
+        // A pipeline selection still requires a complete first write for coverage.
+        if(!inlineConstantsValid)
+        {
+            commands.SetInlineConstants(0,sizeof(constants),&constants);
+            inlineConstantsValid=true;
+        }
+        else
+        {
+            if(std::memcmp(inlineTail.data(),tail,inlineTailSize)==0)return;
+            commands.SetInlineConstants(inlineTailOffset,inlineTailSize,tail);
+        }
+        std::memcpy(inlineTail.data(),tail,inlineTailSize);
+    };
+    RHI::BufferHandle boundInstances=nullptr;
+    uint32_t boundInstanceOffset=0;
+    bool instanceBindingValid=false;
+    const auto bindInstances=[&](RHI::BufferHandle buffer,uint32_t offset) {
+        if(!instanced || !instanceBindingValid || buffer!=boundInstances || offset!=boundInstanceOffset)
+        {
+            commands.BindVertexBuffer(1,buffer,offset);
+            boundInstances=buffer;boundInstanceOffset=offset;instanceBindingValid=true;
+        }
+    };
+	// GPU 간접 배치와 CPU 압축 배치를 같은 목록 순회로 기록하되 실제 개수의 측정 계약은 구분한다.
+	if(visibilityActive || cpuBatchesActive)
 	{
-		recordingStatistics.gpuVisibility=true;
-		// GPU가 만든 가시 인스턴스/간접 인수를 배치별로 연결한다. CPU는 배치와 LOD를 알지만 실제 GPU 가시 개수는 여기서 읽지 않는다.
-		for(uint32_t batchIndex=0;batchIndex<visibilityDraws.size();++batchIndex)
+		recordingStatistics.gpuVisibility=visibilityActive;
+        if(cpuBatchesActive)recordingStatistics.culledEntityCount+=cpuCulledEntities;
+        const auto& batches=visibilityActive ? visibilityDraws : cpuDraws;
+        const auto batchConstants=[&](const VisibilityDraw& draw) {
+            const auto entity=static_cast<EntityID>(draw.entity);
+            const auto& material=scene.Materials()[draw.material];
+            const uint32_t flags=materialStates[draw.material].textureFlags |
+                (scene.GetEntityLighting(entity).receiveShadow ? 32u : 0u);
+            auto constants=MakeDrawConstants(viewProjection,material,scene.GetTransform(entity),flags);
+            if(lodDebugActive)
+            {
+                const float alpha=constants.baseColor.w;
+                constants.baseColor=LodColor(draw.level);constants.baseColor.w=alpha;constants.textureFlags|=64u;
+            }
+            if(m_environmentCapture && !m_environmentCaptureEmitters)constants.emissiveColor={};
+            constants.padding2=draw.material;
+            return constants;
+        };
+		for(uint32_t batchIndex=0;batchIndex<batches.size();++batchIndex)
 		{
-			const auto& draw=visibilityDraws[batchIndex];
+			if(visibilityActive && !gpuVisibility->MayDrawBatch(batchIndex))continue;
+			const auto& draw=batches[batchIndex];
 			const auto entity=static_cast<EntityID>(draw.entity);
 			const auto& mesh=m_meshes[draw.mesh];
 			const auto& material=scene.Materials()[draw.material];
 			const auto* input=draws ? &(*draws)[draw.entity] : nullptr;
             auto batchContext=Platform::GetLiveContext();
-            if(Platform::IsLiveCollectorEnabled()) // 간접 배치는 집계하고 출처·버퍼 링크는 상세 캡처 때만 남긴다.
+            if(Platform::IsLiveCollectorEnabled()) // 수집기가 켜진 경우에만 간접 배치 출처/인수 버퍼 링크를 남긴다.
             {
                 const bool detail=Platform::IsLiveDetailEnabled(batchContext.frame);
-                batchContext.batch=detail?Platform::GetLiveBatchPath(liveId,{scene.m_liveId,1,(uint64_t(1)<<63)|batchIndex}):0;
+                if(detail)prepareLiveBatch();
+                batchContext.batch=detail?Platform::GetLiveBatchId(passBatch,(uint64_t(1)<<63)|batchIndex):0;
                 Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;
                 batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Record;
-                batch.first=batchIndex;batch.stride=sizeof(RHI::DrawIndexedIndirectArguments);
-                batch.bytes=batch.stride;batch.operations=1;
-                batch.resource=detail?Platform::FindLiveObject(gpuVisibility->GetArgumentsBuffer()):0;
-                // 실제 가시 개수는 GPU가 결정하므로 간접 배치 이벤트에는 미확정으로 남기고 CPU capacity를 측정값으로 게시하지 않는다.
-                if(detail)std::strncpy(batch.label,"GPU indirect batch: visible count unknown",sizeof(batch.label)-1);
+                if(visibilityActive)
+                {
+                    batch.first=batchIndex;batch.stride=sizeof(RHI::DrawIndexedIndirectArguments);
+                    batch.bytes=batch.stride;batch.operations=1;
+                    batch.resource=argumentsId;
+                    // 실제 가시 개수는 GPU가 결정하므로 CPU capacity를 측정값으로 게시하지 않는다.
+                    if(detail)std::strncpy(batch.label,"GPU indirect batch: visible count unknown",sizeof(batch.label)-1);
+                    if(detail)RHI::ProfilerAccess::RecordLink(commands,batchInstanceId,batch.id);
+                }
+                else
+                {
+                    batch.first=draw.instanceOffset;batch.elements=draw.instanceCount;
+                    batch.stride=2*sizeof(Math::float4x4);batch.bytes=uint64_t(batch.elements)*batch.stride;batch.operations=1;
+                    batch.resource=batchInstanceId;
+                    if(detail)std::strncpy(batch.label,"CPU compacted instance batch",sizeof(batch.label)-1);
+                    for(uint32_t i=0;detail&&i<draw.instanceCount;++i)
+                    {
+                        const auto source=cpuInstanceEntities[draw.instanceOffset+i];
+                        if(source<scene.m_liveEntities.size())RHI::ProfilerAccess::RecordLink(commands,scene.m_liveEntities[source],batch.id);
+                    }
+                }
                 Platform::RecordLiveEvent(batch);
-                if(detail)Platform::RecordLiveLink({Platform::FindLiveObject(gpuVisibility->GetInstanceBuffer()),batch.id});
             }
             Platform::LiveContextScope linkedBatch(batchContext);
 			const auto selectedPipeline=MaterialPipeline(material,Math::Determinant3x3(scene.GetTransform(entity))<0);
@@ -164,37 +315,74 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 			// 재질과 반전 여부로 고른 파이프라인이 이전 것과 달라지면 새로 바인딩하고 재질 세트 기억도 비운다.
 			{
 				commands.BindGraphicsPipeline(selectedPipeline);boundPipeline=selectedPipeline;boundMaterial=nullptr;
+                instanceBindingValid=false;
+                inlineConstantsValid=false;
 			}
 			auto selectedSet=materialSets[draw.material];
 			if(selectedSet && selectedSet->GetPipeline()!=selectedPipeline) // 세트가 다른 파이프라인용이면 같은 바인딩으로 새 파이프라인 세트를 찾는다.
 			{
-				mainBindingScratch.assign(selectedSet->GetBindings(),selectedSet->GetBindings()+selectedSet->GetBindingCount());
-				selectedSet=CachedResourceSet(selectedPipeline,mainBindingScratch,mainSets);
+                selectedSet=mainMirroredSetScratch[draw.material];
 			}
 			if(!selectedSet) return false; // 간접 draw에 필요한 세트를 얻지 못하면 기록을 실패 처리한다.
 			if(boundMaterial!=selectedSet) // 현재 세트와 다를 때만 중복 없는 바인딩을 기록한다.
 			{
 				boundMaterial=selectedSet;commands.BindResourceSet(boundMaterial);
 			}
-			commands.BindVertexBuffer(0,input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer,0);
-			commands.BindVertexBuffer(1,gpuVisibility->GetInstanceBuffer(),
-				gpuVisibility->GetBatch(batchIndex).instanceOffset*sizeof(GpuVisibility::VisibleInstance));
-			commands.BindIndexBuffer(draw.level ? mesh.lods[draw.level-1].buffer : mesh.indexBuffer,RHI::Format::R32_UINT,0);
-			const uint32_t flags=materialStates[draw.material].textureFlags |
-				(scene.GetEntityLighting(entity).receiveShadow ? 32u : 0u);
-			auto constants=MakeDrawConstants(viewProjection,material,scene.GetTransform(entity),flags);
-			if(lodDebugActive) // 간접 배치의 LOD를 진단색으로 표시하고 원래 알파를 보존한다.
-			{
-				const float alpha=constants.baseColor.w;
-				constants.baseColor=LodColor(draw.level);constants.baseColor.w=alpha;constants.textureFlags|=64u;
-			}
-			constants.padding2=draw.material;
-			commands.SetInlineConstants(0,sizeof(constants),&constants);
-			// GPU 인수 버퍼의 해당 배치 오프셋을 참조하는 명령을 기록한다. 통계는 draw/간접 배치 수만 늘린다.
-			commands.DrawIndexedIndirect(gpuVisibility->GetArgumentsBuffer(),batchIndex*sizeof(RHI::DrawIndexedIndirectArguments));
-			++recordingStatistics.mainDrawCount;++recordingStatistics.indirectBatchCount;
+            const auto vertexBuffer=input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer;
+            commands.BindVertexBuffer(0,vertexBuffer,0);
+            const uint32_t firstInstance=visibilityActive ? gpuVisibility->GetBatch(batchIndex).instanceOffset : draw.instanceOffset;
+			bindInstances(visibilityActive ? gpuVisibility->GetInstanceBuffer() : cpuInstanceBuffer,
+				baseInstance ? 0 : firstInstance*sizeof(GpuVisibility::VisibleInstance));
+            const auto indexBuffer=visibilityActive ? MainIndirectIndexBuffer(mesh,draw.level,material,input) :
+                MainIndexBuffer(mesh,draw.level,material,input);
+            commands.BindIndexBuffer(indexBuffer,RHI::Format::R32_UINT,0);
+            const auto constants=batchConstants(draw);
+			writeConstants(constants);
+            if(visibilityActive)
+            {
+                uint32_t drawCount=1;
+                // The stock instance stream supplies model matrices; every other
+                // effective binding/constant must match across contiguous arguments.
+                if(baseInstance && reuseInlineConstants && !Platform::IsLiveCollectorEnabled())
+                    while(batchIndex+drawCount<batches.size())
+                    {
+                        const auto nextIndex=batchIndex+drawCount;
+                        if(!gpuVisibility->MayDrawBatch(nextIndex))break;
+                        const auto& next=batches[nextIndex];
+                        const auto& nextMesh=m_meshes[next.mesh];
+                        const auto* nextInput=draws ? &(*draws)[next.entity] : nullptr;
+                        const auto& nextMaterial=scene.Materials()[next.material];
+                        const auto nextPipeline=MaterialPipeline(nextMaterial,
+                            Math::Determinant3x3(scene.GetTransform(static_cast<EntityID>(next.entity)))<0);
+                        auto nextSet=materialSets[next.material];
+                        if(nextSet && nextSet->GetPipeline()!=nextPipeline)nextSet=mainMirroredSetScratch[next.material];
+                        if((nextInput && nextInput->vertexBuffer ? nextInput->vertexBuffer : nextMesh.vertexBuffer)!=vertexBuffer ||
+                            MainIndirectIndexBuffer(nextMesh,next.level,nextMaterial,nextInput)!=indexBuffer ||
+                            nextPipeline!=selectedPipeline || nextSet!=selectedSet)break;
+                        const auto nextConstants=batchConstants(next);
+                        if(std::memcmp(reinterpret_cast<const std::byte*>(&constants)+inlineTailOffset,
+                            reinterpret_cast<const std::byte*>(&nextConstants)+inlineTailOffset,inlineTailSize)!=0)break;
+                        ++drawCount;
+                    }
+                commands.DrawIndexedIndirect(gpuVisibility->GetArgumentsBuffer(),
+                    batchIndex*sizeof(RHI::DrawIndexedIndirectArguments),drawCount);
+                recordingStatistics.indirectBatchCount+=drawCount;
+                batchIndex+=drawCount-1;
+            }
+            else
+            {
+                const auto indexCount=draw.level ? mesh.lods[draw.level-1].count : mesh.indexCount;
+                commands.DrawIndexedInstanced(indexCount,draw.instanceCount,0,0,baseInstance?firstInstance:0);
+                recordingStatistics.mainInstanceCount+=draw.instanceCount;
+                recordingStatistics.mainTriangleCount+=uint64_t(indexCount/3)*draw.instanceCount;
+                recordingStatistics.mainOriginalTriangleCount+=uint64_t(mesh.indexCount/3)*draw.instanceCount;
+                recordingStatistics.lodInstanceCounts[draw.level]+=draw.instanceCount;
+            }
+			++recordingStatistics.mainDrawCount;
 		}
 	}
+    // The legacy draw chunk starts with its own instance binding.
+    instanceBindingValid=false;
 	// 직접 경로는 유효 메시/재질 검사 후 선택 LOD와 CPU 절두체 제거를 적용하고 연속 호환 객체를 한 draw로 묶는다.
 	for(uint32_t orderIndex = 0; orderIndex < mainEntityOrder.size(); ++orderIndex)
 	{
@@ -209,17 +397,18 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 		const auto& mesh = m_meshes[meshIndex];
 		if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount) continue; // 업로드 준비된 버퍼/인덱스가 없는 메시를 그리지 않는다.
         const auto level=std::min<uint32_t>(EntityLod(entityIndex),mesh.lods.size());
-        const auto indexBuffer=level ? mesh.lods[level-1].buffer : mesh.indexBuffer;
+        const auto* input=draws ? &(*draws)[entityIndex] : nullptr;
+        auto indexBuffer=MainIndexBuffer(mesh,level,scene.Materials()[materialIndex],input);
         const auto indexCount=level ? mesh.lods[level-1].count : mesh.indexCount;
         const auto& localBounds=draws && (*draws)[entityIndex].hasLocalBounds ? (*draws)[entityIndex].localBounds : mesh.bounds;
-        if(stock && config.enableFrustumCulling && OutsideCamera(localBounds,scene.GetTransform(entity),camera)) { // 표준 입력에서 CPU 제거가 켜졌고 경계가 카메라 밖이면 제거 수만 늘리고 draw를 생략한다.
+        // 카메라 평면은 패스당 한 번 준비하고 유효한 표준 경계가 밖임을 확인했을 때만 draw를 생략한다.
+        if(stock && config.enableFrustumCulling && frustum.Outside(localBounds,scene.GetTransform(entity))) {
             ++recordingStatistics.culledEntityCount;continue;
         }
         const bool mirrored=Math::Determinant3x3(scene.GetTransform(entity))<0;
         uint32_t count=1;
-        // 표준 입력과 인스턴스 스트림에서만 묶기를 시도하며, Blend 제외 조건은 기본 fragment에만 적용한다.
-        if(stock && instanced && (!batchBindings || scene.Materials()[materialIndex].alphaMode!=MaterialAlphaMode::Blend)) {
-            // 렌더 순서의 다음 항목이 연속 객체 ID일 때만 묶는다. 이어지는 조건은 같은 면 방향·정점 버퍼·LOD·메시·재질·그림자 수신 상태를 요구한다.
+        // 표준 인스턴스 스트림에서만 묶고, 기본 fragment가 Blend·투과 재질을 처리하면 정렬 순서를 유지한다.
+        if(stock && instanced && (!batchBindings || !UsesBlendedRendering(scene.Materials()[materialIndex]))) {
             while(orderIndex+count<mainEntityOrder.size() && mainEntityOrder[orderIndex+count]==entityIndex+count) {
                 const auto next=static_cast<EntityID>(entityIndex+count);
                 if((Math::Determinant3x3(scene.GetTransform(next))<0)!=mirrored) break; // 변환에 따른 면 방향이 다르면 같은 파이프라인의 배치로 묶지 않는다.
@@ -232,26 +421,33 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
                     materialStates[index].textures!=materialStates[materialIndex].textures ||
                     materialStates[index].textureFlags!=materialStates[materialIndex].textureFlags ||
                     !EqualMaterial(scene.Materials()[index],scene.Materials()[materialIndex]) ||
-                    (config.enableFrustumCulling && OutsideCamera(draws && (*draws)[entityIndex+count].hasLocalBounds ?
-                        (*draws)[entityIndex+count].localBounds : mesh.bounds,scene.GetTransform(next),camera)))break;
+                    (config.enableFrustumCulling && frustum.Outside(draws && (*draws)[entityIndex+count].hasLocalBounds ?
+                        (*draws)[entityIndex+count].localBounds : mesh.bounds,scene.GetTransform(next))))break;
                 ++count;
             }
         }
+        // Legacy batches compare the current stream only. A previous-position
+        // override on any member must still keep the entire batch on original IB.
+        if(draws && indexBuffer==mesh.mainIndexBuffer)
+            for(uint32_t i=1;i<count;++i)
+                if(MainIndexBuffer(mesh,level,scene.Materials()[materialIndex],&(*draws)[entityIndex+i])!=indexBuffer)
+                {indexBuffer=mesh.indexBuffer;break;}
         auto batchContext=Platform::GetLiveContext();
-        if(Platform::IsLiveCollectorEnabled()) // 배치의 범위·바이트·이유는 집계하고 객체 링크는 상세 캡처 때만 남긴다.
+        if(Platform::IsLiveCollectorEnabled()) // 수집 중이면 직접 배치의 범위·바이트·제한된 이유 분류와 객체 링크를 남긴다.
         {
             const bool detail=Platform::IsLiveDetailEnabled(batchContext.frame);
-            batchContext.batch=detail?Platform::GetLiveBatchPath(liveId,{scene.m_liveId,1,(uint64_t(entityIndex)<<32)|count}):0;
+            if(detail)prepareLiveBatch();
+            batchContext.batch=detail?Platform::GetLiveBatchId(passBatch,(uint64_t(entityIndex)<<32)|count):0;
             batchContext.object=entityIndex<scene.m_liveEntities.size()?scene.m_liveEntities[entityIndex]:scene.m_liveId;
             Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;
             batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Data;
             batch.first=entityIndex;batch.elements=count;batch.stride=2*sizeof(Math::float4x4);
-            batch.bytes=uint64_t(count)*batch.stride;batch.resource=detail?Platform::FindLiveObject(instanceBuffer):0;
+            batch.bytes=uint64_t(count)*batch.stride;batch.resource=instanceId;
             // main의 관측 이유는 사용자 기하·인스턴싱 OFF·그 밖(None)만 구분한다. 위에서 실제로 배치를 끊은 개별 조건을 별도 이유로 저장하지는 않는다.
             batch.reason=!stock?Platform::LiveSplitReason::CustomGeometry:!instanced?Platform::LiveSplitReason::InstancingDisabled:Platform::LiveSplitReason::None;
             Platform::RecordLiveEvent(batch);
             for(uint32_t i=0;detail&&i<count&&entityIndex+i<scene.m_liveEntities.size();++i)
-                Platform::RecordLiveLink({scene.m_liveEntities[entityIndex+i],batch.id});
+                RHI::ProfilerAccess::RecordLink(commands,scene.m_liveEntities[entityIndex+i],batch.id);
         }
         // 이후 명령을 방금 만든 배치 출처에 연결한다. scope가 끝나면 바깥 frame/source 문맥으로 돌아간다.
         Platform::LiveContextScope linkedBatch(batchContext);
@@ -261,13 +457,15 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 			commands.BindGraphicsPipeline(selectedPipeline);
 			boundPipeline=selectedPipeline;
 			boundMaterial=nullptr;
+            instanceBindingValid=false;
+            inlineConstantsValid=false;
 		}
-        if(instanced)commands.BindVertexBuffer(1,instanceBuffer,entityIndex*2*sizeof(Math::float4x4)); // 인스턴스 스트림은 객체당 행렬 두 개의 128바이트 간격으로 배치되어 있으므로 첫 객체의 entityIndex*128 오프셋부터 바인딩한다.
+        // firstInstance 지원 시 버퍼 시작과 객체 인덱스를 사용하고, 미지원 시 객체당 128바이트 오프셋으로 같은 행을 선택한다.
+        if(instanced)bindInstances(instanceBuffer,baseInstance?0:entityIndex*2*sizeof(Math::float4x4));
 		auto selectedSet=materialSets[setIndex];
 		if(selectedSet && selectedSet->GetPipeline()!=selectedPipeline) // 반전 등으로 파이프라인이 달라지면 그 파이프라인용 세트를 얻는다.
 		{
-			mainBindingScratch.assign(selectedSet->GetBindings(),selectedSet->GetBindings()+selectedSet->GetBindingCount());
-			selectedSet=CachedResourceSet(selectedPipeline,mainBindingScratch,mainSets);
+            selectedSet=mainMirroredSetScratch[setIndex];
 		}
 		if(!selectedSet) return false; // 직접 draw에 필요한 세트가 없으면 실패한다.
 		if(!batchBindings || boundMaterial != selectedSet) // 사용자 fragment는 매번 바인딩하고, 기본 경로는 세트가 달라질 때만 바인딩한다.
@@ -275,7 +473,6 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 			boundMaterial = selectedSet;
 			commands.BindResourceSet(boundMaterial);
 		}
-		const auto* input = draws ? &(*draws)[entityIndex] : nullptr;
 		commands.BindVertexBuffer(0, input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer, 0);
 		commands.BindIndexBuffer(indexBuffer, RHI::Format::R32_UINT, 0);
 		const uint32_t flags = materialStates[materialIndex].textureFlags |
@@ -290,11 +487,11 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 		}
 		if(m_environmentCapture && !m_environmentCaptureEmitters) constants.emissiveColor={}; // 환경 캡처에서 발광체 포함을 요청하지 않았다면 emissiveColor를 0으로 만들어 재질 발광을 캡처 색에서 제외한다.
 		constants.padding2 = materialIndex;
-		commands.SetInlineConstants(0, sizeof(constants), &constants);
+		writeConstants(constants);
 		if(input && !input->inlineConstants.empty()) // 사용자 추가 상수가 있을 때 기본 DrawConstants 뒤에 이어 기록한다.
 			commands.SetInlineConstants(sizeof(constants), static_cast<uint32_t>(input->inlineConstants.size()), input->inlineConstants.data());
-        // 선택 LOD의 인덱스와 묶은 객체 수로 명령을 기록한다. 통계는 실제 제출 후보 삼각형과 LOD 전 원본 삼각형을 별도로 누적한다.
-        commands.DrawIndexedInstanced(indexCount,count,0,0,0);
+        // 선택 LOD와 실제 묶은 객체 수로 제출하며 원본 삼각형 수와 선택 LOD 통계는 별도로 누적한다.
+        commands.DrawIndexedInstanced(indexCount,count,0,0,baseInstance?entityIndex:0);
         ++recordingStatistics.mainDrawCount;recordingStatistics.mainInstanceCount+=count;
         recordingStatistics.mainTriangleCount+=uint64_t(indexCount/3)*count;
         recordingStatistics.mainOriginalTriangleCount+=uint64_t(mesh.indexCount/3)*count;

@@ -6,7 +6,7 @@ layout(location=0) out vec3 color;
 void main()
 {
     const vec2 vertices[3]=vec2[3](vec2(-.8,-.6),vec2(.8,-.6),vec2(0,.95));
-    uint id=frame.controls.z!=0u?visibleIds[gl_InstanceIndex]:frame.controls.w;
+    uint id=visibleIds[gl_InstanceIndex];
     vec4 sphere=bounds[id];float phase=.37*float(id);
     sphere.xy+=.25*vec2(sin(frame.camera.w+phase),cos(frame.camera.w*.8+phase));
     vec3 position=sphere.xyz-frame.camera.xyz;

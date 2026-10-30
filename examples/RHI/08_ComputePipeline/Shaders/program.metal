@@ -3,7 +3,6 @@ using namespace metal;
 struct GeneratedVertex { float4 position; float4 color; };
 kernel void computeMain(device GeneratedVertex* outputVertices [[buffer(0)]],constant float4& parameters [[buffer(15)]],
     uint id [[thread_position_in_grid]]) {
-    if(id>=3) return;
     const float2 positions[3]={float2(-0.7,-0.6),float2(0.7,-0.6),float2(0,0.7)};
     const float3 colors[3]={float3(1,0.2,0.15),float3(0.2,1,0.3),float3(0.2,0.4,1)};
     float angle=parameters.x*0.4f,c=cos(angle),s=sin(angle); float2 p=positions[id];

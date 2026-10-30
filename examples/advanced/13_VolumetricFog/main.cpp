@@ -1,179 +1,99 @@
-#include "dyf/RHI/IDevice.h"
-#include "dyf.h"
+#include "dyf/Platform/Window.h"
 #include "dyf/RHI.h"
-#include "vertex.h"
-#include "scene.h"
-#include "fog.h"
-
-#include <algorithm>
-#include <array>
-#include <cmath>
-#include <cstddef>
-#include <cstdint>
 #include <cstdio>
-#include <memory>
-#include <stdexcept>
 #include <string>
+#include <utility>
+
+#include <iterator>
+#include <fstream>
+#include <array>
+#include <cstdint>
+#include <memory>
 #include <vector>
 
 using namespace dyf::RHI;
 
-namespace {
-
-// =============================================================================
-// [셰이더 상수 버퍼 구조체]
-// 16바이트 정렬된 4개 벡터 (총 64바이트)
-// =============================================================================
 struct alignas(16) Params {
-    float sizeTime[4] = {960, 640, 0, 0}; // width, height, time, mode(0:fog, 1:off, 2:transmittance, 3:scattering)
-    float settings[4] = {1, 0.45f, 0.8f, 0.9f}; // exposure, height falloff, unused, unused
+    float sizeTime[4] = {960, 640, 0, 0};
+    float settings[4] = {1, .45f, .8f, .9f};
     float jitter[4] = {};
-    float extra[4] = {}; // extra[0]: fog density, extra[1]: raymarch steps
+    float extra[4] = {};
 };
 
-static_assert(sizeof(Params) == 64 && alignof(Params) == 16);
-static_assert(offsetof(Params, settings) == 16 &&
-              offsetof(Params, jitter) == 32 &&
-              offsetof(Params, extra) == 48);
+int main() {
+    // 예제 폴더에서 실행한다. 컴파일러가 포함된 엔진은 GLSL을 컴파일하고, 그 외에는 .bin을 읽는다.
+    const auto loadShader = [](dyf::RHI::ShaderStage stage, const char* sourcePath, const char* binaryPath)
+    {
+        bool compile = dyf::RHI::IsShaderCompilerAvailable();
+        const char* path = compile ? sourcePath : binaryPath;
+        std::ifstream file(path, std::ios::binary);
+        if(!file && compile)
+        {
+            compile = false;
+            path = binaryPath;
+            file.open(path, std::ios::binary);
+        }
+        if(!file) { std::fprintf(stderr, "Cannot open shader: %s\n", path); return std::vector<uint8_t>{}; }
+        const std::string data{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+        if(!compile) return std::vector<uint8_t>(data.begin(), data.end());
+        auto result = dyf::RHI::CompileShader({stage, data, "main", sourcePath});
+        if(!result.diagnostics.empty()) std::fprintf(stderr, "%s\n", result.diagnostics.c_str());
+        return std::move(result.binary);
+    };
 
-// 수치 인자 검증 및 파싱 함수
-double Number(const std::string& value, double minimum, double maximum) {
-    size_t consumed = 0;
-    double result = std::stod(value, &consumed);
-    if (consumed != value.size() || !std::isfinite(result) || result < minimum || result > maximum) {
-        throw std::runtime_error("Numeric option out of range: " + value);
-    }
-    return result;
-}
-
-
-} // namespace
-
-// =============================================================================
-// [메인 진입점]
-// =============================================================================
-int main(int argc, char** argv) try {
     Params params;
-    params.extra[0] = 0.22f;
+    params.extra[0] = .22f;
     params.extra[1] = 64;
-    params.settings[1] = 0.7f;
-
-    uint64_t frameLimit = 0;
-    bool framesSpecified = false;
-    bool validation = false;
-    bool fixedTime = false;
-    float timeValue = 0;
-
-    // 명령행 옵션 파싱
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-
-        if (arg == "--help") {
-            std::puts("VolumetricFog\n"
-                      "--mode fog|off|transmittance|scattering, --density [0,3], --steps [8,256], --height-falloff [0,4], --exposure [0.01,20]\n"
-                      "Procedural single scattering; no volumetric shadow map or froxel history.\n"
-                      "--frames N (0=unlimited), --time SECONDS, --validation");
-            return 0;
-        }
-
-        if (arg == "--validation") {
-            validation = true;
-            continue;
-        }
-
-        if (i + 1 >= argc) {
-            throw std::runtime_error("Missing value for " + arg);
-        }
-
-        std::string value = argv[++i];
-
-        if (arg == "--frames") {
-            double n = Number(value, 0, 10000000);
-            if (std::floor(n) != n) {
-                throw std::runtime_error("Frame count must be an integer.");
-            }
-            frameLimit = uint64_t(n);
-            framesSpecified = true;
-        } else if (arg == "--time") {
-            timeValue = float(Number(value, 0, 1000000));
-            fixedTime = true;
-        } else if (arg == "--mode") {
-            if (value == "fog") {
-                params.sizeTime[3] = 0;
-            } else if (value == "off") {
-                params.sizeTime[3] = 1;
-            } else if (value == "transmittance") {
-                params.sizeTime[3] = 2;
-            } else if (value == "scattering") {
-                params.sizeTime[3] = 3;
-            } else {
-                throw std::runtime_error("Unknown mode: " + value);
-            }
-        } else if (arg == "--density") {
-            params.extra[0] = float(Number(value, 0, 3));
-        } else if (arg == "--steps") {
-            double n = Number(value, 8, 256);
-            if (std::floor(n) != n) {
-                throw std::runtime_error("This option requires an integer.");
-            }
-            params.extra[1] = float(n);
-        } else if (arg == "--height-falloff") {
-            params.settings[1] = float(Number(value, 0, 4));
-        } else if (arg == "--exposure") {
-            params.settings[0] = float(Number(value, 0.01, 20));
-        } else {
-            throw std::runtime_error("Unknown option: " + arg);
-        }
-    }
-
-
-    // 1. 윈도우 생성 (해상도: 960x640)
+    params.settings[1] = .7f;
     dyf::Platform::Window window(960, 640, "Advanced / 13_VolumetricFog");
-    if (!window.GetHandle()) {
-        throw std::runtime_error("Window creation failed.");
-    }
 
-    // 2. RHI 렌더 디바이스 생성
     DeviceDesc deviceDesc;
-    deviceDesc.enableValidation = validation;
 
     std::unique_ptr<IDevice> owner(IDevice::Create(deviceDesc));
-    if (!owner) {
-        throw std::runtime_error("Device creation failed.");
-    }
+
     auto& device = *owner;
 
     dyf::RHI::ResourceScope resources(device);
 
-    // 3. 스왑체인 생성
     SwapchainDesc swap;
     swap.window = window.GetHandle();
     swap.format = DefaultSwapchainFormat;
     swap.minimumImageCount = 2;
     swap.presentMode = PresentMode::Fifo;
 
-    if (!device.CreateSwapchain(swap)) {
-        throw std::runtime_error("Swapchain creation failed.");
-    }
+    (void)device.CreateSwapchain(swap);
 
-    // 4. 셰이더 모듈 로드
+    const auto vertexBinary = loadShader(ShaderStage::Vertex, "Shaders/vertex.glsl", "Shaders/vertex.bin");
+    const auto sceneBinary = loadShader(ShaderStage::Fragment, "Shaders/scene.glsl", "Shaders/scene.bin");
+    const auto fogBinary = loadShader(ShaderStage::Fragment, "Shaders/fog.glsl", "Shaders/fog.bin");
+#ifdef DY_EXAMPLE_METAL
+    constexpr const char* vertexEntryPoint = "vertexMain";
+    constexpr const char* sceneEntryPoint = "fragmentMain";
+    constexpr const char* fogEntryPoint = "fragmentMain";
+#else
+    constexpr const char* vertexEntryPoint = "main";
+    constexpr const char* sceneEntryPoint = "main";
+    constexpr const char* fogEntryPoint = "main";
+#endif
+    if(vertexBinary.empty() || sceneBinary.empty() || fogBinary.empty()) return 1;
+
     auto vertexShader = resources.Keep(device.CreateShader({
         ShaderStage::Vertex,
-        ShaderData::vertexEntryPoint,
-        ShaderData::vertex,
-        ShaderData::vertexSize
+        vertexEntryPoint,
+        vertexBinary.data(),
+        vertexBinary.size()
     }));
     auto sceneShader = resources.Keep(device.CreateShader({
         ShaderStage::Fragment,
-        ShaderData::sceneEntryPoint,
-        ShaderData::scene,
-        ShaderData::sceneSize
+        sceneEntryPoint,
+        sceneBinary.data(),
+        sceneBinary.size()
     }));
     auto fogShader = resources.Keep(device.CreateShader({
         ShaderStage::Fragment,
-        ShaderData::fogEntryPoint,
-        ShaderData::fog,
-        ShaderData::fogSize
+        fogEntryPoint,
+        fogBinary.data(),
+        fogBinary.size()
     }));
 
     SamplerDesc sampler;
@@ -186,7 +106,6 @@ int main(int argc, char** argv) try {
     ColorAttachmentDesc sceneColorDesc{Format::R16G16B16A16_FLOAT, {}, ColorWriteMask::All};
     ColorAttachmentDesc fogColorDesc{DefaultSwapchainFormat, {}, ColorWriteMask::All};
 
-    // --- 파이프라인 1: 불투명 씬 컬러 및 선형 레이 거리 렌더링 ---
     GraphicsPipelineDesc sceneDesc;
     sceneDesc.vertexShader = vertexShader;
     sceneDesc.fragmentShader = sceneShader;
@@ -197,7 +116,6 @@ int main(int argc, char** argv) try {
     sceneDesc.layout = {nullptr, 0, sizeof(Params), ShaderStageFlags::Fragment, 15};
     auto scenePipeline = resources.Keep(device.CreateGraphicsPipeline(sceneDesc));
 
-    // --- 파이프라인 2: 볼류메트릭 포그 산란 적분 및 백버퍼 합성 ---
     std::vector<ResourceBindingLayout> fogBindings;
     fogBindings.push_back({0, ResourceBindingType::SampledTexture, 1, ShaderStageFlags::Fragment, {}});
     fogBindings.push_back({8, ResourceBindingType::StaticSampler, 1, ShaderStageFlags::Fragment, sampler});
@@ -222,34 +140,20 @@ int main(int argc, char** argv) try {
 
     uint64_t frame = 0;
 
-    // =========================================================================
-    // [메인 렌더 루프]
-    // =========================================================================
-    while (!frameLimit || frame < frameLimit) {
+    while (window.IsRunning()) {
         window.PollEvents();
         if (!window.IsRunning()) {
             break;
         }
 
-        if (!device.BeginFrame()) {
-            if (device.IsLost()) {
-                throw std::runtime_error("Device lost.");
-            }
-            continue;
-        }
+        if (!device.BeginFrame()) continue;
 
         auto backbuffer = device.GetBackBuffer();
-        if (!backbuffer) {
-            throw std::runtime_error("Backbuffer unavailable.");
-        }
 
         const auto dimensions = backbuffer->GetDesc();
 
-        // 윈도우 크기 변경 시 중간 텍스처 재할당
         if (dimensions.width != imageWidth || dimensions.height != imageHeight) {
-            if (!device.WaitIdle()) {
-                throw std::runtime_error("Resize wait failed.");
-            }
+            (void)device.WaitIdle();
             imageResources = std::make_unique<dyf::RHI::ResourceScope>(device);
             imageWidth = dimensions.width;
             imageHeight = dimensions.height;
@@ -269,28 +173,13 @@ int main(int argc, char** argv) try {
 
         params.sizeTime[0] = float(imageWidth);
         params.sizeTime[1] = float(imageHeight);
-        params.sizeTime[2] = fixedTime ? timeValue : float(frame) / 60.0f;
+        params.sizeTime[2] = float(frame) / 60.0f;
 
         dyf::RHI::ResourceScope frameResources(device);
         auto* commands = frameResources.Keep(device.AcquireCommandList());
 
-        // 초기 텍스처 상태 클리어
-        if (initializeImages) {
-            const ResourceBarrierDesc barrier{nullptr, sceneDepth, ResourceState::Undefined, ResourceState::RenderTarget, {}};
-            commands->ResourceBarrier(&barrier, 1);
-            ColorAttachment a;
-            a.texture = sceneDepth;
-            a.loadOp = LoadOp::Clear;
-            a.storeOp = StoreOp::Store;
-            commands->BeginRendering({&a, 1, nullptr});
-            commands->EndRendering();
-            const ResourceBarrierDesc ready{nullptr, sceneDepth, ResourceState::RenderTarget, ResourceState::ShaderResource, {}};
-            commands->ResourceBarrier(&ready, 1);
-        }
-
-        // --- 1단계: HDR 씬 렌더링 ---
         {
-            const ResourceBarrierDesc sceneDepthBarrier{nullptr, sceneDepth, ResourceState::ShaderResource, ResourceState::RenderTarget, {}};
+            const ResourceBarrierDesc sceneDepthBarrier{nullptr, sceneDepth, initializeImages ? ResourceState::Undefined : ResourceState::ShaderResource, ResourceState::RenderTarget, {}};
             commands->ResourceBarrier(&sceneDepthBarrier, 1);
 
             std::array<ColorAttachment, 1> colors{};
@@ -310,7 +199,6 @@ int main(int argc, char** argv) try {
             commands->ResourceBarrier(&sceneDepthReady, 1);
         }
 
-        // --- 2단계: 볼류메트릭 포그 레이마칭 패스 ---
         {
             const ResourceBarrierDesc backbufferBarrier{nullptr, backbuffer, ResourceState::Present, ResourceState::RenderTarget, {}};
             commands->ResourceBarrier(&backbufferBarrier, 1);
@@ -330,32 +218,19 @@ int main(int argc, char** argv) try {
             commands->EndRendering();
         }
 
-        // 백버퍼 프레젠트 상태 전이
         const ResourceBarrierDesc presentBarrier{nullptr, backbuffer, ResourceState::RenderTarget, ResourceState::Present, {}};
         commands->ResourceBarrier(&presentBarrier, 1);
 
-        if (!commands->Close() || !device.Submit(&commands, 1)) {
-            throw std::runtime_error("Frame recording/submission failed.");
-        }
+        (void)commands->Close();
+        (void)device.Submit(&commands, 1);
 
         initializeImages = false;
         ++frame;
 
-
-        if (!device.Present()) {
-            throw std::runtime_error("Present failed.");
-        }
+        (void)device.Present();
     }
 
-    // =========================================================================
-    // [종료 및 GPU 대기]
-    // =========================================================================
-    if (!device.WaitIdle()) {
-        throw std::runtime_error("Final GPU wait failed.");
-    }
+    (void)device.WaitIdle();
     return 0;
 
-} catch (const std::exception& error) {
-    std::fprintf(stderr, "VolumetricFog: %s\n", error.what());
-    return 1;
 }

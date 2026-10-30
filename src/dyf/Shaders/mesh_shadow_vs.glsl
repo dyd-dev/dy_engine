@@ -8,11 +8,13 @@
 
 #define RENDERER_BINDING_SHADOW_MATRIX 3
 
-// 위치와 UV만 필요하다. 표면에 수직인 방향(법선)·표면을 따라가는 방향(접선)·조명은 그림자 깊이 생성에 사용하지 않는다.
+// 위치·UV와 8번 입력의 정점 알파를 사용한다. 법선·접선·조명은 그림자 깊이 생성에 사용하지 않는다.
 layout(location = 0) in vec3 inPosition;
 layout(location = 2) in vec2 inUv;
+layout(location = 8) in float inAlpha;
 layout(location = 0) out vec2 shadowUv;
-#if RENDERER_INSTANCING // 인스턴싱 빌드에서만 물체별 행렬 입력을 사용하며, 일반 경로는 draw 상수의 모델 행렬을 쓴다.
+layout(location = 1) out float shadowAlpha;
+#if RENDERER_INSTANCING
 layout(location = 4) in mat4 instanceModel;
 #endif
 
@@ -47,11 +49,12 @@ layout(set = RENDERER_DESCRIPTOR_SET, binding = RENDERER_BINDING_SHADOW_MATRIX) 
     vec4 softShadowParams;
 } shadowMatrix;
 
-// UV는 그대로 넘기고, 모델 행렬로 월드 위치를 만든 뒤 padding2가 가리키는 광원 행렬을 곱한다. 깊이 저장은 이후 래스터·깊이 단계가 맡는다.
+// UV·정점 알파는 그대로 넘기고, 모델 행렬로 월드 위치를 만든 뒤 padding2가 가리키는 광원 행렬을 곱한다. 깊이 저장은 이후 래스터·깊이 단계가 맡는다.
 void main()
 {
     shadowUv=inUv;
-#if RENDERER_INSTANCING // 인스턴싱 빌드에서만 물체별 행렬 입력을 사용하며, 일반 경로는 draw 상수의 모델 행렬을 쓴다.
+    shadowAlpha=inAlpha;
+#if RENDERER_INSTANCING
     gl_Position = shadowMatrix.lightViewProjectionMatrix[drawConstants.padding2] * instanceModel * vec4(inPosition, 1.0);
 #else
     gl_Position = shadowMatrix.lightViewProjectionMatrix[drawConstants.padding2] * drawConstants.modelMatrix * vec4(inPosition, 1.0);

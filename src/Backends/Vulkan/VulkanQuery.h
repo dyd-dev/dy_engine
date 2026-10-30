@@ -1,5 +1,5 @@
 #pragma once
-#include "../../RHI/Query.h"
+#include "dyf/RHI/Query.h"
 #include "VulkanContext.h"
 #include <stdexcept>
 #include <vector>
@@ -9,7 +9,7 @@ namespace dyf::Backends
 class VulkanTimestampQuery final:public RHI::TimestampQuery
 {
 public:
-    VulkanTimestampQuery(VkDevice device,uint32_t count):TimestampQuery(count),initialized(count,0),m_device(device)
+    VulkanTimestampQuery(VkDevice device,uint32_t count):TimestampQuery(count),initialized(count,0),completions(count,0),m_device(device)
     {
         VkQueryPoolCreateInfo info{};
         info.sType=VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
@@ -22,6 +22,7 @@ public:
     VkQueryPool pool=VK_NULL_HANDLE;
     // A recorded reset becomes observable only after its submission completes.
     std::vector<uint8_t> initialized;
+    std::vector<uint64_t> completions;
 private:
     VkDevice m_device;
 };

@@ -590,14 +590,16 @@ namespace dyf::Math
 		const float3 column0(matrix.m[0], matrix.m[1], matrix.m[2]);
 		const float3 column1(matrix.m[4], matrix.m[5], matrix.m[6]);
 		const float3 column2(matrix.m[8], matrix.m[9], matrix.m[10]);
-		float scaleX = Length(column0);
-		const float scaleY = Length(column1);
-		const float scaleZ = Length(column2);
-		if(scaleX <= 1.0e-8f || scaleY <= 1.0e-8f || scaleZ <= 1.0e-8f) return false;
-		if(Dot(column0, Cross(column1, column2)) < 0.0f) scaleX = -scaleX;
-		const float3 axisX = column0 * (1.0f / scaleX);
+		float scaleX = std::hypot(column0.x, column0.y, column0.z);
+		const float scaleY = std::hypot(column1.x, column1.y, column1.z);
+		const float scaleZ = std::hypot(column2.x, column2.y, column2.z);
+		if(!std::isfinite(scaleX) || !std::isfinite(scaleY) || !std::isfinite(scaleZ)
+			|| scaleX <= 1.0e-8f || scaleY <= 1.0e-8f || scaleZ <= 1.0e-8f) return false;
+		float3 axisX = column0 * (1.0f / scaleX);
 		const float3 axisY = column1 * (1.0f / scaleY);
 		const float3 axisZ = column2 * (1.0f / scaleZ);
+		// Unit axes preserve the determinant sign without overflowing at large scales.
+		if(Dot(axisX, Cross(axisY, axisZ)) < 0.0f) {scaleX = -scaleX; axisX = axisX * -1.0f;}
 		if(std::fabs(Dot(axisX, axisY)) > 1.0e-4f
 			|| std::fabs(Dot(axisX, axisZ)) > 1.0e-4f
 			|| std::fabs(Dot(axisY, axisZ)) > 1.0e-4f) return false;
@@ -627,11 +629,13 @@ namespace dyf::Math
 			const float s = std::sqrt(1.0f + r22 - r00 - r11) * 2.0f;
 			rotation = quat((r02 + r20) / s, (r12 + r21) / s, 0.25f * s, (r10 - r01) / s);
 		}
+		rotation = Normalize(rotation);
+		if(!std::isfinite(rotation.x) || !std::isfinite(rotation.y)
+			|| !std::isfinite(rotation.z) || !std::isfinite(rotation.w)) return false;
 		outTranslation = float3(matrix.m[12], matrix.m[13], matrix.m[14]);
-		outRotation = Normalize(rotation);
+		outRotation = rotation;
 		outScale = float3(scaleX, scaleY, scaleZ);
-		return std::isfinite(outRotation.x) && std::isfinite(outRotation.y)
-			&& std::isfinite(outRotation.z) && std::isfinite(outRotation.w);
+		return true;
 	}
 
 	[[nodiscard]] inline bool MakeDualQuaternionTRS(
@@ -646,10 +650,14 @@ namespace dyf::Math
 			|| !std::isfinite(scale.x) || !std::isfinite(scale.y) || !std::isfinite(scale.z)) return false;
 		const float rotationLengthSquared = Dot(rotation, rotation);
 		if(rotationLengthSquared <= 1.0e-12f) return false;
-		outTransform.real = Normalize(rotation);
-		const quat translationQuaternion(translation.x, translation.y, translation.z, 0.0f);
-		const quat dual = translationQuaternion * outTransform.real;
-		outTransform.dual = quat(dual.x * 0.5f, dual.y * 0.5f, dual.z * 0.5f, dual.w * 0.5f);
+		const quat real = Normalize(rotation);
+		// Halve before the Hamilton product so representable dual components stay finite.
+		const quat translationQuaternion(translation.x * 0.5f, translation.y * 0.5f, translation.z * 0.5f, 0.0f);
+		const quat dual = translationQuaternion * real;
+		if(!std::isfinite(dual.x) || !std::isfinite(dual.y)
+			|| !std::isfinite(dual.z) || !std::isfinite(dual.w)) return false;
+		outTransform.real = real;
+		outTransform.dual = dual;
 		outTransform.scale = scale;
 		return true;
 	}

@@ -1,13 +1,15 @@
 #pragma once
 
 #include "dyf/RHI/ICommandList.h"
+#include "../../RHI/InlineConstantCoverage.h"
 #include "VulkanContext.h"
 #include "VulkanUpload.h"
 
 #include <map>
+#include <array>
 #include <atomic>
-#include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -32,12 +34,15 @@ namespace dyf::Backends
         void MarkDeviceLost() noexcept {m_deviceLost=true;DisableReuse();}
         bool IsDeviceLost() const noexcept {return m_deviceLost;}
     private:
+        struct CacheBlock;
+        static_assert(std::atomic<CacheBlock*>::is_always_lock_free &&
+            std::atomic<VulkanCommandStorage*>::is_always_lock_free,
+            "Vulkan command storage requires lock-free ownership atomics.");
         void RequireSuccess(VkResult,const char*);
         VkDevice m_device=VK_NULL_HANDLE;
         uint32_t m_queueFamily=UINT32_MAX;
         std::atomic<bool> m_reuseEnabled{true},m_deviceLost{false};
-        std::mutex m_mutex;
-        std::vector<std::unique_ptr<VulkanCommandStorage>> m_available;
+        std::atomic<CacheBlock*> m_available{nullptr};
     };
 
 	struct VulkanSubmissionState
@@ -57,6 +62,8 @@ namespace dyf::Backends
 
 		void ResourceBarrierNative(const dyf::RHI::ResourceBarrierDesc* barriers, uint32_t count) override;
         void GlobalBarrierNative() override;
+        void CopyBufferNative(RHI::BufferHandle source, uint32_t sourceOffset,
+            RHI::BufferHandle destination, uint32_t destinationOffset, uint32_t size) override;
 		void BeginRenderingNative(const dyf::RHI::RenderingDesc& desc) override;
 		void EndRenderingNative() override;
 
@@ -76,7 +83,7 @@ namespace dyf::Backends
 		void DrawInstancedNative(uint32_t vertexCount, uint32_t instanceCount, uint32_t startVertex, uint32_t startInstance) override;
 		void DrawIndexedInstancedNative(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) override;
 		void DrawIndirectNative(RHI::BufferHandle arguments, uint32_t offset) override;
-		void DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset) override;
+		void DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset, uint32_t drawCount, uint32_t stride) override;
 		void DispatchMeshNative(uint32_t threadGroupCountX, uint32_t threadGroupCountY, uint32_t threadGroupCountZ) override;
 		bool CloseNative() override;
 
@@ -98,8 +105,10 @@ namespace dyf::Backends
 			return m_referencedSwapchainImages;
 		}
 		[[nodiscard]] bool ValidateForSubmit(VulkanSubmissionState& state) const;
+        [[nodiscard]] VkPipelineStageFlags GetAcquireWaitStage(const VulkanTexture*,bool firstReference) const;
 		void CommitResourceStates();
         void CompleteTimestampResets();
+        void MarkTimestampsSubmitted(uint64_t serial) noexcept;
         void AllowPoolReuse() noexcept {m_poolReusable=true;}
         uint32_t m_maxComputeGroups[3]={};
 
@@ -165,6 +174,7 @@ namespace dyf::Backends
         float m_viewportBounds[2]={};
         struct QueryReset { VulkanTimestampQuery* query; uint32_t first, count; };
         std::vector<QueryReset> m_queryResets;
+        std::vector<std::pair<VulkanTimestampQuery*,uint32_t>> m_queryWrites;
 		bool m_supportsCompute = false;
 		VkCommandBuffer m_commandBuffer = VK_NULL_HANDLE;
 		VulkanPipeline* m_boundPipeline = nullptr;
@@ -174,11 +184,23 @@ namespace dyf::Backends
 		VulkanUploadArena m_uploadArena;
 		std::vector<Operation> m_operations;
 		std::unordered_map<VulkanBuffer*, dyf::RHI::ResourceState> m_bufferStates;
-		std::map<std::pair<VulkanTexture*, uint32_t>, dyf::RHI::ResourceState> m_textureStates;
+        struct RecentBufferState
+        {
+            VulkanBuffer* buffer=nullptr;
+            RHI::ResourceState state=RHI::ResourceState::Undefined;
+        };
+        std::array<RecentBufferState,8> m_recentBufferStates{};
+        uint32_t m_recentBufferStateCount=0,m_recentBufferStateNext=0;
+        void ClearRecentBufferStates() noexcept {m_recentBufferStateCount=m_recentBufferStateNext=0;}
+		RHI::Backend::StateTable<std::pair<VulkanTexture*,uint32_t>,RHI::ResourceState,RHI::Backend::SubresourceHash> m_textureStates;
+        std::unordered_set<const VulkanResourceSet*> m_validatedResourceSets;
+        std::unordered_map<VulkanBuffer*, RHI::CommandStateSummary> m_closedBufferStates;
+        RHI::Backend::StateTable<std::pair<VulkanTexture*,uint32_t>,RHI::CommandStateSummary,RHI::Backend::SubresourceHash> m_closedTextureStates;
+        bool m_stateSummaryValid=false;
 		std::unordered_map<uint32_t, VertexBinding> m_vertexBindings;
 		std::vector<VulkanTexture*> m_referencedSwapchainImages;
 		std::vector<dyf::RHI::Format> m_colorFormats;
-		std::vector<uint8_t> m_inlineConstantCoverage;
+		RHI::Detail::InlineConstantCoverage m_inlineConstantCoverage;
 		dyf::RHI::Format m_indexFormat = dyf::RHI::Format::Unknown;
 		dyf::RHI::Format m_depthFormat = dyf::RHI::Format::Unknown;
 		dyf::RHI::ResourceState m_depthState = dyf::RHI::ResourceState::Undefined;

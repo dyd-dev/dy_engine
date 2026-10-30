@@ -32,7 +32,7 @@ inline void ApplyIntelKnightMaterials(dyf::ModelSceneDesc& actor)
     };
     auto& options=actor.loadOptions;
     options.normalMapYSign=1;
-    // 4K 원본 재질을 해제한 픽셀·ORM 결합 메모리를 포함한 예산이다. 해상도는 줄이지 않는다.
+    // 원본 재질·ORM 결합의 상한이다. 호출자가 별도로 지정한 텍스처 크기 제한은 보존한다.
     options.maxSourceBytes=options.maxParserInputBytes=options.maxParserBytes=
         options.maxDecodedBytes=8ull*1024*1024*1024;
     for(const auto& surface:surfaces)

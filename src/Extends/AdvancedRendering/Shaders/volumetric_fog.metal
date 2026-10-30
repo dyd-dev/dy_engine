@@ -105,18 +105,16 @@ float Visibility(int type,int lightIndex,float3 position,float3 toLight,texture2
     }
     return visibility;
 }
-float3 Incident(float3 position,float3 ray,texture2d<float> shadowImage,
+struct DirectionalRayCache {float3 direction[4];float3 radiance[4];uint mask;};
+float3 Incident(float3 position,float3 ray,thread const DirectionalRayCache& directional,texture2d<float> shadowImage,
     constant Frame& frame,constant Lights& lights,constant Shadows& shadows)
 {
     float3 radiance=0;
     if(lights.counts.w<.5f) return radiance;
-    for(int i=0;i<clamp(int(lights.counts.x+.5),0,4);++i)
+    for(int i=0;i<4;++i)
     {
-        float3 direction=lights.directional[i].directionIntensity.xyz;
-        if(dot(direction,direction)<1e-12f) continue;
-        float3 l=normalize(direction);
-        radiance+=max(lights.directional[i].color.rgb,0.f)*max(lights.directional[i].directionIntensity.w,0.f)*
-            Phase(dot(ray,l),frame)*Visibility(1,i,position,l,shadowImage,lights,shadows);
+        if((directional.mask&(1u<<uint(i)))==0u)continue;
+        radiance+=directional.radiance[i]*Visibility(1,i,position,directional.direction[i],shadowImage,lights,shadows);
     }
     for(int i=0;i<clamp(int(lights.counts.y+.5),0,16);++i)
     {
@@ -152,12 +150,27 @@ float4 Integrate(float2 coordinate,float depth,texture2d<float> shadowImage,
     distance=min(distance,frame.fog.w);
     float dt=distance/float(frame.options.x),transmission=1;
     float3 scattering=0;
+    // Four ray-local entries cache direction/phase; shadow visibility stays per sample.
+    DirectionalRayCache directional;directional.mask=0u;
+    int directionalCount=frame.options.x>0 && frame.fog.x>0 && !(lights.counts.w<.5f)?
+        clamp(int(lights.counts.x+.5),0,4):0;
+    for(int lightIndex=0;lightIndex<4;++lightIndex)
+    {
+        directional.direction[lightIndex]=0;directional.radiance[lightIndex]=0;
+        if(lightIndex>=directionalCount)continue;
+        float3 direction=lights.directional[lightIndex].directionIntensity.xyz;
+        if(dot(direction,direction)<1e-12f)continue;
+        float3 l=normalize(direction);directional.direction[lightIndex]=l;
+        directional.radiance[lightIndex]=max(lights.directional[lightIndex].color.rgb,0.f)*
+            max(lights.directional[lightIndex].directionIntensity.w,0.f)*Phase(dot(ray,l),frame);
+        directional.mask|=1u<<uint(lightIndex);
+    }
     for(uint i=0;i<frame.options.x && frame.fog.x>0;++i)
     {
         float3 position=origin+ray*((float(i)+.5)*dt);
         float density=frame.fog.x*exp(-max(position.z-frame.fog.z,0.f)*frame.fog.y);
         float stepTransmission=exp(-density*dt);
-        scattering+=transmission*(1-stepTransmission)*frame.scattering.rgb*Incident(position,ray,shadowImage,frame,lights,shadows);
+        scattering+=transmission*(1-stepTransmission)*frame.scattering.rgb*Incident(position,ray,directional,shadowImage,frame,lights,shadows);
         transmission*=stepTransmission;
     }
     return float4(clamp(scattering,0.f,65504.f),clamp(transmission,0.f,1.f));

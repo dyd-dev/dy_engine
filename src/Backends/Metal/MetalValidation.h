@@ -5,21 +5,17 @@
 #include "dyf/RHI/Binding.h"
 #include "dyf/RHI/Texture.h"
 #include <algorithm>
-#include <set>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 namespace dyf::Backends::MetalValidation
 {
-    [[nodiscard]] inline bool MayWriteStencil(const RHI::DepthStencilState& state)
-    {
-        const auto changesValue = [](const RHI::StencilFaceState& face)
-        {
-            return face.failOp != RHI::StencilOp::Keep ||
-                face.depthFailOp != RHI::StencilOp::Keep || face.passOp != RHI::StencilOp::Keep;
-        };
-        return state.stencilEnabled && state.stencilWriteMask != 0 &&
-            (changesValue(state.front) || changesValue(state.back));
-    }
-
+#if defined(__APPLE__) && TARGET_OS_OSX
+    inline constexpr uint32_t BufferUpdateAlignment=4;
+#else
+    inline constexpr uint32_t BufferUpdateAlignment=1;
+#endif
     [[nodiscard]] inline bool HasUsage(RHI::BufferUsage value, RHI::BufferUsage usage)
     {
         return (value & usage) != RHI::BufferUsage::None;
@@ -52,6 +48,7 @@ namespace dyf::Backends::MetalValidation
         case RHI::Format::R32G32B32A32_FLOAT:
             return 16;
         case RHI::Format::R16_UINT:
+        case RHI::Format::R16_FLOAT:
             return 2;
         default:
             return 0;
@@ -85,6 +82,7 @@ namespace dyf::Backends::MetalValidation
         case RHI::ResourceState::Undefined:
         case RHI::ResourceState::Common:
         case RHI::ResourceState::CopyDestination:
+        case RHI::ResourceState::CopySource:
             return true;
         case RHI::ResourceState::VertexBuffer:
             return MetalValidation::HasUsage(desc.usage, RHI::BufferUsage::Vertex);
@@ -97,31 +95,6 @@ namespace dyf::Backends::MetalValidation
         case RHI::ResourceState::ShaderResource:
         case RHI::ResourceState::UnorderedAccess:
             return MetalValidation::HasUsage(desc.usage, RHI::BufferUsage::Storage);
-        default:
-            return false;
-        }
-    }
-
-    [[nodiscard]] inline bool IsTextureStateAllowed(
-        const RHI::TextureDesc& desc,
-        RHI::ResourceState state)
-    {
-        switch(state)
-        {
-        case RHI::ResourceState::Undefined:
-        case RHI::ResourceState::Common:
-        case RHI::ResourceState::CopyDestination:
-            return true;
-        case RHI::ResourceState::ShaderResource:
-            return MetalValidation::HasUsage(desc.usage, RHI::TextureUsage::ShaderResource);
-        case RHI::ResourceState::UnorderedAccess:
-            return MetalValidation::HasUsage(desc.usage, RHI::TextureUsage::Storage);
-        case RHI::ResourceState::RenderTarget:
-        case RHI::ResourceState::Present:
-            return MetalValidation::HasUsage(desc.usage, RHI::TextureUsage::RenderTarget);
-        case RHI::ResourceState::DepthRead:
-        case RHI::ResourceState::DepthWrite:
-            return MetalValidation::HasUsage(desc.usage, RHI::TextureUsage::DepthStencil);
         default:
             return false;
         }
@@ -178,80 +151,4 @@ namespace dyf::Backends::MetalValidation
         return nullptr;
     }
 
-    [[nodiscard]] inline bool ValidateResourceSetDesc(const RHI::ResourceSetDesc& desc)
-    {
-        if(desc.pipeline == nullptr || (desc.bindingCount != 0 && desc.bindings == nullptr))
-            return false;
-        const RHI::PipelineLayoutDesc& layout = desc.pipeline->GetLayout();
-
-        std::set<std::pair<uint32_t, uint32_t>> populated;
-        for(uint32_t index = 0; index < desc.bindingCount; ++index)
-        {
-            const RHI::ResourceBinding& binding = desc.bindings[index];
-            const RHI::ResourceBindingLayout* declaration =
-                MetalValidation::FindLayoutBinding(layout, binding.binding);
-            if(declaration == nullptr ||
-                declaration->type == RHI::ResourceBindingType::StaticSampler ||
-                binding.arrayElement >= declaration->count ||
-                !populated.emplace(binding.binding, binding.arrayElement).second)
-            {
-                return false;
-            }
-
-            switch(declaration->type)
-            {
-            case RHI::ResourceBindingType::ConstantBuffer:
-            case RHI::ResourceBindingType::ReadOnlyStorageBuffer:
-            case RHI::ResourceBindingType::ReadWriteStorageBuffer:
-            {
-                const RHI::BufferUsage required =
-                    declaration->type == RHI::ResourceBindingType::ConstantBuffer
-                    ? RHI::BufferUsage::Constant
-                    : RHI::BufferUsage::Storage;
-                if(binding.buffer == nullptr || binding.texture != nullptr || binding.size == 0 ||
-                    !MetalValidation::HasUsage(binding.buffer->GetDesc().usage, required) ||
-                    binding.offset > binding.buffer->GetDesc().size ||
-                    binding.size > binding.buffer->GetDesc().size - binding.offset)
-                {
-                    return false;
-                }
-                break;
-            }
-            case RHI::ResourceBindingType::SampledTexture:
-            case RHI::ResourceBindingType::StorageTexture:
-            {
-                const RHI::TextureUsage required =
-                    declaration->type == RHI::ResourceBindingType::SampledTexture
-                    ? RHI::TextureUsage::ShaderResource : RHI::TextureUsage::Storage;
-                uint32_t firstMip = 0;
-                uint32_t mipCount = 0;
-                uint32_t firstLayer = 0;
-                uint32_t layerCount = 0;
-                if(binding.texture == nullptr || binding.buffer != nullptr ||
-                    !MetalValidation::HasUsage(binding.texture->GetDesc().usage, required))
-                {
-                    return false;
-                }
-                if(!MetalValidation::ResolveBindingSubresources(
-                    binding.texture, binding, declaration->type,
-                    firstMip, mipCount, firstLayer, layerCount)) return false;
-                break;
-            }
-            default:
-                return false;
-            }
-        }
-
-        for(uint32_t index = 0; index < layout.bindingCount; ++index)
-        {
-            const RHI::ResourceBindingLayout& declaration = layout.bindings[index];
-            if(declaration.type == RHI::ResourceBindingType::StaticSampler) continue;
-            for(uint32_t element = 0; element < declaration.count; ++element)
-            {
-                if(populated.find({declaration.binding, element}) == populated.end())
-                    return false;
-            }
-        }
-        return true;
-    }
 }

@@ -32,7 +32,6 @@ namespace dyf::Platform
 		m_window = glfwCreateWindow(width, height, title ? title : "New Window", nullptr, nullptr);
 		if(!m_window)
 		{
-			if(liveWindows == 0) glfwTerminate();
 			std::fprintf(stderr, "[Platform] dyf: failed to create GLFW window.\n");
 			return;
 		}
@@ -104,7 +103,6 @@ namespace dyf::Platform
 			glfwSetWindowUserPointer(m_window, nullptr);
 			glfwDestroyWindow(m_window);
 			m_window = nullptr;
-			if(liveWindows == 0) glfwTerminate();
 			throw;
 		}
 	}
@@ -115,7 +113,8 @@ namespace dyf::Platform
 		{
 			glfwSetWindowUserPointer(m_window, nullptr);
 			glfwDestroyWindow(m_window);
-			if(--liveWindows == 0) glfwTerminate();
+            // GLFW is process-global; a library window cannot terminate the host's windows.
+            --liveWindows;
 		}
 	}
 

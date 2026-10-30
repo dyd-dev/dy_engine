@@ -46,14 +46,6 @@ namespace dyf::Backends
 				? nil : (__bridge id<MTLTexture>)texture->GetNativeTexture();
 		}
 
-		[[nodiscard]] std::pair<MetalTexture*, uint32_t> TextureKey(
-			MetalTexture* texture,
-			uint32_t mipLevel,
-			uint32_t arrayLayer)
-		{
-			return {texture, arrayLayer * texture->GetDesc().mipLevels + mipLevel};
-		}
-
 		[[nodiscard]] MTLLoadAction ToLoadAction(RHI::LoadOp operation)
 		{
 			switch(operation)
@@ -78,11 +70,7 @@ namespace dyf::Backends
 		enum class OperationKind : uint8_t
 		{
 			BufferBarrier,
-			TextureBarrier,
-			BufferRequirement,
-			TextureRequirement,
-			BufferWrite,
-			TextureWrite
+			TextureBarrier
 		};
 
 		struct MetalOperation
@@ -90,13 +78,12 @@ namespace dyf::Backends
 			OperationKind kind = OperationKind::BufferBarrier;
 			MetalBuffer* buffer = nullptr;
 			MetalTexture* texture = nullptr;
-			RHI::ResourceState before = RHI::ResourceState::Undefined;
 			RHI::ResourceState after = RHI::ResourceState::Undefined;
 			uint32_t mipLevel = 0;
 			uint32_t arrayLayer = 0;
 		};
 
-		struct VertexBinding
+		struct MetalVertexBinding
 		{
 			MetalBuffer* buffer = nullptr;
 			uint32_t offset = 0;
@@ -119,12 +106,9 @@ namespace dyf::Backends
 		std::shared_ptr<std::shared_ptr<MetalUploadArena>> uploadCompletionLease;
 
 		std::vector<MetalOperation> operations;
-		std::unordered_map<MetalBuffer*, RHI::ResourceState> bufferStates;
-		std::map<std::pair<MetalTexture*, uint32_t>, RHI::ResourceState> textureStates;
-		std::unordered_map<uint32_t, VertexBinding> vertexBindings;
+		std::unordered_map<uint32_t, MetalVertexBinding> vertexBindings;
 		std::vector<RHI::Format> colorFormats;
 		std::vector<uint8_t> inlineConstants;
-		std::vector<uint8_t> inlineConstantCoverage;
 
 		MetalPipeline* pipeline = nullptr;
 		MetalResourceSet* resourceSet = nullptr;
@@ -132,8 +116,6 @@ namespace dyf::Backends
 		MetalTexture* depthTexture = nullptr;
 		RHI::Format indexFormat = RHI::Format::Unknown;
 		RHI::Format depthFormat = RHI::Format::Unknown;
-		uint32_t depthMipLevel = 0;
-		uint32_t depthArrayLayer = 0;
 		uint32_t indexOffset = 0;
 		uint32_t renderWidth = 0;
 		uint32_t renderHeight = 0;
@@ -141,10 +123,6 @@ namespace dyf::Backends
 		RHI::Rect scissor = {};
 		uint32_t stencilReference = 0;
 		bool rendering = false;
-		bool stencilConfigured = false;
-		bool viewportSet = false;
-		bool scissorSet = false;
-		bool stencilReferenceSet = false;
 		bool closed = false;
 		bool valid = true;
 		bool usesBackBuffer = false;
@@ -158,15 +136,6 @@ namespace dyf::Backends
 			const auto status = buffer.status;
 			return status != MTLCommandBufferStatusNotEnqueued &&
 				status != MTLCommandBufferStatusCompleted && status != MTLCommandBufferStatusError;
-		}
-
-		template<class T>
-		void ReserveForAppend(std::vector<T>& values)
-		{
-			if(values.size() < values.capacity()) return;
-			const auto capacity = values.size() <= values.max_size() / 2 ?
-				std::max(size_t{1}, values.size() * 2) : values.max_size();
-			values.reserve(capacity);
 		}
 
 		template<typename ImplType>
@@ -209,57 +178,6 @@ namespace dyf::Backends
 		}
 
 		template<typename ImplType>
-		[[nodiscard]] bool RequireBufferState(
-			ImplType* impl,
-			MetalBuffer* buffer,
-			RHI::ResourceState first,
-			RHI::ResourceState second = RHI::ResourceState::Undefined)
-		{
-			const auto found = impl->bufferStates.find(buffer);
-			if(found != impl->bufferStates.end() &&
-				found->second != first &&
-				(second == RHI::ResourceState::Undefined || found->second != second))
-			{
-				return false;
-			}
-			MetalOperation operation = {};
-			operation.kind = OperationKind::BufferRequirement;
-			operation.buffer = buffer;
-			operation.before = first;
-			operation.after = second;
-			impl->operations.push_back(operation);
-			return true;
-		}
-
-		template<typename ImplType>
-		[[nodiscard]] bool RequireTextureState(
-			ImplType* impl,
-			MetalTexture* texture,
-			uint32_t mipLevel,
-			uint32_t arrayLayer,
-			RHI::ResourceState first,
-			RHI::ResourceState second = RHI::ResourceState::Undefined)
-		{
-			const auto key = TextureKey(texture, mipLevel, arrayLayer);
-			const auto found = impl->textureStates.find(key);
-			if(found != impl->textureStates.end() &&
-				found->second != first &&
-				(second == RHI::ResourceState::Undefined || found->second != second))
-			{
-				return false;
-			}
-			MetalOperation operation = {};
-			operation.kind = OperationKind::TextureRequirement;
-			operation.texture = texture;
-			operation.mipLevel = mipLevel;
-			operation.arrayLayer = arrayLayer;
-			operation.before = first;
-			operation.after = second;
-			impl->operations.push_back(operation);
-			return true;
-		}
-
-		template<typename ImplType>
 		void TrackSwapchainImage(ImplType* impl, MetalTexture* texture)
 		{
 			if(texture == nullptr || !texture->IsSwapchainImage()) return;
@@ -283,31 +201,22 @@ namespace dyf::Backends
 		template<typename ImplType>
 		void RetainResource(ImplType* impl, id<MTLResource> resource)
 		{
-			if(resource != nil) [impl->retainedResources addObject:resource];
+			if(resource == nil) return;
+			if(impl->retainedResources == nil) impl->retainedResources = [NSMutableArray new];
+			[impl->retainedResources addObject:resource];
 		}
 
 		template<typename ImplType>
-		[[nodiscard]] bool RequireTextureSubresourcesInState(
-			ImplType* impl,
-			MetalTexture* texture,
-			uint32_t firstMipLevel,
-			uint32_t mipLevelCount,
-			uint32_t firstArrayLayer,
-			uint32_t arrayLayerCount,
-			RHI::ResourceState state)
+		MetalUploadArena::Allocation UploadConstants(ImplType* impl, const void* data, size_t size)
 		{
-			for(uint32_t layer = firstArrayLayer;
-				layer < firstArrayLayer + arrayLayerCount; ++layer)
-			{
-				for(uint32_t mip = firstMipLevel;
-					mip < firstMipLevel + mipLevelCount; ++mip)
-				{
-					if(!RequireTextureState(
-						impl, texture, mip, layer, state)) return false;
-				}
-			}
-			return true;
+			if(!impl->uploadArena || !size) return {};
+			// 256 covers the constant-buffer alignment of both Apple and Mac GPU families.
+			// The command's completion lease keeps every page alive through GPU execution.
+			const auto upload = impl->uploadArena->Allocate(size, 256);
+			if(upload) std::memcpy(upload.data, data, size);
+			return upload;
 		}
+
 	}
 
 	MetalCommandList::MetalCommandList(void* commandQueue,
@@ -358,7 +267,6 @@ namespace dyf::Backends
 			(void)completed;
 			uploads->reset();
 		}];
-		m_impl->retainedResources = [NSMutableArray new];
 		m_impl->valid = true;
 		return true;
 	}
@@ -385,28 +293,19 @@ namespace dyf::Backends
 		m_impl->commandBuffer = nil;
 		m_impl->uploadArena.reset();
 		m_impl->operations.clear();
-		m_impl->bufferStates.clear();
-		m_impl->textureStates.clear();
 		m_impl->vertexBindings.clear();
 		m_impl->colorFormats.clear();
 		m_impl->inlineConstants.clear();
-		m_impl->inlineConstantCoverage.clear();
 		m_impl->pipeline = nullptr;
 		m_impl->resourceSet = nullptr;
 		m_impl->indexBuffer = nullptr;
 		m_impl->depthTexture = nullptr;
 		m_impl->indexFormat = RHI::Format::Unknown;
 		m_impl->depthFormat = RHI::Format::Unknown;
-		m_impl->depthMipLevel = 0;
-		m_impl->depthArrayLayer = 0;
 		m_impl->indexOffset = 0;
 		m_impl->renderWidth = 0;
 		m_impl->renderHeight = 0;
 		m_impl->rendering = false;
-		m_impl->stencilConfigured = false;
-		m_impl->viewportSet = false;
-		m_impl->scissorSet = false;
-		m_impl->stencilReferenceSet = false;
 		m_impl->closed = false;
 		m_impl->usesBackBuffer = false;
 	}
@@ -422,6 +321,22 @@ namespace dyf::Backends
         // hazards on one MTLCommandQueue; ending the current encoder creates the
         // native pass boundary, including resources outside the RenderGraph.
         EndBlitEncoding(m_impl);
+    }
+
+    void MetalCommandList::CopyBufferNative(RHI::BufferHandle source,uint32_t sourceOffset,
+        RHI::BufferHandle destination,uint32_t destinationOffset,uint32_t size)
+    {
+        auto* input=dynamic_cast<MetalBuffer*>(source);
+        auto* output=dynamic_cast<MetalBuffer*>(destination);
+        if(!m_impl->valid || m_impl->closed || m_impl->rendering || NativeBuffer(input)==nil || NativeBuffer(output)==nil ||
+            !EnsureBlitEncoder(m_impl))
+        {
+            Invalidate(m_impl);return;
+        }
+        RetainResource(m_impl,NativeBuffer(input));
+        RetainResource(m_impl,NativeBuffer(output));
+        [m_impl->blitEncoder copyFromBuffer:NativeBuffer(input) sourceOffset:sourceOffset
+            toBuffer:NativeBuffer(output) destinationOffset:destinationOffset size:size];
     }
 
 	void MetalCommandList::ResourceBarrierNative(
@@ -450,10 +365,7 @@ namespace dyf::Backends
 			if(barrier.buffer != nullptr)
 			{
 				auto* buffer = dynamic_cast<MetalBuffer*>(barrier.buffer);
-				if(buffer == nullptr || NativeBuffer(buffer) == nil ||
-					!MetalValidation::IsBufferStateAllowed(buffer->GetDesc(), barrier.after) ||
-					(m_impl->bufferStates.find(buffer) != m_impl->bufferStates.end() &&
-						m_impl->bufferStates[buffer] != barrier.before))
+				if(buffer == nullptr || NativeBuffer(buffer) == nil)
 				{
 					Invalidate(m_impl);
 					continue;
@@ -462,9 +374,7 @@ namespace dyf::Backends
 					OperationKind::BufferBarrier,
 					buffer,
 					nullptr,
-					barrier.before,
 					barrier.after});
-				m_impl->bufferStates[buffer] = barrier.after;
 				continue;
 			}
 
@@ -474,7 +384,6 @@ namespace dyf::Backends
 			uint32_t firstLayer = 0;
 			uint32_t layerCount = 0;
 			if(texture == nullptr || NativeTexture(texture) == nil ||
-				!MetalValidation::IsTextureStateAllowed(texture->GetDesc(), barrier.after) ||
 				((barrier.before == RHI::ResourceState::Present ||
 					barrier.after == RHI::ResourceState::Present) &&
 					!texture->IsSwapchainImage()) ||
@@ -491,22 +400,13 @@ namespace dyf::Backends
 			{
 				for(uint32_t mip = firstMip; mip < firstMip + mipCount; ++mip)
 				{
-					const auto key = TextureKey(texture, mip, layer);
-					const auto prior = m_impl->textureStates.find(key);
-					if(prior != m_impl->textureStates.end() && prior->second != barrier.before)
-					{
-						Invalidate(m_impl);
-						continue;
-					}
 					MetalOperation operation = {};
 					operation.kind = OperationKind::TextureBarrier;
 					operation.texture = texture;
-					operation.before = barrier.before;
 					operation.after = barrier.after;
 					operation.mipLevel = mip;
 					operation.arrayLayer = layer;
 					m_impl->operations.push_back(operation);
-					m_impl->textureStates[key] = barrier.after;
 				}
 			}
 		}
@@ -530,10 +430,6 @@ namespace dyf::Backends
 		m_impl->indexFormat = RHI::Format::Unknown;
 		m_impl->indexOffset = 0;
 		m_impl->inlineConstants.clear();
-		m_impl->inlineConstantCoverage.clear();
-		m_impl->viewportSet = false;
-		m_impl->scissorSet = false;
-		m_impl->stencilReferenceSet = false;
 
 		MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor new];
 		m_impl->colorFormats.clear();
@@ -555,9 +451,6 @@ namespace dyf::Backends
 				!MetalValidation::HasUsage(texture->GetDesc().usage, RHI::TextureUsage::RenderTarget) ||
 				attachment.mipLevel >= texture->GetDesc().mipLevels ||
 				attachment.arrayLayer >= texture->GetDesc().depthOrArraySize ||
-				!RequireTextureState(
-					m_impl, texture, attachment.mipLevel, attachment.arrayLayer,
-					RHI::ResourceState::RenderTarget) ||
 				attachment.loadOp == RHI::LoadOp::Undefined || !clearValueValid ||
 				attachment.storeOp == RHI::StoreOp::Undefined)
 			{
@@ -594,9 +487,6 @@ namespace dyf::Backends
 
 		m_impl->depthFormat = RHI::Format::Unknown;
 		m_impl->depthTexture = nullptr;
-		m_impl->depthMipLevel = 0;
-		m_impl->depthArrayLayer = 0;
-		m_impl->stencilConfigured = false;
 		if(valid && desc.depthStencilAttachment != nullptr)
 		{
 			const RHI::DepthStencilAttachment& attachment = *desc.depthStencilAttachment;
@@ -613,10 +503,7 @@ namespace dyf::Backends
 			const bool requiresWrite = attachment.depthLoadOp == RHI::LoadOp::Clear ||
 				(hasStencil && attachment.stencilLoadOp == RHI::LoadOp::Clear);
 			const bool stateValid = subresourceValid && declaredStateValid &&
-				(!requiresWrite || attachment.state == RHI::ResourceState::DepthWrite) &&
-				RequireTextureState(
-					m_impl, texture, attachment.mipLevel, attachment.arrayLayer,
-					attachment.state);
+				(!requiresWrite || attachment.state == RHI::ResourceState::DepthWrite);
 			const bool depthClearValid = attachment.depthLoadOp != RHI::LoadOp::Clear ||
 				(std::isfinite(attachment.clearDepth) && attachment.clearDepth >= 0.0f &&
 					attachment.clearDepth <= 1.0f);
@@ -671,14 +558,17 @@ namespace dyf::Backends
 					pass.stencilAttachment.loadAction = ToLoadAction(attachment.stencilLoadOp);
 					pass.stencilAttachment.storeAction = ToStoreAction(attachment.stencilStoreOp);
 					pass.stencilAttachment.clearStencil = attachment.clearStencil;
-					m_impl->stencilConfigured = hasStencilLoad;
 				}
 				m_impl->depthFormat = texture->GetDesc().format;
 				m_impl->depthTexture = texture;
-				m_impl->depthMipLevel = attachment.mipLevel;
-				m_impl->depthArrayLayer = attachment.arrayLayer;
 			}
 		}
+
+		const auto& area = desc.renderArea;
+		const bool defaultArea = !area.x && !area.y && !area.width && !area.height;
+		if(!defaultArea && (area.x != 0 || area.y != 0 ||
+			area.width != m_impl->renderWidth || area.height != m_impl->renderHeight))
+			valid = false;
 
 		if(valid)
 		{
@@ -739,9 +629,9 @@ namespace dyf::Backends
 
 	void MetalCommandList::BindComputePipelineNative(RHI::PipelineHandle pipelineState)
 	{
-		auto* pipeline = dynamic_cast<MetalPipeline*>(pipelineState);
-		if(m_impl->closed || m_impl->rendering || pipeline == nullptr ||
-			!pipeline->IsCompute() || pipeline->GetNativePipeline() == nullptr)
+		auto* pipeline = static_cast<MetalPipeline*>(pipelineState);
+		if(!m_impl->valid || m_impl->closed || m_impl->rendering ||
+			pipeline->GetNativePipeline() == nullptr)
 		{
 			Invalidate(m_impl);
 			return;
@@ -749,7 +639,6 @@ namespace dyf::Backends
 		m_impl->pipeline = pipeline;
 		m_impl->resourceSet = nullptr;
 		m_impl->inlineConstants.assign(pipeline->GetLayout().inlineConstantSize, 0);
-		m_impl->inlineConstantCoverage.assign(pipeline->GetLayout().inlineConstantSize, 0);
 	}
 
 	void MetalCommandList::DispatchNative(uint32_t x, uint32_t y, uint32_t z)
@@ -759,9 +648,8 @@ namespace dyf::Backends
 
 	void MetalCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint32_t offset)
 	{
-		auto* buffer = dynamic_cast<MetalBuffer*>(arguments);
-		if(m_impl->closed || buffer == nullptr || NativeBuffer(buffer) == nil ||
-			!RequireBufferState(m_impl, buffer, RHI::ResourceState::IndirectArgument))
+		auto* buffer = static_cast<MetalBuffer*>(arguments);
+		if(!m_impl->valid || m_impl->closed || NativeBuffer(buffer) == nil)
 		{
 			Invalidate(m_impl);
 			return;
@@ -774,11 +662,7 @@ namespace dyf::Backends
 		MetalBuffer* arguments, uint32_t offset)
 	{
 		auto* pipeline = m_impl->pipeline;
-		if(m_impl->closed || m_impl->rendering || !pipeline || !pipeline->IsCompute() ||
-			(!arguments && (!x || !y || !z)) ||
-			(pipeline->GetLayout().bindingCount && !m_impl->resourceSet) ||
-			std::any_of(m_impl->inlineConstantCoverage.begin(), m_impl->inlineConstantCoverage.end(),
-				[](uint8_t byte) { return !byte; }))
+		if(!m_impl->valid || m_impl->closed || m_impl->rendering || !pipeline)
 		{
 			Invalidate(m_impl);
 			return;
@@ -792,27 +676,18 @@ namespace dyf::Backends
 			for(uint32_t i = 0; i < m_impl->resourceSet->GetBindingCount(); ++i)
 			{
 				const auto& binding = m_impl->resourceSet->GetBindings()[i];
-				const auto* declaration = MetalValidation::FindLayoutBinding(layout, binding.binding);
-				auto* buffer = dynamic_cast<MetalBuffer*>(binding.buffer);
-				if(!declaration || !buffer) { Invalidate(m_impl); break; }
-				const auto required = declaration->type == RHI::ResourceBindingType::ConstantBuffer
-					? RHI::ResourceState::ConstantBuffer : declaration->type == RHI::ResourceBindingType::ReadOnlyStorageBuffer
-					? RHI::ResourceState::ShaderResource : RHI::ResourceState::UnorderedAccess;
-				if(!RequireBufferState(m_impl, buffer, required)) { Invalidate(m_impl); break; }
+				auto* buffer = static_cast<MetalBuffer*>(binding.buffer);
+				if(NativeBuffer(buffer) == nil) { Invalidate(m_impl); break; }
 				[encoder setBuffer:NativeBuffer(buffer) offset:binding.offset atIndex:binding.binding + binding.arrayElement];
 			}
 		if(!m_impl->inlineConstants.empty())
 		{
-			id<MTLBuffer> constants = [m_impl->commandQueue.device newBufferWithBytes:m_impl->inlineConstants.data()
-				length:m_impl->inlineConstants.size() options:MTLResourceStorageModeShared];
-			if(constants == nil) Invalidate(m_impl);
+			const auto constants = UploadConstants(m_impl, m_impl->inlineConstants.data(), m_impl->inlineConstants.size());
+			if(!constants) Invalidate(m_impl);
 			else
 			{
-				RetainResource(m_impl, constants);
-				[encoder setBuffer:constants offset:0 atIndex:layout.inlineConstantBinding];
-#if !__has_feature(objc_arc)
-				[constants release];
-#endif
+				[encoder setBuffer:constants.page->buffer offset:static_cast<NSUInteger>(constants.offset)
+					atIndex:layout.inlineConstantBinding];
 			}
 		}
 		const auto* size = pipeline->GetThreadGroupSize();
@@ -831,8 +706,8 @@ namespace dyf::Backends
 
 	void MetalCommandList::BindGraphicsPipelineNative(RHI::PipelineHandle pipelineState)
 	{
-		auto* pipeline = dynamic_cast<MetalPipeline*>(pipelineState);
-		if(m_impl->closed || !m_impl->rendering || pipeline == nullptr ||
+		auto* pipeline = static_cast<MetalPipeline*>(pipelineState);
+		if(!m_impl->valid || m_impl->closed || !m_impl->rendering ||
 			pipeline->GetNativePipeline() == nullptr ||
 			(pipeline->GetDesc().depthStencil.format != RHI::Format::Unknown &&
 				pipeline->GetNativeDepthStencil() == nullptr))
@@ -843,22 +718,6 @@ namespace dyf::Backends
 		m_impl->pipeline = pipeline;
 		m_impl->resourceSet = nullptr;
 		m_impl->inlineConstants.assign(pipeline->GetLayout().inlineConstantSize, 0);
-		m_impl->inlineConstantCoverage.assign(
-			pipeline->GetLayout().inlineConstantSize, 0);
-		if((pipeline->GetDesc().depthStencil.depthWriteEnabled ||
-			MetalValidation::MayWriteStencil(pipeline->GetDesc().depthStencil)) &&
-			m_impl->depthTexture != nullptr &&
-			!RequireTextureState(
-				m_impl,
-				m_impl->depthTexture,
-				m_impl->depthMipLevel,
-				m_impl->depthArrayLayer,
-				RHI::ResourceState::DepthWrite))
-		{
-			Invalidate(m_impl);
-			return;
-		}
-
 		id<MTLRenderCommandEncoder> encoder = m_impl->renderEncoder;
 		[encoder setRenderPipelineState:
 			(__bridge id<MTLRenderPipelineState>)pipeline->GetNativePipeline()];
@@ -899,10 +758,9 @@ namespace dyf::Backends
 
 	void MetalCommandList::BindResourceSetNative(RHI::ResourceSetHandle resourceSet)
 	{
-		auto* set = dynamic_cast<MetalResourceSet*>(resourceSet);
-		if(m_impl->closed || m_impl->pipeline == nullptr ||
-			(!m_impl->rendering && !m_impl->pipeline->IsCompute()) ||
-			set == nullptr || set->GetPipeline() != m_impl->pipeline)
+		auto* set = static_cast<MetalResourceSet*>(resourceSet);
+		if(!m_impl->valid || m_impl->closed || m_impl->pipeline == nullptr ||
+			(!m_impl->rendering && !m_impl->pipeline->IsCompute()))
 		{
 			Invalidate(m_impl);
 			return;
@@ -915,31 +773,15 @@ namespace dyf::Backends
 		for(uint32_t index = 0; index < set->GetBindingCount(); ++index)
 		{
 			const RHI::ResourceBinding& binding = set->GetBindings()[index];
+			if(binding.buffer == nullptr) continue;
 			const RHI::ResourceBindingLayout* declaration =
 				MetalValidation::FindLayoutBinding(layout, binding.binding);
-			if(declaration == nullptr)
-			{
-				Invalidate(m_impl);
-				return;
-			}
 			const uint32_t nativeIndex = binding.binding + binding.arrayElement;
 			if(declaration->type == RHI::ResourceBindingType::ConstantBuffer ||
 				declaration->type == RHI::ResourceBindingType::ReadOnlyStorageBuffer ||
 				declaration->type == RHI::ResourceBindingType::ReadWriteStorageBuffer)
 			{
-				auto* buffer = dynamic_cast<MetalBuffer*>(binding.buffer);
-				const RHI::ResourceState requiredState =
-					declaration->type == RHI::ResourceBindingType::ConstantBuffer
-					? RHI::ResourceState::ConstantBuffer
-					: declaration->type == RHI::ResourceBindingType::ReadOnlyStorageBuffer
-						? RHI::ResourceState::ShaderResource
-						: RHI::ResourceState::UnorderedAccess;
-				if(buffer == nullptr || !RequireBufferState(
-					m_impl, buffer, requiredState))
-				{
-					Invalidate(m_impl);
-					return;
-				}
+				auto* buffer = static_cast<MetalBuffer*>(binding.buffer);
 				id<MTLBuffer> native = NativeBuffer(buffer);
 				if(HasStage(declaration->stages, RHI::ShaderStageFlags::Vertex) ||
 					HasStage(declaration->stages, RHI::ShaderStageFlags::Domain))
@@ -958,15 +800,7 @@ namespace dyf::Backends
 
 		for(const MetalTextureBinding& binding : set->GetTextureBindings())
 		{
-			if(binding.texture == nullptr || binding.nativeTexture == nullptr ||
-				!RequireTextureSubresourcesInState(
-					m_impl,
-					binding.texture,
-					binding.firstMipLevel,
-					binding.mipLevelCount,
-					binding.firstArrayLayer,
-					binding.arrayLayerCount,
-					binding.requiredState))
+			if(binding.nativeTexture == nullptr)
 			{
 				Invalidate(m_impl);
 				return;
@@ -994,27 +828,9 @@ namespace dyf::Backends
 		RHI::BufferHandle buffer,
 		uint32_t offset)
 	{
-		auto* metalBuffer = dynamic_cast<MetalBuffer*>(buffer);
-		const RHI::GraphicsPipelineDesc* pipelineDesc = m_impl->pipeline == nullptr
-			? nullptr : &m_impl->pipeline->GetDesc();
-		const RHI::VertexBufferLayout* layout = nullptr;
-		if(pipelineDesc != nullptr)
-		{
-			for(uint32_t index = 0; index < pipelineDesc->vertexBufferCount; ++index)
-			{
-				if(pipelineDesc->vertexBuffers[index].binding == binding)
-				{
-					layout = &pipelineDesc->vertexBuffers[index];
-					break;
-				}
-			}
-		}
-		if(m_impl->closed || !m_impl->rendering || pipelineDesc == nullptr ||
-			layout == nullptr || metalBuffer == nullptr ||
-			offset >= metalBuffer->GetDesc().size ||
-			!MetalValidation::HasUsage(metalBuffer->GetDesc().usage, RHI::BufferUsage::Vertex) ||
-			!RequireBufferState(
-				m_impl, metalBuffer, RHI::ResourceState::VertexBuffer))
+		auto* metalBuffer = static_cast<MetalBuffer*>(buffer);
+		if(!m_impl->valid || m_impl->closed || !m_impl->rendering ||
+			m_impl->pipeline == nullptr || NativeBuffer(metalBuffer) == nil)
 		{
 			Invalidate(m_impl);
 			return;
@@ -1030,16 +846,8 @@ namespace dyf::Backends
 		RHI::Format format,
 		uint32_t offset)
 	{
-		auto* metalBuffer = dynamic_cast<MetalBuffer*>(buffer);
-		const uint32_t indexSize = MetalValidation::FormatSize(format);
-		if(m_impl->closed || !m_impl->rendering || metalBuffer == nullptr ||
-			offset >= metalBuffer->GetDesc().size ||
-			!MetalValidation::HasUsage(metalBuffer->GetDesc().usage, RHI::BufferUsage::Index) ||
-			!RequireBufferState(
-				m_impl, metalBuffer, RHI::ResourceState::IndexBuffer) ||
-			(format != RHI::Format::R16_UINT && format != RHI::Format::R32_UINT) ||
-			indexSize == 0 || offset % indexSize != 0 ||
-			metalBuffer->GetDesc().size - offset < indexSize)
+		auto* metalBuffer = static_cast<MetalBuffer*>(buffer);
+		if(!m_impl->valid || m_impl->closed || !m_impl->rendering || NativeBuffer(metalBuffer) == nil)
 		{
 			Invalidate(m_impl);
 			return;
@@ -1056,57 +864,37 @@ namespace dyf::Backends
 		const void* data)
 	{
 		if(m_impl->closed || m_impl->pipeline == nullptr ||
-			(!m_impl->rendering && !m_impl->pipeline->IsCompute()) ||
-			data == nullptr || size == 0 ||
-			(offset % sizeof(uint32_t)) != 0 || (size % sizeof(uint32_t)) != 0 ||
-			offset > m_impl->inlineConstants.size() ||
-			size > m_impl->inlineConstants.size() - offset)
+			(!m_impl->rendering && !m_impl->pipeline->IsCompute()))
 		{
 			Invalidate(m_impl);
 			return;
 		}
 		std::memcpy(m_impl->inlineConstants.data() + offset, data, size);
-		std::fill(
-			m_impl->inlineConstantCoverage.begin() + offset,
-			m_impl->inlineConstantCoverage.begin() + offset + size,
-			1);
 		if(m_impl->pipeline->IsCompute()) return;
-		id<MTLDevice> device = m_impl->commandQueue.device;
-		id<MTLBuffer> constants = [device newBufferWithBytes:m_impl->inlineConstants.data()
-			length:m_impl->inlineConstants.size()
-			options:MTLResourceStorageModeShared];
-		if(constants == nil)
+		const auto constants = UploadConstants(m_impl, m_impl->inlineConstants.data(), m_impl->inlineConstants.size());
+		if(!constants)
 		{
 			Invalidate(m_impl);
 			return;
 		}
-		RetainResource(m_impl, constants);
 		const RHI::PipelineLayoutDesc& layout = m_impl->pipeline->GetLayout();
 		if(HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Vertex) ||
 			HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Domain))
-			[m_impl->renderEncoder setVertexBuffer:constants
-				offset:0 atIndex:layout.inlineConstantBinding];
+			[m_impl->renderEncoder setVertexBuffer:constants.page->buffer
+				offset:static_cast<NSUInteger>(constants.offset) atIndex:layout.inlineConstantBinding];
 		if(HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Mesh))
 			if(@available(macOS 13.0, iOS 16.0, *))
-				[m_impl->renderEncoder setMeshBuffer:constants offset:0 atIndex:layout.inlineConstantBinding];
+				[m_impl->renderEncoder setMeshBuffer:constants.page->buffer
+					offset:static_cast<NSUInteger>(constants.offset) atIndex:layout.inlineConstantBinding];
 		if(HasStage(layout.inlineConstantStages, RHI::ShaderStageFlags::Fragment))
-			[m_impl->renderEncoder setFragmentBuffer:constants
-				offset:0 atIndex:layout.inlineConstantBinding];
-		[m_impl->renderEncoder useResource:constants usage:MTLResourceUsageRead];
-#if !__has_feature(objc_arc)
-		[constants release];
-#endif
+			[m_impl->renderEncoder setFragmentBuffer:constants.page->buffer
+				offset:static_cast<NSUInteger>(constants.offset) atIndex:layout.inlineConstantBinding];
+		[m_impl->renderEncoder useResource:constants.page->buffer usage:MTLResourceUsageRead];
 	}
 
 	void MetalCommandList::SetViewportNative(const RHI::Viewport& viewport)
 	{
-		if(m_impl->closed || !m_impl->rendering ||
-			!std::isfinite(viewport.x) || !std::isfinite(viewport.y) ||
-			!std::isfinite(viewport.width) || !std::isfinite(viewport.height) ||
-			!std::isfinite(viewport.minDepth) || !std::isfinite(viewport.maxDepth) ||
-			viewport.width <= 0.0f ||
-			viewport.height <= 0.0f || viewport.minDepth < 0.0f ||
-			viewport.maxDepth > 1.0f || viewport.minDepth > viewport.maxDepth)
+		if(!m_impl->valid || m_impl->closed || !m_impl->rendering || m_impl->renderEncoder == nil)
 		{
 			Invalidate(m_impl);
 			return;
@@ -1115,13 +903,13 @@ namespace dyf::Backends
 			viewport.x, viewport.y, viewport.width, viewport.height,
 			viewport.minDepth, viewport.maxDepth};
 		[m_impl->renderEncoder setViewport:native];
-		m_impl->viewportSet = true;
 		m_impl->viewport = viewport;
 	}
 
 	void MetalCommandList::SetScissorNative(const RHI::Rect& rect)
 	{
-		if(m_impl->closed || !m_impl->rendering || rect.x < 0 || rect.y < 0 ||
+		if(!m_impl->valid || m_impl->closed || !m_impl->rendering || m_impl->renderEncoder == nil ||
+			rect.x < 0 || rect.y < 0 ||
 			rect.width == 0 || rect.height == 0 ||
 			static_cast<uint32_t>(rect.x) > m_impl->renderWidth ||
 			rect.width > m_impl->renderWidth - static_cast<uint32_t>(rect.x) ||
@@ -1135,20 +923,17 @@ namespace dyf::Backends
 			static_cast<NSUInteger>(rect.x), static_cast<NSUInteger>(rect.y),
 			rect.width, rect.height};
 		[m_impl->renderEncoder setScissorRect:native];
-		m_impl->scissorSet = true;
 		m_impl->scissor = rect;
 	}
 
 	void MetalCommandList::SetStencilReferenceNative(uint32_t reference)
 	{
-		if(m_impl->closed || !m_impl->rendering ||
-			reference > std::numeric_limits<uint8_t>::max())
+		if(!m_impl->valid || m_impl->closed || !m_impl->rendering || m_impl->renderEncoder == nil)
 		{
 			Invalidate(m_impl);
 			return;
 		}
 		[m_impl->renderEncoder setStencilReferenceValue:reference];
-		m_impl->stencilReferenceSet = true;
 		m_impl->stencilReference = reference;
 	}
 
@@ -1157,47 +942,8 @@ namespace dyf::Backends
 		template<typename ImplType>
 		[[nodiscard]] bool ValidateDrawState(const ImplType* impl)
 		{
-			if(!impl->rendering || impl->pipeline == nullptr ||
-				!impl->viewportSet || !impl->scissorSet)
-			{
-				return false;
-			}
-			const RHI::GraphicsPipelineDesc& desc = impl->pipeline->GetDesc();
-			if(desc.colorAttachmentCount != impl->colorFormats.size() ||
-				desc.depthStencil.format != impl->depthFormat)
-			{
-				return false;
-			}
-			if(desc.depthStencil.stencilEnabled &&
-				(!impl->stencilConfigured || !impl->stencilReferenceSet))
-			{
-				return false;
-			}
-			for(uint32_t index = 0; index < desc.colorAttachmentCount; ++index)
-				if(desc.colorAttachments[index].format != impl->colorFormats[index]) return false;
-			for(uint32_t index = 0; index < desc.vertexBufferCount; ++index)
-				if(impl->vertexBindings.find(desc.vertexBuffers[index].binding) ==
-					impl->vertexBindings.end()) return false;
-			bool resourceSetRequired = false;
-			for(uint32_t index = 0; index < desc.layout.bindingCount; ++index)
-			{
-				if(desc.layout.bindings[index].type !=
-					RHI::ResourceBindingType::StaticSampler)
-				{
-					resourceSetRequired = true;
-					break;
-				}
-			}
-			if(resourceSetRequired && impl->resourceSet == nullptr) return false;
-			if(desc.layout.inlineConstantSize != 0 &&
-				(impl->inlineConstantCoverage.size() != desc.layout.inlineConstantSize ||
-					std::find(impl->inlineConstantCoverage.begin(),
-						impl->inlineConstantCoverage.end(), 0) !=
-						impl->inlineConstantCoverage.end()))
-			{
-				return false;
-			}
-			return true;
+			return impl->valid && impl->rendering && impl->pipeline != nullptr &&
+				impl->renderEncoder != nil;
 		}
 	}
 
@@ -1207,8 +953,7 @@ namespace dyf::Backends
 		uint32_t startVertex,
 		uint32_t startInstance)
 	{
-		if(m_impl->closed || vertexCount == 0 || instanceCount == 0 ||
-			!ValidateDrawState(m_impl))
+		if(m_impl->closed || !ValidateDrawState(m_impl))
 		{
 			Invalidate(m_impl);
 			return;
@@ -1297,10 +1042,8 @@ namespace dyf::Backends
 				(HasStage(pipeline->GetLayout().inlineConstantStages, RHI::ShaderStageFlags::Vertex) ||
 				 HasStage(pipeline->GetLayout().inlineConstantStages, RHI::ShaderStageFlags::Hull)))
 			{
-				id<MTLBuffer> constants = [m_impl->commandQueue.device
-					newBufferWithBytes:inlineConstants.data() length:inlineConstants.size()
-					options:MTLResourceStorageModeShared];
-				if(constants == nil)
+				const auto constants = UploadConstants(m_impl, inlineConstants.data(), inlineConstants.size());
+				if(!constants)
 				{
 					[compute endEncoding];
 					Invalidate(m_impl);
@@ -1309,11 +1052,8 @@ namespace dyf::Backends
 #endif
 					return;
 				}
-				RetainResource(m_impl, constants);
-				[compute setBuffer:constants offset:0 atIndex:pipeline->GetLayout().inlineConstantBinding];
-#if !__has_feature(objc_arc)
-				[constants release];
-#endif
+				[compute setBuffer:constants.page->buffer offset:static_cast<NSUInteger>(constants.offset)
+					atIndex:pipeline->GetLayout().inlineConstantBinding];
 			}
 			[compute setBuffer:factorBuffer offset:static_cast<NSUInteger>(factorRange.writeOffset)
 				atIndex:MetalPipeline::TessellationFactorBufferIndex];
@@ -1391,10 +1131,7 @@ namespace dyf::Backends
 		const uint32_t indexSize = MetalValidation::FormatSize(m_impl->indexFormat);
 		const uint64_t nativeOffset = static_cast<uint64_t>(m_impl->indexOffset) +
 			static_cast<uint64_t>(firstIndex) * indexSize;
-		const uint64_t end = nativeOffset + static_cast<uint64_t>(indexCount) * indexSize;
-		if(m_impl->closed || indexCount == 0 || instanceCount == 0 ||
-			!ValidateDrawState(m_impl) || m_impl->indexBuffer == nullptr ||
-			end > m_impl->indexBuffer->GetDesc().size)
+		if(m_impl->closed || !ValidateDrawState(m_impl))
 		{
 			Invalidate(m_impl);
 			return;
@@ -1414,11 +1151,9 @@ namespace dyf::Backends
 
 	void MetalCommandList::DrawIndirectNative(RHI::BufferHandle arguments, uint32_t offset)
 	{
-		auto* buffer = dynamic_cast<MetalBuffer*>(arguments);
+		auto* buffer = static_cast<MetalBuffer*>(arguments);
 		if(m_impl->closed || !ValidateDrawState(m_impl) ||
-			m_impl->pipeline->IsMesh() || m_impl->pipeline->IsTessellated() ||
-			buffer == nullptr || NativeBuffer(buffer) == nil ||
-			!RequireBufferState(m_impl, buffer, RHI::ResourceState::IndirectArgument))
+			m_impl->pipeline->IsTessellated() || NativeBuffer(buffer) == nil)
 		{
 			Invalidate(m_impl);
 			return;
@@ -1429,14 +1164,12 @@ namespace dyf::Backends
 			indirectBuffer:NativeBuffer(buffer) indirectBufferOffset:offset];
 	}
 
-	void MetalCommandList::DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset)
+	void MetalCommandList::DrawIndexedIndirectNative(RHI::BufferHandle arguments, uint32_t offset, uint32_t drawCount, uint32_t stride)
 	{
-		auto* buffer = dynamic_cast<MetalBuffer*>(arguments);
+		auto* buffer = static_cast<MetalBuffer*>(arguments);
 		if(m_impl->closed || !ValidateDrawState(m_impl) ||
-			m_impl->pipeline->IsMesh() || m_impl->pipeline->IsTessellated() ||
-			m_impl->indexBuffer == nullptr || NativeBuffer(m_impl->indexBuffer) == nil ||
-			buffer == nullptr || NativeBuffer(buffer) == nil ||
-			!RequireBufferState(m_impl, buffer, RHI::ResourceState::IndirectArgument))
+			m_impl->pipeline->IsTessellated() ||
+			NativeBuffer(m_impl->indexBuffer) == nil || NativeBuffer(buffer) == nil)
 		{
 			Invalidate(m_impl);
 			return;
@@ -1444,11 +1177,13 @@ namespace dyf::Backends
 		RetainResource(m_impl, NativeBuffer(buffer));
 		const MTLIndexType indexType = m_impl->indexFormat == RHI::Format::R16_UINT
 			? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
-		[m_impl->renderEncoder
-			drawIndexedPrimitives:static_cast<MTLPrimitiveType>(m_impl->pipeline->GetNativePrimitiveType())
-			indexType:indexType indexBuffer:NativeBuffer(m_impl->indexBuffer)
-			indexBufferOffset:m_impl->indexOffset
-			indirectBuffer:NativeBuffer(buffer) indirectBufferOffset:offset];
+		for (uint32_t draw = 0; draw < drawCount; ++draw)
+			[m_impl->renderEncoder
+				drawIndexedPrimitives:static_cast<MTLPrimitiveType>(m_impl->pipeline->GetNativePrimitiveType())
+				indexType:indexType indexBuffer:NativeBuffer(m_impl->indexBuffer)
+				indexBufferOffset:m_impl->indexOffset
+				indirectBuffer:NativeBuffer(buffer)
+				indirectBufferOffset:static_cast<NSUInteger>(uint64_t(offset) + uint64_t(draw) * stride)];
 	}
 
 	void MetalCommandList::DispatchMeshNative(
@@ -1456,9 +1191,7 @@ namespace dyf::Backends
 		uint32_t threadGroupCountY,
 		uint32_t threadGroupCountZ)
 	{
-		if(m_impl->closed || !m_impl->rendering || m_impl->renderEncoder == nil ||
-			!ValidateDrawState(m_impl) || !m_impl->pipeline->IsMesh() ||
-			threadGroupCountX == 0 || threadGroupCountY == 0 || threadGroupCountZ == 0)
+		if(m_impl->closed || !ValidateDrawState(m_impl))
 		{
 			Invalidate(m_impl);
 			return;
@@ -1518,30 +1251,22 @@ namespace dyf::Backends
 		const void* data,
 		uint32_t size)
 	{
-		if(m_impl->closed || m_impl->rendering || buffer == nullptr ||
-			NativeBuffer(buffer) == nil || data == nullptr ||
-			size == 0 || offset > buffer->GetDesc().size || size > buffer->GetDesc().size - offset)
+		if(m_impl->closed || m_impl->rendering || NativeBuffer(buffer) == nil)
 		{
 			return false;
 		}
-		if(offset % 4u != 0 || size % 4u != 0)
+		if(offset % MetalValidation::BufferUpdateAlignment != 0 || size % MetalValidation::BufferUpdateAlignment != 0)
 		{
 			std::fprintf(stderr,
-				"dyf::RHI [error]: Metal buffer copy requires 4-byte offset and size alignment (offset=%u, size=%u); the native copy was not issued.\n",
-				offset, size);
+				"dyf::RHI [error]: Metal buffer copy requires %u-byte offset and size alignment (offset=%u, size=%u); the native copy was not issued.\n",
+				MetalValidation::BufferUpdateAlignment, offset, size);
 			return false;
 		}
 		if(!m_impl->uploadArena) return false;
-		// Finish fallible host bookkeeping before issuing an irreversible copy.
-		ReserveForAppend(m_impl->operations);
 		const auto upload = m_impl->uploadArena->Allocate(size, 16);
 		if(!upload) return false;
 		std::memcpy(upload.data, data, size);
 		if(!EnsureBlitEncoder(m_impl)) return false;
-		MetalOperation operation = {};
-		operation.kind = OperationKind::BufferWrite;
-		operation.buffer = buffer;
-		m_impl->operations.push_back(operation);
 		[m_impl->blitEncoder copyFromBuffer:upload.page->buffer
 			sourceOffset:static_cast<NSUInteger>(upload.offset)
 			toBuffer:NativeBuffer(buffer)
@@ -1559,57 +1284,44 @@ namespace dyf::Backends
 		uint32_t rowPitch,
 		uint32_t slicePitch)
 	{
-		if(m_impl->closed || m_impl->rendering || texture == nullptr ||
-			NativeTexture(texture) == nil || data == nullptr ||
-			mipLevel >= texture->GetDesc().mipLevels ||
-			arrayLayer >= texture->GetDesc().depthOrArraySize)
+		(void)dataSize; (void)slicePitch; // Source bounds were checked by common RHI.
+		if(m_impl->closed || m_impl->rendering || NativeTexture(texture) == nil)
 		{
 			return false;
 		}
-		const uint32_t pixelSize = MetalValidation::FormatSize(texture->GetDesc().format);
+		const auto format = texture->GetDesc().format;
+		const bool compressed = RHI::IsBlockCompressed(format);
+		const uint32_t elementSize = compressed ? RHI::CompressedBlockBytes(format) : MetalValidation::FormatSize(format);
 		const uint32_t mipWidth = std::max(1u, texture->GetDesc().width >> mipLevel);
 		const uint32_t mipHeight = std::max(1u, texture->GetDesc().height >> mipLevel);
-		if(pixelSize == 0 || mipWidth > std::numeric_limits<uint32_t>::max() / pixelSize)
+		const uint32_t columns = compressed ? mipWidth / 4u + (mipWidth % 4u != 0) : mipWidth;
+		const uint32_t rows = compressed ? mipHeight / 4u + (mipHeight % 4u != 0) : mipHeight;
+		if(elementSize == 0 || columns > std::numeric_limits<uint32_t>::max() / elementSize)
 			return false;
-		const uint32_t tightRowPitch = mipWidth * pixelSize;
-		const uint64_t requiredSourceBytes =
-			static_cast<uint64_t>(rowPitch) * (mipHeight - 1u) + tightRowPitch;
-		if(rowPitch < tightRowPitch ||
-			slicePitch < static_cast<uint64_t>(rowPitch) * mipHeight ||
-			dataSize < requiredSourceBytes)
-		{
-			return false;
-		}
+		const uint32_t tightRowPitch = columns * elementSize;
 
 		if(RHI::HasStencil(texture->GetDesc().format) ||
-			(pixelSize & (pixelSize - 1u)) != 0) return false;
+			(elementSize & (elementSize - 1u)) != 0) return false;
 
 		id<MTLTexture> nativeTexture = NativeTexture(texture);
-		const uint64_t stagingSize64 = static_cast<uint64_t>(tightRowPitch) * mipHeight;
+		const uint64_t stagingSize64 = static_cast<uint64_t>(tightRowPitch) * rows;
 		if(stagingSize64 > std::numeric_limits<NSUInteger>::max())
 		{
 			return false;
 		}
 		if(!m_impl->uploadArena) return false;
-		ReserveForAppend(m_impl->operations);
-		// Metal blit offsets and row pitches are multiples of the pixel size.
-		// Accepted native texture formats are 2/4/8/16-byte pixels, so 16 covers all.
+		// For BC, pitches count 4x4 block rows, including the final 1x1/2x2 mip.
+		// Sixteen-byte offsets cover both pixel sizes and BC1/BC3 block sizes.
 		const auto upload = m_impl->uploadArena->Allocate(stagingSize64, 16);
 		if(!upload) return false;
 		auto* destination = upload.data;
 		const auto* source = static_cast<const uint8_t*>(data);
 		// 입력 행 사이의 패딩만 건너뛴다. 마지막 행 뒤의 패딩은 요구하거나 읽지 않는다.
-		for(uint32_t row = 0; row < mipHeight; ++row)
+		for(uint32_t row = 0; row < rows; ++row)
 			std::memcpy(destination + static_cast<size_t>(row) * tightRowPitch,
 				source + static_cast<size_t>(row) * rowPitch, tightRowPitch);
 
 		if(!EnsureBlitEncoder(m_impl)) return false;
-		MetalOperation operation = {};
-		operation.kind = OperationKind::TextureWrite;
-		operation.texture = texture;
-		operation.mipLevel = mipLevel;
-		operation.arrayLayer = arrayLayer;
-		m_impl->operations.push_back(operation);
 		TrackSwapchainImage(m_impl, texture);
 		[m_impl->blitEncoder
 			copyFromBuffer:upload.page->buffer
@@ -1621,80 +1333,6 @@ namespace dyf::Backends
 			destinationSlice:arrayLayer
 			destinationLevel:mipLevel
 			destinationOrigin:MTLOriginMake(0, 0, 0)];
-		return true;
-	}
-
-	bool MetalCommandList::ValidateForSubmit(MetalSubmissionState& state) const
-	{
-		for(const MetalOperation& operation : m_impl->operations)
-		{
-			switch(operation.kind)
-			{
-			case OperationKind::BufferBarrier:
-			{
-				const auto found = state.buffers.find(operation.buffer);
-				const RHI::ResourceState current = found == state.buffers.end()
-					? operation.buffer->GetState() : found->second;
-				if(current != operation.before) return false;
-				state.buffers[operation.buffer] = operation.after;
-				break;
-			}
-			case OperationKind::TextureBarrier:
-			{
-				const auto key = TextureKey(
-					operation.texture, operation.mipLevel, operation.arrayLayer);
-				const auto found = state.textureSubresources.find(key);
-				const RHI::ResourceState current = found == state.textureSubresources.end()
-					? operation.texture->GetState(operation.mipLevel, operation.arrayLayer)
-					: found->second;
-				if(current != operation.before) return false;
-				state.textureSubresources[key] = operation.after;
-				break;
-			}
-			case OperationKind::BufferRequirement:
-			{
-				const auto found = state.buffers.find(operation.buffer);
-				const RHI::ResourceState current = found == state.buffers.end()
-					? operation.buffer->GetState() : found->second;
-				if(current != operation.before &&
-					(operation.after == RHI::ResourceState::Undefined ||
-						current != operation.after)) return false;
-				break;
-			}
-			case OperationKind::TextureRequirement:
-			{
-				const auto key = TextureKey(
-					operation.texture, operation.mipLevel, operation.arrayLayer);
-				const auto found = state.textureSubresources.find(key);
-				const RHI::ResourceState current = found == state.textureSubresources.end()
-					? operation.texture->GetState(operation.mipLevel, operation.arrayLayer)
-					: found->second;
-				if(current != operation.before &&
-					(operation.after == RHI::ResourceState::Undefined ||
-						current != operation.after)) return false;
-				break;
-			}
-			case OperationKind::BufferWrite:
-			{
-				const auto found = state.buffers.find(operation.buffer);
-				const RHI::ResourceState current = found == state.buffers.end()
-					? operation.buffer->GetState() : found->second;
-				if(current != RHI::ResourceState::CopyDestination) return false;
-				break;
-			}
-			case OperationKind::TextureWrite:
-			{
-				const auto key = TextureKey(
-					operation.texture, operation.mipLevel, operation.arrayLayer);
-				const auto found = state.textureSubresources.find(key);
-				const RHI::ResourceState current = found == state.textureSubresources.end()
-					? operation.texture->GetState(operation.mipLevel, operation.arrayLayer)
-					: found->second;
-				if(current != RHI::ResourceState::CopyDestination) return false;
-				break;
-			}
-			}
-		}
 		return true;
 	}
 

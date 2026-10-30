@@ -36,6 +36,7 @@ namespace dyf::Backends::D3D12Validation
         case RHI::ResourceState::Undefined:
         case RHI::ResourceState::Common:
         case RHI::ResourceState::CopyDestination:
+        case RHI::ResourceState::CopySource:
             return true;
         case RHI::ResourceState::VertexBuffer:
             return D3D12Validation::HasUsage(desc.usage, RHI::BufferUsage::Vertex);
@@ -51,18 +52,5 @@ namespace dyf::Backends::D3D12Validation
         default:
             return false;
         }
-    }
-
-    [[nodiscard]] inline const RHI::ResourceBindingLayout* FindLayoutBinding(
-        const RHI::PipelineLayoutDesc& layout,
-        uint32_t binding)
-    {
-        for(uint32_t index = 0; index < layout.bindingCount; ++index)
-        {
-            const RHI::ResourceBindingLayout& candidate = layout.bindings[index];
-            if(candidate.binding == binding)
-                return &candidate;
-        }
-        return nullptr;
     }
 }

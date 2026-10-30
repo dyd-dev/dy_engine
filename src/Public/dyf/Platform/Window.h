@@ -1,6 +1,7 @@
 #pragma once
 
 #include "dyf/Platform/Input.h"
+#include <cstdint>
 #include <exception>
 #include <memory>
 
@@ -30,6 +31,8 @@ namespace dyf::Platform
 	struct WindowPlatformAccess;
 
 	// One window/event thread owns this facade. UIKit view work is dispatched to its main thread.
+	// Desktop GLFW stays initialized after the last Window; dyf destroys only its own windows.
+	// A GLFW host may terminate the shared runtime after all dyf windows are destroyed.
 	class Window
 	{
 	public:
@@ -61,6 +64,9 @@ namespace dyf::Platform
 		bool SetRawMouseMotion(bool enabled);
 		[[nodiscard]] bool IsRawMouseMotionEnabled() const;
 		[[nodiscard]] NativeWindowHandle GetNativeHandle() const;
+		// Changes when a tracked surface is destroyed/recreated, even if its address
+		// is reused. Zero means untracked; compare the native handle as well.
+		[[nodiscard]] uint64_t GetSurfaceGeneration() const;
 		// Compatibility with existing RHI SwapchainDesc::window; see GetNativeHandle for its kind.
 		void* GetHandle() const;
 	private:

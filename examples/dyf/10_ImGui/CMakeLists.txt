@@ -1,24 +1,26 @@
 cmake_minimum_required(VERSION 3.20)
 project(DyEditor LANGUAGES CXX)
 
-get_filename_component(engine_default "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
-set(DY_ENGINE_SOURCE_DIR "${engine_default}" CACHE PATH "dy_engine source directory.")
 if(NOT TARGET dy_engine)
-    set(DY_EXTEND_IMGUI ON CACHE BOOL "" FORCE)
-    add_subdirectory("${DY_ENGINE_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/dy_engine" EXCLUDE_FROM_ALL)
+    find_path(DY_ENGINE_INCLUDE_DIR dyf/RHI.h REQUIRED)
+    find_library(DY_ENGINE_LIBRARY NAMES dy_engine REQUIRED)
+    add_library(dy_engine STATIC IMPORTED)
+    set_target_properties(dy_engine PROPERTIES
+        IMPORTED_LOCATION "${DY_ENGINE_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${DY_ENGINE_INCLUDE_DIR}"
+        INTERFACE_LINK_LIBRARIES "${DY_ENGINE_LINK_LIBRARIES}")
 endif()
 
-add_executable(DyEditor main.cpp EditorScene.cpp)
-target_link_libraries(DyEditor PRIVATE dy_imgui)
-target_compile_definitions(DyEditor PRIVATE GLFW_INCLUDE_NONE)
-if(MSVC)
-    target_link_options(DyEditor PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
+if(NOT TARGET dyf::ImGui)
+    find_library(DY_IMGUI_LIBRARY NAMES dy_imgui REQUIRED)
+    find_path(DY_IMGUI_INCLUDE_DIR imgui.h REQUIRED)
+    add_library(dyf::ImGui STATIC IMPORTED)
+    set_target_properties(dyf::ImGui PROPERTIES
+        IMPORTED_LOCATION "${DY_IMGUI_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${DY_IMGUI_INCLUDE_DIR}"
+        INTERFACE_LINK_LIBRARIES "dy_engine;${DY_IMGUI_LINK_LIBRARIES}")
 endif()
 
-
-if(DY_ENABLE_TRACY)
-    target_link_libraries(DyEditor PRIVATE dyf::Tracy)
-endif()
-if(DY_ENABLE_RENDERDOC)
-    target_link_libraries(DyEditor PRIVATE dyf::RenderDoc)
-endif()
+add_executable(DyEditor main.cpp)
+target_compile_features(DyEditor PRIVATE cxx_std_17)
+target_link_libraries(DyEditor PRIVATE dyf::ImGui)

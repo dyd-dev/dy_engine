@@ -105,10 +105,16 @@ void Renderer::Impl::FinishLiveSettings(bool success,LiveFrameKey frame) noexcep
     if(!liveId)return; // 라이브 객체를 등록하지 않았다면 제어 결과를 게시할 대상이 없다.
     if(!success){for(auto& request:liveRequests){if(request)FailControl(request,"Renderer apply failed; existing pending settings retained");request=0;}return;} // 적용 실패면 보관한 요청을 실패 처리하고 요청 ID를 비운다. 내부 예약 설정까지 지우지는 않는다.
     // 직전 적용 스냅샷과 비교해 변경 여부를 알리고 현재 config를 보관한다. 이 비교 범위는 위 SameConfig에 나열된 항목이다.
-    const bool changed=!SameConfig(liveAppliedConfig,config);
-    NotifyLiveSettingsApplied(liveId,frame,changed);liveAppliedConfig=config;
-    // 설정이 바뀌었거나 대기 요청이 있는 제어만 실제 적용 프레임·값으로 완료하고 현재 값을 게시한다.
-    for(std::size_t i=0;i<liveControls.size();++i){if(!changed&&!liveRequests[i])continue;const auto value=Value(config,i);if(liveRequests[i]){CompleteControl(liveRequests[i],frame,value);liveRequests[i]=0;}PublishControlValue(liveControls[i].GetId(),value);}
+    try
+    {
+        auto snapshot=config;
+        const bool changed=!SameConfig(liveAppliedConfig,config);
+        liveAppliedConfig=std::move(snapshot);
+        NotifyLiveSettingsApplied(liveId,frame,changed);
+    }
+    catch(...) {std::fputs("dyf: Renderer live settings snapshot failed.\n",stderr);}
+    // 대기 요청을 실제 적용 프레임·값으로 완료하고 ID를 비운 뒤, 요청 유무와 관계없이 모든 제어의 현재 적용값을 게시한다.
+    for(std::size_t i=0;i<liveControls.size();++i){const auto value=Value(config,i);if(liveRequests[i]){CompleteControl(liveRequests[i],frame,value);liveRequests[i]=0;}PublishControlValue(liveControls[i].GetId(),value);}
     PublishControlAvailability(liveControls[8].GetId(),true,"");
     PublishLiveGeometryAvailability(liveCustomDraws);
 }

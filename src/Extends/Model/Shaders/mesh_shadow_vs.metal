@@ -35,9 +35,12 @@ struct ShadowMatrix
 struct ShadowVertex
 {
     float3 position [[attribute(0)]];
+    float2 uv [[attribute(2)]];
+    float4 color [[attribute(8)]];
 };
+struct ShadowOutput {float4 position [[position]];float2 uv;float alpha;};
 
-vertex float4 modelShadowVertexShader(
+vertex ShadowOutput modelShadowVertexShader(
     ShadowVertex input [[stage_in]],
     uint vertexId [[vertex_id]],
     const device SkinInfluence* skinInfluences [[buffer(RENDERER_BINDING_SKIN_INFLUENCES)]],
@@ -47,5 +50,8 @@ vertex float4 modelShadowVertexShader(
 {
     float4x4 skin, skinNormal;
     LoadSkinning(skinInfluences, skinPalette, vertexId, drawConstants.influenceOffset, drawConstants.paletteOffset, skin, skinNormal);
-    return shadowMatrix.lightViewProjectionMatrix[drawConstants.padding2] * drawConstants.modelMatrix * skin * float4(input.position, 1.0f);
+    ShadowOutput output;
+    output.position=shadowMatrix.lightViewProjectionMatrix[drawConstants.padding2] * drawConstants.modelMatrix * skin * float4(input.position, 1.0f);
+    output.uv=input.uv;output.alpha=input.color.a;
+    return output;
 }

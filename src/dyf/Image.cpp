@@ -1,4 +1,5 @@
 #include "dyf/Image.h"
+#include "ImageDds.h"
 
 #include <limits>
 #include <cstdio>
@@ -10,6 +11,8 @@
 #include <array>
 #include <cstring>
 #include <fstream>
+#include <atomic>
+#include <mutex>
 
 // 파일과 모델 내장 이미지의 디코딩은 이 CPU 이미지 로더에서 담당한다.
 #define STB_IMAGE_IMPLEMENTATION
@@ -26,8 +29,26 @@
 
 namespace dyf
 {
+namespace Detail
+{
+struct ImagePixels
+{
+    explicit ImagePixels(std::vector<uint8_t> values):pixels(std::move(values)),byteCount(pixels.size()) {}
+    std::vector<uint8_t> pixels;
+    const size_t byteCount;
+    std::mutex mutex;
+    std::atomic<bool> decoded{true};
+};
+}
 namespace
 {
+    bool RestorableDds(const Detail::ImageDdsData* dds,uint32_t width,uint32_t height)
+    {
+        if(!dds || dds->mips.empty())return false;
+        const uint32_t blockBytes=dds->format==RHI::Format::BC1_UNORM?8u:
+            dds->format==RHI::Format::BC3_UNORM || dds->format==RHI::Format::BC5_UNORM?16u:0u;
+        return blockBytes && uint64_t((uint64_t(width)+3)/4)*((uint64_t(height)+3)/4)*blockBytes==dds->mips[0].size();
+    }
     // stb 임시 픽셀의 소유자다. 조기 반환이나 예외에도 stbi_image_free로 해제한다.
     using DecodedPixels = std::unique_ptr<stbi_uc, decltype(&stbi_image_free)>;
 
@@ -37,7 +58,7 @@ namespace
     struct DdsInfo
     {
         uint32_t width=0,height=0,mipCount=1,blockBytes=0;
-        size_t offset=128,topBytes=0,rowPitch=0;
+        size_t offset=128,topBytes=0,rowPitch=0,mipBytes=0;
         DdsFormat format=DdsFormat::BC1;
         bool normalMap=false,swapRedGreen=false,swapRedAlpha=false;
     };
@@ -65,7 +86,7 @@ namespace
     }
 
     // 정렬되지 않은 입력도 읽도록 little-endian 필드를 바이트 단위로 해석하고, DDS 헤더·픽셀 형식·선언된 전체 mip 길이를 검증한다.
-    // 실제 디코딩은 mip 0만 수행한다. TextureCache가 RGBA 이미지에서 새 mip을 만들므로 나머지 DDS mip은 길이 검증에만 사용한다.
+    // 디코딩할 mip은 해상도 제한에 따라 나중에 선택한다. 원본 전체 mip 길이는 먼저 검증한다.
     bool ParseDds(const uint8_t* bytes,size_t headerBytes,uint64_t fileBytes,DdsInfo& info)
     {
         if(!IsDds(bytes,headerBytes) || headerBytes<128 || ReadU32(bytes+4)!=124 || ReadU32(bytes+76)!=32) // 매직·표준 헤더 크기·픽셀 형식 구조 크기 중 하나라도 틀리면 읽기를 중단한다.
@@ -157,6 +178,8 @@ namespace
             required+=size;width=std::max(1u,width/2);height=std::max(1u,height/2);
         }
         if(required>fileBytes) return DdsFailure("file is truncated within its declared mip chain."); // 선언된 mip 체인 끝이 파일을 벗어나면 잘린 파일로 판단한다.
+        if(required-info.offset>SIZE_MAX) return DdsFailure("complete mip chain exceeds the addressable size.");
+        info.mipBytes=static_cast<size_t>(required-info.offset);
         return true;
     }
 
@@ -172,6 +195,41 @@ namespace
         prefixSize=static_cast<size_t>(std::min<uint64_t>(prefix.size(),fileBytes));
         file.seekg(0);
         return bool(file.read(reinterpret_cast<char*>(prefix.data()),static_cast<std::streamsize>(prefixSize)));
+    }
+
+    RHI::Format PreservedDdsFormat(const DdsInfo& info)
+    {
+        // Normal-map reconstruction and legacy swizzles change decoded pixels.
+        // Keep those inputs on the existing RGBA path.
+        uint32_t fullMips=1;
+        for(uint32_t size=std::max(info.width,info.height);size>1;size>>=1) ++fullMips;
+        if(info.mipCount!=fullMips) return RHI::Format::Unknown;
+        if(info.format==DdsFormat::BC5 && info.normalMap && !info.swapRedGreen && !info.swapRedAlpha)
+            return RHI::Format::BC5_UNORM;
+        if(info.normalMap || info.swapRedGreen || info.swapRedAlpha) return RHI::Format::Unknown;
+        if(info.format==DdsFormat::BC1) return RHI::Format::BC1_UNORM;
+        if(info.format==DdsFormat::BC3) return RHI::Format::BC3_UNORM;
+        return RHI::Format::Unknown;
+    }
+
+    void PreserveDdsBlocks(const DdsInfo& info,const uint8_t* source,Image& image)
+    {
+        const auto format=PreservedDdsFormat(info);
+        if(format==RHI::Format::Unknown) return;
+        auto data=std::make_shared<Detail::ImageDdsData>();
+        data->format=format;
+        data->normalMap=info.normalMap;
+        data->mips.reserve(info.mipCount);
+        uint32_t width=info.width,height=info.height;
+        // ParseDds has checked every level and the complete source byte range.
+        for(uint32_t mip=0;mip<info.mipCount;++mip)
+        {
+            const size_t bytes=size_t((uint64_t(width)+3)/4)*((uint64_t(height)+3)/4)*info.blockBytes;
+            data->mips.emplace_back(source,source+bytes);
+            source+=bytes;
+            width=std::max(1u,width/2);height=std::max(1u,height/2);
+        }
+        Detail::ImageDdsAccess::Set(image,std::move(data));
     }
 
     // 검증된 최상위 mip을 RGBA8로 푼다. 출력 용량을 먼저 검사하고 완성된 Image만 result에 대입한다.
@@ -254,6 +312,46 @@ namespace
         bytes = static_cast<size_t>(size);
         return true;
     }
+
+    void LimitImageDimensions(uint32_t& width,uint32_t& height,uint32_t maximum)
+    {
+        const uint32_t longest=std::max(width,height);
+        if(!maximum || longest<=maximum)return;
+        width=std::max(1u,static_cast<uint32_t>(uint64_t(width)*maximum/longest));
+        height=std::max(1u,static_cast<uint32_t>(uint64_t(height)*maximum/longest));
+    }
+
+    void SelectDdsMip(DdsInfo& info,uint32_t maximum)
+    {
+        while(maximum && std::max(info.width,info.height)>maximum && info.mipCount>1)
+        {
+            info.offset+=info.topBytes;
+            info.mipBytes-=info.topBytes;
+            --info.mipCount;
+            info.width=std::max(1u,info.width/2);
+            info.height=std::max(1u,info.height/2);
+            info.rowPitch=info.blockBytes ? size_t((uint64_t(info.width)+3)/4)*info.blockBytes : size_t(info.width)*4;
+            info.topBytes=info.rowPitch*(info.blockBytes ? (uint64_t(info.height)+3)/4 : info.height);
+        }
+    }
+
+    Image CopyBoundedPixels(const uint8_t* source,uint32_t width,uint32_t height,uint32_t maximum)
+    {
+        uint32_t outputWidth=width,outputHeight=height;
+        LimitImageDimensions(outputWidth,outputHeight,maximum);
+        if(outputWidth==width && outputHeight==height)
+            return Image(width,height,std::vector<uint8_t>(source,source+size_t(width)*height*4));
+        std::vector<uint8_t> pixels(size_t(outputWidth)*outputHeight*4);
+        for(uint32_t y=0;y<outputHeight;++y)
+            for(uint32_t x=0;x<outputWidth;++x)
+            {
+                const auto sx=static_cast<uint32_t>(uint64_t(x)*width/outputWidth);
+                const auto sy=static_cast<uint32_t>(uint64_t(y)*height/outputHeight);
+                std::memcpy(pixels.data()+(size_t(y)*outputWidth+x)*4,
+                    source+(size_t(sy)*width+sx)*4,4);
+            }
+        return Image(outputWidth,outputHeight,std::move(pixels));
+    }
 }
 
 // 파일 헤더가 DDS이면 전용 경로로 mip 0을 읽고, 나머지는 stb로 RGBA8을 만든다. 성공한 이미지에 출처 경로를 붙인다.
@@ -268,12 +366,16 @@ static bool DecodeImage(const std::string& path, Image& result)
         if(!ParseDds(prefix.data(),prefixSize,fileBytes,info)) return false; // DDS 헤더와 선언된 전체 mip 길이 검증에 실패하면 디코딩하지 않는다.
         if(info.topBytes>static_cast<uint64_t>(std::numeric_limits<std::streamsize>::max())) // 스트림 API가 한 번에 표현할 수 없는 읽기 크기는 거부한다.
             return DdsFailure("encoded mip exceeds the stream size limit.");
-        std::vector<uint8_t> encoded(info.topBytes);
+        const uint64_t readBytes=PreservedDdsFormat(info)!=RHI::Format::Unknown ? info.mipBytes : info.topBytes;
+        if(readBytes>SIZE_MAX || readBytes>uint64_t(std::numeric_limits<std::streamsize>::max()))
+            return DdsFailure("encoded mip chain exceeds the stream size limit.");
+        std::vector<uint8_t> encoded(static_cast<size_t>(readBytes));
         file.seekg(static_cast<std::streamoff>(info.offset));
         if(!file.read(reinterpret_cast<char*>(encoded.data()),static_cast<std::streamsize>(encoded.size()))) // 최상위 mip 전체를 읽지 못하면 잘린 입력으로 실패한다.
             return DdsFailure("failed to read the complete top mip.");
         Image image;
         if(!DecodeDdsPixels(info,encoded.data(),UINT64_MAX,image,nullptr)) return false; // DDS 픽셀 변환이 실패하면 기존 result를 유지한다.
+        PreserveDdsBlocks(info,encoded.data(),image);
         image.SetSourcePath(path);result=std::move(image);return true;
     }
     int width = 0, height = 0;
@@ -290,7 +392,7 @@ static bool DecodeImage(const std::string& path, Image& result)
 
 // 메모리 입력은 디코딩 전후의 크기를 검사한다. 용량 문제는 outLimitExceeded로 별도 알리고 result는 성공할 때 교체한다.
 static bool DecodeImage(const uint8_t* encodedBytes, size_t encodedSize, Image& result,
-    uint64_t maxDecodedBytes, bool* outLimitExceeded)
+    uint64_t maxDecodedBytes, uint32_t maxDimension, bool* outLimitExceeded)
 {
     if(outLimitExceeded) *outLimitExceeded = false; // 이번 호출의 용량 초과 상태를 먼저 초기화한다.
     if(!encodedBytes || !encodedSize) return false; // 메모리 주소나 데이터가 없으면 디코딩하지 않는다.
@@ -298,7 +400,14 @@ static bool DecodeImage(const uint8_t* encodedBytes, size_t encodedSize, Image& 
     {
         DdsInfo info;
         if(!ParseDds(encodedBytes,encodedSize,encodedSize,info)) return false; // 메모리 DDS의 헤더와 실제 길이가 맞지 않으면 거부한다.
-        return DecodeDdsPixels(info,encodedBytes+info.offset,maxDecodedBytes,result,outLimitExceeded);
+        SelectDdsMip(info,maxDimension);
+        Image image;
+        if(!DecodeDdsPixels(info,encodedBytes+info.offset,maxDecodedBytes,image,outLimitExceeded)) return false;
+        if(maxDimension && std::max(info.width,info.height)>maxDimension)
+            image=CopyBoundedPixels(image.GetPixels().data(),info.width,info.height,maxDimension);
+        else PreserveDdsBlocks(info,encodedBytes+info.offset,image);
+        result=std::move(image);
+        return true;
     }
     if(encodedSize > static_cast<size_t>(std::numeric_limits<int>::max())) return false; // stb 길이 인자의 int 범위를 넘는 메모리 입력은 거부한다.
 
@@ -319,8 +428,7 @@ static bool DecodeImage(const uint8_t* encodedBytes, size_t encodedSize, Image& 
         return false;
     }
 
-    Image image(static_cast<uint32_t>(width), static_cast<uint32_t>(height),
-        std::vector<uint8_t>(pixels.get(), pixels.get() + bytes));
+    Image image=CopyBoundedPixels(pixels.get(),static_cast<uint32_t>(width),static_cast<uint32_t>(height),maxDimension);
     result = std::move(image);
     return true;
 }
@@ -338,6 +446,10 @@ bool LoadImage(const std::string& path, Image& result)
 // 픽셀을 만들지 않고 크기를 조회한다. DDS는 전체 파일 길이까지 검사하며 실패 시 출력 크기는 0이다.
 bool GetImageDimensions(const std::string& path, uint32_t& width, uint32_t& height)
 {
+    return GetImageDimensions(path,width,height,0);
+}
+bool GetImageDimensions(const std::string& path, uint32_t& width, uint32_t& height,uint32_t maxDimension)
+{
     width = height = 0;
     std::ifstream file;
     std::array<uint8_t,148> prefix={};size_t prefixSize=0;uint64_t fileBytes=0;
@@ -345,7 +457,10 @@ bool GetImageDimensions(const std::string& path, uint32_t& width, uint32_t& heig
     {
         DdsInfo info;
         if(!ParseDds(prefix.data(),prefixSize,fileBytes,info)) return false; // DDS 메타데이터 검증에 실패하면 크기 조회도 실패한다.
-        width=info.width;height=info.height;return true;
+        SelectDdsMip(info,maxDimension);
+        width=info.width;height=info.height;
+        LimitImageDimensions(width,height,maxDimension);
+        return true;
     }
     int imageWidth = 0, imageHeight = 0;
     if(path.empty() || !stbi_info(path.c_str(), &imageWidth, &imageHeight, nullptr) || // 빈 경로·헤더 조회 실패·양수가 아닌 크기이면 크기 조회를 실패시킨다.
@@ -356,14 +471,19 @@ bool GetImageDimensions(const std::string& path, uint32_t& width, uint32_t& heig
     }
     width = static_cast<uint32_t>(imageWidth);
     height = static_cast<uint32_t>(imageHeight);
+    LimitImageDimensions(width,height,maxDimension);
     return true;
 }
 // 메모리 디코더의 예외를 잡아 false로 변환한다. limit은 압축 해제한 RGBA 픽셀 용량의 상한이다.
 bool LoadImage(const uint8_t* bytes,size_t size,Image& result,uint64_t limit,bool* exceeded)
 {
+    return LoadImage(bytes,size,result,limit,0,exceeded);
+}
+bool LoadImage(const uint8_t* bytes,size_t size,Image& result,uint64_t limit,uint32_t maxDimension,bool* exceeded)
+{
     try
     {
-        if(DecodeImage(bytes,size,result,limit,exceeded)) return true; // 메모리 디코딩이 성공하면 완성된 result를 그대로 반환한다.
+        if(DecodeImage(bytes,size,result,limit,maxDimension,exceeded)) return true; // 메모리 디코딩이 성공하면 완성된 result를 그대로 반환한다.
         std::fprintf(stderr,"dyf: image decode failed or decoded byte limit exceeded.\n");
     }
     catch(const std::exception& error) { std::fprintf(stderr,"dyf: image decode: %s\n",error.what()); }
@@ -377,22 +497,51 @@ namespace dyf
 // 입력 벡터를 불변 공유 저장소로 옮긴다. 생성 시 크기 불일치를 거부하지 않으므로 IsValid로 확인한다.
 Image::Image(uint32_t width, uint32_t height, std::vector<uint8_t> rgba8, ColorSpace colorSpace)
     : m_width(width), m_height(height),
-      m_pixels(std::make_shared<const std::vector<uint8_t>>(std::move(rgba8))), m_colorSpace(colorSpace)
+      m_pixels(std::make_shared<Detail::ImagePixels>(std::move(rgba8))), m_colorSpace(colorSpace)
 {
 }
 
 // 양수 해상도와 RGBA 네 성분 단위 및 정확한 픽셀 개수를 검사한다.
 bool Image::IsValid() const
 {
-    return m_width && m_height && m_pixels && m_pixels->size() % 4 == 0 &&
-        static_cast<uint64_t>(m_width) * m_height == m_pixels->size() / 4;
+    return m_width && m_height && m_pixels && m_pixels->byteCount % 4 == 0 &&
+        static_cast<uint64_t>(m_width) * m_height == m_pixels->byteCount / 4;
 }
 
 // 저장소가 없으면 공통 빈 배열을 반환해 읽는 쪽에 항상 유효한 참조를 준다.
 const std::vector<uint8_t>& Image::GetPixels() const
 {
     static const std::vector<uint8_t> empty;
-    return m_pixels ? *m_pixels : empty;
+    if(!m_pixels)return empty;
+    if(!m_pixels->decoded.load(std::memory_order_acquire))
+    {
+        std::lock_guard<std::mutex> lock(m_pixels->mutex);
+        if(!m_pixels->decoded.load(std::memory_order_relaxed))
+        {
+            if(!RestorableDds(m_dds.get(),m_width,m_height))throw std::runtime_error("Invalid preserved DDS cache.");
+            DdsInfo info;info.width=m_width;info.height=m_height;
+            info.format=m_dds->format==RHI::Format::BC1_UNORM?DdsFormat::BC1:
+                m_dds->format==RHI::Format::BC3_UNORM?DdsFormat::BC3:DdsFormat::BC5;
+            info.normalMap=m_dds->normalMap;
+            info.blockBytes=info.format==DdsFormat::BC1?8:16;
+            Image decoded;
+            if(!DecodeDdsPixels(info,m_dds->mips[0].data(),m_pixels->byteCount,decoded,nullptr))
+                throw std::runtime_error("Preserved DDS reconstruction failed.");
+            m_pixels->pixels=std::move(decoded.m_pixels->pixels);
+            m_pixels->decoded.store(true,std::memory_order_release);
+        }
+    }
+    return m_pixels->pixels;
+}
+
+uint64_t Image::ReleaseDecodedPixels() const
+{
+    if(!IsValid() || !RestorableDds(m_dds.get(),m_width,m_height))return 0;
+    std::lock_guard<std::mutex> lock(m_pixels->mutex);
+    const uint64_t bytes=m_pixels->pixels.capacity();
+    std::vector<uint8_t>().swap(m_pixels->pixels);
+    m_pixels->decoded.store(false,std::memory_order_release);
+    return bytes;
 }
 
 // 이미지의 출처 문자열만 교체한다. 픽셀이나 GPU 캐시를 수정하지 않는다.
@@ -422,6 +571,10 @@ const std::vector<float>& HdrImage::GetPixels() const
 // HDR 파일 여부·해상도·할당 범위를 확인하고 float로 디코딩한다. 모든 성분이 유한하고 음수가 아닐 때만 결과를 교체한다.
 bool LoadHdrImage(const std::string& path,HdrImage& image)
 {
+    return LoadHdrImage(path,image,0);
+}
+bool LoadHdrImage(const std::string& path,HdrImage& image,uint32_t maxDimension)
+{
     try
     {
         int width=0,height=0;
@@ -431,14 +584,32 @@ bool LoadHdrImage(const std::string& path,HdrImage& image)
         std::unique_ptr<float,decltype(&stbi_image_free)> pixels(
             stbi_loadf(path.c_str(),&width,&height,nullptr,4),stbi_image_free);
         if(!pixels) {std::fprintf(stderr,"dyf: HDR load failed: %s\n",path.c_str());return false;} // HDR 디코더가 픽셀을 반환하지 못하면 진단하고 실패한다.
+        if(width<=0 || height<=0 || uint64_t(width)*height>SIZE_MAX/(4*sizeof(float)))return false;
         const size_t count=size_t(width)*height*4;
         // 특정 방향에서 들어오거나 나가는 빛의 세기를 나타내는 값(방사휘도)은 RGB에 저장된다.
         // 알파도 함께 검사하며, 검사에 실패하면 기존 image를 교체하지 않는다.
         for(size_t i=0;i<count;++i)
             if(!std::isfinite(pixels.get()[i]) || pixels.get()[i]<0) // NaN·무한대·음수 성분이 하나라도 있으면 실패한다.
             {std::fprintf(stderr,"dyf: HDR image contains invalid radiance: %s\n",path.c_str());return false;}
-        image=HdrImage(static_cast<uint32_t>(width),static_cast<uint32_t>(height),
-            std::vector<float>(pixels.get(),pixels.get()+count));
+        uint32_t outputWidth=static_cast<uint32_t>(width),outputHeight=static_cast<uint32_t>(height);
+        LimitImageDimensions(outputWidth,outputHeight,maxDimension);
+        if(outputWidth==static_cast<uint32_t>(width) && outputHeight==static_cast<uint32_t>(height))
+            image=HdrImage(outputWidth,outputHeight,std::vector<float>(pixels.get(),pixels.get()+count));
+        else
+        {
+            // Copy only retained pixels; the decoder already owns the temporary
+            // full float image. Never build a second full-resolution vector.
+            std::vector<float> retained(size_t(outputWidth)*outputHeight*4);
+            for(uint32_t y=0;y<outputHeight;++y)
+                for(uint32_t x=0;x<outputWidth;++x)
+                {
+                    const auto sx=static_cast<uint32_t>(uint64_t(x)*width/outputWidth);
+                    const auto sy=static_cast<uint32_t>(uint64_t(y)*height/outputHeight);
+                    std::memcpy(retained.data()+(size_t(y)*outputWidth+x)*4,
+                        pixels.get()+(size_t(sy)*width+sx)*4,4*sizeof(float));
+                }
+            image=HdrImage(outputWidth,outputHeight,std::move(retained));
+        }
         return true;
     }
     catch(const std::exception& error) {std::fprintf(stderr,"dyf: HDR load: %s\n",error.what());return false;}

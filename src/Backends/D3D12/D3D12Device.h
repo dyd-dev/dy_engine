@@ -12,6 +12,18 @@ namespace dyf::Backends
         D3D12Device();
         ~D3D12Device() override;
 
+    protected:
+        bool SupportsDdsCompression(RHI::Format) const noexcept;
+        bool SupportsLinearFiltering(RHI::Format) const noexcept;
+        bool SupportsFormatNative(RHI::Format format,RHI::FormatFeature feature) const noexcept override
+        {
+            switch(feature)
+            {
+            case RHI::FormatFeature::LinearFiltering: return SupportsLinearFiltering(format);
+            case RHI::FormatFeature::CompressedSampling: return SupportsDdsCompression(format);
+            }
+            return false;
+        }
         void DestroySwapchainNative() override;
         bool WaitIdleNative() override;
         bool IsLostNative() const override;
@@ -76,7 +88,6 @@ namespace dyf::Backends
             uint32_t rowPitch,
             uint32_t slicePitch) override;
 
-    protected:
         int Initialize(const void* windowHandle, const RHI::DeviceDesc& desc) override;
 
     private:

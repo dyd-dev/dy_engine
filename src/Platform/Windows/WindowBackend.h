@@ -36,6 +36,7 @@ namespace dyf::Platform
 		virtual bool SetRawMouseMotion(bool) = 0;
 		virtual bool IsRawMouseMotionEnabled() const = 0;
 		virtual NativeWindowHandle GetNativeHandle() const = 0;
+		virtual uint64_t GetSurfaceGeneration() const { return 0; }
 		virtual void* GetGlfwWindow() const noexcept { return nullptr; }
 
 	protected:

@@ -61,6 +61,17 @@ namespace dyf::Backends
 			uint32_t slicePitch) override;
 
 	protected:
+        bool SupportsLinearFiltering(RHI::Format) const noexcept;
+        bool SupportsDdsCompression(RHI::Format) const noexcept;
+        bool SupportsFormatNative(RHI::Format format,RHI::FormatFeature feature) const noexcept override
+        {
+            switch(feature)
+            {
+            case RHI::FormatFeature::LinearFiltering: return SupportsLinearFiltering(format);
+            case RHI::FormatFeature::CompressedSampling: return SupportsDdsCompression(format);
+            }
+            return false;
+        }
         RHI::UploadMemoryStatistics GetUploadMemoryStatisticsNative() const override;
         bool SetUploadMemoryPolicyNative(bool,bool) override;
 		int Initialize(const void* windowHandle, const dyf::RHI::DeviceDesc& desc) override;

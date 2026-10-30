@@ -97,12 +97,13 @@ namespace dyf::Platform
 				{
 					Detail::FrameCaptureRequest capture;
 					if(!Detail::DecodeFrameCapture(payload, capture, error)) return false;
-					const bool accepted = RequestLiveFrameCapture(capture.device, capture.source, capture.request) != 0;
-					const auto acknowledgement = Detail::EncodeAck({capture.request, accepted,
+					const bool accepted=RequestLiveFrameCapture(capture.device,capture.source,capture.request)!=0;
+					const auto acknowledgement=Detail::EncodeAck({capture.request,accepted,
 						accepted ? "" : "Frame capture rejected: missing source, disabled collector or capture pending"});
-					return Detail::SendPacket(handle, Detail::PacketKind::ControlAck, acknowledgement, stop);
+					return Detail::SendPacket(handle,Detail::PacketKind::ControlAck,acknowledgement,stop);
 				}
-				if(header.kind != static_cast<std::uint32_t>(Detail::PacketKind::Control) || !Detail::DecodeControl(payload, request, error)) return false;
+				if(header.kind != static_cast<std::uint32_t>(Detail::PacketKind::Control) ||
+					!Detail::DecodeControl(payload, request, error)) return false;
 
 				const bool accepted = Detail::EnqueueControl(request) != 0;
 				const auto acknowledgement = Detail::EncodeAck({request.request, accepted,
@@ -114,7 +115,8 @@ namespace dyf::Platform
 			{
 				const auto snapshot = ReadLiveSnapshot();
 				if(!snapshot) return false;
-				const auto payload = Detail::EncodeBoundedSnapshot(*snapshot);
+				auto bounded = *snapshot;
+				const auto payload = Detail::EncodeBoundedSnapshot(bounded);
 				return Detail::SendPacket(handle, Detail::PacketKind::Snapshot, payload, stop);
 			}
 

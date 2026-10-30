@@ -36,9 +36,13 @@ cbuffer ShadowMatrix : register(
 #undef DY_SHADOW_FLOAT4
 };
 
-float4 main(float3 position : TEXCOORD0, uint vertexId : SV_VertexID) : SV_POSITION
+struct ShadowOutput {float4 position:SV_Position;float2 uv:TEXCOORD0;float alpha:TEXCOORD1;};
+ShadowOutput main(float3 position:TEXCOORD0,float2 uv:TEXCOORD2,float4 color:TEXCOORD8,uint vertexId:SV_VertexID)
 {
     float4x4 skin, skinNormal;
     LoadSkinning(vertexId, influenceOffset, paletteOffset, skin, skinNormal);
-    return mul(lightViewProjectionMatrix[padding2], mul(modelMatrix, mul(skin, float4(position, 1.0))));
+    ShadowOutput output;
+    output.position=mul(lightViewProjectionMatrix[padding2], mul(modelMatrix, mul(skin, float4(position, 1.0))));
+    output.uv=uv;output.alpha=color.a;
+    return output;
 }
