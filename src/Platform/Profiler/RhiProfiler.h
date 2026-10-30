@@ -62,6 +62,7 @@ namespace dyf::RHI
         std::vector<Platform::LiveEvent> events;
         std::vector<Platform::LiveFlowLink> links;
         Platform::LiveEventSummary summary;
+        bool hasSummary=false;
         std::unordered_map<const void*, Platform::LiveId> objectIds;
         Platform::LiveId FindObject(const void* object) noexcept
         {

@@ -27,7 +27,7 @@ namespace dyf::Platform::Detail
 		}
 
 		FIELDS(LiveFrameSummary, v.key, v.appliedRevision, v.beginNs, v.endNs, v.sampleAgeNs, v.frame, v.cpuRender, v.gpuMain,
-			v.gpuShadow, v.gpuMeasured, v.objects, v.gpuCoverageComplete, v.incomplete, v.stages, v.recorded, v.submitted, v.completed, v.outcome)
+			v.gpuShadow, v.gpuMeasured, v.objects, v.gpuCoverageComplete, v.incomplete, v.stages, v.recorded, v.submitted, v.completed, v.outcome, v.captureRequest)
 		FIELDS(LiveMetricAggregate, v.state, v.average, v.maximum, v.ready, v.pending, v.unsupported, v.unavailable, v.lastReadyFrame)
 		FIELDS(LiveStageAggregate, v.totalElements, v.totalBytes, v.totalOperations, v.meanElements, v.meanBytes, v.meanOperations, v.cpu, v.gpu)
 		FIELDS(LiveAggregate, v.device, v.source, v.appliedRevision, v.beginNs, v.endNs, v.frameCount, v.fps, v.mixedRevision, v.frame,
@@ -55,12 +55,13 @@ namespace dyf::Platform::Detail
 			v.objects, v.loss)
 		FIELDS(LiveComparisonEvidence, v.request, v.before, v.after)
 		FIELDS(LiveSourceSnapshot, v.device, v.source, v.latest, v.recent, v.runRanges, v.recentSeconds, v.history, v.longFrames,
-			v.flow, v.recentGpuSpans, v.comparisonEvidence)
+			v.flow, v.recentGpuSpans, v.comparisonEvidence, v.captureRequest, v.capture)
 		FIELDS(ControlChoice, v.value, v.label)
 		FIELDS(ControlDesc, v.id, v.device, v.source, v.owner, v.key, v.label, v.kind, v.application, v.appliedValue, v.writable,
 			v.minimum, v.maximum, v.choices, v.unavailableReason, v.category, v.description, v.onPath, v.offPath, v.conditions, v.tradeoffs)
 		FIELDS(ControlRequest, v.request, v.control, v.value)
 		FIELDS(ControlAck, v.request, v.accepted, v.message)
+		FIELDS(FrameCaptureRequest, v.request, v.device, v.source)
 		FIELDS(ControlStatus, v.request, v.control, v.device, v.source, v.state, v.requested, v.actual, v.appliedFrame,
 			v.appliedRevision, v.requestedNs, v.appliedNs, v.baseline, v.after, v.message, v.previousActual)
 		FIELDS(LiveCollectorStatistics, v.retainedFrames, v.retainedDetailBytes, v.commandGenerations, v.batches)
@@ -291,7 +292,7 @@ namespace dyf::Platform::Detail
 				source.flow.omittedLinks += source.flow.links.size();
 				source.flow.events.clear();
 				source.flow.links.clear();
-				for(auto * evidence : { & source.comparisonEvidence.before, & source.comparisonEvidence.after })
+				for(auto * evidence : { & source.comparisonEvidence.before, & source.comparisonEvidence.after, & source.capture })
 				{
 					snapshot.loss.events += evidence->flow.events.size();
 					snapshot.loss.links += evidence->flow.links.size();
@@ -309,7 +310,7 @@ namespace dyf::Platform::Detail
 			{
 				snapshot.loss.gpuSpans += source.flow.gpuSpans.size();
 				source.flow.gpuSpans.clear();
-				for(auto * evidence : { & source.comparisonEvidence.before, & source.comparisonEvidence.after })
+				for(auto * evidence : { & source.comparisonEvidence.before, & source.comparisonEvidence.after, & source.capture })
 				{
 					snapshot.loss.gpuSpans += evidence->flow.gpuSpans.size();
 					evidence->loss.gpuSpans += evidence->flow.gpuSpans.size();
@@ -339,7 +340,7 @@ namespace dyf::Platform::Detail
 			{
 				snapshot.loss.inventory += snapshot.objects.size();
 				snapshot.objects.clear();
-				for(auto & source : snapshot.sources) for(auto * evidence : { & source.comparisonEvidence.before, & source.comparisonEvidence.after })
+				for(auto & source : snapshot.sources) for(auto * evidence : { & source.comparisonEvidence.before, & source.comparisonEvidence.after, & source.capture })
 				{
 					snapshot.loss.inventory += evidence->objects.size();
 					evidence->loss.inventory += evidence->objects.size();
@@ -463,6 +464,33 @@ namespace dyf::Platform::Detail
 				}
 			}
 			const auto & comparison = source.comparisonEvidence;
+			const auto & capture = source.capture;
+			const auto & captured = capture.summary;
+			if((capture.available && (!source.captureRequest || captured.captureRequest != source.captureRequest ||
+				!captured.key.frame || captured.key.device != source.device || captured.key.source != source.source ||
+				captured.endNs < captured.beginNs || captured.endNs > value.producerTimeNs || capture.flow.key != captured.key)) ||
+				capture.objects.size() > 128 || capture.flow.events.size() > 2048 || capture.flow.links.size() > 4096 ||
+				capture.flow.gpuSpans.size() > 128 || (!capture.available && (!capture.flow.events.empty() ||
+				!capture.flow.links.empty() || !capture.flow.gpuSpans.empty() || !capture.objects.empty())))
+			{
+				error = "Invalid requested frame capture";
+				return false;
+			}
+			for(const auto & event : capture.flow.events) if(event.context.frame != captured.key ||
+				event.context.appliedRevision != captured.appliedRevision)
+			{
+				error = "Mismatched captured event/revision";
+				return false;
+			}
+			for(const auto & span : capture.flow.gpuSpans) if(span.frame != captured.key ||
+				span.appliedRevision != captured.appliedRevision ||
+				(span.hasQueueInterval && (!span.gpuClockDomain || span.endGpuNs < span.beginGpuNs)) ||
+				(span.hasCpuInterval && (value.clock.cpu != LiveCpuClock::QueryPerformanceCounter ||
+				!value.clock.frequency || span.endCpuNs < span.beginCpuNs)))
+			{
+				error = "Invalid captured GPU interval/domain/revision";
+				return false;
+			}
 			for(const auto * evidence : { & comparison.before, & comparison.after }) if(evidence->available)
 			{
 				const auto status = std::find_if(value.controlStatus.begin(), value.controlStatus.end(), [&](const auto & request)
@@ -504,7 +532,7 @@ namespace dyf::Platform::Detail
 				}
 			}
 			for(const auto * flow : { & source.flow, & comparison.before.flow,
-				& comparison.after.flow }) for(const auto & event : flow->events) if(event.kind == LiveEventKind::UploadMemory &&(event.operations != 1 || !event.bytes || event.arguments [0] < 0 || event.arguments [0] > 1))
+				& comparison.after.flow, & capture.flow }) for(const auto & event : flow->events) if(event.kind == LiveEventKind::UploadMemory &&(event.operations != 1 || !event.bytes || event.arguments [0] < 0 || event.arguments [0] > 1))
 			{
 				error = "Invalid native upload memory event";
 				return false;
@@ -527,6 +555,16 @@ namespace dyf::Platform::Detail
 		return Decode(data, r, error) && r.request && r.control;
 	}
 
+	std::vector<std::uint8_t> EncodeFrameCapture(const FrameCaptureRequest & request)
+	{
+		Writer writer;
+		writer.Value(request);
+		return std::move(writer.data);
+	}
+	bool DecodeFrameCapture(const std::vector<std::uint8_t> & data, FrameCaptureRequest & request, std::string & error)
+	{
+		return Decode(data, request, error) && request.request && request.device && request.source;
+	}
 	std::vector<std::uint8_t> EncodeAck(const ControlAck & r)
 	{
 		Writer writer;
@@ -541,7 +579,7 @@ namespace dyf::Platform::Detail
 
 	bool ValidateHeader(const PacketHeader & h) noexcept
 	{
-		return h.magic == 0x564c5944 && h.version == LiveProtocolVersion &&(h.kind >= 1 && h.kind <= 3) && h.size > 0 &&
+		return h.magic == 0x564c5944 && h.version == LiveProtocolVersion &&(h.kind >= 1 && h.kind <= 4) && h.size > 0 &&
 			h.size <= LiveTransferLimit - sizeof(PacketHeader);
 	}
 

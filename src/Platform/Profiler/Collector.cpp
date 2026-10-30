@@ -164,6 +164,7 @@ namespace dyf::Platform
 			LiveId revision = 0;
 			bool budgetLimited = false;
 			std::shared_ptr<EvidenceRecord> record;
+			LiveId captureRequest = 0;
 		};
 		template<class T> bool PushDetail(FrameRecord & frame, std::vector<T> & values, const T & value, std::size_t limit)
 		{
@@ -237,6 +238,8 @@ namespace dyf::Platform
 			LiveAggregate baseline;
 			EvidenceCandidate candidate, previousCandidate, beforeEvidence, afterEvidence;
 			LiveId evidenceRequest = 0;
+			LiveId captureRequest = 0, pendingCapture = 0;
+			EvidenceCandidate capture;
 		};
 		struct BatchRecord
 		{
@@ -326,7 +329,7 @@ namespace dyf::Platform
 			const auto begin = origin +(frame.summary.endNs - origin) / LiveAverageWindowNs * LiveAverageWindowNs;
 			if(source.candidate.key.frame && source.candidate.beginNs == begin) return;
 			source.previousCandidate = std::move(source.candidate);
-			source.candidate = { frame.summary.key, begin, begin + LiveAverageWindowNs, frame.summary.appliedRevision, true, { } };
+			source.candidate = { frame.summary.key, begin, begin + LiveAverageWindowNs, frame.summary.appliedRevision, true, { }, frame.summary.captureRequest };
 			// One independently owned prefix per source/second; this reservation includes all retained capacities.
 			constexpr std::size_t reservation = 1024u * 1024u, eventLimit = 2048, linkLimit = 4096, objectLimit = 128;
 			static_assert(sizeof(EvidenceRecord) + eventLimit * sizeof(LiveEvent) + linkLimit * sizeof(LiveFlowLink) + 128 * sizeof(LiveGpuSpan) + objectLimit *(sizeof(LiveObjectInfo) + 257) < reservation);
@@ -446,6 +449,29 @@ namespace dyf::Platform
 				value.windowBeginNs = candidate.beginNs;
 				value.windowEndNs = candidate.endNs;
 				value.loss.frames = 1;
+			}
+			return value;
+		}
+
+		LiveFrameEvidence CopyCapture(const EvidenceCandidate& candidate, std::uint64_t now)
+		{
+			LiveFrameEvidence value;
+			if(!candidate.key.frame) return value;
+			if(candidate.record)
+			{
+				std::lock_guard<std::mutex> lock(candidate.record->mutex);
+				value=candidate.record->value;
+				value.summary.sampleAgeNs=now>=value.summary.endNs?now-value.summary.endNs:0;
+			}
+			else
+			{
+				value.budgetLimited=candidate.budgetLimited;
+				value.summary.key=value.flow.key=candidate.key;
+				value.summary.appliedRevision=value.windowRevision=candidate.revision;
+				value.summary.captureRequest=candidate.captureRequest;
+				value.windowBeginNs=candidate.beginNs;
+				value.windowEndNs=candidate.endNs;
+				value.loss.frames=1;
 			}
 			return value;
 		}
@@ -1149,6 +1175,43 @@ namespace dyf::Platform
 	{
 		return enabled.load(std::memory_order_relaxed);
 	}
+	LiveId RequestLiveFrameCapture(LiveId device, LiveId source, LiveId request) noexcept
+	{
+		if(!IsLiveCollectorEnabled() || !device || !source) return 0;
+		try
+		{
+			auto& state=S();
+			std::lock_guard<std::mutex> lock(state.mutex);
+			const auto found=state.sources.find(source);
+			if(found==state.sources.end() || found->second.device!=device || found->second.retiredNs) return 0;
+			auto& record=found->second;
+			if(record.captureRequest!=record.capture.captureRequest) return 0;
+			if(!request) request=AllocateLiveId();
+			if(!request || request==record.captureRequest) return 0;
+			record.captureRequest=record.pendingCapture=request;
+			return request;
+		}
+		catch(...) {return 0;}
+	}
+	bool IsLiveDetailEnabled(LiveFrameKey key) noexcept
+	{
+		if(!IsLiveCollectorEnabled()) return false;
+		if(!key.frame) key=context.frame;
+		if(!key.frame) return false;
+		// A frame's capture choice does not change; recording workers can reuse it.
+		static thread_local LiveFrameKey cachedKey;
+		static thread_local bool cachedDetail=false;
+		if(cachedKey==key) return cachedDetail;
+		try
+		{
+			const auto frame=currentFrame && currentFrame->summary.key==key ? currentFrame : Frame(key);
+			if(!frame) return false;
+			cachedKey=key;
+			cachedDetail=frame->summary.captureRequest!=0;
+			return cachedDetail;
+		}
+		catch(...) {return false;}
+	}
 
 	bool SetLiveCollectorEnabled(bool value) noexcept
 	{
@@ -1476,6 +1539,7 @@ namespace dyf::Platform
 			frame->summary.beginNs = LiveNowNs();
 			frame->attemptBeginNs = frame->summary.beginNs;
 			frame->summary.appliedRevision = record.revision;
+			frame->summary.captureRequest = record.pendingCapture;
 			frame->flow.key = token.key;
 			if(!record.run)
 			{
@@ -1486,6 +1550,7 @@ namespace dyf::Platform
 			}
 			frame->run = record.run;
 			record.frames.push_back(frame);
+			record.pendingCapture = 0;
 			++s.frameCount;
 			currentFrame = frame;
 			context = { token.key, record.revision, source, 0, 0 };
@@ -1589,6 +1654,12 @@ namespace dyf::Platform
 					source.lastEndedNs = f->summary.endNs;
 					GpuSummary(* f);
 					UpdateSecond(* f);
+					if(f->summary.captureRequest)
+					{
+						const auto begin=source.run->originNs+(f->summary.endNs-source.run->originNs)/LiveAverageWindowNs*LiveAverageWindowNs;
+						source.capture={f->summary.key,begin,begin+LiveAverageWindowNs,
+							f->summary.appliedRevision,true,{},f->summary.captureRequest};
+					}
 					auto detail = std::make_shared<LiveFlowSnapshot>();
 					detail->key = f->flow.key;
 					detail->omittedEvents = f->flow.omittedEvents;
@@ -1597,6 +1668,20 @@ namespace dyf::Platform
 					detail->links.swap(f->flow.links);
 					f->publishedFlow = std::move(detail);
 					CaptureEvidence(s, source, * f, source.run->originNs);
+					if(f->summary.captureRequest)
+					{
+						if(source.candidate.key == f->summary.key) source.capture = source.candidate;
+						else
+						{
+							// Keep comparison evidence for its original representative frame.
+							auto candidate=std::move(source.candidate), previous=std::move(source.previousCandidate);
+							source.candidate={};
+							CaptureEvidence(s, source, * f, source.run->originNs);
+							source.capture=std::move(source.candidate);
+							source.candidate=std::move(candidate);
+							source.previousCandidate=std::move(previous);
+						}
+					}
 					const auto cutoff = f->summary.endNs > LiveHistoryWindowNs ? f->summary.endNs - LiveHistoryWindowNs : 0;
 					while(frames.size() > 1 && frames.front()->ended && frames.front()->summary.endNs < cutoff)
 					{
@@ -1842,13 +1927,13 @@ namespace dyf::Platform
 		{
 			auto e = input;
 			if(!e.context.frame.frame) e.context = context;
-			if(!e.id) e.id = AllocateLiveId();
 			auto f = Frame(e.context.frame);
 			if(!f)
 			{
 				++s.omittedEvents;
 				return;
 			}
+			if(!e.id && f->summary.captureRequest) e.id = AllocateLiveId();
 			std::unique_lock < std::mutex > lock(f->mutex);
 			auto & summary = f->summary;
 			std::optional<LiveFrameSummary> before;
@@ -1943,6 +2028,13 @@ namespace dyf::Platform
 			}
 			if(e.kind == LiveEventKind::Output && e.commandKind == LiveCommandKind::Present && e.outcome == LiveOutcome::Completed &&
 				!f->ended) f->acquireSkipped = false;
+			if(!f->summary.captureRequest)
+			{
+				if(e.kind == LiveEventKind::Wait && e.outcome == LiveOutcome::Skipped && e.id == e.context.frame.frame)
+					f->acquireSkipped = true;
+				if(before) {UpdateSecond(*f, &*before);RepairEvidence(*f);}
+				return;
+			}
 			if(e.kind == LiveEventKind::Wait && e.outcome == LiveOutcome::Skipped && e.id == e.context.frame.frame)
 			{
 				f->acquireSkipped = true;
@@ -1992,12 +2084,13 @@ namespace dyf::Platform
 
 	void RecordLiveLink(const LiveFlowLink & link) noexcept
 	{
-		if(!IsLiveCollectorEnabled()) return;
+		if(!IsLiveDetailEnabled()) return;
 		try
 		{
 			if(auto f = Frame(context.frame))
 			{
 				std::unique_lock < std::mutex > lock(f->mutex);
+				if(!f->summary.captureRequest) return;
 				if(f->ended)
 				{
 					AppendEvidenceDetail(* f, nullptr, & link);
@@ -2164,6 +2257,8 @@ namespace dyf::Platform
 			copy.run = pair.second.run;
 			copy.lastEndedKey = pair.second.lastEndedKey;
 			copy.evidenceRequest = pair.second.evidenceRequest;
+			copy.captureRequest = pair.second.captureRequest;
+			copy.capture = pair.second.capture;
 			copy.beforeEvidence = pair.second.beforeEvidence;
 			copy.afterEvidence = pair.second.afterEvidence;
 			if(auto latest = pair.second.lastEnded.lock())
@@ -2184,6 +2279,8 @@ namespace dyf::Platform
 			LiveSourceSnapshot out;
 			out.device = source.device;
 			out.source = pair.first;
+			out.captureRequest = source.captureRequest;
+			out.capture = CopyCapture(source.capture, now);
 			ReadRun(* source.run, now, out);
 			const auto compared = std::find_if(result->controlStatus.begin(), result->controlStatus.end(), [&](const auto & status)
 			{

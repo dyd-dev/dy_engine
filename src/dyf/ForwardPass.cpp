@@ -281,8 +281,9 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
             auto batchContext=Platform::GetLiveContext();
             if(Platform::IsLiveCollectorEnabled()) // 수집기가 켜진 경우에만 간접 배치 출처/인수 버퍼 링크를 남긴다.
             {
-                prepareLiveBatch();
-                batchContext.batch=Platform::GetLiveBatchId(passBatch,(uint64_t(1)<<63)|batchIndex);
+                const bool detail=Platform::IsLiveDetailEnabled(batchContext.frame);
+                if(detail)prepareLiveBatch();
+                batchContext.batch=detail?Platform::GetLiveBatchId(passBatch,(uint64_t(1)<<63)|batchIndex):0;
                 Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;
                 batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Record;
                 if(visibilityActive)
@@ -291,16 +292,16 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
                     batch.bytes=batch.stride;batch.operations=1;
                     batch.resource=argumentsId;
                     // 실제 가시 개수는 GPU가 결정하므로 CPU capacity를 측정값으로 게시하지 않는다.
-                    std::strncpy(batch.label,"GPU indirect batch: visible count unknown",sizeof(batch.label)-1);
-                    RHI::ProfilerAccess::RecordLink(commands,batchInstanceId,batch.id);
+                    if(detail)std::strncpy(batch.label,"GPU indirect batch: visible count unknown",sizeof(batch.label)-1);
+                    if(detail)RHI::ProfilerAccess::RecordLink(commands,batchInstanceId,batch.id);
                 }
                 else
                 {
                     batch.first=draw.instanceOffset;batch.elements=draw.instanceCount;
                     batch.stride=2*sizeof(Math::float4x4);batch.bytes=uint64_t(batch.elements)*batch.stride;batch.operations=1;
                     batch.resource=batchInstanceId;
-                    std::strncpy(batch.label,"CPU compacted instance batch",sizeof(batch.label)-1);
-                    for(uint32_t i=0;i<draw.instanceCount;++i)
+                    if(detail)std::strncpy(batch.label,"CPU compacted instance batch",sizeof(batch.label)-1);
+                    for(uint32_t i=0;detail&&i<draw.instanceCount;++i)
                     {
                         const auto source=cpuInstanceEntities[draw.instanceOffset+i];
                         if(source<scene.m_liveEntities.size())RHI::ProfilerAccess::RecordLink(commands,scene.m_liveEntities[source],batch.id);
@@ -434,8 +435,9 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
         auto batchContext=Platform::GetLiveContext();
         if(Platform::IsLiveCollectorEnabled()) // 수집 중이면 직접 배치의 범위·바이트·제한된 이유 분류와 객체 링크를 남긴다.
         {
-            prepareLiveBatch();
-            batchContext.batch=Platform::GetLiveBatchId(passBatch,(uint64_t(entityIndex)<<32)|count);
+            const bool detail=Platform::IsLiveDetailEnabled(batchContext.frame);
+            if(detail)prepareLiveBatch();
+            batchContext.batch=detail?Platform::GetLiveBatchId(passBatch,(uint64_t(entityIndex)<<32)|count):0;
             batchContext.object=entityIndex<scene.m_liveEntities.size()?scene.m_liveEntities[entityIndex]:scene.m_liveId;
             Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;
             batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Data;
@@ -444,7 +446,7 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
             // main의 관측 이유는 사용자 기하·인스턴싱 OFF·그 밖(None)만 구분한다. 위에서 실제로 배치를 끊은 개별 조건을 별도 이유로 저장하지는 않는다.
             batch.reason=!stock?Platform::LiveSplitReason::CustomGeometry:!instanced?Platform::LiveSplitReason::InstancingDisabled:Platform::LiveSplitReason::None;
             Platform::RecordLiveEvent(batch);
-            for(uint32_t i=0;i<count&&entityIndex+i<scene.m_liveEntities.size();++i)
+            for(uint32_t i=0;detail&&i<count&&entityIndex+i<scene.m_liveEntities.size();++i)
                 RHI::ProfilerAccess::RecordLink(commands,scene.m_liveEntities[entityIndex+i],batch.id);
         }
         // 이후 명령을 방금 만든 배치 출처에 연결한다. scope가 끝나면 바깥 frame/source 문맥으로 돌아간다.

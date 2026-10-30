@@ -597,13 +597,14 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
         auto batchContext=Platform::GetLiveContext();
         if(Platform::IsLiveCollectorEnabled()) // 수집 중이면 그림자 배치의 범위·제한된 이유 분류와 원본 객체 링크를 남긴다.
         {
-            if(!sceneBatch)
+            const bool detail=Platform::IsLiveDetailEnabled(batchContext.frame);
+            if(detail && !sceneBatch)
             {
                 sceneBatch=Platform::GetLiveBatchId(liveId,scene.m_liveId);
                 instanceId=Platform::FindLiveObject(instanceSource);
             }
-            if(!passBatch)passBatch=Platform::GetLiveBatchId(sceneBatch,100+view);
-            batchContext.batch=Platform::GetLiveBatchId(passBatch,(uint64_t(entityIndex)<<32)|count);
+            if(detail && !passBatch)passBatch=Platform::GetLiveBatchId(sceneBatch,100+view);
+            batchContext.batch=detail?Platform::GetLiveBatchId(passBatch,(uint64_t(entityIndex)<<32)|count):0;
             batchContext.object=entityIndex<scene.m_liveEntities.size()?scene.m_liveEntities[entityIndex]:scene.m_liveId;
             Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;
             batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Data;
@@ -612,7 +613,7 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
             // 이 그림자 배치의 reason은 사용자 기하·인스턴싱 OFF·그 밖(None)만 구분한다. 위에서 실제로 묶기를 끝낸 메시·재질·절두체 조건은 각각 기록하지 않는다.
             batch.reason=!stock?Platform::LiveSplitReason::CustomGeometry:!instanced?Platform::LiveSplitReason::InstancingDisabled:Platform::LiveSplitReason::None;
             Platform::RecordLiveEvent(batch);
-            for(uint32_t i=0;i<count;++i)
+            for(uint32_t i=0;detail&&i<count;++i)
             {
                 const auto original=packed ? shadowInstances.entities[firstInstance+i] : entityIndex+i;
                 if(original<scene.m_liveEntities.size())

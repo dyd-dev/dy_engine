@@ -122,6 +122,8 @@ namespace dyf::Platform
 	{
 		LiveFrameKey key;
 		LiveId appliedRevision = 0;
+		// Zero means summary-only; suppressed optional detail is not a loss.
+		LiveId captureRequest = 0;
 		std::uint64_t beginNs = 0, endNs = 0, sampleAgeNs = 0;
 		LiveSample frame, cpuRender, gpuMain, gpuShadow, gpuMeasured;
 		LiveObjectGauge objects;
@@ -428,6 +430,8 @@ namespace dyf::Platform
 		// One latest request per source. Each side is an original representative frame,
 		// never an averaged/synthetic frame; window fields identify its aggregate.
 		LiveComparisonEvidence comparisonEvidence;
+		LiveId captureRequest = 0;
+		LiveFrameEvidence capture;
 	};
 
 	struct LiveCollectorStatistics
@@ -453,6 +457,8 @@ namespace dyf::Platform
 	LiveClockInfo GetLiveClockInfo() noexcept;
 	bool SetLiveCollectorEnabled(bool enabled) noexcept;
 	bool IsLiveCollectorEnabled() noexcept;
+	LiveId RequestLiveFrameCapture(LiveId device, LiveId source, LiveId request = 0) noexcept;
+	bool IsLiveDetailEnabled(LiveFrameKey frame = {}) noexcept;
 
 	LiveId AllocateLiveId() noexcept;
 	LiveId RegisterLiveObject(const void* object, const LiveObjectDesc&) noexcept;

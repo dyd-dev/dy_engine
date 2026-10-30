@@ -65,12 +65,12 @@ namespace dyf::Platform
 #ifdef DY_LIVE_PROFILING_ENABLED
 		if(IsLiveCollectorEnabled())
 		{
-			event.id = AllocateLiveId();
+			event.id = IsLiveDetailEnabled() ? AllocateLiveId() : 0;
 			event.context = GetLiveContext();
 			event.kind = kind;
 			event.stage = stage;
 			event.beginNs = NowNs();
-			if(label) std::strncpy(event.label, label, sizeof(event.label) - 1);
+			if(event.id && label) std::strncpy(event.label, label, sizeof(event.label) - 1);
 		}
 #else
 		(void)kind;

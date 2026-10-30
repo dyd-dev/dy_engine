@@ -357,7 +357,7 @@ namespace dyf::RHI
         if(m_passes[pass]->HasGlobalBarrier()) commands->GlobalBarrier();
         const auto& barriers = m_passBarriers[pass];
         commands->ResourceBarrier(barriers.data(), static_cast<uint32_t>(barriers.size()));
-        if(!eventId)
+        if(!Platform::IsLiveCollectorEnabled())
         {
             if(!m_passes[pass]->Execute(commands))return false;
         }
@@ -368,7 +368,7 @@ namespace dyf::RHI
                 static_cast<int64_t>(m_passes[pass]->GetReads().size()),static_cast<int64_t>(m_passes[pass]->GetWrites().size())};
             event.arguments[4]=LiveRhiThreadToken();
             const auto& name=m_passes[pass]->GetName();
-            for(size_t i=0;i<name.size()&&i+1<sizeof(event.label);++i)event.label[i]=name[i];
+            for(size_t i=0;eventId&&i<name.size()&&i+1<sizeof(event.label);++i)event.label[i]=name[i];
             event.beginNs=Platform::LiveNowNs();
             bool executed=false;
             try{executed=m_passes[pass]->Execute(commands);}
@@ -386,8 +386,11 @@ namespace dyf::RHI
 #endif
                 commands->RecordLiveResourceLink(write?eventId:id,write?id:eventId);
             };
-            for(const auto& binding:m_passes[pass]->GetReads())linkResource(binding,false);
-            for(const auto& binding:m_passes[pass]->GetWrites())linkResource(binding,true);
+            if(eventId)
+            {
+                for(const auto& binding:m_passes[pass]->GetReads())linkResource(binding,false);
+                for(const auto& binding:m_passes[pass]->GetWrites())linkResource(binding,true);
+            }
         }
 
         // Compile resolves aliases and duplicate declarations to one resource use.
@@ -409,7 +412,7 @@ namespace dyf::RHI
             return Fail("Compile must succeed before recording on an open command list outside rendering.");
         }
         if(!RecordBoundary(commands)) return false;
-        const bool live=Platform::IsLiveCollectorEnabled();
+        const bool live=Platform::IsLiveDetailEnabled(commands->m_liveDeferred->m_liveContext.frame);
         std::vector<uint64_t> passEvents;
         if(live){passEvents.resize(m_passes.size());for(auto& id:passEvents)id=Platform::AllocateLiveId();}
         for(uint32_t pass : m_executionOrder)
@@ -481,7 +484,7 @@ namespace dyf::RHI
         final->m_sharedReferences = references;
         final->m_imageGeneration = boundary->m_imageGeneration;
         std::vector<uint8_t> recorded(m_passes.size(), 0);
-        const bool live=Platform::IsLiveCollectorEnabled();
+        const bool live=Platform::IsLiveDetailEnabled();
         std::vector<uint64_t> passEvents;
         if(live){passEvents.resize(m_passes.size());for(auto& id:passEvents)id=Platform::AllocateLiveId();}
         const auto context=Platform::GetLiveContext();
