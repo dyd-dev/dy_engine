@@ -42,6 +42,11 @@ namespace dyf::Platform
 		std::atomic<std::uint64_t> detailBytes { 0 };
 #ifdef DY_LIVE_TEST_CLOCK
 		std::atomic<std::uint64_t> testNowNs { 0 };
+		std::atomic<std::uint64_t> testHistoryFrameVisits { 0 }, testLinkFrameLocks { 0 };
+		std::atomic<std::uint64_t> testCommandPruneEntries { 0 };
+		std::atomic<std::uint64_t> testLateFlowCopies { 0 }, testBoundedSnapshotCopies { 0 };
+		std::atomic<std::uint64_t> testMetricChanges { 0 }, testWireWriteChecks { 0 }, testBatchLocks { 0 };
+		std::atomic<std::uint64_t> testFrameLookups { 0 }, testEventInputCopies { 0 }, testEventSummaryScratchBytes { 0 };
 		std::atomic<std::int64_t> testAllocationFailure { - 1 };
 #endif
 		void AggregationAllocationPoint()
@@ -164,6 +169,7 @@ namespace dyf::Platform
 			LiveId revision = 0;
 			bool budgetLimited = false;
 			std::shared_ptr<EvidenceRecord> record;
+			LiveId captureRequest = 0;
 		};
 		template<class T> bool PushDetail(FrameRecord & frame, std::vector<T> & values, const T & value, std::size_t limit)
 		{
@@ -196,16 +202,19 @@ namespace dyf::Platform
 				{ std::lock_guard<std::mutex> lock(frame->mutex);
 				base = frame->publishedFlow;
 				}
-				if(!base) break;
+				// A newer frame can retire the full flow; retained capture evidence was updated separately.
+				if(!base) return true;
+				if((event && base->events.size() >= 8192) || (link && base->links.size() >= 16384)) break;
+#ifdef DY_LIVE_TEST_CLOCK
+				++testLateFlowCopies;
+#endif
 				auto copy = std::make_shared<LiveFlowSnapshot>(* base);
 				if(event)
 				{
-					if(copy->events.size() >= 8192) break;
 					copy->events.push_back(* event);
 				}
 				if(link)
 				{
-					if(copy->links.size() >= 16384) break;
 					copy->links.push_back(* link);
 				}
 				++copy->revision;
@@ -230,6 +239,63 @@ namespace dyf::Platform
 			return false;
 		}
 
+		bool AppendLateLinks(const std::shared_ptr<FrameRecord> & frame, const LiveFlowLink * links, std::size_t count,
+			std::atomic<std::uint64_t> & omittedLinks) noexcept
+		{
+			try
+			{
+				for(unsigned attempt = 0; attempt < 4; ++attempt)
+				{
+					std::shared_ptr<const LiveFlowSnapshot> base;
+					{ std::lock_guard<std::mutex> lock(frame->mutex);
+					if(!frame->ended) return false;
+					base = frame->publishedFlow;
+					}
+					if(!base || base->links.size() >= 16384) return false;
+					const auto accepted = (std::min)(count, std::size_t(16384) - base->links.size());
+#ifdef DY_LIVE_TEST_CLOCK
+					++testLateFlowCopies;
+#endif
+					auto copy = std::make_shared<LiveFlowSnapshot>(*base);
+					copy->links.insert(copy->links.end(), links, links + accepted);
+					copy->revision += accepted;
+					const auto oldBytes = base->events.capacity() * sizeof(LiveEvent) + base->links.capacity() * sizeof(LiveFlowLink);
+					const auto newBytes = copy->events.capacity() * sizeof(LiveEvent) + copy->links.capacity() * sizeof(LiveFlowLink);
+					std::lock_guard<std::mutex> lock(frame->mutex);
+					if(frame->publishedFlow != base) continue;
+					if(newBytes > oldBytes && !ReserveDetail(newBytes - oldBytes, OptionalDetailBudget)) return false;
+					if(newBytes < oldBytes)
+					{
+						detailBytes -= oldBytes - newBytes;
+						frame->retainedBytes -= oldBytes - newBytes;
+					}
+					else frame->retainedBytes += newBytes - oldBytes;
+					frame->publishedFlow = std::move(copy);
+					frame->flow.omittedLinks += count - accepted;
+					if(accepted != count) omittedLinks += count - accepted;
+					frame->summary.incomplete |= accepted != count;
+					try
+					{
+						if(auto evidence = frame->evidence.lock())
+						{
+							std::lock_guard<std::mutex> evidenceLock(evidence->mutex);
+							auto & value = evidence->value;
+							const auto retained = (std::min)(count, std::size_t(4096) - value.flow.links.size());
+							value.flow.links.insert(value.flow.links.end(), links, links + retained);
+							value.flow.revision += count;
+							value.flow.omittedLinks += count - retained;
+							value.loss.links += count - retained;
+							value.budgetLimited |= retained != count;
+						}
+					}
+					catch(...) { frame->summary.incomplete = true; omittedLinks += count; }
+					return true;
+				}
+			}
+			catch(...) {}
+			return false;
+		}
+
 		struct SourceRecord
 		{
 			LiveId device = 0, revision = 1;
@@ -241,6 +307,8 @@ namespace dyf::Platform
 			LiveAggregate baseline;
 			EvidenceCandidate candidate, previousCandidate, beforeEvidence, afterEvidence;
 			LiveId evidenceRequest = 0;
+			LiveId captureRequest = 0, pendingCapture = 0;
+			EvidenceCandidate capture;
 		};
 		struct BatchRecord
 		{
@@ -326,12 +394,11 @@ namespace dyf::Platform
 
 		void CaptureEvidence(State & state, SourceRecord & source, FrameRecord & frame, std::uint64_t origin) noexcept
 		{
-			if(source.retiredNs) return;
 			const auto begin = origin +(frame.summary.endNs - origin) / LiveAverageWindowNs * LiveAverageWindowNs;
-			if(source.candidate.key.frame && source.candidate.beginNs == begin) return;
 			source.previousCandidate = std::move(source.candidate);
-			source.candidate = { frame.summary.key, begin, begin + LiveAverageWindowNs, frame.summary.appliedRevision, true, { } };
-			// One independently owned prefix per source/second; this reservation includes all retained capacities.
+			source.candidate = { frame.summary.key, begin, begin + LiveAverageWindowNs, frame.summary.appliedRevision, true, { }, frame.summary.captureRequest };
+			if(source.retiredNs) return;
+			// Requested captures own a bounded prefix, including all retained capacities.
 			constexpr std::size_t reservation = 1024u * 1024u, eventLimit = 2048, linkLimit = 4096, objectLimit = 128;
 			static_assert(sizeof(EvidenceRecord) + eventLimit * sizeof(LiveEvent) + linkLimit * sizeof(LiveFlowLink) + 128 * sizeof(LiveGpuSpan) + objectLimit *(sizeof(LiveObjectInfo) + 257) < reservation);
 			try
@@ -432,10 +499,10 @@ namespace dyf::Platform
 			}
 		}
 
-		LiveFrameEvidence CopyEvidence(const EvidenceCandidate & candidate, const LiveAggregate & aggregate, std::uint64_t now)
+		LiveFrameEvidence CopyEvidence(const EvidenceCandidate & candidate, std::uint64_t now)
 		{
 			LiveFrameEvidence value;
-			if(!Matches(candidate, aggregate)) return value;
+			if(!candidate.key.frame) return value;
 			if(candidate.record)
 			{
 				std::lock_guard<std::mutex> lock(candidate.record->mutex);
@@ -447,11 +514,17 @@ namespace dyf::Platform
 				value.budgetLimited = candidate.budgetLimited;
 				value.summary.key = value.flow.key = candidate.key;
 				value.summary.appliedRevision = value.windowRevision = candidate.revision;
+				value.summary.captureRequest = candidate.captureRequest;
 				value.windowBeginNs = candidate.beginNs;
 				value.windowEndNs = candidate.endNs;
 				value.loss.frames = 1;
 			}
 			return value;
+		}
+
+		LiveFrameEvidence CopyEvidence(const EvidenceCandidate & candidate, const LiveAggregate & aggregate, std::uint64_t now)
+		{
+			return Matches(candidate, aggregate) ? CopyEvidence(candidate, now) : LiveFrameEvidence{};
 		}
 
 #define LIVE_COUNTER_FIELDS(X) X(draw) X(drawIndexed) X(dispatch) X(dispatchMesh) X(instances) X(barriers) X(bindings) X(submissions) X(waits) X(objectsCreated) X(objectsDestroyed) X(batches) X(elements) X(dirtyRanges) X(uploadCalls) X(uploadBytes) X(fullUploads) X(partialUploads) X(uploadPageAllocations) X(uploadPageReuses) X(uploadPageAllocationBytes)
@@ -644,10 +717,19 @@ namespace dyf::Platform
 			}
 		}
 
-		void Change(LiveMetricAggregate & aggregate, MetricValues & values, LiveSample sample, LiveFrameKey key, bool adding)
+		LiveSample Normalize(LiveSample sample)
 		{
 			if(sample.state == LiveValueState::Ready &&(!std::isfinite(sample.milliseconds) ||
 				sample.milliseconds < 0)) sample.state = LiveValueState::Unavailable;
+			return sample;
+		}
+
+		void Change(LiveMetricAggregate & aggregate, MetricValues & values, LiveSample sample, LiveFrameKey key, bool adding)
+		{
+#ifdef DY_LIVE_TEST_CLOCK
+			++testMetricChanges;
+#endif
+			sample = Normalize(sample);
 			auto & count = sample.state == LiveValueState::Ready ? aggregate.ready : sample.state == LiveValueState::Pending ? aggregate.pending : sample.state == LiveValueState::Unsupported ? aggregate.unsupported : aggregate.unavailable;
 			if(adding) ++count;
 			else --count;
@@ -710,6 +792,41 @@ namespace dyf::Platform
 			}
 		}
 
+		void Change(SecondRecord & second, const LiveFrameSummary & before, const LiveFrameSummary & after)
+		{
+			auto & total = second.total;
+			const auto oldSamples = Samples(before), samples = Samples(after);
+			const auto metrics = Metrics(total);
+			for(std::size_t i = 0; i < MetricCount; ++i)
+			{
+				const auto old = Normalize(oldSamples [i]), sample = Normalize(samples [i]);
+				if(old.state == sample.state &&(sample.state != LiveValueState::Ready ||
+					(old.milliseconds == sample.milliseconds && std::signbit(old.milliseconds) == std::signbit(sample.milliseconds))))
+				{
+					if(sample.state == LiveValueState::Ready)
+					{
+						// Preserve the original subtract/add rounding without rebuilding unchanged metric trees.
+						metrics [i]->average += -old.milliseconds;
+						if(metrics [i]->ready == 1) metrics [i]->average = 0;
+						metrics [i]->average += sample.milliseconds;
+					}
+					continue;
+				}
+				Change(* metrics [i], second.values [i], old, before.key, false);
+				Change(* metrics [i], second.values [i], sample, after.key, true);
+			}
+#define CHANGE_DELTA(n) total.recordedTotal.n += after.recorded.n - before.recorded.n; total.submittedTotal.n += after.submitted.n - before.submitted.n; total.completedTotal.n += after.completed.n - before.completed.n;
+			LIVE_COUNTER_FIELDS(CHANGE_DELTA)
+#undef CHANGE_DELTA
+			for(std::size_t i = 0; i < LiveStageCount; ++i)
+			{
+				auto & stage = total.stages [i];
+				stage.totalElements += after.stages [i].elements - before.stages [i].elements;
+				stage.totalBytes += after.stages [i].bytes - before.stages [i].bytes;
+				stage.totalOperations += after.stages [i].operations - before.stages [i].operations;
+			}
+		}
+
 		// Call with only the frame mutex held (or state -> frame); never acquire state from run.
 		void UpdateSecond(FrameRecord & frame, const LiveFrameSummary * before = nullptr)
 		{
@@ -735,13 +852,13 @@ namespace dyf::Platform
 					total.endNs = total.beginNs + LiveAverageWindowNs;
 				}
 				auto & second = it->second;
-				if(before) Change(second, * before, false);
 				if(second.total.appliedRevision != frame.summary.appliedRevision)
 				{
 					second.total.appliedRevision = 0;
 					second.total.mixedRevision = true;
 				}
-				Change(second, frame.summary, true);
+				if(before) Change(second, * before, frame.summary);
+				else Change(second, frame.summary, true);
 				Advance(run, LiveNowNs());
 			}
 			catch(...)
@@ -919,41 +1036,50 @@ namespace dyf::Platform
 			}
 		}
 
-		LiveAggregate Aggregate(const SourceRecord & source, LiveId id, LiveId revision, std::uint64_t begin, std::uint64_t end)
+		bool AddCommandCounts(State & state, LiveCommandRef command, const LiveCounters<std::uint64_t> & counts)
 		{
-			LiveAggregate a;
-			a.device = source.device;
-			a.source = id;
-			a.appliedRevision = revision;
-			a.beginNs = begin;
-			a.endNs = end;
-			for(const auto & record : source.frames)
+			std::lock_guard<std::mutex> lock(state.commandMutex);
+			const auto key = std::make_pair(command.commandList, command.generation);
+			auto found = state.commandCounts.find(key);
+			if(found == state.commandCounts.end())
 			{
-				std::lock_guard<std::mutex> lock(record->mutex);
-				const auto & f = record->summary;
-				if(!record->ended || f.appliedRevision != revision || f.endNs < begin || f.endNs >= end) continue;
-				++a.frameCount;
-				Accumulate(a.frame, f.frame, f.key);
-				Accumulate(a.cpuRender, f.cpuRender, f.key);
-				Accumulate(a.gpuMain, f.gpuMain, f.key);
-				Accumulate(a.gpuShadow, f.gpuShadow, f.key);
-				Accumulate(a.gpuMeasured, f.gpuMeasured, f.key);
-				Accumulate(a.objects, { f.objects.state, double(f.objects.count) }, f.key);
-				Add(a.recordedTotal, f.recorded);
-				Add(a.submittedTotal, f.submitted);
-				Add(a.completedTotal, f.completed);
-				for(std::size_t i = 0; i < LiveStageCount; ++i)
+				for(auto it = state.commandCounts.lower_bound({ command.commandList, 0 }); it != state.commandCounts.end() &&
+					it->first.first == command.commandList;)
 				{
-					auto & s = a.stages [i];
-					const auto & v = f.stages [i];
-					s.totalElements += v.elements;
-					s.totalBytes += v.bytes;
-					s.totalOperations += v.operations;
-					Accumulate(s.cpu, v.cpu, f.key);
-					Accumulate(s.gpu, v.gpu, f.key);
+#ifdef DY_LIVE_TEST_CLOCK
+					++testCommandPruneEntries;
+#endif
+					it = state.commandCounts.erase(it);
 				}
+				if(state.commandCounts.size() >= 4096) return false;
+				found = state.commandCounts.emplace(key, LiveCounters<std::uint64_t>{}).first;
 			}
-			return Finish(std::move(a));
+			Add(found->second, counts);
+			return true;
+		}
+
+		void Accumulate(LiveAggregate & a, const LiveFrameSummary & f)
+		{
+			++a.frameCount;
+			Accumulate(a.frame, f.frame, f.key);
+			Accumulate(a.cpuRender, f.cpuRender, f.key);
+			Accumulate(a.gpuMain, f.gpuMain, f.key);
+			Accumulate(a.gpuShadow, f.gpuShadow, f.key);
+			Accumulate(a.gpuMeasured, f.gpuMeasured, f.key);
+			Accumulate(a.objects, { f.objects.state, double(f.objects.count) }, f.key);
+			Add(a.recordedTotal, f.recorded);
+			Add(a.submittedTotal, f.submitted);
+			Add(a.completedTotal, f.completed);
+			for(std::size_t i = 0; i < LiveStageCount; ++i)
+			{
+				auto & s = a.stages [i];
+				const auto & v = f.stages [i];
+				s.totalElements += v.elements;
+				s.totalBytes += v.bytes;
+				s.totalOperations += v.operations;
+				Accumulate(s.cpu, v.cpu, f.key);
+				Accumulate(s.gpu, v.gpu, f.key);
+			}
 		}
 
 		FrameRecord * FindFrame(State & s, LiveFrameKey key)
@@ -966,6 +1092,9 @@ namespace dyf::Platform
 
 		std::shared_ptr<FrameRecord> Frame(LiveFrameKey key)
 		{
+#if defined(DY_LIVE_TEST_CLOCK) && !defined(DY_LIVE_COST_TIMING)
+			++testFrameLookups;
+#endif
 			if(currentFrame && currentFrame->summary.key == key) return currentFrame;
 			auto & s = S();
 			std::lock_guard<std::mutex> lock(s.mutex);
@@ -1118,6 +1247,13 @@ namespace dyf::Platform
 	}
 
 #ifdef DY_LIVE_TEST_CLOCK
+	Detail::TestLiveWork Detail::TakeTestLiveWork() noexcept
+	{
+		return { testHistoryFrameVisits.exchange(0), testLinkFrameLocks.exchange(0), testCommandPruneEntries.exchange(0), testLateFlowCopies.exchange(0), testBoundedSnapshotCopies.exchange(0), testMetricChanges.exchange(0), testWireWriteChecks.exchange(0), testBatchLocks.exchange(0), testFrameLookups.exchange(0), testEventInputCopies.exchange(0), testEventSummaryScratchBytes.exchange(0) };
+	}
+	void Detail::RecordTestBoundedSnapshotCopy() noexcept { ++testBoundedSnapshotCopies; }
+	void Detail::RecordTestWireWrite() noexcept { ++testWireWriteChecks; }
+
 	void Detail::SetTestLiveNowNs(std::uint64_t now) noexcept
 	{
 		testNowNs = now;
@@ -1132,6 +1268,39 @@ namespace dyf::Platform
 	bool IsLiveCollectorEnabled() noexcept
 	{
 		return enabled.load(std::memory_order_relaxed);
+	}
+
+	LiveId RequestLiveFrameCapture(LiveId device, LiveId source, LiveId request) noexcept
+	{
+		if(!IsLiveCollectorEnabled() || !device || !source) return 0;
+		try
+		{
+			auto & state = S();
+			std::lock_guard<std::mutex> lock(state.mutex);
+			const auto found = state.sources.find(source);
+			if(found == state.sources.end() || found->second.device != device || found->second.retiredNs) return 0;
+			auto & record = found->second;
+			if(record.captureRequest != record.capture.captureRequest) return 0;
+			if(!request) request = AllocateLiveId();
+			if(!request || request == record.captureRequest) return 0;
+			record.captureRequest = record.pendingCapture = request;
+			return request;
+		}
+		catch(...) { return 0; }
+	}
+
+	bool IsLiveDetailEnabled(LiveFrameKey key) noexcept
+	{
+		if(!IsLiveCollectorEnabled()) return false;
+		if(!key.frame) key = context.frame;
+		if(!key.frame) return false;
+		if(currentFrame && currentFrame->summary.key == key) return currentFrame->summary.captureRequest != 0;
+		try
+		{
+			const auto frame = Frame(key);
+			return frame && frame->summary.captureRequest != 0;
+		}
+		catch(...) { return false; }
 	}
 
 	bool SetLiveCollectorEnabled(bool value) noexcept
@@ -1301,12 +1470,15 @@ namespace dyf::Platform
 
 	}
 
-	LiveId GetLiveBatchId(LiveId owner, std::uint64_t discriminator) noexcept
+	LiveId GetLiveBatchPath(LiveId owner, std::initializer_list<std::uint64_t> discriminators) noexcept
 	{
-		if(!IsLiveCollectorEnabled() || !owner) return 0;
+		if(!IsLiveCollectorEnabled() || !owner || discriminators.size() == 0) return 0;
 		try
 		{
 			auto & s = S();
+#if defined(DY_LIVE_TEST_CLOCK) && !defined(DY_LIVE_COST_TIMING)
+			++testBatchLocks;
+#endif
 			std::lock_guard<std::mutex> lock(s.mutex);
 			const auto now = LiveNowNs();
 			if(now >= s.nextBatchSweepNs)
@@ -1316,27 +1488,40 @@ namespace dyf::Platform
 				else ++it;
 				s.nextBatchSweepNs = now + 1000000000;
 			}
-			const auto key = std::make_pair(owner, discriminator);
-			auto it = s.batches.find(key);
-			if(it != s.batches.end())
+			// Refresh every prefix so active children keep their parent IDs alive.
+			for(const auto discriminator : discriminators)
 			{
-				it->second.lastNs = now;
-				return it->second.id;
+				const auto key = std::make_pair(owner, discriminator);
+				auto it = s.batches.find(key);
+				if(it != s.batches.end())
+				{
+					it->second.lastNs = now;
+					owner = it->second.id;
+				}
+				else
+				{
+					if(s.batches.size() >= 65536)
+					{
+						++s.loss.inventory;
+						return 0;
+					}
+					const auto id = AllocateLiveId();
+					s.batches.emplace(key, BatchRecord { id, now });
+					owner = id;
+				}
 			}
-			if(s.batches.size() >= 65536)
-			{
-				++s.loss.inventory;
-				return 0;
-			}
-			const auto id = AllocateLiveId();
-			s.batches.emplace(key, BatchRecord { id, now });
-			return id;
+			return owner;
 		}
 		catch(...)
 		{
 			return 0;
 		}
 
+	}
+
+	LiveId GetLiveBatchId(LiveId owner, std::uint64_t discriminator) noexcept
+	{
+		return GetLiveBatchPath(owner, { discriminator });
 	}
 
 	void PublishLiveDevice(const LiveDeviceSnapshot & value) noexcept
@@ -1362,6 +1547,7 @@ namespace dyf::Platform
 	void SetLiveContext(LiveContext value) noexcept
 	{
 		context = value;
+		if(currentFrame && currentFrame->summary.key == value.frame) return;
 		if(!value.frame.frame)
 		{
 			currentFrame.reset();
@@ -1460,6 +1646,7 @@ namespace dyf::Platform
 			frame->summary.beginNs = LiveNowNs();
 			frame->attemptBeginNs = frame->summary.beginNs;
 			frame->summary.appliedRevision = record.revision;
+			frame->summary.captureRequest = record.pendingCapture;
 			frame->flow.key = token.key;
 			if(!record.run)
 			{
@@ -1470,6 +1657,7 @@ namespace dyf::Platform
 			}
 			frame->run = record.run;
 			record.frames.push_back(frame);
+			record.pendingCapture = 0;
 			++s.frameCount;
 			currentFrame = frame;
 			context = { token.key, record.revision, source, 0, 0 };
@@ -1514,6 +1702,7 @@ namespace dyf::Platform
 			return;
 		}
 
+		std::shared_ptr<const LiveFlowSnapshot> retiredDetail;
 		try
 		{
 			auto & s = S();
@@ -1561,7 +1750,7 @@ namespace dyf::Platform
 							previous->retainedBytes -= bytes;
 							detailBytes -= bytes;
 						}
-						previous->publishedFlow.reset();
+						retiredDetail = std::move(previous->publishedFlow);
 					}
 					if(currentFrame && currentFrame.get() == f) source.lastEnded = currentFrame;
 					else for(auto frame = frames.rbegin(); frame != frames.rend(); ++frame) if(frame->get() == f)
@@ -1573,14 +1762,20 @@ namespace dyf::Platform
 					source.lastEndedNs = f->summary.endNs;
 					GpuSummary(* f);
 					UpdateSecond(* f);
-					auto detail = std::make_shared<LiveFlowSnapshot>();
-					detail->key = f->flow.key;
-					detail->omittedEvents = f->flow.omittedEvents;
-					detail->omittedLinks = f->flow.omittedLinks;
-					detail->events.swap(f->flow.events);
-					detail->links.swap(f->flow.links);
-					f->publishedFlow = std::move(detail);
-					CaptureEvidence(s, source, * f, source.run->originNs);
+					if(f->summary.captureRequest)
+					{
+						const auto begin = source.run->originNs +(f->summary.endNs - source.run->originNs) / LiveAverageWindowNs * LiveAverageWindowNs;
+						source.capture = { f->summary.key, begin, begin + LiveAverageWindowNs, f->summary.appliedRevision, true, {}, f->summary.captureRequest };
+						auto detail = std::make_shared<LiveFlowSnapshot>();
+						detail->key = f->flow.key;
+						detail->omittedEvents = f->flow.omittedEvents;
+						detail->omittedLinks = f->flow.omittedLinks;
+						detail->events.swap(f->flow.events);
+						detail->links.swap(f->flow.links);
+						f->publishedFlow = std::move(detail);
+						CaptureEvidence(s, source, * f, source.run->originNs);
+						source.capture = source.candidate;
+					}
 					const auto cutoff = f->summary.endNs > LiveHistoryWindowNs ? f->summary.endNs - LiveHistoryWindowNs : 0;
 					while(frames.size() > 1 && frames.front()->ended && frames.front()->summary.endNs < cutoff)
 					{
@@ -1595,6 +1790,7 @@ namespace dyf::Platform
 		{
 			++S().omittedFrames;
 		}
+		retiredDetail.reset();
 
 		if(token.previous.frame.frame)
 		{
@@ -1611,80 +1807,82 @@ namespace dyf::Platform
 		SetLiveContext(token.previous);
 	}
 
+	namespace
+	{
+		bool AccumulateEventData(LiveCounters<std::uint64_t> & counts, LiveStageMetrics * stage, const LiveEvent & e) noexcept
+		{
+			if(!IsLiveCollectorEnabled()) return true;
+			if(e.kind == LiveEventKind::UploadMemory)
+			{
+				if(e.operations != 1 || !e.bytes || e.arguments [0] < 0 || e.arguments [0] > 1)
+				{
+					return false;
+				}
+				if(e.arguments [0]) ++counts.uploadPageReuses;
+				else
+				{
+					++counts.uploadPageAllocations;
+					counts.uploadPageAllocationBytes += e.bytes;
+				}
+				return true;
+			}
+
+			if(!stage) return false;
+			stage->elements += e.elements;
+			stage->bytes += e.bytes;
+			stage->operations += e.operations;
+			if(e.endNs >= e.beginNs && e.endNs)
+			{
+				stage->cpu.state = LiveValueState::Ready;
+				stage->cpu.milliseconds += double(e.endNs - e.beginNs) / 1e6;
+			}
+
+			if(e.kind == LiveEventKind::Command)
+			{
+				switch(e.commandKind)
+				{
+					case LiveCommandKind::Draw : ++counts.draw;
+					counts.instances += e.arguments [1];
+					break;
+					case LiveCommandKind::DrawIndexed : ++counts.drawIndexed;
+					counts.instances += e.arguments [1];
+					break;
+					case LiveCommandKind::Dispatch : ++counts.dispatch;
+					break;
+					case LiveCommandKind::DispatchMesh : ++counts.dispatchMesh;
+					break;
+					case LiveCommandKind::Barrier : counts.barriers += e.operations;
+					break;
+					case LiveCommandKind::Bind : counts.bindings += e.operations;
+					break;
+					default : break;
+				}
+			}
+
+			else if(e.kind == LiveEventKind::Upload)
+			{
+				++counts.uploadCalls;
+				counts.uploadBytes += e.bytes;
+				if(e.fullUpload) ++counts.fullUploads;
+				else ++counts.partialUploads;
+			}
+
+			else if(e.kind == LiveEventKind::Batch)
+			{
+				++counts.batches;
+				counts.elements += e.elements;
+			}
+
+			else if(e.kind == LiveEventKind::DataRange) counts.dirtyRanges += e.operations;
+			else if(e.kind == LiveEventKind::Wait) counts.waits += e.operations ? e.operations : 1;
+			return true;
+		}
+	}
+
 	void AccumulateLiveEventSummary(LiveEventSummary & summary, const LiveEvent & e) noexcept
 	{
-		if(!IsLiveCollectorEnabled()) return;
-		if(e.kind == LiveEventKind::UploadMemory)
-		{
-			if(e.operations != 1 || !e.bytes || e.arguments [0] < 0 || e.arguments [0] > 1)
-			{
-				++summary.omittedEvents;
-				return;
-			}
-			if(e.arguments [0]) ++summary.recorded.uploadPageReuses;
-			else
-			{
-				++summary.recorded.uploadPageAllocations;
-				summary.recorded.uploadPageAllocationBytes += e.bytes;
-			}
-			return;
-		}
-
-		if(static_cast<std::size_t>(e.stage) >= LiveStageCount)
-		{
-			++summary.omittedEvents;
-			return;
-		}
-
-		auto & stage = summary.stages [static_cast<std::size_t>(e.stage)];
-		stage.elements += e.elements;
-		stage.bytes += e.bytes;
-		stage.operations += e.operations;
-		if(e.endNs >= e.beginNs && e.endNs)
-		{
-			stage.cpu.state = LiveValueState::Ready;
-			stage.cpu.milliseconds += double(e.endNs - e.beginNs) / 1e6;
-		}
-
-		auto & counts = summary.recorded;
-		if(e.kind == LiveEventKind::Command)
-		{
-			switch(e.commandKind)
-			{
-				case LiveCommandKind::Draw : ++counts.draw;
-				counts.instances += e.arguments [1];
-				break;
-				case LiveCommandKind::DrawIndexed : ++counts.drawIndexed;
-				counts.instances += e.arguments [1];
-				break;
-				case LiveCommandKind::Dispatch : ++counts.dispatch;
-				break;
-				case LiveCommandKind::DispatchMesh : ++counts.dispatchMesh;
-				break;
-				case LiveCommandKind::Barrier : counts.barriers += e.operations;
-				break;
-				case LiveCommandKind::Bind : counts.bindings += e.operations;
-				break;
-				default : break;
-			}
-		}
-
-		else if(e.kind == LiveEventKind::Upload)
-		{
-			++counts.uploadCalls;
-			counts.uploadBytes += e.bytes;
-			if(e.fullUpload) ++counts.fullUploads;
-			else ++counts.partialUploads;
-		}
-
-		else if(e.kind == LiveEventKind::Batch)
-		{
-			++counts.batches;
-			counts.elements += e.elements;
-		}
-
-		else if(e.kind == LiveEventKind::DataRange) counts.dirtyRanges += e.operations;
-		else if(e.kind == LiveEventKind::Wait) counts.waits += e.operations ? e.operations : 1;
+		const auto index = static_cast<std::size_t>(e.stage);
+		if(!AccumulateEventData(summary.recorded, index < LiveStageCount ? &summary.stages[index] : nullptr, e)) ++summary.omittedEvents;
 	}
 
 	// Keep room for submission accounting and GPU results when optional detail fills.
@@ -1700,7 +1898,7 @@ namespace dyf::Platform
 
 	void RecordLiveEventSummary(LiveCommandRef command, const LiveEventSummary & summary) noexcept
 	{
-		if(!IsLiveCollectorEnabled()) return;
+		// Flush work collected while enabled even if collection stopped before the recording closed.
 		try
 		{
 			auto & s = S();
@@ -1736,13 +1934,7 @@ namespace dyf::Platform
 			{
 				auto logical = summary.recorded;
 				ClearNativeUploadCounts(logical);
-				std::lock_guard<std::mutex> commands(s.commandMutex);
-				const auto key = std::make_pair(command.commandList, command.generation);
-				for(auto it = s.commandCounts.lower_bound({ command.commandList, 0 }); it != s.commandCounts.end() &&
-					it->first.first == command.commandList;) if(it->first != key) it = s.commandCounts.erase(it);
-				else ++it;
-				if(s.commandCounts.size() < 4096 || s.commandCounts.count(key)) Add(s.commandCounts [key], logical);
-				else f->summary.incomplete = true;
+				if(!AddCommandCounts(s, command, logical)) f->summary.incomplete = true;
 			}
 		}
 		catch(...)
@@ -1758,15 +1950,23 @@ namespace dyf::Platform
 		auto & s = S();
 		try
 		{
-			auto e = input;
-			if(!e.context.frame.frame) e.context = context;
-			if(!e.id) e.id = AllocateLiveId();
-			auto f = Frame(e.context.frame);
+			auto f = Frame(input.context.frame.frame ? input.context.frame : context.frame);
 			if(!f)
 			{
 				++s.omittedEvents;
 				return;
 			}
+			std::optional<LiveEvent> normalized;
+			if(!input.context.frame.frame || (!input.id && f->summary.captureRequest))
+			{
+				normalized = input;
+#if defined(DY_LIVE_TEST_CLOCK) && !defined(DY_LIVE_COST_TIMING)
+				++testEventInputCopies;
+#endif
+				if(!normalized->context.frame.frame) normalized->context = context;
+				if(!normalized->id && f->summary.captureRequest) normalized->id = AllocateLiveId();
+			}
+			const auto & e = normalized ? *normalized : input;
 			std::unique_lock < std::mutex > lock(f->mutex);
 			auto & summary = f->summary;
 			std::optional<LiveFrameSummary> before;
@@ -1782,19 +1982,8 @@ namespace dyf::Platform
 				e.command.generation, e.outcome))) return;
 			if(includeSummary)
 			{
-				LiveEventSummary eventSummary;
-				AccumulateLiveEventSummary(eventSummary, e);
-				auto counts = eventSummary.recorded;
-				auto & stage = summary.stages [static_cast<std::size_t>(e.stage)];
-				const auto & extra = eventSummary.stages [static_cast<std::size_t>(e.stage)];
-				stage.elements += extra.elements;
-				stage.bytes += extra.bytes;
-				stage.operations += extra.operations;
-				if(extra.cpu.state == LiveValueState::Ready)
-				{
-					stage.cpu.state = LiveValueState::Ready;
-					stage.cpu.milliseconds += extra.cpu.milliseconds;
-				}
+				LiveCounters<std::uint64_t> counts;
+				AccumulateEventData(counts, &summary.stages[static_cast<std::size_t>(e.stage)], e);
 				if(e.kind == LiveEventKind::Submission)
 				{
 					if(e.outcome == LiveOutcome::Submitted || e.outcome == LiveOutcome::Completed)
@@ -1849,18 +2038,18 @@ namespace dyf::Platform
 					Add(summary.recorded, counts);
 					if(e.command.commandList && e.kind != LiveEventKind::UploadMemory)
 					{
-						std::lock_guard<std::mutex> commands(s.commandMutex);
-						auto key = std::make_pair(e.command.commandList, e.command.generation);
-						for(auto it = s.commandCounts.lower_bound({ e.command.commandList, 0 }); it != s.commandCounts.end() &&
-							it->first.first == e.command.commandList;) if(it->first != key) it = s.commandCounts.erase(it);
-						else ++it;
-						if(s.commandCounts.size() < 4096 || s.commandCounts.count(key)) Add(s.commandCounts [key], counts);
-						else summary.incomplete = true;
+						if(!AddCommandCounts(s, e.command, counts)) summary.incomplete = true;
 					}
 				}
 			}
 			if(e.kind == LiveEventKind::Output && e.commandKind == LiveCommandKind::Present && e.outcome == LiveOutcome::Completed &&
 				!f->ended) f->acquireSkipped = false;
+			if(!f->summary.captureRequest)
+			{
+				if(e.kind == LiveEventKind::Wait && e.outcome == LiveOutcome::Skipped && e.id == e.context.frame.frame) f->acquireSkipped = true;
+				if(before) UpdateSecond(*f, &*before);
+				return;
+			}
 			if(e.kind == LiveEventKind::Wait && e.outcome == LiveOutcome::Skipped && e.id == e.context.frame.frame)
 			{
 				f->acquireSkipped = true;
@@ -1910,29 +2099,56 @@ namespace dyf::Platform
 
 	void RecordLiveLink(const LiveFlowLink & link) noexcept
 	{
-		if(!IsLiveCollectorEnabled()) return;
+		RecordLiveLinks(&link, 1);
+	}
+
+	void RecordLiveLinks(const LiveFlowLink * links, std::size_t count) noexcept
+	{
+		if(!IsLiveCollectorEnabled() || !links || !count) return;
 		try
 		{
 			if(auto f = Frame(context.frame))
 			{
+				if(!f->summary.captureRequest) return;
+#ifdef DY_LIVE_TEST_CLOCK
+				++testLinkFrameLocks;
+#endif
 				std::unique_lock < std::mutex > lock(f->mutex);
 				if(f->ended)
 				{
-					AppendEvidenceDetail(* f, nullptr, & link);
 					lock.unlock();
-					if(!AppendLateDetail(f, nullptr, & link)) ++S().omittedLinks;
+					if(count > 1 && AppendLateLinks(f, links, count, S().omittedLinks)) return;
+					for(std::size_t i = 0; i < count; ++i) try
+					{
+						{ std::lock_guard<std::mutex> guard(f->mutex);
+						AppendEvidenceDetail(* f, nullptr, & links[i]);
+						}
+						if(!AppendLateDetail(f, nullptr, & links[i])) ++S().omittedLinks;
+					}
+					catch(...) { ++S().omittedLinks; }
 				}
-				else if(!PushDetail(* f, f->flow.links, link, 16384))
+				else for(std::size_t i = 0; i < count; ++i) try
 				{
-					++f->flow.omittedLinks;
-					++S().omittedLinks;
-					f->summary.incomplete = true;
+					if(f->flow.links.size() >= 16384)
+					{
+						f->flow.omittedLinks += count - i;
+						S().omittedLinks += count - i;
+						f->summary.incomplete = true;
+						break;
+					}
+					if(!PushDetail(* f, f->flow.links, links[i], 16384))
+					{
+						++f->flow.omittedLinks;
+						++S().omittedLinks;
+						f->summary.incomplete = true;
+					}
 				}
+				catch(...) { ++S().omittedLinks; }
 			}
 		}
 		catch(...)
 		{
-			++S().omittedLinks;
+			S().omittedLinks += count;
 		}
 
 	}
@@ -2023,6 +2239,13 @@ namespace dyf::Platform
 	std::shared_ptr<const LiveSnapshot> ReadLiveSnapshot()
 	{
 		if(!IsLiveCollectorEnabled()) return { };
+		struct SnapshotFrame
+		{
+			LiveFrameSummary summary;
+			std::vector<LiveGpuSpan> gpuSpans;
+			std::uint64_t omittedEvents = 0, omittedLinks = 0;
+			bool ended = false;
+		};
 		struct SnapshotSource
 		{
 			SourceRecord record;
@@ -2082,6 +2305,8 @@ namespace dyf::Platform
 			copy.run = pair.second.run;
 			copy.lastEndedKey = pair.second.lastEndedKey;
 			copy.evidenceRequest = pair.second.evidenceRequest;
+			copy.captureRequest = pair.second.captureRequest;
+			copy.capture = pair.second.capture;
 			copy.beforeEvidence = pair.second.beforeEvidence;
 			copy.afterEvidence = pair.second.afterEvidence;
 			if(auto latest = pair.second.lastEnded.lock())
@@ -2102,6 +2327,15 @@ namespace dyf::Platform
 			LiveSourceSnapshot out;
 			out.device = source.device;
 			out.source = pair.first;
+			out.captureRequest = source.captureRequest;
+			out.capture = CopyEvidence(source.capture, now);
+			if(!out.capture.available)
+			{
+				out.capture.flow.events.clear();
+				out.capture.flow.links.clear();
+				out.capture.flow.gpuSpans.clear();
+				out.capture.objects.clear();
+			}
 			ReadRun(* source.run, now, out);
 			const auto compared = std::find_if(result->controlStatus.begin(), result->controlStatus.end(), [&](const auto & status)
 			{
@@ -2115,43 +2349,60 @@ namespace dyf::Platform
 			}
 			auto detail = std::move(pair.second.detail);
 			std::vector<LiveGpuSpan> recent;
-			for(auto & ptr : source.frames)
+			std::vector<SnapshotFrame> frames;
+			frames.reserve(source.frames.size());
+			for(const auto & ptr : source.frames)
 			{
-				auto copy = std::make_shared<FrameRecord>();
+				auto & copy = frames.emplace_back();
 				{ std::lock_guard<std::mutex> lock(ptr->mutex);
-				copy->summary = ptr->summary;
-				copy->ended = ptr->ended;
-				copy->flow.gpuSpans = ptr->flow.gpuSpans;
-				copy->flow.omittedEvents = ptr->flow.omittedEvents;
-				copy->flow.omittedLinks = ptr->flow.omittedLinks;
-				} ptr = std::move(copy);
+				copy.summary = ptr->summary;
+				copy.ended = ptr->ended;
+				copy.gpuSpans = ptr->flow.gpuSpans;
+				copy.omittedEvents = ptr->flow.omittedEvents;
+				copy.omittedLinks = ptr->flow.omittedLinks;
+				}
 			}
-			auto latest = std::find_if(source.frames.rbegin(), source.frames.rend(), [&](const auto & f)
+			auto latest = std::find_if(frames.rbegin(), frames.rend(), [&](const auto & f)
 			{
-				return f->ended && f->summary.key == source.lastEndedKey;
+				return f.ended && f.summary.key == source.lastEndedKey;
 			});
-			if(latest != source.frames.rend())
+			if(latest != frames.rend())
 			{
-				out.latest =(* latest)->summary;
+				out.latest = latest->summary;
+				out.flow.key = latest->summary.key;
 				if(detail) out.flow = * detail;
-				out.flow.gpuSpans =(* latest)->flow.gpuSpans;
-				out.flow.omittedEvents =(* latest)->flow.omittedEvents;
-				out.flow.omittedLinks =(* latest)->flow.omittedLinks;
+				out.flow.gpuSpans = latest->gpuSpans;
+				out.flow.omittedEvents = latest->omittedEvents;
+				out.flow.omittedLinks = latest->omittedLinks;
 			}
 			out.latest.sampleAgeNs = now >= out.latest.endNs ? now - out.latest.endNs : 0;
-			for(auto it = source.frames.rbegin(); it != source.frames.rend() &&
-				recent.size() < 1024; ++it) for(const auto & span :(* it)->flow.gpuSpans) if(span.duration.state != LiveValueState::Pending && recent.size() < 1024) recent.push_back(span);
+			for(auto it = frames.rbegin(); it != frames.rend() &&
+				recent.size() < 1024; ++it) for(const auto & span : it->gpuSpans) if(span.duration.state != LiveValueState::Pending && recent.size() < 1024) recent.push_back(span);
 			out.recentGpuSpans = std::move(recent);
-			std::set<std::pair<std::uint64_t, LiveId>> buckets;
-			for(const auto & frame : source.frames) if(frame->ended)
+			std::map<std::pair<std::uint64_t, LiveId>, LiveAggregate> buckets;
+			for(const auto & frame : frames)
 			{
-				buckets.emplace(frame->summary.endNs / LivePublishIntervalNs, frame->summary.appliedRevision);
-				if(frame->summary.cpuRender.milliseconds >= 1000 ||
-					frame->summary.endNs - frame->summary.beginNs >= 1000000000ull ||(frame->summary.frame.state == LiveValueState::Ready &&
-					frame->summary.frame.milliseconds >= 1000)) out.longFrames.push_back(frame->summary);
+#ifdef DY_LIVE_TEST_CLOCK
+				++testHistoryFrameVisits;
+#endif
+				if(!frame.ended) continue;
+				const auto & summary = frame.summary;
+				auto & bucket = buckets[{ summary.endNs / LivePublishIntervalNs, summary.appliedRevision }];
+				if(!bucket.frameCount)
+				{
+					bucket.device = source.device;
+					bucket.source = pair.first;
+					bucket.appliedRevision = summary.appliedRevision;
+					bucket.beginNs = summary.endNs / LivePublishIntervalNs * LivePublishIntervalNs;
+					bucket.endNs = bucket.beginNs + LivePublishIntervalNs;
+				}
+				Accumulate(bucket, summary);
+				if(summary.cpuRender.milliseconds >= 1000 ||
+					summary.endNs - summary.beginNs >= 1000000000ull ||(summary.frame.state == LiveValueState::Ready &&
+					summary.frame.milliseconds >= 1000)) out.longFrames.push_back(summary);
 			}
-			for(const auto & bucket : buckets) out.history.push_back(Aggregate(source, pair.first, bucket.second,
-				bucket.first * LivePublishIntervalNs,(bucket.first + 1) * LivePublishIntervalNs));
+			out.history.reserve(buckets.size());
+			for(auto & bucket : buckets) out.history.push_back(Finish(std::move(bucket.second)));
 			result->sources.push_back(std::move(out));
 		}
 

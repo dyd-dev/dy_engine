@@ -144,20 +144,19 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
 			const auto& material=scene.Materials()[draw.material];
 			const auto* input=draws ? &(*draws)[draw.entity] : nullptr;
             auto batchContext=Platform::GetLiveContext();
-            if(Platform::IsLiveCollectorEnabled()) // 수집기가 켜진 경우에만 간접 배치 출처/인수 버퍼 링크를 남긴다.
+            if(Platform::IsLiveCollectorEnabled()) // 간접 배치는 집계하고 출처·버퍼 링크는 상세 캡처 때만 남긴다.
             {
-                const auto sceneBatch=Platform::GetLiveBatchId(liveId,scene.m_liveId);
-                const auto passBatch=Platform::GetLiveBatchId(sceneBatch,1);
-                batchContext.batch=Platform::GetLiveBatchId(passBatch,(uint64_t(1)<<63)|batchIndex);
+                const bool detail=Platform::IsLiveDetailEnabled(batchContext.frame);
+                batchContext.batch=detail?Platform::GetLiveBatchPath(liveId,{scene.m_liveId,1,(uint64_t(1)<<63)|batchIndex}):0;
                 Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;
                 batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Record;
                 batch.first=batchIndex;batch.stride=sizeof(RHI::DrawIndexedIndirectArguments);
                 batch.bytes=batch.stride;batch.operations=1;
-                batch.resource=Platform::FindLiveObject(gpuVisibility->GetArgumentsBuffer());
+                batch.resource=detail?Platform::FindLiveObject(gpuVisibility->GetArgumentsBuffer()):0;
                 // 실제 가시 개수는 GPU가 결정하므로 간접 배치 이벤트에는 미확정으로 남기고 CPU capacity를 측정값으로 게시하지 않는다.
-                std::strncpy(batch.label,"GPU indirect batch: visible count unknown",sizeof(batch.label)-1);
+                if(detail)std::strncpy(batch.label,"GPU indirect batch: visible count unknown",sizeof(batch.label)-1);
                 Platform::RecordLiveEvent(batch);
-                Platform::RecordLiveLink({Platform::FindLiveObject(gpuVisibility->GetInstanceBuffer()),batch.id});
+                if(detail)Platform::RecordLiveLink({Platform::FindLiveObject(gpuVisibility->GetInstanceBuffer()),batch.id});
             }
             Platform::LiveContextScope linkedBatch(batchContext);
 			const auto selectedPipeline=MaterialPipeline(material,Math::Determinant3x3(scene.GetTransform(entity))<0);
@@ -239,20 +238,19 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene, const Camera& camera,
             }
         }
         auto batchContext=Platform::GetLiveContext();
-        if(Platform::IsLiveCollectorEnabled()) // 수집 중이면 직접 배치의 범위·바이트·제한된 이유 분류와 객체 링크를 남긴다.
+        if(Platform::IsLiveCollectorEnabled()) // 배치의 범위·바이트·이유는 집계하고 객체 링크는 상세 캡처 때만 남긴다.
         {
-            const auto sceneBatch=Platform::GetLiveBatchId(liveId,scene.m_liveId);
-            const auto passBatch=Platform::GetLiveBatchId(sceneBatch,1);
-            batchContext.batch=Platform::GetLiveBatchId(passBatch,(uint64_t(entityIndex)<<32)|count);
+            const bool detail=Platform::IsLiveDetailEnabled(batchContext.frame);
+            batchContext.batch=detail?Platform::GetLiveBatchPath(liveId,{scene.m_liveId,1,(uint64_t(entityIndex)<<32)|count}):0;
             batchContext.object=entityIndex<scene.m_liveEntities.size()?scene.m_liveEntities[entityIndex]:scene.m_liveId;
             Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;
             batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Data;
             batch.first=entityIndex;batch.elements=count;batch.stride=2*sizeof(Math::float4x4);
-            batch.bytes=uint64_t(count)*batch.stride;batch.resource=Platform::FindLiveObject(instanceBuffer);
+            batch.bytes=uint64_t(count)*batch.stride;batch.resource=detail?Platform::FindLiveObject(instanceBuffer):0;
             // main의 관측 이유는 사용자 기하·인스턴싱 OFF·그 밖(None)만 구분한다. 위에서 실제로 배치를 끊은 개별 조건을 별도 이유로 저장하지는 않는다.
             batch.reason=!stock?Platform::LiveSplitReason::CustomGeometry:!instanced?Platform::LiveSplitReason::InstancingDisabled:Platform::LiveSplitReason::None;
             Platform::RecordLiveEvent(batch);
-            for(uint32_t i=0;i<count&&entityIndex+i<scene.m_liveEntities.size();++i)
+            for(uint32_t i=0;detail&&i<count&&entityIndex+i<scene.m_liveEntities.size();++i)
                 Platform::RecordLiveLink({scene.m_liveEntities[entityIndex+i],batch.id});
         }
         // 이후 명령을 방금 만든 배치 출처에 연결한다. scope가 끝나면 바깥 frame/source 문맥으로 돌아간다.

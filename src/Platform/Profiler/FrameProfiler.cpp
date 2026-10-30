@@ -219,18 +219,26 @@ namespace dyf::Platform
 		try
 		{
 			RHI::TimestampCalibration pair;
-			const bool calibrated = completion && device.GetTimestampCalibration(pair);
-			const auto now = LiveNowNs();
+			bool initialized = false, calibrated = false;
+			std::uint64_t now = 0;
+			LiveId submission = 0;
 			for(auto it = gpuScopes.begin(); it != gpuScopes.end();)
 			{
 				if(it->span.frame == frame && !it->completion)
 				{
 					if(completion)
 					{
+						if(!initialized)
+						{
+							calibrated = device.GetTimestampCalibration(pair);
+							now = LiveNowNs();
+							submission = device.GetLiveSubmissionId(completion);
+							initialized = true;
+						}
 						it->completion = completion;
 						it->submittedNs = now;
 						if(calibrated) it->calibration = pair;
-						it->span.begin.submission = it->span.end.submission = device.GetLiveSubmissionId(completion);
+						it->span.begin.submission = it->span.end.submission = submission;
 						it->span.outcome = LiveOutcome::Submitted;
 						RecordLiveGpuSpan(it->span);
 						++it;
@@ -254,22 +262,25 @@ namespace dyf::Platform
 	void FrameProfiler::CollectGpuScopes() noexcept
 	{
 		std::lock_guard<std::mutex> lock(gpuMutex);
+		if(gpuScopes.empty()) return;
 		try
 		{
+			RHI::FenceHandle completed;
+			const auto bits = device.GetTimestampValidBits();
+			const auto period = device.GetTimestampPeriodNanoseconds();
 			for(auto it = gpuScopes.begin(); it != gpuScopes.end();)
 			{
-				if(!it->completion || !device.IsComplete(it->completion))
+				if(!it->completion || (it->completion != completed && !device.IsComplete(it->completion)))
 				{
 					++it;
 					continue;
 				}
+				completed = it->completion;
 
 				std::uint64_t ticks[2]{};
 				auto& span = it->span;
 				span.outcome = LiveOutcome::Completed;
 				span.duration.state = LiveValueState::Unavailable;
-				const auto bits = device.GetTimestampValidBits();
-				const auto period = device.GetTimestampPeriodNanoseconds();
 				if(bits && bits <= 64 && period > 0 && device.ReadTimestamps(it->query, 0, 2, ticks))
 				{
 					const auto mask = bits == 64 ? UINT64_MAX : (std::uint64_t(1) << bits) - 1;

@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <string>
@@ -126,6 +127,8 @@ namespace dyf::Platform
 	{
 		LiveFrameKey key;
 		LiveId appliedRevision = 0;
+		// Zero means summary-only; intentional non-capture is not detail loss.
+		LiveId captureRequest = 0;
 		std::uint64_t beginNs = 0, endNs = 0, sampleAgeNs = 0;
 		LiveSample frame, cpuRender, gpuMain, gpuShadow, gpuMeasured;
 		LiveObjectGauge objects;
@@ -432,6 +435,9 @@ namespace dyf::Platform
 		// One latest request per source. Each side is an original representative frame,
 		// never an averaged/synthetic frame; window fields identify its aggregate.
 		LiveComparisonEvidence comparisonEvidence;
+		// The last requested frame survives subsequent summary-only frames.
+		LiveId captureRequest = 0;
+		LiveFrameEvidence capture;
 	};
 
 	struct LiveCollectorStatistics
@@ -457,6 +463,9 @@ namespace dyf::Platform
 	LiveClockInfo GetLiveClockInfo() noexcept;
 	bool SetLiveCollectorEnabled(bool enabled) noexcept;
 	bool IsLiveCollectorEnabled() noexcept;
+	// Request the next new frame of an existing source. Zero means rejected/busy.
+	LiveId RequestLiveFrameCapture(LiveId device, LiveId source, LiveId request = 0) noexcept;
+	bool IsLiveDetailEnabled(LiveFrameKey frame = {}) noexcept;
 
 	LiveId AllocateLiveId() noexcept;
 	LiveId RegisterLiveObject(const void* object, const LiveObjectDesc&) noexcept;
@@ -465,6 +474,7 @@ namespace dyf::Platform
 	void RebindLiveObject(LiveId, const void* object) noexcept;
 	void RetireLiveObject(LiveId) noexcept;
 	LiveId GetLiveBatchId(LiveId owner, std::uint64_t discriminator) noexcept;
+	LiveId GetLiveBatchPath(LiveId owner, std::initializer_list<std::uint64_t> discriminators) noexcept;
 	void PublishLiveDevice(const LiveDeviceSnapshot&) noexcept;
 
 	LiveContext GetLiveContext() noexcept;
@@ -475,6 +485,7 @@ namespace dyf::Platform
 
 	void RecordLiveEvent(const LiveEvent&, bool includeSummary = true) noexcept;
 	void RecordLiveLink(const LiveFlowLink&) noexcept;
+	void RecordLiveLinks(const LiveFlowLink*, std::size_t count) noexcept;
 	void RecordLiveGpuSpan(const LiveGpuSpan&) noexcept;
 	// Coverage is complete after every submitted command-list span is registered.
 	void SetLiveGpuCoverage(LiveFrameKey, bool complete) noexcept;
@@ -548,6 +559,10 @@ namespace dyf::Platform
 namespace dyf::Platform::Detail
 {
 #ifdef DY_LIVE_TEST_CLOCK
+	struct TestLiveWork { std::uint64_t historyFrameVisits = 0, linkFrameLocks = 0, commandPruneEntries = 0, lateFlowCopies = 0, boundedSnapshotCopies = 0, metricChanges = 0, wireWriteChecks = 0, batchLocks = 0, frameLookups = 0, eventInputCopies = 0, eventSummaryScratchBytes = 0; };
+	TestLiveWork TakeTestLiveWork() noexcept;
+	void RecordTestBoundedSnapshotCopy() noexcept;
+	void RecordTestWireWrite() noexcept;
 	void SetTestLiveNowNs(std::uint64_t) noexcept;
 	void FailTestLiveAggregationAllocationAfter(std::int64_t) noexcept;
 #endif

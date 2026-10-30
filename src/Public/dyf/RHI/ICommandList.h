@@ -156,6 +156,8 @@ namespace dyf::RHI
             const void* resource,uint64_t elements,uint64_t bytes,uint64_t operations,
             Platform::LiveEventKind kind,bool fullUpload=false,const char* label=nullptr) noexcept;
         void RecordLiveResourceLink(std::uint64_t,std::uint64_t) noexcept;
+        std::uint64_t FindLiveResource(const void*);
+        void FlushLiveResourceLinks() noexcept;
         void RecordLiveInfo(Platform::LiveEvent) noexcept;
         void FinishLiveRecording(Platform::LiveOutcome,bool terminal=false) noexcept;
         void RecordLiveBindings(std::uint64_t,Platform::LiveCommandKind) noexcept;

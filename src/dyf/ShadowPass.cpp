@@ -215,22 +215,21 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene, const Camera& camera, 
                         ++count;
                     }
                 }
-        // 배치 ID에 Renderer→Scene→그림자 view→객체 범위를 연결한다. 메인 패스와 다른 pass ID를 사용해 같은 객체의 작업을 섞지 않는다.
+        // 상세 캡처의 배치 ID에 Renderer→Scene→그림자 view→객체 범위를 연결한다. 메인 패스와 다른 pass ID로 같은 객체의 작업을 구분한다.
         auto batchContext=Platform::GetLiveContext();
-        if(Platform::IsLiveCollectorEnabled()) // 수집 중이면 그림자 배치의 범위·제한된 이유 분류와 원본 객체 링크를 남긴다.
+        if(Platform::IsLiveCollectorEnabled()) // 그림자 배치의 범위·이유는 집계하고 객체 링크는 상세 캡처 때만 남긴다.
         {
-            const auto sceneBatch=Platform::GetLiveBatchId(liveId,scene.m_liveId);
-            const auto passBatch=Platform::GetLiveBatchId(sceneBatch,100+view);
-            batchContext.batch=Platform::GetLiveBatchId(passBatch,(uint64_t(entityIndex)<<32)|count);
+            const bool detail=Platform::IsLiveDetailEnabled(batchContext.frame);
+            batchContext.batch=detail?Platform::GetLiveBatchPath(liveId,{scene.m_liveId,100+view,(uint64_t(entityIndex)<<32)|count}):0;
             batchContext.object=entityIndex<scene.m_liveEntities.size()?scene.m_liveEntities[entityIndex]:scene.m_liveId;
             Platform::LiveEvent batch;batch.id=batchContext.batch;batch.context=batchContext;
             batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Data;
             batch.first=entityIndex;batch.elements=count;batch.stride=2*sizeof(Math::float4x4);
-            batch.bytes=uint64_t(count)*batch.stride;batch.resource=Platform::FindLiveObject(instanceBuffer);
+            batch.bytes=uint64_t(count)*batch.stride;batch.resource=detail?Platform::FindLiveObject(instanceBuffer):0;
             // 이 그림자 배치의 reason은 사용자 기하·인스턴싱 OFF·그 밖(None)만 구분한다. 위에서 실제로 묶기를 끝낸 메시·재질·절두체 조건은 각각 기록하지 않는다.
             batch.reason=!stock?Platform::LiveSplitReason::CustomGeometry:!instanced?Platform::LiveSplitReason::InstancingDisabled:Platform::LiveSplitReason::None;
             Platform::RecordLiveEvent(batch);
-            for(uint32_t i=0;i<count&&entityIndex+i<scene.m_liveEntities.size();++i)
+            for(uint32_t i=0;detail&&i<count&&entityIndex+i<scene.m_liveEntities.size();++i)
                 Platform::RecordLiveLink({scene.m_liveEntities[entityIndex+i],batch.id});
         }
         Platform::LiveContextScope linkedBatch(batchContext);
