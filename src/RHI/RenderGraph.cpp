@@ -71,6 +71,18 @@ namespace dyf::RHI
         return *this;
     }
 
+    void RenderGraphPass::Reset() noexcept
+    {
+        m_name.clear();
+        m_revision = 0;
+        m_pipeline = nullptr;
+        m_reads.clear();
+        m_writes.clear();
+        m_executeCallback = nullptr;
+        m_globalBarrier = false;
+        m_recordingMode = RGRecordingMode::Ordered;
+    }
+
     bool RenderGraphPass::Execute(ICommandList* commands) const
     {
         if(!commands) return Fail("a command list is required.");
@@ -178,26 +190,48 @@ namespace dyf::RHI
 
     RenderGraphPass& RenderGraph::AddPass(const std::string& name, RGRecordingMode mode)
     {
-        auto pass = std::make_unique<RenderGraphPass>(name, static_cast<uint32_t>(m_passes.size()), mode);
+        const auto index = m_passes.size();
+        if(m_passStorage.size() <= index) m_passStorage.resize(index + 1);
+        auto& pass = m_passStorage[index];
+        if(!pass) pass = std::make_unique<RenderGraphPass>(name, static_cast<uint32_t>(index), mode);
+        else
+        {
+            pass->m_name = name;
+            pass->m_index = static_cast<uint32_t>(index);
+            pass->m_recordingMode = mode;
+        }
         auto& result = *pass;
         m_passes.push_back(std::move(pass));
         m_compiled = false;
         return result;
     }
 
-    bool RenderGraph::Compile()
+    void RenderGraph::ClearCompiled() noexcept
     {
         m_compiled = false;
         m_compiledRevisions.clear();
         m_executionOrder.clear();
+        for(size_t index = 0; index < m_executionStages.size(); ++index)
+        {
+            auto& stage = m_executionStages[index];
+            stage.passIndices.clear();
+            stage.passIndices.swap(m_stageStorage[index].passIndices);
+        }
         m_executionStages.clear();
         m_dependencies.clear();
         m_passBarriers.clear();
+        m_passBarrierOffsets.clear();
         m_finalBarriers.clear();
         m_passUses.clear();
         m_passUseOffsets.clear();
+    }
+
+    bool RenderGraph::Compile()
+    {
+        ClearCompiled();
         const uint32_t passCount = static_cast<uint32_t>(m_passes.size());
         const uint32_t noPass = UINT32_MAX;
+        const size_t noReader = SIZE_MAX;
         size_t bindingCount = 0;
         for(const auto& pass : m_passes)
             bindingCount += pass->GetReads().size() + pass->GetWrites().size();
@@ -206,23 +240,26 @@ namespace dyf::RHI
         m_passUses.reserve(bindingCount);
         m_passUseOffsets.reserve(size_t(passCount) + 1);
         m_passUseOffsets.push_back(0);
-        std::vector<std::vector<uint32_t>> edges(passCount);
+        m_passBarrierOffsets.reserve(size_t(passCount) + 1);
+        m_passBarrierOffsets.push_back(0);
+        m_lastDependencies.assign(passCount, noPass);
+        m_stageIndices.assign(passCount, 0);
         const auto addDependency=[&](uint32_t before,uint32_t after) {
-            auto& outgoing=edges[before];
             // Destination passes are visited in order; a repeated edge is
             // always the last one, even when several resources establish it.
-            if(outgoing.empty() || outgoing.back()!=after)outgoing.push_back(after);
+            if(m_lastDependencies[before] == after) return;
+            m_dependencies.push_back({before, after});
+            m_lastDependencies[before] = after;
+            m_stageIndices[after] = (std::max)(m_stageIndices[after], m_stageIndices[before] + 1);
         };
-        std::vector<uint32_t> lastWriter(m_resources.size(), noPass);
-        std::vector<std::vector<uint32_t>> readers(m_resources.size());
-        std::vector<ResourceState> states;
-        states.reserve(m_resources.size());
-        for(const auto& resource : m_resources) states.push_back(resource.initialState);
-        struct Use { ResourceState state = ResourceState::Undefined; bool write = false; };
-        std::vector<Use> uses(m_resources.size());
-        std::vector<uint32_t> usedIndices;
-        usedIndices.reserve(m_resources.size());
-        m_passBarriers.resize(passCount);
+        m_lastWriters.assign(m_resources.size(), noPass);
+        m_readerHeads.assign(m_resources.size(), noReader);
+        m_readers.clear();
+        m_states.clear();
+        m_states.reserve(m_resources.size());
+        for(const auto& resource : m_resources) m_states.push_back(resource.initialState);
+        m_uses.assign(m_resources.size(), {});
+        m_usedIndices.reserve(m_resources.size());
         uint32_t lastGlobal = noPass;
 
         // 모든 import는 외부 내용을 가진다. 뒤쪽 writer가 앞선 read의 생산자라고 추측하지 않는다.
@@ -236,7 +273,7 @@ namespace dyf::RHI
                 for(uint32_t previous = first; previous < pass; ++previous) addDependency(previous,pass);
                 lastGlobal = pass;
             }
-            usedIndices.clear();
+            m_usedIndices.clear();
             const auto collect = [&](const std::vector<RGResourceBinding>& bindings, bool write) {
                 for(const auto& binding : bindings)
                 {
@@ -246,11 +283,11 @@ namespace dyf::RHI
                     const auto& resource = m_resources[found->second];
                     if(!(resource.buffer ? IsBufferStateAllowed(resource.buffer->GetDesc(), binding.state) :
                         IsTextureStateAllowed(resource.texture->GetDesc(), binding.state))) return false;
-                    auto& use = uses[found->second];
+                    auto& use = m_uses[found->second];
                     if(use.state == ResourceState::Undefined)
                     {
                         use = {binding.state, write};
-                        usedIndices.push_back(found->second);
+                        m_usedIndices.push_back(found->second);
                     }
                     if(use.state != binding.state) return false;
                     use.write |= write;
@@ -262,50 +299,60 @@ namespace dyf::RHI
 
             // Preserve the resource-index order of barriers without allocating
             // a tree node for every resource binding in every pass.
-            std::sort(usedIndices.begin(), usedIndices.end());
-            for(uint32_t index : usedIndices)
+            std::sort(m_usedIndices.begin(), m_usedIndices.end());
+            for(uint32_t index : m_usedIndices)
             {
-                const auto use = uses[index];
+                const auto use = m_uses[index];
                 m_passUses.push_back({index, use.state});
-                if(lastWriter[index] != noPass) addDependency(lastWriter[index],pass);
+                if(m_lastWriters[index] != noPass) addDependency(m_lastWriters[index],pass);
                 // Read/read의 상태가 달라도 layout/state 전환에는 실행 순서가 필요하다.
-                if(use.write || states[index] != use.state)
+                if(use.write || m_states[index] != use.state)
                 {
-                    for(uint32_t reader : readers[index]) addDependency(reader,pass);
-                    readers[index].clear();
+                    for(size_t reader = m_readerHeads[index]; reader != noReader; reader = m_readers[reader].next)
+                        addDependency(m_readers[reader].pass, pass);
+                    m_readerHeads[index] = noReader;
                 }
-                if(use.write) lastWriter[index] = pass;
-                else readers[index].push_back(pass);
+                if(use.write) m_lastWriters[index] = pass;
+                else
+                {
+                    m_readers.push_back({pass, m_readerHeads[index]});
+                    m_readerHeads[index] = m_readers.size() - 1;
+                }
 
                 const auto& resource = m_resources[index];
-                if(states[index] != use.state || CanWrite(use.state))
-                    m_passBarriers[pass].push_back({resource.buffer, resource.texture, states[index], use.state, {}});
-                states[index] = use.state;
-                uses[index] = {};
+                if(m_states[index] != use.state || CanWrite(use.state))
+                    m_passBarriers.push_back({resource.buffer, resource.texture, m_states[index], use.state, {}});
+                m_states[index] = use.state;
+                m_uses[index] = {};
             }
             m_passUseOffsets.push_back(m_passUses.size());
+            m_passBarrierOffsets.push_back(m_passBarriers.size());
         }
         for(uint32_t index = 0; index < m_resources.size(); ++index)
         {
             const auto& resource = m_resources[index];
-            if(states[index] != resource.finalState)
-                m_finalBarriers.push_back({resource.buffer, resource.texture, states[index], resource.finalState, {}});
+            if(m_states[index] != resource.finalState)
+                m_finalBarriers.push_back({resource.buffer, resource.texture, m_states[index], resource.finalState, {}});
         }
 
-        std::vector<uint32_t> stageIndices(passCount, 0);
         // Dependencies only point forward; registration order is also submission order.
         // Explicit backward dependencies would require a topological sort again.
         for(uint32_t pass = 0; pass < passCount; ++pass)
         {
             m_executionOrder.push_back(pass);
-            const uint32_t stage = stageIndices[pass];
-            if(m_executionStages.size() <= stage) m_executionStages.resize(size_t(stage) + 1);
+            const uint32_t stage = m_stageIndices[pass];
+            while(m_executionStages.size() <= stage)
+            {
+                const auto index = m_executionStages.size();
+                if(m_stageStorage.size() <= index) m_stageStorage.resize(index + 1);
+                m_executionStages.emplace_back();
+                m_executionStages.back().passIndices.swap(m_stageStorage[index].passIndices);
+            }
             m_executionStages[stage].passIndices.push_back(pass);
-            for(uint32_t next : edges[pass])
-                stageIndices[next] = (std::max)(stageIndices[next], stage + 1);
         }
-        for(uint32_t before=0;before<passCount;++before)
-            for(uint32_t after:edges[before])m_dependencies.push_back({before,after});
+        std::sort(m_dependencies.begin(), m_dependencies.end(), [](const auto& left, const auto& right) {
+            return left.before < right.before || (left.before == right.before && left.after < right.after);
+        });
         for(const auto& pass : m_passes) m_compiledRevisions.push_back(pass->GetRevision());
         m_compiled = true;
         return true;
@@ -355,8 +402,10 @@ namespace dyf::RHI
     {
         if(m_timestampQuery) commands->WriteTimestamp(m_timestampQuery,2+2*pass);
         if(m_passes[pass]->HasGlobalBarrier()) commands->GlobalBarrier();
-        const auto& barriers = m_passBarriers[pass];
-        commands->ResourceBarrier(barriers.data(), static_cast<uint32_t>(barriers.size()));
+        const auto firstBarrier = m_passBarrierOffsets[pass];
+        const auto barrierCount = m_passBarrierOffsets[pass + 1] - firstBarrier;
+        commands->ResourceBarrier(barrierCount ? m_passBarriers.data() + firstBarrier : nullptr,
+            static_cast<uint32_t>(barrierCount));
         if(!Platform::IsLiveCollectorEnabled())
         {
             if(!m_passes[pass]->Execute(commands))return false;
@@ -525,23 +574,23 @@ namespace dyf::RHI
         return true;
     }
 
-    void RenderGraph::Reset()
+    void RenderGraph::Reset() noexcept
     {
         m_resources.clear();
         m_resourceNameToHandle.clear();
         m_resourceIndices.clear();
         m_bufferHandles.clear();
         m_textureHandles.clear();
+        for(size_t index = 0; index < m_passes.size(); ++index)
+        {
+            m_passes[index]->Reset();
+            m_passes[index].swap(m_passStorage[index]);
+        }
         m_passes.clear();
-        m_compiledRevisions.clear();
-        m_executionOrder.clear();
-        m_executionStages.clear();
-        m_dependencies.clear();
-        m_passBarriers.clear();
-        m_finalBarriers.clear();
-        m_passUses.clear();
-        m_passUseOffsets.clear();
-        m_compiled = false;
+        ClearCompiled();
+        m_lastWriters.clear();m_readerHeads.clear();m_usedIndices.clear();
+        m_stageIndices.clear();m_lastDependencies.clear();m_readers.clear();
+        m_states.clear();m_uses.clear();
         m_timestampQuery=nullptr;
     }
 

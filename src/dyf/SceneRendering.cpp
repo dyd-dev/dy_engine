@@ -250,7 +250,8 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             noAreaMaterialPipelines[0];
         using State = RHI::ResourceState;
         // 타깃을 시작/끝 상태와 함께 그래프로 가져오고 패스의 읽기/쓰기 의존성을 선언한다. 이 선언은 실제 명령 기록보다 먼저 이루어진다.
-        RHI::RenderGraph graph;
+        auto& graph=frameGraph;graph.Reset();
+        struct GraphReset { RHI::RenderGraph& graph;~GraphReset(){graph.Reset();} } resetGraph{graph};
         const auto ownedLighting=frameNoAreaLights
             ? graph.ImportBuffer("Renderer owned lighting constants",lightingBuffer,State::ConstantBuffer,State::ConstantBuffer)
             : RHI::RGResourceHandle{};

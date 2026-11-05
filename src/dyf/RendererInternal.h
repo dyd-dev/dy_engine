@@ -379,6 +379,7 @@ struct Renderer::Impl
     bool depthPrepassReported=false;
     std::vector<uint64_t> depthPassRevisions;
     std::vector<uint64_t> depthProtectedInputs;
+    RHI::RenderGraph frameGraph;
     DepthGeometrySnapshot depthGeometrySnapshot;
     Math::float4x4 depthGeometryView,depthGeometryProjection;
     bool depthGeometryUnchanged=false;
