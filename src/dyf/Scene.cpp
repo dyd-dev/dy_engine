@@ -14,6 +14,7 @@ namespace dyf
 MaterialID Scene::CreateMaterial(const MaterialDesc& material)
 {
     m_materials.push_back(material);
+    ++m_materialRevision;
     return static_cast<MaterialID>(m_materials.size() - 1);
 }
 
@@ -48,6 +49,7 @@ EntityID Scene::CreateEntity(MeshID mesh, MaterialID material,
     }
     // 배열 추가가 모두 성공한 뒤 장면 변경 번호를 확정한다. 관측 객체 등록 실패는 장면 생성 실패로 확장하지 않는다.
     ++m_transformRevision;
+    ++m_topologyRevision;
     if(Platform::IsLiveCollectorEnabled()){ // 수집 중일 때만 객체 관측 ID를 추가하며 관측 예외는 무시한다.
         try{m_liveEntities.resize(count+1,0);m_liveEntities[count]=Platform::RegisterLiveObject(nullptr,{Platform::LiveObjectKind::Entity,0,m_liveId,1,sizeof(Math::float4x4),"Scene entity"});}catch(...){}
     }
@@ -71,13 +73,19 @@ MeshID Scene::GetEntityMesh(EntityID entity) const { return m_entityMeshes[ToInd
 MaterialID Scene::GetEntityMaterial(EntityID entity) const { return m_entityMaterials[ToIndex(entity)]; }
 const Math::float4x4& Scene::GetTransform(EntityID entity) const { return m_entityTransforms[ToIndex(entity)]; }
 const EntityLightingDesc& Scene::GetEntityLighting(EntityID entity) const { return m_entityLighting[ToIndex(entity)]; }
-void Scene::SetEntityLighting(EntityID entity, const EntityLightingDesc& lighting) { m_entityLighting[ToIndex(entity)] = lighting; }
+void Scene::SetEntityLighting(EntityID entity, const EntityLightingDesc& lighting)
+{
+    auto& current=m_entityLighting[ToIndex(entity)];
+    if(current.castShadow==lighting.castShadow && current.receiveShadow==lighting.receiveShadow)return;
+    current=lighting;++m_entityLightingRevision;
+}
 // 교체할 재질 사본을 먼저 만들고 예외 없는 이동 대입으로 확정한다. 복사가 실패하면 기존 재질은 유지된다.
 void Scene::SetMaterial(MaterialID material, const MaterialDesc& value)
 {
     static_assert(std::is_nothrow_move_assignable_v<MaterialDesc>);
     auto replacement=value;
     m_materials[ToIndex(material)]=std::move(replacement);
+    ++m_materialRevision;
 }
 
 // 렌더러에는 읽기 전용 컨테이너 참조를 제공한다. Scene이 실제 저장소를 계속 소유한다.
@@ -159,6 +167,7 @@ bool EntityHandle::SetTransform(const Math::float4x4& value)
     if(!Finite(value)){std::fprintf(stderr,"dyf: transform must be finite.\n");return false;} // NaN·무한대 행렬은 기존 변환을 유지하고 거부한다.
     auto& current=data->m_entityTransforms[ToIndex(m_id)];
     if(std::equal(std::begin(current.m),std::end(current.m),std::begin(value.m)))return true; // 행렬 값이 같으면 변경 번호를 올리지 않고 성공한다.
+    if((Math::Determinant3x3(current)<0)!=(Math::Determinant3x3(value)<0))++data->m_facingRevision;
     current=value;
     data->m_entityTransformRevisions[ToIndex(m_id)]=++data->m_transformRevision;
     return true;

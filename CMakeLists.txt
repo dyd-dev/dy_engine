@@ -271,7 +271,7 @@ if(DY_BUILD_CONFORMANCE_TESTS)
     endforeach()
     foreach(case IN ITEMS same-value sparse submit-retry record-retry second-range-retry all-moving fragmented
             growth replacement aba two-renderers queued bindless lighting-retry draw-retry growth-retry
-            bindless-retry scratch shadow-static light-order)
+            bindless-retry scratch shadow-static light-order gpu-camera gpu-mutations gpu-owners gpu-retry gpu-motion material-cache)
         add_test(NAME SceneIncrementalUpload_${case} COMMAND SceneIncrementalUploadTests ${case})
     endforeach()
     if(WIN32)

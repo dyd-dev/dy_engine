@@ -42,6 +42,7 @@ namespace
 // 한 메시의 원본/LOD 버퍼, 인덱스 수, 경계, 준비 상태를 함께 정리한다. 이 함수 자체는 Scene의 CPU MeshData를 삭제하지 않는다.
 void Renderer::Impl::DestroyMeshState(RHI::IDevice* device, SceneMeshState& mesh)
 {
+    ++geometryRevision;
     mesh.shadowArena={};
     shadowArenaDirty=true;shadowArenaAttempted=false;
 	DestroyBuffer(device, mesh.vertexBuffer, mesh.vertexReady);
@@ -167,6 +168,7 @@ bool Renderer::Impl::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 		// 원본·LOD·추가 주/그림자 인덱스의 업로드 제출 상태가 모두 준비된 메시만 재사용한다. prepared는 GPU 완료 확인값이 아니다.
 		if(mesh.prepared && (!config.enableLod || mesh.lodsGenerated) && (!preparePerMeshShadow || (mesh.shadowIndexReady && mesh.shadowVertexReady)) &&
             (!needMain || mesh.mainIndexReady)) continue;
+        ++geometryRevision;
         const MeshData& source = *sourceMesh;
 		mesh.prepared=false;
         mesh.bounds={};
@@ -643,6 +645,7 @@ bool Renderer::Impl::PrepareMainIndirectGeometry(const Scene& scene,RHI::IDevice
             }
             if(levels<2 || indexCount>UINT32_MAX/sizeof(uint32_t))
             {
+                if(mesh.indirectIndexReady)++geometryRevision;
                 mesh.indirectIndexReady=false;
                 continue;
             }
@@ -650,6 +653,7 @@ bool Renderer::Impl::PrepareMainIndirectGeometry(const Scene& scene,RHI::IDevice
             if(mesh.indirectIndexReady && mesh.indirectIndexBuffer && mesh.indirectIndexBuffer->GetDesc().size==bytes &&
                 mesh.indirectFirstIndices==firstIndices)continue;
             // Expanded LOD layouts must not use offsets from the previous copy.
+            if(mesh.indirectIndexReady)++geometryRevision;
             mesh.indirectIndexReady=false;
             bool valid=true;
             for(uint32_t level=0;level<levels;++level)
@@ -686,6 +690,7 @@ bool Renderer::Impl::PrepareMainIndirectGeometry(const Scene& scene,RHI::IDevice
             mesh.indirectIndexBuffer=std::exchange(replacement.buffer,nullptr);
             mesh.indirectFirstIndices=replacement.firstIndices;
             mesh.indirectIndexReady=true;
+            ++geometryRevision;
             mesh.indirectIndexAttemptedBytes=0;
             if(previous)device->DestroyBuffer(previous);
         }

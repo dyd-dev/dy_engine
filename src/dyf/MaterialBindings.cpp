@@ -84,11 +84,13 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
             environment=&neutralEnvironment;
         }
         if(!environment->constantBuffer)return false;
+        auto& indices=materialIndexScratch;
+        if(!materialPageCount || materialPageRevision!=materialCacheKey.generation)
+        {
 		// 클러스터 조명 슬롯 앞의 19개 텍스처 단위로 재질을 묶는다.
         if(materialPages.empty())materialPages.emplace_back(); // 첫 페이지가 없으면 임시 저장소를 하나 마련한다.
         for(auto& page:materialPages) {page.textures.clear();page.materials.clear();}
         uint32_t pageCount=1;
-        auto& indices=materialIndexScratch;
         // 재질마다 8개 uint 슬롯을 확보하고 텍스처 다섯 종류의 페이지 내 위치를 채운다. 남는 슬롯은 정렬/레이아웃 계약에 맞춰 0으로 둔다.
         indices.assign(materialStates.size()*8,0);
 		// 현재 페이지에 새로 필요한 고유 텍스처 수를 먼저 센다. 같은 재질의 여러 슬롯이 같은 핸들이어도 한 번만 센다.
@@ -117,6 +119,9 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
 				if(found == page.textures.end()) page.textures.push_back(texture); // 페이지에 처음 등장한 텍스처만 목록에 넣고 해당 위치를 인덱스로 사용한다.
 			}
 		}
+        materialPageCount=pageCount;materialPageRevision=materialCacheKey.generation;
+        }
+        const auto pageCount=materialPageCount;
 		if(indices.size() > UINT32_MAX / sizeof(uint32_t)) return false; // 재질 인덱스 버퍼 바이트 수가 32비트를 넘으면 실패한다.
         const auto bytes=static_cast<uint32_t>(indices.size()*sizeof(uint32_t));
         if(!materialIndexBuffer || materialIndexBuffer->GetDesc().size!=bytes) { // 버퍼가 없거나 크기가 바뀌면 새 버퍼를 만들고 업로드 필요 상태로 둔다.
@@ -127,6 +132,7 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
         // 이번 기록에서 사용할 버퍼를 고정한다. materialIndexRecorded는 기록 여부이며 ready/기준 바이트 확정은 SceneRendering의 draw 제출 성공 뒤에 한다.
         auto* materialBuffer=materialIndexBuffer;
         if(!materialIndexReady || indices!=materialIndexBytes) { // 새 버퍼이거나 마지막 제출 성공 바이트와 다를 때만 업로드를 기록한다.
+            materialIndexBytes.reserve(indices.size()); // Commit after Submit must not allocate.
             if(materialIndexReady) { // 기존 셰이더 읽기 버퍼는 복사 목적 상태로 전환한 뒤 갱신한다.
                 const RHI::ResourceBarrierDesc barrier={materialBuffer,nullptr,RHI::ResourceState::ShaderResource,RHI::ResourceState::CopyDestination,{}};
                 commands.ResourceBarrier(&barrier,1);

@@ -147,6 +147,11 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             return RendererFailure("Scene depth target creation failed.");
         // 이번 프레임의 Renderer·Scene·복사한 카메라와 자원 핸들을 확장 모듈이 읽을 묶음으로 연결한다. RenderFrame 자체가 Scene을 새로 소유하는 것은 아니다.
         RenderFrame renderFrame{owner,scene,camera};
+        renderFrame.geometry.swap(frameGeometryScratch);
+        struct GeometryScratchReturn {
+            std::vector<RenderGeometryDraw>& frame;std::vector<RenderGeometryDraw>& scratch;
+            ~GeometryScratchReturn(){frame.clear();frame.swap(scratch);}
+        } geometryScratchReturn{renderFrame.geometry,frameGeometryScratch};
         renderFrame.requirements=requirements;
         renderFrame.lodDebug=lodDebugActive;renderFrame.wireframe=wireframeActive;
         renderFrame.blackTexture=defaultMaterialTextures[2];
@@ -555,7 +560,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             // draw 제출의 펜스와 기록한 통계를 보관한다. 뒤의 readback 또는 Present가 실패해도 이미 제출한 작업이 취소되지는 않으므로 이 값은 유지한다.
             lastRenderCompletion=completion;
             lastStatistics=recordingStatistics;
-            if(materialIndexRecorded) {materialIndexReady=true;materialIndexBytes.swap(materialIndexScratch);} // 이번 draw 목록에 재질 인덱스 업로드가 있었으면 ready와 비교 기준 바이트를 갱신한다.
+            if(materialIndexRecorded) {materialIndexReady=true;materialIndexBytes=materialIndexScratch;} // 이번 draw 목록에 재질 인덱스 업로드가 있었으면 ready와 비교 기준 바이트를 갱신한다.
             // draw 제출이 성공한 시점에 아틀라스/모션/효과/GPU visibility 이력을 다음 프레임 기준으로 확정한다. 실제 GPU 접근 순서는 RHI 제출/배리어 계약에 따른다.
             CommitShadowAtlas(scene);
             CommitFrameResources(renderFrame);

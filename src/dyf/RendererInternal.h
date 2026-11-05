@@ -4,6 +4,7 @@
 #include "dyf/Renderer.h"
 #include "ShaderLayout.h"
 #include "DepthPrepassValidation.h"
+#include "GpuVisibility.h"
 #include "dyf/RenderExtension.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/RHI/Indirect.h"
@@ -18,7 +19,6 @@ namespace dyf
 {
 class BasicEnvironmentResources;
 class BasicLightingResources;
-class GpuVisibility;
 class OutputPresentation;
 struct RenderFrame;
 
@@ -273,7 +273,8 @@ struct Renderer::Impl
     bool AddExtensionPasses(RenderStage,RenderFrame&,RHI::RenderGraph&);
     bool UsesGpuVisibility() const;
     bool PrepareVisibility(const Scene&,const Camera&,RHI::ICommandList&,uint32_t,uint32_t,
-        const std::vector<RendererDrawDesc>*);
+        const std::vector<RendererDrawDesc>*,bool motion=false);
+    void PrepareMaterialRepresentatives(const Scene&);
     bool PrepareCpuBatches(const Scene&,const Camera&,RHI::ICommandList&,const std::vector<RendererDrawDesc>*,bool motion);
     // 카메라/모션 이력, 가시성, 조명, 효과 준비를 먼저 수행하고 성공한 draw 제출 뒤 CommitFrameResources로 이번 프레임 이력을 확정한다.
     bool PrepareFrameResources(RenderFrame&,RHI::ICommandList&);
@@ -380,6 +381,7 @@ struct Renderer::Impl
     std::vector<uint64_t> depthPassRevisions;
     std::vector<uint64_t> depthProtectedInputs;
     RHI::RenderGraph frameGraph;
+    std::vector<RenderGeometryDraw> frameGeometryScratch;
     DepthGeometrySnapshot depthGeometrySnapshot;
     Math::float4x4 depthGeometryView,depthGeometryProjection;
     bool depthGeometryUnchanged=false;
@@ -422,6 +424,8 @@ struct Renderer::Impl
     };
     // bindless 재질을 텍스처 페이지로 나누고 자원 세트에 연결하기 위한 재사용 임시 배열이다.
     std::vector<MaterialPageScratch> materialPages;
+    uint64_t materialPageRevision=0;
+    uint32_t materialPageCount=0;
     std::vector<RHI::ResourceSetHandle> mainSetScratch,shadowSetScratch;
     std::vector<RHI::ResourceSetHandle> mainMirroredSetScratch;
     std::vector<RHI::ResourceBinding> mainBindingScratch,mainCombinedBindingScratch,shadowBindingScratch;
@@ -448,6 +452,7 @@ struct Renderer::Impl
     RHI::FenceHandle lastRenderCompletion;
     // Scene의 CPU 원본과 대응하는 기하·LOD·텍스처 캐시다. 설정 변경 시 같은 장치·고정 입력 형식의 업로드 자원을 그대로 유지한다.
     std::vector<SceneMeshState> m_meshes;
+    uint64_t geometryRevision=0;
     // Only this Impl owns arena buffers; mesh ranges never own/alias their handles.
     RHI::BufferHandle shadowArenaVertices=nullptr,shadowArenaIndices=nullptr;
     uint64_t shadowArenaGeneration=0;
@@ -459,7 +464,19 @@ struct Renderer::Impl
     std::vector<TextureSlot> m_textures;
     std::vector<uint32_t> m_freeTextureSlots;
     std::map<std::tuple<const void*,ColorSpace,bool>,uint32_t> m_indices;
+    struct TextureCacheKey {
+        std::weak_ptr<Scene> scene;
+        uint64_t revision=0,generation=0;
+        bool valid=false,stock=false;
+    } textureCacheKey;
     std::vector<SceneMaterialState> materialStates;
+    struct MaterialCacheKey {
+        std::weak_ptr<Scene> scene;
+        uint64_t revision=0,textures=0,generation=0,representatives=0;
+        std::array<RHI::TextureHandle,3> defaults={};
+        bool valid=false,stock=false;
+    } materialCacheKey;
+    std::vector<uint32_t> materialRepresentatives;
     // 확장 모듈이 환경/지역광을 공급하지 않을 때 사용할 기본 자원이다. extensions는 등록 순서를 유지하며 Impl이 단독 소유한다.
     std::unique_ptr<BasicEnvironmentResources> basicEnvironment;
     std::unique_ptr<BasicLightingResources> basicLighting;
@@ -475,6 +492,14 @@ struct Renderer::Impl
     };
     std::unique_ptr<GpuVisibility> gpuVisibility;
     std::vector<VisibilityDraw> visibilityDraws;
+    struct VisibilityCache {
+        std::weak_ptr<Scene> scene;
+        uint64_t topology=0,materials=0,lighting=0,facing=0,geometry=0,transforms=0;
+        bool valid=false,motion=false;
+        std::vector<GpuVisibility::Instance> inputs;
+        std::vector<GpuVisibility::Batch> batches;
+        std::vector<uint64_t> keys;
+    } visibilityCache;
     std::vector<uint64_t> visibilityKeys;
     std::weak_ptr<Scene> visibilityScene;
     bool visibilityActive=false;

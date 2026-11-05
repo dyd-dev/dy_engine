@@ -296,6 +296,7 @@ void Renderer::Impl::SwapResources(Impl& other)
     swap(config,other.config);
     swap(shaderSources,other.shaderSources);
     swap(materialStates,other.materialStates);
+    swap(materialCacheKey,other.materialCacheKey);swap(materialRepresentatives,other.materialRepresentatives);
     swap(vertexShader,other.vertexShader);
     swap(fragmentShader,other.fragmentShader);
     swap(depthPrepassFragmentShader,other.depthPrepassFragmentShader);
@@ -359,7 +360,9 @@ void Renderer::Impl::SwapResources(Impl& other)
     swap(materialIndexScratch,other.materialIndexScratch);
     swap(lightingIndexScratch,other.lightingIndexScratch);
     swap(materialPages,other.materialPages);
+    swap(materialPageRevision,other.materialPageRevision);swap(materialPageCount,other.materialPageCount);
     swap(gpuVisibility,other.gpuVisibility);swap(visibilityDraws,other.visibilityDraws);
+    swap(visibilityCache,other.visibilityCache);
     swap(visibilityKeys,other.visibilityKeys);swap(visibilityScene,other.visibilityScene);
     swap(visibilityActive,other.visibilityActive);
     swap(cpuDrawInputs,other.cpuDrawInputs);swap(cpuDraws,other.cpuDraws);

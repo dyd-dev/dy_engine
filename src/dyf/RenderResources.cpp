@@ -163,6 +163,9 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
         if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount) continue; // GPU 버퍼와 인덱스가 준비된 메시만 확장에 전달한다.
         const bool cpuBatch=cpuBatchesActive && !UsesBlendedRendering(scene.Materials()[materialIndex]);
         if(cpuBatch && cpuBatchIndices[i]==UINT32_MAX)continue;
+        const bool gpuBatch=!cpuBatch && visibilityActive && !UsesBlendedRendering(scene.Materials()[materialIndex]);
+        // Only a representative emits GPU draw records for the extension passes.
+        if(gpuBatch && (visibilityIndex>=visibilityDraws.size() || visibilityDraws[visibilityIndex].entity!=i))continue;
         RenderGeometryDraw draw;
         const auto* input=frame.draws ? &(*frame.draws)[i] : nullptr;
         const auto level=std::min<uint32_t>(EntityLod(i),mesh.lods.size());
@@ -194,7 +197,7 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
             draw.instanceCount=batch.instanceCount;
             frame.geometry.push_back(std::move(draw));
         }
-        else if(visibilityActive && !UsesBlendedRendering(*draw.material)) // GPU 가시성이 활성인 불투명/마스크 재질은 간접 draw 목록으로 전달한다.
+        else if(gpuBatch) // GPU 가시성이 활성인 불투명/마스크 재질은 간접 draw 목록으로 전달한다.
         {
             // GPU 배치의 대표 객체에서 LOD별 간접 draw 항목을 펼친다. 같은 그룹의 다른 객체는 GPU 인스턴스 버퍼에 포함되므로 별도 직접 draw를 중복 추가하지 않는다.
             while(visibilityIndex<visibilityDraws.size() && visibilityDraws[visibilityIndex].entity==i)
@@ -204,7 +207,13 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
                 const auto& selected=visibilityDraws[batchIndex];
                 const auto& batch=gpuVisibility->GetBatch(batchIndex);
                 auto indirect=draw;
-                indirect.indexBuffer=MainIndirectIndexBuffer(mesh,selected.level,scene.Materials()[materialIndex],input);
+                // Main consumes the canonical material, which may belong to another mesh group.
+                indirect.material=&scene.Materials()[selected.material];
+                indirect.baseColor=indirect.material->baseColor;
+                indirect.textures=materialStates[selected.material].textures;
+                indirect.textureFlags=materialStates[selected.material].textureFlags |
+                    (scene.GetEntityLighting(entity).receiveShadow ? 32u : 0u) | (lodDebugActive ? 64u : 0u);
+                indirect.indexBuffer=MainIndirectIndexBuffer(mesh,selected.level,*indirect.material,input);
                 indirect.indexCount=batch.indexCount;
                 indirect.instanceBuffer=gpuVisibility->GetInstanceBuffer();
                 indirect.indirectArguments=gpuVisibility->GetArgumentsBuffer();
@@ -214,7 +223,7 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
                 if(lodDebugActive) // 간접 draw도 해당 GPU LOD 단계의 진단색을 사용한다.
                 {
                     indirect.baseColor=LodColor(selected.level);
-                    indirect.baseColor.w=draw.baseColor.w;
+                    indirect.baseColor.w=indirect.material->baseColor.w;
                 }
                 frame.geometry.push_back(std::move(indirect));
             }

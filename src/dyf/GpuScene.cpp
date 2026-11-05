@@ -60,6 +60,16 @@ public:
 }
 
 // 설정 요청뿐 아니라 인스턴싱·표준 셰이더·Compute·IndirectDraw 지원을 함께 검사한다. 환경 캡처는 이 경로에서 제외한다.
+void Renderer::Impl::PrepareMaterialRepresentatives(const Scene& scene)
+{
+    if(materialCacheKey.representatives==materialCacheKey.generation &&
+        materialRepresentatives.size()==scene.Materials().size())return;
+    MaterialCanonicalizer canonical(scene,materialStates);
+    materialRepresentatives.resize(scene.Materials().size());
+    for(uint32_t i=0;i<materialRepresentatives.size();++i)materialRepresentatives[i]=canonical(i);
+    materialCacheKey.representatives=materialCacheKey.generation;
+}
+
 bool Renderer::Impl::UsesGpuVisibility() const
 {
     return config.enableGpuCulling && config.enableInstancing && UsesStockGeometry() &&
@@ -69,19 +79,33 @@ bool Renderer::Impl::UsesGpuVisibility() const
 
 // 내용이 같은 재질을 대표 재질로 모으고, 메시·재질·정점 버퍼·그림자 수신·면 방향이 같은 객체를 그룹으로 묶는다. 그룹별 LOD 배치와 객체별 경계/행렬 입력을 만든 뒤 각 배치의 출력 구간을 정하고 업로드를 기록한다.
 bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,RHI::ICommandList& uploads,
-    uint32_t width,uint32_t height,const std::vector<RendererDrawDesc>* draws)
+    uint32_t width,uint32_t height,const std::vector<RendererDrawDesc>* draws,bool motion)
 {
-    visibilityActive=false;visibilityDraws.clear();
+    visibilityActive=false;
     if(!UsesGpuVisibility() || !stockDrawInputs) return true; // 장치/설정/입력 계약이 맞지 않으면 GPU 경로만 생략하고 CPU 렌더는 계속할 수 있다.
     if(!PrepareMainIndirectGeometry(scene,device))return false;
+    PrepareMaterialRepresentatives(scene);
+    const std::weak_ptr<Scene> owner=scene.m_lifetime;
+    auto& cache=visibilityCache;
+    const bool rebuild=draws || !cache.valid || cache.scene.expired() ||
+        cache.scene.owner_before(owner) || owner.owner_before(cache.scene) ||
+        cache.topology!=scene.m_topologyRevision || cache.materials!=materialCacheKey.generation ||
+        cache.lighting!=scene.m_entityLightingRevision || cache.facing!=scene.m_facingRevision ||
+        cache.geometry!=geometryRevision;
+    auto& batches=cache.batches;
+    auto& inputs=cache.inputs;auto& keys=cache.keys;
+    if(rebuild)
+    {
+        cache.valid=false;visibilityDraws.clear();batches.clear();inputs.clear();keys.clear();
+        inputs.reserve(scene.GetEntityCount());keys.reserve(scene.GetEntityCount());
+    }
+    if(rebuild || motion || cache.motion || cache.transforms!=scene.m_transformRevision)
+    {
     // 같은 메시·동등 재질·현재/이전 정점 버퍼·그림자 수신·반전 여부인 객체만 같은 그룹으로 묶는다. 재질 ID가 달라도 실제 내용이 같으면 대표 재질로 통합할 수 있다.
     using Key=std::tuple<uint32_t,uint32_t,uint32_t,uintptr_t,uintptr_t,bool,bool,bool>;
     std::map<Key,std::array<uint32_t,4>> groups;
-    std::vector<GpuVisibility::Batch> batches;
-    std::vector<GpuVisibility::Instance> inputs;
-    std::vector<uint64_t> keys;
-    inputs.reserve(scene.GetEntityCount());keys.reserve(scene.GetEntityCount());
-    MaterialCanonicalizer canonicalMaterial(scene,materialStates);
+    const auto viewProjection=motion ? camera.projection*camera.view : Math::float4x4{};
+    size_t inputIndex=0;
     // 객체 ID 순서로 후보를 수집하고 Blend·투과 표면은 Forward 정렬 또는 별도 투명 패스에 남긴다.
     for(uint32_t i=0;i<scene.GetEntityCount();++i)
     {
@@ -92,7 +116,7 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
         const auto meshIndex=ToIndex(meshId),sourceMaterialIndex=ToIndex(materialId);
         if(meshIndex>=m_meshes.size() || sourceMaterialIndex>=scene.Materials().size() || // 배열 범위를 벗어난 메시/재질 참조는 접근하지 않는다.
             sourceMaterialIndex>=materialStates.size()) continue;
-        const uint32_t materialIndex=canonicalMaterial(sourceMaterialIndex);
+        const uint32_t materialIndex=materialRepresentatives[sourceMaterialIndex];
         const auto& mesh=m_meshes[meshIndex];
         if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount || // GPU 메시가 준비되지 않았거나 Blend 재질이면 이 불투명 간접 경로에서 제외한다.
             UsesBlendedRendering(scene.Materials()[materialIndex])) continue;
@@ -109,13 +133,15 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
             }
         // Explicit source-buffer overrides still disable source LODs. Matching
         // effective buffer pointers must not reuse a group's shorter batch array.
+        std::array<uint32_t,4> ids={};
+        if(rebuild)
+        {
         const Key key{meshIndex,materialIndex,levels,reinterpret_cast<uintptr_t>(vertex),
             reinterpret_cast<uintptr_t>(previous),scene.GetEntityLighting(entity).receiveShadow,
             Math::Determinant3x3(scene.GetTransform(entity))<0,!input || input->deformationHistoryValid};
         auto found=groups.find(key);
         if(found==groups.end()) // 새 호환성 그룹을 처음 만나면 LOD별 간접 배치와 대표 draw를 만든다.
         {
-            std::array<uint32_t,4> ids={};
             for(uint32_t level=0;level<levels;++level)
             {
                 if(batches.size()>=UINT32_MAX) return false; // 32비트 배치 ID로 표현할 수 없으면 실패한다.
@@ -132,12 +158,17 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
             }
             found=groups.emplace(key,ids).first;
         }
+        ids=found->second;
+        }
+        else ids=inputs[inputIndex].batches;
         // 현재 모델과 이전 MVP를 넣는다. 유효한 장면 이력이 없으면 현재 MVP로 시작하고 변형 이력이 끊겼으면 previousMVP를 0으로 표시한다.
-        GpuVisibility::Instance value;
-        value.model=scene.GetTransform(entity);value.lodCount=levels;value.batches=found->second;
-        value.previousMVP=frameHistoryValid && i<previousModels.size()
-            ? previousViewProjection*previousModels[i] : camera.projection*camera.view*value.model;
+        GpuVisibility::Instance value=rebuild ? GpuVisibility::Instance{} : inputs[inputIndex];
+        value.model=scene.GetTransform(entity);value.lodCount=levels;value.batches=ids;
+        value.previousMVP=motion ? (frameHistoryValid && i<previousModels.size()
+            ? previousViewProjection*previousModels[i] : viewProjection*value.model) : Math::float4x4{};
         if(input && !input->deformationHistoryValid) value.previousMVP={}; // 변형의 이전 상태가 유효하지 않으면 이전 MVP 사용을 막는다.
+        if(rebuild || scene.m_entityTransformRevisions[i]>cache.transforms)
+        {
         const auto& bounds=input && input->hasLocalBounds ? input->localBounds : mesh.bounds;
         // 월드 변환의 절대 행/열 합으로 보수적인 스케일 상한을 구한다. 전단·비균일 스케일에서도 구의 반경을 작게 잡아 객체를 잘못 제거하지 않으려는 계산이다.
         float columnMax=0,rowMax=0;
@@ -166,15 +197,27 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
         for(uint32_t level=0;level<levels;++level)
         {
             errors[level]=level ? mesh.lods[level-1].error*scale : 0;
-            auto& capacity=batches[value.batches[level]].capacity;
-            if(capacity==UINT32_MAX) return false; // 배치별 후보 개수 증가가 32비트 범위를 넘지 않도록 막는다.
-            ++capacity;
         }
-        inputs.push_back(value);
+        }
+        if(rebuild)
+        {
+            for(uint32_t level=0;level<levels;++level)
+            {
+                auto& capacity=batches[value.batches[level]].capacity;
+                if(capacity==UINT32_MAX)return false;
+                ++capacity;
+            }
+            inputs.push_back(value);
         // GPU 입력 순서별로 원본 객체 ID와 메시 인덱스를 저장한다. 이 키 배열이 직전 프레임과 같을 때만 같은 객체의 LOD 이력으로 취급한다.
-        keys.push_back((uint64_t(i)<<32)|meshIndex);
+            keys.push_back((uint64_t(i)<<32)|meshIndex);
+        }
+        else inputs[inputIndex]=value;
+        ++inputIndex;
     }
-    if(inputs.empty()) return true; // 후보가 없으면 GPU 자원 준비 없이 성공한다.
+    cache.transforms=scene.m_transformRevision;cache.motion=motion;
+    }
+    if(rebuild)
+    {
     // 배치별 최악의 가시 인스턴스 구간을 하나의 출력 버퍼 안에 연속 배치한다. 누적 계산은 64비트로 해 오버플로를 먼저 검사한다.
     uint64_t offset=0;
     for(auto& batch:batches)
@@ -182,6 +225,11 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
         batch.instanceOffset=static_cast<uint32_t>(offset);offset+=batch.capacity;
         if(offset>UINT32_MAX/sizeof(GpuVisibility::VisibleInstance)) return false; // 가시 인스턴스 버퍼 바이트 용량이 32비트를 넘으면 실패한다.
     }
+    cache.scene=owner;cache.topology=scene.m_topologyRevision;cache.materials=materialCacheKey.generation;
+    cache.lighting=scene.m_entityLightingRevision;cache.facing=scene.m_facingRevision;cache.geometry=geometryRevision;
+    cache.valid=!draws; // Legacy overrides remain mutable between calls.
+    }
+    if(inputs.empty()) return true;
     if(!gpuVisibility) gpuVisibility=std::make_unique<GpuVisibility>(*device); // GPU 가시성 관리자가 없을 때 같은 장치로 지연 생성한다.
     // 카메라·화면 크기·LOD 오차/여유 폭·CPU 설정을 GPU 계산 입력으로 전달한다. 행 순서나 Scene 소유자가 달라지면 이전 GPU LOD 이력을 끊는다.
     GpuVisibility::Settings settings;
@@ -189,12 +237,11 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
     settings.pixelError=config.lodPixelError;settings.hysteresis=config.lodHysteresis;
     settings.screenSize=config.lodScreenSize;
     settings.frustum=config.enableFrustumCulling;settings.lod=config.enableLod;
-    const std::weak_ptr<Scene> owner=scene.m_lifetime;
     settings.resetHistory=keys!=visibilityKeys || visibilityScene.expired() ||
         visibilityScene.owner_before(owner) || owner.owner_before(visibilityScene);
     if(!gpuVisibility->Prepare(inputs,batches,settings) || !gpuVisibility->RecordUploads(uploads)) return false; // 자원 준비 또는 업로드 기록 실패면 visibilityActive를 켜지 않는다.
     // 준비와 업로드 기록이 성공한 뒤에만 이번 경로를 active로 표시한다. 이 시점은 아직 GPU compute나 draw 완료 시점이 아니다.
-    visibilityKeys=std::move(keys);visibilityScene=owner;visibilityActive=true;return true;
+    visibilityKeys=keys;visibilityScene=owner;visibilityActive=true;return true;
 }
 
 bool Renderer::Impl::PrepareCpuBatches(const Scene& scene,const Camera& camera,RHI::ICommandList& uploads,
@@ -222,7 +269,7 @@ bool Renderer::Impl::PrepareCpuBatches(const Scene& scene,const Camera& camera,R
     if(!repeated) {cpuBatchesActive=false;return true;}
     cpuBatchIndices.assign(scene.GetEntityCount(),UINT32_MAX);
     cpuDrawInputs.reserve(scene.GetEntityCount());
-    MaterialCanonicalizer canonicalMaterial(scene,materialStates);
+    PrepareMaterialRepresentatives(scene);
     const CameraFrustum frustum(camera);
     for(uint32_t i=0;i<scene.GetEntityCount();++i)
     {
@@ -242,7 +289,7 @@ bool Renderer::Impl::PrepareCpuBatches(const Scene& scene,const Camera& camera,R
         const auto vertex=input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer;
         const auto previous=input && input->previousVertexBuffer ? input->previousVertexBuffer : vertex;
         const auto level=std::min<uint32_t>(EntityLod(i),mesh.lods.size());
-        CpuDrawKey key{meshIndex,canonicalMaterial(materialIndex),level,reinterpret_cast<uintptr_t>(vertex),
+        CpuDrawKey key{meshIndex,materialRepresentatives[materialIndex],level,reinterpret_cast<uintptr_t>(vertex),
             reinterpret_cast<uintptr_t>(previous),scene.GetEntityLighting(entity).receiveShadow,
             Math::Determinant3x3(world)<0,!input || input->deformationHistoryValid};
         cpuDrawInputs.push_back({key,i});

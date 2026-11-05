@@ -156,7 +156,13 @@ bool GpuVisibility::Prepare(const std::vector<Instance>& inputs,const std::vecto
     if(capacity>UINT32_MAX/sizeof(VisibleInstance)) return false; // 마지막 배치 끝까지의 인스턴스 바이트 크기가 RHI 32비트 범위를 넘으면 중단한다.
     // 여러 GPU 실행이 동시에 결과를 추가해도 저장 위치가 겹치지 않게 위치를 확보하는 것(원자적 append)을 사용한다.
     // CPU에서 각 배치로 갈 수 있는 모든 원본 인스턴스를 세고, 원자적 append가 다음 배치 구간을 침범하지 않도록 확보된 용량과 비교한다.
-    std::vector<uint32_t> needed(batches.size(),0);
+    const bool sameInputs=m_inputData.size()==inputs.size() &&
+        std::memcmp(m_inputData.data(),inputs.data(),inputs.size()*sizeof(Instance))==0;
+    const bool sameBatches=m_batches.size()==batches.size() &&
+        std::memcmp(m_batches.data(),batches.data(),batches.size()*sizeof(Batch))==0;
+    if(!sameInputs || !sameBatches)
+    {
+    auto& needed=m_needed;needed.assign(batches.size(),0);
     for(const auto& input:inputs)
     {
         if(!input.lodCount || input.lodCount>4) return false; // 원본을 포함한 LOD 개수는 1~4여야 고정 배열 안에서 접근할 수 있다.
@@ -169,6 +175,7 @@ bool GpuVisibility::Prepare(const std::vector<Instance>& inputs,const std::vecto
             for(uint32_t earlier=0;earlier<level;++earlier) repeated=repeated || input.batches[earlier]==batch;
             if(!repeated && ++needed[batch]>batches[batch].capacity) return false; // 중복 배치가 아닌 후보를 추가했을 때 예약 용량을 넘으면 GPU 기록 전에 실패시킨다.
         }
+    }
     }
     if(!PreparePipeline()) return false; // 기능 또는 파이프라인 준비가 실패하면 자원/상수 준비를 계속하지 않는다.
     if(!m_inputs || m_inputData.size()!=inputs.size() || m_batches.size()!=batches.size() || m_capacity!=capacity) // 입력 수·배치 수·출력 구간 용량이 바뀌면 관련 버퍼와 이력을 한 묶음으로 다시 만든다.
@@ -194,10 +201,6 @@ bool GpuVisibility::Prepare(const std::vector<Instance>& inputs,const std::vecto
         m_capacity=static_cast<uint32_t>(capacity);
     }
     // 동일한 입력/배치는 CPU 사본과 GPU 업로드를 재사용하며 이번 프레임의 패스 등록 상태만 초기화한다.
-    const bool sameInputs=m_inputData.size()==inputs.size() &&
-        std::memcmp(m_inputData.data(),inputs.data(),inputs.size()*sizeof(Instance))==0;
-    const bool sameBatches=m_batches.size()==batches.size() &&
-        std::memcmp(m_batches.data(),batches.data(),batches.size()*sizeof(Batch))==0;
     m_uploadDirty[0]=m_uploadDirty[0] || !sameInputs;
     m_uploadDirty[1]=m_uploadDirty[1] || !sameBatches;
     if(!sameInputs)m_inputData=inputs;

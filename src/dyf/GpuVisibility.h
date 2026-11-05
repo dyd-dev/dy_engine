@@ -117,6 +117,7 @@ private:
     RHI::RGResourceHandle m_instancesGraph,m_argumentsGraph;
     std::vector<Instance> m_inputData; // 원본 입력의 CPU 사본을 소유해 업로드 기록 시 호출자 벡터 수명에 의존하지 않는다.
     std::vector<Batch> m_batches;
+    std::vector<uint32_t> m_needed;
     std::vector<uint8_t> m_possibleBatches;
     Frame m_frameData;
     uint32_t m_capacity=0; // 모든 배치 구간을 담는 출력 인스턴스 버퍼 용량이다. GPU가 현재 사용한 길이가 아니다.

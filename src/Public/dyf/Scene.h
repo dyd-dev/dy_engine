@@ -96,6 +96,7 @@ namespace dyf
         // Append and real transform edits stamp entities; each Renderer keeps its own cursor.
         uint64_t m_transformRevision=0;
         std::vector<uint64_t> m_entityTransformRevisions;
+        uint64_t m_topologyRevision=0,m_materialRevision=0,m_entityLightingRevision=0,m_facingRevision=0;
         std::vector<DirectionalLight> m_directionalLights;
         std::vector<PointLight> m_pointLights;
         std::vector<SpotLight> m_spotLights;
