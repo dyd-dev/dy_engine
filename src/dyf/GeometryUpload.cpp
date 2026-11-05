@@ -52,9 +52,13 @@ void Renderer::Impl::DestroyMeshState(RHI::IDevice* device, SceneMeshState& mesh
 	DestroyBuffer(device, mesh.mainIndexBuffer, mesh.mainIndexReady);
     DestroyBuffer(device,mesh.indirectIndexBuffer,mesh.indirectIndexReady);
     mesh.indirectFirstIndices={};
+    mesh.mainClusters.clear();
     mesh.indirectIndexAttemptedBytes=0;
     mesh.shadowIndexFormat=RHI::Format::R32_UINT;
-	for(auto& lod:mesh.lods) DestroyBuffer(device,lod.buffer,lod.ready);
+    for(auto& lod:mesh.lods) {
+        DestroyBuffer(device,lod.buffer,lod.ready);
+        DestroyBuffer(device,lod.rangeBuffer,lod.rangeReady);
+    }
 	mesh.lods.clear();mesh.lodsGenerated=false;
 	mesh.indexCount = 0;
     mesh.bounds={};
@@ -144,13 +148,21 @@ void Renderer::Impl::BuildShadowClusters(const std::vector<CompactShadowVertex>&
     std::vector<uint32_t>& indices,std::vector<ShadowCluster>& clusters)
 {BuildSpatialClusters(vertices,indices,clusters);}
 
+void Renderer::Impl::BuildMainClusters(const std::vector<RendererVertex>& vertices,
+    std::vector<uint32_t>& indices,std::vector<ShadowCluster>& clusters)
+{BuildSpatialClusters(vertices,indices,clusters);}
+
 RHI::BufferHandle Renderer::Impl::MainIndexBuffer(const SceneMeshState& mesh,uint32_t level,
     const MaterialDesc& material,const RendererDrawDesc* input) const
 {
-    if(level)return mesh.lods[level-1].buffer;
     const bool originalVertices=!input ||
         ((!input->vertexBuffer || input->vertexBuffer==mesh.vertexBuffer) &&
          (!input->previousVertexBuffer || input->previousVertexBuffer==mesh.vertexBuffer));
+    if(level) {
+        const auto& lod=mesh.lods[level-1];
+        return stockDrawInputs && !UsesBlendedRendering(material) && originalVertices && lod.rangeReady && lod.rangeBuffer
+            ? lod.rangeBuffer : lod.buffer;
+    }
     return stockDrawInputs && !UsesBlendedRendering(material) && originalVertices &&
         mesh.mainIndexBuffer && mesh.mainIndexReady ? mesh.mainIndexBuffer : mesh.indexBuffer;
 }
@@ -320,6 +332,11 @@ bool Renderer::Impl::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
                     if(sharedReferenced==sourceReferenced)mainIndices.clear();
                 }
             }
+            if(indices.size()>=6144 && UsesGpuVisibility()) {
+                if(mainIndices.empty())mainIndices=indices;
+                BuildMainClusters(vertices,mainIndices,mesh.mainClusters);
+                if(mesh.mainClusters.empty() && mainIndices==indices)mainIndices.clear();
+            }
             if(mainIndices.empty())mesh.mainIndexReady=true;
         }
 		if(config.enableLod && !mesh.lodsGenerated) // LOD가 켜져 있고 아직 생성하지 않은 메시만 LOD를 준비한다.
@@ -343,7 +360,13 @@ bool Renderer::Impl::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 			for(auto& level:levels)
 			{
 				SceneMeshState::IndexLod lod;lod.count=static_cast<uint32_t>(level.indices.size());lod.error=level.error;
-				lod.indices=std::move(level.indices);pendingLods.push_back(std::move(lod));
+                lod.indices=std::move(level.indices);
+                if(UsesGpuVisibility() && lod.indices.size()>=6144) {
+                    lod.rangeIndices=lod.indices;
+                    BuildMainClusters(vertices,lod.rangeIndices,lod.clusters);
+                    if(lod.clusters.empty())lod.rangeIndices.clear();
+                }
+                pendingLods.push_back(std::move(lod));
 			}
 			mesh.lods=std::move(pendingLods);
 			// 생성된 LOD가 없어도 lodsGenerated를 켜서, 더 줄일 수 없는 메시를 다음 호출에서 다시 단순화하지 않는다.
@@ -430,13 +453,20 @@ bool Renderer::Impl::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
         }
 		for(auto& lod:mesh.lods)
 		{
-			if(lod.ready) continue; // 이미 제출한 LOD 버퍼는 다시 보내지 않는다.
 			const uint32_t bytes=lod.count*sizeof(uint32_t);
-			if(lod.indices.size()!=lod.count || !EnsureBuffer(device,lod.buffer,lod.ready,bytes, // LOD CPU 개수·GPU 버퍼 확보·업로드 기록 중 하나라도 실패하면 중단한다.
-				sizeof(uint32_t),RHI::BufferUsage::Index) ||
-				!RecordBufferUpload(device,*commands,lod.buffer,lod.indices.data(),bytes,RHI::ResourceState::IndexBuffer))
-			{uploadFailed=true;break;}
-			uploaded.push_back(&lod.ready);
+            if(!lod.ready) {
+                if(lod.indices.size()!=lod.count || !EnsureBuffer(device,lod.buffer,lod.ready,bytes,
+                    sizeof(uint32_t),RHI::BufferUsage::Index) ||
+                    !RecordBufferUpload(device,*commands,lod.buffer,lod.indices.data(),bytes,RHI::ResourceState::IndexBuffer))
+                    {uploadFailed=true;break;}
+                uploaded.push_back(&lod.ready);
+            }
+            if(!lod.rangeReady && !lod.rangeIndices.empty()) {
+                if(!EnsureBuffer(device,lod.rangeBuffer,lod.rangeReady,bytes,sizeof(uint32_t),RHI::BufferUsage::Index) ||
+                    !RecordBufferUpload(device,*commands,lod.rangeBuffer,lod.rangeIndices.data(),bytes,RHI::ResourceState::IndexBuffer))
+                    {uploadFailed=true;break;}
+                uploaded.push_back(&lod.rangeReady);
+            }
 		}
 		if(uploadFailed) break; // LOD 준비에서 생긴 실패도 바깥 메시 반복까지 중단시킨다.
 	}
@@ -455,8 +485,9 @@ bool Renderer::Impl::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 			bool lodsReady=true;
 			for(auto& lod:mesh.lods)
 			{
-				lodsReady=lodsReady && lod.ready;
+                lodsReady=lodsReady && lod.ready && (lod.rangeIndices.empty() || lod.rangeReady);
 				if(lod.ready) std::vector<uint32_t>().swap(lod.indices); // LOD 업로드가 제출되었으면 재시도용 CPU 인덱스 저장소를 비운다.
+                if(lod.rangeReady)std::vector<uint32_t>().swap(lod.rangeIndices);
 			}
 			// 필요한 원본·주/그림자 버퍼와 LOD의 업로드 제출이 성공했을 때만 prepared를 확정한다.
             // Original geometry is renderable while the optional first arena is
@@ -687,7 +718,7 @@ bool Renderer::Impl::PrepareMainIndirectGeometry(const Scene& scene,RHI::IDevice
                 if(levels==sources.size() || !lod.ready || !lod.buffer || !lod.count)break;
                 if(indexCount>UINT32_MAX/sizeof(uint32_t))break;
                 firstIndices[levels]=static_cast<uint32_t>(indexCount);
-                sources[levels]=lod.buffer;counts[levels]=lod.count;
+                sources[levels]=lod.rangeReady && lod.rangeBuffer?lod.rangeBuffer:lod.buffer;counts[levels]=lod.count;
                 indexCount+=lod.count;++levels;
             }
             if(levels<2 || indexCount>UINT32_MAX/sizeof(uint32_t))

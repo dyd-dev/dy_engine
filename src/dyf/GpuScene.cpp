@@ -73,8 +73,7 @@ void Renderer::Impl::PrepareMaterialRepresentatives(const Scene& scene)
 bool Renderer::Impl::UsesGpuVisibility() const
 {
     return config.enableGpuCulling && config.enableInstancing && UsesStockGeometry() &&
-        shaderSources.bytes[MeshFragment].empty() && !m_environmentCapture && device->Supports(RHI::Feature::Compute) &&
-        device->Supports(RHI::Feature::IndirectDraw);
+        shaderSources.bytes[MeshFragment].empty() && !m_environmentCapture && GpuVisibility::Supported(*device);
 }
 
 // 내용이 같은 재질을 대표 재질로 모으고, 메시·재질·정점 버퍼·그림자 수신·면 방향이 같은 객체를 그룹으로 묶는다. 그룹별 LOD 배치와 객체별 경계/행렬 입력을 만든 뒤 각 배치의 출력 구간을 정하고 업로드를 기록한다.
@@ -92,11 +91,11 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
         cache.topology!=scene.m_topologyRevision || cache.materials!=materialCacheKey.generation ||
         cache.lighting!=scene.m_entityLightingRevision || cache.facing!=scene.m_facingRevision ||
         cache.geometry!=geometryRevision;
-    auto& batches=cache.batches;
+    auto& batches=cache.batches;auto& ranges=cache.ranges;
     auto& inputs=cache.inputs;auto& keys=cache.keys;
     if(rebuild)
     {
-        cache.valid=false;visibilityDraws.clear();batches.clear();inputs.clear();keys.clear();
+        cache.valid=false;visibilityDraws.clear();batches.clear();ranges.clear();inputs.clear();keys.clear();
         inputs.reserve(scene.GetEntityCount());keys.reserve(scene.GetEntityCount());
     }
     if(rebuild || motion || cache.motion || cache.transforms!=scene.m_transformRevision)
@@ -154,6 +153,18 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
                     batch.firstIndex=mesh.indirectFirstIndices[level];
                     assert(uint64_t(batch.firstIndex)+batch.indexCount<=indices->GetDesc().size/sizeof(uint32_t));
                 }
+                // Bounds belong only to the immutable stock vertices and selected index ordering.
+                const bool stockVertices=(!input || !input->vertexBuffer) && vertex==mesh.vertexBuffer;
+                const auto& clusters=level?mesh.lods[level-1].clusters:mesh.mainClusters;
+                const bool matchingIndices=level
+                    ? mesh.lods[level-1].rangeReady && (indices==mesh.lods[level-1].rangeBuffer || indices==mesh.indirectIndexBuffer)
+                    : indices==mesh.mainIndexBuffer || (indices==mesh.indirectIndexBuffer && mesh.mainIndexBuffer && mesh.mainIndexReady);
+                if(stockVertices && matchingIndices)
+                    for(const auto& cluster:clusters) {
+                        const auto& box=cluster.bounds;
+                        ranges.push_back({{box.min.x,box.min.y,box.min.z,box.valid?1.f:0.f},
+                            {box.max.x,box.max.y,box.max.z,0},ids[level],cluster.firstIndex,cluster.indexCount,0});
+                    }
                 batches.push_back(batch);visibilityDraws.push_back({i,meshIndex,materialIndex,level});
             }
             found=groups.emplace(key,ids).first;
@@ -163,6 +174,7 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
         else ids=inputs[inputIndex].batches;
         // 현재 모델과 이전 MVP를 넣는다. 유효한 장면 이력이 없으면 현재 MVP로 시작하고 변형 이력이 끊겼으면 previousMVP를 0으로 표시한다.
         GpuVisibility::Instance value=rebuild ? GpuVisibility::Instance{} : inputs[inputIndex];
+        value.padding0=i==UINT32_MAX?0:i+1;
         value.model=scene.GetTransform(entity);value.lodCount=levels;value.batches=ids;
         value.previousMVP=motion ? (frameHistoryValid && i<previousModels.size()
             ? previousViewProjection*previousModels[i] : viewProjection*value.model) : Math::float4x4{};
@@ -239,7 +251,7 @@ bool Renderer::Impl::PrepareVisibility(const Scene& scene,const Camera& camera,R
     settings.frustum=config.enableFrustumCulling;settings.lod=config.enableLod;
     settings.resetHistory=keys!=visibilityKeys || visibilityScene.expired() ||
         visibilityScene.owner_before(owner) || owner.owner_before(visibilityScene);
-    if(!gpuVisibility->Prepare(inputs,batches,settings) || !gpuVisibility->RecordUploads(uploads)) return false; // 자원 준비 또는 업로드 기록 실패면 visibilityActive를 켜지 않는다.
+    if(!gpuVisibility->Prepare(inputs,batches,settings,ranges) || !gpuVisibility->RecordUploads(uploads)) return false; // 자원 준비 또는 업로드 기록 실패면 visibilityActive를 켜지 않는다.
     // 준비와 업로드 기록이 성공한 뒤에만 이번 경로를 active로 표시한다. 이 시점은 아직 GPU compute나 draw 완료 시점이 아니다.
     visibilityKeys=keys;visibilityScene=owner;visibilityActive=true;return true;
 }

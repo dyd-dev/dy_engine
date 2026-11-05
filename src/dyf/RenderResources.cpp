@@ -252,7 +252,9 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
                 indirect.indirectArguments=gpuVisibility->GetArgumentsBuffer();
                 // The shared indirect arguments already select the first row.
                 indirect.instanceOffset=baseInstance?0:batch.instanceOffset*sizeof(GpuVisibility::VisibleInstance);
-                indirect.indirectOffset=batchIndex*sizeof(RHI::DrawIndexedIndirectArguments);
+                const auto range=gpuVisibility->GetDrawRange(batchIndex);
+                indirect.indirectOffset=range.first*sizeof(RHI::DrawIndexedIndirectArguments);
+                indirect.indirectCount=range.count;
                 if(lodDebugActive) // 간접 draw도 해당 GPU LOD 단계의 진단색을 사용한다.
                 {
                     indirect.baseColor=LodColor(selected.level);
@@ -278,6 +280,7 @@ void Renderer::Impl::UpdateFrameLighting(RenderFrame& frame,bool graphReady) con
     if(visibilityActive) // GPU 가시성 경로를 사용하는 프레임만 가시 인스턴스/간접 인수 연결을 제공한다.
     {
         frame.visibleInstances={gpuVisibility->GetInstanceBuffer(),handle(gpuVisibility->GetInstancesHandle())};
+        frame.visibleInstanceKeys={gpuVisibility->GetInstanceKeysBuffer(),handle(gpuVisibility->GetInstanceKeysHandle())};
         frame.indirectArguments={gpuVisibility->GetArgumentsBuffer(),handle(gpuVisibility->GetArgumentsHandle())};
     }
     else if(cpuBatchesActive)

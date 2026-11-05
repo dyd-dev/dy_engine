@@ -13,7 +13,7 @@ struct DepthGeometryInput
 {
     RHI::BufferHandle vertices=nullptr,indices=nullptr,instances=nullptr,arguments=nullptr;
     RHI::TextureHandle alphaTexture=nullptr;
-    uint32_t instanceOffset=0,argumentOffset=0,indexCount=0,instanceCount=0,textureFlags=0;
+    uint32_t instanceOffset=0,argumentOffset=0,indexCount=0,instanceCount=0,indirectCount=0,textureFlags=0;
     Math::float4x4 model;
     Math::Bounds3 bounds;
     const MaterialDesc* material=nullptr;
@@ -25,7 +25,7 @@ struct DepthGeometryInput
         :vertices(draw.vertexBuffer),indices(draw.indexBuffer),instances(draw.instanceBuffer),
         arguments(draw.indirectArguments),alphaTexture(draw.textures[ToIndex(MaterialTextureKind::BaseColor)]),
         instanceOffset(draw.instanceOffset),argumentOffset(draw.indirectOffset),indexCount(draw.indexCount),
-        instanceCount(draw.instanceCount),textureFlags(draw.textureFlags),model(draw.model),bounds(draw.localBounds),
+        instanceCount(draw.instanceCount),indirectCount(draw.indirectCount),textureFlags(draw.textureFlags),model(draw.model),bounds(draw.localBounds),
         material(draw.material),alpha(draw.baseColor.w)
     {
         if(material) {alphaMode=material->alphaMode;materialAlpha=material->baseColor.w;
@@ -37,7 +37,7 @@ struct DepthGeometryInput
         return vertices==current.vertices && indices==current.indices && instances==current.instances &&
             arguments==current.arguments && alphaTexture==current.alphaTexture &&
             instanceOffset==current.instanceOffset && argumentOffset==current.argumentOffset &&
-            indexCount==current.indexCount && instanceCount==current.instanceCount && textureFlags==current.textureFlags &&
+            indexCount==current.indexCount && instanceCount==current.instanceCount && indirectCount==current.indirectCount && textureFlags==current.textureFlags &&
             std::memcmp(model.m,current.model.m,sizeof(model.m))==0 && bounds.valid==current.bounds.valid &&
             bounds.min.x==current.bounds.min.x && bounds.min.y==current.bounds.min.y && bounds.min.z==current.bounds.min.z &&
             bounds.max.x==current.bounds.max.x && bounds.max.y==current.bounds.max.y && bounds.max.z==current.bounds.max.z &&

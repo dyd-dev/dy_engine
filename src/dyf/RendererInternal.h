@@ -137,14 +137,19 @@ struct Renderer::Impl
         struct IndexLod
         {
             RHI::BufferHandle buffer=nullptr;
+            RHI::BufferHandle rangeBuffer=nullptr;
             uint32_t count=0;
             float error=0;
             bool ready=false;
+            bool rangeReady=false;
             std::vector<uint32_t> indices;
+            std::vector<uint32_t> rangeIndices;
+            std::vector<ShadowCluster> clusters;
         };
         RHI::BufferHandle vertexBuffer=nullptr,indexBuffer=nullptr,shadowVertexBuffer=nullptr,shadowIndexBuffer=nullptr,mainIndexBuffer=nullptr;
         RHI::BufferHandle indirectIndexBuffer=nullptr;
         std::array<uint32_t,4> indirectFirstIndices={};
+        std::vector<ShadowCluster> mainClusters;
         bool indirectIndexReady=false;
         uint32_t indirectIndexAttemptedBytes=0;
         RHI::Format shadowIndexFormat=RHI::Format::R32_UINT;
@@ -336,6 +341,8 @@ struct Renderer::Impl
         std::vector<CompactShadowVertex>&,std::vector<uint32_t>&);
     static void BuildShadowClusters(const std::vector<CompactShadowVertex>&,std::vector<uint32_t>&,
         std::vector<ShadowCluster>&);
+    static void BuildMainClusters(const std::vector<RendererVertex>&,std::vector<uint32_t>&,
+        std::vector<ShadowCluster>&);
     bool PrepareShadowArena(const Scene&,RHI::IDevice*);
     bool PrepareMainIndirectGeometry(const Scene&,RHI::IDevice*);
     void SelectLods(const Scene&,const Camera&,uint32_t width,uint32_t height,const std::vector<RendererDrawDesc>*);
@@ -526,6 +533,7 @@ struct Renderer::Impl
         bool valid=false,motion=false;
         std::vector<GpuVisibility::Instance> inputs;
         std::vector<GpuVisibility::Batch> batches;
+        std::vector<GpuVisibility::Range> ranges;
         std::vector<uint64_t> keys;
     } visibilityCache;
     std::vector<uint64_t> visibilityKeys;

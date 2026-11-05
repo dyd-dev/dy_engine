@@ -288,8 +288,9 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
                 batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Record;
                 if(visibilityActive)
                 {
-                    batch.first=batchIndex;batch.stride=sizeof(RHI::DrawIndexedIndirectArguments);
-                    batch.bytes=batch.stride;batch.operations=1;
+                    const auto range=gpuVisibility->GetDrawRange(batchIndex);
+                    batch.first=range.first;batch.stride=sizeof(RHI::DrawIndexedIndirectArguments);
+                    batch.bytes=uint64_t(batch.stride)*range.count;batch.operations=range.count;
                     batch.resource=argumentsId;
                     // 실제 가시 개수는 GPU가 결정하므로 CPU capacity를 측정값으로 게시하지 않는다.
                     if(detail)std::strncpy(batch.label,"GPU indirect batch: visible count unknown",sizeof(batch.label)-1);
@@ -341,6 +342,8 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
             if(visibilityActive)
             {
                 uint32_t drawCount=1;
+                const auto range=gpuVisibility->GetDrawRange(batchIndex);
+                uint32_t commandCount=range.count;
                 // The stock instance stream supplies model matrices; every other
                 // effective binding/constant must match across contiguous arguments.
                 if(baseInstance && reuseInlineConstants && !Platform::IsLiveCollectorEnabled())
@@ -362,11 +365,14 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
                         const auto nextConstants=batchConstants(next);
                         if(std::memcmp(reinterpret_cast<const std::byte*>(&constants)+inlineTailOffset,
                             reinterpret_cast<const std::byte*>(&nextConstants)+inlineTailOffset,inlineTailSize)!=0)break;
+                        const auto nextRange=gpuVisibility->GetDrawRange(nextIndex);
+                        if(nextRange.first!=range.first+commandCount)break;
+                        commandCount+=nextRange.count;
                         ++drawCount;
                     }
                 commands.DrawIndexedIndirect(gpuVisibility->GetArgumentsBuffer(),
-                    batchIndex*sizeof(RHI::DrawIndexedIndirectArguments),drawCount);
-                recordingStatistics.indirectBatchCount+=drawCount;
+                    range.first*sizeof(RHI::DrawIndexedIndirectArguments),commandCount);
+                recordingStatistics.indirectBatchCount+=commandCount;
                 batchIndex+=drawCount-1;
             }
             else

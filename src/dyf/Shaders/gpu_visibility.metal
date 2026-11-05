@@ -63,7 +63,7 @@ kernel void kernelMain(uint3 threadId [[thread_position_in_grid]],
 #if GPU_VISIBILITY_OCCLUSION // 가림 빌드에서만 Hi-Z 자원·판정 함수·제거 조건을 포함한다.
     texture2d<float> hizImage [[texture(6)]],constant OcclusionFrame& occlusion [[buffer(7)]],sampler hizSampler [[sampler(8)]],
 #endif
-    constant uint4& operation [[buffer(15)]])
+    device uint2* instanceKeys [[buffer(9)]],constant uint4& operation [[buffer(15)]])
 {
     // 2차원 dispatch를 operation.y의 실제 스레드 행 폭으로 펼친다. dispatch 그룹 수 자체를 곱하는 것이 아니다.
     uint id=threadId.x+threadId.y*operation.y;
@@ -127,4 +127,5 @@ kernel void kernelMain(uint3 threadId [[thread_position_in_grid]],
     uint index=atomic_fetch_add_explicit(&arguments[batchId*5+1],1,memory_order_relaxed);
     if(index>=batch.capacityPadding.x) return; // 출력 버퍼 범위를 넘는 쓰기를 막는다. 원자 증가된 인수 개수는 되돌리지 않으므로 CPU의 용량 검증이 전제다.
     visible[batch.instanceOffset+index]={input.model,input.previousMVP};
+    instanceKeys[batch.instanceOffset+index]=uint2(input.metadata.z,batch.firstIndex/3u);
 }

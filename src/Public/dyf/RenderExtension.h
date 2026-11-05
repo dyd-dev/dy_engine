@@ -62,6 +62,7 @@ struct RenderGeometryDraw
     RHI::BufferHandle vertexBuffer = nullptr, indexBuffer = nullptr;
     RHI::BufferHandle previousVertexBuffer = nullptr, instanceBuffer = nullptr, indirectArguments = nullptr;
     uint32_t instanceOffset = 0, indirectOffset = 0;
+    uint32_t indirectCount = 1; // Consecutive 20-byte indexed indirect commands.
     bool deformationHistoryValid = true;
     uint32_t indexCount = 0;
     Math::Bounds3 localBounds;
@@ -114,7 +115,8 @@ struct RenderFrame
     RenderTexture output={}, color={}, depth={}, shadow={};
     RenderTexture normal={}, albedo={}, ao={}, motion={};
     RenderTexture reactive={};
-    RenderBuffer visibleInstances={}, indirectArguments={};
+    // Keys are instance-rate uint2 {scene entity+1, absolute firstIndex/3}; zero entity is unknown.
+    RenderBuffer visibleInstances={}, indirectArguments={}, visibleInstanceKeys={};
     RenderLightingResources lighting={};
     RenderHistory history={};
     RenderRequirements requirements={};
@@ -170,7 +172,7 @@ public:
     const RenderHistory& history;
     const RenderRequirements& requirements;
     RenderTexture &output,&color,&depth,&shadow,&normal,&albedo,&ao,&motion,&reactive;
-    RenderBuffer &visibleInstances,&indirectArguments;
+    RenderBuffer &visibleInstances,&indirectArguments,&visibleInstanceKeys;
     RenderLightingResources& lighting;
     RHI::TextureHandle const blackTexture;
     const bool lodDebug,wireframe,gpuVisibility,environmentCapture,hasShadows;
@@ -183,7 +185,7 @@ private:
         geometry(frame.geometry),history(frame.history),requirements(frame.requirements),
         output(frame.output),color(frame.color),depth(frame.depth),shadow(frame.shadow),normal(frame.normal),
         albedo(frame.albedo),ao(frame.ao),motion(frame.motion),reactive(frame.reactive),
-        visibleInstances(frame.visibleInstances),indirectArguments(frame.indirectArguments),
+        visibleInstances(frame.visibleInstances),indirectArguments(frame.indirectArguments),visibleInstanceKeys(frame.visibleInstanceKeys),
         lighting(frame.lighting),blackTexture(frame.blackTexture),lodDebug(frame.lodDebug),wireframe(frame.wireframe),
         gpuVisibility(frame.gpuVisibility),environmentCapture(frame.environmentCapture),hasShadows(frame.hasShadows),
         temporalAA(frame.temporalAA),outputWritten(frame.outputWritten),opaqueDepthComplete(frame.opaqueDepthComplete),

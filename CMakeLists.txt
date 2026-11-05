@@ -52,6 +52,7 @@ target_sources(dy_engine PRIVATE
     src/dyf/GeometryUpload.cpp
     src/dyf/GpuScene.cpp
     src/dyf/GpuVisibility.cpp
+    src/dyf/GpuRangeVisibility.cpp
     src/dyf/GpuShadowVisibility.cpp
     src/dyf/GpuShadowPass.cpp
     src/dyf/Image.cpp
@@ -307,6 +308,16 @@ if(DY_BUILD_CONFORMANCE_TESTS)
             METAL_ENTRY shadowInspect)
         add_test(NAME GpuShadowVisibility COMMAND GpuShadowVisibilityTests)
         set_tests_properties(GpuShadowVisibility PROPERTIES RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+        add_executable(GpuRangeVisibilityTests tests/GpuRangeVisibilityTests.cpp)
+        target_include_directories(GpuRangeVisibilityTests PRIVATE "${PROJECT_SOURCE_DIR}/src")
+        target_link_libraries(GpuRangeVisibilityTests PRIVATE dy_engine)
+        dy_compile_shader(GpuRangeVisibilityTests RangeInspect comp
+            GLSL "${PROJECT_SOURCE_DIR}/tests/shaders/range_inspect.glsl"
+            HLSL "${PROJECT_SOURCE_DIR}/tests/shaders/range_inspect.hlsl"
+            METAL "${PROJECT_SOURCE_DIR}/tests/shaders/range_inspect.metal"
+            METAL_ENTRY shadowInspect)
+        add_test(NAME GpuRangeVisibility COMMAND GpuRangeVisibilityTests)
+        set_tests_properties(GpuRangeVisibility PROPERTIES RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
     endif()
     add_executable(RhiCommandCloseTests tests/RhiCommandCloseTests.cpp)
     target_link_libraries(RhiCommandCloseTests PRIVATE dy_engine)
