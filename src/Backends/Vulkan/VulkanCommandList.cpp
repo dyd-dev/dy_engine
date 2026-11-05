@@ -16,6 +16,7 @@ namespace dyf::Backends
 {
     struct VulkanCommandStorage
     {
+        VulkanCommandScratch scratch;
         VkDevice device=VK_NULL_HANDLE;
         VkCommandPool pool=VK_NULL_HANDLE;
         VkCommandBuffer buffer=VK_NULL_HANDLE;
@@ -83,7 +84,9 @@ namespace dyf::Backends
 
     void VulkanCommandPoolCache::Return(std::unique_ptr<VulkanCommandStorage> storage) noexcept
     {
-        if(!storage || !m_reuseEnabled)return;
+        if(!storage)return;
+        storage->scratch.Clear();
+        if(!m_reuseEnabled)return;
         auto* owned=storage.release();
         for(auto* block=m_available.load(std::memory_order_acquire);block;block=block->next)
             for(auto& slot:block->slots)
@@ -147,28 +150,28 @@ namespace dyf::Backends
     void VulkanCommandList::ResetTimestampsNative(RHI::TimestampQueryHandle query,uint32_t first,uint32_t count)
     {
         auto* native=static_cast<VulkanTimestampQuery*>(query);
-        m_queryResets.push_back({native,first,count});
+        m_scratch.m_queryResets.push_back({native,first,count});
         vkCmdResetQueryPool(m_commandBuffer,native->pool,first,count);
     }
     void VulkanCommandList::CompleteTimestampResets()
     {
-        for(const auto& reset:m_queryResets)
+        for(const auto& reset:m_scratch.m_queryResets)
             std::fill_n(reset.query->initialized.begin()+reset.first,reset.count,uint8_t{1});
     }
     void VulkanCommandList::WriteTimestampNative(RHI::TimestampQueryHandle query,uint32_t index)
     {
         auto* native=static_cast<VulkanTimestampQuery*>(query);
-        m_queryWrites.emplace_back(native,index);
+        m_scratch.m_queryWrites.emplace_back(native,index);
         vkCmdWriteTimestamp2(m_commandBuffer,VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,native->pool,index);
     }
     void VulkanCommandList::MarkTimestampsSubmitted(uint64_t serial) noexcept
     {
-        for(const auto& reset:m_queryResets)
+        for(const auto& reset:m_scratch.m_queryResets)
         {
             std::fill_n(reset.query->initialized.begin()+reset.first,reset.count,uint8_t{0});
             std::fill_n(reset.query->completions.begin()+reset.first,reset.count,serial);
         }
-        for(const auto& write:m_queryWrites)write.first->completions[write.second]=serial;
+        for(const auto& write:m_scratch.m_queryWrites)write.first->completions[write.second]=serial;
     }
 	namespace
 	{
@@ -372,19 +375,24 @@ namespace dyf::Backends
         std::copy_n(properties.limits.viewportBoundsRange,2,m_viewportBounds);
         m_supportsCompute=(context.physicalInfo->graphicsQueue.queueFlags&VK_QUEUE_COMPUTE_BIT)!=0;
         m_commandStorage=m_commandPools->Acquire();m_commandBuffer=m_commandStorage->buffer;
+        m_scratch=std::move(m_commandStorage->scratch);
 	}
 
 	VulkanCommandList::~VulkanCommandList()
 	{
         // 완료 fence나 미제출 폐기로 안전성이 확인된 pool만 재사용한다.
         // wrapper와 업로드 arena의 소멸은 기존 참조·페이지 반환 순서를 유지한다.
-        if(m_poolReusable && IsValid())m_commandPools->Return(std::move(m_commandStorage));
+        if(m_poolReusable && IsValid())
+        {
+            m_commandStorage->scratch=std::move(m_scratch);
+            m_commandPools->Return(std::move(m_commandStorage));
+        }
         else m_commandStorage.reset();
 	}
 
     void VulkanCommandList::GlobalBarrierNative()
     {
-        m_validatedResourceSets.clear();
+        m_scratch.m_validatedResourceSets.clear();
         ClearRecentBufferStates();
         VkMemoryBarrier barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -418,7 +426,7 @@ namespace dyf::Backends
 			return;
 		}
 		if (count == 0) return;
-        m_validatedResourceSets.clear();
+        m_scratch.m_validatedResourceSets.clear();
         ClearRecentBufferStates();
 
         // Native recording is synchronous on each thread; retain translation storage between calls.
@@ -470,8 +478,8 @@ namespace dyf::Backends
 					Fail();
 					return;
 				}
-				const auto prior = m_bufferStates.find(buffer);
-				if (prior != m_bufferStates.end() && prior->second != source.before)
+				const auto prior = m_scratch.m_bufferStates.find(buffer);
+				if (prior != m_scratch.m_bufferStates.end() && prior->second != source.before)
 				{
 					Fail();
 					return;
@@ -493,8 +501,8 @@ namespace dyf::Backends
 				operation.buffer = buffer;
 				operation.before = source.before;
 				operation.after = source.after;
-				m_operations.push_back(operation);
-				m_bufferStates[buffer] = source.after;
+				m_scratch.m_operations.push_back(operation);
+				m_scratch.m_bufferStates[buffer] = source.after;
 			}
 			else
 			{
@@ -514,7 +522,7 @@ namespace dyf::Backends
 					for (uint32_t mip = source.subresources.firstMipLevel;
 						mip < source.subresources.firstMipLevel + mipLevelCount; ++mip)
 					{
-						const auto* prior = m_textureStates.FindValue(TextureKey(texture, mip, layer));
+						const auto* prior = m_scratch.m_textureStates.FindValue(TextureKey(texture, mip, layer));
 						if (prior && *prior != source.before)
 						{
 							Fail();
@@ -564,8 +572,8 @@ namespace dyf::Backends
 						operation.after = source.after;
 						operation.mipLevel = mip;
 						operation.arrayLayer = layer;
-						m_operations.push_back(operation);
-						m_textureStates[TextureKey(texture, mip, layer)] = source.after;
+						m_scratch.m_operations.push_back(operation);
+						m_scratch.m_textureStates[TextureKey(texture, mip, layer)] = source.after;
 					}
 				}
 				TrackSwapchainImage(texture);
@@ -587,17 +595,17 @@ namespace dyf::Backends
 
 		m_boundPipeline = nullptr;
 		m_boundResourceSet = nullptr;
-        m_validatedResourceSets.clear();
+        m_scratch.m_validatedResourceSets.clear();
         ClearRecentBufferStates();
-		m_vertexBindings.clear();
+		m_scratch.m_vertexBindings.clear();
 		m_indexBuffer = nullptr;
 		m_indexFormat = dyf::RHI::Format::Unknown;
 		m_indexOffset = 0;
-		m_inlineConstantCoverage.Reset(0);
+		m_scratch.m_inlineConstantCoverage.Reset(0);
 		m_hasViewport = false;
 		m_hasScissor = false;
 		m_hasStencilReference = false;
-		m_colorFormats.clear();
+		m_scratch.m_colorFormats.clear();
 		m_depthTexture = nullptr;
 		m_depthFormat = dyf::RHI::Format::Unknown;
 		m_depthState = dyf::RHI::ResourceState::Undefined;
@@ -659,7 +667,7 @@ namespace dyf::Backends
 				else std::copy(source.clearColor, source.clearColor + 4, attachment.clearValue.color.float32);
 			}
 			colorAttachments.push_back(attachment);
-			m_colorFormats.push_back(texture->GetDesc().format);
+			m_scratch.m_colorFormats.push_back(texture->GetDesc().format);
 			TrackSwapchainImage(texture);
 		}
 
@@ -784,14 +792,14 @@ void VulkanCommandList::BindComputePipelineNative(RHI::PipelineHandle value)
     if(m_closed || m_rendering || !pipeline || !pipeline->IsCompute()){Fail();return;}
     vkCmdBindPipeline(m_commandBuffer,VK_PIPELINE_BIND_POINT_COMPUTE,pipeline->GetHandle());
     m_boundPipeline=pipeline;m_boundResourceSet=nullptr;
-    m_inlineConstantCoverage.Reset(pipeline->GetLayout().inlineConstantSize);
+    m_scratch.m_inlineConstantCoverage.Reset(pipeline->GetLayout().inlineConstantSize);
 }
 void VulkanCommandList::DispatchNative(uint32_t x,uint32_t y,uint32_t z)
 {
     if(m_closed || m_rendering || !m_boundPipeline || !m_boundPipeline->IsCompute() ||
         !x || !y || !z || x>m_maxComputeGroups[0] || y>m_maxComputeGroups[1] || z>m_maxComputeGroups[2] ||
         (m_boundPipeline->RequiresResourceSet() && !m_boundResourceSet) ||
-        !m_inlineConstantCoverage.IsComplete())
+        !m_scratch.m_inlineConstantCoverage.IsComplete())
     {Fail();return;}
     vkCmdDispatch(m_commandBuffer,x,y,z);
 }
@@ -801,7 +809,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
     auto* buffer = dynamic_cast<VulkanBuffer*>(arguments);
     if (m_closed || m_failed || m_rendering || !m_boundPipeline || !m_boundPipeline->IsCompute() ||
         (m_boundPipeline->RequiresResourceSet() && !m_boundResourceSet) ||
-        !m_inlineConstantCoverage.IsComplete() ||
+        !m_scratch.m_inlineConstantCoverage.IsComplete() ||
         !RequireBufferState(buffer, RHI::ResourceState::IndirectArgument))
     {
         Fail();
@@ -829,7 +837,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 			Fail();
 			return;
 		}
-		m_inlineConstantCoverage.Reset(pipeline->GetLayout().inlineConstantSize);
+		m_scratch.m_inlineConstantCoverage.Reset(pipeline->GetLayout().inlineConstantSize);
 		vkCmdBindPipeline(m_commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->GetHandle());
 		m_boundPipeline = pipeline;
 		m_boundResourceSet = nullptr;
@@ -844,7 +852,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 			Fail();
 			return;
 		}
-        if(!m_validatedResourceSets.count(set))
+        if(m_scratch.m_validatedResourceSets.find(set)==m_scratch.m_validatedResourceSets.end())
         {
             // Sets are immutable. Only a barrier can change an already required state.
             for(const auto& requirement:set->GetNativeStateRequirements())
@@ -869,7 +877,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
                     TrackSwapchainImage(requirement.texture);
                 }
             }
-            m_validatedResourceSets.insert(set);
+            m_scratch.m_validatedResourceSets.try_emplace(set, true);
         }
 		const VkDescriptorSet descriptorSet = set->GetSet();
 		if (descriptorSet != VK_NULL_HANDLE)
@@ -908,7 +916,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		const VkBuffer handle = nativeBuffer->GetHandle();
 		const VkDeviceSize nativeOffset = offset;
 		vkCmdBindVertexBuffers(m_commandBuffer, binding, 1, &handle, &nativeOffset);
-		m_vertexBindings[binding] = { nativeBuffer, offset };
+		m_scratch.m_vertexBindings[binding] = { nativeBuffer, offset };
 	}
 
 	void VulkanCommandList::BindIndexBufferNative(dyf::RHI::BufferHandle buffer, dyf::RHI::Format format, uint32_t offset)
@@ -959,7 +967,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 			return;
 		}
 		vkCmdPushConstants(m_commandBuffer, m_boundPipeline->GetPipelineLayout(), stages, offset, size, data);
-		m_inlineConstantCoverage.Write(offset, size);
+		m_scratch.m_inlineConstantCoverage.Write(offset, size);
 	}
 
 	void VulkanCommandList::SetViewportNative(const dyf::RHI::Viewport& viewport)
@@ -1106,10 +1114,10 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
             Fail();
         }
 		m_closed = true;
-        m_closedBufferStates.clear();m_closedTextureStates.clear();
+        m_scratch.m_closedBufferStates.clear();m_scratch.m_closedTextureStates.clear();
         m_stateSummaryValid=false;
         bool valid=true;
-        for(const auto& operation:m_operations)
+        for(const auto& operation:m_scratch.m_operations)
         {
             const bool buffer=operation.kind==OperationKind::BufferBarrier ||
                 operation.kind==OperationKind::BufferRequirement || operation.kind==OperationKind::BufferWrite;
@@ -1118,14 +1126,14 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
             const auto required=write?RHI::ResourceState::CopyDestination:operation.before;
             if(buffer)
             {
-                auto summary=m_closedBufferStates.try_emplace(operation.buffer,required).first;
+                auto summary=m_scratch.m_closedBufferStates.try_emplace(operation.buffer,required).first;
                 if(!summary->second.Append(required,operation.after,barrier))
                 {valid=false;break;}
             }
             else
             {
                 const auto key=TextureKey(operation.texture,operation.mipLevel,operation.arrayLayer);
-                auto& summary=m_closedTextureStates.GetOrEmplace(key,required);
+                auto& summary=m_scratch.m_closedTextureStates.GetOrEmplace(key,required);
                 if(!summary.Append(required,operation.after,barrier))
                 {valid=false;break;}
             }
@@ -1149,7 +1157,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		Operation operation{};
 		operation.kind = OperationKind::BufferWrite;
 		operation.buffer = &buffer;
-		m_operations.push_back(operation);
+		m_scratch.m_operations.push_back(operation);
 		VkBufferCopy region{};
 		region.srcOffset = staging.offset;
 		region.dstOffset = offset;
@@ -1212,7 +1220,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		operation.texture = &texture;
 		operation.mipLevel = mipLevel;
 		operation.arrayLayer = arrayLayer;
-		m_operations.push_back(operation);
+		m_scratch.m_operations.push_back(operation);
 		VkBufferImageCopy region{};
 		region.bufferOffset = staging.offset + padding;
 		region.bufferRowLength = packed ? 0 : (rowPitch / bytesPerPixel)*(compressed ? 4u : 1u);
@@ -1241,8 +1249,8 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
             if(m_recentBufferStates[i].buffer==buffer && m_recentBufferStates[i].state==state)
                 return true;
         if(!buffer->IsStateAllowed(state)) return false;
-		const auto found = m_bufferStates.find(buffer);
-        if(found!=m_bufferStates.end())
+		const auto found = m_scratch.m_bufferStates.find(buffer);
+        if(found!=m_scratch.m_bufferStates.end())
         {
             if(found->second!=state) return false;
         }
@@ -1252,8 +1260,8 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		    operation.kind = OperationKind::BufferRequirement;
 		    operation.buffer = buffer;
 		    operation.before = state;
-		    m_operations.push_back(operation);
-		    m_bufferStates.emplace(buffer, state);
+		    m_scratch.m_operations.push_back(operation);
+		    m_scratch.m_bufferStates.emplace(buffer, state);
         }
         m_recentBufferStates[m_recentBufferStateNext]={buffer,state};
         m_recentBufferStateNext=(m_recentBufferStateNext+1)%m_recentBufferStates.size();
@@ -1273,7 +1281,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 			return false;
 		}
 		const auto key = TextureKey(texture, mipLevel, arrayLayer);
-		const auto* found = m_textureStates.FindValue(key);
+		const auto* found = m_scratch.m_textureStates.FindValue(key);
 		if (found) return *found == state;
 		Operation operation{};
 		operation.kind = OperationKind::TextureRequirement;
@@ -1281,8 +1289,8 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		operation.mipLevel = mipLevel;
 		operation.arrayLayer = arrayLayer;
 		operation.before = state;
-		m_operations.push_back(operation);
-		m_textureStates.GetOrEmplace(key, state);
+		m_scratch.m_operations.push_back(operation);
+		m_scratch.m_textureStates.GetOrEmplace(key, state);
 		return true;
 	}
 
@@ -1313,10 +1321,10 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 	void VulkanCommandList::TrackSwapchainImage(VulkanTexture* texture)
 	{
 		if (texture == nullptr || !texture->IsSwapchainImage()) return;
-		if (std::find(m_referencedSwapchainImages.begin(), m_referencedSwapchainImages.end(), texture) ==
-			m_referencedSwapchainImages.end())
+		if (std::find(m_scratch.m_referencedSwapchainImages.begin(), m_scratch.m_referencedSwapchainImages.end(), texture) ==
+			m_scratch.m_referencedSwapchainImages.end())
 		{
-			m_referencedSwapchainImages.push_back(texture);
+			m_scratch.m_referencedSwapchainImages.push_back(texture);
 		}
 	}
 
@@ -1332,7 +1340,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		{
 			return false;
 		}
-		if (m_boundPipeline->GetColorFormats() != m_colorFormats ||
+		if (m_boundPipeline->GetColorFormats() != m_scratch.m_colorFormats ||
 			m_boundPipeline->GetDepthFormat() != m_depthFormat)
 		{
 			return false;
@@ -1343,8 +1351,8 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 		}
 		for (const dyf::RHI::VertexBufferLayout& layout : m_boundPipeline->GetVertexBuffers())
 		{
-			const auto found = m_vertexBindings.find(layout.binding);
-			if (found == m_vertexBindings.end()) return false;
+			const auto found = m_scratch.m_vertexBindings.find(layout.binding);
+			if (found == m_scratch.m_vertexBindings.end()) return false;
 			uint64_t first = 0;
 			uint64_t count = 0;
 			if (layout.stepMode == dyf::RHI::VertexStepMode::Instance)
@@ -1361,7 +1369,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 			if (first + count > available / layout.stride) return false;
 		}
 		if (m_boundPipeline->RequiresResourceSet() && m_boundResourceSet == nullptr) return false;
-		return m_inlineConstantCoverage.IsComplete();
+		return m_scratch.m_inlineConstantCoverage.IsComplete();
 	}
 
     VkPipelineStageFlags VulkanCommandList::GetAcquireWaitStage(
@@ -1371,7 +1379,7 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
         const auto colorState=[](RHI::ResourceState state) {
             return state==RHI::ResourceState::Present || state==RHI::ResourceState::RenderTarget;
         };
-        for(const auto& operation:m_operations)
+        for(const auto& operation:m_scratch.m_operations)
         {
             if(operation.texture!=image)continue;
             if(!found && firstReference && (operation.kind!=OperationKind::TextureBarrier ||
@@ -1392,14 +1400,14 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 	bool VulkanCommandList::ValidateForSubmit(VulkanSubmissionState& state) const
 	{
         if(!m_closed || m_failed || !m_stateSummaryValid)return false;
-        for(const auto& entry:m_closedBufferStates)
+        for(const auto& entry:m_scratch.m_closedBufferStates)
         {
             const auto found=state.buffers.find(entry.first);
             const auto current=found==state.buffers.end()?entry.first->GetState():found->second;
             if(current!=entry.second.initial)return false;
             if(entry.second.writes)state.buffers[entry.first]=entry.second.final;
         }
-        for(const auto& entry:m_closedTextureStates)
+        for(const auto& entry:m_scratch.m_closedTextureStates)
         {
             const auto& key=entry.first;
             const auto found=state.textureSubresources.find(key);
@@ -1415,9 +1423,9 @@ void VulkanCommandList::DispatchIndirectNative(RHI::BufferHandle arguments, uint
 	void VulkanCommandList::CommitResourceStates()
 	{
         if(!m_closed || m_failed || !m_stateSummaryValid)return;
-        for(const auto& entry:m_closedBufferStates)
+        for(const auto& entry:m_scratch.m_closedBufferStates)
             if(entry.second.writes)entry.first->SetState(entry.second.final);
-        for(const auto& entry:m_closedTextureStates)
+        for(const auto& entry:m_scratch.m_closedTextureStates)
             if(entry.second.writes)
             {
                 const auto levels=entry.first.first->GetDesc().mipLevels;
