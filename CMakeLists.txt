@@ -52,6 +52,8 @@ target_sources(dy_engine PRIVATE
     src/dyf/GeometryUpload.cpp
     src/dyf/GpuScene.cpp
     src/dyf/GpuVisibility.cpp
+    src/dyf/GpuShadowVisibility.cpp
+    src/dyf/GpuShadowPass.cpp
     src/dyf/Image.cpp
     src/dyf/Lighting.cpp
     src/dyf/LightingData.cpp
@@ -287,6 +289,25 @@ if(DY_BUILD_CONFORMANCE_TESTS)
     target_include_directories(ShadowAtlasCacheTests PRIVATE "${PROJECT_SOURCE_DIR}/src")
     target_link_libraries(ShadowAtlasCacheTests PRIVATE dy_engine)
     add_test(NAME ShadowAtlasCache COMMAND ShadowAtlasCacheTests)
+    add_executable(ShadowRenderPassTests tests/ShadowRenderPassTests.cpp)
+    if(USE_VULKAN OR USE_D3D12 OR USE_METAL)
+        target_sources(ShadowRenderPassTests PRIVATE src/Backends/Null/NullDevice.cpp)
+    endif()
+    target_include_directories(ShadowRenderPassTests PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    target_link_libraries(ShadowRenderPassTests PRIVATE dy_engine)
+    add_test(NAME ShadowRenderPass COMMAND ShadowRenderPassTests)
+    if(USE_VULKAN OR USE_D3D12 OR USE_METAL)
+        add_executable(GpuShadowVisibilityTests tests/GpuShadowVisibilityTests.cpp)
+        target_include_directories(GpuShadowVisibilityTests PRIVATE "${PROJECT_SOURCE_DIR}/src")
+        target_link_libraries(GpuShadowVisibilityTests PRIVATE dy_engine)
+        dy_compile_shader(GpuShadowVisibilityTests ShadowInspect comp
+            GLSL "${PROJECT_SOURCE_DIR}/tests/shaders/shadow_inspect.glsl"
+            HLSL "${PROJECT_SOURCE_DIR}/tests/shaders/shadow_inspect.hlsl"
+            METAL "${PROJECT_SOURCE_DIR}/tests/shaders/shadow_inspect.metal"
+            METAL_ENTRY shadowInspect)
+        add_test(NAME GpuShadowVisibility COMMAND GpuShadowVisibilityTests)
+        set_tests_properties(GpuShadowVisibility PROPERTIES RUN_SERIAL TRUE SKIP_RETURN_CODE 77)
+    endif()
     add_executable(RhiCommandCloseTests tests/RhiCommandCloseTests.cpp)
     target_link_libraries(RhiCommandCloseTests PRIVATE dy_engine)
     add_test(NAME RhiCommandClose COMMAND RhiCommandCloseTests)

@@ -274,6 +274,8 @@ struct RendererStatistics
     uint64_t mainOriginalTriangleCount=0;
     // GPU가 정하는 가시 개수는 CPU 제출 개수와 구분한다.
     bool gpuVisibility=false;
+    // GPU shadow visibility counts are not read back; shadow instance/triangle counts are unavailable in this path.
+    bool gpuShadowCulling=false;
     uint32_t indirectBatchCount=0;
     // 요청한 토글과 구분하여 해당 프레임에서 사용하는 경로와 실제 자원 크기를 보여준다.
     bool gpuOcclusion=false,clusteredLighting=false,surfacePrepass=false;

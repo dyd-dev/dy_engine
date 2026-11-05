@@ -246,11 +246,54 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             }
         } cacheFrame{*this,scene.GetEntityCount()==0};
         // 설정 요청만으로 그림자를 사용했다고 하지 않고 파이프라인·뷰·깊이·상수·타깃 폭이 모두 준비되었는지 확인한다.
+        struct ShadowInstanceFrame
+        {
+            Impl& r;
+            RHI::BufferHandle previous,previousArguments;
+            bool previousReady,previousArgumentsReady,committed=false;
+            explicit ShadowInstanceFrame(Impl& owner):r(owner),previous(r.shadowInstanceBuffer),previousArguments(r.shadowArgumentsBuffer),
+                previousReady(r.shadowInstanceReady),previousArgumentsReady(r.shadowArgumentsReady) {}
+            ~ShadowInstanceFrame()
+            {
+                if(committed)
+                {
+                    if(r.shadowInstanceBuffer!=previous)r.device->DestroyBuffer(previous);
+                    if(r.shadowArgumentsBuffer!=previousArguments)r.device->DestroyBuffer(previousArguments);
+                }
+                else
+                {
+                    if(r.shadowInstanceBuffer!=previous)r.device->DestroyBuffer(r.shadowInstanceBuffer);
+                    r.shadowInstanceBuffer=previous;r.shadowInstanceReady=previousReady;r.shadowInstancesActive=false;
+                    if(r.shadowArgumentsBuffer!=previousArguments)r.device->DestroyBuffer(r.shadowArgumentsBuffer);
+                    r.shadowArgumentsBuffer=previousArguments;r.shadowArgumentsReady=previousArgumentsReady;r.shadowIndirectActive=false;
+                }
+            }
+            void Commit()
+            {
+                if(r.shadowInstancesActive)
+                {
+                    r.shadowInstanceReady=true;
+                    r.shadowInstanceBytes.swap(r.shadowInstances.matrices);
+                }
+                if(r.shadowIndirectActive)
+                {
+                    r.shadowArgumentsReady=true;r.shadowArgumentBytes.swap(r.shadowInstances.arguments);
+                }
+                committed=true;
+            }
+        } shadowInstanceFrame(*this);
+        shadowInstancesActive=false;shadowIndirectActive=false;
+        gpuShadows.active=false;gpuShadows.requested=false;
         const bool hasShadows = shadowPipeline && shadows.viewCount && shadowDepthTarget &&
             shadowMatrixBuffer && shadowDepthTarget->GetDesc().width;
         if(hasShadows)PrepareShadowCasters(scene,draws);
         const bool cachedShadows=hasShadows && ReuseShadowAtlas(scene,shadows,draws);
         const bool drawShadows=hasShadows && !cachedShadows;
+        if(drawShadows) {
+            frame.preparation=nativeDevice->AcquireCommandList();
+            if(!frame.preparation || !PrepareShadowPassResources(scene,shadows,*frame.preparation,draws))
+                return RendererFailure("Shadow resource preparation failed.");
+        }
         frameNoAreaLights=frameNoAreaLights && stockDrawInputs && UsesStockGeometry() && !wireframeActive &&
             noAreaMaterialPipelines[0];
         using State = RHI::ResourceState;
@@ -307,11 +350,18 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         }
         if(!requirements.providesLocalLights && basicLighting && !basicLighting->Import(graph,renderFrame.lighting)) // 지역광 공급 확장이 없는 경우 기본 지역광 자원을 그래프에 가져오며 실패는 전파한다.
             return RendererFailure("Basic local light resource import failed.");
-        if(drawShadows) // 그림자가 준비되었지만 정적 아틀라스를 재사용할 수 없을 때만 새 그림자 패스를 기록한다.
-            graph.AddPass("Shadow", RHI::RGRecordingMode::Independent).Write(shadow,State::DepthWrite)
-                .SetExecute([&](RHI::ICommandList* commands) {
-                    require(RecordShadowPass(scene,camera,shadows,*commands,draws));
-                });
+        if(gpuShadows.active && !gpuShadows.visibility->AddPasses(graph))
+            return RendererFailure("GPU shadow pass creation failed.");
+        recordingStatistics.gpuShadowCulling=gpuShadows.active;
+        if(drawShadows) {
+            auto& pass=graph.AddPass("Shadow",RHI::RGRecordingMode::Independent).Write(shadow,State::DepthWrite);
+            if(gpuShadows.active)
+                pass.Read(gpuShadows.visibility->InstancesResource(),State::VertexBuffer)
+                    .Read(gpuShadows.visibility->ArgumentsResource(),State::IndirectArgument);
+            pass.SetExecute([&](RHI::ICommandList* commands) {
+                require(RecordShadowPass(scene,camera,shadows,*commands,draws));
+            });
+        }
         // GPU visibility 패스/기본 조명 import 뒤에는 현재 graph의 리소스 핸들을 확장에도 연결할 수 있다.
         UpdateFrameLighting(renderFrame,true);
         if(!AddExtensionPasses(RenderStage::BeforeOpaque,renderFrame,graph)) return false; // 불투명 이전 확장 패스 구성 실패면 중단한다.
@@ -427,49 +477,11 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             if(frameOpaqueDepthComplete && !noAreaDepthPrepassPipelines[0])frameNoAreaLights=false;
         }
         // Mirror FrameBuffers: retain the previous allocation/bytes until the list containing this upload is submitted.
-        struct ShadowInstanceFrame
-        {
-            Impl& r;
-            RHI::BufferHandle previous,previousArguments;
-            bool previousReady,previousArgumentsReady,committed=false;
-            explicit ShadowInstanceFrame(Impl& owner):r(owner),previous(r.shadowInstanceBuffer),previousArguments(r.shadowArgumentsBuffer),
-                previousReady(r.shadowInstanceReady),previousArgumentsReady(r.shadowArgumentsReady) {}
-            ~ShadowInstanceFrame()
-            {
-                if(committed)
-                {
-                    if(r.shadowInstanceBuffer!=previous)r.device->DestroyBuffer(previous);
-                    if(r.shadowArgumentsBuffer!=previousArguments)r.device->DestroyBuffer(previousArguments);
-                }
-                else
-                {
-                    if(r.shadowInstanceBuffer!=previous)r.device->DestroyBuffer(r.shadowInstanceBuffer);
-                    r.shadowInstanceBuffer=previous;r.shadowInstanceReady=previousReady;r.shadowInstancesActive=false;
-                    if(r.shadowArgumentsBuffer!=previousArguments)r.device->DestroyBuffer(r.shadowArgumentsBuffer);
-                    r.shadowArgumentsBuffer=previousArguments;r.shadowArgumentsReady=previousArgumentsReady;r.shadowIndirectActive=false;
-                }
-            }
-            void Commit()
-            {
-                if(r.shadowInstancesActive)
-                {
-                    r.shadowInstanceReady=true;
-                    r.shadowInstanceBytes.swap(r.shadowInstances.matrices);
-                }
-                if(r.shadowIndirectActive)
-                {
-                    r.shadowArgumentsReady=true;r.shadowArgumentBytes.swap(r.shadowInstances.arguments);
-                }
-                committed=true;
-            }
-        } shadowInstanceFrame(*this);
-        shadowInstancesActive=false;shadowIndirectActive=false;
-        frame.preparation=nativeDevice->AcquireCommandList();
+        if(!frame.preparation)frame.preparation=nativeDevice->AcquireCommandList();
         if(!frame.preparation)return RendererFailure("Pass preparation command acquisition failed.");
         // All registry/cache changes finish on the owner before worker snapshots.
         // Their upload commands execute before the graph in the same submission.
         if(!PrepareMainPassResources(scene,*frame.preparation,draws) ||
-            (drawShadows && !PrepareShadowPassResources(scene,shadows,*frame.preparation,draws)) ||
             (toneMap && !PrepareToneMap(renderFrame.color.texture)) ||
             (overlay && !PrepareCanvas(*overlay,*frame.preparation,overlayTarget,preparedCanvases[0])) ||
             (profilerOverlay && !PrepareCanvas(*profilerOverlay,*frame.preparation,overlayTarget,preparedCanvases[1])))
@@ -539,6 +551,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             CommitFrameData();
             buffers.committed=true;
             shadowInstanceFrame.Commit();
+            if(gpuShadows.active)gpuShadows.visibility->CommitFrame();
             if(frameNoAreaLights && recordingStatistics.mainDrawCount && !noAreaReported)
             {
                 std::fputs("[Renderer] Main area-light-free shader active: uploaded Rect/Disc counts are zero; no graph lighting writes or global barriers.\n",stderr);

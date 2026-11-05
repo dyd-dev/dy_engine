@@ -4,6 +4,7 @@
 #include "dyf/Renderer.h"
 #include "ShaderLayout.h"
 #include "DepthPrepassValidation.h"
+#include "GpuShadowVisibility.h"
 #include "GpuVisibility.h"
 #include "dyf/RenderExtension.h"
 #include "dyf/RHI/IDevice.h"
@@ -117,12 +118,18 @@ struct Renderer::Impl
         float px,py,pz,u,v,alpha;
     };
     static_assert(sizeof(CompactShadowVertex)==24);
+    struct ShadowCluster
+    {
+        uint32_t firstIndex=0,indexCount=0;
+        Math::Bounds3 bounds;
+    };
     struct ShadowArenaRange
     {
         uint64_t generation=0;
         uint32_t baseVertex=0,indexByteOffset=0;
         RHI::Format indexFormat=RHI::Format::R32_UINT;
         bool sortSafeInputs=false;
+        std::vector<ShadowCluster> clusters;
     };
     // 메시 원본 하나에 대응하는 정점·원본 인덱스·LOD 인덱스 버퍼와 경계다. ready는 해당 버퍼 업로드의 제출 성공, prepared는 필요한 버퍼 모두의 제출 성공 또는 빈 메시 처리를 뜻한다. 어느 쪽도 GPU 완료 판정은 아니다.
     struct SceneMeshState
@@ -162,6 +169,11 @@ struct Renderer::Impl
         bool mirrored=false,compact=false,arena=false,sortSafe=false;
         RHI::PipelineHandle pipeline=nullptr;
         RHI::ResourceSetHandle set=nullptr;
+        RHI::BufferHandle vertices=nullptr,indices=nullptr;
+        RHI::Format indexFormat=RHI::Format::R32_UINT;
+        int32_t vertexOffset=0;
+        Math::Bounds3 localBounds;
+        bool clustered=false;
         ShadowBounds worldBounds;
     };
     struct ShadowInstanceData
@@ -176,6 +188,18 @@ struct Renderer::Impl
         std::vector<Key> keys;
         std::vector<RHI::DrawIndexedIndirectArguments> arguments;
         bool Build(const Scene&,const ShadowData&,const std::vector<ShadowCaster>&,bool cull,bool allowSingleDraws=false);
+    };
+    struct ShadowGpuState
+    {
+        std::unique_ptr<GpuShadowVisibility> visibility;
+        std::vector<ShadowCaster> casters;
+        std::vector<std::array<uint32_t,3>> coverage,coverageScratch;
+        std::vector<GpuShadowVisibility::Input> inputs;
+        std::vector<GpuShadowVisibility::Batch> batches;
+        std::vector<GpuShadowVisibility::View> views;
+        std::vector<uint32_t> representatives;
+        uint64_t generation=0;
+        bool requested=false,active=false;
     };
     // 파이프라인과 전체 바인딩을 키로 자원 세트를 재사용한다. 해시는 후보 검색용이고 unusedFrames는 캐시에서 제거할 시기를 정한다.
     struct CachedSet { RHI::ResourceSetHandle set=nullptr; uint32_t unusedFrames=0; size_t keyHash=0; };
@@ -310,6 +334,8 @@ struct Renderer::Impl
     bool PrepareGeometry(const Scene&,RHI::IDevice*);
     static bool BuildCompactShadowGeometry(const std::vector<RendererVertex>&,const std::vector<uint32_t>&,
         std::vector<CompactShadowVertex>&,std::vector<uint32_t>&);
+    static void BuildShadowClusters(const std::vector<CompactShadowVertex>&,std::vector<uint32_t>&,
+        std::vector<ShadowCluster>&);
     bool PrepareShadowArena(const Scene&,RHI::IDevice*);
     bool PrepareMainIndirectGeometry(const Scene&,RHI::IDevice*);
     void SelectLods(const Scene&,const Camera&,uint32_t width,uint32_t height,const std::vector<RendererDrawDesc>*);
@@ -322,6 +348,7 @@ struct Renderer::Impl
         std::vector<uint32_t>&);
     bool PrepareShadowPassResources(const Scene&,const ShadowData&,RHI::ICommandList&,
         const std::vector<RendererDrawDesc>*);
+    bool PrepareGpuShadowPass(const Scene&,const ShadowData&,RHI::ICommandList&);
     bool RecordShadowPass(const Scene&,const Camera&,const ShadowData&,RHI::ICommandList&,
         const std::vector<RendererDrawDesc>*);
     bool RecordMainPass(const Scene&,const Camera&,RHI::ICommandList&,
@@ -434,6 +461,7 @@ struct Renderer::Impl
     std::vector<double> shadowBatchDepthScratch;
     bool shadowBatchSortReported=false;
     ShadowInstanceData shadowInstances;
+    ShadowGpuState gpuShadows;
     std::vector<Math::float4x4> shadowInstanceBytes;
     RHI::BufferHandle shadowInstanceBuffer=nullptr;
     bool shadowInstanceReady=false,shadowInstancesActive=false;

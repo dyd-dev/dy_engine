@@ -99,6 +99,51 @@ bool Renderer::Impl::BuildCompactShadowGeometry(const std::vector<RendererVertex
     return true;
 }
 
+template<class Vertex,class Cluster>
+void BuildSpatialClusters(const std::vector<Vertex>& vertices,
+    std::vector<uint32_t>& indices,std::vector<Cluster>& clusters)
+{
+    clusters.clear();
+    if(vertices.empty() || indices.size()%3 || indices.size()>UINT32_MAX)return;
+    const size_t triangles=indices.size()/3;
+    // Both main and shadow draws can reject these immutable spatial ranges on the GPU.
+    const size_t count=std::min<size_t>(triangles/1024,256);
+    if(count<2)return;
+    for(uint32_t index:indices) {
+        if(index>=vertices.size())return;
+        const auto& v=vertices[index];
+        for(float value:{v.px,v.py,v.pz})if(!std::isfinite(value) || std::abs(value)>1e10f)return;
+    }
+    Math::Bounds3 centers;
+    for(size_t i=0;i<indices.size();i+=3) {
+        const auto& a=vertices[indices[i]];const auto& b=vertices[indices[i+1]];const auto& c=vertices[indices[i+2]];
+        centers.Include({(a.px+b.px+c.px)/3.f,(a.py+b.py+c.py)/3.f,(a.pz+b.pz+c.pz)/3.f});
+    }
+    const float extent=std::max({centers.max.x-centers.min.x,centers.max.y-centers.min.y,centers.max.z-centers.min.z});
+    // meshoptimizer quantizes triangle centers with 65535/extent before converting to integers.
+    if(extent==0 || !std::isfinite(65535.f/extent))return;
+    std::vector<uint32_t> spatial(indices.size());
+    meshopt_spatialSortTriangles(spatial.data(),indices.data(),indices.size(),
+        &vertices.front().px,vertices.size(),sizeof(Vertex));
+    const size_t step=((triangles+count-1)/count)*3;
+    for(size_t first=0;first<spatial.size();first+=step) {
+        Cluster cluster;
+        cluster.firstIndex=static_cast<uint32_t>(first);
+        cluster.indexCount=static_cast<uint32_t>(std::min(step,spatial.size()-first));
+        for(size_t i=first;i<first+cluster.indexCount;++i) {
+            const auto& v=vertices[spatial[i]];
+            cluster.bounds.Include({v.px,v.py,v.pz});
+        }
+        meshopt_optimizeVertexCache(spatial.data()+first,spatial.data()+first,cluster.indexCount,vertices.size());
+        clusters.push_back(cluster);
+    }
+    indices.swap(spatial);
+}
+
+void Renderer::Impl::BuildShadowClusters(const std::vector<CompactShadowVertex>& vertices,
+    std::vector<uint32_t>& indices,std::vector<ShadowCluster>& clusters)
+{BuildSpatialClusters(vertices,indices,clusters);}
+
 RHI::BufferHandle Renderer::Impl::MainIndexBuffer(const SceneMeshState& mesh,uint32_t level,
     const MaterialDesc& material,const RendererDrawDesc* input) const
 {
@@ -494,6 +539,8 @@ bool Renderer::Impl::PrepareShadowArena(const Scene& scene,RHI::IDevice* device)
             if(!BuildCompactShadowGeometry(sourceVertices,inputIndices,compactVertices,compactIndices))return false;
             if(compactIndices.empty())continue;
             if(compactIndices.size()!=mesh.indexCount)return false;
+            auto& range=ranges[index];
+            BuildShadowClusters(compactVertices,compactIndices,range.clusters);
             const uint32_t maximum=*std::max_element(compactIndices.begin(),compactIndices.end());
             const auto format=maximum<=UINT16_MAX?RHI::Format::R16_UINT:RHI::Format::R32_UINT;
             const uint32_t indexSize=format==RHI::Format::R16_UINT?2u:4u;
@@ -504,7 +551,6 @@ bool Renderer::Impl::PrepareShadowArena(const Scene& scene,RHI::IDevice* device)
                 vertices.size()>INT32_MAX || indexOffset>UINT32_MAX || indexBytes>UINT32_MAX-indexOffset ||
                 indexOffset+indexBytes>indices.max_size())
                 return true; // Keep existing arena/per-mesh/original-buffer fallbacks.
-            auto& range=ranges[index];
             range.generation=generation;range.baseVertex=static_cast<uint32_t>(vertices.size());
             range.indexByteOffset=static_cast<uint32_t>(indexOffset);range.indexFormat=format;
             range.sortSafeInputs=true;
@@ -588,6 +634,7 @@ bool Renderer::Impl::PrepareShadowArena(const Scene& scene,RHI::IDevice* device)
 void Renderer::Impl::ReleaseGeometry(RHI::IDevice* device)
 {
 	if(device == nullptr) return; // 장치가 없으면 GPU 캐시 해제 루틴을 호출하지 않는다.
+    gpuShadows={};
 	for(auto& mesh : m_meshes) DestroyMeshState(device, mesh);
 	m_meshes.clear();
     if(shadowArenaVertices)device->DestroyBuffer(shadowArenaVertices);

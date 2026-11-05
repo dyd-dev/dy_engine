@@ -379,6 +379,7 @@ void Renderer::Impl::SwapResources(Impl& other)
     swap(shadowCasterScratch,other.shadowCasterScratch);
     swap(shadowViewScratch,other.shadowViewScratch);
     swap(shadowInstances,other.shadowInstances);
+    swap(gpuShadows,other.gpuShadows);
     swap(shadowInstanceBytes,other.shadowInstanceBytes);
     swap(shadowInstanceBuffer,other.shadowInstanceBuffer);
     swap(shadowInstanceReady,other.shadowInstanceReady);
