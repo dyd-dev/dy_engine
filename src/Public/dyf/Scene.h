@@ -82,6 +82,7 @@ namespace dyf
     private:
         friend struct EntityHandle;
         friend class Renderer;
+        friend class ReadOnlyRenderExtension;
         template<typename T> friend struct LightHandle;
         template<typename T> std::vector<T>& Lights();
         void SetMaterial(MaterialID material, const MaterialDesc& value);

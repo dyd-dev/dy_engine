@@ -10,6 +10,39 @@
 
 namespace dyf
 {
+std::array<uint64_t,4> ReadOnlyRenderExtension::SourceRevisions(const Scene& scene) noexcept
+{ return {scene.m_transformRevision,scene.m_topologyRevision,scene.m_materialRevision,scene.m_entityLightingRevision}; }
+
+bool ReadOnlyRenderExtension::InputsUnchanged(const RenderFrame& frame,const std::array<uint64_t,4>& revisions,const Camera* previous) const
+{
+    const bool unchanged=SourceRevisions(frame.scene)==revisions && (!previous ||
+        (SameDepthCamera(previous->view,previous->projection,frame.camera) &&
+        std::memcmp(&previous->position,&frame.camera.position,sizeof(previous->position))==0));
+    if(!unchanged)std::fprintf(stderr,"dyf: Read-only module %s modified Scene/camera inputs.\n",GetName());
+    return unchanged;
+}
+
+bool ReadOnlyRenderExtension::PrepareCamera(RenderFrame& frame)
+{
+    const auto revisions=SourceRevisions(frame.scene);ReadOnlyRenderFrame view(frame);
+    const bool prepared=PrepareCamera(frame.camera,view);
+    return InputsUnchanged(frame,revisions,nullptr) && prepared;
+}
+
+bool ReadOnlyRenderExtension::Prepare(RenderFrame& frame,RHI::ICommandList& commands)
+{
+    const auto revisions=SourceRevisions(frame.scene);const auto camera=frame.camera;ReadOnlyRenderFrame view(frame);
+    const bool prepared=Prepare(view,commands);
+    return InputsUnchanged(frame,revisions,&camera) && prepared;
+}
+
+bool ReadOnlyRenderExtension::AddPasses(RenderStage stage,RenderFrame& frame,RHI::RenderGraph& graph)
+{
+    const auto revisions=SourceRevisions(frame.scene);const auto camera=frame.camera;ReadOnlyRenderFrame view(frame);
+    const bool added=AddPasses(stage,view,graph);
+    return InputsUnchanged(frame,revisions,&camera) && added;
+}
+
 // 각 모듈이 공급하거나 필요로 하는 기능을 OR로 합친다. 가시성 차폐 제거가 요청되면 표면 깊이도 필요하다고 추가한다.
 RenderRequirements Renderer::Impl::CollectRequirements() const
 {
@@ -121,7 +154,7 @@ bool Renderer::Impl::AddExtensionPasses(RenderStage stage,RenderFrame& frame,RHI
             }
             else frame.opaqueDepthComplete=false;
         }
-        if(depthGeometryUnchanged && (!depthGeometrySnapshot.Matches(frame.geometry) ||
+        if(depthGeometryUnchanged && !extension->HasReadOnlyGeometryInputs() && (!depthGeometrySnapshot.Matches(frame.geometry) ||
             !SameDepthCamera(depthGeometryView,depthGeometryProjection,frame.camera)))depthGeometryUnchanged=false;
     }
     frameLighting=frame.lighting;

@@ -243,7 +243,7 @@ if(DY_BUILD_CONFORMANCE_TESTS)
         add_test(NAME LiveCapture COMMAND LiveCaptureTests)
     endif()
     foreach(test IN ITEMS RendererException RendererLifecycle RendererTextureRetry RendererLiveSettings
-            RendererConfigBoundary FrameProfilerCalibration RhiAuditRecovery)
+            RendererConfigBoundary FrameProfilerCalibration RhiAuditRecovery RenderFrameReadOnly)
         add_executable(${test}Tests "tests/${test}Tests.cpp")
         if(USE_VULKAN OR USE_D3D12 OR USE_METAL)
             target_sources(${test}Tests PRIVATE src/Backends/Null/NullDevice.cpp)

@@ -6,7 +6,7 @@ namespace dyf::Detail
 {
 namespace
 {
-class PostProcessModule final : public RenderExtension
+class PostProcessModule final : public ReadOnlyRenderExtension
 {
 public:
     const char* GetName() const override { return "PostProcess"; }
@@ -24,7 +24,7 @@ public:
         return requirements;
     }
 
-    bool PrepareCamera(RenderFrame& frame) override
+    bool PrepareCamera(Camera& camera,ReadOnlyRenderFrame& frame) override
     {
         m_recorded=false;
         if(!AdvancedModuleEnabled(frame.renderer)) return true;
@@ -44,12 +44,12 @@ public:
         if(!m_post->Prepare(target.width,target.height,frame.output.texture->GetDesc().format,settings)) return false;
         m_post->SetSkyReprojection(frame.camera,frame.history.previousCameraView,
             frame.history.previousCameraProjection,frame.history.valid);
-        TemporalPostProcess::ApplyJitter(frame.camera,m_post->JitterPixels(),target.width,target.height);
+        TemporalPostProcess::ApplyJitter(camera,m_post->JitterPixels(),target.width,target.height);
         frame.temporalAA=settings.taa;
         return true;
     }
 
-    bool AddPasses(RenderStage stage,RenderFrame& frame,RHI::RenderGraph& graph) override
+    bool AddPasses(RenderStage stage,ReadOnlyRenderFrame& frame,RHI::RenderGraph& graph) override
     {
         if(stage!=RenderStage::PostProcess || frame.outputWritten || !AdvancedModuleEnabled(frame.renderer)) return true;
         if(!m_post) return AdvancedPassFailure("Post-processing resources were not prepared.");

@@ -6,7 +6,7 @@ namespace dyf::Detail
 {
 namespace
 {
-class ClusteredLightingModule final : public RenderExtension
+class ClusteredLightingModule final : public ReadOnlyRenderExtension
 {
 public:
     const char* GetName() const override {return "ClusteredLighting";}
@@ -20,7 +20,7 @@ public:
         return requirements;
     }
 
-    bool Prepare(RenderFrame& frame,RHI::ICommandList& uploads) override
+    bool Prepare(ReadOnlyRenderFrame& frame,RHI::ICommandList& uploads) override
     {
         m_prepared=false;
         const auto& config=frame.renderer.GetAppliedConfig();
@@ -38,7 +38,7 @@ public:
         return true;
     }
 
-    bool AddPasses(RenderStage stage,RenderFrame& frame,RHI::RenderGraph& graph) override
+    bool AddPasses(RenderStage stage,ReadOnlyRenderFrame& frame,RHI::RenderGraph& graph) override
     {
         if(stage!=RenderStage::BeforeOpaque || !m_prepared) return true;
         if(!m_lighting.AddPasses(graph))

@@ -21,7 +21,7 @@ inline bool AdvancedPassFailure(const char* message)
 // native filtering merely by placing a value in a formerly unused GPU word.
 struct EnvironmentFilteringProof
 {
-    const RenderFrame* frame=nullptr;
+    const void* frame=nullptr;
     const RHI::IDevice* device=nullptr;
     RenderEnvironmentResources resources={};
     bool nativeFiltering=false;

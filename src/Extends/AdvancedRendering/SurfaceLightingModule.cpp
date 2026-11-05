@@ -9,7 +9,7 @@ namespace dyf::Detail
 {
 namespace
 {
-class SurfaceLightingModule final : public RenderExtension
+class SurfaceLightingModule final : public ReadOnlyRenderExtension
 {
 public:
     const char* GetName() const override { return "SurfaceLighting"; }
@@ -41,7 +41,7 @@ public:
         return requirements;
     }
 
-    bool Prepare(RenderFrame& frame,RHI::ICommandList& uploads) override
+    bool Prepare(ReadOnlyRenderFrame& frame,RHI::ICommandList& uploads) override
     {
         m_prepared=m_recorded=false;
         if(!AdvancedModuleEnabled(frame.renderer)) return true;
@@ -74,7 +74,7 @@ public:
         return true;
     }
 
-    bool AddPasses(RenderStage stage,RenderFrame& frame,RHI::RenderGraph& graph) override
+    bool AddPasses(RenderStage stage,ReadOnlyRenderFrame& frame,RHI::RenderGraph& graph) override
     {
         if(!AdvancedModuleEnabled(frame.renderer) || frame.outputWritten || !frame.requirements.RequiresDepth()) return true;
         if(stage!=RenderStage::BeforeOpaque && stage!=RenderStage::AfterOpaque) return true;

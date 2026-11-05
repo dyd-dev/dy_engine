@@ -109,7 +109,7 @@ bool Renderer::Impl::PrepareFrameResources(RenderFrame& frame,RHI::ICommandList&
                     std::fprintf(stderr,"dyf: Render module %s preparation failed.\n",extension->GetName());
                     return false;
                 }
-                if(depthGeometryUnchanged && (!depthGeometrySnapshot.Matches(frame.geometry) ||
+                if(depthGeometryUnchanged && !extension->HasReadOnlyGeometryInputs() && (!depthGeometrySnapshot.Matches(frame.geometry) ||
                     !SameDepthCamera(depthGeometryView,depthGeometryProjection,frame.camera)))depthGeometryUnchanged=false;
             }
     frameAmbientOcclusion=frame.ao.texture;

@@ -136,6 +136,7 @@ class RenderExtension
 {
 public:
     virtual ~RenderExtension() = default;
+    bool HasReadOnlyGeometryInputs() const noexcept;
     virtual const char* GetName() const { return "RenderExtension"; }
     virtual RenderPreparation GetPreparationStage() const { return RenderPreparation::Effects; }
     virtual bool UsesSurfacePipeline(const Renderer&) const { return false; }
@@ -156,4 +157,55 @@ public:
     virtual void CommitFrame(const RenderFrame&) {}
     virtual void InvalidateHistory(bool release = false) { (void)release; }
 };
+
+// Borrowed for one callback. Capture the view by value or copy required values into graph callbacks.
+class ReadOnlyRenderFrame
+{
+public:
+    Renderer& renderer;
+    const Scene& scene;
+    const Camera& camera;
+    const std::vector<RendererDrawDesc>* const draws;
+    const std::vector<RenderGeometryDraw>& geometry;
+    const RenderHistory& history;
+    const RenderRequirements& requirements;
+    RenderTexture &output,&color,&depth,&shadow,&normal,&albedo,&ao,&motion,&reactive;
+    RenderBuffer &visibleInstances,&indirectArguments;
+    RenderLightingResources& lighting;
+    RHI::TextureHandle const blackTexture;
+    const bool lodDebug,wireframe,gpuVisibility,environmentCapture,hasShadows;
+    bool &temporalAA,&outputWritten,&opaqueDepthComplete;
+    const void* GetIdentity() const noexcept { return m_identity; }
+private:
+    friend class ReadOnlyRenderExtension;
+    explicit ReadOnlyRenderFrame(RenderFrame& frame)
+        :renderer(frame.renderer),scene(frame.scene),camera(frame.camera),draws(frame.draws),
+        geometry(frame.geometry),history(frame.history),requirements(frame.requirements),
+        output(frame.output),color(frame.color),depth(frame.depth),shadow(frame.shadow),normal(frame.normal),
+        albedo(frame.albedo),ao(frame.ao),motion(frame.motion),reactive(frame.reactive),
+        visibleInstances(frame.visibleInstances),indirectArguments(frame.indirectArguments),
+        lighting(frame.lighting),blackTexture(frame.blackTexture),lodDebug(frame.lodDebug),wireframe(frame.wireframe),
+        gpuVisibility(frame.gpuVisibility),environmentCapture(frame.environmentCapture),hasShadows(frame.hasShadows),
+        temporalAA(frame.temporalAA),outputWritten(frame.outputWritten),opaqueDepthComplete(frame.opaqueDepthComplete),
+        m_identity(&frame) {}
+    const void* m_identity;
+};
+
+// Legacy extensions retain mutable callbacks. This adapter makes geometry/camera writes unavailable after preparation.
+class ReadOnlyRenderExtension : public RenderExtension
+{
+public:
+    bool PrepareCamera(RenderFrame&) final;
+    bool Prepare(RenderFrame&,RHI::ICommandList&) final;
+    bool AddPasses(RenderStage,RenderFrame&,RHI::RenderGraph&) final;
+    virtual bool PrepareCamera(Camera&,ReadOnlyRenderFrame&) { return true; }
+    virtual bool Prepare(ReadOnlyRenderFrame&,RHI::ICommandList&) { return true; }
+    virtual bool AddPasses(RenderStage,ReadOnlyRenderFrame&,RHI::RenderGraph&) { return true; }
+private:
+    static std::array<uint64_t,4> SourceRevisions(const Scene&) noexcept;
+    bool InputsUnchanged(const RenderFrame&,const std::array<uint64_t,4>&,const Camera* previous) const;
+};
+
+inline bool RenderExtension::HasReadOnlyGeometryInputs() const noexcept
+{ return dynamic_cast<const ReadOnlyRenderExtension*>(this)!=nullptr; }
 }

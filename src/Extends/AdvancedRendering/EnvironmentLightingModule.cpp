@@ -6,7 +6,7 @@ namespace dyf::Detail
 {
 namespace
 {
-class EnvironmentLightingModule final : public RenderExtension
+class EnvironmentLightingModule final : public ReadOnlyRenderExtension
 {
 public:
     explicit EnvironmentLightingModule(std::shared_ptr<EnvironmentFilteringProof> proof):m_proof(std::move(proof)) {}
@@ -29,7 +29,7 @@ public:
         return requirements;
     }
 
-    bool Prepare(RenderFrame& frame,RHI::ICommandList& uploads) override
+    bool Prepare(ReadOnlyRenderFrame& frame,RHI::ICommandList& uploads) override
     {
         m_prepared=false;
         if(m_proof) *m_proof={};
@@ -53,12 +53,12 @@ public:
         resources.probeParameters=m_environment->GetProbeParameters();
         resources.diffuse={m_environment->GetDiffuse(),{}};
         resources.specular={m_environment->GetSpecular(),{}};
-        if(m_proof) *m_proof={&frame,&frame.renderer.GetDevice(),resources,m_environment->UsesNativeFiltering()};
+        if(m_proof) *m_proof={frame.GetIdentity(),&frame.renderer.GetDevice(),resources,m_environment->UsesNativeFiltering()};
         m_prepared=true;
         return true;
     }
 
-    bool AddPasses(RenderStage stage,RenderFrame& frame,RHI::RenderGraph& graph) override
+    bool AddPasses(RenderStage stage,ReadOnlyRenderFrame& frame,RHI::RenderGraph& graph) override
     {
         if(frame.outputWritten || !m_prepared) return true;
         if(stage==RenderStage::BeforeOpaque)

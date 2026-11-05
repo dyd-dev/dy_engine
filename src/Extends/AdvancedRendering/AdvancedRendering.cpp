@@ -63,15 +63,15 @@ bool AdvancedRendering::NeedsSurface(const Renderer& renderer) const
     return GetRequirements(renderer).RequiresDepth();
 }
 
-bool AdvancedRendering::PrepareCamera(RenderFrame& frame)
+bool AdvancedRendering::PrepareCamera(Camera& camera,ReadOnlyRenderFrame& frame)
 {
-    for(auto& module:m_modules) if(!module->PrepareCamera(frame)) return false;
+    for(auto& module:m_modules) if(!static_cast<ReadOnlyRenderExtension&>(*module).PrepareCamera(camera,frame)) return false;
     return true;
 }
 
-bool AdvancedRendering::Prepare(RenderFrame& frame,RHI::ICommandList& uploads)
+bool AdvancedRendering::Prepare(ReadOnlyRenderFrame& frame,RHI::ICommandList& uploads)
 {
-    for(auto& module:m_modules) if(!module->Prepare(frame,uploads)) return false;
+    for(auto& module:m_modules) if(!static_cast<ReadOnlyRenderExtension&>(*module).Prepare(frame,uploads)) return false;
     return true;
 }
 

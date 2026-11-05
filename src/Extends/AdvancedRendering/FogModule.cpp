@@ -7,14 +7,14 @@ namespace dyf::Detail
 {
 namespace
 {
-class FogModule final : public RenderExtension
+class FogModule final : public ReadOnlyRenderExtension
 {
 public:
     const char* GetName() const override { return "VolumetricFog"; }
 
     RenderRequirements GetRequirements(const Renderer&) const override { return {}; }
 
-    bool Prepare(RenderFrame& frame,RHI::ICommandList& uploads) override
+    bool Prepare(ReadOnlyRenderFrame& frame,RHI::ICommandList& uploads) override
     {
         m_prepared=false;
         const auto& config=frame.renderer.GetAppliedConfig();
@@ -38,7 +38,7 @@ public:
         return m_prepared;
     }
 
-    bool AddPasses(RenderStage stage,RenderFrame& frame,RHI::RenderGraph& graph) override
+    bool AddPasses(RenderStage stage,ReadOnlyRenderFrame& frame,RHI::RenderGraph& graph) override
     {
         if(stage!=RenderStage::Atmosphere || frame.outputWritten || !m_prepared) return true;
         VolumetricFog::LightingResources resources;
