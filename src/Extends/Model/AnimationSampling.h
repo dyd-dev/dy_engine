@@ -5,7 +5,7 @@
 namespace dyf::Detail
 {
 // Internal fast path: this exact clip must already have sampled successfully in
-// the current UpdateAnimations call, with no intervening edits to its keys.
+// the current call, or belong to an immutable ModelScene asset validated earlier.
 // Per-instance indices, sample time and evaluated results are still checked.
 bool SampleAnimationClipValidatedKeys(const AnimationClip&,float,
     std::vector<NodeTransform>&,std::vector<std::vector<float>>&);
@@ -17,13 +17,13 @@ struct NodeHierarchyScratch
 };
 
 // Reuse temporary storage while retaining full hierarchy validation. Capturing
-// the successful evaluation order lets one synchronous update share topology.
+// the successful evaluation order lets immutable assets retain their topology.
 bool BuildGlobalNodeMatricesWithScratch(const std::vector<ModelNode>&,
     const std::vector<NodeTransform>&,std::vector<Math::float4x4>&,
     NodeHierarchyScratch&,bool captureOrder);
 
 // The order must come from a successful validation of these exact nodes in the
-// current update. Only topology is shared; every local/global pose is evaluated.
+// current call, or the same immutable asset. Local/global poses remain instance-owned.
 bool BuildGlobalNodeMatricesValidatedOrder(const std::vector<ModelNode>&,
     const std::vector<NodeTransform>&,std::vector<Math::float4x4>&,
     const std::vector<uint32_t>&);
