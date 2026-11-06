@@ -97,6 +97,7 @@ GpuVisibility::~GpuVisibility()
 {
     ReleaseBuffers();
     m_device.DestroyPipeline(m_rangePipeline);m_device.DestroyShader(m_rangeShader);
+    m_device.DestroyPipeline(m_rangeOcclusionPipeline);m_device.DestroyShader(m_rangeOcclusionShader);
     m_device.DestroyPipeline(m_hizPipeline);m_device.DestroyPipeline(m_occlusionPipeline);
     m_device.DestroyShader(m_hizShader);m_device.DestroyShader(m_occlusionShader);
     m_device.DestroyPipeline(m_pipeline);m_device.DestroyShader(m_shader);
@@ -339,6 +340,7 @@ bool GpuVisibility::AddPasses(RHI::RenderGraph& graph)
 // 가림 전용 바인딩과 소유 HiZ·상수 버퍼만 정리한다. m_hizDepth는 외부 깊이를 기억하는 핸들이므로 null로 끊기만 한다.
 void GpuVisibility::ReleaseOcclusion()
 {
+    m_device.DestroyResourceSet(m_rangeOcclusionResources);m_rangeOcclusionResources=nullptr;
     m_device.DestroyResourceSet(m_occlusionResources);m_occlusionResources=nullptr;
     for(auto resources:m_hizResources) m_device.DestroyResourceSet(resources);
     m_hizResources.clear();

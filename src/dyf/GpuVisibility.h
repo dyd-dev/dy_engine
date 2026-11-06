@@ -109,6 +109,7 @@ private:
     };
     bool PreparePipeline();
     bool PrepareRanges(const std::vector<Range>&,bool sameBatches);
+    bool PrepareRangeOcclusion();
     bool AddRangePass(RHI::RenderGraph&,bool afterOcclusion);
     void ReleaseRanges();
     bool PrepareOcclusion(RHI::TextureHandle);
@@ -132,6 +133,9 @@ private:
     RHI::ShaderHandle m_rangeShader=nullptr;
     RHI::PipelineHandle m_rangePipeline=nullptr;
     RHI::ResourceSetHandle m_rangeResources=nullptr;
+    RHI::ShaderHandle m_rangeOcclusionShader=nullptr;
+    RHI::PipelineHandle m_rangeOcclusionPipeline=nullptr;
+    RHI::ResourceSetHandle m_rangeOcclusionResources=nullptr;
     RHI::BufferHandle m_rangeData=nullptr,m_rangeInstances=nullptr,m_rangeArguments=nullptr,m_rangeKeys=nullptr;
     RHI::RGResourceHandle m_rangeInstancesGraph,m_rangeArgumentsGraph,m_rangeKeysGraph;
     std::vector<Range> m_ranges;
