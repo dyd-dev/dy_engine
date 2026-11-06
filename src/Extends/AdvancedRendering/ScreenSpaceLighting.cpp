@@ -104,7 +104,7 @@ bool ScreenSpaceLighting::CreateDenoisePipelines()
     bindings.push_back({7,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Fragment,sampler});
     bindings.push_back({12,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Fragment,{}});
     const ColorAttachmentDesc colors[]={{Format::R16G16B16A16_FLOAT,{},ColorWriteMask::All},
-        {Format::R16G16B16A16_FLOAT,{},ColorWriteMask::All},{Format::R32G32B32A32_FLOAT,{},ColorWriteMask::All}};
+        {Format::R16G16B16A16_FLOAT,{},ColorWriteMask::All},{Format::R16G16B16A16_FLOAT,{},ColorWriteMask::All}};
     for(uint32_t i=0;i<2;++i)
     {
         if(m_denoisePipelines[i]) continue;
@@ -130,8 +130,9 @@ bool ScreenSpaceLighting::PrepareDenoise(uint32_t effect,bool enabled)
         target.image=m_device->CreateTexture(desc);target.state=ResourceState::Undefined;
         return target.image!=nullptr;
     };
+    // Guide channels only copy/clamp the existing FP16 Surface values.
     for(auto& slot:history.frames) for(uint32_t channel=0;channel<3;++channel)
-        if(!create(slot[channel],channel==2?Format::R32G32B32A32_FLOAT:Format::R16G16B16A16_FLOAT)) return false;
+        if(!create(slot[channel],Format::R16G16B16A16_FLOAT)) return false;
     for(auto& target:history.spatial) if(!create(target,Format::R16G16B16A16_FLOAT)) return false;
     return true;
 }
