@@ -4,6 +4,7 @@
 #include "BasicEnvironmentResources.h"
 #include "dyf/Scene.h"
 #include "dyf/RHI/Buffer.h"
+#include "dyf/RHI/Pipeline.h"
 #include "dyf/RHI/ResourceSet.h"
 #include <algorithm>
 #include <array>
@@ -65,6 +66,9 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
 	const std::vector<RendererDrawDesc>* draws, std::vector<RHI::ResourceSetHandle>& sets)
 {
 	if(device == nullptr || pipeline == nullptr || lightingBuffer == nullptr) return false; // 필수 장치·파이프라인·조명 상수가 없으면 세트를 구성할 수 없다.
+    const auto& layout=pipeline->GetLayout();
+    const bool surfaceOwnerBinding=std::any_of(layout.bindings,layout.bindings+layout.bindingCount,
+        [](const RHI::ResourceBindingLayout& binding) {return binding.binding==25;});
 	if(stockDrawInputs) draws=nullptr; // 표준 호환 입력은 객체별 추가 자원을 쓰지 않으므로 재질별 세트를 공유한다.
 	const bool shadowsEnabled = shadowDepthTarget != nullptr;
 	if(shadowsEnabled && shadowMatrixBuffer == nullptr) return false; // 그림자 타깃이 있는데 상수가 없으면 불완전한 세트를 만들지 않는다.
@@ -171,8 +175,10 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
             bindings.push_back({19,0,frameLighting.clusterLights.buffer,nullptr,0,frameLighting.clusterLights.buffer->GetDesc().size,{}});
             bindings.push_back({20,0,frameLighting.clusterList.buffer,nullptr,0,frameLighting.clusterList.buffer->GetDesc().size,{}});
             bindings.push_back({21,0,frameLighting.clusterConstants.buffer,nullptr,0,sizeof(RendererClusterConstants),{}});
-            bindings.push_back({26,0,nullptr,frameLighting.areaMatrix.texture ? frameLighting.areaMatrix.texture : defaultMaterialTextures[2],0,0,{}});
-            bindings.push_back({27,0,nullptr,frameLighting.areaAmplitude.texture ? frameLighting.areaAmplitude.texture : defaultMaterialTextures[2],0,0,{}});
+            if(surfaceOwnerBinding)
+                bindings.push_back({25,0,nullptr,frameSurfaceCache?frameSurfaceOwner:defaultMaterialTextures[2],0,0,{}});
+            bindings.push_back({26,0,nullptr,frameSurfaceCache?frameSurfaceNormal:frameLighting.areaMatrix.texture ? frameLighting.areaMatrix.texture : defaultMaterialTextures[2],0,0,{}});
+            bindings.push_back({27,0,nullptr,frameSurfaceCache?frameSurfaceAlbedo:frameLighting.areaAmplitude.texture ? frameLighting.areaAmplitude.texture : defaultMaterialTextures[2],0,0,{}});
             bindings.push_back({22,0,nullptr,advanced && frameAmbientOcclusion ? frameAmbientOcclusion : defaultMaterialTextures[0],0,0,{}});
             bindings.push_back({23,0,nullptr,environment->specular.texture,0,0,{}});
             bindings.push_back({24,0,nullptr,environment->diffuse.texture,0,0,{}});
@@ -264,8 +270,10 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
             bindings.push_back({19,0,frameLighting.clusterLights.buffer,nullptr,0,frameLighting.clusterLights.buffer->GetDesc().size,{}});
             bindings.push_back({20,0,frameLighting.clusterList.buffer,nullptr,0,frameLighting.clusterList.buffer->GetDesc().size,{}});
             bindings.push_back({21,0,frameLighting.clusterConstants.buffer,nullptr,0,sizeof(RendererClusterConstants),{}});
-            bindings.push_back({26,0,nullptr,frameLighting.areaMatrix.texture ? frameLighting.areaMatrix.texture : defaultMaterialTextures[2],0,0,{}});
-            bindings.push_back({27,0,nullptr,frameLighting.areaAmplitude.texture ? frameLighting.areaAmplitude.texture : defaultMaterialTextures[2],0,0,{}});
+            if(surfaceOwnerBinding)
+                bindings.push_back({25,0,nullptr,frameSurfaceCache?frameSurfaceOwner:defaultMaterialTextures[2],0,0,{}});
+            bindings.push_back({26,0,nullptr,frameSurfaceCache?frameSurfaceNormal:frameLighting.areaMatrix.texture ? frameLighting.areaMatrix.texture : defaultMaterialTextures[2],0,0,{}});
+            bindings.push_back({27,0,nullptr,frameSurfaceCache?frameSurfaceAlbedo:frameLighting.areaAmplitude.texture ? frameLighting.areaAmplitude.texture : defaultMaterialTextures[2],0,0,{}});
 		}
 		if(draws) // 일반 경로의 객체별 추가 정점 자원을 기본 바인딩 뒤에 붙인다.
 		{

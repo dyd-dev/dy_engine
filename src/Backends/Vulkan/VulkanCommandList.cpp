@@ -264,7 +264,8 @@ namespace dyf::Backends
 			case dyf::RHI::Format::R32_FLOAT:
 				return 4;
 			case dyf::RHI::Format::R16G16B16A16_FLOAT:
-			case dyf::RHI::Format::R32G32_FLOAT:
+			case dyf::RHI::Format::R32G32_UINT:
+            case dyf::RHI::Format::R32G32_FLOAT:
 				return 8;
 			case dyf::RHI::Format::R32G32B32_FLOAT:
 				return 12;
@@ -630,10 +631,10 @@ namespace dyf::Backends
 				: std::max(1u, texture->GetDesc().height >> source.mipLevel);
 			const VkAttachmentLoadOp loadOp = ToLoadOp(source.loadOp);
 			const VkAttachmentStoreOp storeOp = ToStoreOp(source.storeOp);
-			const bool integerColor = texture != nullptr && (texture->GetDesc().format == RHI::Format::R32_UINT ||
+			const bool integerColor = texture != nullptr && (texture->GetDesc().format == RHI::Format::R32G32_UINT || texture->GetDesc().format == RHI::Format::R32_UINT ||
 				texture->GetDesc().format == RHI::Format::R16_UINT);
 			const bool clearValueValid = source.loadOp != dyf::RHI::LoadOp::Clear ||
-				std::all_of(source.clearColor, source.clearColor + (integerColor ? 1u : 4u), [&](float component)
+				std::all_of(source.clearColor, source.clearColor + (integerColor ? (texture->GetDesc().format==RHI::Format::R32G32_UINT?2u:1u) : 4u), [&](float component)
 				{
 					if (!std::isfinite(component)) return false;
 					if (!integerColor) return true;
@@ -663,7 +664,8 @@ namespace dyf::Backends
 			if (source.loadOp == RHI::LoadOp::Clear)
 			{
 				if (integerColor)
-					attachment.clearValue.color.uint32[0] = static_cast<uint32_t>(source.clearColor[0]);
+                    for(uint32_t channel=0;channel<(texture->GetDesc().format==RHI::Format::R32G32_UINT?2u:1u);++channel)
+                        attachment.clearValue.color.uint32[channel] = static_cast<uint32_t>(source.clearColor[channel]);
 				else std::copy(source.clearColor, source.clearColor + 4, attachment.clearValue.color.float32);
 			}
 			colorAttachments.push_back(attachment);

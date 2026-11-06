@@ -47,9 +47,11 @@ bool ReadOnlyRenderExtension::AddPasses(RenderStage stage,RenderFrame& frame,RHI
 RenderRequirements Renderer::Impl::CollectRequirements() const
 {
     RenderRequirements result;
+    result.acceptsPackedMaterialOwner=true;
     for(const auto& extension:extensions)
     {
         const auto requirements=extension->GetRequirements(owner);
+        result.acceptsPackedMaterialOwner&=requirements.acceptsPackedMaterialOwner;
         result.providesSurface|=requirements.providesSurface;
         result.needsSurface|=requirements.needsSurface;
         result.needsDepth|=requirements.needsDepth;
@@ -105,10 +107,13 @@ bool Renderer::Impl::AddExtensionPasses(RenderStage stage,RenderFrame& frame,RHI
     for(auto& extension:extensions)
     {
         const bool previous=frame.opaqueDepthComplete;
+        const bool previousMaterial=frame.surfaceMaterialComplete;
+        const auto oldOwner=frame.materialOwner,oldNormal=frame.normal,oldAlbedo=frame.albedo;
+        const auto oldKeys=frame.visibleInstanceKeys;
         const auto oldDepth=frame.depth;
         const auto oldView=frame.camera.view,oldProjection=frame.camera.projection;
         depthPassRevisions.clear();
-        if(previous || frameOpaqueDepthComplete || frameDepthPrepassValid)
+        if(previous || previousMaterial || frameOpaqueDepthComplete || frameDepthPrepassValid)
             for(uint32_t i=0;const auto* pass=graph.GetPass(i);++i)depthPassRevisions.push_back(pass->GetRevision());
         frame.opaqueDepthComplete=false;
         if(!extension->AddPasses(stage,frame,graph)) // 확장이 이 단계의 패스를 추가하지 못하면 모듈 이름/단계와 함께 실패를 전파한다.
@@ -120,7 +125,7 @@ bool Renderer::Impl::AddExtensionPasses(RenderStage stage,RenderFrame& frame,RHI
         const bool beforeMain=stage==RenderStage::BeforeOpaque || stage==RenderStage::OpaqueLighting;
         bool cpuChanged=!SameDepthCamera(oldView,oldProjection,frame.camera);
         bool changed=cpuChanged || oldDepth.texture!=frame.depth.texture || oldDepth.resource!=frame.depth.resource;
-        if(previous || frameOpaqueDepthComplete || frameDepthPrepassValid)
+        if(previous || previousMaterial || frameOpaqueDepthComplete || frameDepthPrepassValid)
         {
             for(uint32_t i=0;i<depthPassRevisions.size();++i)
             {
@@ -138,6 +143,31 @@ bool Renderer::Impl::AddExtensionPasses(RenderStage stage,RenderFrame& frame,RHI
         // New GPU passes registered after Main execute after it. Only CPU input
         // changes or edits of earlier passes can invalidate its captured prepass.
         if(cpuChanged || (beforeMain && changed))frameOpaqueDepthComplete=frameDepthPrepassValid=false;
+        const bool explicitMaterial=!previousMaterial && frame.surfaceMaterialComplete;
+        bool materialChanged=changed || oldOwner.texture!=frame.materialOwner.texture || oldOwner.resource!=frame.materialOwner.resource ||
+            oldNormal.texture!=frame.normal.texture || oldNormal.resource!=frame.normal.resource ||
+            oldAlbedo.texture!=frame.albedo.texture || oldAlbedo.resource!=frame.albedo.resource ||
+            oldKeys.buffer!=frame.visibleInstanceKeys.buffer || oldKeys.resource!=frame.visibleInstanceKeys.resource;
+        if(previousMaterial)
+        {
+            if(!extension->HasReadOnlyGeometryInputs())materialChanged|=!surfaceGeometrySnapshot.Matches(frame.geometry);
+            for(uint32_t i=static_cast<uint32_t>(depthPassRevisions.size());const auto* pass=graph.GetPass(i);++i)
+                for(const auto& write:pass->GetWrites())
+                    if(std::binary_search(surfaceProtectedInputs.begin(),surfaceProtectedInputs.end(),write.handle.id))materialChanged=true;
+        }
+        if(previousMaterial && materialChanged)frame.surfaceMaterialComplete=false;
+        if(explicitMaterial && beforeMain)
+        {
+            surfaceGeometrySnapshot.Capture(frame.geometry);surfaceProtectedInputs=depthProtectedInputs;
+            for(auto resource:{frame.materialOwner.resource,frame.normal.resource,frame.albedo.resource,frame.visibleInstanceKeys.resource})
+                if(resource.IsValid())surfaceProtectedInputs.push_back(resource.id);
+            // The producing pass reads all source images, geometry and stable keys.
+            for(uint32_t i=0;const auto* pass=graph.GetPass(i);++i)
+                for(const auto& write:pass->GetWrites())if(write.handle==frame.materialOwner.resource)
+                    for(const auto& read:pass->GetReads())surfaceProtectedInputs.push_back(read.handle.id);
+            std::sort(surfaceProtectedInputs.begin(),surfaceProtectedInputs.end());
+            surfaceProtectedInputs.erase(std::unique(surfaceProtectedInputs.begin(),surfaceProtectedInputs.end()),surfaceProtectedInputs.end());
+        }
         const bool explicitOptIn=frame.opaqueDepthComplete;
         if(!explicitOptIn)frame.opaqueDepthComplete=previous && !changed;
         if(explicitOptIn && beforeMain)

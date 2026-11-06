@@ -441,6 +441,11 @@ bool MetalDevice::SupportsNative(RHI::Feature feature) const
         return [m_impl->device supportsFeatureSet:MTLFeatureSet_iOS_GPUFamily3_v1];
 #endif
 #endif
+    case RHI::Feature::FragmentPrimitiveId:
+        // Apple feature tables: Primitive ID requires Apple7 or Mac2.
+        if(@available(macOS 11.0, iOS 14.0, tvOS 14.0, *))
+            return [m_impl->device supportsFamily:MTLGPUFamilyApple7] || [m_impl->device supportsFamily:MTLGPUFamilyMac2];
+        return false;
     case RHI::Feature::Compute:
     case RHI::Feature::Rasterization:
     case RHI::Feature::Tessellation:

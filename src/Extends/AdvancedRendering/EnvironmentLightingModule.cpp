@@ -17,6 +17,7 @@ public:
     RenderRequirements GetRequirements(const Renderer& renderer) const override
     {
         RenderRequirements requirements;
+        requirements.acceptsPackedMaterialOwner=true;
         if(!AdvancedModuleEnabled(renderer)) return requirements;
         requirements.providesEnvironment=true;
         const auto& config=renderer.GetAppliedConfig();

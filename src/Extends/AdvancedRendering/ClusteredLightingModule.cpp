@@ -16,6 +16,7 @@ public:
     RenderRequirements GetRequirements(const Renderer&) const override
     {
         RenderRequirements requirements;
+        requirements.acceptsPackedMaterialOwner=true;
         requirements.providesLocalLights=true;
         return requirements;
     }

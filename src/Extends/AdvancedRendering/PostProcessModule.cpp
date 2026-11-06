@@ -14,6 +14,7 @@ public:
     RenderRequirements GetRequirements(const Renderer& renderer) const override
     {
         RenderRequirements requirements;
+        requirements.acceptsPackedMaterialOwner=true;
         if(!AdvancedModuleEnabled(renderer)) return requirements;
         const auto& config=renderer.GetAppliedConfig();
         const bool diagnostic=config.debugLodColor || config.debugWireframe;

@@ -35,9 +35,11 @@ AdvancedRendering::~AdvancedRendering()=default;
 RenderRequirements AdvancedRendering::GetRequirements(const Renderer& renderer) const
 {
     RenderRequirements combined;
+    combined.acceptsPackedMaterialOwner=true;
     for(const auto& module:m_modules)
     {
         const auto requirements=module->GetRequirements(renderer);
+        combined.acceptsPackedMaterialOwner&=requirements.acceptsPackedMaterialOwner;
         combined.providesSurface|=requirements.providesSurface;
         combined.needsSurface|=requirements.needsSurface;
         combined.needsDepth|=requirements.needsDepth;

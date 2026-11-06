@@ -2,6 +2,8 @@
 
 #include "dyf/RenderExtension.h"
 #include "dyf/Camera.h"
+#include "ImageDds.h"
+#include <array>
 #include <cstring>
 #include <vector>
 
@@ -61,6 +63,46 @@ struct DepthGeometrySnapshot
         for(size_t i=0;i<draws.size();++i)if(!inputs[i].Matches(draws[i]))return false;
         return true;
     }
+};
+// Immutable source identities plus every material scalar consumed by stock shading.
+struct SurfaceGeometryInput
+{
+    DepthGeometryInput depth;
+    std::array<RHI::TextureHandle,ToIndex(MaterialTextureKind::Count)> textures;
+    std::array<const void*,5> images={};
+    std::array<uint32_t,15> imageProperties={};
+    std::array<float,24> values={};
+    bool unlit=false;
+    explicit SurfaceGeometryInput(const RenderGeometryDraw& draw):depth(draw),textures(draw.textures)
+    {
+        if(!draw.material)return;
+        const auto& m=*draw.material;
+        values={draw.baseColor.x,draw.baseColor.y,draw.baseColor.z,draw.baseColor.w,
+            m.baseColor.x,m.baseColor.y,m.baseColor.z,m.baseColor.w,
+            m.emissiveColor.x,m.emissiveColor.y,m.emissiveColor.z,m.metallicFactor,m.roughnessFactor,
+            m.normalScale,m.normalYSign,m.occlusionStrength,m.transmissionFactor,m.indexOfRefraction,
+            m.thickness,m.attenuationColor.x,m.attenuationColor.y,m.attenuationColor.z,m.attenuationDistance,m.alphaCutoff};
+        unlit=m.unlit;
+        const Image* sources[]={&m.baseColorTexture,&m.metallicRoughnessTexture,&m.normalTexture,&m.occlusionTexture,&m.emissiveTexture};
+        for(uint32_t i=0;i<5;++i){images[i]=Detail::ImageDdsAccess::Identity(*sources[i]);
+            imageProperties[i*3]=sources[i]->GetWidth();imageProperties[i*3+1]=sources[i]->GetHeight();
+            imageProperties[i*3+2]=static_cast<uint32_t>(sources[i]->GetColorSpace());}
+    }
+    bool Matches(const RenderGeometryDraw& draw) const
+    {
+        const SurfaceGeometryInput current(draw);
+        return depth.Matches(draw) && textures==current.textures && images==current.images &&
+            imageProperties==current.imageProperties && unlit==current.unlit &&
+            std::memcmp(values.data(),current.values.data(),sizeof(values))==0;
+    }
+};
+struct SurfaceGeometrySnapshot
+{
+    std::vector<SurfaceGeometryInput> inputs;
+    void Capture(const std::vector<RenderGeometryDraw>& draws)
+    {inputs.clear();inputs.reserve(draws.size());for(const auto& draw:draws)inputs.emplace_back(draw);}
+    bool Matches(const std::vector<RenderGeometryDraw>& draws) const
+    {if(inputs.size()!=draws.size())return false;for(size_t i=0;i<draws.size();++i)if(!inputs[i].Matches(draws[i]))return false;return true;}
 };
 inline bool SameDepthCamera(const Math::float4x4& view,const Math::float4x4& projection,const Camera& camera)
 {

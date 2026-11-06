@@ -16,6 +16,7 @@ public:
     RenderRequirements GetRequirements(const Renderer& renderer) const override
     {
         RenderRequirements requirements;
+        requirements.acceptsPackedMaterialOwner=true;
         const auto& config=renderer.GetAppliedConfig();
         if(AdvancedModuleEnabled(renderer) && config.advanced.transparency && !config.debugWireframe)
         {

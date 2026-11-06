@@ -8,6 +8,10 @@ layout(location=4) in vec3 previousPosition;
 layout(location=5) in mat4 instanceModel;
 layout(location=9) in mat4 instancePreviousMVP;
 layout(location=13) in vec4 color;
+#if SURFACE_OWNER
+layout(location=14) in uvec2 sourceKey;
+layout(location=7) flat out uvec2 instanceKey;
+#endif
 struct Draw {mat4 model;mat4 previousMVP;mat4 normalMatrix;vec4 baseColor;vec4 materialParams;uvec4 flags;vec4 alpha;};
 layout(std430,set=0,binding=11) readonly buffer Draws {Draw draws[];};
 layout(set=0,binding=12) uniform Frame {mat4 view;mat4 projection;mat4 inverseProjection;mat4 viewProjection;vec4 size;vec4 ao;vec4 lighting;vec4 options;uvec4 outputs;mat4 inversePreviousProjection;} frame;
@@ -41,6 +45,9 @@ mat3 SurfaceNormalMatrix(mat4 model)
 void main()
 {
     Draw draw=draws[index.x];
+#if SURFACE_OWNER
+    instanceKey=sourceKey;
+#endif
     mat4 model=index.y!=0u?instanceModel:draw.model;
     precise vec4 world=model*vec4(position,1.0);
     precise vec4 clipPosition=frame.viewProjection*world;

@@ -12,7 +12,8 @@ class FogModule final : public ReadOnlyRenderExtension
 public:
     const char* GetName() const override { return "VolumetricFog"; }
 
-    RenderRequirements GetRequirements(const Renderer&) const override { return {}; }
+    RenderRequirements GetRequirements(const Renderer&) const override
+    { RenderRequirements r;r.acceptsPackedMaterialOwner=true;return r; }
 
     bool Prepare(ReadOnlyRenderFrame& frame,RHI::ICommandList& uploads) override
     {

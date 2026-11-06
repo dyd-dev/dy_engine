@@ -1,3 +1,6 @@
+#if RENDERER_SURFACE_CACHE
+Texture2D<uint2> surfaceOwner:register(t25);
+#endif
 #ifndef RENDERER_BINDLESS // 재질 텍스처 배열 방식이 지정되지 않았으면 개별 텍스처 바인딩을 기본으로 사용한다.
 #define RENDERER_BINDLESS 0
 #endif
@@ -196,6 +199,9 @@ struct PSInput
     float3 worldNormal        : TEXCOORD2;
     float4 worldTangent       : TEXCOORD3;
     float4 color              : TEXCOORD5;
+#if RENDERER_SURFACE_CACHE
+    nointerpolation uint2 instanceKey:TEXCOORD6;
+#endif
 #if RENDERER_ENABLE_SHADOWS
     float4 lightSpacePosition : TEXCOORD4;
 #endif
@@ -243,17 +249,23 @@ StructuredBuffer<uint4> materialTextureIndices:register(t29, space0);
 #endif
 // kind 0~4는 기본색·금속/거칠기·법선·AO·발광이다. bindless 경로는 재질당 uint4 두 칸 중 kind/4번 칸의 kind%4 성분을 읽어 19개 텍스처 배열의 인덱스로 사용한다.
 // 개별 경로는 0/4/5/6/7번 텍스처와 8번 샘플러를 사용한다. 텍스처의 sRGB/Linear 해석은 연결된 텍스처 형식이 담당한다.
+#if RENDERER_SURFACE_CACHE
+static float2 materialDx,materialDy;
+#define MATERIAL_SAMPLE(t,u) t.SampleGrad(LinearSampler,u,materialDx,materialDy)
+#else
+#define MATERIAL_SAMPLE(t,u) t.Sample(LinearSampler,u)
+#endif
 float4 SampleMaterial(uint kind,float2 uv)
 {
 #if RENDERER_BINDLESS // bindless 빌드이면 재질 배열·인덱스 표와 그에 맞는 그림자 연결 번호를 사용한다.
     uint index=materialTextureIndices[padding2*2u+kind/4u][kind%4u];
-    return materialTextures[index].Sample(LinearSampler,uv);
+    return MATERIAL_SAMPLE(materialTextures[index],uv);
 #else
-    if(kind==0u) return BaseColorTexture.Sample(LinearSampler,uv); // 기본색 종류는 0번 텍스처를 읽는다.
-    if(kind==1u) return MetallicRoughnessTexture.Sample(LinearSampler,uv); // 금속/거칠기 종류는 4번 텍스처를 읽는다.
-    if(kind==2u) return NormalTexture.Sample(LinearSampler,uv); // 법선 종류는 5번 텍스처를 읽는다.
-    if(kind==3u) return OcclusionTexture.Sample(LinearSampler,uv); // AO 종류는 6번 텍스처를 읽고, 남은 발광 종류는 아래 7번 텍스처로 간다.
-    return EmissiveTexture.Sample(LinearSampler,uv);
+    if(kind==0u) return MATERIAL_SAMPLE(BaseColorTexture,uv); // 기본색 종류는 0번 텍스처를 읽는다.
+    if(kind==1u) return MATERIAL_SAMPLE(MetallicRoughnessTexture,uv); // 금속/거칠기 종류는 4번 텍스처를 읽는다.
+    if(kind==2u) return MATERIAL_SAMPLE(NormalTexture,uv); // 법선 종류는 5번 텍스처를 읽는다.
+    if(kind==3u) return MATERIAL_SAMPLE(OcclusionTexture,uv); // AO 종류는 6번 텍스처를 읽고, 남은 발광 종류는 아래 7번 텍스처로 간다.
+    return MATERIAL_SAMPLE(EmissiveTexture,uv);
 #endif
 }
 
@@ -709,11 +721,29 @@ inline float3 EvaluateLights(RendererLightingConstants lighting, float3 worldPos
 #if RENDERER_DEPTH_PREPASS
 [earlydepthstencil]
 #endif
-float4 main(PSInput input, bool frontFace : SV_IsFrontFace) : SV_TARGET
+float4 main(PSInput input, bool frontFace : SV_IsFrontFace
+#if RENDERER_SURFACE_CACHE
+,uint primitive:SV_PrimitiveID
+#endif
+) : SV_TARGET
 {
     uint textureFlags = drawTextureFlags;
+#if RENDERER_SURFACE_CACHE
+    materialDx=ddx(input.uv);materialDy=ddy(input.uv);
+#endif
+    bool cachedMaterial=false;
+#if RENDERER_SURFACE_CACHE
+    int3 cachePixel=int3(input.position.xy,0);
+    uint2 owner=surfaceOwner.Load(cachePixel);
+    uint triangleIndex=input.instanceKey.y+primitive,ownerStride=padding1>>8;
+    cachedMaterial=input.instanceKey.x!=0u && owner.x==triangleIndex*ownerStride+input.instanceKey.x
+        && (ownerStride!=0u || owner.y==triangleIndex);
+    float4 cachedNormal=0,cachedAlbedo=0;
+    if(cachedMaterial){cachedNormal=ltcMatrixTexture.Load(cachePixel);cachedAlbedo=ltcAmplitudeTexture.Load(cachePixel);}
+#endif
+
     float4 base = baseColor * input.color;
-    if ((textureFlags & RENDERER_TEXTURE_FLAG_BASE_COLOR) != 0u)
+    if (!cachedMaterial && (textureFlags & RENDERER_TEXTURE_FLAG_BASE_COLOR) != 0u)
     {
         base *= SampleMaterial(0u,input.uv);
     }
@@ -749,13 +779,13 @@ float4 main(PSInput input, bool frontFace : SV_IsFrontFace) : SV_TARGET
     float occlusion = 1.0;
     // Opaque environment buffers already include authored AO and screen AO.
     bool usesEnvironmentBuffers=environmentSettings.x>0.5 && alphaMode!=2u;
-    if ((textureFlags & RENDERER_TEXTURE_FLAG_METALLIC_ROUGHNESS) != 0u)
+    if (!cachedMaterial && (textureFlags & RENDERER_TEXTURE_FLAG_METALLIC_ROUGHNESS) != 0u)
     {
         float4 metallicRoughness = SampleMaterial(1u,input.uv);
         roughness = clamp(roughness * metallicRoughness.g, minRoughness, 1.0);
         metallic = clamp(metallic * metallicRoughness.b, 0.0, 1.0);
     }
-    if ((textureFlags & RENDERER_TEXTURE_FLAG_OCCLUSION) != 0u && !usesEnvironmentBuffers)
+    if (!cachedMaterial && (textureFlags & RENDERER_TEXTURE_FLAG_OCCLUSION) != 0u && !usesEnvironmentBuffers)
     {
         occlusion = lerp(1.0, SampleMaterial(3u,input.uv).r, clamp(materialParams.w, 0.0, 1.0));
     }
@@ -765,6 +795,7 @@ float4 main(PSInput input, bool frontFace : SV_IsFrontFace) : SV_TARGET
         emissive *= SampleMaterial(4u,input.uv).rgb;
     }
 
+    // Keep the original normal for derivatives and narrow specular lobes; FP16 oct normals lose angular precision.
     float3 normal = GetNormal(input, textureFlags);
     // Derivatives precede discard and the two-sided normal orientation branch.
     float3 normalDx=ddx(normal),normalDy=ddy(normal);
@@ -774,6 +805,10 @@ float4 main(PSInput input, bool frontFace : SV_IsFrontFace) : SV_TARGET
     roughness=sqrt(sqrt(filteredAlphaSquared));
     if(alphaMode==1u) clip(base.a-asfloat(padding0)); // Mask 모드에서 cutoff보다 작은 픽셀을 버린다. 그 외 알파 모드는 이 잘라내기를 하지 않는다.
     if((padding1 & 4u)!=0u && !frontFace) normal=-normal; // 양면 재질의 뒷면이면 법선을 반대로 돌려 뒤쪽 표면 방향으로 조명한다.
+#if RENDERER_SURFACE_CACHE
+    if(cachedMaterial){albedo=cachedAlbedo.rgb;metallic=cachedAlbedo.a;
+        roughness=cachedNormal.z;occlusion=usesEnvironmentBuffers?1.0:cachedNormal.w;}
+#endif
     float3 viewDir = normalize(lighting.cameraPosition.xyz - input.worldPosition * lighting.cameraPosition.w);
     DirectSurface directSurface=PrepareDirectSurface(normal,viewDir,albedo,metallic,roughness);
     float3 f0=directSurface.f0;

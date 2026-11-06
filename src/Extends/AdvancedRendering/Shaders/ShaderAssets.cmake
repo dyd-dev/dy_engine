@@ -42,6 +42,11 @@ if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
     dy_embed_stock_metal_library(ScreenSpaceMetalLibrary kScreenSpaceMetalLibrary
         surface_vs surface_ps surface_debug screen_space_vs screen_space_ps
         INVARIANT_PROGRAMS surface_vs)
+    foreach(opaque IN ITEMS 0 1)
+        dy_embed_stock_metal_library(SurfaceOwner${opaque} kSurfaceOwner${opaque} surface_vs surface_ps
+            -DSURFACE_OWNER=1 -DSURFACE_OPAQUE=${opaque} INVARIANT_PROGRAMS surface_vs)
+    endforeach()
+    dy_embed_stock_metal_library(SurfaceOpaqueMetal kSurfaceOpaqueMetal surface_ps -DSURFACE_OPAQUE=1)
     dy_embed_stock_metal_library(TransparentLibrary kTransparentLibrary
         transparent_vs transparent_ps transparent_copy_vs transparent_copy_ps transparent_depth_copy_ps
         INVARIANT_PROGRAMS transparent_vs)
@@ -74,6 +79,12 @@ else()
     dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/surface_vs.${shader_extension}" vert SurfaceVertex kSurfaceVertex)
     dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/surface_ps.${shader_extension}" frag SurfaceFragment kSurfaceFragment)
     dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/surface_ps.${shader_extension}" frag SurfaceFullFragment kSurfaceFullFragment -DSURFACE_FULL_OUTPUTS=1)
+    dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/surface_ps.${shader_extension}" frag SurfaceOpaqueFullFragment kSurfaceOpaqueFullFragment -DSURFACE_FULL_OUTPUTS=1 -DSURFACE_OPAQUE=1)
+    dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/surface_vs.${shader_extension}" vert SurfaceOwnerVertex kSurfaceOwnerVertex -DSURFACE_OWNER=1)
+    foreach(opaque IN ITEMS 0 1)
+        dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/surface_ps.${shader_extension}" frag SurfaceOpaque${opaque} kSurfaceOpaque${opaque} -DSURFACE_OPAQUE=${opaque})
+        dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/surface_ps.${shader_extension}" frag SurfaceOwner${opaque} kSurfaceOwner${opaque} -DSURFACE_OPAQUE=${opaque} -DSURFACE_OWNER=1 -DSURFACE_FULL_OUTPUTS=1)
+    endforeach()
     dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/surface_debug.${shader_extension}" frag SurfaceDebugFragment kSurfaceDebugFragment)
     dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/transparent_vs.${shader_extension}" vert TransparentVertex kTransparentVertex)
     dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/transparent_ps.${shader_extension}" frag TransparentFragment kTransparentFragment)

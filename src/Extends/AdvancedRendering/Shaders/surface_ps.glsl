@@ -1,4 +1,13 @@
 #version 450
+#ifndef SURFACE_OPAQUE
+#define SURFACE_OPAQUE 0
+#endif
+#ifndef SURFACE_OWNER
+#define SURFACE_OWNER 0
+#endif
+#if SURFACE_OPAQUE
+layout(early_fragment_tests) in;
+#endif
 #ifndef SURFACE_FULL_OUTPUTS
 #define SURFACE_FULL_OUTPUTS 0
 #endif
@@ -9,6 +18,10 @@ layout(location=3) in vec4 currentClip;
 layout(location=4) in vec4 previousClip;
 layout(location=5) in float viewDepth;
 layout(location=6) in vec4 vertexColor;
+#if SURFACE_OWNER
+layout(location=7) flat in uvec2 instanceKey;
+layout(location=3) out uvec2 materialOwner;
+#endif
 layout(location=0) out vec4 normalRoughAO;
 layout(location=1) out vec4 albedoMetal;
 layout(location=2) out vec4 motionDepth;
@@ -37,10 +50,18 @@ void main()
     bool needNormal=(frame.outputs.w&1u)!=0u,needMaterial=(frame.outputs.w&2u)!=0u,needMotion=(frame.outputs.w&4u)!=0u;
 #endif
     vec4 base=draw.baseColor*vertexColor;
-    if((needMaterial || draw.flags.y==1u) && (flags&1u)!=0u)base*=texture(sampler2D(baseTexture,materialSampler),uv);
+    if((needMaterial || (SURFACE_OPAQUE==0 && draw.flags.y==1u)) && (flags&1u)!=0u)base*=texture(sampler2D(baseTexture,materialSampler),uv);
     if((flags&64u)!=0u)base.rgb=draw.baseColor.rgb;
+#if SURFACE_OWNER
+    // Preserve Surface's nonnegative output contract; unsupported inputs use original Main sampling.
+    bool cacheValid=all(greaterThanEqual(base.rgb,vec3(0))) && all(lessThanEqual(base.rgb,vec3(65504))) &&
+        ((flags&8u)==0u || (draw.materialParams.w>=0.0 && draw.materialParams.w<=1.0));
+    uint triangle=instanceKey.y+uint(gl_PrimitiveID);
+    uint owner=triangle*index.w+instanceKey.x;
+    materialOwner=cacheValid && instanceKey.x!=0u?uvec2(owner,triangle):uvec2(0);
+#endif
     vec3 n=vec3(0,0,1);float roughness=0.04;
-    vec2 mr=draw.materialParams.xy;
+    vec2 mr=clamp(draw.materialParams.xy,vec2(0,0.04),vec2(1,1));
     if((needNormal || needMaterial) && (flags&2u)!=0u)mr*=texture(sampler2D(materialTexture,materialSampler),uv).bg;
     if(needNormal)
     {
@@ -61,7 +82,9 @@ void main()
         float filteredAlphaSquared=min(1.0,roughness*roughness*roughness*roughness+min(2.0*normalVariance,0.18));
         roughness=sqrt(sqrt(filteredAlphaSquared));
     }
+#if !SURFACE_OPAQUE
     if(draw.flags.y==1u && base.a<draw.alpha.x)discard;
+#endif
 #if !SURFACE_FULL_OUTPUTS
     vec4 values[3]=vec4[3](vec4(0),vec4(0),vec4(0));
 #endif

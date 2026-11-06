@@ -282,6 +282,7 @@ struct Renderer::Impl
     static RHI::ShaderDesc DefaultShadowFragment();
     static RHI::ShaderDesc DefaultDepthPrepassFragment(bool shadows,bool bindless);
     static RHI::ShaderDesc DefaultNoAreaFragment(bool shadows,bool bindless,bool depthPrepass);
+    static RHI::ShaderDesc DefaultSurfaceCacheShader(bool vertex,bool shadows,bool bindless);
     RHI::PipelineHandle MaterialPipeline(const MaterialDesc&,bool mirrored=false) const;
     bool CaptureFrame(Image&);
     bool Initialize();
@@ -315,7 +316,7 @@ struct Renderer::Impl
     void CommitFrameData();
     RHI::ResourceSetHandle CachedResourceSet(RHI::PipelineHandle,const std::vector<RHI::ResourceBinding>&,std::vector<CachedSet>&);
     void PruneResourceSets(std::vector<CachedSet>&);
-    RHI::PipelineLayoutDesc MeshLayout(bool bindless, std::vector<RHI::ResourceBindingLayout>& bindings) const;
+    RHI::PipelineLayoutDesc MeshLayout(bool bindless, std::vector<RHI::ResourceBindingLayout>& bindings,bool surfaceOwner=false) const;
     // 소유한 RHI 핸들과 보조 객체를 정리하는 한곳의 해제 경계다. 장치 포인터가 유효한 동안 실행된다.
     void Shutdown();
     // 준비→업로드 제출→그래프 구성/기록→draw 제출→readback/Present를 조율한다. 패스 기록 함수 자체는 최종 제출이나 GPU 완료를 맡지 않는다.
@@ -399,6 +400,10 @@ struct Renderer::Impl
     RHI::ShaderHandle vertexShader=nullptr,fragmentShader=nullptr,shadowVertexShader=nullptr;
     RHI::ShaderHandle shadowFragmentShader=nullptr;
     RHI::ShaderHandle depthPrepassFragmentShader=nullptr;
+    RHI::ShaderHandle surfaceCacheVertex=nullptr,surfaceCacheFragment=nullptr;
+    std::array<RHI::PipelineHandle,8> surfaceCachePipelines={};
+    bool frameSurfaceCache=false,surfaceCacheReported=false;
+    RHI::TextureHandle frameSurfaceOwner=nullptr,frameSurfaceNormal=nullptr,frameSurfaceAlbedo=nullptr;
     RHI::ShaderHandle noAreaFragmentShader=nullptr,noAreaDepthPrepassFragmentShader=nullptr;
     RHI::ShaderHandle canvasVertexShader=nullptr,canvasFragmentShader=nullptr;
     RHI::ShaderHandle toneVertexShader=nullptr,toneFragmentShader=nullptr;
@@ -417,6 +422,8 @@ struct Renderer::Impl
     RHI::RenderGraph frameGraph;
     std::vector<RenderGeometryDraw> frameGeometryScratch;
     DepthGeometrySnapshot depthGeometrySnapshot;
+    SurfaceGeometrySnapshot surfaceGeometrySnapshot;
+    std::vector<uint64_t> surfaceProtectedInputs;
     Math::float4x4 depthGeometryView,depthGeometryProjection;
     bool depthGeometryUnchanged=false;
     std::array<RHI::PipelineHandle,4> wireframePipelines={};

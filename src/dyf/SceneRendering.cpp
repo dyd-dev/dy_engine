@@ -44,6 +44,9 @@ bool Renderer::Impl::RenderToTexture(const Scene& scene,const Camera& camera,RHI
 bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamera, const Canvas* overlay, Image* readback,
     const std::vector<RendererDrawDesc>* draws,RHI::TextureHandle selectedOutput,RHI::ResourceState before)
 {
+    frameSurfaceCache=false;frameSurfaceOwner=frameSurfaceNormal=frameSurfaceAlbedo=nullptr;
+    surfaceProtectedInputs.clear();
+    const uint64_t surfaceTransformRevision=scene.m_transformRevision;
     frameOpaqueDepthComplete=frameDepthPrepassValid=false;frameNoAreaLights=false;depthGeometryUnchanged=false;depthProtectedInputs.clear();
     // main은 사용자 draw 배열의 존재만으로 라이브 제어 가용성을 먼저 게시한다. 실제 표준 호환 판정은 설정 적용 뒤 아래에서 따로 수행한다.
     InitializeLiveProfiling();PublishLiveGeometryAvailability(draws!=nullptr);
@@ -405,6 +408,12 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         // 색/깊이 쓰기와 조명·그림자·AO·인수 읽기 의존성을 선언해 그래프가 실행 순서와 전환을 정하게 한다.
         auto& mainPass = graph.AddPass("MainForward", RHI::RGRecordingMode::Independent);
         mainPass.Write(color, State::RenderTarget).Write(depth, State::DepthWrite);
+        if(renderFrame.surfaceMaterialComplete)
+        {
+            mainPass.Read(renderFrame.materialOwner.resource,State::ShaderResource)
+                .Read(renderFrame.normal.resource,State::ShaderResource).Read(renderFrame.albedo.resource,State::ShaderResource);
+            if(visibilityActive)mainPass.Read(gpuVisibility->GetInstanceKeysHandle(),State::VertexBuffer);
+        }
         if(ownedLighting.IsValid())mainPass.Read(ownedLighting,State::ConstantBuffer);
         if(renderFrame.lighting.areaMatrix.resource.IsValid()) // 면적광 행렬 LUT가 그래프 자원이면 메인 패스 읽기 의존성을 추가한다.
             mainPass.Read(renderFrame.lighting.areaMatrix.resource,State::ShaderResource);
@@ -475,6 +484,16 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
                 if(!frameNoAreaLights)break;
             }
             if(frameOpaqueDepthComplete && !noAreaDepthPrepassPipelines[0])frameNoAreaLights=false;
+        }
+        frameSurfaceCache=config.advanced.reuseSurfaceMaterials && renderFrame.surfaceMaterialComplete && frameOpaqueDepthComplete && frameNoAreaLights &&
+            visibilityActive && scene.m_transformRevision==surfaceTransformRevision && stockDrawInputs && UsesStockGeometry() && !wireframeActive && !lodDebugActive &&
+            shaderSources.bytes[MeshVertex].empty() && shaderSources.bytes[MeshFragment].empty() && surfaceCachePipelines[0] &&
+            surfaceGeometrySnapshot.Matches(renderFrame.geometry) && renderFrame.materialOwner.texture &&
+            gpuVisibility->GetInstanceKeysBuffer();
+        if(frameSurfaceCache)
+        {
+            frameSurfaceOwner=renderFrame.materialOwner.texture;frameSurfaceNormal=renderFrame.normal.texture;
+            frameSurfaceAlbedo=renderFrame.albedo.texture;
         }
         // Mirror FrameBuffers: retain the previous allocation/bytes until the list containing this upload is submitted.
         if(!frame.preparation)frame.preparation=nativeDevice->AcquireCommandList();
@@ -552,6 +571,12 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             buffers.committed=true;
             shadowInstanceFrame.Commit();
             if(gpuShadows.active)gpuShadows.visibility->CommitFrame();
+            if(frameSurfaceCache && recordingStatistics.mainDrawCount && !surfaceCacheReported)
+            {
+                std::fprintf(stderr,"[Renderer] MainForward exact entity+primitive Surface material reuse active. Owner format: %s.\n",
+                    frameSurfaceOwner->GetDesc().format==RHI::Format::R32_UINT?"R32_UINT":"R32G32_UINT");
+                surfaceCacheReported=true;
+            }
             if(frameNoAreaLights && recordingStatistics.mainDrawCount && !noAreaReported)
             {
                 std::fputs("[Renderer] Main area-light-free shader active: uploaded Rect/Disc counts are zero; no graph lighting writes or global barriers.\n",stderr);

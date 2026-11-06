@@ -93,12 +93,24 @@ struct RenderRequirements
     bool providesEnvironment = false;
     // needsSurface retains the legacy full-output contract; aggregate only the raw flags.
     bool needsDepth = false, needsNormal = false, needsMaterial = false, needsMotion = false;
+    // Opt in only if this extension accepts either documented materialOwner format.
+    bool acceptsPackedMaterialOwner = false;
     constexpr uint32_t SurfaceOutputMask() const
     { return needsSurface?7u:(needsNormal?1u:0u)|(needsMaterial?2u:0u)|(needsMotion?4u:0u); }
     constexpr bool RequiresSurface() const { return SurfaceOutputMask()!=0; }
     constexpr bool RequiresDepth() const { return needsDepth || RequiresSurface(); }
     constexpr bool RequiresGeometry() const { return needsGeometry || RequiresDepth(); }
 };
+// MainForward carries the packing stride in the upper 24 bits of its draw flags.
+constexpr uint32_t SurfaceOwnerStride(uint32_t entityCount)
+{
+    return entityCount<=(UINT32_MAX>>8)?entityCount:0;
+}
+constexpr bool SurfaceOwnerIndicesFit(uint32_t stride,uint32_t indexBufferBytes)
+{
+    const uint64_t triangles=indexBufferBytes/(3*sizeof(uint32_t));
+    return stride && triangles*stride<=UINT32_MAX;
+}
 static_assert([] {RenderRequirements r;r.needsDepth=true;return r.RequiresDepth() && !r.RequiresSurface() && r.RequiresGeometry();}());
 static_assert([] {RenderRequirements r;r.needsSurface=true;return r.SurfaceOutputMask()==7 && r.RequiresDepth();}());
 static_assert([] {RenderRequirements r;r.needsMotion=true;return r.SurfaceOutputMask()==4 && r.RequiresDepth();}());
@@ -114,7 +126,12 @@ struct RenderFrame
     // AfterOpaque에서 color를 교체하면 다음 확장과 기본 톤 매핑의 입력이 된다.
     RenderTexture output={}, color={}, depth={}, shadow={};
     RenderTexture normal={}, albedo={}, ao={}, motion={};
-    RenderTexture reactive={};
+    RenderTexture reactive={}, materialOwner={};
+    // Opt-in: full Surface images match geometry/material inputs; owner is
+    // R32G32_UINT {entityKey, absolute triangle index} by default. If every extension
+    // opts in and the range fits, R32_UINT stores triangle * entityCount + entityKey (1..entityCount).
+    // A zero entity key is invalid in both formats. Mutations invalidate the proof.
+    bool surfaceMaterialComplete=false;
     // Keys are instance-rate uint2 {scene entity+1, absolute firstIndex/3}; zero entity is unknown.
     RenderBuffer visibleInstances={}, indirectArguments={}, visibleInstanceKeys={};
     RenderLightingResources lighting={};
@@ -171,12 +188,12 @@ public:
     const std::vector<RenderGeometryDraw>& geometry;
     const RenderHistory& history;
     const RenderRequirements& requirements;
-    RenderTexture &output,&color,&depth,&shadow,&normal,&albedo,&ao,&motion,&reactive;
+    RenderTexture &output,&color,&depth,&shadow,&normal,&albedo,&ao,&motion,&reactive,&materialOwner;
     RenderBuffer &visibleInstances,&indirectArguments,&visibleInstanceKeys;
     RenderLightingResources& lighting;
     RHI::TextureHandle const blackTexture;
     const bool lodDebug,wireframe,gpuVisibility,environmentCapture,hasShadows;
-    bool &temporalAA,&outputWritten,&opaqueDepthComplete;
+    bool &temporalAA,&outputWritten,&opaqueDepthComplete,&surfaceMaterialComplete;
     const void* GetIdentity() const noexcept { return m_identity; }
 private:
     friend class ReadOnlyRenderExtension;
@@ -184,12 +201,12 @@ private:
         :renderer(frame.renderer),scene(frame.scene),camera(frame.camera),draws(frame.draws),
         geometry(frame.geometry),history(frame.history),requirements(frame.requirements),
         output(frame.output),color(frame.color),depth(frame.depth),shadow(frame.shadow),normal(frame.normal),
-        albedo(frame.albedo),ao(frame.ao),motion(frame.motion),reactive(frame.reactive),
+        albedo(frame.albedo),ao(frame.ao),motion(frame.motion),reactive(frame.reactive),materialOwner(frame.materialOwner),
         visibleInstances(frame.visibleInstances),indirectArguments(frame.indirectArguments),visibleInstanceKeys(frame.visibleInstanceKeys),
         lighting(frame.lighting),blackTexture(frame.blackTexture),lodDebug(frame.lodDebug),wireframe(frame.wireframe),
         gpuVisibility(frame.gpuVisibility),environmentCapture(frame.environmentCapture),hasShadows(frame.hasShadows),
         temporalAA(frame.temporalAA),outputWritten(frame.outputWritten),opaqueDepthComplete(frame.opaqueDepthComplete),
-        m_identity(&frame) {}
+        surfaceMaterialComplete(frame.surfaceMaterialComplete),m_identity(&frame) {}
     const void* m_identity;
 };
 

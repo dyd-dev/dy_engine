@@ -60,6 +60,9 @@ struct MeshVertex
     float2 uv [[attribute(2)]];
     float4 tangent [[attribute(3)]];
     float4 color [[attribute(8)]];
+#if RENDERER_SURFACE_CACHE
+    uint2 sourceKey [[attribute(9)]];
+#endif
 #if RENDERER_INSTANCING
     float4 model0 [[attribute(4)]];
     float4 model1 [[attribute(5)]];
@@ -77,6 +80,9 @@ struct RasterData
     float3 worldNormal [[user(locn2)]];
     float4 worldTangent [[user(locn3)]];
     float4 color [[user(locn5)]];
+#if RENDERER_SURFACE_CACHE
+    uint2 instanceKey [[user(locn6),flat]];
+#endif
 #if RENDERER_ENABLE_SHADOWS
     float4 lightSpacePosition [[user(locn4)]];
 #endif
@@ -137,6 +143,9 @@ vertex RasterData RENDERER_VERTEX_ENTRY(
     const float3x3 normalMatrix = MeshNormalMatrix(world);
 
     RasterData output;
+#if RENDERER_SURFACE_CACHE
+    output.instanceKey=input.sourceKey;
+#endif
     output.position = clipPosition;
     output.uv = input.uv;
     output.color = input.color;

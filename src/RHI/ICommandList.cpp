@@ -566,14 +566,15 @@ try
         {
             const auto format=color.texture->GetDesc().format;
             const uint32_t channels=(format==Format::R16_UINT || format==Format::R16_FLOAT || format==Format::R32_UINT || format==Format::R32_FLOAT) ? 1u :
-                format==Format::R32G32_FLOAT ? 2u : format==Format::R32G32B32_FLOAT ? 3u : 4u;
+                (format==Format::R32G32_FLOAT || format==Format::R32G32_UINT) ? 2u : format==Format::R32G32B32_FLOAT ? 3u : 4u;
             for(uint32_t channel=0;channel<channels;++channel)
                 if(!std::isfinite(color.clearColor[channel])){m_recordingFailed=true;return;}
             // 없는 채널은 계약상 사용하지 않는다. native에도 무의미한 NaN/Inf를 전달하지 않는다.
             for(uint32_t channel=channels;channel<4;++channel)color.clearColor[channel]=0;
-            if(format==Format::R16_UINT || format==Format::R32_UINT)
+            if(format==Format::R16_UINT || format==Format::R32_UINT || format==Format::R32G32_UINT)
+            for(uint32_t channel=0;channel<channels;++channel)
             {
-                const double value=color.clearColor[0];
+                const double value=color.clearColor[channel];
                 const double maximum=format==Format::R16_UINT ? 65535.0 : 4294967295.0;
                 if(value<0 || value>maximum || std::trunc(value)!=value)
                 {

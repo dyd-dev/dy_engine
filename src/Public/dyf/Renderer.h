@@ -120,6 +120,8 @@ namespace dyf
 		bool temporalAA = true;
 		bool bloom = true;
 		bool transparency = true;
+		// 추가 버퍼 비용이 있으므로 대상 장면에서 성능을 확인한 뒤 켠다.
+		bool reuseSurfaceMaterials = false;
 		VolumetricFogConfig fog = {};
 		SurfaceDebugView surfaceDebugView = SurfaceDebugView::None;
 		float aoRadius = 1.2f;
@@ -279,6 +281,7 @@ struct RendererStatistics
     uint32_t indirectBatchCount=0;
     // 요청한 토글과 구분하여 해당 프레임에서 사용하는 경로와 실제 자원 크기를 보여준다.
     bool gpuOcclusion=false,clusteredLighting=false,surfacePrepass=false;
+    bool surfaceMaterialReuse=false; // At least one stock opaque draw used exact primitive ownership.
     uint32_t renderWidth=0,renderHeight=0,outputWidth=0,outputHeight=0;
     uint32_t shadowViewCount=0,shadowViewResolution=0;
     float directionalShadowDistance=0;

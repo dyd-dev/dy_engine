@@ -12,6 +12,12 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#if defined(DY_SURFACE_OWNER_PROBE_METAL)
+#include "SurfaceOwnerProbe.h"
+#elif defined(DY_SURFACE_OWNER_PROBE)
+#include "SurfaceOwnerProbeVertex.h"
+#include "SurfaceOwnerProbeFragment.h"
+#endif
 
 namespace RenderingProbe
 {
@@ -19,6 +25,78 @@ using namespace dyf;
 using namespace dyf::RHI;
 inline void Check(bool value,const char* message)
 {if(!value)throw std::runtime_error(message);}
+#if defined(DY_SURFACE_OWNER_PROBE)
+// Test-only integer projection avoids interpreting UINT2 ownership as filtered float color.
+class SurfaceOwnerProbe
+{
+    IDevice& m_device;
+    ResourceScope m_resources;
+    PipelineHandle m_pipeline=nullptr;
+    TextureHandle m_target=nullptr;
+    ResourceState m_state=ResourceState::Undefined;
+    uint32_t m_ownerStride=0;
+public:
+    explicit SurfaceOwnerProbe(IDevice& device):m_device(device),m_resources(device)
+    {
+#if defined(DY_SURFACE_OWNER_PROBE_METAL)
+        const ShaderDesc vs{ShaderStage::Vertex,"surfaceOwnerProbeVertex",kSurfaceOwnerProbe,kSurfaceOwnerProbeSize};
+        const ShaderDesc fs{ShaderStage::Fragment,"surfaceOwnerProbeFragment",kSurfaceOwnerProbe,kSurfaceOwnerProbeSize};
+#else
+        const ShaderDesc vs{ShaderStage::Vertex,"main",kSurfaceOwnerProbeVertex,kSurfaceOwnerProbeVertexSize};
+        const ShaderDesc fs{ShaderStage::Fragment,"main",kSurfaceOwnerProbeFragment,kSurfaceOwnerProbeFragmentSize};
+#endif
+        GraphicsPipelineDesc desc;desc.vertexShader=m_resources.Keep(device.CreateShader(vs));
+        desc.fragmentShader=m_resources.Keep(device.CreateShader(fs));desc.topology=PrimitiveTopology::TriangleList;
+        desc.raster={FillMode::Solid,CullMode::None,FrontFace::CounterClockwise,0,0,0};
+        const ColorAttachmentDesc color{Format::R8G8B8A8_UNORM,{},ColorWriteMask::All};
+        const ResourceBindingLayout binding{0,ResourceBindingType::SampledTexture,1,ShaderStageFlags::Fragment,{}};
+        desc.colorAttachments=&color;desc.colorAttachmentCount=1;desc.layout={&binding,1,0,ShaderStageFlags::None,0};
+        m_pipeline=m_resources.Keep(device.CreateGraphicsPipeline(desc));
+        Check(m_pipeline!=nullptr,"Owner projection pipeline creation failed.");
+    }
+    void Capture(RenderGraph& graph,RenderTexture owner,uint32_t ownerStride)
+    {
+        Check(owner.texture && owner.resource.IsValid(),"Owner projection requires a captured texture.");
+        const auto& size=owner.texture->GetDesc();
+        Check(size.format==(ownerStride?Format::R32_UINT:Format::R32G32_UINT),"Unexpected Surface owner representation");
+        m_ownerStride=ownerStride;
+        if(!m_target)
+        {
+            TextureDesc desc;desc.width=size.width;desc.height=size.height;desc.format=Format::R8G8B8A8_UNORM;
+            desc.usage=TextureUsage::RenderTarget|TextureUsage::ShaderResource;
+            m_target=m_resources.Keep(m_device.CreateTexture(desc));
+        }
+        Check(m_target && m_target->GetDesc().width==size.width && m_target->GetDesc().height==size.height,
+            "Owner projection extent changed.");
+        const ResourceBinding binding{0,0,nullptr,owner.texture,0,0,{}};
+        const auto set=m_resources.Keep(m_device.CreateResourceSet({m_pipeline,&binding,1}));
+        Check(set!=nullptr,"Owner projection resources failed.");
+        const auto target=graph.ImportTexture("Probe exact Surface owner",m_target,m_state,ResourceState::ShaderResource);
+        Check(target.IsValid(),"Owner projection output import failed.");
+        graph.AddPass("Probe exact Surface owner",RGRecordingMode::Independent)
+            .Read(owner.resource,ResourceState::ShaderResource).Write(target,ResourceState::RenderTarget)
+            .SetExecute([this,set,width=size.width,height=size.height](ICommandList* commands) {
+                ColorAttachment color;color.texture=m_target;color.loadOp=LoadOp::Clear;color.storeOp=StoreOp::Store;
+                commands->BeginRendering({&color,1,nullptr});commands->SetViewport({0,0,float(width),float(height),0,1});
+                commands->SetScissor({0,0,width,height});commands->BindGraphicsPipeline(m_pipeline);commands->BindResourceSet(set);
+                commands->DrawInstanced(3,1,0,0);commands->EndRendering();
+            });
+        m_state=ResourceState::ShaderResource;
+    }
+    void VerifyQuad()
+    {
+        TextureReadback image;Check(m_target && m_device.ReadTexture(m_target,image),"Owner projection readback failed.");
+        const auto exact=[&](uint32_t x,uint32_t y,uint8_t entity,uint8_t primitive) {
+            const auto* p=image.pixels.data()+size_t(y)*image.rowPitch+x*4;
+            Check(p[0]==entity && p[1]==primitive && p[2]==0 && p[3]==255,
+                "Surface owner must contain exact entity+1 and distinct absolute primitive IDs.");
+        };
+        exact(0,0,0,0);
+        exact(image.width*3/4,image.height*3/4,1,0);
+        exact(image.width/4,image.height/4,uint8_t(m_ownerStride+1),m_ownerStride?0:1);
+    }
+};
+#endif
 template<class F> void Reject(const char* label,F operation)
 {
     std::fprintf(stderr,"EXPECTED_COMMON_REJECTION_BEGIN %s\n",label);
@@ -333,11 +411,15 @@ public:
         bool found=false;
         for(uint32_t p=0;const auto* pass=graph.GetPass(p);++p)
         {
-            if(pass->GetName()!="Surface requested outputs depth" && pass->GetName()!="Opaque masked depth only")continue;
+            if(pass->GetName()!="Surface requested outputs depth" && pass->GetName()!="Opaque masked depth only" &&
+                pass->GetName()!="Surface primitive material cache")continue;
             found=true;uint32_t colors=0;bool depth=false;
             for(const auto& write:pass->GetWrites())
             {if(write.state==ResourceState::RenderTarget)++colors;if(write.handle==frame.depth.resource && write.state==ResourceState::DepthWrite)depth=true;}
-            Check(colors==count && depth,"Surface pass MRT count/depth does not match its demand.");
+            const bool owner=frame.materialOwner.texture && frame.materialOwner.resource.IsValid();
+            Check(!owner || (mask==7 && frame.materialOwner.texture->GetDesc().format==Format::R32G32_UINT),
+                "Surface owner requires full material outputs and exact integer keys.");
+            Check(colors==count+uint32_t(owner) && depth,"Surface pass MRT count/depth does not match its demand.");
         }
         Check(found,"Surface/depth-only graph pass was not added.");
         for(uint32_t bit=0;bit<3;++bit)if(mask&(1u<<bit))

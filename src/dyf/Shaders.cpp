@@ -25,6 +25,12 @@
 #include "ToneMapFragment.h"
 #endif
 #if defined(ENABLE_METAL) || defined(ENABLE_D3D12) || defined(ENABLE_VULKAN)
+#include "SurfaceCacheVertex0.h"
+#include "SurfaceCacheVertex1.h"
+#include "SurfaceCacheFragment00.h"
+#include "SurfaceCacheFragment01.h"
+#include "SurfaceCacheFragment10.h"
+#include "SurfaceCacheFragment11.h"
 #include "StockDepthPrepassFragment.h"
 #include "StockDepthPrepassFragmentNoShadows.h"
 #include "BindlessDepthPrepassFragment.h"
@@ -77,6 +83,28 @@ RHI::ShaderDesc Renderer::Impl::DefaultDepthPrepassFragment(bool shadows,bool bi
     RHI::ShaderDesc desc;desc.stage=RHI::ShaderStage::Fragment;return desc;
 #endif
 }
+RHI::ShaderDesc Renderer::Impl::DefaultSurfaceCacheShader(bool vertex,bool shadows,bool bindless)
+{
+#if defined(ENABLE_METAL) || defined(ENABLE_VULKAN) || defined(ENABLE_D3D12)
+#if defined(ENABLE_METAL)
+    const char* entry=vertex?"surfaceCacheVertex":"surfaceCacheFragment";
+#else
+    const char* entry="main";
+#endif
+    if(vertex)return shadows
+        ? RHI::ShaderDesc{RHI::ShaderStage::Vertex,entry,kSurfaceCacheVertex1,kSurfaceCacheVertex1Size}
+        : RHI::ShaderDesc{RHI::ShaderStage::Vertex,entry,kSurfaceCacheVertex0,kSurfaceCacheVertex0Size};
+    if(shadows)return bindless
+        ? RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kSurfaceCacheFragment11,kSurfaceCacheFragment11Size}
+        : RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kSurfaceCacheFragment10,kSurfaceCacheFragment10Size};
+    return bindless
+        ? RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kSurfaceCacheFragment01,kSurfaceCacheFragment01Size}
+        : RHI::ShaderDesc{RHI::ShaderStage::Fragment,entry,kSurfaceCacheFragment00,kSurfaceCacheFragment00Size};
+#else
+    (void)vertex;(void)shadows;(void)bindless;return {};
+#endif
+}
+
 RHI::ShaderDesc Renderer::Impl::DefaultNoAreaFragment(bool shadows,bool bindless,bool depthPrepass)
 {
 #if defined(ENABLE_METAL)

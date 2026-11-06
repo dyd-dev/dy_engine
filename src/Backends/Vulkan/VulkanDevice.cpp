@@ -135,6 +135,7 @@ namespace dyf::Backends
             case RHI::Feature::RenderArea:
             case RHI::Feature::SamplerLodBias:
             case RHI::Feature::FractionalDepthBias: return true;
+            case RHI::Feature::FragmentPrimitiveId: return supported.geometryShader == VK_TRUE;
             case RHI::Feature::Tessellation:
             case RHI::Feature::IndirectTessellation: return supported.tessellationShader == VK_TRUE;
             case RHI::Feature::IndirectFirstInstance: return supported.drawIndirectFirstInstance == VK_TRUE;
@@ -2174,6 +2175,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		VkPhysicalDeviceFeatures enabled{};
 		enabled.samplerAnisotropy = supported.samplerAnisotropy;
         enabled.textureCompressionBC = supported.textureCompressionBC;
+        enabled.geometryShader = supported.geometryShader;
 		enabled.fillModeNonSolid = supported.fillModeNonSolid;
 		enabled.depthBiasClamp = supported.depthBiasClamp;
 		enabled.tessellationShader = supported.tessellationShader;

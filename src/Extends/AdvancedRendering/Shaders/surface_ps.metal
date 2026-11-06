@@ -1,12 +1,30 @@
+#ifndef SURFACE_OPAQUE
+#define SURFACE_OPAQUE 0
+#endif
+#ifndef SURFACE_OWNER
+#define SURFACE_OWNER 0
+#endif
 #include <metal_stdlib>
 using namespace metal;
 struct SurfaceDraw {float4x4 model;float4x4 previousMVP;float4x4 normalMatrix;float4 baseColor;float4 materialParams;uint4 flags;float4 alpha;};
 struct SurfaceFrame {float4x4 view;float4x4 projection;float4x4 inverseProjection;float4x4 viewProjection;float4 size;float4 ao;float4 lighting;float4 options;uint4 outputs;float4x4 inversePreviousProjection;};
-struct SurfaceOutput {float4 position [[position]];float2 uv;float3 worldNormal;float4 worldTangent;float4 currentClip;float4 previousClip;float viewDepth;float4 vertexColor;};
-struct SurfaceTargets {float4 normalRoughAO [[color(0)]];float4 albedoMetal [[color(1)]];float4 motionDepth [[color(2)]];};
+struct SurfaceOutput {float4 position [[position]];float2 uv;float3 worldNormal;float4 worldTangent;float4 currentClip;float4 previousClip;float viewDepth;float4 vertexColor;
+#if SURFACE_OWNER
+uint2 instanceKey [[flat]];
+#endif
+};
+struct SurfaceTargets {float4 normalRoughAO [[color(0)]];float4 albedoMetal [[color(1)]];float4 motionDepth [[color(2)]];
+#if SURFACE_OWNER
+uint2 materialOwner [[color(3)]];
+#endif
+};
 struct SurfaceTargets1 {float4 first [[color(0)]];};
 struct SurfaceTargets2 {float4 first [[color(0)]];float4 second [[color(1)]];};
-struct SurfaceValues {float4 values[3];};
+struct SurfaceValues {float4 values[3];
+#if SURFACE_OWNER
+bool cacheValid;
+#endif
+};
 static float2 surfaceOctEncode(float3 n)
 {
     n/=abs(n.x)+abs(n.y)+abs(n.z);
@@ -21,10 +39,15 @@ static SurfaceValues SurfaceEvaluate(SurfaceOutput input,bool front,
     SurfaceDraw draw=draws[index.x];uint flags=draw.flags.x;SurfaceValues output={};
     bool needNormal=(frame.outputs.w&1u)!=0u,needMaterial=(frame.outputs.w&2u)!=0u,needMotion=(frame.outputs.w&4u)!=0u;
     float4 base=draw.baseColor*input.vertexColor;
-    if((needMaterial || draw.flags.y==1) && (flags&1)!=0)base*=baseTexture.sample(materialSampler,input.uv);
+    if((needMaterial || (SURFACE_OPAQUE==0 && draw.flags.y==1)) && (flags&1)!=0)base*=baseTexture.sample(materialSampler,input.uv);
     if((flags&64u)!=0u)base.rgb=draw.baseColor.rgb;
+#if SURFACE_OWNER
+    // Preserve Surface's nonnegative output contract; unsupported inputs use original Main sampling.
+    output.cacheValid=all(base.rgb>=0.0f) && all(base.rgb<=65504.0f) &&
+        ((flags&8u)==0u || (draw.materialParams.w>=0.0f && draw.materialParams.w<=1.0f));
+#endif
     float3 n=float3(0,0,1);float roughness=0.04f;
-    float2 mr=draw.materialParams.xy;
+    float2 mr=clamp(draw.materialParams.xy,float2(0,0.04),float2(1,1));
     if((needNormal || needMaterial) && (flags&2)!=0)mr*=materialTexture.sample(materialSampler,input.uv).bg;
     if(needNormal)
     {
@@ -43,7 +66,9 @@ static SurfaceValues SurfaceEvaluate(SurfaceOutput input,bool front,
         float filteredAlphaSquared=min(1.0f,roughness*roughness*roughness*roughness+min(2.0f*normalVariance,0.18f));
         roughness=sqrt(sqrt(filteredAlphaSquared));
     }
+#if !SURFACE_OPAQUE
     if(draw.flags.y==1 && base.a<draw.alpha.x)discard_fragment();
+#endif
     if(needNormal)
     {
         if(draw.flags.z!=0 && !front)n=-n;
@@ -72,21 +97,45 @@ static SurfaceValues SurfaceEvaluate(SurfaceOutput input,bool front,
     texture2d<float> materialTexture [[texture(1)]],texture2d<float> normalTexture [[texture(2)]], \
     texture2d<float> aoTexture [[texture(3)]],texture2d<float> emissiveTexture [[texture(4)]],sampler materialSampler [[sampler(8)]]
 #define SURFACE_EVALUATE SurfaceEvaluate(input,front,draws,frame,index,baseTexture,materialTexture,normalTexture,aoTexture,emissiveTexture,materialSampler)
+#if !SURFACE_OWNER
+#if SURFACE_OPAQUE
+[[early_fragment_tests]]
+#endif
 fragment void surfaceFragment0(SURFACE_ARGUMENTS) { (void)SURFACE_EVALUATE; }
+#if SURFACE_OPAQUE
+[[early_fragment_tests]]
+#endif
 fragment SurfaceTargets1 surfaceFragment1(SURFACE_ARGUMENTS)
 {
     SurfaceValues values=SURFACE_EVALUATE;
     return {values.values[0]};
 }
+#if SURFACE_OPAQUE
+[[early_fragment_tests]]
+#endif
 fragment SurfaceTargets2 surfaceFragment2(SURFACE_ARGUMENTS)
 {
     SurfaceValues values=SURFACE_EVALUATE;
     return {values.values[0],values.values[1]};
 }
-fragment SurfaceTargets surfaceFragment(SURFACE_ARGUMENTS)
+#endif
+#if SURFACE_OPAQUE
+[[early_fragment_tests]]
+#endif
+fragment SurfaceTargets surfaceFragment(SURFACE_ARGUMENTS
+#if SURFACE_OWNER
+,uint primitive [[primitive_id]]
+#endif
+)
 {
     SurfaceValues values=SURFACE_EVALUATE;
+#if SURFACE_OWNER
+    uint triangle=input.instanceKey.y+primitive;
+    uint owner=triangle*index.w+input.instanceKey.x;
+    return {values.values[0],values.values[1],values.values[2],values.cacheValid && input.instanceKey.x!=0u?uint2(owner,triangle):uint2(0)};
+#else
     return {values.values[0],values.values[1],values.values[2]};
+#endif
 }
 #undef SURFACE_EVALUATE
 #undef SURFACE_ARGUMENTS
