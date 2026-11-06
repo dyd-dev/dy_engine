@@ -47,10 +47,11 @@ struct ModelRuntimeTestAccess
 };
 }
 
-namespace { bool countAllocations=false; size_t allocations=0; }
+namespace { bool countAllocations=false; size_t allocations=0; thread_local long failAfter=-1; }
 void* operator new(std::size_t size)
 {
     if(countAllocations) ++allocations;
+    if(failAfter>=0 && failAfter--==0) {failAfter=-1;throw std::bad_alloc();}
     if(void* memory=std::malloc(size?size:1)) return memory;
     throw std::bad_alloc();
 }
@@ -63,6 +64,38 @@ void operator delete[](void* memory,std::size_t) noexcept { std::free(memory); }
 namespace
 {
 using namespace dyf;
+
+void RegistrationRecovery(bool binding)
+{
+    unsigned failures=0;
+    for(long position=0;position<128;++position)
+    {
+        ModelScene scene;ModelInstance input;input.nodes.resize(1);
+        ModelInstanceID id=ModelInstanceID::Invalid;
+        if(binding) {
+            id=scene.CreateModelInstance(input);
+            Check(IsValid(id) && bool(scene.Add(CreateCubeMesh())),"binding recovery fixture");
+        }
+        bool threw=false;failAfter=position;
+        try {
+            if(binding)Check(scene.BindEntityToModel(id,static_cast<EntityID>(0),0),"binding attempt");
+            else id=scene.CreateModelInstance(input);
+        }catch(const std::bad_alloc&) {threw=true;}
+        failAfter=-1;
+        if(!threw)break;
+        ++failures;
+        if(binding) {
+            Check(static_cast<const ModelScene&>(scene).GetModelInstance(id).bindings.empty(),"failed binding published partial state");
+            Check(scene.BindEntityToModel(id,static_cast<EntityID>(0),0),"binding allocation retry");
+        } else {
+            Check(!scene.IsValidModelInstance(static_cast<ModelInstanceID>(0)),"failed creation published a model instance");
+            id=scene.CreateModelInstance(input);Check(ToIndex(id)==0,"creation allocation retry duplicated instance");
+        }
+        Check(scene.UpdateAnimations(0),"recovered model animation update");
+    }
+    Check(failures>0 && failures<128,"model allocation sweep incomplete");
+    std::cout<<"PASS model "<<(binding?"binding":"creation")<<" allocation recovery: "<<failures<<" failures\n";
+}
 
 void AnimationReuse()
 {
@@ -309,8 +342,10 @@ int main(int argc,char** argv) try
     else if(mode=="aliases")RegistrationSnapshots();
     else if(mode=="controls")PlaybackControls();
     else if(mode=="mixed")MixedDeformationReuse();
+    else if(mode=="creation-recovery")RegistrationRecovery(false);
+    else if(mode=="binding-recovery")RegistrationRecovery(true);
     else return 2;
     std::cout<<"PASS model runtime "<<mode<<'\n';return 0;
 }
 catch(const std::exception& error)
-{countAllocations=false;std::cerr<<error.what()<<'\n';return 1;}
+{countAllocations=false;failAfter=-1;std::cerr<<error.what()<<'\n';return 1;}

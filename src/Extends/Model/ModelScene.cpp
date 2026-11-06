@@ -104,7 +104,8 @@ namespace dyf
 
 		state.validOutputs = false;
 		m_modelInstances.push_back(instance);
-		state.instances.resize(m_modelInstances.size());
+		try {state.instances.resize(m_modelInstances.size());}
+		catch(...) {m_modelInstances.pop_back();throw;}
 		return static_cast<ModelInstanceID>(m_modelInstances.size() - 1u);
 	}
 
@@ -134,9 +135,9 @@ namespace dyf
 		binding.nodeIndex = nodeIndex;
 		binding.skinIndex = skinIndex;
 		binding.assetMeshIndex = assetMeshIndex;
+        m_entityHasMorphTargets.resize(GetEntityCount(), false);
 		instance.bindings.push_back(binding);
 		m_animationState->validOutputs = false;
-        m_entityHasMorphTargets.resize(GetEntityCount(), false);
         m_entityHasMorphTargets[ToIndex(entity)] = asset != nullptr && assetMeshIndex != UINT32_MAX &&
             !asset->meshes[assetMeshIndex].morphTargets.empty();
 		return true;
