@@ -53,7 +53,8 @@ public:
         }
     }
 
-    void Update(const dyf::Platform::Window& window, std::initializer_list<Control> controls)
+    void Update(const dyf::Platform::Window& window, std::initializer_list<Control> controls,
+        bool allowRenderControls=true, bool allowControls=true)
     {
         using namespace dyf::Platform;
         const auto logical = window.GetSize(), pixels = window.GetFramebufferSize();
@@ -69,6 +70,10 @@ public:
         m_input = &window.GetInput();
         m_focused = window.HasFocus();
         m_controls.assign(controls.begin(),controls.end());
+        if(!allowControls)
+            for(auto& control:m_controls) if(control.key!=Key::Escape) control.enabled=false;
+        if(!allowRenderControls)
+            for(auto& control:m_controls) if(control.group==ControlGroup::Render) control.enabled=false;
         m_pressed.reset();
         m_escapeConsumed = false;
         m_gesture.BeginFrame(m_focused,resized);
@@ -105,9 +110,9 @@ public:
             ClosePanels();
             m_escapeConsumed = true;
         }
-        if(m_focused && m_input->WasPressed(Key::F11)) SetProfilerVisible(!m_profilerVisible);
+        if(allowControls && m_focused && m_input->WasPressed(Key::F11)) SetProfilerVisible(!m_profilerVisible);
         const auto actions = m_gesture.activated;
-        for(int action : actions) Activate(action);
+        for(int action : actions) if(allowControls || action==Back) Activate(action);
         m_scroll = std::clamp(m_scroll+m_gesture.scrollDelta,0.f,m_scrollMaximum);
         BuildLayout();
     }
@@ -140,6 +145,16 @@ public:
     {
         m_details = false; m_controlsOpen = false; m_scroll = 0; m_gesture.Cancel(); BuildLayout();
     }
+    void ShowProfiler(int tab = -1)
+    {
+        m_profilerVisible = true;
+        m_details = tab >= 0;
+        m_detailTab = std::clamp(tab,0,2);
+        m_controlsOpen = false;
+        m_scroll = 0;
+        m_gesture.Cancel();
+        BuildLayout();
+    }
     void ToggleControls()
     {
         m_controlsOpen = !m_controlsOpen; m_details = false; m_scroll = 0; m_gesture.Cancel(); BuildLayout();
@@ -151,7 +166,7 @@ public:
     }
 
     void Draw(dyf::Canvas& canvas, const dyf::Renderer& renderer, std::string_view title,
-        std::string_view status = {})
+        std::string_view status = {}, const char* presentationState=nullptr)
     {
         if(m_width < 96 || m_height < 96) return;
         EnsureFonts();
@@ -161,15 +176,30 @@ public:
         const auto& applied = renderer.GetAppliedConfig();
         if(!title.empty())
         {
-            const float width = std::min(350.f,std::max(1.f,m_card.x-24));
-            if(width >= 150 || !m_profilerVisible)
+            const float presentationWidth=std::min(640.f,(m_details ? m_panel.x : m_profilerVisible ? m_card.x : m_width)-24);
+            if(presentationState && presentationWidth>=420)
             {
-                const float available = m_profilerVisible ? width : std::min(350.f,m_width-24);
-                const float height = TextHeight(title,available-24,1)+(status.empty()?0:TextHeight(status,available-24,0))+22;
-                const detail::HudRect badge{12,12,available,height};
-                Panel(canvas,badge);
-                float y = Wrapped(canvas,title,24,22,available-24,1,Paper());
-                if(!status.empty()) Wrapped(canvas,status,24,y+2,available-24,0,Muted());
+                const auto color=std::string_view(presentationState)=="ON" ? Accent() : dyf::Math::float4{1,.70f,.35f,1};
+                const float titleHeight=std::max(62.f,TextHeight(title,presentationWidth-166,2));
+                const float height=titleHeight+TextHeight(status,presentationWidth-32,1)+38;
+                Panel(canvas,{12,12,presentationWidth,height});
+                Fill(canvas,{12,12,5,height},color);
+                Text(canvas,presentationState,30,24,3,color);
+                Wrapped(canvas,title,162,25,presentationWidth-166,2,Paper());
+                Wrapped(canvas,status,28,28+titleHeight,presentationWidth-32,1,Paper());
+            }
+            else
+            {
+                const float width = std::min(350.f,std::max(1.f,m_card.x-24));
+                if(width >= 150 || !m_profilerVisible)
+                {
+                    const float available = m_profilerVisible ? width : std::min(350.f,m_width-24);
+                    const float height = TextHeight(title,available-24,1)+(status.empty()?0:TextHeight(status,available-24,0))+22;
+                    const detail::HudRect badge{12,12,available,height};
+                    Panel(canvas,badge);
+                    float y = Wrapped(canvas,title,24,22,available-24,1,Paper());
+                    if(!status.empty()) Wrapped(canvas,status,24,y+2,available-24,0,Muted());
+                }
             }
         }
         if(m_profilerVisible && !m_details) DrawSummary(canvas,timing);
@@ -189,7 +219,7 @@ private:
     struct Button { detail::HudRect bounds; int action; std::string label; bool active=false, enabled=true, held=false; };
     struct MetricRow { std::string label, value; double fraction=0; };
     std::string m_fontPath;
-    std::unique_ptr<dyf::Font> m_small, m_body, m_large;
+    std::unique_ptr<dyf::Font> m_small, m_body, m_large, m_presentation;
     float m_fontScale = 0, m_scale = 1, m_width = 0, m_height = 0;
     float m_pointerScaleX = 1, m_pointerScaleY = 1;
     int m_windowWidth = 0, m_windowHeight = 0, m_pixelWidth = 0, m_pixelHeight = 0;
@@ -492,10 +522,11 @@ private:
             m_small=dyf::Font::Load(m_fontPath,14*m_scale);
             m_body=dyf::Font::Load(m_fontPath,18*m_scale);
             m_large=dyf::Font::Load(m_fontPath,26*m_scale);
+            m_presentation=dyf::Font::Load(m_fontPath,46*m_scale);
         }
     }
-    dyf::Font* Typeface(int size) { return size==2 ? m_large.get() : size==1 ? m_body.get() : m_small.get(); }
-    static float FontSize(int size) { return size==2 ? 26.f : size==1 ? 18.f : 14.f; }
+    dyf::Font* Typeface(int size) { return size==3 ? m_presentation.get() : size==2 ? m_large.get() : size==1 ? m_body.get() : m_small.get(); }
+    static float FontSize(int size) { return size==3 ? 46.f : size==2 ? 26.f : size==1 ? 18.f : 14.f; }
     float LineHeight(int size)
     {
         auto* font=Typeface(size);

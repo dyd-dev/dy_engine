@@ -25,11 +25,27 @@ if(NOT TARGET dyf::AdvancedRendering)
 endif()
 
 add_executable(ShowcaseCinematic main.cpp)
+target_compile_features(ShowcaseCinematic PRIVATE cxx_std_20)
 target_link_libraries(ShowcaseCinematic PRIVATE dyf::Model dyf::AdvancedRendering)
 dyf_configure_showcase(ShowcaseCinematic showcase)
+
+# The presentation opens all three assets in one process and keeps its window alive.
+add_executable(ShowcasePresentation main.cpp)
+target_compile_features(ShowcasePresentation PRIVATE cxx_std_20)
+target_link_libraries(ShowcasePresentation PRIVATE dyf::Model dyf::AdvancedRendering)
+target_compile_definitions(ShowcasePresentation PRIVATE DY_PRESENTATION_DEFAULT=1)
+dyf_configure_showcase(ShowcasePresentation presentation)
 set_property(TARGET ShowcaseCinematic APPEND PROPERTY DY_EXAMPLE_PRESETS
     "ShowcaseBistroExterior|exterior"
     "ShowcaseBistroNight|night"
     "ShowcaseBistroWine|interior"
     "ShowcaseEmerald|emerald"
     "ShowcaseKnight|exterior|--actor|knight|--comparison-mode|skinning")
+
+if(WIN32)
+    foreach(scene IN ITEMS exterior interior emerald)
+        file(GENERATE OUTPUT "$<TARGET_FILE_DIR:ShowcaseCinematic>/Demo-${scene}.cmd"
+            CONTENT "@echo off\n\"%~dp0$<TARGET_FILE_NAME:ShowcaseCinematic>\" ${scene} --presentation %*\nif errorlevel 1 pause\n"
+            NEWLINE_STYLE CRLF)
+    endforeach()
+endif()
