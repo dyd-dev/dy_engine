@@ -168,7 +168,8 @@ bool GpuVisibility::Prepare(const std::vector<Instance>& inputs,const std::vecto
     uint64_t capacity=0;
     for(const auto& batch:batches)
     {
-        if(!batch.capacity || !batch.indexCount || batch.instanceOffset<capacity) return false; // 배치는 출력 공간과 인덱스를 가져야 하고 앞 배치의 끝보다 앞에서 시작하면 안 된다.
+        if(!batch.capacity || !batch.indexCount || batch.instanceOffset<capacity ||
+            uint64_t(batch.firstIndex)+batch.indexCount>UINT32_MAX) return false; // 출력 구간과 간접 드로의 인덱스 범위가 넘치지 않아야 한다.
         capacity=uint64_t(batch.instanceOffset)+batch.capacity;
     }
     if(capacity>UINT32_MAX/sizeof(VisibleInstance)) return false; // 마지막 배치 끝까지의 인스턴스 바이트 크기가 RHI 32비트 범위를 넘으면 중단한다.

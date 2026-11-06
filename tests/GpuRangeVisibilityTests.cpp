@@ -99,6 +99,14 @@ int main() try {
         inspect({3,1,9,0,0,3,1,12,0,2},false,2); // Projective bounds fail open.
         inputs[0].model=Math::float4x4::Identity();
         for(auto& input:inputs)input.centerRadius.w=.1f;
+        for(const auto size:{std::array<uint32_t,2>{17,33},{65,129},{257,67},{128,64}}) {
+            td.width=size[0];td.height=size[1];
+            depth=own.Keep(device->CreateTexture(td));Check(depth!=nullptr,"resized depth texture");
+            depthState=ResourceState::Undefined;
+            inspect({3,0,9,0,0,3,0,12,0,2},false,2);
+            inspect({3,2,9,0,0,3,0,12,0,2},false,1);
+            inspect({},true,1);
+        }
     }
     inputs[0].model.m[0]=-1;inputs[0].model.m[4]=3;
     inspect({3,2,9,0,0,3,0,12,0,2},false);inspect({},true);

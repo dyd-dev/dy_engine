@@ -114,6 +114,18 @@ int main(int argc,char** argv) {
  if(mode=="cull") {Check(scene.GetEntity(static_cast<dyf::EntityID>(1)).SetPosition({10000,0,0}),"move");drawCount=instanceCount=0;Check(renderer->RenderToTexture(scene,camera,target,RHI::ResourceState::ShaderResource),"cull render");Check(instanceCount==2,"outside entity must be culled");}
 
  const auto render=[&] {drawCount=instanceCount=0;return renderer->RenderToTexture(scene,camera,target,RHI::ResourceState::ShaderResource);};
+ if(mode=="growth" || mode=="growth-retry") {
+  auto* previous=renderer->m_impl->cpuInstanceBuffer;
+  Check(previous && previous->GetDesc().size==64*sizeof(dyf::Math::float4x4)*2,"CPU batch growth fixture capacity");
+  while(scene.GetEntityCount()<65)Check(bool(scene.AddInstance(source)),"CPU batch growth instance");
+  if(mode=="growth-retry") {
+   device.failDraw=true;Check(!render(),"CPU batch growth submission failure");
+   Check(renderer->m_impl->cpuInstanceBuffer==previous && renderer->m_impl->cpuInstanceReady,"CPU batch growth failed to restore old owner/state");
+  }
+  Check(render() && instanceCount==65,"CPU batch growth/retry lost instances");
+  Check(renderer->m_impl->cpuInstanceBuffer!=previous,"CPU batch capacity did not grow");
+  const auto buffers=device.buffers;Check(render() && instanceCount==65 && device.buffers==buffers,"grown CPU batch did not stabilize");
+ }
  if(mode=="cull") {
   for(uint32_t i=0;i<scene.GetEntityCount();++i)Check(scene.GetEntity(static_cast<dyf::EntityID>(i)).SetPosition({10000,0,0}),"move all outside");
   Check(render(),"all culled clear-only render");const auto stats=renderer->GetLastRenderStatistics();

@@ -186,10 +186,10 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
 			const auto entity=static_cast<EntityID>(index);
 			const auto mesh=scene.GetEntityMesh(entity);
 			Math::float3 local={};
-			if(IsValid(mesh) && ToIndex(mesh)<m_meshes.size() && m_meshes[ToIndex(mesh)].bounds.valid) // 유효한 메시 경계가 있을 때만 경계 중심을 정렬 기준으로 쓴다.
+			if(IsValid(mesh) && ToIndex(mesh)<m_meshes.size())
 			{
-				const auto& bounds=m_meshes[ToIndex(mesh)].bounds;
-				local=(bounds.min+bounds.max)*0.5f;
+				const auto& bounds=draws && (*draws)[index].hasLocalBounds ? (*draws)[index].localBounds : m_meshes[ToIndex(mesh)].bounds;
+				if(bounds.valid)local=(bounds.min+bounds.max)*0.5f;
 			}
 			const auto center=Math::TransformPoint(scene.GetTransform(entity),local);
 			const float z=Math::TransformPoint(camera.view,center).z;

@@ -109,6 +109,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         if(!m_environmentCapture)m_profiler.PollGpuSamples(); // 창·텍스처 Scene 경로에서 이전 제출의 GPU 표본을 polling한다. 이 조회가 모든 GPU 작업을 동기 대기하는 것은 아니다.
         auto* windowOutput=selectedOutput ? nullptr : nativeDevice->GetBackBuffer();
         auto* output=selectedOutput ? selectedOutput : windowOutput;
+        if(!output) return RendererFailure("Scene output acquisition failed.");
         // 고정 장면 해상도는 별도 타깃에 그리고 창으로 비율 유지 복사한다. overlay/HUD는 최종 창 크기를 따라 그린다.
         const bool fixedOutput=!selectedOutput && config.renderWidth && config.renderHeight;
         if(fixedOutput) // 고정 장면 해상도가 지정되었으면 별도 출력 타깃을 준비한다.

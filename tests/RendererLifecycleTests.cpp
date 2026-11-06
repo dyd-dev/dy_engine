@@ -3,13 +3,14 @@
 #define main CommitProbeEntryUnused
 #include "RendererExceptionTests.cpp"
 #undef main
+#include "dyf/Canvas.h"
 
 namespace {
 struct LifecycleDevice final : dyf::Backends::NullDevice
 {
     uint64_t serial=0, pipelineCalls=0, presentCalls=0;
     unsigned pipelineFailureCountdown=0;
-    bool failPresent=false;
+    bool failPresent=false,failBackbuffer=false;
     LifecycleDevice(){Check(Initialize(nullptr,{})==0,"Lifecycle Null init failed");}
     ~LifecycleDevice() override {ReleaseResources();}
     bool SupportsNative(R::Feature feature) const override
@@ -27,6 +28,9 @@ struct LifecycleDevice final : dyf::Backends::NullDevice
     uint64_t GetCompletedSubmissionNative() override {return serial;}
     uint64_t GetLastSubmissionNative() const override {return serial;}
     bool PresentNative() override {++presentCalls;const bool presented=NullDevice::PresentNative();return presented && !std::exchange(failPresent,false);}
+    R::TextureHandle GetBackBufferNative() override {return std::exchange(failBackbuffer,false)?nullptr:NullDevice::GetBackBufferNative();}
+    bool UpdateBufferNative(R::ICommandList&,R::BufferHandle,uint32_t,const void*,uint32_t) override {return true;}
+    bool UpdateTextureNative(R::ICommandList&,R::TextureHandle,uint32_t,uint32_t,const void*,uint32_t,uint32_t,uint32_t) override {return true;}
     R::PipelineHandle CreateGraphicsPipelineNative(const R::GraphicsPipelineDesc& desc) override
     {
         ++pipelineCalls;
@@ -122,6 +126,24 @@ void PipelineRetryProbe()
     Check(state.InitializeMesh(a,true) && state.pipeline->m_colorFormats.at(0)==a->GetDesc().format,"Full-rebuild recovery control failed");
     device.DestroyTexture(a);device.DestroyTexture(b);
 }
+
+void MissingBackbufferProbe(bool fixed,bool canvas)
+{
+    LifecycleDevice device;dyf::RendererConfig config;config.enableProfilerHud=false;
+    if(fixed)config.renderWidth=config.renderHeight=16;
+    auto renderer=dyf::Renderer::Create(device,reinterpret_cast<void*>(1),config);
+    Check(bool(renderer),"Missing output fixture");
+    dyf::Scene scene;dyf::Camera camera;dyf::Canvas overlay(16,16);
+    const auto render=[&] {return canvas?renderer->Render(overlay):renderer->Render(scene,camera);};
+    Check(render(),"Missing output control frame");
+    const auto serial=device.serial;device.failBackbuffer=true;
+    Check(!render(),"Missing output was accepted");
+    Check(device.serial==serial && !device.HasActiveFrame(),"Missing output submitted work or retained acquired frame");
+    Check(render(),"Missing output retry failed");
+    renderer.reset();Check(device.WaitIdle(),"Missing output teardown");
+    const auto counters=device.GetResourceAllocationCounters();
+    Check(!counters.buffers.live && !counters.textures.live && !counters.pipelines.live,"Missing output leaked resources");
+}
 }
 
 int main()
@@ -130,6 +152,7 @@ int main()
     {
         WsiRecoveryProbe(true);WsiRecoveryProbe(false);
         TerminalPresentationProbe(true);TerminalPresentationProbe(false);PipelineRetryProbe();
+        MissingBackbufferProbe(false,false);MissingBackbufferProbe(true,false);MissingBackbufferProbe(false,true);
         std::puts("PASS renderer lifecycle regression tests: CPU fake native only.");
         return 0;
     }

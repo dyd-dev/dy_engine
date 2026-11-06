@@ -65,7 +65,8 @@ bool GpuShadowVisibility::Prepare(const std::vector<Input>& inputs,const std::ve
     const auto entityCount=transforms->GetDesc().size/sizeof(Instance);
     uint64_t capacity=0;
     for(const auto& batch:batches) {
-        if(!batch.indexCount || !batch.capacity || batch.instanceOffset!=capacity)return false;
+        if(!batch.indexCount || !batch.capacity || batch.instanceOffset!=capacity ||
+            uint64_t(batch.firstIndex)+batch.indexCount>UINT32_MAX)return false;
         capacity+=batch.capacity;
     }
     const uint64_t argumentCount=uint64_t(batches.size())*views.size();
