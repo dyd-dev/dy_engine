@@ -312,8 +312,10 @@ int main(int argc, char** argv)
         bool benchmarkHostTiming = false;
         bool benchmarkNoEnvironmentLighting = false;
         bool benchmarkHalfResolution = false;
+        bool render1080p = false;
         uint32_t benchmarkScreenEffectsMask = 7;
         bool cpuCulling = false;
+        bool surfaceMaterialReuse = RendererConfig{}.advanced.reuseSurfaceMaterials;
         auto profile = showcase::PlatformProfile::Automatic();
         uint32_t recordingWorkers = 0;
         bool shadowQualitySpecified = false;
@@ -384,9 +386,12 @@ int main(int argc, char** argv)
                 "  --benchmark-no-environment-lighting  Diagnostic: disable diffuse/specular IBL\n"
                 "  --benchmark-half-resolution  Diagnostic: halve render and window dimensions\n"
                 "  --profile MODE           auto (default), desktop, mobile; mobile uses 720p/512px textures\n"
+                "  --1080p                  Use a 1920x1080 render target with the selected quality profile\n"
                 "  --recording-workers N    CPU recording workers, 1..64 (desktop up to 4, mobile up to 2)\n"
                 "  --frames-in-flight N     Maximum GPU frames in flight, 1..4 (default 2)\n"
                 "  --cpu-culling            Use CPU frustum culling/instancing; disable GPU culling and Hi-Z occlusion\n"
+                "  --surface-material-reuse Enable Surface material reuse (default off)\n"
+                "  --no-surface-material-reuse Disable Surface material reuse\n"
                 "  --no-probes              Skip 3 spatial probe bakes; interior keeps its single room fallback\n"
                 "  --no-gui                 Legacy compatibility flag; the Canvas HUD is always used\n"
                 "  --shadow-quality MODE    low, medium, high (desktop high, mobile medium)\n"
@@ -406,12 +411,15 @@ int main(int argc, char** argv)
             if(argument == "--help") { usage(); return 0; }
             if(argument == "--no-gui") continue; // Keep older host/launch arguments compatible with the Canvas HUD.
             if(argument == "--no-probes") bakeSpatialProbes = false;
+            else if(argument == "--1080p") render1080p = true;
             else if(argument == "--profile" && i + 1 < argc)
                 profile = showcase::PlatformProfile::Parse(argv[++i]);
             else if(argument == "--scene-preset" && i + 1 < argc)
             { scenePreset=argv[++i];presetSpecified=true; }
             else if(argument == "--night") night=true;
             else if(argument == "--cpu-culling") cpuCulling = true;
+            else if(argument == "--surface-material-reuse") surfaceMaterialReuse = true;
+            else if(argument == "--no-surface-material-reuse") surfaceMaterialReuse = false;
             else if(argument == "--comparison-mode" && i + 1 < argc)
             {
                 const std::string mode = argv[++i];
@@ -955,8 +963,9 @@ int main(int argc, char** argv)
             }
         }
 
-        const uint32_t renderWidth=profile.Width()/(benchmarkHalfResolution?2u:1u);
-        const uint32_t renderHeight=profile.Height()/(benchmarkHalfResolution?2u:1u);
+        const uint32_t divisor = benchmarkHalfResolution ? 2u : 1u;
+        const uint32_t renderWidth = (render1080p ? 1920u : profile.Width()) / divisor;
+        const uint32_t renderHeight = (render1080p ? 1080u : profile.Height()) / divisor;
         DY_EXAMPLE_WINDOW(window, renderWidth, renderHeight,night ? "dy_engine / Bistro Night - Space pause | R restart | Tab free camera" :
             "dy_engine / Cinematic Showcase - Space pause | R restart | Tab free camera");
 #ifdef DY_PROFILER_TRACING_ENABLED
@@ -1027,6 +1036,7 @@ int main(int argc, char** argv)
         config.enableProfilerHud = false;
         config.enableParallelRenderGraph = true;
         config.enableGpuCulling = true;
+        config.advanced.reuseSurfaceMaterials = surfaceMaterialReuse;
         config.enableOcclusionCulling = true;
         if(cpuCulling) config.enableGpuCulling = config.enableOcclusionCulling = false;
         config.recordingThreadCount = recordingWorkers;
@@ -1396,6 +1406,7 @@ int main(int argc, char** argv)
                 << " taa=" << applied.advanced.temporalAA << " bloom=" << applied.advanced.bloom
                 << " transparency=" << applied.advanced.transparency << " auto_exposure=" << applied.advanced.autoExposure << '\n'
                 << "# paths gpu_culling=" << applied.enableGpuCulling << " occlusion=" << applied.enableOcclusionCulling
+                << " surface_material_reuse=" << applied.advanced.reuseSurfaceMaterials
                 << " cpu_culling=" << applied.enableFrustumCulling << " instancing=" << applied.enableInstancing
                 << " lod=" << applied.enableLod << " lod_error=" << applied.lodPixelError
                 << " parallel=" << applied.enableParallelRenderGraph << " workers=" << applied.recordingThreadCount
@@ -1443,8 +1454,8 @@ int main(int argc, char** argv)
             enum Column { Kind, Index, SceneTime, Interval, Wall, RenderWall, Cpu, Acquire, Prepare, Record, Submit, Present,
                 Sequence, CpuSamples, Gpu, GpuSamples, Draws, ShadowDraws, Instances, Triangles,
                 ShadowTriangles, Culled, Batches, GpuVisibility, GpuOcclusion, ShadowReuse,
-                RenderWidth, RenderHeight, OutputWidth, OutputHeight, Pass, PassMs, PassSamples, ColumnCount };
-            output << "record_type,index,scene_time_seconds,submission_interval_ms,frame_work_wall_ms,render_work_wall_ms,cpu_render_ms,cpu_acquire_ms,cpu_prepare_ms,cpu_record_ms,cpu_submit_ms,cpu_present_ms,profiler_sequence,cpu_samples,gpu_frame_ms,gpu_samples,main_draws,shadow_draws,main_instances,main_triangles,shadow_triangles,culled_entities,indirect_batches,gpu_visibility,gpu_occlusion,shadow_reused,render_width,render_height,output_width,output_height,gpu_pass_name,gpu_pass_ms,gpu_pass_samples\n";
+                RenderWidth, RenderHeight, OutputWidth, OutputHeight, Pass, PassMs, PassSamples, GpuShadowCulling, ColumnCount };
+            output << "record_type,index,scene_time_seconds,submission_interval_ms,frame_work_wall_ms,render_work_wall_ms,cpu_render_ms,cpu_acquire_ms,cpu_prepare_ms,cpu_record_ms,cpu_submit_ms,cpu_present_ms,profiler_sequence,cpu_samples,gpu_frame_ms,gpu_samples,main_draws,shadow_draws,main_instances,main_triangles,shadow_triangles,culled_entities,indirect_batches,gpu_visibility,gpu_occlusion,shadow_reused,render_width,render_height,output_width,output_height,gpu_pass_name,gpu_pass_ms,gpu_pass_samples,gpu_shadow_culling\n";
             using Row = std::array<std::string,ColumnCount>;
             const auto set = [](Row& row,Column column,const auto& value) {
                 std::ostringstream text; text.imbue(std::locale::classic()); text << std::setprecision(10) << value;
@@ -1475,7 +1486,9 @@ int main(int argc, char** argv)
                     set(row,Submit,frame.cpu.cpuSubmitMilliseconds); set(row,Present,frame.cpu.cpuPresentMilliseconds);
                     set(row,CpuSamples,1); cpus.push_back(frame.cpu.cpuRenderMilliseconds);
                 }
-                set(row,Draws,s.mainDrawCount); set(row,ShadowDraws,s.shadowDrawCount); set(row,ShadowTriangles,s.shadowTriangleCount);
+                set(row,Draws,s.mainDrawCount); set(row,ShadowDraws,s.shadowDrawCount);
+                if(!s.gpuShadowCulling)set(row,ShadowTriangles,s.shadowTriangleCount);
+                set(row,GpuShadowCulling,s.gpuShadowCulling);
                 if(!s.gpuVisibility) { set(row,Instances,s.mainInstanceCount); set(row,Triangles,s.mainTriangleCount); set(row,Culled,s.culledEntityCount); }
                 set(row,Batches,s.indirectBatchCount); set(row,GpuVisibility,s.gpuVisibility); set(row,GpuOcclusion,s.gpuOcclusion);
                 set(row,ShadowReuse,s.reusedShadowAtlas); set(row,RenderWidth,s.renderWidth); set(row,RenderHeight,s.renderHeight);
@@ -2054,7 +2067,9 @@ int main(int argc, char** argv)
                 ready = true;
                 releaseCpuImageCache();
                 clock.Reset();
-                std::fputs("First frame submitted.\n", stderr);
+                const auto& stats = renderer->GetLastRenderStatistics();
+                std::fprintf(stderr, "First frame submitted.\nRender size %ux%u, output %ux%u.\n",
+                    stats.renderWidth, stats.renderHeight, stats.outputWidth, stats.outputHeight);
             }
             if(metrics) metricsTime += elapsed;
             if(metrics && metricsTime >= 1)

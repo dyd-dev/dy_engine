@@ -176,8 +176,11 @@ Canvas Renderer::Impl::BuildProfilerOverlay(uint32_t width,uint32_t height,bool 
 	std::snprintf(line,sizeof(line),"CPU SUBMIT %.2f  PRESENT %.2f  READBACK %.2f MS",m_profiler.GetSnapshot().cpuSubmitAverageMilliseconds,
 		m_profiler.GetSnapshot().cpuPresentAverageMilliseconds,m_profiler.GetSnapshot().cpuReadbackAverageMilliseconds);
 	Text(canvas,line,18,180,{1,1,1,1},1.6f);
-	std::snprintf(line,sizeof(line),"ENTITIES %u  SHADOW INST %u  TRI %llu",m_entities,m_profilerStatistics.shadowInstanceCount,
-		static_cast<unsigned long long>(m_profilerStatistics.shadowTriangleCount));
+    if(m_profilerStatistics.gpuShadowCulling)
+        std::snprintf(line,sizeof(line),"ENTITIES %u  SHADOW INST/TRI N/A (GPU)",m_entities);
+    else
+        std::snprintf(line,sizeof(line),"ENTITIES %u  SHADOW INST %u  TRI %llu",m_entities,m_profilerStatistics.shadowInstanceCount,
+            static_cast<unsigned long long>(m_profilerStatistics.shadowTriangleCount));
 	Text(canvas,line,18,200,{1,1,1,1},1.6f);
 	// 자원 카운터와 GPU 표본 수를 함께 표시해 시간 값의 근거를 볼 수 있게 한다.
 	std::snprintf(line,sizeof(line),"LIVE BUF %llu TEX %llu PSO %llu  GPU SAMPLES %u",

@@ -424,8 +424,9 @@ private:
             add("Indirect batches",std::to_string(stats.indirectBatchCount));
             add("CPU-culled entities",std::to_string(stats.culledEntityCount));
             add("Shadow draws",std::to_string(stats.shadowDrawCount));
-            add("Shadow instances",std::to_string(stats.shadowInstanceCount));
-            add("Shadow triangles",std::to_string(stats.shadowTriangleCount));
+            add("Shadow instances",stats.gpuShadowCulling ? "N/A (GPU)" : std::to_string(stats.shadowInstanceCount));
+            add("Shadow triangles",stats.gpuShadowCulling ? "N/A (GPU)" : std::to_string(stats.shadowTriangleCount));
+            add("GPU shadow culling",stats.gpuShadowCulling ? "On" : "Off");
             add("Shadow atlas",stats.reusedShadowAtlas ? "Cached" : "Updated");
             add("Render size",std::to_string(stats.renderWidth)+" x "+std::to_string(stats.renderHeight));
             add("Output size",std::to_string(stats.outputWidth)+" x "+std::to_string(stats.outputHeight));
