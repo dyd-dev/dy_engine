@@ -34,12 +34,12 @@ bool visibleToLight(Input item,float4x4 model,View view) {
     }
     return true;
 }
-kernel void kernelMain(uint3 thread [[thread_position_in_grid]],device const Input* inputs [[buffer(0)]],
+kernel void kernelMain(uint3 threadId [[thread_position_in_grid]],device const Input* inputs [[buffer(0)]],
     device const Batch* batches [[buffer(1)]],device const View* views [[buffer(2)]],
     device const Instance* models [[buffer(3)]],device Instance* visible [[buffer(4)]],
     device atomic_uint* arguments [[buffer(5)]],constant Operation& operation [[buffer(15)]]) {
     const uint4 counts=operation.counts,settings=operation.settings;
-    uint id=thread.x+thread.y*counts.y;
+    uint id=threadId.x+threadId.y*counts.y;
     if(counts.x==0) {
         if(id>=counts.w*settings.x)return;
         uint view=id/counts.w,b=id%counts.w;Batch batch=batches[b];uint offset=id*5;
