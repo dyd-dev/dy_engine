@@ -14,7 +14,8 @@
 </p>
 
 <p align="center">
-  <a href="https://dyd-dev.github.io/dy_engine/index.html">문서</a> ·
+  <a href="https://dyd-dev.github.io/dy_engine/">API 문서</a> ·
+  <a href="https://www.youtube.com/watch?v=STVjKfLLPLw">시연 영상</a> ·
   <a href="#빠른-시작">빠른 시작</a> ·
   <a href="#쇼케이스">쇼케이스</a> ·
   <a href="#구조">구조</a> ·
@@ -22,7 +23,9 @@
   <a href="#제작진">제작진</a>
 </p>
 
-![dy_framework로 렌더링한 Emerald Square의 건물과 식생](.github/assets/emerald-square.png)
+[![dy_framework 시연 영상 보기 — Emerald Square 렌더링 화면](.github/assets/emerald-square.png)](https://www.youtube.com/watch?v=STVjKfLLPLw)
+
+<p align="center"><a href="https://www.youtube.com/watch?v=STVjKfLLPLw"><strong>▶ YouTube에서 시연 영상 보기</strong></a></p>
 
 <p align="center"><sub>Emerald Square · dy_framework 실제 렌더링 화면 · 원본 에셋 출처는 <a href="#라이선스와-크레딧">크레딧</a> 참고</sub></p>
 
@@ -79,6 +82,7 @@ CI는 컴파일과 패키징을 확인합니다. 모든 기기의 실행 결과�
 
 `ShowcasePresentation`은 Bistro Exterior → Bistro Interior → Emerald Square를 같은 창에서 연속 시연합니다. 장면마다 기능을 켜고 끄며 결과를 비교할 수 있습니다.
 
+- [프로젝트 시연 영상 · YouTube](https://www.youtube.com/watch?v=STVjKfLLPLw)
 - [프로젝트 발표자료 · PPTX](.github/assets/dy-framework.pptx)
 - [연속 시연과 조작 방법](showcase/cinematic/Presentation.md)
 - [장면별 설명과 측정 조건](showcase/Presentation.md)
@@ -119,7 +123,7 @@ flowchart TB
 | [`src/Extends/`](src/Extends/) | Model·AdvancedRendering·ImGui·Tracy·RenderDoc |
 | [`examples/`](examples/) · [`showcase/`](showcase/) | API 학습용 예제와 발표용 장면 |
 | [`android/`](android/) · [`ios/`](ios/) | 모바일 앱 프로젝트 |
-| [`docs/`](docs/) · [`tests/`](tests/) | API 문서와 회귀·계약 테스트 |
+| [API 문서 · GitHub Pages](https://dyd-dev.github.io/dy_engine/) · [`tests/`](tests/) | API 문서와 회귀·계약 테스트 |
 
 ## 빠른 시작
 
@@ -225,6 +229,7 @@ target_link_libraries(app PRIVATE dy_engine)
 
 | 목적 | 자료 |
 | --- | --- |
+| API 문서 홈 | [dy_framework API 문서](https://dyd-dev.github.io/dy_engine/) |
 | 개발 환경 준비 | [시작하기](https://dyd-dev.github.io/dy_engine/component/getting-started.html) |
 | 첫 화면 만들기 | [Canvas 앱 빠른 시작](https://dyd-dev.github.io/dy_engine/component/quickstart.html) |
 | API 찾기 | [API 레퍼런스](https://dyd-dev.github.io/dy_engine/component/api-index.html) |
