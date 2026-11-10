@@ -128,6 +128,7 @@ if(DY_ENABLE_TRACY)
             GIT_TAG "v0.13.1"
             GIT_SHALLOW TRUE)
         FetchContent_MakeAvailable(tracy)
+        dy_check_tracy_inputs()
     endif()
 endif()
 

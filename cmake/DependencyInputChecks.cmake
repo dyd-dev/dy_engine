@@ -91,3 +91,92 @@ function(dy_check_fastgltf_inputs)
         "URI decodedUri(uri.path()); // Re-allocate so we can decode potential characters.\n\tif (!decodedUri.valid() || !decodedUri.isLocalPath()) return Error::InvalidURI;")
     dy_use_checked_source(fastgltf "${original}" "${binary_dir}/input-checks/io.cpp" "${contents}")
 endfunction()
+
+function(dy_check_tracy_inputs)
+    get_target_property(source_dir TracyClient SOURCE_DIR)
+    get_target_property(binary_dir TracyClient BINARY_DIR)
+    set(output_dir "${binary_dir}/input-checks/public")
+    file(COPY "${source_dir}/public/" DESTINATION "${output_dir}"
+        PATTERN "TracyProfiler.cpp" EXCLUDE PATTERN "TracyProfiler.hpp" EXCLUDE)
+    configure_file("${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../src/Extends/Tracy/QueryTransferBounds.h"
+        "${output_dir}/client/DyfQueryTransferBounds.h" COPYONLY)
+
+    file(READ "${source_dir}/public/client/TracyProfiler.hpp" header)
+    string(REPLACE "\r\n" "\n" header "${header}")
+    dy_replace_dependency_text(header
+        "    char* m_queryDataPtr;"
+        "    char* m_queryDataPtr = nullptr;\n    dyf::Detail::QueryTransferBounds m_queryDataBounds;\n    void ResetQueryData();")
+    set(header "#include \"DyfQueryTransferBounds.h\"\n${header}")
+    dy_write_dependency_source("${output_dir}/client/TracyProfiler.hpp" "${header}")
+
+    file(READ "${source_dir}/public/client/TracyProfiler.cpp" contents)
+    string(REPLACE "\r\n" "\n" contents "${contents}")
+    set(reset [=[void Profiler::ResetQueryData()
+{
+    tracy_free( m_queryData );
+    tracy_free( m_queryImage );
+    m_queryData = m_queryDataPtr = m_queryImage = nullptr;
+    m_queryDataBounds = {};
+}
+
+bool Profiler::HandleServerQuery()]=])
+    dy_replace_dependency_text(contents "bool Profiler::HandleServerQuery()" "${reset}")
+    dy_replace_dependency_text(contents
+        "    m_queryData = nullptr;\n    m_queryImage = nullptr;"
+        "    m_queryData = nullptr;\n    m_queryImage = nullptr;\n    m_queryDataPtr = nullptr;\n    m_queryDataBounds = {};")
+    set(before [=[    case ServerQuerySourceCode:
+        QueueSourceCodeQuery( uint32_t( ptr ) );
+        break;
+    case ServerQueryDataTransfer:
+        if( m_queryData )
+        {
+            assert( !m_queryImage );
+            m_queryImage = m_queryData;
+        }
+        m_queryDataPtr = m_queryData = (char*)tracy_malloc( ptr + 11 );
+        AckServerQuery();
+        break;
+    case ServerQueryDataTransferPart:
+        memcpy( m_queryDataPtr, &ptr, 8 );]=])
+    set(after [=[    case ServerQuerySourceCode:
+        if( m_exectime == 0 || !m_queryData || !m_queryDataBounds.Complete()
+            || m_queryData[m_queryDataBounds.length - 1] != '\0' ) return false;
+        QueueSourceCodeQuery( uint32_t( ptr ) );
+        break;
+    case ServerQueryDataTransfer:
+        {
+            dyf::Detail::QueryTransferBounds bounds;
+            if( !bounds.Begin( ptr ) || (m_queryData && (m_queryImage
+                || !m_queryDataBounds.Complete()
+                || m_queryData[m_queryDataBounds.length - 1] != '\0')) ) return false;
+            auto data = (char*)tracy_malloc( bounds.remaining );
+            if( !data ) return false;
+            if( m_queryData ) m_queryImage = m_queryData;
+            m_queryDataPtr = m_queryData = data;
+            m_queryDataBounds = bounds;
+        }
+        AckServerQuery();
+        break;
+    case ServerQueryDataTransferPart:
+        if( !m_queryData || !m_queryDataBounds.ConsumePart() ) return false;
+        memcpy( m_queryDataPtr, &ptr, 8 );]=])
+    dy_replace_dependency_text(contents "${before}" "${after}")
+    # All socket ownership releases end the connection's partial transfer.
+    string(FIND "${contents}" "m_sock = nullptr;" socket_release)
+    if(socket_release LESS 0)
+        message(FATAL_ERROR "Tracy connection cleanup changed; review the input-check patch")
+    endif()
+    string(REPLACE "m_sock = nullptr;" "ResetQueryData();\n        m_sock = nullptr;" contents "${contents}")
+    dy_replace_dependency_text(contents
+        "    tracy_free( s_thread );"
+        "    tracy_free( s_thread );\n    ResetQueryData();")
+    dy_write_dependency_source("${output_dir}/client/TracyProfiler.cpp" "${contents}")
+    file(READ "${source_dir}/public/TracyClient.cpp" client)
+    dy_use_checked_source(TracyClient "${source_dir}/public/TracyClient.cpp"
+        "${output_dir}/TracyClient.cpp" "${client}")
+    target_include_directories(TracyClient BEFORE PUBLIC "$<BUILD_INTERFACE:${output_dir}>")
+    include(GNUInstallDirs)
+    install(FILES "${output_dir}/client/TracyProfiler.hpp"
+        "${output_dir}/client/DyfQueryTransferBounds.h"
+        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/tracy/client")
+endfunction()
