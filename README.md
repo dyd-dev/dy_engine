@@ -42,9 +42,9 @@ Vulkan, Direct3D 12, Metal에서는 애플리케이션이 자원 상태와 동�
 
 | 만들고 싶은 것 | 시작할 API와 예제 |
 | --- | --- |
-| 도형·이미지·텍스트가 있는 2D 화면 | `Canvas` + `Renderer` · [기본 도형 예제](examples/dyf/01_Primitives/) |
-| 모델·재질·조명·애니메이션을 사용하는 3D 장면 | `Scene` + `Renderer`, 필요에 따라 Model·AdvancedRendering 확장 · [모델·애니메이션 예제](examples/dyf/07_ModelAnim/) |
-| 직접 구성하는 렌더링·컴퓨트 패스와 GPU 명령 | `RHI::IDevice` + `ICommandList` · [장치와 화면 표시](examples/RHI/01_DeviceAndPresent/) → [RenderGraph](examples/RHI/11_RenderGraph/) |
+| 도형·이미지·텍스트가 있는 2D 화면 | `Canvas` + `Renderer` · [기본 도형 코드](examples/dyf/01_Primitives/main.cpp) · [전체 파일](examples/dyf/01_Primitives/) |
+| 모델·재질·조명·애니메이션을 사용하는 3D 장면 | `Scene` + `Renderer`, 필요에 따라 Model·AdvancedRendering 확장 · [모델·애니메이션 코드](examples/dyf/07_ModelAnim/main.cpp) · [전체 파일](examples/dyf/07_ModelAnim/) |
+| 직접 구성하는 렌더링·컴퓨트 패스와 GPU 명령 | `RHI::IDevice` + `ICommandList` · [장치와 화면 표시 코드](examples/RHI/01_DeviceAndPresent/main.cpp) · [전체 파일](examples/RHI/01_DeviceAndPresent/)<br>패스 구성으로 이어가기: [RenderGraph 코드](examples/RHI/11_RenderGraph/main.cpp) · [전체 파일](examples/RHI/11_RenderGraph/) |
 
 앱의 실행 흐름과 장면 데이터는 사용자 코드에서 구성합니다. 기본 렌더러를 사용할 때는 `dyf` 예제부터, 자원 상태와 제출을 직접 제어할 때는 RHI 예제부터 읽으면 됩니다.
 
