@@ -1,4 +1,5 @@
 include(FetchContent)
+include(DependencyInputChecks)
 
 # Desktop windows use GLFW. Android and iOS use their native window APIs.
 if(WIN32 OR CMAKE_SYSTEM_NAME MATCHES "^(Linux|Darwin)$")
