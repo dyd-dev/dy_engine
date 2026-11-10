@@ -556,6 +556,7 @@ bool D3D12Device::SupportsNative(RHI::Feature feature) const
     case RHI::Feature::IndirectDispatch:
         return m_internal && m_internal->dispatchSignature;
     case RHI::Feature::Compute:
+    case RHI::Feature::FragmentPrimitiveId:
     case RHI::Feature::Rasterization:
     case RHI::Feature::RenderArea:
     case RHI::Feature::Tessellation:
@@ -1215,7 +1216,8 @@ void D3D12Device::DestroySwapchainNative()
             {
             case RHI::Format::R8G8B8A8_UNORM: return DXGI_FORMAT_R8G8B8A8_UNORM;
             case RHI::Format::R16G16B16A16_FLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
-            case RHI::Format::R32G32_FLOAT: return DXGI_FORMAT_R32G32_FLOAT;
+            case RHI::Format::R32G32_UINT: return DXGI_FORMAT_R32G32_UINT;
+        case RHI::Format::R32G32_FLOAT: return DXGI_FORMAT_R32G32_FLOAT;
             case RHI::Format::R32_FLOAT: return DXGI_FORMAT_R32_FLOAT;
             case RHI::Format::R32G32B32_FLOAT: return DXGI_FORMAT_R32G32B32_FLOAT;
             case RHI::Format::R32G32B32A32_FLOAT: return DXGI_FORMAT_R32G32B32A32_FLOAT;

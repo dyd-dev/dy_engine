@@ -22,7 +22,8 @@ namespace dyf::Backends
 			case RHI::Format::B8G8R8A8_UNORM_SRGB: return MTLPixelFormatBGRA8Unorm_sRGB;
 			case RHI::Format::R16G16B16A16_FLOAT: return MTLPixelFormatRGBA16Float;
             case RHI::Format::R16_FLOAT: return MTLPixelFormatR16Float;
-			case RHI::Format::R32G32_FLOAT: return MTLPixelFormatRG32Float;
+			case RHI::Format::R32G32_UINT: return MTLPixelFormatRG32Uint;
+            case RHI::Format::R32G32_FLOAT: return MTLPixelFormatRG32Float;
             case RHI::Format::R32_FLOAT: return MTLPixelFormatR32Float;
 			case RHI::Format::R32G32B32A32_FLOAT: return MTLPixelFormatRGBA32Float;
 			case RHI::Format::D32_FLOAT: return MTLPixelFormatDepth32Float;
@@ -41,7 +42,8 @@ namespace dyf::Backends
 		{
 			switch(format)
 			{
-			case RHI::Format::R32G32_FLOAT: return MTLVertexFormatFloat2;
+			case RHI::Format::R32G32_UINT: return MTLVertexFormatUInt2;
+            case RHI::Format::R32G32_FLOAT: return MTLVertexFormatFloat2;
             case RHI::Format::R32_FLOAT: return MTLVertexFormatFloat;
 			case RHI::Format::R32G32B32_FLOAT: return MTLVertexFormatFloat3;
 			case RHI::Format::R32G32B32A32_FLOAT: return MTLVertexFormatFloat4;
@@ -394,7 +396,7 @@ namespace dyf::Backends
             // https://developer.apple.com/metal/Metal-Feature-Set-Tables.pdf
             if(attachment.blend.enabled &&
                 (attachment.format == RHI::Format::R16_UINT ||
-                    attachment.format == RHI::Format::R32_UINT)) return false;
+                    attachment.format == RHI::Format::R32_UINT || attachment.format == RHI::Format::R32G32_UINT)) return false;
         }
         if(desc.depthStencil.format != RHI::Format::Unknown &&
             ToPixelFormat(desc.depthStencil.format) == MTLPixelFormatInvalid) return false;

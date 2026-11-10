@@ -6,11 +6,37 @@
 #include <cmath>
 #include <cstdio>
 #include <unordered_map>
-#include <unordered_set>
 #include "AnimationSampling.h"
 
 namespace dyf
 {
+	struct ModelScene::AnimationState
+	{
+		struct Asset
+		{
+			std::vector<uint8_t> validatedClips;
+			std::vector<uint32_t> nodeOrder;
+			bool validHierarchy = false;
+		};
+		struct Instance
+		{
+			bool mutableAccess = false, validPose = false;
+			ModelAssetID asset = ModelAssetID::Invalid;
+			uint32_t clip = UINT32_MAX;
+			float time = 0;
+		};
+		std::vector<Asset> assets;
+		std::vector<Instance> instances;
+		Detail::NodeHierarchyScratch hierarchy;
+		std::vector<SkinJointMatrices> skinPalette;
+		std::unordered_map<uint64_t, uint32_t> paletteOffsets;
+		bool validOutputs = false;
+		uint32_t entityCount = 0;
+	};
+
+	ModelScene::ModelScene() : m_animationState(std::make_unique<AnimationState>()) {}
+	ModelScene::~ModelScene() = default;
+
 	namespace
 	{
 		[[nodiscard]] bool ValidInstance(ModelInstanceID instance, const std::vector<ModelInstance>& instances)
@@ -63,10 +89,23 @@ namespace dyf
 			instance.localPose[nodeIndex] = nodes[nodeIndex].bindTransform;
 			instance.nodeMorphWeights[nodeIndex] = nodes[nodeIndex].morphWeights;
 		}
-		if(!BuildGlobalNodeMatrices(nodes, instance.localPose, instance.globalPose))
-			return ModelInstanceID::Invalid;
+		auto& state = *m_animationState;
+		state.assets.resize(m_modelAssets.size());
+		auto* cached = asset ? &state.assets[ToIndex(instance.assetId)] : nullptr;
+		const bool built = cached && cached->validHierarchy
+			? Detail::BuildGlobalNodeMatricesValidatedOrder(nodes, instance.localPose, instance.globalPose, cached->nodeOrder)
+			: Detail::BuildGlobalNodeMatricesWithScratch(nodes, instance.localPose, instance.globalPose, state.hierarchy, asset != nullptr);
+		if(!built) return ModelInstanceID::Invalid;
+		if(cached && !cached->validHierarchy)
+		{
+			cached->nodeOrder = state.hierarchy.order;
+			cached->validHierarchy = true;
+		}
 
-		m_modelInstances.push_back(std::move(instance));
+		state.validOutputs = false;
+		m_modelInstances.push_back(instance);
+		try {state.instances.resize(m_modelInstances.size());}
+		catch(...) {m_modelInstances.pop_back();throw;}
 		return static_cast<ModelInstanceID>(m_modelInstances.size() - 1u);
 	}
 
@@ -96,8 +135,9 @@ namespace dyf
 		binding.nodeIndex = nodeIndex;
 		binding.skinIndex = skinIndex;
 		binding.assetMeshIndex = assetMeshIndex;
-		instance.bindings.push_back(binding);
         m_entityHasMorphTargets.resize(GetEntityCount(), false);
+		instance.bindings.push_back(binding);
+		m_animationState->validOutputs = false;
         m_entityHasMorphTargets[ToIndex(entity)] = asset != nullptr && assetMeshIndex != UINT32_MAX &&
             !asset->meshes[assetMeshIndex].morphTargets.empty();
 		return true;
@@ -114,8 +154,12 @@ namespace dyf
         Platform::CpuScope timing(Platform::LiveStage::Data,"Model animation arrays");
 #endif
 		bool success = true;
+		bool allSucceeded = true;
+		auto& state = *m_animationState;
 		const auto fail = [&](ModelInstanceID instance, EntityID entity, const char* reason)
 		{
+			state.validOutputs = false;
+			allSucceeded = false;
 			std::fprintf(stderr, "dyf: Animation update failed: %s (instance=%u, entity=%u)\n",
 				reason, ToIndex(instance), ToIndex(entity));
 			if(!IsValid(instance) || !IsValid(resultInstance) || instance == resultInstance) success = false;
@@ -125,6 +169,29 @@ namespace dyf
 			fail(ModelInstanceID::Invalid, EntityID::Invalid, "deltaSeconds must be finite");
 			return success;
 		}
+		// Only unexposed asset instances have a complete immutable-input contract.
+		bool unchanged = state.validOutputs && state.entityCount == GetEntityCount() &&
+			state.instances.size() == m_modelInstances.size();
+		for(size_t index = 0; unchanged && index < m_modelInstances.size(); ++index)
+		{
+			const auto& instance = m_modelInstances[index];
+			const auto* asset = TryGetModelAsset(instance.assetId);
+			unchanged = asset && !state.instances[index].mutableAccess &&
+				(!instance.playback.playing || instance.playback.clipIndex >= asset->animations.size() ||
+					deltaSeconds * instance.playback.speed == 0.0f);
+		}
+		if(unchanged)
+		{
+			for(size_t index = 0; index < m_modelInstances.size(); ++index)
+				for(const auto& binding : m_modelInstances[index].bindings)
+					if(!GetEntity(binding.entity).SetTransform(m_modelInstances[index].rootTransform *
+						m_modelInstances[index].globalPose[binding.nodeIndex]))
+						fail(static_cast<ModelInstanceID>(index), binding.entity, "invalid entity binding");
+			return success;
+		}
+		state.validOutputs = false;
+		state.assets.resize(m_modelAssets.size());
+		state.instances.resize(m_modelInstances.size());
 		m_jointPaletteMatrices.clear();
         m_entitySkinPaletteOffsets.assign(GetEntityCount(), UINT32_MAX);
         // Bindings may arrive through CreateModelInstance or mutable instance edits.
@@ -136,42 +203,19 @@ namespace dyf
 			morphedMesh.indices.clear();
 		}
 
-		std::vector<SkinJointMatrices> skinPalette;
-		std::unordered_map<uint64_t, uint32_t> paletteOffsets;
-		// Keys cannot change while this synchronous update samples the instances.
-		// Keep validation local to this call so edits before the next update are seen.
-		std::unordered_set<const AnimationClip*> sampledClips;
-		Detail::NodeHierarchyScratch hierarchyScratch;
-		std::unordered_map<const ModelAsset*,std::vector<uint32_t>> nodeOrders;
-		std::vector<uint8_t> assetUses;
-		if(m_modelInstances.size()>1 && !m_modelAssets.empty())
-		{
-			assetUses.assign(m_modelAssets.size(),0u);
-			for(const auto& instance:m_modelInstances)
-				if(IsValidModelAsset(instance.assetId))
-				{
-					auto& uses=assetUses[ToIndex(instance.assetId)];
-					if(uses<2u)++uses;
-				}
-		}
+		auto& skinPalette = state.skinPalette;
+		auto& paletteOffsets = state.paletteOffsets;
 		for(size_t instanceIndex = 0; instanceIndex < m_modelInstances.size(); ++instanceIndex)
 		{
 			paletteOffsets.clear();
 			ModelInstance& instance = m_modelInstances[instanceIndex];
 			const ModelInstanceID instanceId = static_cast<ModelInstanceID>(instanceIndex);
 			const ModelAsset* asset = TryGetModelAsset(instance.assetId);
-			const bool sharedAsset=asset && !assetUses.empty() && assetUses[ToIndex(instance.assetId)]>1u;
+			auto& cachedPose = state.instances[instanceIndex];
+			auto* cachedAsset = asset ? &state.assets[ToIndex(instance.assetId)] : nullptr;
 			const std::vector<ModelNode>& nodes = asset != nullptr ? asset->nodes : instance.nodes;
 			const std::vector<ModelSkin>& skins = asset != nullptr ? asset->skins : instance.skins;
 			const std::vector<AnimationClip>& clips = asset != nullptr ? asset->animations : instance.clips;
-			instance.localPose.resize(nodes.size());
-			instance.nodeMorphWeights.resize(nodes.size());
-			for(size_t nodeIndex = 0; nodeIndex < nodes.size(); ++nodeIndex)
-			{
-				instance.localPose[nodeIndex] = nodes[nodeIndex].bindTransform;
-				instance.nodeMorphWeights[nodeIndex] = nodes[nodeIndex].morphWeights;
-			}
-
 			const bool validClip = instance.playback.clipIndex < clips.size();
 			if(validClip)
 			{
@@ -204,41 +248,68 @@ namespace dyf
 						instance.playback.time = clamped;
 					}
 				}
-				const bool knownKeys=sharedAsset && sampledClips.count(&clip)!=0;
-				const bool sampled=knownKeys
-					? Detail::SampleAnimationClipValidatedKeys(clip,instance.playback.time,instance.localPose,instance.nodeMorphWeights)
-					: SampleAnimationClip(clip,instance.playback.time,instance.localPose,instance.nodeMorphWeights);
-				if(!sampled)
+			}
+
+			const bool samePose = cachedAsset && !cachedPose.mutableAccess && cachedPose.validPose &&
+				cachedPose.asset == instance.assetId && cachedPose.clip == instance.playback.clipIndex &&
+				cachedPose.time == instance.playback.time;
+			if(!samePose)
+			{
+				cachedPose.validPose = false;
+				instance.localPose.resize(nodes.size());
+				instance.nodeMorphWeights.resize(nodes.size());
+				for(size_t nodeIndex = 0; nodeIndex < nodes.size(); ++nodeIndex)
 				{
-					fail(instanceId, EntityID::Invalid, "invalid animation clip");
+					instance.localPose[nodeIndex] = nodes[nodeIndex].bindTransform;
+					instance.nodeMorphWeights[nodeIndex] = nodes[nodeIndex].morphWeights;
+				}
+				if(validClip)
+				{
+					const auto& clip = clips[instance.playback.clipIndex];
+					if(cachedAsset) cachedAsset->validatedClips.resize(clips.size());
+					const bool knownKeys = cachedAsset && cachedAsset->validatedClips[instance.playback.clipIndex];
+					const bool sampled = knownKeys
+						? Detail::SampleAnimationClipValidatedKeys(clip, instance.playback.time, instance.localPose, instance.nodeMorphWeights)
+						: SampleAnimationClip(clip, instance.playback.time, instance.localPose, instance.nodeMorphWeights);
+					if(!sampled)
+					{
+						fail(instanceId, EntityID::Invalid, "invalid animation clip");
+						continue;
+					}
+					if(cachedAsset) cachedAsset->validatedClips[instance.playback.clipIndex] = 1;
+				}
+
+				for(auto entry = m_morphOverrides.lower_bound({instanceId, 0u, 0u});
+					entry != m_morphOverrides.end() && std::get<0>(entry->first) == instanceId; ++entry)
+				{
+					const auto node = std::get<1>(entry->first), target = std::get<2>(entry->first);
+					if(node < instance.nodeMorphWeights.size() && target < instance.nodeMorphWeights[node].size())
+						instance.nodeMorphWeights[node][target] = entry->second;
+				}
+
+				bool validHierarchy=false;
+				if(cachedAsset && cachedAsset->validHierarchy)
+					validHierarchy=Detail::BuildGlobalNodeMatricesValidatedOrder(
+						nodes,instance.localPose,instance.globalPose,cachedAsset->nodeOrder);
+				else
+				{
+					validHierarchy=Detail::BuildGlobalNodeMatricesWithScratch(
+						nodes,instance.localPose,instance.globalPose,state.hierarchy,cachedAsset != nullptr);
+					if(validHierarchy && cachedAsset)
+					{
+						cachedAsset->nodeOrder = state.hierarchy.order;
+						cachedAsset->validHierarchy = true;
+					}
+				}
+				if(!validHierarchy)
+				{
+					fail(instanceId, EntityID::Invalid, "invalid node hierarchy");
 					continue;
 				}
-				if(sharedAsset && !knownKeys)sampledClips.insert(&clip);
-			}
-
-			for(auto entry = m_morphOverrides.lower_bound({instanceId, 0u, 0u});
-				entry != m_morphOverrides.end() && std::get<0>(entry->first) == instanceId; ++entry)
-			{
-				const auto node = std::get<1>(entry->first), target = std::get<2>(entry->first);
-				if(node < instance.nodeMorphWeights.size() && target < instance.nodeMorphWeights[node].size())
-					instance.nodeMorphWeights[node][target] = entry->second;
-			}
-
-			bool validHierarchy=false;
-			const auto knownOrder=sharedAsset ? nodeOrders.find(asset) : nodeOrders.end();
-			if(knownOrder!=nodeOrders.end())
-				validHierarchy=Detail::BuildGlobalNodeMatricesValidatedOrder(
-					nodes,instance.localPose,instance.globalPose,knownOrder->second);
-			else
-			{
-				validHierarchy=Detail::BuildGlobalNodeMatricesWithScratch(
-					nodes,instance.localPose,instance.globalPose,hierarchyScratch,sharedAsset);
-				if(validHierarchy && sharedAsset)nodeOrders.emplace(asset,std::move(hierarchyScratch.order));
-			}
-			if(!validHierarchy)
-			{
-				fail(instanceId, EntityID::Invalid, "invalid node hierarchy");
-				continue;
+				cachedPose.asset = instance.assetId;
+				cachedPose.clip = instance.playback.clipIndex;
+				cachedPose.time = instance.playback.time;
+				cachedPose.validPose = true;
 			}
 			for(auto current = instance.bindings.begin(); current != instance.bindings.end(); ++current)
 			{
@@ -333,6 +404,8 @@ namespace dyf
 				this->m_entitySkinPaletteOffsets[ToIndex(binding.entity)] = paletteOffset;
 			}
 		}
+		state.validOutputs = allSucceeded;
+		state.entityCount = GetEntityCount();
 		return success;
 	}
 
@@ -347,6 +420,7 @@ namespace dyf
 		instance.playback.time = 0.0f;
 		instance.playback.playing = true;
 		instance.playback.loop = loop;
+		m_animationState->validOutputs = false;
 		return true;
 	}
 
@@ -357,6 +431,7 @@ namespace dyf
 		playback.clipIndex = UINT32_MAX;
 		playback.time = 0;
 		playback.playing = false;
+		m_animationState->validOutputs = false;
 		return UpdateAnimations(0, instanceId);
 	}
 
@@ -366,6 +441,8 @@ namespace dyf
 		const auto& weights = m_modelInstances[ToIndex(instanceId)].nodeMorphWeights;
 		if(nodeIndex >= weights.size() || targetIndex >= weights[nodeIndex].size()) return false;
 		m_morphOverrides.erase({instanceId, nodeIndex, targetIndex});
+		m_animationState->instances[ToIndex(instanceId)].validPose = false;
+		m_animationState->validOutputs = false;
 		return true;
 	}
 
@@ -377,6 +454,7 @@ namespace dyf
 		const std::vector<AnimationClip>& clips = asset != nullptr ? asset->animations : instance.clips;
 		if(!paused && instance.playback.clipIndex >= clips.size()) return false;
 		instance.playback.playing = !paused;
+		m_animationState->validOutputs = false;
 		return true;
 	}
 
@@ -384,6 +462,7 @@ namespace dyf
 	{
 		if(!ValidInstance(instanceId, m_modelInstances) || !std::isfinite(speed)) return false;
 		m_modelInstances[ToIndex(instanceId)].playback.speed = speed;
+		m_animationState->validOutputs = false;
 		return true;
 	}
 
@@ -391,6 +470,7 @@ namespace dyf
 	{
 		if(!ValidInstance(instanceId, m_modelInstances)) return false;
 		m_modelInstances[ToIndex(instanceId)].playback.loop = loop;
+		m_animationState->validOutputs = false;
 		return true;
 	}
 
@@ -413,6 +493,8 @@ namespace dyf
 			|| targetIndex >= instance.nodeMorphWeights[nodeIndex].size()) return false;
 		m_morphOverrides[{instanceId, nodeIndex, targetIndex}] = weight;
 		instance.nodeMorphWeights[nodeIndex][targetIndex] = weight;
+		m_animationState->instances[ToIndex(instanceId)].validPose = false;
+		m_animationState->validOutputs = false;
 		return true;
 	}
 
@@ -428,7 +510,11 @@ namespace dyf
 
 	ModelInstance* ModelScene::TryGetModelInstance(ModelInstanceID instance)
 	{
-		return IsValidModelInstance(instance) ? &m_modelInstances[ToIndex(instance)] : nullptr;
+		if(!IsValidModelInstance(instance)) return nullptr;
+		// Returned references may be retained and edited after any later update.
+		m_animationState->instances[ToIndex(instance)].mutableAccess = true;
+		m_animationState->validOutputs = false;
+		return &m_modelInstances[ToIndex(instance)];
 	}
 
 	const ModelInstance& ModelScene::GetModelInstance(ModelInstanceID instance) const

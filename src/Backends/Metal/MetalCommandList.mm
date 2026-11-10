@@ -67,30 +67,9 @@ namespace dyf::Backends
 			}
 		}
 
-		enum class OperationKind : uint8_t
-		{
-			BufferBarrier,
-			TextureBarrier
-		};
-
-		struct MetalOperation
-		{
-			OperationKind kind = OperationKind::BufferBarrier;
-			MetalBuffer* buffer = nullptr;
-			MetalTexture* texture = nullptr;
-			RHI::ResourceState after = RHI::ResourceState::Undefined;
-			uint32_t mipLevel = 0;
-			uint32_t arrayLayer = 0;
-		};
-
-		struct MetalVertexBinding
-		{
-			MetalBuffer* buffer = nullptr;
-			uint32_t offset = 0;
-		};
 	}
 
-	struct MetalCommandList::Impl
+	struct MetalCommandList::Impl : MetalCommandScratch
 	{
 		id<MTLCommandQueue> commandQueue = nil;
 		id<MTLCommandBuffer> commandBuffer = nil;
@@ -105,10 +84,8 @@ namespace dyf::Backends
 		std::shared_ptr<MetalUploadArena> uploadArena;
 		std::shared_ptr<std::shared_ptr<MetalUploadArena>> uploadCompletionLease;
 
-		std::vector<MetalOperation> operations;
-		std::unordered_map<uint32_t, MetalVertexBinding> vertexBindings;
-		std::vector<RHI::Format> colorFormats;
-		std::vector<uint8_t> inlineConstants;
+        std::shared_ptr<MetalCommandScratchPool> scratchPool;
+        std::unique_ptr<MetalCommandScratch> scratchStorage;
 
 		MetalPipeline* pipeline = nullptr;
 		MetalResourceSet* resourceSet = nullptr;
@@ -220,12 +197,18 @@ namespace dyf::Backends
 	}
 
 	MetalCommandList::MetalCommandList(void* commandQueue,
-		std::shared_ptr<MetalUploadPool> uploadPool)
+		std::shared_ptr<MetalUploadPool> uploadPool, std::shared_ptr<MetalCommandScratchPool> scratchPool)
 	{
 		auto impl = std::make_unique<Impl>();
 		impl->commandQueue = (__bridge id<MTLCommandQueue>)commandQueue;
 		impl->uploadPool = uploadPool ? std::move(uploadPool) :
 			MakeMetalUploadPool(impl->commandQueue.device);
+        impl->scratchPool = std::move(scratchPool);
+        if(impl->scratchPool)
+        {
+            impl->scratchStorage = impl->scratchPool->Acquire();
+            static_cast<MetalCommandScratch&>(*impl) = std::move(*impl->scratchStorage);
+        }
 		m_impl = impl.release();
 	}
 
@@ -243,7 +226,15 @@ namespace dyf::Backends
 			[m_impl->commandBuffer release];
 #endif
 		}
-		else Reset();
+		else
+        {
+            Reset();
+            if(m_impl->scratchPool && m_impl->scratchStorage)
+            {
+                *m_impl->scratchStorage = std::move(static_cast<MetalCommandScratch&>(*m_impl));
+                m_impl->scratchPool->Return(std::move(m_impl->scratchStorage));
+            }
+        }
 		delete m_impl;
 	}
 
@@ -292,10 +283,7 @@ namespace dyf::Backends
 		m_impl->resumePass = nil;
 		m_impl->commandBuffer = nil;
 		m_impl->uploadArena.reset();
-		m_impl->operations.clear();
-		m_impl->vertexBindings.clear();
-		m_impl->colorFormats.clear();
-		m_impl->inlineConstants.clear();
+        m_impl->Clear();
 		m_impl->pipeline = nullptr;
 		m_impl->resourceSet = nullptr;
 		m_impl->indexBuffer = nullptr;
@@ -371,7 +359,7 @@ namespace dyf::Backends
 					continue;
 				}
 				m_impl->operations.push_back({
-					OperationKind::BufferBarrier,
+					MetalOperationKind::BufferBarrier,
 					buffer,
 					nullptr,
 					barrier.after});
@@ -401,7 +389,7 @@ namespace dyf::Backends
 				for(uint32_t mip = firstMip; mip < firstMip + mipCount; ++mip)
 				{
 					MetalOperation operation = {};
-					operation.kind = OperationKind::TextureBarrier;
+					operation.kind = MetalOperationKind::TextureBarrier;
 					operation.texture = texture;
 					operation.after = barrier.after;
 					operation.mipLevel = mip;
@@ -1340,9 +1328,9 @@ namespace dyf::Backends
 	{
 		for(const MetalOperation& operation : m_impl->operations)
 		{
-			if(operation.kind == OperationKind::BufferBarrier)
+			if(operation.kind == MetalOperationKind::BufferBarrier)
 				operation.buffer->SetState(operation.after);
-			else if(operation.kind == OperationKind::TextureBarrier)
+			else if(operation.kind == MetalOperationKind::TextureBarrier)
 				operation.texture->SetState(
 					operation.mipLevel, operation.arrayLayer, operation.after);
 		}

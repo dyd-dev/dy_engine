@@ -163,6 +163,9 @@ struct RasterData
     float3 worldNormal [[user(locn2)]];
     float4 worldTangent [[user(locn3)]];
     float4 color [[user(locn5)]];
+#if RENDERER_SURFACE_CACHE
+    uint2 instanceKey [[user(locn6),flat]];
+#endif
 #if RENDERER_ENABLE_SHADOWS
     float4 lightSpacePosition [[user(locn4)]];
 #endif
@@ -711,6 +714,9 @@ inline float3 ResolveNormal(
 inline float4 RunFragmentShader(
     RasterData input,
     bool frontFace,
+#if RENDERER_SURFACE_CACHE
+    uint primitive,texture2d<uint,access::read> surfaceOwner,
+#endif
     constant DrawConstants& drawConstants,
     constant RendererLightingConstants& lighting,
     const device ClusterLight* clusterLights,const device uint* clusterList,constant ClusterParameters& clusters,
@@ -733,10 +739,24 @@ inline float4 RunFragmentShader(
     )
 {
     const uint textureFlags = drawConstants.textureFlags;
+    bool cachedMaterial=false;
+#if RENDERER_SURFACE_CACHE
+    const float2 materialDx=dfdx(input.uv),materialDy=dfdy(input.uv);
+    const uint2 cachePixel=uint2(input.position.xy);
+    uint2 owner=surfaceOwner.read(cachePixel).xy;
+    uint triangle=input.instanceKey.y+primitive,ownerStride=drawConstants.padding1>>8;
+    cachedMaterial=input.instanceKey.x!=0u && owner.x==triangle*ownerStride+input.instanceKey.x
+        && (ownerStride!=0u || owner.y==triangle);
+    float4 cachedNormal=0,cachedAlbedo=0;
+    if(cachedMaterial){cachedNormal=ltcMatrixTexture.read(cachePixel);cachedAlbedo=ltcAmplitudeTexture.read(cachePixel);}
+#define CACHE_SAMPLE(t) t.sample(materialSampler,input.uv,gradient2d(materialDx,materialDy))
+#else
+#define CACHE_SAMPLE(t) t.sample(materialSampler,input.uv)
+#endif
     float4 base = drawConstants.baseColor * input.color;
-    if ((textureFlags & kTextureFlagBaseColor) != 0u)
+    if (!cachedMaterial && (textureFlags & kTextureFlagBaseColor) != 0u)
     {
-        base *= baseColorTexture.sample(materialSampler, input.uv);
+        base *= CACHE_SAMPLE(baseColorTexture);
     }
     // 알파 모드 0은 불투명, 1은 마스크 잘라내기, 2는 블렌드다. 일반 경로에서 마스크 discard는 법선 미분 계산 뒤로 미뤄 픽셀 이웃 미분을 유지한다.
     const uint alphaMode=drawConstants.padding1 & 3u;
@@ -761,7 +781,7 @@ inline float4 RunFragmentShader(
             isnan(color.b)?0:clamp(color.b,0.0f,65504.0f));
         return float4(color,alphaMode==2u?base.a:1.0f);
     }
-    const float3 albedo=base.rgb;
+    float3 albedo=base.rgb;
 
     const float minRoughness =
         clamp(lighting.pbrParams.x, 0.01f, 1.0f);
@@ -775,10 +795,10 @@ inline float4 RunFragmentShader(
     // Opaque environment buffers already include authored AO and screen AO.
     bool usesEnvironmentBuffers=environment.settings.x>0.5f && alphaMode!=2u;
 
-    if ((textureFlags & kTextureFlagMetallicRoughness) != 0u) // 이미지 G로 거칠기, B로 금속도를 곱하고 유효 범위로 제한한다.
+    if (!cachedMaterial && (textureFlags & kTextureFlagMetallicRoughness) != 0u) // 이미지 G로 거칠기, B로 금속도를 곱하고 유효 범위로 제한한다.
     {
         const float4 metallicRoughness =
-            metallicRoughnessTexture.sample(materialSampler, input.uv);
+            CACHE_SAMPLE(metallicRoughnessTexture);
         roughness = clamp(
             roughness * metallicRoughness.g,
             minRoughness,
@@ -788,12 +808,13 @@ inline float4 RunFragmentShader(
             0.0f,
             1.0f);
     }
-    if ((textureFlags & kTextureFlagOcclusion) != 0u && !usesEnvironmentBuffers)
+    if (!cachedMaterial && (textureFlags & kTextureFlagOcclusion) != 0u && !usesEnvironmentBuffers)
     {
-        occlusion = mix(1.0f, occlusionTexture.sample(materialSampler, input.uv).r,
+        occlusion = mix(1.0f, CACHE_SAMPLE(occlusionTexture).r,
             clamp(drawConstants.materialParams.w, 0.0f, 1.0f));
     }
 
+    // Keep the original normal for derivatives and narrow specular lobes; FP16 oct normals lose angular precision.
     float3 normal =
         ResolveNormal(input, drawConstants, normalTexture, materialSampler);
     // Derivatives precede discard and the two-sided normal orientation branch.
@@ -804,6 +825,11 @@ inline float4 RunFragmentShader(
     roughness=sqrt(sqrt(filteredAlphaSquared));
     if(alphaMode==1u && base.a<as_type<float>(drawConstants.padding0)) discard_fragment(); // Mask 모드에서 cutoff보다 작은 픽셀을 버린다. 그 외 알파 모드는 이 잘라내기를 하지 않는다.
     if((drawConstants.padding1 & 4u)!=0u && !frontFace) normal=-normal; // 양면 재질의 뒷면이면 법선을 반대로 돌려 뒤쪽 표면 방향으로 조명한다.
+#if RENDERER_SURFACE_CACHE
+    if(cachedMaterial){albedo=cachedAlbedo.rgb;metallic=cachedAlbedo.a;
+        roughness=cachedNormal.z;occlusion=usesEnvironmentBuffers?1.0f:cachedNormal.w;}
+#endif
+#undef CACHE_SAMPLE
     const float3 viewDirection =
         normalize(lighting.cameraPosition.xyz - input.worldPosition * lighting.cameraPosition.w);
 
@@ -876,6 +902,9 @@ inline float4 RunFragmentShader(
 fragment float4 RENDERER_FRAGMENT_ENTRY(
     RasterData input [[stage_in]],
     bool frontFace [[front_facing]],
+#if RENDERER_SURFACE_CACHE
+    uint primitive [[primitive_id]],texture2d<uint,access::read> surfaceOwner [[texture(25)]],
+#endif
 #if RENDERER_BINDLESS
     texture2d<float> screenAOTexture [[texture(22)]],
     texture2d<float> environmentSpecularTexture [[texture(23)]],
@@ -936,6 +965,9 @@ fragment float4 RENDERER_FRAGMENT_ENTRY(
     return RunFragmentShader(
         input,
         frontFace,
+#if RENDERER_SURFACE_CACHE
+        primitive,surfaceOwner,
+#endif
         drawConstants,
         lighting,
         clusterLights,clusterList,clusters,

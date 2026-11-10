@@ -19,6 +19,7 @@ layout(std430,set=0,binding=0) readonly buffer Inputs {Instance inputs[];};
 layout(std430,set=0,binding=1) readonly buffer Batches {Batch batches[];};
 layout(std430,set=0,binding=2) writeonly buffer Visible {VisibleInstance visible[];};
 layout(std430,set=0,binding=3) buffer Arguments {uint arguments[];};
+layout(std430,set=0,binding=9) writeonly buffer Keys {uvec2 instanceKeys[];};
 layout(std430,set=0,binding=4) buffer History {uint history[];};
 // planes는 정규화된 절두체 6면, depthRow는 시점 앞쪽 거리를 구하는 행이다.
 // 상태 전환 방향마다 서로 다른 기준을 적용해 잦은 전환을 막는 방식(히스테리시스)의 폭을 projection에 담는다.
@@ -132,4 +133,5 @@ void main()
     if(index>=batch.capacityPadding.x) return; // 출력 버퍼 범위를 넘는 쓰기를 막는다. 원자 증가된 인수 개수는 되돌리지 않으므로 CPU의 용량 검증이 전제다.
     visible[batch.instanceOffset+index].model=value.model;
     visible[batch.instanceOffset+index].previousMVP=value.previousMVP;
+    instanceKeys[batch.instanceOffset+index]=uvec2(value.metadata.z,batch.firstIndex/3u);
 }

@@ -64,6 +64,7 @@ public:
     void InvalidateHistory();
 
 private:
+    friend struct ModelRuntimeTestAccess;
     struct MeshBuffer
     {
         std::weak_ptr<const MeshData> source;
@@ -81,10 +82,24 @@ private:
         RHI::PipelineHandle pipeline = nullptr;
         std::array<RHI::ResourceBinding, 4> bindings = {};
     };
+    struct DeformationInput
+    {
+        std::weak_ptr<const MeshData> source;
+        std::vector<uint8_t> palette, morphVertices;
+        uint64_t influenceRevision = 0, geometryRevision = 0;
+        uint32_t influenceOffset = UINT32_MAX;
+        Math::Bounds3 bounds;
+    };
+    struct FrameDeformation
+    {
+        FrameBuffer output;
+        uint64_t geometryRevision = 0;
+    };
     struct FrameResources
     {
         std::vector<FrameBuffer> buffers;
         std::vector<FrameSet> sets;
+        std::vector<FrameDeformation> deformations;
         std::vector<uintptr_t> workingSet;
         RHI::FenceHandle completion;
     };
@@ -131,6 +146,7 @@ private:
     std::vector<uint64_t> m_requiredInfluenceJoints;
     std::vector<bool> m_validInfluences;
     std::vector<RendererDrawDesc> m_draws;
+    std::vector<DeformationInput> m_deformationInputs;
     const ModelScene* m_historyScene = nullptr;
     uint32_t m_historyFrame = UINT32_MAX;
     std::vector<RendererDrawDesc> m_historyDraws;

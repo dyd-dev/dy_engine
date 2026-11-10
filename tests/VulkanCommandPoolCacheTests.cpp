@@ -196,6 +196,32 @@ namespace
         Populate(cache,320);
         CHECK(created.load()==before);
     }
+    void CheckCpuScratchReuse()
+    {
+        Cache cache(Context());
+        auto storage=cache.Acquire();
+        auto& scratch=storage->scratch;
+        auto* buffer=reinterpret_cast<dyf::Backends::VulkanBuffer*>(uintptr_t{1});
+        scratch.m_operations.resize(64);
+        scratch.m_bufferStates.emplace(buffer,dyf::RHI::ResourceState::Common);
+        scratch.m_queryResets.push_back({nullptr,0,1});
+        scratch.m_queryWrites.push_back({nullptr,0});
+        scratch.m_referencedSwapchainImages.push_back(nullptr);
+        scratch.m_inlineConstantCoverage.Reset(128);
+        const auto* operations=scratch.m_operations.data();
+        const auto stateBytes=scratch.m_bufferStates.StorageBytes();
+        cache.Return(std::move(storage));
+        auto reused=cache.Acquire();
+        CHECK(reused->scratch.m_operations.empty() && reused->scratch.m_operations.data()==operations);
+        CHECK(reused->scratch.m_bufferStates.empty() && reused->scratch.m_bufferStates.StorageBytes()==stateBytes);
+        CHECK(reused->scratch.m_queryResets.empty() && reused->scratch.m_queryWrites.empty());
+        CHECK(reused->scratch.m_referencedSwapchainImages.empty() && reused->scratch.m_inlineConstantCoverage.IsComplete());
+        // A leased GPU storage cannot donate its scratch to a simultaneous recording.
+        auto simultaneous=cache.Acquire();
+        CHECK(simultaneous->scratch.m_operations.data()!=operations);
+        cache.Return(std::move(simultaneous));
+        cache.Return(std::move(reused));
+    }
 }
 
 int main()
@@ -203,6 +229,7 @@ int main()
     CheckProgressDuringGrowth();
     CheckConcurrentOwnership();
     CheckConcurrentGrowth();
+    CheckCpuScratchReuse();
     CheckFailures();
     CHECK(created.load()==destroyed.load());
     std::puts("PASS VulkanCommandPoolCache: independent progress, 80000 concurrent leases, growth, loss, allocation failure, drain");

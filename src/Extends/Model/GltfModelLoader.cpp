@@ -657,7 +657,9 @@ namespace dyf
 			{
 				const auto* uriSource =
 					std::get_if<fastgltf::sources::URI>(&gltf.buffers[bufferIndex].data);
-				if(uriSource == nullptr || !uriSource->uri.isLocalPath()) continue;
+				if(uriSource == nullptr) continue;
+				if(!uriSource->uri.valid() || !uriSource->uri.isLocalPath())
+					return ReportModelError(filepath, "external glTF buffer URI must be a valid local path");
 
 				const std::filesystem::path externalPath = basePath / uriSource->uri.fspath();
 				if(!IsPathInsideDirectory(basePath, externalPath, sizeError))
@@ -688,7 +690,9 @@ namespace dyf
 			{
 				const auto* uriSource =
 					std::get_if<fastgltf::sources::URI>(&gltf.images[imageIndex].data);
-				if(uriSource == nullptr || !uriSource->uri.isLocalPath()) continue;
+				if(uriSource == nullptr) continue;
+				if(!uriSource->uri.valid() || !uriSource->uri.isLocalPath())
+					return ReportModelError(filepath, "external glTF image URI must be a valid local path");
 
 				const std::filesystem::path externalPath = basePath / uriSource->uri.fspath();
 				if(!IsPathInsideDirectory(basePath, externalPath, sizeError))

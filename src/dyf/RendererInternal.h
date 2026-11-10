@@ -4,6 +4,8 @@
 #include "dyf/Renderer.h"
 #include "ShaderLayout.h"
 #include "DepthPrepassValidation.h"
+#include "GpuShadowVisibility.h"
+#include "GpuVisibility.h"
 #include "dyf/RenderExtension.h"
 #include "dyf/RHI/IDevice.h"
 #include "dyf/RHI/Indirect.h"
@@ -18,7 +20,6 @@ namespace dyf
 {
 class BasicEnvironmentResources;
 class BasicLightingResources;
-class GpuVisibility;
 class OutputPresentation;
 struct RenderFrame;
 
@@ -117,12 +118,18 @@ struct Renderer::Impl
         float px,py,pz,u,v,alpha;
     };
     static_assert(sizeof(CompactShadowVertex)==24);
+    struct ShadowCluster
+    {
+        uint32_t firstIndex=0,indexCount=0;
+        Math::Bounds3 bounds;
+    };
     struct ShadowArenaRange
     {
         uint64_t generation=0;
         uint32_t baseVertex=0,indexByteOffset=0;
         RHI::Format indexFormat=RHI::Format::R32_UINT;
         bool sortSafeInputs=false;
+        std::vector<ShadowCluster> clusters;
     };
     // 메시 원본 하나에 대응하는 정점·원본 인덱스·LOD 인덱스 버퍼와 경계다. ready는 해당 버퍼 업로드의 제출 성공, prepared는 필요한 버퍼 모두의 제출 성공 또는 빈 메시 처리를 뜻한다. 어느 쪽도 GPU 완료 판정은 아니다.
     struct SceneMeshState
@@ -130,14 +137,19 @@ struct Renderer::Impl
         struct IndexLod
         {
             RHI::BufferHandle buffer=nullptr;
+            RHI::BufferHandle rangeBuffer=nullptr;
             uint32_t count=0;
             float error=0;
             bool ready=false;
+            bool rangeReady=false;
             std::vector<uint32_t> indices;
+            std::vector<uint32_t> rangeIndices;
+            std::vector<ShadowCluster> clusters;
         };
         RHI::BufferHandle vertexBuffer=nullptr,indexBuffer=nullptr,shadowVertexBuffer=nullptr,shadowIndexBuffer=nullptr,mainIndexBuffer=nullptr;
         RHI::BufferHandle indirectIndexBuffer=nullptr;
         std::array<uint32_t,4> indirectFirstIndices={};
+        std::vector<ShadowCluster> mainClusters;
         bool indirectIndexReady=false;
         uint32_t indirectIndexAttemptedBytes=0;
         RHI::Format shadowIndexFormat=RHI::Format::R32_UINT;
@@ -162,6 +174,11 @@ struct Renderer::Impl
         bool mirrored=false,compact=false,arena=false,sortSafe=false;
         RHI::PipelineHandle pipeline=nullptr;
         RHI::ResourceSetHandle set=nullptr;
+        RHI::BufferHandle vertices=nullptr,indices=nullptr;
+        RHI::Format indexFormat=RHI::Format::R32_UINT;
+        int32_t vertexOffset=0;
+        Math::Bounds3 localBounds;
+        bool clustered=false;
         ShadowBounds worldBounds;
     };
     struct ShadowInstanceData
@@ -176,6 +193,18 @@ struct Renderer::Impl
         std::vector<Key> keys;
         std::vector<RHI::DrawIndexedIndirectArguments> arguments;
         bool Build(const Scene&,const ShadowData&,const std::vector<ShadowCaster>&,bool cull,bool allowSingleDraws=false);
+    };
+    struct ShadowGpuState
+    {
+        std::unique_ptr<GpuShadowVisibility> visibility;
+        std::vector<ShadowCaster> casters;
+        std::vector<std::array<uint32_t,3>> coverage,coverageScratch;
+        std::vector<GpuShadowVisibility::Input> inputs;
+        std::vector<GpuShadowVisibility::Batch> batches;
+        std::vector<GpuShadowVisibility::View> views;
+        std::vector<uint32_t> representatives;
+        uint64_t generation=0;
+        bool requested=false,active=false;
     };
     // 파이프라인과 전체 바인딩을 키로 자원 세트를 재사용한다. 해시는 후보 검색용이고 unusedFrames는 캐시에서 제거할 시기를 정한다.
     struct CachedSet { RHI::ResourceSetHandle set=nullptr; uint32_t unusedFrames=0; size_t keyHash=0; };
@@ -253,6 +282,7 @@ struct Renderer::Impl
     static RHI::ShaderDesc DefaultShadowFragment();
     static RHI::ShaderDesc DefaultDepthPrepassFragment(bool shadows,bool bindless);
     static RHI::ShaderDesc DefaultNoAreaFragment(bool shadows,bool bindless,bool depthPrepass);
+    static RHI::ShaderDesc DefaultSurfaceCacheShader(bool vertex,bool shadows,bool bindless);
     RHI::PipelineHandle MaterialPipeline(const MaterialDesc&,bool mirrored=false) const;
     bool CaptureFrame(Image&);
     bool Initialize();
@@ -273,7 +303,8 @@ struct Renderer::Impl
     bool AddExtensionPasses(RenderStage,RenderFrame&,RHI::RenderGraph&);
     bool UsesGpuVisibility() const;
     bool PrepareVisibility(const Scene&,const Camera&,RHI::ICommandList&,uint32_t,uint32_t,
-        const std::vector<RendererDrawDesc>*);
+        const std::vector<RendererDrawDesc>*,bool motion=false);
+    void PrepareMaterialRepresentatives(const Scene&);
     bool PrepareCpuBatches(const Scene&,const Camera&,RHI::ICommandList&,const std::vector<RendererDrawDesc>*,bool motion);
     // 카메라/모션 이력, 가시성, 조명, 효과 준비를 먼저 수행하고 성공한 draw 제출 뒤 CommitFrameResources로 이번 프레임 이력을 확정한다.
     bool PrepareFrameResources(RenderFrame&,RHI::ICommandList&);
@@ -285,7 +316,7 @@ struct Renderer::Impl
     void CommitFrameData();
     RHI::ResourceSetHandle CachedResourceSet(RHI::PipelineHandle,const std::vector<RHI::ResourceBinding>&,std::vector<CachedSet>&);
     void PruneResourceSets(std::vector<CachedSet>&);
-    RHI::PipelineLayoutDesc MeshLayout(bool bindless, std::vector<RHI::ResourceBindingLayout>& bindings) const;
+    RHI::PipelineLayoutDesc MeshLayout(bool bindless, std::vector<RHI::ResourceBindingLayout>& bindings,bool surfaceOwner=false) const;
     // 소유한 RHI 핸들과 보조 객체를 정리하는 한곳의 해제 경계다. 장치 포인터가 유효한 동안 실행된다.
     void Shutdown();
     // 준비→업로드 제출→그래프 구성/기록→draw 제출→readback/Present를 조율한다. 패스 기록 함수 자체는 최종 제출이나 GPU 완료를 맡지 않는다.
@@ -309,6 +340,10 @@ struct Renderer::Impl
     bool PrepareGeometry(const Scene&,RHI::IDevice*);
     static bool BuildCompactShadowGeometry(const std::vector<RendererVertex>&,const std::vector<uint32_t>&,
         std::vector<CompactShadowVertex>&,std::vector<uint32_t>&);
+    static void BuildShadowClusters(const std::vector<CompactShadowVertex>&,std::vector<uint32_t>&,
+        std::vector<ShadowCluster>&);
+    static void BuildMainClusters(const std::vector<RendererVertex>&,std::vector<uint32_t>&,
+        std::vector<ShadowCluster>&);
     bool PrepareShadowArena(const Scene&,RHI::IDevice*);
     bool PrepareMainIndirectGeometry(const Scene&,RHI::IDevice*);
     void SelectLods(const Scene&,const Camera&,uint32_t width,uint32_t height,const std::vector<RendererDrawDesc>*);
@@ -321,6 +356,7 @@ struct Renderer::Impl
         std::vector<uint32_t>&);
     bool PrepareShadowPassResources(const Scene&,const ShadowData&,RHI::ICommandList&,
         const std::vector<RendererDrawDesc>*);
+    bool PrepareGpuShadowPass(const Scene&,const ShadowData&,RHI::ICommandList&);
     bool RecordShadowPass(const Scene&,const Camera&,const ShadowData&,RHI::ICommandList&,
         const std::vector<RendererDrawDesc>*);
     bool RecordMainPass(const Scene&,const Camera&,RHI::ICommandList&,
@@ -364,6 +400,10 @@ struct Renderer::Impl
     RHI::ShaderHandle vertexShader=nullptr,fragmentShader=nullptr,shadowVertexShader=nullptr;
     RHI::ShaderHandle shadowFragmentShader=nullptr;
     RHI::ShaderHandle depthPrepassFragmentShader=nullptr;
+    RHI::ShaderHandle surfaceCacheVertex=nullptr,surfaceCacheFragment=nullptr;
+    std::array<RHI::PipelineHandle,8> surfaceCachePipelines={};
+    bool frameSurfaceCache=false,surfaceCacheReported=false;
+    RHI::TextureHandle frameSurfaceOwner=nullptr,frameSurfaceNormal=nullptr,frameSurfaceAlbedo=nullptr;
     RHI::ShaderHandle noAreaFragmentShader=nullptr,noAreaDepthPrepassFragmentShader=nullptr;
     RHI::ShaderHandle canvasVertexShader=nullptr,canvasFragmentShader=nullptr;
     RHI::ShaderHandle toneVertexShader=nullptr,toneFragmentShader=nullptr;
@@ -379,7 +419,11 @@ struct Renderer::Impl
     bool depthPrepassReported=false;
     std::vector<uint64_t> depthPassRevisions;
     std::vector<uint64_t> depthProtectedInputs;
+    RHI::RenderGraph frameGraph;
+    std::vector<RenderGeometryDraw> frameGeometryScratch;
     DepthGeometrySnapshot depthGeometrySnapshot;
+    SurfaceGeometrySnapshot surfaceGeometrySnapshot;
+    std::vector<uint64_t> surfaceProtectedInputs;
     Math::float4x4 depthGeometryView,depthGeometryProjection;
     bool depthGeometryUnchanged=false;
     std::array<RHI::PipelineHandle,4> wireframePipelines={};
@@ -421,6 +465,8 @@ struct Renderer::Impl
     };
     // bindless 재질을 텍스처 페이지로 나누고 자원 세트에 연결하기 위한 재사용 임시 배열이다.
     std::vector<MaterialPageScratch> materialPages;
+    uint64_t materialPageRevision=0;
+    uint32_t materialPageCount=0;
     std::vector<RHI::ResourceSetHandle> mainSetScratch,shadowSetScratch;
     std::vector<RHI::ResourceSetHandle> mainMirroredSetScratch;
     std::vector<RHI::ResourceBinding> mainBindingScratch,mainCombinedBindingScratch,shadowBindingScratch;
@@ -429,6 +475,7 @@ struct Renderer::Impl
     std::vector<double> shadowBatchDepthScratch;
     bool shadowBatchSortReported=false;
     ShadowInstanceData shadowInstances;
+    ShadowGpuState gpuShadows;
     std::vector<Math::float4x4> shadowInstanceBytes;
     RHI::BufferHandle shadowInstanceBuffer=nullptr;
     bool shadowInstanceReady=false,shadowInstancesActive=false;
@@ -447,6 +494,7 @@ struct Renderer::Impl
     RHI::FenceHandle lastRenderCompletion;
     // Scene의 CPU 원본과 대응하는 기하·LOD·텍스처 캐시다. 설정 변경 시 같은 장치·고정 입력 형식의 업로드 자원을 그대로 유지한다.
     std::vector<SceneMeshState> m_meshes;
+    uint64_t geometryRevision=0;
     // Only this Impl owns arena buffers; mesh ranges never own/alias their handles.
     RHI::BufferHandle shadowArenaVertices=nullptr,shadowArenaIndices=nullptr;
     uint64_t shadowArenaGeneration=0;
@@ -458,7 +506,19 @@ struct Renderer::Impl
     std::vector<TextureSlot> m_textures;
     std::vector<uint32_t> m_freeTextureSlots;
     std::map<std::tuple<const void*,ColorSpace,bool>,uint32_t> m_indices;
+    struct TextureCacheKey {
+        std::weak_ptr<Scene> scene;
+        uint64_t revision=0,generation=0;
+        bool valid=false,stock=false;
+    } textureCacheKey;
     std::vector<SceneMaterialState> materialStates;
+    struct MaterialCacheKey {
+        std::weak_ptr<Scene> scene;
+        uint64_t revision=0,textures=0,generation=0,representatives=0;
+        std::array<RHI::TextureHandle,3> defaults={};
+        bool valid=false,stock=false;
+    } materialCacheKey;
+    std::vector<uint32_t> materialRepresentatives;
     // 확장 모듈이 환경/지역광을 공급하지 않을 때 사용할 기본 자원이다. extensions는 등록 순서를 유지하며 Impl이 단독 소유한다.
     std::unique_ptr<BasicEnvironmentResources> basicEnvironment;
     std::unique_ptr<BasicLightingResources> basicLighting;
@@ -474,6 +534,15 @@ struct Renderer::Impl
     };
     std::unique_ptr<GpuVisibility> gpuVisibility;
     std::vector<VisibilityDraw> visibilityDraws;
+    struct VisibilityCache {
+        std::weak_ptr<Scene> scene;
+        uint64_t topology=0,materials=0,lighting=0,facing=0,geometry=0,transforms=0;
+        bool valid=false,motion=false;
+        std::vector<GpuVisibility::Instance> inputs;
+        std::vector<GpuVisibility::Batch> batches;
+        std::vector<GpuVisibility::Range> ranges;
+        std::vector<uint64_t> keys;
+    } visibilityCache;
     std::vector<uint64_t> visibilityKeys;
     std::weak_ptr<Scene> visibilityScene;
     bool visibilityActive=false;

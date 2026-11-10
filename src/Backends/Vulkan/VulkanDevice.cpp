@@ -135,6 +135,7 @@ namespace dyf::Backends
             case RHI::Feature::RenderArea:
             case RHI::Feature::SamplerLodBias:
             case RHI::Feature::FractionalDepthBias: return true;
+            case RHI::Feature::FragmentPrimitiveId: return supported.geometryShader == VK_TRUE;
             case RHI::Feature::Tessellation:
             case RHI::Feature::IndirectTessellation: return supported.tessellationShader == VK_TRUE;
             case RHI::Feature::IndirectFirstInstance: return supported.drawIndirectFirstInstance == VK_TRUE;
@@ -321,6 +322,7 @@ namespace dyf::Backends
             VkSemaphore waitSemaphore=VK_NULL_HANDLE;
             VkFence fence=VK_NULL_HANDLE;
             uint32_t imageIndex=0;
+            size_t fenceIndex=0;
             bool acquireSuboptimal=false;
             uint64_t frame=0;
             bool timed=false;
@@ -336,6 +338,7 @@ namespace dyf::Backends
         void ConfigurePresentWorker(RHI::PresentMode mode);
         bool PollPresent(bool wait=false);
         bool ApplyPresentResult(const PresentJob&,const PresentResult&);
+        bool AcquirePresentFence(PresentJob&);
         VkResult AcquireImage(uint32_t slot,uint64_t timeout,uint32_t& image,bool prefetch=false);
         VkResult WaitForAcquisitions(uint64_t timeout=1000000000ull);
         void TryPrefetchImage();
@@ -1258,17 +1261,6 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 			return false;
 		}
 		if (m_imagesInFlight[m_currentImageIndex] != VK_NULL_HANDLE) return unavailable("image-fence");
-        if(m_presentFencesEnabled)
-        {
-            const auto status=vkGetFenceStatus(m_context.device,m_presentFences[m_currentImageIndex]);
-            if(status==VK_NOT_READY)return unavailable("presentation-fence");
-            if(status!=VK_SUCCESS)
-            {
-                m_submissionFaulted=true;
-                LogVulkanFailure("vkGetFenceStatus(presentation)",status);
-                return false;
-            }
-        }
 
 		m_backBuffer = m_backBuffers[m_currentImageIndex].get();
 		m_frameReady = true;
@@ -1466,6 +1458,58 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		return true;
 	}
 
+    bool VulkanDevice::Impl::AcquirePresentFence(PresentJob& job)
+    {
+        if(!m_presentFencesEnabled)return true;
+        for(size_t i=0;i<m_presentFences.size();++i)
+        {
+            if(m_presentFencePending[i])
+            {
+                const auto status=vkGetFenceStatus(m_context.device,m_presentFences[i]);
+                if(status==VK_NOT_READY)continue;
+                if(status!=VK_SUCCESS)
+                {
+                    m_submissionFaulted=true;
+                    LogVulkanFailure("vkGetFenceStatus(presentation)",status);
+                    return false;
+                }
+                m_presentFencePending[i]=0;
+            }
+            const auto reset=vkResetFences(m_context.device,1,&m_presentFences[i]);
+            if(reset!=VK_SUCCESS)
+            {
+                m_submissionFaulted=true;
+                LogVulkanFailure("vkResetFences(presentation)",reset);
+                return false;
+            }
+            job.fence=m_presentFences[i];job.fenceIndex=i;
+            return true;
+        }
+        // Acquire orders semaphore reuse on the GPU; pending host fences keep their own lifetime.
+        try
+        {
+            m_presentFences.reserve(m_presentFences.size()+1);
+            m_presentFencePending.reserve(m_presentFences.size()+1);
+        }
+        catch(const std::exception& error)
+        {
+            m_submissionFaulted=true;
+            std::fprintf(stderr,"[Vulkan] Presentation fence storage failed: %s\n",error.what());
+            return false;
+        }
+        VkFenceCreateInfo create{};create.sType=VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        const auto result=vkCreateFence(m_context.device,&create,nullptr,&job.fence);
+        if(result!=VK_SUCCESS)
+        {
+            m_submissionFaulted=true;
+            LogVulkanFailure("vkCreateFence(presentation)",result);
+            return false;
+        }
+        job.fenceIndex=m_presentFences.size();
+        m_presentFences.push_back(job.fence);m_presentFencePending.push_back(0);
+        return true;
+    }
+
     bool VulkanDevice::Impl::Present()
     {
         if(!m_frameReady || !m_imageAcquired || m_swapchain.GetHandle()==VK_NULL_HANDLE || m_submissionFaulted)return false;
@@ -1473,6 +1517,8 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         const bool joined=PollPresent(true);
         RecordWsi(m_wsiFrame,"Vulkan previous present join",joinStarted,joined?0:-1);
         if(!joined)return false;
+        PresentJob job{};
+        if(!AcquirePresentFence(job))return false;
         // 모든 이미지 작업 뒤에서 한 번만 표시 세마포어를 신호한다.
         SubmissionRecord completion{};
         m_submissions.reserve(m_submissions.size()+1);
@@ -1518,22 +1564,10 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         m_imagesInFlight[m_currentImageIndex]=completion.fence;
         m_submissions.push_back(std::move(completion));
 
-        PresentJob job{};
         job.frame=m_wsiFrame;job.timed=Platform::HasFrameTimingSink();
         job.queue=m_context.presentQueue;job.swapchain=m_swapchain.GetHandle();job.imageIndex=m_currentImageIndex;
         job.waitSemaphore=m_renderFinishedSemaphores[m_currentImageIndex];job.acquireSuboptimal=m_recreateAfterPresent;
-        if(m_presentFencesEnabled)
-        {
-            const auto reset=vkResetFences(m_context.device,1,&m_presentFences[m_currentImageIndex]);
-            if(reset!=VK_SUCCESS)
-            {
-                m_submissionFaulted=true;
-                LogVulkanFailure("vkResetFences(presentation)",reset);
-                return false;
-            }
-            job.fence=m_presentFences[m_currentImageIndex];
-            m_presentFencePending[m_currentImageIndex]=1;
-        }
+        if(job.fence)m_presentFencePending[job.fenceIndex]=1;
         // Prefetch after graphics submission, before the worker owns this swapchain.
         // BeginFrame can then record/submit the next image while host Present runs.
         TryPrefetchImage();
@@ -1545,7 +1579,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
             assert(queued);
             if(!queued)
             {
-                if(job.fence)m_presentFencePending[job.imageIndex]=0;
+                if(job.fence)m_presentFencePending[job.fenceIndex]=0;
                 m_submissionFaulted=true;return false;
             }
         }
@@ -1570,7 +1604,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
         if(job.swapchain!=m_swapchain.GetHandle()) {m_submissionFaulted=true;return false;}
         // OOM leaves the presentation unqueued; its reset fence will never signal.
         if(job.fence && (result==VK_ERROR_OUT_OF_HOST_MEMORY || result==VK_ERROR_OUT_OF_DEVICE_MEMORY))
-            m_presentFencePending[job.imageIndex]=0;
+            m_presentFencePending[job.fenceIndex]=0;
         if((result==VK_SUCCESS || result==VK_SUBOPTIMAL_KHR) && !m_retiredSwapchains.empty() &&
             m_retiredReleaseImage==UINT32_MAX)m_retiredReleaseImage=job.imageIndex;
         if(result==VK_SUCCESS || result==VK_SUBOPTIMAL_KHR || result==VK_ERROR_OUT_OF_DATE_KHR)
@@ -2141,6 +2175,7 @@ RHI::PipelineHandle VulkanDevice::CreateComputePipelineNative(const RHI::Compute
 		VkPhysicalDeviceFeatures enabled{};
 		enabled.samplerAnisotropy = supported.samplerAnisotropy;
         enabled.textureCompressionBC = supported.textureCompressionBC;
+        enabled.geometryShader = supported.geometryShader;
 		enabled.fillModeNonSolid = supported.fillModeNonSolid;
 		enabled.depthBiasClamp = supported.depthBiasClamp;
 		enabled.tessellationShader = supported.tessellationShader;

@@ -8,8 +8,15 @@ struct Input {
     float4 model0:TEXCOORD5;float4 model1:TEXCOORD6;float4 model2:TEXCOORD7;float4 model3:TEXCOORD8;
     float4 previous0:TEXCOORD9;float4 previous1:TEXCOORD10;float4 previous2:TEXCOORD11;float4 previous3:TEXCOORD12;
     float4 color:TEXCOORD13;
+#if SURFACE_OWNER
+uint2 sourceKey:TEXCOORD14;
+#endif
 };
-struct Output {precise float4 position:SV_Position;float2 uv:TEXCOORD0;float3 worldNormal:TEXCOORD1;float4 worldTangent:TEXCOORD2;float4 currentClip:TEXCOORD3;float4 previousClip:TEXCOORD4;float viewDepth:TEXCOORD5;float4 vertexColor:TEXCOORD6;};
+struct Output {precise float4 position:SV_Position;float2 uv:TEXCOORD0;float3 worldNormal:TEXCOORD1;float4 worldTangent:TEXCOORD2;float4 currentClip:TEXCOORD3;float4 previousClip:TEXCOORD4;float viewDepth:TEXCOORD5;float4 vertexColor:TEXCOORD6;
+#if SURFACE_OWNER
+nointerpolation uint2 instanceKey:TEXCOORD7;
+#endif
+};
 float3 SurfaceNormalizeOr(float3 value,float3 fallback)
 {
     float scale=max(max(abs(value.x),abs(value.y)),abs(value.z));
@@ -37,6 +44,9 @@ Output main(Input input)
     float4x4 model=drawIndex.y!=0?transpose(float4x4(input.model0,input.model1,input.model2,input.model3)):draw.model;
     precise float4 world=mul(model,float4(input.position,1.0));
     Output output=(Output)0;
+#if SURFACE_OWNER
+    output.instanceKey=input.sourceKey;
+#endif
     precise float4 clipPosition=mul(viewProjection,world);
     // 이전 변형을 알 수 없는 표면은 이 프레임의 시간 누적을 거부한다.
     output.currentClip=clipPosition;

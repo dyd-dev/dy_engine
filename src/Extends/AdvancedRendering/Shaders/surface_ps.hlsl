@@ -1,3 +1,9 @@
+#ifndef SURFACE_OPAQUE
+#define SURFACE_OPAQUE 0
+#endif
+#ifndef SURFACE_OWNER
+#define SURFACE_OWNER 0
+#endif
 #ifndef SURFACE_FULL_OUTPUTS
 #define SURFACE_FULL_OUTPUTS 0
 #endif
@@ -7,15 +13,30 @@ cbuffer Frame:register(b12) {float4x4 view;float4x4 projection;float4x4 inverseP
 cbuffer Index:register(b15) {uint4 drawIndex;};
 Texture2D<float4> baseTexture:register(t0),materialTexture:register(t1),normalTexture:register(t2),aoTexture:register(t3),emissiveTexture:register(t4);
 SamplerState materialSampler:register(s8);
-struct Input {float4 position:SV_Position;float2 uv:TEXCOORD0;float3 worldNormal:TEXCOORD1;float4 worldTangent:TEXCOORD2;float4 currentClip:TEXCOORD3;float4 previousClip:TEXCOORD4;float viewDepth:TEXCOORD5;float4 vertexColor:TEXCOORD6;};
-struct Output {float4 normalRoughAO:SV_Target0;float4 albedoMetal:SV_Target1;float4 motionDepth:SV_Target2;};
+struct Input {float4 position:SV_Position;float2 uv:TEXCOORD0;float3 worldNormal:TEXCOORD1;float4 worldTangent:TEXCOORD2;float4 currentClip:TEXCOORD3;float4 previousClip:TEXCOORD4;float viewDepth:TEXCOORD5;float4 vertexColor:TEXCOORD6;
+#if SURFACE_OWNER
+nointerpolation uint2 instanceKey:TEXCOORD7;
+#endif
+};
+struct Output {float4 normalRoughAO:SV_Target0;float4 albedoMetal:SV_Target1;float4 motionDepth:SV_Target2;
+#if SURFACE_OWNER
+uint2 materialOwner:SV_Target3;
+#endif
+};
 float2 octEncode(float3 n)
 {
     n/=abs(n.x)+abs(n.y)+abs(n.z);
     if(n.z<0)n.xy=(1.0-abs(n.yx))*float2(n.x>=0?1:-1,n.y>=0?1:-1);
     return n.xy*0.5+0.5;
 }
-Output main(Input input,bool front:SV_IsFrontFace)
+#if SURFACE_OPAQUE
+[earlydepthstencil]
+#endif
+Output main(Input input,bool front:SV_IsFrontFace
+#if SURFACE_OWNER
+,uint primitive:SV_PrimitiveID
+#endif
+)
 {
     Draw draw=draws[drawIndex.x];uint flags=draw.flags.x;Output output;
 #if SURFACE_FULL_OUTPUTS
@@ -24,10 +45,18 @@ Output main(Input input,bool front:SV_IsFrontFace)
     bool needNormal=(outputs.w&1u)!=0u,needMaterial=(outputs.w&2u)!=0u,needMotion=(outputs.w&4u)!=0u;
 #endif
     float4 base=draw.baseColor*input.vertexColor;
-    if((needMaterial || draw.flags.y==1) && (flags&1)!=0)base*=baseTexture.Sample(materialSampler,input.uv);
+    if((needMaterial || (SURFACE_OPAQUE==0 && draw.flags.y==1)) && (flags&1)!=0)base*=baseTexture.Sample(materialSampler,input.uv);
     if((flags&64u)!=0u)base.rgb=draw.baseColor.rgb;
+#if SURFACE_OWNER
+    // Preserve Surface's nonnegative output contract; unsupported inputs use original Main sampling.
+    bool cacheValid=all(base.rgb>=0.0) && all(base.rgb<=65504.0) &&
+        ((flags&8u)==0u || (draw.materialParams.w>=0.0 && draw.materialParams.w<=1.0));
+    uint triangleIndex=input.instanceKey.y+primitive;
+    uint owner=triangleIndex*drawIndex.w+input.instanceKey.x;
+    output.materialOwner=cacheValid && input.instanceKey.x!=0u?uint2(owner,triangleIndex):uint2(0,0);
+#endif
     float3 n=float3(0,0,1);float roughness=0.04;
-    float2 mr=draw.materialParams.xy;
+    float2 mr=clamp(draw.materialParams.xy,float2(0,0.04),float2(1,1));
     if((needNormal || needMaterial) && (flags&2)!=0)mr*=materialTexture.Sample(materialSampler,input.uv).bg;
     if(needNormal)
     {
@@ -46,7 +75,9 @@ Output main(Input input,bool front:SV_IsFrontFace)
         float filteredAlphaSquared=min(1.0,roughness*roughness*roughness*roughness+min(2.0*normalVariance,0.18));
         roughness=sqrt(sqrt(filteredAlphaSquared));
     }
+#if !SURFACE_OPAQUE
     if(draw.flags.y==1 && base.a<draw.alpha.x)discard;
+#endif
 #if !SURFACE_FULL_OUTPUTS
     float4 values[3]={float4(0,0,0,0),float4(0,0,0,0),float4(0,0,0,0)};
 #endif

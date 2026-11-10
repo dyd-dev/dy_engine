@@ -19,8 +19,11 @@ namespace dyf::RHI
 
 #if defined(__ANDROID__)
     inline constexpr Format DefaultSwapchainFormat = Format::R8G8B8A8_UNORM;
+    // Android's WindowManager controls composition of the native window.
+    inline constexpr CompositeAlpha DefaultSwapchainCompositeAlpha = CompositeAlpha::Inherit;
 #else
     inline constexpr Format DefaultSwapchainFormat = Format::B8G8R8A8_UNORM;
+    inline constexpr CompositeAlpha DefaultSwapchainCompositeAlpha = CompositeAlpha::Opaque;
 #endif
 
 	struct SwapchainDesc
@@ -38,6 +41,6 @@ namespace dyf::RHI
 		uint32_t initialHeight = 0;
         const void* window = nullptr;
         ColorSpace colorSpace = ColorSpace::Srgb;
-        CompositeAlpha compositeAlpha = CompositeAlpha::Opaque;
+        CompositeAlpha compositeAlpha = DefaultSwapchainCompositeAlpha;
 	};
 }

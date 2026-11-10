@@ -35,9 +35,19 @@ namespace dyf
 	{
 		if(device == nullptr) return false; // 장치가 없으면 캐시 동기화를 시작하지 않는다.
 
+		const bool stock=UsesStockGeometry();
+        const std::weak_ptr<Scene> owner=scene.m_lifetime;
+        if(textureCacheKey.valid && !textureCacheKey.scene.expired() &&
+            !textureCacheKey.scene.owner_before(owner) && !owner.owner_before(textureCacheKey.scene) &&
+            textureCacheKey.revision==scene.m_materialRevision && textureCacheKey.stock==stock)return true;
+        textureCacheKey.valid=false;
+        ++textureCacheKey.generation;
+        const auto commit=[&] {
+            textureCacheKey.scene=owner;textureCacheKey.revision=scene.m_materialRevision;
+            textureCacheKey.stock=stock;textureCacheKey.valid=true;return true;
+        };
 		for(auto& slot:m_textures) slot.used=false;
 		std::vector<uint32_t> pending;
-		const bool stock=UsesStockGeometry();
 		for(const auto& material : scene.Materials())
 		{
 			uint32_t kind=0;
@@ -91,7 +101,7 @@ namespace dyf
 				m_freeTextureSlots.push_back(i);
 			}
 		}
-		if(pending.empty()) return true; // 추가 업로드가 없으면 현재 캐시로 성공한다.
+		if(pending.empty()) return commit(); // 추가 업로드가 없으면 현재 캐시로 성공한다.
 
 		// 작업 스레드가 만든 축소 레벨들과 성공 여부만 넘긴다. 원본 mip 0은 Image에서 읽는다.
 		struct PreparedMips
@@ -244,12 +254,14 @@ namespace dyf
 		}
         std::fprintf(stderr,"[Renderer] Material texture uploads: %zu images, %u preserved DDS BC1/BC3/BC5; payload=%llu bytes, RGBA equivalent=%llu bytes.\n",
             pending.size(),compressedTextures,static_cast<unsigned long long>(uploadedBytes),static_cast<unsigned long long>(rgbaBytes));
-		return true;
+		return commit();
 	}
 
 	// 소유한 GPU 텍스처를 RHI에 반납하고 Image 참조·인덱스 맵을 비운다.
 	void Renderer::Impl::ReleaseTextures(RHI::IDevice* device)
 	{
+        textureCacheKey.valid=false;++textureCacheKey.generation;
+        materialCacheKey.valid=false;
 		for(TextureSlot& slot : m_textures)
 		{
 			if(slot.texture) device->DestroyTexture(slot.texture); // 종료하는 캐시 슬롯의 GPU 텍스처를 반납한다.
@@ -264,6 +276,12 @@ void Renderer::Impl::UpdateMaterialStates(const Scene& scene)
 {
 	const uint32_t materialCount = scene.Materials().size();
 	const bool stockShaders = UsesStockGeometry();
+    const std::weak_ptr<Scene> owner=scene.m_lifetime;
+    if(materialCacheKey.valid && !materialCacheKey.scene.expired() &&
+        !materialCacheKey.scene.owner_before(owner) && !owner.owner_before(materialCacheKey.scene) &&
+        materialCacheKey.revision==scene.m_materialRevision && materialCacheKey.textures==textureCacheKey.generation &&
+        materialCacheKey.stock==stockShaders && materialCacheKey.defaults==defaultMaterialTextures)return;
+    materialCacheKey.valid=false;
 	// 이미지가 없는 슬롯에는 흰색, 표면에 수직인 방향(법선)을 담는 기본 텍스처, 검정 등 용도별 대체 텍스처를 넣는다.
 	// 대체 핸들이 있어도 textureFlags의 해당 비트는 켜지지 않으므로 셰이더는 원래 재질 이미지가 있었는지 구분할 수 있다.
 	constexpr std::array<uint32_t,ToIndex(MaterialTextureKind::Count)> defaults = {0u,0u,1u,0u,2u};
@@ -303,6 +321,10 @@ void Renderer::Impl::UpdateMaterialStates(const Scene& scene)
 				materialState.textureFlags &= ~(1u << ToIndex(MaterialTextureKind::Emissive));
 		}
 	}
+    materialCacheKey.scene=owner;materialCacheKey.revision=scene.m_materialRevision;
+    materialCacheKey.textures=textureCacheKey.generation;materialCacheKey.stock=stockShaders;
+    materialCacheKey.defaults=defaultMaterialTextures;
+    ++materialCacheKey.generation;materialCacheKey.valid=true;
 }
 
 	// 픽셀 주소와 색 공간으로 찾되 제출 상태가 ShaderResource인 슬롯만 반환한다. 이 조회 자체가 GPU 완료를 기다리지는 않는다.

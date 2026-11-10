@@ -7,6 +7,7 @@
 #include <cstring>
 #include <future>
 #include <limits>
+#include <memory>
 #include <vector>
 #if defined(ENABLE_METAL)
 #include "EnvironmentLibrary.h"
@@ -264,7 +265,9 @@ bool UploadTexture(RHI::IDevice& device,RHI::ICommandList& commands,uint32_t wid
     using namespace RHI;
     TextureDesc desc;desc.width=width;desc.height=height;desc.mipLevels=static_cast<uint32_t>(levels.size());
     desc.format=Format::R32G32B32A32_FLOAT;desc.usage=TextureUsage::ShaderResource;
-    auto* texture=device.CreateTexture(desc);
+    const auto destroy=[&device](Texture* value) {device.DestroyTexture(value);};
+    std::unique_ptr<Texture,decltype(destroy)> owned(device.CreateTexture(desc),destroy);
+    auto* texture=owned.get();
     if(!texture) return false;
     ResourceBarrierDesc barrier{nullptr,texture,ResourceState::Undefined,ResourceState::CopyDestination,{}};
     commands.ResourceBarrier(&barrier,1);
@@ -274,12 +277,12 @@ bool UploadTexture(RHI::IDevice& device,RHI::ICommandList& commands,uint32_t wid
         if(size>UINT32_MAX || levels[level].size()!=size/sizeof(float) ||
             !device.UpdateTexture(commands,texture,level,0,levels[level].data(),static_cast<uint32_t>(size),
                 static_cast<uint32_t>(pitch),static_cast<uint32_t>(size)))
-        {device.DestroyTexture(texture);return false;}
+        return false;
         width=std::max(1u,width/2);height=std::max(1u,height/2);
     }
     barrier.before=ResourceState::CopyDestination;barrier.after=ResourceState::ShaderResource;
     commands.ResourceBarrier(&barrier,1);
-    result=texture;return true;
+    result=owned.release();return true;
 }
 
 bool UpdateSet(RHI::IDevice& device,RHI::PipelineHandle pipeline,RHI::ResourceSetHandle& set,
@@ -329,7 +332,13 @@ void EnvironmentLighting::Reset()
 bool EnvironmentLighting::BuildEnvironment(RHI::ICommandList& commands,const HdrImage& source,const HdrImage& diffuseSource,
     uint32_t preparationThreads)
 {
-    std::array<RHI::TextureHandle,4> pending={};
+    struct PendingTextures {
+        RHI::IDevice& device;
+        std::array<RHI::TextureHandle,4> textures={};
+        bool committed=false;
+        ~PendingTextures() {if(!committed)for(auto* texture:textures)device.DestroyTexture(texture);}
+    } owner{*m_device};
+    auto& pending=owner.textures;
     const bool valid=source.IsValid();
     std::array<Math::float4,9> irradiance={};
     std::vector<std::vector<float>> radiance(1),prefilter,brdf(1);
@@ -403,15 +412,13 @@ bool EnvironmentLighting::BuildEnvironment(RHI::ICommandList& commands,const Hdr
     if(!whiteReady || !UploadTexture(*m_device,commands,width,height,radiance,pending[0]) ||
         !UploadTexture(*m_device,commands,width,height,prefilter,pending[1]) ||
         !UploadTexture(*m_device,commands,128u,128u,brdf,pending[2]))
-    {
-        for(auto* texture:pending) m_device->DestroyTexture(texture);
         return false;
-    }
     m_device->DestroyResourceSet(m_specularSet);m_device->DestroyResourceSet(m_backgroundSet);
     m_device->DestroyResourceSet(m_diffuseSet);m_diffuseSet=nullptr;
     m_specularSet=m_backgroundSet=nullptr;
     for(auto* texture:{m_radiance,m_prefilter,m_brdf,m_white}) m_device->DestroyTexture(texture);
     m_radiance=pending[0];m_prefilter=pending[1];m_brdf=pending[2];m_white=pending[3];
+    owner.committed=true;
     m_source=source;m_diffuseSource=diffuseSource.IsValid() ? diffuseSource : source;m_irradiance=irradiance;
     m_prefilterMaxMagnitude=prefilterMaxMagnitude;m_prefilterFinite=prefilterFinite;
     return true;
@@ -485,7 +492,9 @@ bool EnvironmentLighting::BuildProbes(RHI::ICommandList& commands,const std::vec
     TextureDesc description;description.width=width;description.height=height;
     description.depthOrArraySize=static_cast<uint32_t>(layers);description.mipLevels=MipCount(width,height);
     description.format=Format::R32G32B32A32_FLOAT;description.usage=TextureUsage::ShaderResource;
-    auto* image=m_device->CreateTexture(description);if(!image) return false;
+    const auto destroy=[this](Texture* value) {m_device->DestroyTexture(value);};
+    std::unique_ptr<Texture,decltype(destroy)> owned(m_device->CreateTexture(description),destroy);
+    auto* image=owned.get();if(!image) return false;
     ResourceBarrierDesc barrier{nullptr,image,ResourceState::Undefined,ResourceState::CopyDestination,{}};
     commands.ResourceBarrier(&barrier,1);
     const float black[4]={0,0,0,1};
@@ -502,7 +511,7 @@ bool EnvironmentLighting::BuildProbes(RHI::ICommandList& commands,const std::vec
             }
             const uint32_t pitch=mipWidth*4*sizeof(float),size=pitch*mipHeight;
             if(!m_device->UpdateTexture(commands,image,mip,layer,pixels,size,pitch,size))
-            {m_device->DestroyTexture(image);return false;}
+                return false;
             mipWidth=std::max(1u,mipWidth/2);mipHeight=std::max(1u,mipHeight/2);
         }
     }
@@ -510,7 +519,7 @@ bool EnvironmentLighting::BuildProbes(RHI::ICommandList& commands,const std::vec
     commands.ResourceBarrier(&barrier,1);
     m_device->DestroyResourceSet(m_diffuseSet);m_diffuseSet=nullptr;
     m_device->DestroyResourceSet(m_specularSet);m_specularSet=nullptr;
-    m_device->DestroyTexture(m_probePrefilter);m_probePrefilter=image;m_probeIndices=std::move(pending);
+    m_device->DestroyTexture(m_probePrefilter);m_probePrefilter=owned.release();m_probeIndices=std::move(pending);
     return true;
 }
 

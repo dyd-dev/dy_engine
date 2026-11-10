@@ -10,13 +10,48 @@
 
 namespace dyf
 {
+std::array<uint64_t,4> ReadOnlyRenderExtension::SourceRevisions(const Scene& scene) noexcept
+{ return {scene.m_transformRevision,scene.m_topologyRevision,scene.m_materialRevision,scene.m_entityLightingRevision}; }
+
+bool ReadOnlyRenderExtension::InputsUnchanged(const RenderFrame& frame,const std::array<uint64_t,4>& revisions,const Camera* previous) const
+{
+    const bool unchanged=SourceRevisions(frame.scene)==revisions && (!previous ||
+        (SameDepthCamera(previous->view,previous->projection,frame.camera) &&
+        std::memcmp(&previous->position,&frame.camera.position,sizeof(previous->position))==0));
+    if(!unchanged)std::fprintf(stderr,"dyf: Read-only module %s modified Scene/camera inputs.\n",GetName());
+    return unchanged;
+}
+
+bool ReadOnlyRenderExtension::PrepareCamera(RenderFrame& frame)
+{
+    const auto revisions=SourceRevisions(frame.scene);ReadOnlyRenderFrame view(frame);
+    const bool prepared=PrepareCamera(frame.camera,view);
+    return InputsUnchanged(frame,revisions,nullptr) && prepared;
+}
+
+bool ReadOnlyRenderExtension::Prepare(RenderFrame& frame,RHI::ICommandList& commands)
+{
+    const auto revisions=SourceRevisions(frame.scene);const auto camera=frame.camera;ReadOnlyRenderFrame view(frame);
+    const bool prepared=Prepare(view,commands);
+    return InputsUnchanged(frame,revisions,&camera) && prepared;
+}
+
+bool ReadOnlyRenderExtension::AddPasses(RenderStage stage,RenderFrame& frame,RHI::RenderGraph& graph)
+{
+    const auto revisions=SourceRevisions(frame.scene);const auto camera=frame.camera;ReadOnlyRenderFrame view(frame);
+    const bool added=AddPasses(stage,view,graph);
+    return InputsUnchanged(frame,revisions,&camera) && added;
+}
+
 // 각 모듈이 공급하거나 필요로 하는 기능을 OR로 합친다. 가시성 차폐 제거가 요청되면 표면 깊이도 필요하다고 추가한다.
 RenderRequirements Renderer::Impl::CollectRequirements() const
 {
     RenderRequirements result;
+    result.acceptsPackedMaterialOwner=true;
     for(const auto& extension:extensions)
     {
         const auto requirements=extension->GetRequirements(owner);
+        result.acceptsPackedMaterialOwner&=requirements.acceptsPackedMaterialOwner;
         result.providesSurface|=requirements.providesSurface;
         result.needsSurface|=requirements.needsSurface;
         result.needsDepth|=requirements.needsDepth;
@@ -72,10 +107,13 @@ bool Renderer::Impl::AddExtensionPasses(RenderStage stage,RenderFrame& frame,RHI
     for(auto& extension:extensions)
     {
         const bool previous=frame.opaqueDepthComplete;
+        const bool previousMaterial=frame.surfaceMaterialComplete;
+        const auto oldOwner=frame.materialOwner,oldNormal=frame.normal,oldAlbedo=frame.albedo;
+        const auto oldKeys=frame.visibleInstanceKeys;
         const auto oldDepth=frame.depth;
         const auto oldView=frame.camera.view,oldProjection=frame.camera.projection;
         depthPassRevisions.clear();
-        if(previous || frameOpaqueDepthComplete || frameDepthPrepassValid)
+        if(previous || previousMaterial || frameOpaqueDepthComplete || frameDepthPrepassValid)
             for(uint32_t i=0;const auto* pass=graph.GetPass(i);++i)depthPassRevisions.push_back(pass->GetRevision());
         frame.opaqueDepthComplete=false;
         if(!extension->AddPasses(stage,frame,graph)) // 확장이 이 단계의 패스를 추가하지 못하면 모듈 이름/단계와 함께 실패를 전파한다.
@@ -87,7 +125,7 @@ bool Renderer::Impl::AddExtensionPasses(RenderStage stage,RenderFrame& frame,RHI
         const bool beforeMain=stage==RenderStage::BeforeOpaque || stage==RenderStage::OpaqueLighting;
         bool cpuChanged=!SameDepthCamera(oldView,oldProjection,frame.camera);
         bool changed=cpuChanged || oldDepth.texture!=frame.depth.texture || oldDepth.resource!=frame.depth.resource;
-        if(previous || frameOpaqueDepthComplete || frameDepthPrepassValid)
+        if(previous || previousMaterial || frameOpaqueDepthComplete || frameDepthPrepassValid)
         {
             for(uint32_t i=0;i<depthPassRevisions.size();++i)
             {
@@ -105,6 +143,31 @@ bool Renderer::Impl::AddExtensionPasses(RenderStage stage,RenderFrame& frame,RHI
         // New GPU passes registered after Main execute after it. Only CPU input
         // changes or edits of earlier passes can invalidate its captured prepass.
         if(cpuChanged || (beforeMain && changed))frameOpaqueDepthComplete=frameDepthPrepassValid=false;
+        const bool explicitMaterial=!previousMaterial && frame.surfaceMaterialComplete;
+        bool materialChanged=changed || oldOwner.texture!=frame.materialOwner.texture || oldOwner.resource!=frame.materialOwner.resource ||
+            oldNormal.texture!=frame.normal.texture || oldNormal.resource!=frame.normal.resource ||
+            oldAlbedo.texture!=frame.albedo.texture || oldAlbedo.resource!=frame.albedo.resource ||
+            oldKeys.buffer!=frame.visibleInstanceKeys.buffer || oldKeys.resource!=frame.visibleInstanceKeys.resource;
+        if(previousMaterial)
+        {
+            if(!extension->HasReadOnlyGeometryInputs())materialChanged|=!surfaceGeometrySnapshot.Matches(frame.geometry);
+            for(uint32_t i=static_cast<uint32_t>(depthPassRevisions.size());const auto* pass=graph.GetPass(i);++i)
+                for(const auto& write:pass->GetWrites())
+                    if(std::binary_search(surfaceProtectedInputs.begin(),surfaceProtectedInputs.end(),write.handle.id))materialChanged=true;
+        }
+        if(previousMaterial && materialChanged)frame.surfaceMaterialComplete=false;
+        if(explicitMaterial && beforeMain)
+        {
+            surfaceGeometrySnapshot.Capture(frame.geometry);surfaceProtectedInputs=depthProtectedInputs;
+            for(auto resource:{frame.materialOwner.resource,frame.normal.resource,frame.albedo.resource,frame.visibleInstanceKeys.resource})
+                if(resource.IsValid())surfaceProtectedInputs.push_back(resource.id);
+            // The producing pass reads all source images, geometry and stable keys.
+            for(uint32_t i=0;const auto* pass=graph.GetPass(i);++i)
+                for(const auto& write:pass->GetWrites())if(write.handle==frame.materialOwner.resource)
+                    for(const auto& read:pass->GetReads())surfaceProtectedInputs.push_back(read.handle.id);
+            std::sort(surfaceProtectedInputs.begin(),surfaceProtectedInputs.end());
+            surfaceProtectedInputs.erase(std::unique(surfaceProtectedInputs.begin(),surfaceProtectedInputs.end()),surfaceProtectedInputs.end());
+        }
         const bool explicitOptIn=frame.opaqueDepthComplete;
         if(!explicitOptIn)frame.opaqueDepthComplete=previous && !changed;
         if(explicitOptIn && beforeMain)
@@ -121,7 +184,7 @@ bool Renderer::Impl::AddExtensionPasses(RenderStage stage,RenderFrame& frame,RHI
             }
             else frame.opaqueDepthComplete=false;
         }
-        if(depthGeometryUnchanged && (!depthGeometrySnapshot.Matches(frame.geometry) ||
+        if(depthGeometryUnchanged && !extension->HasReadOnlyGeometryInputs() && (!depthGeometrySnapshot.Matches(frame.geometry) ||
             !SameDepthCamera(depthGeometryView,depthGeometryProjection,frame.camera)))depthGeometryUnchanged=false;
     }
     frameLighting=frame.lighting;
@@ -163,6 +226,9 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
         if(!mesh.prepared || !mesh.vertexBuffer || !mesh.indexBuffer || !mesh.indexCount) continue; // GPU 버퍼와 인덱스가 준비된 메시만 확장에 전달한다.
         const bool cpuBatch=cpuBatchesActive && !UsesBlendedRendering(scene.Materials()[materialIndex]);
         if(cpuBatch && cpuBatchIndices[i]==UINT32_MAX)continue;
+        const bool gpuBatch=!cpuBatch && visibilityActive && !UsesBlendedRendering(scene.Materials()[materialIndex]);
+        // Only a representative emits GPU draw records for the extension passes.
+        if(gpuBatch && (visibilityIndex>=visibilityDraws.size() || visibilityDraws[visibilityIndex].entity!=i))continue;
         RenderGeometryDraw draw;
         const auto* input=frame.draws ? &(*frame.draws)[i] : nullptr;
         const auto level=std::min<uint32_t>(EntityLod(i),mesh.lods.size());
@@ -194,7 +260,7 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
             draw.instanceCount=batch.instanceCount;
             frame.geometry.push_back(std::move(draw));
         }
-        else if(visibilityActive && !UsesBlendedRendering(*draw.material)) // GPU 가시성이 활성인 불투명/마스크 재질은 간접 draw 목록으로 전달한다.
+        else if(gpuBatch) // GPU 가시성이 활성인 불투명/마스크 재질은 간접 draw 목록으로 전달한다.
         {
             // GPU 배치의 대표 객체에서 LOD별 간접 draw 항목을 펼친다. 같은 그룹의 다른 객체는 GPU 인스턴스 버퍼에 포함되므로 별도 직접 draw를 중복 추가하지 않는다.
             while(visibilityIndex<visibilityDraws.size() && visibilityDraws[visibilityIndex].entity==i)
@@ -204,17 +270,25 @@ void Renderer::Impl::PrepareRenderGeometry(RenderFrame& frame) const
                 const auto& selected=visibilityDraws[batchIndex];
                 const auto& batch=gpuVisibility->GetBatch(batchIndex);
                 auto indirect=draw;
-                indirect.indexBuffer=MainIndirectIndexBuffer(mesh,selected.level,scene.Materials()[materialIndex],input);
+                // Main consumes the canonical material, which may belong to another mesh group.
+                indirect.material=&scene.Materials()[selected.material];
+                indirect.baseColor=indirect.material->baseColor;
+                indirect.textures=materialStates[selected.material].textures;
+                indirect.textureFlags=materialStates[selected.material].textureFlags |
+                    (scene.GetEntityLighting(entity).receiveShadow ? 32u : 0u) | (lodDebugActive ? 64u : 0u);
+                indirect.indexBuffer=MainIndirectIndexBuffer(mesh,selected.level,*indirect.material,input);
                 indirect.indexCount=batch.indexCount;
                 indirect.instanceBuffer=gpuVisibility->GetInstanceBuffer();
                 indirect.indirectArguments=gpuVisibility->GetArgumentsBuffer();
                 // The shared indirect arguments already select the first row.
                 indirect.instanceOffset=baseInstance?0:batch.instanceOffset*sizeof(GpuVisibility::VisibleInstance);
-                indirect.indirectOffset=batchIndex*sizeof(RHI::DrawIndexedIndirectArguments);
+                const auto range=gpuVisibility->GetDrawRange(batchIndex);
+                indirect.indirectOffset=range.first*sizeof(RHI::DrawIndexedIndirectArguments);
+                indirect.indirectCount=range.count;
                 if(lodDebugActive) // 간접 draw도 해당 GPU LOD 단계의 진단색을 사용한다.
                 {
                     indirect.baseColor=LodColor(selected.level);
-                    indirect.baseColor.w=draw.baseColor.w;
+                    indirect.baseColor.w=indirect.material->baseColor.w;
                 }
                 frame.geometry.push_back(std::move(indirect));
             }
@@ -236,6 +310,7 @@ void Renderer::Impl::UpdateFrameLighting(RenderFrame& frame,bool graphReady) con
     if(visibilityActive) // GPU 가시성 경로를 사용하는 프레임만 가시 인스턴스/간접 인수 연결을 제공한다.
     {
         frame.visibleInstances={gpuVisibility->GetInstanceBuffer(),handle(gpuVisibility->GetInstancesHandle())};
+        frame.visibleInstanceKeys={gpuVisibility->GetInstanceKeysBuffer(),handle(gpuVisibility->GetInstanceKeysHandle())};
         frame.indirectArguments={gpuVisibility->GetArgumentsBuffer(),handle(gpuVisibility->GetArgumentsHandle())};
     }
     else if(cpuBatchesActive)
