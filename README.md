@@ -8,6 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/dyd-dev/dy_engine/actions/workflows/ci.yml"><img src="https://github.com/dyd-dev/dy_engine/actions/workflows/ci.yml/badge.svg?branch=main" alt="main 브랜치 빌드 CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue?style=flat-square" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/C%2B%2B-17-00599C?style=flat-square&logo=cplusplus" alt="C++17">
   <img src="https://img.shields.io/badge/CMake-3.20%2B-064F8C?style=flat-square&logo=cmake" alt="CMake 3.20 이상">
   <img src="https://img.shields.io/badge/Graphics-Vulkan%20%7C%20D3D12%20%7C%20Metal-556270?style=flat-square" alt="Vulkan, Direct3D 12, Metal">
@@ -378,7 +379,9 @@ API나 동작을 바꾸는 수정은 관련 예제·문서도 함께 갱신하�
 
 ## 라이선스와 크레딧
 
-현재 저장소 루트에는 프레임워크 자체의 라이선스 파일이 포함되어 있지 않습니다. 외부 라이브러리와 시연 에셋에는 각각의 라이선스가 적용됩니다.
+dy_framework의 자체 작성 코드와 문서는 [MIT License](LICENSE)로 배포합니다. 상업적 사용·수정·복제·재배포와 비공개 제품에 포함하는 것을 허용하며, 수정한 소스를 공개할 의무는 없습니다. 배포본에는 저작권 표시와 MIT 라이선스 문구를 유지해야 합니다. 소프트웨어는 보증 없이 제공됩니다.
+
+외부 라이브러리·LTC 표·시연 에셋과 해당 에셋을 사용한 이미지·영상에는 원본의 별도 라이선스가 적용됩니다. 프레임워크의 MIT 라이선스가 이 자료들의 이용 조건을 변경하지는 않습니다. 특히 Emerald Square 원본의 **비상업 조건(CC BY-NC-SA 3.0)**은 그대로 유지됩니다.
 
 GLFW, stb, bcdec, meshoptimizer, fastgltf, ufbx, Dear ImGui, Tracy 등 외부 프로젝트를 사용합니다. 의존성 버전과 원본은 [의존성 설정](cmake/Dependencies.cmake) 및 각 [확장 모듈](src/Extends/)의 CMake 설정에서 확인할 수 있습니다.
 
