@@ -20,6 +20,7 @@
   <a href="#쇼케이스">쇼케이스</a> ·
   <a href="#구조">구조</a> ·
   <a href=".github/assets/dy-framework.pptx">발표자료</a> ·
+  <a href="#문제-해결">문제 해결</a> ·
   <a href="#제작진">제작진</a>
 </p>
 
@@ -36,6 +37,16 @@
 Vulkan, Direct3D 12, Metal에서는 애플리케이션이 자원 상태와 동기화, GPU 명령 기록을 직접 관리합니다. dy_framework는 이 제어권을 공통 RHI(Rendering Hardware Interface)로 제공하고, 그 위에 장면·재질·조명·2D 그리기를 위한 API를 구성했습니다.
 
 기본 렌더러로 화면을 만들고, 필요한 효과를 확장 모듈로 연결하며, 직접 GPU 작업을 구성할 때는 RHI를 사용할 수 있습니다. 장면 데이터와 GPU 자원 소유를 분리하고, 데이터 지향 처리와 SIMD, 병렬 명령 기록을 설계에 반영했습니다.
+
+### 어디에서 시작하나요?
+
+| 만들고 싶은 것 | 시작할 API와 예제 |
+| --- | --- |
+| 도형·이미지·텍스트가 있는 2D 화면 | `Canvas` + `Renderer` · [기본 도형 예제](examples/dyf/01_Primitives/) |
+| 모델·재질·조명·애니메이션을 사용하는 3D 장면 | `Scene` + `Renderer`, 필요에 따라 Model·AdvancedRendering 확장 · [모델·애니메이션 예제](examples/dyf/07_ModelAnim/) |
+| 직접 구성하는 렌더링·컴퓨트 패스와 GPU 명령 | `RHI::IDevice` + `ICommandList` · [장치와 화면 표시](examples/RHI/01_DeviceAndPresent/) → [RenderGraph](examples/RHI/11_RenderGraph/) |
+
+앱의 실행 흐름과 장면 데이터는 사용자 코드에서 구성합니다. 기본 렌더러를 사용할 때는 `dyf` 예제부터, 자원 상태와 제출을 직접 제어할 때는 RHI 예제부터 읽으면 됩니다.
 
 ## 주요 기능
 
@@ -185,16 +196,99 @@ cmake --build build/showcase-vulkan --config Release --target ShowcaseCinematic 
 
 ### 내 프로젝트에 연결
 
-기존 CMake 프로젝트에 소스를 포함하고 필요한 타깃을 링크합니다. `app`은 사용자가 정의한 실행 파일 타깃입니다. Windows의 백엔드 옵션은 CMake 구성 시 지정합니다.
+소스를 `external/dy_engine`에 배치하고 앱의 `main.cpp`를 엔진 타깃과 연결합니다. 다음은 별도 앱 프로젝트의 `CMakeLists.txt`입니다. 기존 프로젝트에는 `add_subdirectory`와 링크 설정을 가져오면 됩니다.
 
 ```cmake
+cmake_minimum_required(VERSION 3.20)
+project(DyCanvasApp LANGUAGES CXX)
+
 add_subdirectory(external/dy_engine)
-target_link_libraries(app PRIVATE dy_engine)
+add_executable(DyCanvasApp main.cpp)
+target_link_libraries(DyCanvasApp PRIVATE dy_engine)
 ```
 
-기본 API는 `<dyf.h>`, 저수준 API는 `<dyf/RHI.h>`로 시작합니다. 모델 로딩에는 `dyf::Model`, 고급 렌더링에는 `dyf::AdvancedRendering`을 추가로 링크합니다. 고급 렌더링 모듈은 `Renderer::AddExtension`으로 등록합니다.
+`main.cpp`는 아래 [Canvas 최소 앱](https://dyd-dev.github.io/dy_engine/component/examples/quickstart-canvas.cpp)으로 시작할 수 있습니다. 창을 먼저 만들고 렌더러를 나중에 생성해, 종료 시 GPU 자원이 창보다 먼저 정리되도록 합니다.
 
-완전한 Canvas 앱은 [빠른 시작 예제](https://dyd-dev.github.io/dy_engine/component/quickstart.html), 자원 수명과 명령 제출은 [RHI 가이드](https://dyd-dev.github.io/dy_engine/component/rhi-lifecycle.html)를 참고하세요.
+<details>
+<summary><strong>Canvas 최소 앱 코드 · C++17</strong></summary>
+
+```cpp
+#include <dyf.h>
+#include <cstdio>
+#include <exception>
+
+int main()
+{
+    try
+    {
+        constexpr uint32_t width = 640, height = 480;
+        dyf::Platform::Window window(width, height, "dy_engine / Canvas");
+        if (!window.GetHandle()) return 1;
+
+        // 창은 렌더러보다 오래 살아 있어야 한다.
+        auto renderer = dyf::Renderer::Create(window.GetHandle());
+        if (!renderer) return 1;
+
+        dyf::Canvas canvas(width, height);
+        if (!canvas.IsValid()) return 1;
+        canvas.Clear({0.04f, 0.06f, 0.10f, 1.0f});
+        canvas.FillRect({80, 100, 220, 140}, {0.10f, 0.65f, 0.95f, 1.0f});
+        canvas.FillCircle({430, 230}, 70.0f, {1.0f, 0.65f, 0.15f, 1.0f});
+        canvas.Line({80, 340}, {540, 340}, {1, 1, 1, 1}, 3.0f);
+
+        while (window.IsRunning())
+        {
+            window.PollEvents();
+            if (!window.IsRunning()) break;
+            // 같은 CPU 명령 목록을 여러 프레임에서 다시 그릴 수 있다.
+            if (!renderer->Render(canvas)) return 1;
+        }
+        return 0;
+    }
+    catch (const std::exception& error)
+    {
+        std::fprintf(stderr, "%s\n", error.what());
+        return 1;
+    }
+}
+```
+
+</details>
+
+앱 폴더에서 다음과 같이 구성하고 빌드합니다. Windows는 앞서 준비한 Vulkan SDK와 C++ 도구를 사용합니다. Linux·macOS에서는 `-DUSE_VULKAN=ON`을 생략하면 플랫폼에 맞는 백엔드가 선택됩니다.
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_VULKAN=ON
+cmake --build build --config Release --target DyCanvasApp
+```
+
+기본 API는 `<dyf.h>`, 저수준 API는 `<dyf/RHI.h>`로 시작합니다. 단계별 설명은 [빠른 시작](https://dyd-dev.github.io/dy_engine/component/quickstart.html), 자원 수명과 명령 제출은 [RHI 가이드](https://dyd-dev.github.io/dy_engine/component/rhi-lifecycle.html)를 참고하세요.
+
+### 확장 연결
+
+확장을 사용하려면 **CMake 구성 옵션을 켜고, 앱에 해당 타깃을 링크한 뒤, 확장 헤더를 포함**합니다. 옵션만 켜는 것으로 앱에서 모든 효과가 자동 적용되지는 않습니다.
+
+| 기능 | 구성 옵션 | 앱에 링크할 타깃 |
+| --- | --- | --- |
+| 모델 로딩·애니메이션 | `DY_EXTEND_MODEL=ON` | `dyf::Model` |
+| 고급 조명·투명·후처리 | `DY_EXTEND_ADVANCED_RENDERING=ON` | `dyf::AdvancedRendering` |
+| Dear ImGui | `DY_EXTEND_IMGUI=ON` | `dyf::ImGui` |
+| Tracy 프로파일링 | `DY_ENABLE_TRACY=ON` | `dyf::Tracy` |
+| RenderDoc 캡처 | `DY_ENABLE_RENDERDOC=ON` | `dyf::RenderDoc` |
+
+예를 들어 고급 렌더링은 `dyf::AdvancedRendering`을 링크하고 `<dyf/Extends/AdvancedRendering.h>`를 포함한 뒤, `Renderer::AddExtension`으로 프리셋 또는 필요한 모듈을 등록합니다. 헤더·초기화·설정 방법은 [모듈과 API 계층](https://dyd-dev.github.io/dy_engine/component/modules.html)을 참고하세요.
+
+### 셰이더 준비
+
+기본 렌더러의 셰이더는 CMake 빌드 중 컴파일되어 라이브러리에 내장됩니다. 사용자 셰이더는 선택한 백엔드에 맞는 소스와 바이너리를 준비합니다.
+
+| 백엔드 | 셰이더 소스 | 컴파일 도구와 결과 |
+| --- | --- | --- |
+| Vulkan | GLSL · `.glsl` | `glslc` → SPIR-V |
+| Direct3D 12 | HLSL · `.hlsl` | `dxc` → DXIL |
+| Metal | Metal Shading Language · `.metal` | `xcrun metal` + `metallib` → Metal 라이브러리 |
+
+`dy_compile_shader` 빌드 헬퍼는 [CompileShaders.cmake](cmake/CompileShaders.cmake), 바인딩·정점 입력 규약은 [Renderer 셰이더와 외부 입력 준비](https://dyd-dev.github.io/dy_engine/component/renderer-inputs.html)에서 확인할 수 있습니다. 런타임 GLSL 컴파일은 Vulkan에서 `DY_ENABLE_SHADER_COMPILER=ON`으로 빌드했을 때 제공되는 별도 기능입니다.
 
 ## CMake 옵션
 
@@ -238,6 +332,37 @@ target_link_libraries(app PRIVATE dy_engine)
 | 단계별 실습 | [dyf 예제](examples/dyf/) · [RHI 예제](examples/RHI/) · [고급 예제](examples/advanced/) |
 | 프로젝트 소개 | [발표자료](.github/assets/dy-framework.pptx) · [쇼케이스 안내](showcase/Presentation.md) |
 | 문제 제보·개선 제안 | [GitHub Issues](https://github.com/dyd-dev/dy_engine/issues) |
+
+## 문제 해결
+
+<details>
+<summary><strong>빌드·실행 중 자주 확인할 항목</strong></summary>
+
+| 증상 | 확인할 항목 |
+| --- | --- |
+| Windows에서 빌드는 되지만 화면이 렌더링되지 않음 | `USE_VULKAN`과 `USE_D3D12`가 모두 꺼져 있으면 Null 백엔드입니다. 둘 중 하나를 켜고 새 빌드 폴더에 구성합니다. |
+| `glslc`·`dxc`를 찾지 못함 | 해당 컴파일러가 설치되어 있고 CMake에서 찾을 수 있는지 확인합니다. 필요하면 `-DDY_GLSLC="전체 경로"` 또는 `-DDY_DXC="전체 경로"`를 지정합니다. |
+| Linux에서 창 시스템 의존성을 찾지 못함 | 선택한 X11 또는 Wayland의 개발 패키지를 준비합니다. `DY_LINUX_WINDOW_SYSTEM=X11` 또는 `WAYLAND`로 사용할 창 시스템을 명시할 수 있습니다. |
+| 기본 예제만 빌드하려는데 대용량 에셋을 내려받음 | 새 구성에서는 `DY_BUILD_SHOWCASE`가 `DY_BUILD_EXAMPLES` 값을 기본값으로 사용합니다. `-DDY_BUILD_SHOWCASE=OFF`를 명시합니다. |
+| 모델·조명·ImGui 예제 타깃이 없거나 확장 링크에 실패함 | 필요한 `DY_EXTEND_*` 옵션, 생성된 `dyf::*` 타깃, 앱의 `target_link_libraries` 설정을 함께 확인합니다. |
+| 고급 효과를 켰는데 변화가 없음 | 해당 확장의 링크·모듈 등록과 Renderer 설정을 확인합니다. 고급 렌더링은 HDR·표준 지오메트리 등 각 모듈의 요구 조건도 충족해야 합니다. |
+| 백엔드를 바꾼 뒤 설정이 충돌함 | 기존 `CMakeCache.txt`의 설정이 남아 있을 수 있습니다. Vulkan·D3D12 등 구성마다 빌드 폴더를 분리합니다. |
+
+플랫폼별 준비 과정과 에셋 경로는 [시작하기](https://dyd-dev.github.io/dy_engine/component/getting-started.html), 현재 옵션은 [CMake 옵션](#cmake-옵션)을 참고하세요.
+
+</details>
+
+## 참여와 문의
+
+버그 제보와 개선 제안은 [GitHub Issues](https://github.com/dyd-dev/dy_engine/issues), 코드·문서 수정은 [Pull requests](https://github.com/dyd-dev/dy_engine/pulls)를 이용해 주세요.
+
+문제를 재현할 수 있도록 다음 정보를 함께 남겨 주세요.
+
+- 사용한 커밋, OS, GPU·드라이버, 그래픽 백엔드
+- CMake 구성·빌드·실행 명령과 최소 재현 예제
+- 기대한 결과와 실제 결과, 오류 로그 또는 화면
+
+API나 동작을 바꾸는 수정은 관련 예제·문서도 함께 갱신하고, 확인한 플랫폼·빌드 구성과 검증 결과를 적어 주세요. 프레임 시간이나 성능 문제는 해상도·VSync·장면·품질 설정을 함께 기록하면 비교에 도움이 됩니다.
 
 ## 제작진
 
