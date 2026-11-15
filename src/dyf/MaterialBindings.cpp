@@ -4,6 +4,7 @@
 #include "BasicEnvironmentResources.h"
 #include "dyf/Scene.h"
 #include "dyf/RHI/Buffer.h"
+#include "dyf/RHI/Pipeline.h"
 #include "dyf/RHI/ResourceSet.h"
 #include <algorithm>
 #include <array>
@@ -65,6 +66,9 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
 	const std::vector<RendererDrawDesc>* draws, std::vector<RHI::ResourceSetHandle>& sets)
 {
 	if(device == nullptr || pipeline == nullptr || lightingBuffer == nullptr) return false; // 필수 장치·파이프라인·조명 상수가 없으면 세트를 구성할 수 없다.
+    const auto& layout=pipeline->GetLayout();
+    const bool surfaceOwnerBinding=std::any_of(layout.bindings,layout.bindings+layout.bindingCount,
+        [](const RHI::ResourceBindingLayout& binding) {return binding.binding==25;});
 	if(stockDrawInputs) draws=nullptr; // 표준 호환 입력은 객체별 추가 자원을 쓰지 않으므로 재질별 세트를 공유한다.
 	const bool shadowsEnabled = shadowDepthTarget != nullptr;
 	if(shadowsEnabled && shadowMatrixBuffer == nullptr) return false; // 그림자 타깃이 있는데 상수가 없으면 불완전한 세트를 만들지 않는다.
@@ -84,11 +88,13 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
             environment=&neutralEnvironment;
         }
         if(!environment->constantBuffer)return false;
+        auto& indices=materialIndexScratch;
+        if(!materialPageCount || materialPageRevision!=materialCacheKey.generation)
+        {
 		// 클러스터 조명 슬롯 앞의 19개 텍스처 단위로 재질을 묶는다.
         if(materialPages.empty())materialPages.emplace_back(); // 첫 페이지가 없으면 임시 저장소를 하나 마련한다.
         for(auto& page:materialPages) {page.textures.clear();page.materials.clear();}
         uint32_t pageCount=1;
-        auto& indices=materialIndexScratch;
         // 재질마다 8개 uint 슬롯을 확보하고 텍스처 다섯 종류의 페이지 내 위치를 채운다. 남는 슬롯은 정렬/레이아웃 계약에 맞춰 0으로 둔다.
         indices.assign(materialStates.size()*8,0);
 		// 현재 페이지에 새로 필요한 고유 텍스처 수를 먼저 센다. 같은 재질의 여러 슬롯이 같은 핸들이어도 한 번만 센다.
@@ -117,6 +123,9 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
 				if(found == page.textures.end()) page.textures.push_back(texture); // 페이지에 처음 등장한 텍스처만 목록에 넣고 해당 위치를 인덱스로 사용한다.
 			}
 		}
+        materialPageCount=pageCount;materialPageRevision=materialCacheKey.generation;
+        }
+        const auto pageCount=materialPageCount;
 		if(indices.size() > UINT32_MAX / sizeof(uint32_t)) return false; // 재질 인덱스 버퍼 바이트 수가 32비트를 넘으면 실패한다.
         const auto bytes=static_cast<uint32_t>(indices.size()*sizeof(uint32_t));
         if(!materialIndexBuffer || materialIndexBuffer->GetDesc().size!=bytes) { // 버퍼가 없거나 크기가 바뀌면 새 버퍼를 만들고 업로드 필요 상태로 둔다.
@@ -127,6 +136,7 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
         // 이번 기록에서 사용할 버퍼를 고정한다. materialIndexRecorded는 기록 여부이며 ready/기준 바이트 확정은 SceneRendering의 draw 제출 성공 뒤에 한다.
         auto* materialBuffer=materialIndexBuffer;
         if(!materialIndexReady || indices!=materialIndexBytes) { // 새 버퍼이거나 마지막 제출 성공 바이트와 다를 때만 업로드를 기록한다.
+            materialIndexBytes.reserve(indices.size()); // Commit after Submit must not allocate.
             if(materialIndexReady) { // 기존 셰이더 읽기 버퍼는 복사 목적 상태로 전환한 뒤 갱신한다.
                 const RHI::ResourceBarrierDesc barrier={materialBuffer,nullptr,RHI::ResourceState::ShaderResource,RHI::ResourceState::CopyDestination,{}};
                 commands.ResourceBarrier(&barrier,1);
@@ -165,8 +175,10 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
             bindings.push_back({19,0,frameLighting.clusterLights.buffer,nullptr,0,frameLighting.clusterLights.buffer->GetDesc().size,{}});
             bindings.push_back({20,0,frameLighting.clusterList.buffer,nullptr,0,frameLighting.clusterList.buffer->GetDesc().size,{}});
             bindings.push_back({21,0,frameLighting.clusterConstants.buffer,nullptr,0,sizeof(RendererClusterConstants),{}});
-            bindings.push_back({26,0,nullptr,frameLighting.areaMatrix.texture ? frameLighting.areaMatrix.texture : defaultMaterialTextures[2],0,0,{}});
-            bindings.push_back({27,0,nullptr,frameLighting.areaAmplitude.texture ? frameLighting.areaAmplitude.texture : defaultMaterialTextures[2],0,0,{}});
+            if(surfaceOwnerBinding)
+                bindings.push_back({25,0,nullptr,frameSurfaceCache?frameSurfaceOwner:defaultMaterialTextures[2],0,0,{}});
+            bindings.push_back({26,0,nullptr,frameSurfaceCache?frameSurfaceNormal:frameLighting.areaMatrix.texture ? frameLighting.areaMatrix.texture : defaultMaterialTextures[2],0,0,{}});
+            bindings.push_back({27,0,nullptr,frameSurfaceCache?frameSurfaceAlbedo:frameLighting.areaAmplitude.texture ? frameLighting.areaAmplitude.texture : defaultMaterialTextures[2],0,0,{}});
             bindings.push_back({22,0,nullptr,advanced && frameAmbientOcclusion ? frameAmbientOcclusion : defaultMaterialTextures[0],0,0,{}});
             bindings.push_back({23,0,nullptr,environment->specular.texture,0,0,{}});
             bindings.push_back({24,0,nullptr,environment->diffuse.texture,0,0,{}});
@@ -258,8 +270,10 @@ bool Renderer::Impl::CreateMaterialResourceSets(const Scene& scene, RHI::IComman
             bindings.push_back({19,0,frameLighting.clusterLights.buffer,nullptr,0,frameLighting.clusterLights.buffer->GetDesc().size,{}});
             bindings.push_back({20,0,frameLighting.clusterList.buffer,nullptr,0,frameLighting.clusterList.buffer->GetDesc().size,{}});
             bindings.push_back({21,0,frameLighting.clusterConstants.buffer,nullptr,0,sizeof(RendererClusterConstants),{}});
-            bindings.push_back({26,0,nullptr,frameLighting.areaMatrix.texture ? frameLighting.areaMatrix.texture : defaultMaterialTextures[2],0,0,{}});
-            bindings.push_back({27,0,nullptr,frameLighting.areaAmplitude.texture ? frameLighting.areaAmplitude.texture : defaultMaterialTextures[2],0,0,{}});
+            if(surfaceOwnerBinding)
+                bindings.push_back({25,0,nullptr,frameSurfaceCache?frameSurfaceOwner:defaultMaterialTextures[2],0,0,{}});
+            bindings.push_back({26,0,nullptr,frameSurfaceCache?frameSurfaceNormal:frameLighting.areaMatrix.texture ? frameLighting.areaMatrix.texture : defaultMaterialTextures[2],0,0,{}});
+            bindings.push_back({27,0,nullptr,frameSurfaceCache?frameSurfaceAlbedo:frameLighting.areaAmplitude.texture ? frameLighting.areaAmplitude.texture : defaultMaterialTextures[2],0,0,{}});
 		}
 		if(draws) // 일반 경로의 객체별 추가 정점 자원을 기본 바인딩 뒤에 붙인다.
 		{

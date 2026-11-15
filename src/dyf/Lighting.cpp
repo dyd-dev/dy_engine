@@ -285,6 +285,7 @@ bool Renderer::Impl::ReuseShadowAtlas(const Scene& scene,ShadowData& shadows,con
     };
     const auto appendPosition=[&](const Math::float3& value) {append(value.x);append(value.y);append(value.z);};
     append(config.lighting.shadowQuality);append(config.enableFrustumCulling);append(config.enableInstancing);
+    append(gpuShadows.requested);
     append(shadows.viewCount);append(shadows.columns);append(shadows.rows);append(shadows.resolution);
     append(shadowArenaGeneration);
     const bool sameAtlas=cache.valid && cache.target==shadowDepthTarget && !cache.scene.expired() &&
@@ -340,14 +341,23 @@ bool Renderer::Impl::ReuseShadowAtlas(const Scene& scene,ShadowData& shadows,con
         }
     }
     bool dirty=false;
+    const bool sameGpuCasters=sameAtlas && cache.casterBytes==cache.pendingCasterBytes &&
+        std::all_of(shadowCasterScratch.begin(),shadowCasterScratch.end(),
+            [&](const ShadowCaster& caster){return !cache.casterDirty[caster.entity];});
     for(uint32_t view=0;view<shadows.viewCount;++view)
     {
         auto& entry=cache.views[view];entry.pendingBytes.clear();
         destination=&entry.pendingBytes;
         append(shadows.constants.lightViewProjectionMatrix[view].m);
-        append(shadows.casterVolumes[view].count);
-        for(uint32_t plane=0;plane<shadows.casterVolumes[view].count;++plane)append(shadows.casterVolumes[view].planes[plane]);
+        // Receiver volumes only select casters; identical membership below preserves the same depth contents.
         const auto& rect=shadows.constants.atlasRect[view];append(rect.x);append(rect.y);append(rect.z);append(rect.w);
+        if(gpuShadows.requested) {
+            // Membership is decided on the GPU; invalidate conservatively without a CPU visibility pass/readback.
+            append(shadows.casterVolumes[view].count);
+            for(uint32_t plane=0;plane<shadows.casterVolumes[view].count;++plane)append(shadows.casterVolumes[view].planes[plane]);
+            const bool reusable=sameGpuCasters && entry.bytes==entry.pendingBytes;
+            shadows.dirtyViews[view]=!reusable;dirty|=!reusable;continue;
+        }
         CollectShadowViewCasters(shadowCasterScratch,shadows,view,config.enableFrustumCulling,shadowViewScratch);
         append(shadowViewScratch.size());
         bool reusable=sameAtlas;

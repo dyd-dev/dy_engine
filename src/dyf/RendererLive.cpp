@@ -34,6 +34,7 @@ void SetValue(RendererConfig& c,std::size_t i,const ControlValue& v)
 // 라이브 설정 revision의 변화 판정에 쓰이는 비교다. 여기 나열한 bool/열거/스칼라만 비교하므로 RendererConfig 모든 필드의 완전 동등 비교로 확대해 읽지 않는다.
 bool SameConfig(const RendererConfig& a,const RendererConfig& b)
 {
+    if(a.advanced.reuseSurfaceMaterials!=b.advanced.reuseSurfaceMaterials)return false;
     // 아래 정수·열거·플래그 중 하나라도 다르면 라이브 설정 변경으로 판단한다.
     if(a.vsync!=b.vsync||a.allowReadback!=b.allowReadback||a.enableHdrRendering!=b.enableHdrRendering||a.enableProfilerHud!=b.enableProfilerHud||a.profilerStartsExpanded!=b.profilerStartsExpanded||a.enableParallelRenderGraph!=b.enableParallelRenderGraph||a.recordingThreadCount!=b.recordingThreadCount||a.enableInstancing!=b.enableInstancing||a.enableFrustumCulling!=b.enableFrustumCulling||a.lighting.enabled!=b.lighting.enabled||a.lighting.shadows!=b.lighting.shadows||a.lighting.shadowQuality!=b.lighting.shadowQuality||a.enableIncrementalTransformUploads!=b.enableIncrementalTransformUploads||a.enableResourceSetCache!=b.enableResourceSetCache||a.enableBindlessMaterials!=b.enableBindlessMaterials||a.enableCanvasBatching!=b.enableCanvasBatching||a.enableCanvasImageCache!=b.enableCanvasImageCache||a.enableCanvasVertexBufferReuse!=b.enableCanvasVertexBufferReuse)return false;
     // 두 설정의 대응 float 묶음을 같은 순서로 만들어 비트 단위 비교한다. 값의 근사 동등성이 아니라 저장 표현 일치 여부를 사용한다.

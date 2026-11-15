@@ -186,10 +186,10 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
 			const auto entity=static_cast<EntityID>(index);
 			const auto mesh=scene.GetEntityMesh(entity);
 			Math::float3 local={};
-			if(IsValid(mesh) && ToIndex(mesh)<m_meshes.size() && m_meshes[ToIndex(mesh)].bounds.valid) // 유효한 메시 경계가 있을 때만 경계 중심을 정렬 기준으로 쓴다.
+			if(IsValid(mesh) && ToIndex(mesh)<m_meshes.size())
 			{
-				const auto& bounds=m_meshes[ToIndex(mesh)].bounds;
-				local=(bounds.min+bounds.max)*0.5f;
+				const auto& bounds=draws && (*draws)[index].hasLocalBounds ? (*draws)[index].localBounds : m_meshes[ToIndex(mesh)].bounds;
+				if(bounds.valid)local=(bounds.min+bounds.max)*0.5f;
 			}
 			const auto center=Math::TransformPoint(scene.GetTransform(entity),local);
 			const float z=Math::TransformPoint(camera.view,center).z;
@@ -255,12 +255,15 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
 		recordingStatistics.gpuVisibility=visibilityActive;
         if(cpuBatchesActive)recordingStatistics.culledEntityCount+=cpuCulledEntities;
         const auto& batches=visibilityActive ? visibilityDraws : cpuDraws;
+        const uint32_t ownerStride=frameSurfaceCache && frameSurfaceOwner->GetDesc().format==RHI::Format::R32_UINT
+            ? SurfaceOwnerStride(scene.GetEntityCount()) : 0;
         const auto batchConstants=[&](const VisibilityDraw& draw) {
             const auto entity=static_cast<EntityID>(draw.entity);
             const auto& material=scene.Materials()[draw.material];
             const uint32_t flags=materialStates[draw.material].textureFlags |
                 (scene.GetEntityLighting(entity).receiveShadow ? 32u : 0u);
             auto constants=MakeDrawConstants(viewProjection,material,scene.GetTransform(entity),flags);
+            constants.padding1|=ownerStride<<8;
             if(lodDebugActive)
             {
                 const float alpha=constants.baseColor.w;
@@ -288,8 +291,9 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
                 batch.kind=Platform::LiveEventKind::Batch;batch.stage=Platform::LiveStage::Record;
                 if(visibilityActive)
                 {
-                    batch.first=batchIndex;batch.stride=sizeof(RHI::DrawIndexedIndirectArguments);
-                    batch.bytes=batch.stride;batch.operations=1;
+                    const auto range=gpuVisibility->GetDrawRange(batchIndex);
+                    batch.first=range.first;batch.stride=sizeof(RHI::DrawIndexedIndirectArguments);
+                    batch.bytes=uint64_t(batch.stride)*range.count;batch.operations=range.count;
                     batch.resource=argumentsId;
                     // 실제 가시 개수는 GPU가 결정하므로 CPU capacity를 측정값으로 게시하지 않는다.
                     if(detail)std::strncpy(batch.label,"GPU indirect batch: visible count unknown",sizeof(batch.label)-1);
@@ -311,6 +315,9 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
             }
             Platform::LiveContextScope linkedBatch(batchContext);
 			const auto selectedPipeline=MaterialPipeline(material,Math::Determinant3x3(scene.GetTransform(entity))<0);
+            const bool reuseSurfaceMaterial=frameSurfaceCache && material.alphaMode==MaterialAlphaMode::Opaque &&
+                !material.unlit && !UsesBlendedRendering(material);
+            if(reuseSurfaceMaterial)recordingStatistics.surfaceMaterialReuse=true;
 			if(selectedPipeline!=boundPipeline) // 행렬 변환이 넓이·부피를 얼마나 바꾸고 방향을 뒤집는지 나타내는 값(행렬식)이 음수이면 MaterialPipeline에 반전 여부를 전달한다.
 			// 재질과 반전 여부로 고른 파이프라인이 이전 것과 달라지면 새로 바인딩하고 재질 세트 기억도 비운다.
 			{
@@ -333,6 +340,7 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
             const uint32_t firstInstance=visibilityActive ? gpuVisibility->GetBatch(batchIndex).instanceOffset : draw.instanceOffset;
 			bindInstances(visibilityActive ? gpuVisibility->GetInstanceBuffer() : cpuInstanceBuffer,
 				baseInstance ? 0 : firstInstance*sizeof(GpuVisibility::VisibleInstance));
+            if(reuseSurfaceMaterial && visibilityActive)commands.BindVertexBuffer(2,gpuVisibility->GetInstanceKeysBuffer(),baseInstance?0:firstInstance*8);
             const auto indexBuffer=visibilityActive ? MainIndirectIndexBuffer(mesh,draw.level,material,input) :
                 MainIndexBuffer(mesh,draw.level,material,input);
             commands.BindIndexBuffer(indexBuffer,RHI::Format::R32_UINT,0);
@@ -341,6 +349,8 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
             if(visibilityActive)
             {
                 uint32_t drawCount=1;
+                const auto range=gpuVisibility->GetDrawRange(batchIndex);
+                uint32_t commandCount=range.count;
                 // The stock instance stream supplies model matrices; every other
                 // effective binding/constant must match across contiguous arguments.
                 if(baseInstance && reuseInlineConstants && !Platform::IsLiveCollectorEnabled())
@@ -362,11 +372,14 @@ bool Renderer::Impl::RecordMainPass(const Scene& scene,const Camera& camera,
                         const auto nextConstants=batchConstants(next);
                         if(std::memcmp(reinterpret_cast<const std::byte*>(&constants)+inlineTailOffset,
                             reinterpret_cast<const std::byte*>(&nextConstants)+inlineTailOffset,inlineTailSize)!=0)break;
+                        const auto nextRange=gpuVisibility->GetDrawRange(nextIndex);
+                        if(nextRange.first!=range.first+commandCount)break;
+                        commandCount+=nextRange.count;
                         ++drawCount;
                     }
                 commands.DrawIndexedIndirect(gpuVisibility->GetArgumentsBuffer(),
-                    batchIndex*sizeof(RHI::DrawIndexedIndirectArguments),drawCount);
-                recordingStatistics.indirectBatchCount+=drawCount;
+                    range.first*sizeof(RHI::DrawIndexedIndirectArguments),commandCount);
+                recordingStatistics.indirectBatchCount+=commandCount;
                 batchIndex+=drawCount-1;
             }
             else

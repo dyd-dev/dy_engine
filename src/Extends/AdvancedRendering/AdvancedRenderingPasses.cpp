@@ -2,10 +2,10 @@
 
 namespace dyf
 {
-bool AdvancedRendering::AddPasses(RenderStage stage,RenderFrame& frame,RHI::RenderGraph& graph)
+bool AdvancedRendering::AddPasses(RenderStage stage,ReadOnlyRenderFrame& frame,RHI::RenderGraph& graph)
 {
     for(auto& module:m_modules)
-        if(!module->AddPasses(stage,frame,graph)) return false;
+        if(!static_cast<ReadOnlyRenderExtension&>(*module).AddPasses(stage,frame,graph)) return false;
     return true;
 }
 }

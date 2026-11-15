@@ -296,10 +296,13 @@ void Renderer::Impl::SwapResources(Impl& other)
     swap(config,other.config);
     swap(shaderSources,other.shaderSources);
     swap(materialStates,other.materialStates);
+    swap(materialCacheKey,other.materialCacheKey);swap(materialRepresentatives,other.materialRepresentatives);
     swap(vertexShader,other.vertexShader);
     swap(fragmentShader,other.fragmentShader);
     swap(depthPrepassFragmentShader,other.depthPrepassFragmentShader);
     swap(noAreaFragmentShader,other.noAreaFragmentShader);
+    swap(surfaceCacheVertex,other.surfaceCacheVertex);swap(surfaceCacheFragment,other.surfaceCacheFragment);
+    swap(surfaceCachePipelines,other.surfaceCachePipelines);
     swap(noAreaDepthPrepassFragmentShader,other.noAreaDepthPrepassFragmentShader);
     swap(shadowVertexShader,other.shadowVertexShader);
     swap(shadowFragmentShader,other.shadowFragmentShader);
@@ -359,7 +362,9 @@ void Renderer::Impl::SwapResources(Impl& other)
     swap(materialIndexScratch,other.materialIndexScratch);
     swap(lightingIndexScratch,other.lightingIndexScratch);
     swap(materialPages,other.materialPages);
+    swap(materialPageRevision,other.materialPageRevision);swap(materialPageCount,other.materialPageCount);
     swap(gpuVisibility,other.gpuVisibility);swap(visibilityDraws,other.visibilityDraws);
+    swap(visibilityCache,other.visibilityCache);
     swap(visibilityKeys,other.visibilityKeys);swap(visibilityScene,other.visibilityScene);
     swap(visibilityActive,other.visibilityActive);
     swap(cpuDrawInputs,other.cpuDrawInputs);swap(cpuDraws,other.cpuDraws);
@@ -376,6 +381,7 @@ void Renderer::Impl::SwapResources(Impl& other)
     swap(shadowCasterScratch,other.shadowCasterScratch);
     swap(shadowViewScratch,other.shadowViewScratch);
     swap(shadowInstances,other.shadowInstances);
+    swap(gpuShadows,other.gpuShadows);
     swap(shadowInstanceBytes,other.shadowInstanceBytes);
     swap(shadowInstanceBuffer,other.shadowInstanceBuffer);
     swap(shadowInstanceReady,other.shadowInstanceReady);
@@ -595,6 +601,8 @@ RHI::PipelineHandle Renderer::Impl::MaterialPipeline(const MaterialDesc& materia
         return wireframePipelines[(material.doubleSided ? 1u : 0u) | (mirrored ? 2u : 0u)];
     const uint32_t variant=(UsesBlendedRendering(material) ? 2u : 0u) |
         (material.doubleSided ? 1u : 0u) | (mirrored ? 4u : 0u);
+    if(frameSurfaceCache && material.alphaMode==MaterialAlphaMode::Opaque && !UsesBlendedRendering(material) && !material.unlit && surfaceCachePipelines[variant])
+        return surfaceCachePipelines[variant];
     if(frameNoAreaLights && stockDrawInputs && UsesStockGeometry() && !wireframeActive)
     {
         const auto selected=frameOpaqueDepthComplete && !UsesBlendedRendering(material)
@@ -634,6 +642,13 @@ bool Renderer::Impl::InitializeMesh(RHI::TextureHandle output,bool compositeAlph
     const bool depthPrepass=UsesStockGeometry() && UsesAdvancedRendering();
     if(depthPrepass && !depthPrepassFragmentShader)
         depthPrepassFragmentShader=nativeDevice->CreateShader(DefaultDepthPrepassFragment(shadows,UsesBindlessMaterials()));
+    if(depthPrepass && UsesInstanceStream() && device->Supports(RHI::Feature::FragmentPrimitiveId))
+    {
+        if(!surfaceCacheVertex){const auto desc=DefaultSurfaceCacheShader(true,shadows,UsesBindlessMaterials());
+            if(desc.binary)surfaceCacheVertex=nativeDevice->CreateShader(desc);}
+        if(!surfaceCacheFragment){const auto desc=DefaultSurfaceCacheShader(false,shadows,UsesBindlessMaterials());
+            if(desc.binary)surfaceCacheFragment=nativeDevice->CreateShader(desc);}
+    }
     if(UsesStockGeometry())
     {
         if(!noAreaFragmentShader)
@@ -662,6 +677,7 @@ bool Renderer::Impl::InitializeMesh(RHI::TextureHandle output,bool compositeAlph
     nativeDevice->DestroyPipeline(pipeline);pipeline=nullptr;
     for(auto& value:materialPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
     for(auto& value:depthPrepassPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
+    for(auto& value:surfaceCachePipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
     for(auto& value:noAreaMaterialPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
     for(auto& value:noAreaDepthPrepassPipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
     for(auto& value:wireframePipelines) {nativeDevice->DestroyPipeline(value);value=nullptr;}
@@ -698,12 +714,13 @@ void Renderer::Impl::Shutdown()
     for(auto* value:{pipeline,shadowPipeline,canvasPipeline,tonePipeline})if(value)device->DestroyPipeline(value); // 생성된 메인·그림자·Canvas·톤 매핑 파이프라인만 해제한다.
     for(auto* value:materialPipelines)if(value)device->DestroyPipeline(value); // 생성된 재질 변형 파이프라인만 해제한다.
     for(auto* value:depthPrepassPipelines)if(value)device->DestroyPipeline(value);
+    for(auto* value:surfaceCachePipelines)if(value)device->DestroyPipeline(value);
     for(auto* value:noAreaMaterialPipelines)if(value)device->DestroyPipeline(value);
     for(auto* value:noAreaDepthPrepassPipelines)if(value)device->DestroyPipeline(value);
     for(auto* value:wireframePipelines)if(value)device->DestroyPipeline(value); // 생성된 와이어프레임 변형만 해제한다.
     for(auto* value:shadowMaterialPipelines)if(value)device->DestroyPipeline(value); // 생성된 그림자 재질 변형만 해제한다.
     for(auto* value:compactShadowPipelines)if(value)device->DestroyPipeline(value);
-    for(auto* shader:{vertexShader,fragmentShader,depthPrepassFragmentShader,noAreaFragmentShader,noAreaDepthPrepassFragmentShader,shadowVertexShader,shadowFragmentShader,canvasVertexShader,canvasFragmentShader,toneVertexShader,toneFragmentShader})
+    for(auto* shader:{vertexShader,fragmentShader,surfaceCacheVertex,surfaceCacheFragment,depthPrepassFragmentShader,noAreaFragmentShader,noAreaDepthPrepassFragmentShader,shadowVertexShader,shadowFragmentShader,canvasVertexShader,canvasFragmentShader,toneVertexShader,toneFragmentShader})
         if(shader)device->DestroyShader(shader); // 실제로 존재하는 셰이더 핸들만 장치에 반환한다.
 }
 

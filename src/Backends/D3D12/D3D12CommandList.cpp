@@ -24,64 +24,6 @@ using Microsoft::WRL::ComPtr;
 
 namespace dyf::Backends
 {
-    struct D3D12CommandStorage
-    {
-        ComPtr<ID3D12CommandAllocator> allocator;
-        ComPtr<ID3D12GraphicsCommandList> commands;
-    };
-
-    struct D3D12CommandPoolCache::Impl
-    {
-        struct Slot {std::atomic<D3D12CommandStorage*> storage{nullptr};};
-        static_assert(std::atomic<D3D12CommandStorage*>::is_always_lock_free,
-            "D3D12 command storage requires lock-free ownership atomics.");
-        ComPtr<ID3D12Device> device;
-        std::array<Slot,64> available;
-        ~Impl()
-        {for(auto& slot:available)delete slot.storage.load(std::memory_order_relaxed);}
-    };
-
-    D3D12CommandPoolCache::D3D12CommandPoolCache(void* device) :m_impl(std::make_unique<Impl>())
-    {m_impl->device=static_cast<ID3D12Device*>(device);}
-    D3D12CommandPoolCache::~D3D12CommandPoolCache()=default;
-
-    std::unique_ptr<D3D12CommandStorage> D3D12CommandPoolCache::Acquire()
-    {
-        if(!m_impl->device)return {};
-        std::unique_ptr<D3D12CommandStorage> storage;
-        for(auto& slot:m_impl->available)
-        {
-            if(!slot.storage.load(std::memory_order_relaxed))continue;
-            storage.reset(slot.storage.exchange(nullptr,std::memory_order_acquire));
-            if(storage)break;
-        }
-        if(storage)
-        {
-            if(FAILED(storage->allocator->Reset()) || FAILED(storage->commands->Reset(storage->allocator.Get(),nullptr)))return {};
-        }
-        else
-        {
-            storage=std::make_unique<D3D12CommandStorage>();
-            if(FAILED(m_impl->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&storage->allocator))) ||
-                FAILED(m_impl->device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,storage->allocator.Get(),nullptr,
-                    IID_PPV_ARGS(&storage->commands))))return {};
-        }
-        return storage;
-    }
-
-    void D3D12CommandPoolCache::Return(std::unique_ptr<D3D12CommandStorage> storage) noexcept
-    {
-        if(!storage)return;
-        auto* owned=storage.release();
-        for(auto& slot:m_impl->available)
-        {
-            D3D12CommandStorage* empty=nullptr;
-            if(slot.storage.compare_exchange_strong(empty,owned,std::memory_order_release,
-                std::memory_order_relaxed))return;
-        }
-        delete owned; // The existing 64-entry cache bound remains unchanged.
-    }
-
     namespace
     {
         D3D12_RESOURCE_STATES ToNativeState(RHI::ResourceState state)
@@ -119,7 +61,7 @@ namespace dyf::Backends
                 images.push_back(texture);
         }
 
-        using RetainedObjects = std::unordered_map<ID3D12Object*, ComPtr<ID3D12Object>>;
+        using RetainedObjects = RHI::Backend::StateTable<ID3D12Object*, ComPtr<ID3D12Object>>;
 
         void RetainObject(RetainedObjects& objects, ID3D12Object* object)
         {
@@ -200,16 +142,96 @@ namespace dyf::Backends
         };
     }
 
-    struct D3D12CommandListInternal
+    struct D3D12CommandScratch
     {
-        D3D12CommandListInternal(std::shared_ptr<D3D12UploadPool> pool,RHI::Detail::UploadPolicy policy)
-            : uploads(std::move(pool),policy) {}
-
         struct DiscardRequest
         {
             ComPtr<ID3D12Resource> resource;
             UINT subresource = 0;
         };
+
+        struct TimestampOperation { D3D12TimestampQuery* query; uint32_t index; bool write; };
+        std::vector<D3D12Texture*> referencedSwapchainImages;
+        RetainedObjects retainedObjects;
+        std::vector<DiscardRequest> storeDiscardResources;
+        std::vector<D3D12Operation> operations;
+        RHI::Backend::StateTable<uint32_t, D3D12_VERTEX_BUFFER_VIEW> vertexBufferViews;
+        std::vector<TimestampOperation> timestamps;
+        void Clear() noexcept
+        {
+            referencedSwapchainImages.clear();
+            retainedObjects.clear();
+            storeDiscardResources.clear();
+            operations.clear();
+            vertexBufferViews.clear();
+            timestamps.clear();
+        }
+    };
+
+    struct D3D12CommandStorage
+    {
+        D3D12CommandScratch scratch;
+        ComPtr<ID3D12CommandAllocator> allocator;
+        ComPtr<ID3D12GraphicsCommandList> commands;
+    };
+
+    struct D3D12CommandPoolCache::Impl
+    {
+        struct Slot {std::atomic<D3D12CommandStorage*> storage{nullptr};};
+        static_assert(std::atomic<D3D12CommandStorage*>::is_always_lock_free,
+            "D3D12 command storage requires lock-free ownership atomics.");
+        ComPtr<ID3D12Device> device;
+        std::array<Slot,64> available;
+        ~Impl()
+        {for(auto& slot:available)delete slot.storage.load(std::memory_order_relaxed);}
+    };
+
+    D3D12CommandPoolCache::D3D12CommandPoolCache(void* device) :m_impl(std::make_unique<Impl>())
+    {m_impl->device=static_cast<ID3D12Device*>(device);}
+    D3D12CommandPoolCache::~D3D12CommandPoolCache()=default;
+
+    std::unique_ptr<D3D12CommandStorage> D3D12CommandPoolCache::Acquire()
+    {
+        if(!m_impl->device)return {};
+        std::unique_ptr<D3D12CommandStorage> storage;
+        for(auto& slot:m_impl->available)
+        {
+            if(!slot.storage.load(std::memory_order_relaxed))continue;
+            storage.reset(slot.storage.exchange(nullptr,std::memory_order_acquire));
+            if(storage)break;
+        }
+        if(storage)
+        {
+            if(FAILED(storage->allocator->Reset()) || FAILED(storage->commands->Reset(storage->allocator.Get(),nullptr)))return {};
+        }
+        else
+        {
+            storage=std::make_unique<D3D12CommandStorage>();
+            if(FAILED(m_impl->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&storage->allocator))) ||
+                FAILED(m_impl->device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,storage->allocator.Get(),nullptr,
+                    IID_PPV_ARGS(&storage->commands))))return {};
+        }
+        return storage;
+    }
+
+    void D3D12CommandPoolCache::Return(std::unique_ptr<D3D12CommandStorage> storage) noexcept
+    {
+        if(!storage)return;
+        storage->scratch.Clear();
+        auto* owned=storage.release();
+        for(auto& slot:m_impl->available)
+        {
+            D3D12CommandStorage* empty=nullptr;
+            if(slot.storage.compare_exchange_strong(empty,owned,std::memory_order_release,
+                std::memory_order_relaxed))return;
+        }
+        delete owned; // The existing 64-entry cache bound remains unchanged.
+    }
+
+    struct D3D12CommandListInternal : D3D12CommandScratch
+    {
+        D3D12CommandListInternal(std::shared_ptr<D3D12UploadPool> pool,RHI::Detail::UploadPolicy policy)
+            : uploads(std::move(pool),policy) {}
 
         ComPtr<ID3D12CommandAllocator> allocator;
         ComPtr<ID3D12GraphicsCommandList> commandList;
@@ -223,17 +245,10 @@ namespace dyf::Backends
         D3D12Detail::UploadArena<D3D12UploadPage> uploads;
         ID3D12Device* device = nullptr;
         D3D12PipelineState* pipeline = nullptr;
-        std::vector<D3D12Texture*> referencedSwapchainImages;
-        RetainedObjects retainedObjects;
-        std::vector<DiscardRequest> storeDiscardResources;
         D3D12_RECT renderArea = {};
-        std::vector<D3D12Operation> operations;
-        std::map<uint32_t, D3D12_VERTEX_BUFFER_VIEW> vertexBufferViews;
         bool rendering = false;
         bool closed = false;
         bool recordingFailed = false;
-        struct TimestampOperation { D3D12TimestampQuery* query; uint32_t index; bool write; };
-        std::vector<TimestampOperation> timestamps;
     };
 
     namespace
@@ -274,6 +289,7 @@ namespace dyf::Backends
             try {m_internal->commandStorage=m_internal->commandPool->Acquire();}
             catch(...) {delete m_internal;m_internal=nullptr;throw;}
             if(!m_internal->commandStorage) {m_internal->recordingFailed=true;return;}
+            static_cast<D3D12CommandScratch&>(*m_internal)=std::move(m_internal->commandStorage->scratch);
             m_internal->allocator=m_internal->commandStorage->allocator;
             m_internal->commandList=m_internal->commandStorage->commands;
             return;
@@ -300,7 +316,10 @@ namespace dyf::Backends
     D3D12CommandList::~D3D12CommandList()
     {
         if(m_internal && m_internal->reuseAllowed && IsClosed() && m_internal->commandStorage)
+        {
+            m_internal->commandStorage->scratch=std::move(static_cast<D3D12CommandScratch&>(*m_internal));
             m_internal->commandPool->Return(std::move(m_internal->commandStorage));
+        }
         delete m_internal;
     }
 

@@ -24,11 +24,16 @@ public:
         float aoRadius=1.2f, aoStrength=1.0f, rayDistance=12.0f;
         float giStrength=1.0f, reflectionStrength=1.0f, thickness=0.25f;
         uint32_t frameIndex=0,aoFrameIndex=0;
+        RHI::BufferHandle instanceKeys=nullptr;
+        bool captureOwner=false;
+        uint32_t ownerStride=0;
         uint32_t surfaceMask=7; // normal/roughness/AO, albedo/metal, motion/linear-depth
+        RHI::Format OwnerFormat() const { return ownerStride?RHI::Format::R32_UINT:RHI::Format::R32G32_UINT; }
+        uint32_t SurfacePipelineBase() const { return 8u*(captureOwner?(ownerStride?9u:8u):surfaceMask); }
     };
     struct GraphResources
     {
-        RHI::RGResourceHandle normal, albedo, motion, ao, color;
+        RHI::RGResourceHandle normal, albedo, motion, ao, color, owner;
     };
     ScreenSpaceLighting()=default;
     ~ScreenSpaceLighting();
@@ -41,7 +46,7 @@ public:
         const Camera&,const std::vector<SurfaceDraw>&,const Settings&);
     bool Import(RHI::RenderGraph&);
     bool AddSurface(RHI::RenderGraph&,RHI::RGResourceHandle depth,
-        RHI::RGResourceHandle instances={},RHI::RGResourceHandle arguments={});
+        RHI::RGResourceHandle instances={},RHI::RGResourceHandle arguments={},RHI::RGResourceHandle keys={});
     bool AddAO(RHI::RenderGraph&);
     // envSpec is exactly the linear HDR environment-specular contribution added
     // by the main pass. SSR replaces only its confidence-weighted part; it must
@@ -68,11 +73,12 @@ public:
     // 카메라·오브젝트 이동과 이전 정점 버퍼의 변형을 함께 반영한다.
     RHI::TextureHandle GetMotion() const { return m_textures[Motion]; }
     RHI::TextureHandle GetAlbedoMetal() const { return m_textures[Albedo]; }
+    RHI::TextureHandle GetOwner() const { return m_textures[Owner]; }
     RHI::TextureHandle GetColor() const { return m_colorOutput; }
     const GraphResources& GetGraphResources() const { return m_graph; }
 
 private:
-    enum ImageIndex : uint32_t {Normal,Albedo,Motion,AORaw,AOHorizontal,AO,GI,Reflection,Color,ImageCount};
+    enum ImageIndex : uint32_t {Normal,Albedo,Motion,AORaw,AOHorizontal,AO,GI,Reflection,Color,Owner,ImageCount};
     struct DrawGPU
     {
         Math::float4x4 model,previousMVP,normalMatrix;
@@ -104,6 +110,11 @@ private:
             return hash;
         }
     };
+    struct SurfaceSet
+    {
+        RHI::ResourceSetHandle set=nullptr;
+        uint32_t unusedFrames=0;
+    };
     struct ScreenSet
     {
         std::array<RHI::TextureHandle,8> textures={};
@@ -131,7 +142,7 @@ private:
         RHI::ResourceSetHandle set=nullptr;
         uint32_t unusedFrames=0;
     };
-    bool CreatePipelines(uint32_t surfaceMask);
+    bool CreatePipelines(const Settings&);
     void PrepareDepthPlane(bool enabled);
     bool CreateDenoisePipelines();
     bool PrepareDenoise(uint32_t effect,bool enabled);
@@ -167,7 +178,10 @@ private:
     GraphResources m_graph;
     std::array<RHI::ShaderHandle,6> m_shaders={};
     RHI::ShaderHandle m_fullSurfaceShader=nullptr;
-    std::array<RHI::PipelineHandle,32> m_surfacePipelines={};
+    std::array<RHI::PipelineHandle,80> m_surfacePipelines={};
+    std::array<RHI::ShaderHandle,5> m_surfaceVariants={};
+    RHI::ShaderHandle m_ownerVertex=nullptr;
+    std::array<RHI::ShaderHandle,4> m_opaqueMetalShaders={};
     std::array<RHI::ShaderHandle,3> m_compactSurfaceShaders={};
     RHI::PipelineHandle m_screenPipeline=nullptr,m_lightingPipeline=nullptr;
     RHI::PipelineHandle m_debugPipeline=nullptr;
@@ -184,7 +198,7 @@ private:
     std::vector<double> m_drawDepths;
     std::vector<RHI::ResourceSetHandle> m_drawSets;
     std::vector<ScreenSet> m_screenSets;
-    std::unordered_map<SurfaceSetKey,RHI::ResourceSetHandle,SurfaceSetHash> m_surfaceSets;
+    std::unordered_map<SurfaceSetKey,SurfaceSet,SurfaceSetHash> m_surfaceSets;
     std::array<EffectHistory,2> m_effectHistory={};
     std::array<RHI::ShaderHandle,2> m_denoiseShaders={};
     std::array<RHI::PipelineHandle,2> m_denoisePipelines={};

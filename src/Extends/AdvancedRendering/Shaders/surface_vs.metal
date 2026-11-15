@@ -8,8 +8,15 @@ struct SurfaceInput {
     float4 model0 [[attribute(5)]];float4 model1 [[attribute(6)]];float4 model2 [[attribute(7)]];float4 model3 [[attribute(8)]];
     float4 previous0 [[attribute(9)]];float4 previous1 [[attribute(10)]];float4 previous2 [[attribute(11)]];float4 previous3 [[attribute(12)]];
     float4 color [[attribute(13)]];
+#if SURFACE_OWNER
+    uint2 sourceKey [[attribute(14)]];
+#endif
 };
-struct SurfaceOutput {float4 position [[position,invariant]];float2 uv;float3 worldNormal;float4 worldTangent;float4 currentClip;float4 previousClip;float viewDepth;float4 vertexColor;};
+struct SurfaceOutput {float4 position [[position,invariant]];float2 uv;float3 worldNormal;float4 worldTangent;float4 currentClip;float4 previousClip;float viewDepth;float4 vertexColor;
+#if SURFACE_OWNER
+uint2 instanceKey [[flat]];
+#endif
+};
 float3 SurfaceNormalizeOr(float3 value,float3 fallback)
 {
     float scale=max(max(abs(value.x),abs(value.y)),abs(value.z));
@@ -36,6 +43,9 @@ vertex SurfaceOutput surfaceVertex(SurfaceInput input [[stage_in]],device const 
     float4x4 model=index.y?float4x4(input.model0,input.model1,input.model2,input.model3):draw.model;
     const float4 world=model*float4(input.position,1.0f);
     SurfaceOutput output={};
+#if SURFACE_OWNER
+    output.instanceKey=input.sourceKey;
+#endif
     const float4 clipPosition=frame.viewProjection*world;
     // 같은 표면의 이전 변형과 이전 카메라 좌표로 재투영한다.
     output.currentClip=clipPosition;

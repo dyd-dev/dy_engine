@@ -44,6 +44,9 @@ bool Renderer::Impl::RenderToTexture(const Scene& scene,const Camera& camera,RHI
 bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamera, const Canvas* overlay, Image* readback,
     const std::vector<RendererDrawDesc>* draws,RHI::TextureHandle selectedOutput,RHI::ResourceState before)
 {
+    frameSurfaceCache=false;frameSurfaceOwner=frameSurfaceNormal=frameSurfaceAlbedo=nullptr;
+    surfaceProtectedInputs.clear();
+    const uint64_t surfaceTransformRevision=scene.m_transformRevision;
     frameOpaqueDepthComplete=frameDepthPrepassValid=false;frameNoAreaLights=false;depthGeometryUnchanged=false;depthProtectedInputs.clear();
     // main은 사용자 draw 배열의 존재만으로 라이브 제어 가용성을 먼저 게시한다. 실제 표준 호환 판정은 설정 적용 뒤 아래에서 따로 수행한다.
     InitializeLiveProfiling();PublishLiveGeometryAvailability(draws!=nullptr);
@@ -106,6 +109,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         if(!m_environmentCapture)m_profiler.PollGpuSamples(); // 창·텍스처 Scene 경로에서 이전 제출의 GPU 표본을 polling한다. 이 조회가 모든 GPU 작업을 동기 대기하는 것은 아니다.
         auto* windowOutput=selectedOutput ? nullptr : nativeDevice->GetBackBuffer();
         auto* output=selectedOutput ? selectedOutput : windowOutput;
+        if(!output) return RendererFailure("Scene output acquisition failed.");
         // 고정 장면 해상도는 별도 타깃에 그리고 창으로 비율 유지 복사한다. overlay/HUD는 최종 창 크기를 따라 그린다.
         const bool fixedOutput=!selectedOutput && config.renderWidth && config.renderHeight;
         if(fixedOutput) // 고정 장면 해상도가 지정되었으면 별도 출력 타깃을 준비한다.
@@ -147,6 +151,11 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             return RendererFailure("Scene depth target creation failed.");
         // 이번 프레임의 Renderer·Scene·복사한 카메라와 자원 핸들을 확장 모듈이 읽을 묶음으로 연결한다. RenderFrame 자체가 Scene을 새로 소유하는 것은 아니다.
         RenderFrame renderFrame{owner,scene,camera};
+        renderFrame.geometry.swap(frameGeometryScratch);
+        struct GeometryScratchReturn {
+            std::vector<RenderGeometryDraw>& frame;std::vector<RenderGeometryDraw>& scratch;
+            ~GeometryScratchReturn(){frame.clear();frame.swap(scratch);}
+        } geometryScratchReturn{renderFrame.geometry,frameGeometryScratch};
         renderFrame.requirements=requirements;
         renderFrame.lodDebug=lodDebugActive;renderFrame.wireframe=wireframeActive;
         renderFrame.blackTexture=defaultMaterialTextures[2];
@@ -241,16 +250,60 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             }
         } cacheFrame{*this,scene.GetEntityCount()==0};
         // 설정 요청만으로 그림자를 사용했다고 하지 않고 파이프라인·뷰·깊이·상수·타깃 폭이 모두 준비되었는지 확인한다.
+        struct ShadowInstanceFrame
+        {
+            Impl& r;
+            RHI::BufferHandle previous,previousArguments;
+            bool previousReady,previousArgumentsReady,committed=false;
+            explicit ShadowInstanceFrame(Impl& owner):r(owner),previous(r.shadowInstanceBuffer),previousArguments(r.shadowArgumentsBuffer),
+                previousReady(r.shadowInstanceReady),previousArgumentsReady(r.shadowArgumentsReady) {}
+            ~ShadowInstanceFrame()
+            {
+                if(committed)
+                {
+                    if(r.shadowInstanceBuffer!=previous)r.device->DestroyBuffer(previous);
+                    if(r.shadowArgumentsBuffer!=previousArguments)r.device->DestroyBuffer(previousArguments);
+                }
+                else
+                {
+                    if(r.shadowInstanceBuffer!=previous)r.device->DestroyBuffer(r.shadowInstanceBuffer);
+                    r.shadowInstanceBuffer=previous;r.shadowInstanceReady=previousReady;r.shadowInstancesActive=false;
+                    if(r.shadowArgumentsBuffer!=previousArguments)r.device->DestroyBuffer(r.shadowArgumentsBuffer);
+                    r.shadowArgumentsBuffer=previousArguments;r.shadowArgumentsReady=previousArgumentsReady;r.shadowIndirectActive=false;
+                }
+            }
+            void Commit()
+            {
+                if(r.shadowInstancesActive)
+                {
+                    r.shadowInstanceReady=true;
+                    r.shadowInstanceBytes.swap(r.shadowInstances.matrices);
+                }
+                if(r.shadowIndirectActive)
+                {
+                    r.shadowArgumentsReady=true;r.shadowArgumentBytes.swap(r.shadowInstances.arguments);
+                }
+                committed=true;
+            }
+        } shadowInstanceFrame(*this);
+        shadowInstancesActive=false;shadowIndirectActive=false;
+        gpuShadows.active=false;gpuShadows.requested=false;
         const bool hasShadows = shadowPipeline && shadows.viewCount && shadowDepthTarget &&
             shadowMatrixBuffer && shadowDepthTarget->GetDesc().width;
         if(hasShadows)PrepareShadowCasters(scene,draws);
         const bool cachedShadows=hasShadows && ReuseShadowAtlas(scene,shadows,draws);
         const bool drawShadows=hasShadows && !cachedShadows;
+        if(drawShadows) {
+            frame.preparation=nativeDevice->AcquireCommandList();
+            if(!frame.preparation || !PrepareShadowPassResources(scene,shadows,*frame.preparation,draws))
+                return RendererFailure("Shadow resource preparation failed.");
+        }
         frameNoAreaLights=frameNoAreaLights && stockDrawInputs && UsesStockGeometry() && !wireframeActive &&
             noAreaMaterialPipelines[0];
         using State = RHI::ResourceState;
         // 타깃을 시작/끝 상태와 함께 그래프로 가져오고 패스의 읽기/쓰기 의존성을 선언한다. 이 선언은 실제 명령 기록보다 먼저 이루어진다.
-        RHI::RenderGraph graph;
+        auto& graph=frameGraph;graph.Reset();
+        struct GraphReset { RHI::RenderGraph& graph;~GraphReset(){graph.Reset();} } resetGraph{graph};
         const auto ownedLighting=frameNoAreaLights
             ? graph.ImportBuffer("Renderer owned lighting constants",lightingBuffer,State::ConstantBuffer,State::ConstantBuffer)
             : RHI::RGResourceHandle{};
@@ -301,11 +354,18 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         }
         if(!requirements.providesLocalLights && basicLighting && !basicLighting->Import(graph,renderFrame.lighting)) // 지역광 공급 확장이 없는 경우 기본 지역광 자원을 그래프에 가져오며 실패는 전파한다.
             return RendererFailure("Basic local light resource import failed.");
-        if(drawShadows) // 그림자가 준비되었지만 정적 아틀라스를 재사용할 수 없을 때만 새 그림자 패스를 기록한다.
-            graph.AddPass("Shadow", RHI::RGRecordingMode::Independent).Write(shadow,State::DepthWrite)
-                .SetExecute([&](RHI::ICommandList* commands) {
-                    require(RecordShadowPass(scene,camera,shadows,*commands,draws));
-                });
+        if(gpuShadows.active && !gpuShadows.visibility->AddPasses(graph))
+            return RendererFailure("GPU shadow pass creation failed.");
+        recordingStatistics.gpuShadowCulling=gpuShadows.active;
+        if(drawShadows) {
+            auto& pass=graph.AddPass("Shadow",RHI::RGRecordingMode::Independent).Write(shadow,State::DepthWrite);
+            if(gpuShadows.active)
+                pass.Read(gpuShadows.visibility->InstancesResource(),State::VertexBuffer)
+                    .Read(gpuShadows.visibility->ArgumentsResource(),State::IndirectArgument);
+            pass.SetExecute([&](RHI::ICommandList* commands) {
+                require(RecordShadowPass(scene,camera,shadows,*commands,draws));
+            });
+        }
         // GPU visibility 패스/기본 조명 import 뒤에는 현재 graph의 리소스 핸들을 확장에도 연결할 수 있다.
         UpdateFrameLighting(renderFrame,true);
         if(!AddExtensionPasses(RenderStage::BeforeOpaque,renderFrame,graph)) return false; // 불투명 이전 확장 패스 구성 실패면 중단한다.
@@ -349,6 +409,12 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
         // 색/깊이 쓰기와 조명·그림자·AO·인수 읽기 의존성을 선언해 그래프가 실행 순서와 전환을 정하게 한다.
         auto& mainPass = graph.AddPass("MainForward", RHI::RGRecordingMode::Independent);
         mainPass.Write(color, State::RenderTarget).Write(depth, State::DepthWrite);
+        if(renderFrame.surfaceMaterialComplete)
+        {
+            mainPass.Read(renderFrame.materialOwner.resource,State::ShaderResource)
+                .Read(renderFrame.normal.resource,State::ShaderResource).Read(renderFrame.albedo.resource,State::ShaderResource);
+            if(visibilityActive)mainPass.Read(gpuVisibility->GetInstanceKeysHandle(),State::VertexBuffer);
+        }
         if(ownedLighting.IsValid())mainPass.Read(ownedLighting,State::ConstantBuffer);
         if(renderFrame.lighting.areaMatrix.resource.IsValid()) // 면적광 행렬 LUT가 그래프 자원이면 메인 패스 읽기 의존성을 추가한다.
             mainPass.Read(renderFrame.lighting.areaMatrix.resource,State::ShaderResource);
@@ -420,50 +486,22 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             }
             if(frameOpaqueDepthComplete && !noAreaDepthPrepassPipelines[0])frameNoAreaLights=false;
         }
-        // Mirror FrameBuffers: retain the previous allocation/bytes until the list containing this upload is submitted.
-        struct ShadowInstanceFrame
+        frameSurfaceCache=config.advanced.reuseSurfaceMaterials && renderFrame.surfaceMaterialComplete && frameOpaqueDepthComplete && frameNoAreaLights &&
+            visibilityActive && scene.m_transformRevision==surfaceTransformRevision && stockDrawInputs && UsesStockGeometry() && !wireframeActive && !lodDebugActive &&
+            shaderSources.bytes[MeshVertex].empty() && shaderSources.bytes[MeshFragment].empty() && surfaceCachePipelines[0] &&
+            surfaceGeometrySnapshot.Matches(renderFrame.geometry) && renderFrame.materialOwner.texture &&
+            gpuVisibility->GetInstanceKeysBuffer();
+        if(frameSurfaceCache)
         {
-            Impl& r;
-            RHI::BufferHandle previous,previousArguments;
-            bool previousReady,previousArgumentsReady,committed=false;
-            explicit ShadowInstanceFrame(Impl& owner):r(owner),previous(r.shadowInstanceBuffer),previousArguments(r.shadowArgumentsBuffer),
-                previousReady(r.shadowInstanceReady),previousArgumentsReady(r.shadowArgumentsReady) {}
-            ~ShadowInstanceFrame()
-            {
-                if(committed)
-                {
-                    if(r.shadowInstanceBuffer!=previous)r.device->DestroyBuffer(previous);
-                    if(r.shadowArgumentsBuffer!=previousArguments)r.device->DestroyBuffer(previousArguments);
-                }
-                else
-                {
-                    if(r.shadowInstanceBuffer!=previous)r.device->DestroyBuffer(r.shadowInstanceBuffer);
-                    r.shadowInstanceBuffer=previous;r.shadowInstanceReady=previousReady;r.shadowInstancesActive=false;
-                    if(r.shadowArgumentsBuffer!=previousArguments)r.device->DestroyBuffer(r.shadowArgumentsBuffer);
-                    r.shadowArgumentsBuffer=previousArguments;r.shadowArgumentsReady=previousArgumentsReady;r.shadowIndirectActive=false;
-                }
-            }
-            void Commit()
-            {
-                if(r.shadowInstancesActive)
-                {
-                    r.shadowInstanceReady=true;
-                    r.shadowInstanceBytes.swap(r.shadowInstances.matrices);
-                }
-                if(r.shadowIndirectActive)
-                {
-                    r.shadowArgumentsReady=true;r.shadowArgumentBytes.swap(r.shadowInstances.arguments);
-                }
-                committed=true;
-            }
-        } shadowInstanceFrame(*this);
-        shadowInstancesActive=false;shadowIndirectActive=false;
-        frame.preparation=nativeDevice->AcquireCommandList();
+            frameSurfaceOwner=renderFrame.materialOwner.texture;frameSurfaceNormal=renderFrame.normal.texture;
+            frameSurfaceAlbedo=renderFrame.albedo.texture;
+        }
+        // Mirror FrameBuffers: retain the previous allocation/bytes until the list containing this upload is submitted.
+        if(!frame.preparation)frame.preparation=nativeDevice->AcquireCommandList();
         if(!frame.preparation)return RendererFailure("Pass preparation command acquisition failed.");
         // All registry/cache changes finish on the owner before worker snapshots.
         // Their upload commands execute before the graph in the same submission.
         if(!PrepareMainPassResources(scene,*frame.preparation,draws) ||
-            (drawShadows && !PrepareShadowPassResources(scene,shadows,*frame.preparation,draws)) ||
             (toneMap && !PrepareToneMap(renderFrame.color.texture)) ||
             (overlay && !PrepareCanvas(*overlay,*frame.preparation,overlayTarget,preparedCanvases[0])) ||
             (profilerOverlay && !PrepareCanvas(*profilerOverlay,*frame.preparation,overlayTarget,preparedCanvases[1])))
@@ -533,6 +571,13 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             CommitFrameData();
             buffers.committed=true;
             shadowInstanceFrame.Commit();
+            if(gpuShadows.active)gpuShadows.visibility->CommitFrame();
+            if(frameSurfaceCache && recordingStatistics.mainDrawCount && !surfaceCacheReported)
+            {
+                std::fprintf(stderr,"[Renderer] MainForward exact entity+primitive Surface material reuse active. Owner format: %s.\n",
+                    frameSurfaceOwner->GetDesc().format==RHI::Format::R32_UINT?"R32_UINT":"R32G32_UINT");
+                surfaceCacheReported=true;
+            }
             if(frameNoAreaLights && recordingStatistics.mainDrawCount && !noAreaReported)
             {
                 std::fputs("[Renderer] Main area-light-free shader active: uploaded Rect/Disc counts are zero; no graph lighting writes or global barriers.\n",stderr);
@@ -554,7 +599,7 @@ bool Renderer::Impl::RenderScene(const Scene& scene, const Camera* selectedCamer
             // draw 제출의 펜스와 기록한 통계를 보관한다. 뒤의 readback 또는 Present가 실패해도 이미 제출한 작업이 취소되지는 않으므로 이 값은 유지한다.
             lastRenderCompletion=completion;
             lastStatistics=recordingStatistics;
-            if(materialIndexRecorded) {materialIndexReady=true;materialIndexBytes.swap(materialIndexScratch);} // 이번 draw 목록에 재질 인덱스 업로드가 있었으면 ready와 비교 기준 바이트를 갱신한다.
+            if(materialIndexRecorded) {materialIndexReady=true;materialIndexBytes=materialIndexScratch;} // 이번 draw 목록에 재질 인덱스 업로드가 있었으면 ready와 비교 기준 바이트를 갱신한다.
             // draw 제출이 성공한 시점에 아틀라스/모션/효과/GPU visibility 이력을 다음 프레임 기준으로 확정한다. 실제 GPU 접근 순서는 RHI 제출/배리어 계약에 따른다.
             CommitShadowAtlas(scene);
             CommitFrameResources(renderFrame);

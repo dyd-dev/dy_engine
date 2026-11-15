@@ -284,6 +284,8 @@ void Renderer::Impl::CollectShadowViewCasters(const std::vector<ShadowCaster>& c
 void Renderer::Impl::PrepareShadowCasters(const Scene& scene,const std::vector<RendererDrawDesc>* draws)
 {
     const bool stock=stockDrawInputs,instanced=UsesInstanceStream(),cull=stock && config.enableFrustumCulling;
+    gpuShadows.requested=stock && instanced && cull && config.enableGpuCulling && instanceBuffer &&
+        !Platform::IsLiveCollectorEnabled() && GpuShadowVisibility::Supported(*device);
     auto& casters=shadowCasterScratch;
     casters.clear();
     casters.reserve(scene.GetEntityCount());
@@ -311,12 +313,17 @@ void Renderer::Impl::PrepareShadowCasters(const Scene& scene,const std::vector<R
             mesh.shadowArena.generation==shadowArenaGeneration && mesh.shadowVertexReady && mesh.shadowIndexReady;
         caster.compact=originalVertices && (caster.arena || (mesh.shadowVertexBuffer && mesh.shadowVertexReady &&
             mesh.shadowIndexBuffer && mesh.shadowIndexReady));
+        caster.vertices=caster.arena?shadowArenaVertices:caster.compact?mesh.shadowVertexBuffer:vertexBuffer;
+        caster.indices=caster.arena?shadowArenaIndices:caster.compact?mesh.shadowIndexBuffer:mesh.indexBuffer;
+        caster.indexFormat=caster.arena?mesh.shadowArena.indexFormat:caster.compact?mesh.shadowIndexFormat:RHI::Format::R32_UINT;
+        caster.vertexOffset=caster.arena?static_cast<int32_t>(mesh.shadowArena.baseVertex):0;
+        caster.localBounds=draws && (*draws)[i].hasLocalBounds?(*draws)[i].localBounds:mesh.bounds;
+        caster.clustered=caster.arena && mesh.shadowArena.sortSafeInputs && (!draws || !(*draws)[i].hasLocalBounds);
         caster.batch=static_cast<uint32_t>(casters.size());
         const auto& transform=scene.GetTransform(entity);
         caster.mirrored=Math::Determinant3x3(transform)<0;
-        if(cull)
-            caster.worldBounds.bounds=ShadowWorldBounds(draws && (*draws)[i].hasLocalBounds ? (*draws)[i].localBounds :
-                mesh.bounds,transform,caster.worldBounds.magnitude);
+        if(cull && !gpuShadows.requested)
+            caster.worldBounds.bounds=ShadowWorldBounds(caster.localBounds,transform,caster.worldBounds.magnitude);
         caster.sortSafe=caster.arena && mesh.shadowArena.sortSafeInputs && caster.worldBounds.bounds.valid;
         if(caster.sortSafe)
         {
@@ -326,6 +333,20 @@ void Renderer::Impl::PrepareShadowCasters(const Scene& scene,const std::vector<R
                 if(!std::isfinite(value) || std::abs(value)>1e10f)caster.sortSafe=false;
             for(double value:caster.worldBounds.magnitude)
                 if(!std::isfinite(value) || value>1e21)caster.sortSafe=false;
+        }
+        if(caster.sortSafe && instanced && cull && !mesh.shadowArena.clusters.empty() &&
+            (!draws || !(*draws)[i].hasLocalBounds) && !Platform::IsLiveCollectorEnabled() &&
+            device->Supports(RHI::Feature::IndirectDraw) && device->Supports(RHI::Feature::IndirectFirstInstance))
+        {
+            for(const auto& cluster:mesh.shadowArena.clusters)
+            {
+                auto part=caster;
+                part.batch=static_cast<uint32_t>(casters.size());
+                part.firstIndex=cluster.firstIndex;part.indexCount=cluster.indexCount;
+                part.worldBounds.bounds=ShadowWorldBounds(cluster.bounds,transform,part.worldBounds.magnitude);
+                casters.push_back(part);
+            }
+            continue;
         }
         if(stock && instanced && !casters.empty()) {
             const auto& previous=casters.back();
@@ -346,6 +367,7 @@ void Renderer::Impl::PrepareShadowCasters(const Scene& scene,const std::vector<R
         }
         casters.push_back(caster);
     }
+    if(casters.empty())gpuShadows.requested=false;
 }
 
 bool Renderer::Impl::PrepareShadowPassResources(const Scene& scene,const ShadowData& shadows,
@@ -410,6 +432,7 @@ bool Renderer::Impl::PrepareShadowPassResources(const Scene& scene,const ShadowD
             if(!caster.set)return false;
         }
 	}
+    if(gpuShadows.requested)return PrepareGpuShadowPass(scene,shadows,uploads);
     if(!stock || !instanced || !UsesStockGeometry() ||
         !shadowInstances.Build(scene,shadows,casters,cull,canIndirect))return true;
     constexpr uint32_t stride=2*sizeof(Math::float4x4);
@@ -484,9 +507,14 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
     const bool instanced=UsesInstanceStream();
     const bool baseInstance=stock && instanced;
     const bool cull=stock && config.enableFrustumCulling;
-    const bool packed=shadowInstancesActive;
-    const bool partial=device->Supports(RHI::Feature::RenderArea);
-    const auto instanceSource=packed ? shadowInstanceBuffer : instanceBuffer;
+    const bool gpu=gpuShadows.active,packed=gpu || shadowInstancesActive;
+    // A full redraw needs one clear; only cached tiles require bounded render passes.
+    const bool partial=device->Supports(RHI::Feature::RenderArea) &&
+        std::any_of(shadows.dirtyViews.begin(),shadows.dirtyViews.begin()+shadows.viewCount,
+            [](bool dirty){return !dirty;});
+    const auto instanceSource=gpu?gpuShadows.visibility->Instances():packed?shadowInstanceBuffer:instanceBuffer;
+    const bool indirect=gpu || shadowIndirectActive;
+    const auto argumentSource=gpu?gpuShadows.visibility->Arguments():shadowArgumentsBuffer;
     const auto& casters=shadowCasterScratch;
 #ifdef DY_RENDERDOC_ENABLED
     commands.BeginDebugEvent("Shadow");
@@ -514,8 +542,10 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
             // 광원 절두체 밖임을 보수적으로 확인한 객체만 이번 뷰 목록에서 제거한다.
             auto& visible=shadowViewScratch;
             if(cull && !packed)CollectShadowViewCasters(casters,shadows,view,true,visible);
-            const auto packedRange=packed ? shadowInstances.views[view] : ShadowInstanceData::View{};
+            const auto packedRange=gpu ? ShadowInstanceData::View{view*static_cast<uint32_t>(gpuShadows.batches.size()),
+                static_cast<uint32_t>(gpuShadows.batches.size())} : packed ? shadowInstances.views[view] : ShadowInstanceData::View{};
             const auto casterAt=[&](uint32_t index) -> const ShadowCaster& {
+                if(gpu)return casters[gpuShadows.representatives[index]];
                 if(packed)return casters[shadowInstances.draws[packedRange.first+index].caster];
                 return casters[cull ? visible[index] : index];
             };
@@ -585,7 +615,7 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
 				const uint32_t materialIndex=caster.material;
 				const auto& mesh = m_meshes[caster.mesh];
 				const auto& material=scene.Materials()[materialIndex];
-                const auto* packedDraw=packed ? &shadowInstances.draws[packedRange.first+drawIndex] : nullptr;
+                const auto* packedDraw=shadowInstancesActive ? &shadowInstances.draws[packedRange.first+drawIndex] : nullptr;
 				uint32_t count=packedDraw ? packedDraw->count : 1;
                 while(!packed && drawIndex+count<visibleCount) {
                     const auto& next=casterAt(drawIndex+count);
@@ -630,9 +660,7 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
 				}
 				const auto selectedSet=caster.set;
 				if(selectedSet!=boundSet) {commands.BindResourceSet(selectedSet);boundSet=selectedSet;} // 같은 자원 세트의 반복 바인딩을 생략한다.
-				const auto vertexBuffer=input && input->vertexBuffer ? input->vertexBuffer : mesh.vertexBuffer;
-                const auto selectedVertices=caster.arena ? shadowArenaVertices :
-                    caster.compact ? mesh.shadowVertexBuffer : vertexBuffer;
+                const auto selectedVertices=caster.vertices;
                 if(!caster.arena || selectedVertices!=boundVertices)
                 {
                     commands.BindVertexBuffer(0,selectedVertices,0);
@@ -649,10 +677,8 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
                         instanceStreamBound=true;
                     }
                 }
-                const auto selectedIndices=caster.arena ? shadowArenaIndices :
-                    caster.compact ? mesh.shadowIndexBuffer : mesh.indexBuffer;
-                const auto indexFormat=caster.arena ? mesh.shadowArena.indexFormat :
-                    caster.compact ? mesh.shadowIndexFormat : RHI::Format::R32_UINT;
+                const auto selectedIndices=caster.indices;
+                const auto indexFormat=caster.indexFormat;
                 if(!caster.arena || selectedIndices!=boundIndices || indexFormat!=boundIndexFormat)
                 {
                     commands.BindIndexBuffer(selectedIndices,indexFormat,0);
@@ -676,7 +702,7 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
                     inlineConstantsValid=true;
                 }
                 uint32_t run=1;
-                if(shadowIndirectActive && packed)
+                if(indirect && packed && caster.arena)
                 {
                     while(drawIndex+run<visibleCount)
                     {
@@ -690,17 +716,17 @@ bool Renderer::Impl::RecordShadowPass(const Scene& scene,const Camera& camera,co
                 const uint32_t firstIndex=caster.firstIndex+(caster.arena ? mesh.shadowArena.indexByteOffset/
                     (indexFormat==RHI::Format::R16_UINT?2u:4u) : 0);
                 const int32_t baseVertex=caster.arena ? static_cast<int32_t>(mesh.shadowArena.baseVertex) : 0;
-                if(shadowIndirectActive && packed)
-                    commands.DrawIndexedIndirect(shadowArgumentsBuffer,(packedRange.first+drawIndex)*sizeof(RHI::DrawIndexedIndirectArguments),run);
+                if(indirect && packed)
+                    commands.DrawIndexedIndirect(argumentSource,(packedRange.first+drawIndex)*sizeof(RHI::DrawIndexedIndirectArguments),run);
                 else commands.DrawIndexedInstanced(caster.indexCount,count,firstIndex,baseVertex,baseInstance?firstInstance:0);
                 if(caster.arena && !shadowArenaReported)
                 {
                     std::fprintf(stderr,"[Renderer] Shared shadow arena selected: generation=%llu mixed R16/R32 index ranges; %s, cache-optimized triangle order.\n",
-                        static_cast<unsigned long long>(shadowArenaGeneration),packed?"packed instance batches":"entity instance runs");
+                        static_cast<unsigned long long>(shadowArenaGeneration),gpu?"GPU culled instance batches":packed?"packed instance batches":"entity instance runs");
                     shadowArenaReported=true;
                 }
 				++recordingStatistics.shadowDrawCount;
-                for(uint32_t i=0;i<run;++i)
+                for(uint32_t i=0;!gpu && i<run;++i)
                 {
                     const auto instances=packed ? shadowInstances.draws[packedRange.first+drawIndex+i].count : count;
                     recordingStatistics.shadowInstanceCount+=instances;

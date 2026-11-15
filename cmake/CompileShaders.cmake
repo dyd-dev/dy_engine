@@ -273,7 +273,7 @@ macro(dy_build_stock_shaders)
     set(DY_STOCK_SHADER_NATIVE_SOURCES)
     foreach(language IN ITEMS glsl hlsl metal)
         set(programs mesh_vs mesh_ps mesh_shadow_vs mesh_shadow_ps
-            gpu_visibility gpu_hiz)
+            gpu_visibility gpu_hiz gpu_shadow_visibility)
         if(language STREQUAL "metal")
             list(APPEND programs canvas tone_map presentation_copy environment_depth)
         else()
@@ -628,12 +628,42 @@ macro(dy_build_stock_shaders)
                 -DRENDERER_DEPTH_PREPASS=1 -DRENDERER_PCF_GATHER=1)
         endif()
 
+        foreach(cache_shadows IN ITEMS 0 1)
+            if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
+                dy_embed_stock_metal_library(SurfaceCacheVertex${cache_shadows} kSurfaceCacheVertex${cache_shadows} mesh_vs
+                    -DRENDERER_INSTANCING=1 -DRENDERER_SURFACE_CACHE=1 -DRENDERER_ENABLE_SHADOWS=${cache_shadows}
+                    -DRENDERER_VERTEX_ENTRY=surfaceCacheVertex INVARIANT_PROGRAMS mesh_vs)
+                foreach(cache_bindless IN ITEMS 0 1)
+                    dy_embed_stock_metal_library(SurfaceCacheFragment${cache_shadows}${cache_bindless} kSurfaceCacheFragment${cache_shadows}${cache_bindless} mesh_ps
+                        -DRENDERER_SURFACE_CACHE=1 -DRENDERER_ENABLE_AREA_LIGHTS=0 -DRENDERER_DEPTH_PREPASS=1
+                        -DRENDERER_ENABLE_SHADOWS=${cache_shadows} -DRENDERER_BINDLESS=${cache_bindless}
+                        -DRENDERER_FRAGMENT_ENTRY=surfaceCacheFragment)
+                endforeach()
+            else()
+                dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_vs.${shader_extension}" vert
+                    SurfaceCacheVertex${cache_shadows} kSurfaceCacheVertex${cache_shadows}
+                    -DRENDERER_INSTANCING=1 -DRENDERER_SURFACE_CACHE=1 -DRENDERER_ENABLE_SHADOWS=${cache_shadows})
+                foreach(cache_bindless IN ITEMS 0 1)
+                    dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/mesh_ps.${shader_extension}" frag
+                        SurfaceCacheFragment${cache_shadows}${cache_bindless} kSurfaceCacheFragment${cache_shadows}${cache_bindless}
+                        -DRENDERER_SURFACE_CACHE=1 -DRENDERER_ENABLE_AREA_LIGHTS=0 -DRENDERER_DEPTH_PREPASS=1
+                        -DRENDERER_ENABLE_SHADOWS=${cache_shadows} -DRENDERER_BINDLESS=${cache_bindless})
+                endforeach()
+            endif()
+        endforeach()
+
         if(DY_BACKEND_NORMALIZED STREQUAL "METAL")
+            dy_embed_stock_metal_library(GpuRangeCompute kGpuRangeCompute gpu_range_visibility)
+            dy_embed_stock_metal_library(GpuRangeOcclusionCompute kGpuRangeOcclusionCompute gpu_range_visibility -DGPU_RANGE_OCCLUSION=1)
             dy_embed_stock_metal_library(GpuVisibilityCompute kGpuVisibilityCompute gpu_visibility)
+            dy_embed_stock_metal_library(GpuShadowCompute kGpuShadowCompute gpu_shadow_visibility)
             dy_embed_stock_metal_library(GpuOcclusionCompute kGpuOcclusionCompute gpu_visibility -DGPU_VISIBILITY_OCCLUSION=1)
             dy_embed_stock_metal_library(GpuHiZCompute kGpuHiZCompute gpu_hiz)
         else()
+            dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/gpu_range_visibility.${shader_extension}" comp GpuRangeCompute kGpuRangeCompute)
+            dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/gpu_range_visibility.${shader_extension}" comp GpuRangeOcclusionCompute kGpuRangeOcclusionCompute -DGPU_RANGE_OCCLUSION=1)
             dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/gpu_visibility.${shader_extension}" comp GpuVisibilityCompute kGpuVisibilityCompute)
+            dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/gpu_shadow_visibility.${shader_extension}" comp GpuShadowCompute kGpuShadowCompute)
             dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/gpu_visibility.${shader_extension}" comp GpuOcclusionCompute kGpuOcclusionCompute -DGPU_VISIBILITY_OCCLUSION=1)
             dy_embed_stock_shader("${DY_STOCK_SHADER_SOURCE_DIR}/gpu_hiz.${shader_extension}" comp GpuHiZCompute kGpuHiZCompute)
         endif()

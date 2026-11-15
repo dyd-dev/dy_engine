@@ -17,6 +17,7 @@ StructuredBuffer<Instance> inputs:register(t0,space0);
 StructuredBuffer<Batch> batches:register(t1,space0);
 RWStructuredBuffer<VisibleInstance> visible:register(u2,space0);
 RWStructuredBuffer<uint> arguments:register(u3,space0);
+RWStructuredBuffer<uint2> instanceKeys:register(u9,space0);
 RWStructuredBuffer<uint> history:register(u4,space0);
 // planes는 정규화된 절두체 6면, depthRow는 시점 앞쪽 거리를 구하는 행이다.
 // 상태 전환 방향마다 서로 다른 기준을 적용해 잦은 전환을 막는 방식(히스테리시스)의 폭을 projection에 담는다.
@@ -126,4 +127,5 @@ void main(uint3 threadId:SV_DispatchThreadID)
     if(index>=batch.capacityPadding.x) return; // 출력 버퍼 범위를 넘는 쓰기를 막는다. 원자 증가된 인수 개수는 되돌리지 않으므로 CPU의 용량 검증이 전제다.
     VisibleInstance result;result.model=input.model;result.previousMVP=input.previousMVP;
     visible[batch.instanceOffset+index]=result;
+    instanceKeys[batch.instanceOffset+index]=uint2(input.metadata.z,batch.firstIndex/3u);
 }

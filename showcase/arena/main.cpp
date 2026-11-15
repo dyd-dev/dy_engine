@@ -452,7 +452,7 @@ int main(int argc, char** argv)
             enum Column { Kind, Index, SceneTime, Interval, Wall, RenderWall, Cpu, Acquire, Prepare, Record, Submit, Present,
                 Sequence, CpuSamples, Gpu, GpuSamples, Draws, ShadowDraws, Instances, Triangles, ShadowTriangles, Culled,
                 Batches, GpuVisibility, GpuOcclusion, ShadowReuse, RenderWidth, RenderHeight, OutputWidth, OutputHeight,
-                Pass, PassMs, PassSamples, ColumnCount };
+                Pass, PassMs, PassSamples, GpuShadowCulling, ColumnCount };
             using Row = std::array<std::string, ColumnCount>;
             const auto set = [](Row& row, Column column, const auto& value) {
                 std::ostringstream text; text.imbue(std::locale::classic()); text << std::setprecision(17) << value;
@@ -467,7 +467,7 @@ int main(int argc, char** argv)
                 }
                 output << '\n';
             };
-            output << "record_type,index,scene_time_seconds,submission_interval_ms,frame_work_wall_ms,render_work_wall_ms,cpu_render_ms,cpu_acquire_ms,cpu_prepare_ms,cpu_record_ms,cpu_submit_ms,cpu_present_ms,profiler_sequence,cpu_samples,gpu_frame_ms,gpu_samples,main_draws,shadow_draws,main_instances,main_triangles,shadow_triangles,culled_entities,indirect_batches,gpu_visibility,gpu_occlusion,shadow_reused,render_width,render_height,output_width,output_height,gpu_pass_name,gpu_pass_ms,gpu_pass_samples\n";
+            output << "record_type,index,scene_time_seconds,submission_interval_ms,frame_work_wall_ms,render_work_wall_ms,cpu_render_ms,cpu_acquire_ms,cpu_prepare_ms,cpu_record_ms,cpu_submit_ms,cpu_present_ms,profiler_sequence,cpu_samples,gpu_frame_ms,gpu_samples,main_draws,shadow_draws,main_instances,main_triangles,shadow_triangles,culled_entities,indirect_batches,gpu_visibility,gpu_occlusion,shadow_reused,render_width,render_height,output_width,output_height,gpu_pass_name,gpu_pass_ms,gpu_pass_samples,gpu_shadow_culling\n";
             std::vector<double> intervals;
             intervals.reserve(measured.size());
             for(size_t i=0; i<measured.size(); ++i)
@@ -475,7 +475,9 @@ int main(int argc, char** argv)
                 const auto& frame = measured[i]; const auto& s = frame.statistics;
                 Row row{}; row[Kind] = "frame"; set(row, Index, i+1); set(row, SceneTime, frame.sceneTime);
                 set(row, Interval, frame.interval); set(row, Wall, frame.wall); set(row, RenderWall, frame.renderWall);
-                set(row, Draws, s.mainDrawCount); set(row, ShadowDraws, s.shadowDrawCount); set(row, ShadowTriangles, s.shadowTriangleCount);
+                set(row, Draws, s.mainDrawCount); set(row, ShadowDraws, s.shadowDrawCount);
+                if(!s.gpuShadowCulling)set(row, ShadowTriangles, s.shadowTriangleCount);
+                set(row, GpuShadowCulling, s.gpuShadowCulling);
                 if(!s.gpuVisibility)
                 { set(row, Instances, s.mainInstanceCount); set(row, Triangles, s.mainTriangleCount); set(row, Culled, s.culledEntityCount); }
                 set(row, Batches, s.indirectBatchCount); set(row, GpuVisibility, s.gpuVisibility); set(row, GpuOcclusion, s.gpuOcclusion);

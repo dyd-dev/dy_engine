@@ -14,7 +14,8 @@ cbuffer DrawConstants : register(b10,space0)
     float4 materialParams;
 };
 // 반전 변환의 면 방향을 보정하고, Mask 재질만 정점·텍스처 알파와 임곗값을 검사한다.
-void main(float2 uv : TEXCOORD0, float vertexAlpha : TEXCOORD1, bool frontFace : SV_IsFrontFace)
+// Keep the input registers aligned with ShadowOutput, including its position slot.
+void main(float4 position : SV_Position, float2 uv : TEXCOORD0, float vertexAlpha : TEXCOORD1, bool frontFace : SV_IsFrontFace)
 {
     bool front=frontFace!=((padding1 & 32u)!=0u);
     if((padding1 & 4u)==0u && !front) discard;

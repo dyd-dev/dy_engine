@@ -17,10 +17,19 @@
 
 #if defined(ENABLE_METAL)
 #include "ScreenSpaceMetalLibrary.h"
+#include "SurfaceOpaqueMetal.h"
+#include "SurfaceOwner0.h"
+#include "SurfaceOwner1.h"
 #elif defined(ENABLE_VULKAN) || defined(ENABLE_D3D12)
 #include "SurfaceVertex.h"
 #include "SurfaceFragment.h"
 #include "SurfaceFullFragment.h"
+#include "SurfaceOpaqueFullFragment.h"
+#include "SurfaceOpaque0.h"
+#include "SurfaceOpaque1.h"
+#include "SurfaceOwner0.h"
+#include "SurfaceOwner1.h"
+#include "SurfaceOwnerVertex.h"
 #include "ScreenSpaceVertex.h"
 #include "ScreenSpaceFragment.h"
 #include "ScreenSpaceLightingFragment.h"
@@ -95,7 +104,7 @@ bool ScreenSpaceLighting::CreateDenoisePipelines()
     bindings.push_back({7,ResourceBindingType::StaticSampler,1,ShaderStageFlags::Fragment,sampler});
     bindings.push_back({12,ResourceBindingType::ConstantBuffer,1,ShaderStageFlags::Fragment,{}});
     const ColorAttachmentDesc colors[]={{Format::R16G16B16A16_FLOAT,{},ColorWriteMask::All},
-        {Format::R16G16B16A16_FLOAT,{},ColorWriteMask::All},{Format::R32G32B32A32_FLOAT,{},ColorWriteMask::All}};
+        {Format::R16G16B16A16_FLOAT,{},ColorWriteMask::All},{Format::R16G16B16A16_FLOAT,{},ColorWriteMask::All}};
     for(uint32_t i=0;i<2;++i)
     {
         if(m_denoisePipelines[i]) continue;
@@ -121,8 +130,9 @@ bool ScreenSpaceLighting::PrepareDenoise(uint32_t effect,bool enabled)
         target.image=m_device->CreateTexture(desc);target.state=ResourceState::Undefined;
         return target.image!=nullptr;
     };
+    // Guide channels only copy/clamp the existing FP16 Surface values.
     for(auto& slot:history.frames) for(uint32_t channel=0;channel<3;++channel)
-        if(!create(slot[channel],channel==2?Format::R32G32B32A32_FLOAT:Format::R16G16B16A16_FLOAT)) return false;
+        if(!create(slot[channel],Format::R16G16B16A16_FLOAT)) return false;
     for(auto& target:history.spatial) if(!create(target,Format::R16G16B16A16_FLOAT)) return false;
     return true;
 }
@@ -206,7 +216,7 @@ bool ScreenSpaceLighting::AddDenoise(RenderGraph& graph,uint32_t effect,TextureH
 void ScreenSpaceLighting::DestroySets()
 {
     if(!m_device) return;
-    for(const auto& cached:m_surfaceSets) m_device->DestroyResourceSet(cached.second);
+    for(const auto& cached:m_surfaceSets) m_device->DestroyResourceSet(cached.second.set);
     for(const auto& cached:m_screenSets) m_device->DestroyResourceSet(cached.set);
     for(const auto& cached:m_denoiseSets) m_device->DestroyResourceSet(cached.set);
     m_device->DestroyResourceSet(m_depthCopySet);m_depthCopySet=nullptr;
@@ -230,13 +240,16 @@ void ScreenSpaceLighting::Reset()
         m_device->DestroyPipeline(m_debugPipeline);
         for(auto* shader:m_shaders) m_device->DestroyShader(shader);
         m_device->DestroyShader(m_fullSurfaceShader);
+        m_device->DestroyShader(m_ownerVertex);
+        for(auto* shader:m_surfaceVariants)m_device->DestroyShader(shader);
+        for(auto* shader:m_opaqueMetalShaders)m_device->DestroyShader(shader);
         for(auto* shader:m_compactSurfaceShaders) m_device->DestroyShader(shader);
         for(auto* shader:m_denoiseShaders) m_device->DestroyShader(shader);
         for(auto* pipeline:m_denoisePipelines) m_device->DestroyPipeline(pipeline);
         m_device->DestroyBuffer(m_frameBuffer);m_device->DestroyBuffer(m_drawBuffer);
     }
     m_textures={};m_states={};m_handles={};m_imported={};m_shaders={};m_surfacePipelines={};
-    m_fullSurfaceShader=nullptr;
+    m_fullSurfaceShader=nullptr;m_ownerVertex=nullptr;m_surfaceVariants={};m_opaqueMetalShaders={};
     m_compactSurfaceShaders={};
     m_screenPipeline=m_lightingPipeline=nullptr;m_frameBuffer=m_drawBuffer=nullptr;
     m_debugPipeline=nullptr;m_debugFormat=Format::Unknown;
@@ -249,10 +262,12 @@ void ScreenSpaceLighting::Reset()
     m_effectHistory={};m_denoiseShaders={};m_denoisePipelines={};
 }
 
-bool ScreenSpaceLighting::CreatePipelines(uint32_t surfaceMask)
+bool ScreenSpaceLighting::CreatePipelines(const Settings& settings)
 {
-    const uint32_t first=surfaceMask*4,colorCount=SurfaceColorCount(surfaceMask);
-    if(m_surfacePipelines[first] && m_surfacePipelines[first+1] && m_surfacePipelines[first+2] && m_surfacePipelines[first+3] &&
+    const bool owner=settings.captureOwner;
+    const uint32_t surfaceMask=settings.surfaceMask,first=settings.SurfacePipelineBase();
+    const uint32_t colorCount=SurfaceColorCount(surfaceMask)+(owner?1u:0u);
+    if(m_surfacePipelines[first] && m_surfacePipelines[first+1] && m_surfacePipelines[first+2] && m_surfacePipelines[first+3] && m_surfacePipelines[first+7] &&
         m_screenPipeline && m_lightingPipeline) return true;
     std::array<ShaderDesc,6> shaders={};
 #if defined(ENABLE_METAL)
@@ -295,6 +310,44 @@ bool ScreenSpaceLighting::CreatePipelines(uint32_t surfaceMask)
         surfaceFragment=shader;
     }
 #endif
+    ShaderHandle opaqueFragment=nullptr;
+#if defined(ENABLE_VULKAN) || defined(ENABLE_D3D12)
+    const ShaderDesc variants[]={
+        {ShaderStage::Fragment,"main",kSurfaceOpaque0,kSurfaceOpaque0Size},
+        {ShaderStage::Fragment,"main",kSurfaceOpaque1,kSurfaceOpaque1Size},
+        {ShaderStage::Fragment,"main",kSurfaceOwner0,kSurfaceOwner0Size},
+        {ShaderStage::Fragment,"main",kSurfaceOwner1,kSurfaceOwner1Size}};
+    const uint32_t variant=owner?2u:0u;
+    for(uint32_t i=variant;i<variant+2;++i)
+        if(!m_surfaceVariants[i] && !(m_surfaceVariants[i]=m_device->CreateShader(variants[i])))return false;
+    surfaceFragment=m_surfaceVariants[variant];opaqueFragment=m_surfaceVariants[variant+1];
+    if(!owner && surfaceMask==7 && m_fullSurfaceShader)
+    {
+        if(!m_surfaceVariants[4])m_surfaceVariants[4]=m_device->CreateShader(
+            {ShaderStage::Fragment,"main",kSurfaceOpaqueFullFragment,kSurfaceOpaqueFullFragmentSize});
+        if(!m_surfaceVariants[4])return false;
+        surfaceFragment=m_fullSurfaceShader;opaqueFragment=m_surfaceVariants[4];
+    }
+    if(owner && !m_ownerVertex && !(m_ownerVertex=m_device->CreateShader(
+        {ShaderStage::Vertex,"main",kSurfaceOwnerVertex,kSurfaceOwnerVertexSize})))return false;
+#elif defined(ENABLE_METAL)
+    if(!owner)
+    {
+    const char* opaqueEntries[]={"surfaceFragment0","surfaceFragment1","surfaceFragment2","surfaceFragment"};
+    auto& opaque=m_opaqueMetalShaders[colorCount];
+    if(!opaque)opaque=m_device->CreateShader({ShaderStage::Fragment,opaqueEntries[colorCount],kSurfaceOpaqueMetal,kSurfaceOpaqueMetalSize});
+    if(!opaque)return false;
+    opaqueFragment=opaque;
+    }
+    else
+    {
+        if(!m_ownerVertex)m_ownerVertex=m_device->CreateShader({ShaderStage::Vertex,"surfaceVertex",kSurfaceOwner0,kSurfaceOwner0Size});
+        if(!m_surfaceVariants[2])m_surfaceVariants[2]=m_device->CreateShader({ShaderStage::Fragment,"surfaceFragment",kSurfaceOwner0,kSurfaceOwner0Size});
+        if(!m_surfaceVariants[3])m_surfaceVariants[3]=m_device->CreateShader({ShaderStage::Fragment,"surfaceFragment",kSurfaceOwner1,kSurfaceOwner1Size});
+        if(!m_ownerVertex || !m_surfaceVariants[2] || !m_surfaceVariants[3])return false;
+        surfaceFragment=m_surfaceVariants[2];opaqueFragment=m_surfaceVariants[3];
+    }
+#endif
     SamplerDesc sampler;
     sampler.minFilter=sampler.magFilter=SamplerFilter::Linear;
     sampler.mipFilter=SamplerFilter::Linear;
@@ -310,7 +363,7 @@ bool ScreenSpaceLighting::CreatePipelines(uint32_t surfaceMask)
     surfaceBindings.push_back({12,ResourceBindingType::ConstantBuffer,1,
         ShaderStageFlags::Vertex|ShaderStageFlags::Fragment,{}});
     const VertexBufferLayout vertices[]={{0,64,VertexStepMode::Vertex},{1,64,VertexStepMode::Vertex},
-        {2,128,VertexStepMode::Instance}};
+        {2,128,VertexStepMode::Instance},{3,8,VertexStepMode::Instance}};
     const VertexAttribute attributes[]={{0,0,Format::R32G32B32_FLOAT,0},
         {1,0,Format::R32G32B32_FLOAT,12},{2,0,Format::R32G32_FLOAT,24},
         {3,0,Format::R32G32B32A32_FLOAT,32},{4,1,Format::R32G32B32_FLOAT,0},
@@ -318,22 +371,24 @@ bool ScreenSpaceLighting::CreatePipelines(uint32_t surfaceMask)
         {7,2,Format::R32G32B32A32_FLOAT,32},{8,2,Format::R32G32B32A32_FLOAT,48},
         {9,2,Format::R32G32B32A32_FLOAT,64},{10,2,Format::R32G32B32A32_FLOAT,80},
         {11,2,Format::R32G32B32A32_FLOAT,96},{12,2,Format::R32G32B32A32_FLOAT,112},
-        {13,0,Format::R32G32B32A32_FLOAT,48}};
+        {13,0,Format::R32G32B32A32_FLOAT,48},{14,3,Format::R32G32_UINT,0}};
     const ColorAttachmentDesc colors[]={{Format::R16G16B16A16_FLOAT,{},ColorWriteMask::All},
         {Format::R16G16B16A16_FLOAT,{},ColorWriteMask::All},
-        {Format::R16G16B16A16_FLOAT,{},ColorWriteMask::All}};
+        {Format::R16G16B16A16_FLOAT,{},ColorWriteMask::All},
+        {settings.OwnerFormat(),{},ColorWriteMask::All}};
     GraphicsPipelineDesc desc;
-    desc.vertexShader=m_shaders[0];desc.fragmentShader=surfaceFragment;
-    desc.topology=PrimitiveTopology::TriangleList;desc.vertexBuffers=vertices;desc.vertexBufferCount=3;
-    desc.vertexAttributes=attributes;desc.vertexAttributeCount=14;
+    desc.vertexShader=owner?m_ownerVertex:m_shaders[0];desc.fragmentShader=surfaceFragment;
+    desc.topology=PrimitiveTopology::TriangleList;desc.vertexBuffers=vertices;desc.vertexBufferCount=owner?4:3;
+    desc.vertexAttributes=attributes;desc.vertexAttributeCount=owner?15:14;
     desc.raster={FillMode::Solid,CullMode::Back,FrontFace::CounterClockwise,0,0,0};
     desc.depthStencil.format=Format::D32_FLOAT;desc.depthStencil.depthTestEnabled=true;
     desc.depthStencil.depthWriteEnabled=true;desc.depthStencil.depthCompareOp=CompareOp::Less;
     desc.colorAttachments=colors;desc.colorAttachmentCount=colorCount;
     desc.layout={surfaceBindings.data(),static_cast<uint32_t>(surfaceBindings.size()),16,
         ShaderStageFlags::Vertex|ShaderStageFlags::Fragment,15};
-    for(uint32_t i=0;i<4;++i)
+    for(uint32_t i=0;i<8;++i)
     {
+        desc.fragmentShader=(i&4u)?opaqueFragment:surfaceFragment;
         desc.raster.cullMode=(i&1u)?CullMode::None:CullMode::Back;
         desc.raster.frontFace=(i&2u)?FrontFace::Clockwise:FrontFace::CounterClockwise;
         if(!m_surfacePipelines[first+i] && !(m_surfacePipelines[first+i]=m_device->CreateGraphicsPipeline(desc))) return false;
@@ -439,6 +494,14 @@ bool ScreenSpaceLighting::Prepare(IDevice& device,ICommandList& uploads,TextureH
     const Camera& camera,const std::vector<SurfaceDraw>& draws,const Settings& settings)
 {
     const auto fail=[this]() {Invalidate();return false;};
+    // Retry optional owner resources only before this call records any uploads.
+    const auto withoutOwner=[&]() {
+        if(!settings.captureOwner) return fail();
+        Reset();auto fallback=settings;
+        if(fallback.ownerStride)fallback.ownerStride=0;
+        else fallback.captureOwner=false;
+        return Prepare(device,uploads,depth,camera,draws,fallback);
+    };
     m_prepared=false;
     if(m_device && m_device!=&device) Reset();
     m_device=&device;
@@ -447,10 +510,13 @@ bool ScreenSpaceLighting::Prepare(IDevice& device,ICommandList& uploads,TextureH
     const uint32_t width=depth->GetDesc().width,height=depth->GetDesc().height;
     if(!width || !height || !std::isfinite(settings.aoRadius+settings.rayDistance+settings.thickness) ||
         settings.aoRadius<=0 || settings.rayDistance<=0 || settings.thickness<=0) return fail();
+    if(settings.captureOwner && (settings.surfaceMask!=7 || !settings.instanceKeys || !device.Supports(Feature::FragmentPrimitiveId)))return fail();
     if(draws.size()>UINT32_MAX/sizeof(DrawGPU) || settings.surfaceMask>7 ||
         (settings.ambientOcclusion && (settings.surfaceMask&5u)!=5u) ||
         ((settings.diffuseGI || settings.reflections) && settings.surfaceMask!=7u)) return fail();
-    if(!CreatePipelines(settings.surfaceMask)) return fail();
+    if(!CreatePipelines(settings)) return withoutOwner();
+    for(auto& cached:m_surfaceSets)
+        if(cached.second.unusedFrames<UINT32_MAX) ++cached.second.unusedFrames;
     for(auto& cached:m_screenSets)
         if(cached.unusedFrames<UINT32_MAX) ++cached.unusedFrames;
     for(auto& cached:m_denoiseSets)
@@ -478,22 +544,18 @@ bool ScreenSpaceLighting::Prepare(IDevice& device,ICommandList& uploads,TextureH
         const bool enabled=(i<=Motion && (settings.surfaceMask&(1u<<i))) ||
             (i>=AORaw && i<=AO && settings.ambientOcclusion) ||
             (i==GI && settings.diffuseGI) || (i==Reflection && settings.reflections) ||
-            (i==Color && (settings.diffuseGI || settings.reflections));
-        if(!enabled)
+            (i==Color && (settings.diffuseGI || settings.reflections)) || (i==Owner && settings.captureOwner);
+        if(m_textures[i] && (!enabled || (i==Owner && m_textures[i]->GetDesc().format!=settings.OwnerFormat())))
         {
-            if(m_textures[i])
-            {
-                DestroySets();device.DestroyTexture(m_textures[i]);m_textures[i]=nullptr;m_states[i]=ResourceState::Undefined;
-            }
-            continue;
+            DestroySets();device.DestroyTexture(m_textures[i]);m_textures[i]=nullptr;m_states[i]=ResourceState::Undefined;
         }
-        if(m_textures[i]) continue;
+        if(!enabled || m_textures[i]) continue;
         TextureDesc desc;
-        const bool full=i<=Motion || i==Color;
+        const bool full=i<=Motion || i==Color || i==Owner;
         desc.width=full?width:(width+1)/2;desc.height=full?height:(height+1)/2;
-        desc.format=Format::R16G16B16A16_FLOAT;
+        desc.format=i==Owner?settings.OwnerFormat():Format::R16G16B16A16_FLOAT;
         desc.usage=TextureUsage::RenderTarget|TextureUsage::ShaderResource;
-        if(!(m_textures[i]=device.CreateTexture(desc))) return fail();
+        if(!(m_textures[i]=device.CreateTexture(desc))) return i==Owner?withoutOwner():fail();
     }
     if(!PrepareDenoise(0,settings.diffuseGI) || !PrepareDenoise(1,settings.reflections)) return fail();
     if(!m_whiteAO)
@@ -521,6 +583,9 @@ bool ScreenSpaceLighting::Prepare(IDevice& device,ICommandList& uploads,TextureH
         // Instance providers already cull each row; representative bounds cannot reject the whole batch.
         if(settings.frustumCulling && !draw.instanceBuffer && !draw.indirectArguments && frustum.Outside(draw.localBounds,draw.model)) continue;
         if(!draw.vertexBuffer || !draw.indexBuffer) return fail();
+        if(draw.indirectArguments && (!draw.indirectCount || draw.indirectOffset%4 ||
+            uint64_t(draw.indirectOffset)+uint64_t(draw.indirectCount)*sizeof(DrawIndexedIndirectArguments)>draw.indirectArguments->GetDesc().size))return fail();
+        if(settings.captureOwner && (!draw.indirectArguments || !draw.instanceBuffer || draw.instanceOffset%128))return fail();
         for(auto* texture:draw.textures) if(!texture) return fail();
         DrawGPU gpu{};
         gpu.model=draw.model;
@@ -532,7 +597,7 @@ bool ScreenSpaceLighting::Prepare(IDevice& device,ICommandList& uploads,TextureH
             material.normalScale,material.occlusionStrength};
         gpu.flags=draw.textureFlags;gpu.alphaMode=static_cast<uint32_t>(material.alphaMode);
         gpu.doubleSided=material.doubleSided?1:0;
-        gpu.pipelineIndex=settings.surfaceMask*4+(gpu.doubleSided|(Math::Determinant3x3(draw.model)<0?2u:0u));
+        gpu.pipelineIndex=settings.SurfacePipelineBase()+(material.alphaMode==MaterialAlphaMode::Opaque?4u:0u)+(gpu.doubleSided|(Math::Determinant3x3(draw.model)<0?2u:0u));
         gpu.alpha={material.alphaCutoff,material.normalYSign,material.unlit?1.f:0.f,0};
         m_gpuScratch.push_back(gpu);m_draws.push_back(draw);
     }
@@ -611,7 +676,7 @@ ResourceSetHandle ScreenSpaceLighting::SurfaceResources(const SurfaceDraw& draw,
 {
     const SurfaceSetKey key{draw.textures,pipeline};
     const auto cached=m_surfaceSets.find(key);
-    if(cached!=m_surfaceSets.end()) return cached->second;
+    if(cached!=m_surfaceSets.end()) {cached->second.unusedFrames=0;return cached->second.set;}
     std::vector<ResourceBinding> bindings;
     for(uint32_t i=0;i<draw.textures.size();++i) bindings.push_back({i,0,nullptr,draw.textures[i],0,0,{}});
     bindings.push_back({11,0,m_drawBuffer,nullptr,0,m_drawBuffer->GetDesc().size,{}});
@@ -619,7 +684,7 @@ ResourceSetHandle ScreenSpaceLighting::SurfaceResources(const SurfaceDraw& draw,
     auto* set=m_device->CreateResourceSet({pipeline,bindings.data(),static_cast<uint32_t>(bindings.size())});
     if(set)
     {
-        try {m_surfaceSets.emplace(key,set);}
+        try {m_surfaceSets.emplace(key,SurfaceSet{set,0});}
         catch(...) {m_device->DestroyResourceSet(set);throw;}
     }
     return set;
@@ -651,13 +716,13 @@ bool ScreenSpaceLighting::Import(RenderGraph& graph)
     if(!m_prepared) return false;
     m_handles={};m_imported={};m_depthPlaneHandle={};
     const char* names[]={"Surface normal roughness AO","Surface albedo metal","Surface motion depth",
-        "AO raw","AO horizontal","AO filtered","Screen diffuse GI","Screen reflection","Screen lit HDR"};
+        "AO raw","AO horizontal","AO filtered","Screen diffuse GI","Screen reflection","Screen lit HDR","Surface primitive owner"};
     for(uint32_t i=0;i<ImageCount;++i)
     {
         const bool enabled=(i<=Motion && (m_settings.surfaceMask&(1u<<i))) ||
             (i>=AORaw && i<=AO && m_settings.ambientOcclusion) ||
             (i==GI && m_settings.diffuseGI) || (i==Reflection && m_settings.reflections) ||
-            (i==Color && (m_settings.diffuseGI || m_settings.reflections));
+            (i==Color && (m_settings.diffuseGI || m_settings.reflections)) || (i==Owner && m_settings.captureOwner);
         if(!enabled) continue;
         m_handles[i]=graph.ImportTexture(names[i],m_textures[i],m_states[i],ResourceState::ShaderResource);
         if(!m_handles[i].IsValid()) return false;
@@ -677,14 +742,14 @@ bool ScreenSpaceLighting::Import(RenderGraph& graph)
     }
     m_frameHandle=graph.ImportBuffer("Screen camera",m_frameBuffer,ResourceState::ConstantBuffer,ResourceState::ConstantBuffer);
     m_drawHandle=graph.ImportBuffer("Surface draws",m_drawBuffer,ResourceState::ShaderResource,ResourceState::ShaderResource);
-    m_graph={m_handles[Normal],m_handles[Albedo],m_handles[Motion],m_handles[AO],m_handles[Color]};
+    m_graph={m_handles[Normal],m_handles[Albedo],m_handles[Motion],m_handles[AO],m_handles[Color],m_handles[Owner]};
     return m_frameHandle.IsValid() && m_drawHandle.IsValid();
 }
 
 bool ScreenSpaceLighting::AddSurface(RenderGraph& graph,RGResourceHandle depth,
-    RGResourceHandle instances,RGResourceHandle arguments)
+    RGResourceHandle instances,RGResourceHandle arguments,RGResourceHandle keys)
 {
-    if(!depth.IsValid() || !m_prepared) return false;
+    if(!depth.IsValid() || !m_prepared || (m_settings.captureOwner && !keys.IsValid())) return false;
     bool usesInstances=false,usesArguments=false;
     for(const auto& draw:m_draws)
     {
@@ -693,11 +758,12 @@ bool ScreenSpaceLighting::AddSurface(RenderGraph& graph,RGResourceHandle depth,
         usesInstances|=draw.instanceBuffer!=nullptr;usesArguments|=draw.indirectArguments!=nullptr;
     }
     m_depthHandle=depth;
-    auto& pass=graph.AddPass(m_settings.surfaceMask?"Surface requested outputs depth":"Opaque masked depth only", RHI::RGRecordingMode::Independent);
+    auto& pass=graph.AddPass(m_settings.captureOwner?"Surface primitive material cache":m_settings.surfaceMask?"Surface requested outputs depth":"Opaque masked depth only", RHI::RGRecordingMode::Independent);
     for(uint32_t i=Normal;i<=Motion;++i)
         if(m_settings.surfaceMask&(1u<<i))pass.Write(m_handles[i],ResourceState::RenderTarget);
     pass.Write(depth,ResourceState::DepthWrite).Read(m_frameHandle,ResourceState::ConstantBuffer)
         .Read(m_drawHandle,ResourceState::ShaderResource);
+    if(m_settings.captureOwner)pass.Write(m_handles[Owner],ResourceState::RenderTarget).Read(keys,ResourceState::VertexBuffer);
     if(usesInstances) pass.Read(instances,ResourceState::VertexBuffer);
     if(usesArguments) pass.Read(arguments,ResourceState::IndirectArgument);
     std::unordered_set<BufferHandle> vertexImports,indexImports;
@@ -722,11 +788,12 @@ bool ScreenSpaceLighting::AddSurface(RenderGraph& graph,RGResourceHandle depth,
     }
     const bool baseInstance=m_device->Supports(Feature::IndirectFirstInstance);
     pass.SetExecute([this,baseInstance](ICommandList* commands) {
-        ColorAttachment colors[3];
+        ColorAttachment colors[4];
         uint32_t colorCount=0;
         for(uint32_t i=0;i<3;++i)
             if(m_settings.surfaceMask&(1u<<i))
             {colors[colorCount].texture=m_textures[i];colors[colorCount].loadOp=LoadOp::Clear;colors[colorCount++].storeOp=StoreOp::Store;}
+        if(m_settings.captureOwner){colors[colorCount].texture=m_textures[Owner];colors[colorCount].loadOp=LoadOp::Clear;colors[colorCount++].storeOp=StoreOp::Store;}
         DepthStencilAttachment depth;
         depth.texture=m_depth;depth.state=ResourceState::DepthWrite;
         depth.depthLoadOp=LoadOp::Clear;depth.depthStoreOp=StoreOp::Store;depth.clearDepth=1;
@@ -766,10 +833,11 @@ bool ScreenSpaceLighting::AddSurface(RenderGraph& graph,RGResourceHandle depth,
                 commands->BindVertexBuffer(2,draw.instanceBuffer,instanceOffset);
                 boundInstances=draw.instanceBuffer;boundInstanceOffset=instanceOffset;instanceBindingValid=true;
             }
+            if(m_settings.captureOwner)commands->BindVertexBuffer(3,m_settings.instanceKeys,instanceOffset/128*8);
             commands->BindIndexBuffer(draw.indexBuffer,Format::R32_UINT,0);
-            const uint32_t index[4]={i,draw.instanceBuffer?1u:0u,draw.deformationHistoryValid?1u:0u,0};
+            const uint32_t index[4]={i,draw.instanceBuffer?1u:0u,draw.deformationHistoryValid?1u:0u,m_settings.ownerStride};
             commands->SetInlineConstants(0,sizeof(index),index);
-            if(draw.indirectArguments) commands->DrawIndexedIndirect(draw.indirectArguments,draw.indirectOffset);
+            if(draw.indirectArguments) commands->DrawIndexedIndirect(draw.indirectArguments,draw.indirectOffset,draw.indirectCount);
             else commands->DrawIndexedInstanced(draw.indexCount,draw.instanceCount,0,0,
                 directBaseInstance?draw.instanceOffset/instanceStride:0);
         }
@@ -969,6 +1037,12 @@ void ScreenSpaceLighting::CommitFrame()
         effect.write=1-effect.write;effect.valid=true;effect.pending=false;
     }
     const auto frameWindow=std::max(1u,m_device->GetDesc().maxFramesInFlight);
+    for(auto cached=m_surfaceSets.begin();cached!=m_surfaceSets.end();)
+    {
+        if(cached->second.unusedFrames<frameWindow) {++cached;continue;}
+        m_device->DestroyResourceSet(cached->second.set);
+        cached=m_surfaceSets.erase(cached);
+    }
     m_screenSets.erase(std::remove_if(m_screenSets.begin(),m_screenSets.end(),[&](const ScreenSet& cached) {
         if(cached.unusedFrames<frameWindow) return false;
         m_device->DestroyResourceSet(cached.set);return true;

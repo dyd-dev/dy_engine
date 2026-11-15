@@ -7,6 +7,7 @@
 
 #include "dyf/RHI/ICommandList.h"
 #include "MetalUploadPool.h"
+#include "MetalCommandScratch.h"
 
 namespace dyf::Backends
 {
@@ -19,7 +20,8 @@ namespace dyf::Backends
 	{
 	public:
 		explicit MetalCommandList(void* commandQueue,
-			std::shared_ptr<MetalDetail::UploadPagePool<MetalUploadPage>> uploadPool = {});
+			std::shared_ptr<MetalDetail::UploadPagePool<MetalUploadPage>> uploadPool = {},
+            std::shared_ptr<MetalCommandScratchPool> scratchPool = {});
 
 	protected:
         bool ReplayNative(const std::vector<std::function<bool(ICommandList&)>>& commands) override;

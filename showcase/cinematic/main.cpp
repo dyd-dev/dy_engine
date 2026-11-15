@@ -16,6 +16,8 @@
 #include "AnimatedActor.h"
 #include "BistroNight.h"
 #include "KnightMaterials.h"
+#include "Presentation.h"
+#include "CinematicTask.h"
 #include "../CameraPath.h"
 
 #include <algorithm>
@@ -28,6 +30,7 @@
 #include <cstring>
 #include <exception>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <filesystem>
@@ -284,7 +287,9 @@ void BenchmarkSummary(std::ostream& output, const char* name, std::vector<double
 }
 }
 
-int main(int argc, char** argv)
+static showcase::CinematicTask RunCinematic(int argc, char** argv,
+    std::unique_ptr<dy_examples::ExampleWindowLease>* sequenceWindow=nullptr, bool advanceWhenFinished=false,
+    std::unique_ptr<dyf::RHI::IDevice>* sequenceDevice=nullptr, showcase::PresentationPlayback* playback=nullptr)
 {
     try
     {
@@ -299,6 +304,7 @@ int main(int argc, char** argv)
         std::string cameraPath,exportCameraPath;
         double initialTourTime=0;
         bool initiallyPaused=false;
+        bool presentation=false;
         bool night=false;
         std::string scenePreset="exterior";
         bool presetSpecified=false;
@@ -312,8 +318,10 @@ int main(int argc, char** argv)
         bool benchmarkHostTiming = false;
         bool benchmarkNoEnvironmentLighting = false;
         bool benchmarkHalfResolution = false;
+        bool render1080p = false;
         uint32_t benchmarkScreenEffectsMask = 7;
         bool cpuCulling = false;
+        bool surfaceMaterialReuse = RendererConfig{}.advanced.reuseSurfaceMaterials;
         auto profile = showcase::PlatformProfile::Automatic();
         uint32_t recordingWorkers = 0;
         bool shadowQualitySpecified = false;
@@ -368,6 +376,10 @@ int main(int argc, char** argv)
                 "  --path FILE              Shared comparison CSV, seconds/eye/target/FOV/up (11 columns)\n"
                 "  --export-camera FILE     Write a 60 Hz camera CSV without creating a window or GPU device\n"
                 "  --start N --paused       Hold an identical comparison timestamp in both renderers\n"
+                "  --presentation          5 shots x 6 s: OFF 2 s / ON 2 s / OFF 2 s; H manual, R restart\n"
+                "                          exterior / interior / emerald; 1024px textures, selected effects only\n"
+                "  --presentation-all      Exterior -> Interior -> Emerald in this process and window\n"
+                "  --presentation-verify   Run the same sequence, log timings and exit after all scenes\n"
                 "  --benchmark-frames N     Submit N measured frames starting at --start, then exit\n"
                 "  --benchmark-warmup N     Submit N warm-up frames and drain GPU work first (default 120)\n"
                 "  --benchmark-step N       Scene seconds per measured submission (default 0 = frozen); warm-up stays at --start\n"
@@ -384,9 +396,12 @@ int main(int argc, char** argv)
                 "  --benchmark-no-environment-lighting  Diagnostic: disable diffuse/specular IBL\n"
                 "  --benchmark-half-resolution  Diagnostic: halve render and window dimensions\n"
                 "  --profile MODE           auto (default), desktop, mobile; mobile uses 720p/512px textures\n"
+                "  --1080p                  Use a 1920x1080 render target with the selected quality profile\n"
                 "  --recording-workers N    CPU recording workers, 1..64 (desktop up to 4, mobile up to 2)\n"
                 "  --frames-in-flight N     Maximum GPU frames in flight, 1..4 (default 2)\n"
                 "  --cpu-culling            Use CPU frustum culling/instancing; disable GPU culling and Hi-Z occlusion\n"
+                "  --surface-material-reuse Enable Surface material reuse (default off)\n"
+                "  --no-surface-material-reuse Disable Surface material reuse\n"
                 "  --no-probes              Skip 3 spatial probe bakes; interior keeps its single room fallback\n"
                 "  --no-gui                 Legacy compatibility flag; the Canvas HUD is always used\n"
                 "  --shadow-quality MODE    low, medium, high (desktop high, mobile medium)\n"
@@ -403,15 +418,19 @@ int main(int argc, char** argv)
         for(int i = 1; i < argc; ++i)
         {
             const std::string argument = argv[i];
-            if(argument == "--help") { usage(); return 0; }
+            if(argument == "--help") { usage(); co_return 0; }
             if(argument == "--no-gui") continue; // Keep older host/launch arguments compatible with the Canvas HUD.
             if(argument == "--no-probes") bakeSpatialProbes = false;
+            else if(argument == "--presentation") presentation = true;
+            else if(argument == "--1080p") render1080p = true;
             else if(argument == "--profile" && i + 1 < argc)
                 profile = showcase::PlatformProfile::Parse(argv[++i]);
             else if(argument == "--scene-preset" && i + 1 < argc)
             { scenePreset=argv[++i];presetSpecified=true; }
             else if(argument == "--night") night=true;
             else if(argument == "--cpu-culling") cpuCulling = true;
+            else if(argument == "--surface-material-reuse") surfaceMaterialReuse = true;
+            else if(argument == "--no-surface-material-reuse") surfaceMaterialReuse = false;
             else if(argument == "--comparison-mode" && i + 1 < argc)
             {
                 const std::string mode = argv[++i];
@@ -478,7 +497,7 @@ int main(int argc, char** argv)
             else if(argument == "--glass-layers" && i + 1 < argc)
             {
                 const auto layers = std::stoul(argv[++i]);
-                if(layers<1 || layers>2) { usage(); return 1; }
+                if(layers<1 || layers>2) { usage(); co_return 1; }
                 glassLayers = static_cast<uint32_t>(layers);
             }
             else if(argument == "--shadow-distance" && i + 1 < argc) shadowDistance = std::stof(argv[++i]);
@@ -489,7 +508,7 @@ int main(int argc, char** argv)
                 const auto directional = std::stoul(argv[++i]);
                 const auto point = std::stoul(argv[++i]);
                 const auto spot = std::stoul(argv[++i]);
-                if(directional>4 || point>16 || spot>16) { usage(); return 1; }
+                if(directional>4 || point>16 || spot>16) { usage(); co_return 1; }
                 directionalShadowLights = static_cast<uint32_t>(directional);
                 pointShadowLights = static_cast<uint32_t>(point);
                 spotShadowLights = static_cast<uint32_t>(spot);
@@ -501,7 +520,7 @@ int main(int argc, char** argv)
                 if(quality == "low") shadowQuality = ShadowQuality::Low;
                 else if(quality == "medium") shadowQuality = ShadowQuality::Medium;
                 else if(quality == "high") shadowQuality = ShadowQuality::High;
-                else { usage(); return 1; }
+                else { usage(); co_return 1; }
             }
             else if(argument == "--actor" && i + 1 < argc) actorDescription.path = argv[++i];
             else if(argument == "--actor-size" && i + 1 < argc)
@@ -521,7 +540,7 @@ int main(int argc, char** argv)
             }
             else if(!argument.empty() && argument.front() != '-' && !sceneSpecified)
             { model.path = argument; sceneSpecified = true;if(!presetSpecified)scenePreset="none"; }
-            else { usage(); return 1; }
+            else { usage(); co_return 1; }
         }
         if(benchmarkRequested && (!benchmarkFrames || benchmarkOutput.empty() || !exportCameraPath.empty()))
             throw std::runtime_error("Benchmark requires positive --benchmark-frames and --benchmark-output; camera export is a separate mode.");
@@ -557,7 +576,7 @@ int main(int argc, char** argv)
             if(actorDescription.path.empty())
             {
                 std::fputs("Intel Knight path is unavailable; set DY_SHOWCASE_KNIGHT_ACTOR when configuring the build.\n",stderr);
-                return 1;
+                co_return 1;
             }
         }
         if(knightPreset)
@@ -572,12 +591,12 @@ int main(int argc, char** argv)
             !std::isfinite(actorDescription.position.z))
         {
             usage();
-            return 1;
+            co_return 1;
         }
         if(!std::isfinite(shadowDistance) || shadowDistance < 0 ||
             !std::isfinite(shadowSplit) || shadowSplit < 0 || shadowSplit > 1 ||
             !std::isfinite(lightRadius) || lightRadius < 0 || !std::isfinite(initialTourTime) || initialTourTime<0)
-        { usage(); return 1; }
+        { usage(); co_return 1; }
         const auto filename = std::filesystem::path(model.path).filename().string();
         if(scenePreset!="none" && scenePreset!="exterior" && scenePreset!="interior" &&
             scenePreset!="emerald" && scenePreset!="sponza")
@@ -586,6 +605,9 @@ int main(int argc, char** argv)
         const bool wine = scenePreset=="interior";
         const bool bistroInterior = scenePreset=="interior";
         const bool emerald = scenePreset=="emerald";
+        if(presentation && (benchmarkRequested || !exportCameraPath.empty() || night || (!bistro && !emerald)))
+            throw std::runtime_error("--presentation requires exterior, interior or emerald and cannot be combined with benchmarking, camera export or night lighting.");
+        if(presentation) bakeSpatialProbes=false; // These shots need only the room fallback, not three spatial captures.
         std::fprintf(stderr,"Scene preset: %s (material interpretation never depends on the filename).\n",scenePreset.c_str());
         if(night && (!bistro || bistroInterior))
             throw std::runtime_error("Night lighting is a Bistro exterior preset.");
@@ -598,7 +620,8 @@ int main(int argc, char** argv)
         model.loadOptions.maxDecodedBytes = model.loadOptions.maxSourceBytes;
         if(!recordingWorkers) recordingWorkers = profile.Workers();
         if(profile.mobile && !shadowQualitySpecified) shadowQuality = ShadowQuality::Medium;
-        model.loadOptions.maxTextureDimension = profile.TextureLimit();
+        model.loadOptions.maxTextureDimension = presentation ?
+            std::min(profile.TextureLimit() ? profile.TextureLimit() : UINT32_MAX,showcase::PresentationTextureLimit) : profile.TextureLimit();
         model.loadOptions.textureDecodeThreadCount = profile.Workers();
         actorDescription.loadOptions.maxTextureDimension = profile.TextureLimit();
         actorDescription.loadOptions.textureDecodeThreadCount = profile.Workers();
@@ -612,7 +635,7 @@ int main(int argc, char** argv)
             actorDescription.loadOptions.maxParserBytes = actorDescription.loadOptions.maxDecodedBytes = 1536ull*1024*1024;
         }
         std::fprintf(stderr,"Showcase profile: %s; material texture limit=%u (0=source), recording workers=%u.\n",
-            profile.Name(),profile.TextureLimit(),recordingWorkers);
+            profile.Name(),model.loadOptions.maxTextureDimension,recordingWorkers);
         if(emerald || bistro)
         {
             // ORCA's Falcor convention: G/B = roughness/metalness, R unused;
@@ -658,9 +681,37 @@ int main(int argc, char** argv)
         ModelInstanceID modelInstance = ModelInstanceID::Invalid;
         std::fprintf(stderr, "Loading environment: %s\n", model.path.c_str());
         ModelAssetID environmentAsset=ModelAssetID::Invalid;
-        if(!LoadModelAsset(scene,model.path,model.loadOptions,&environmentAsset)) return 1;
+        if(sequenceWindow && !*sequenceWindow)
+            *sequenceWindow=std::make_unique<dy_examples::ExampleWindowLease>(
+                render1080p ? 1920u : profile.Width(),render1080p ? 1080u : profile.Height(),"DYF / Preparing presentation");
+        if(sequenceWindow && *sequenceWindow)
+        {
+            // Keep the persistent window responsive while the next asset is decoded on the CPU.
+            auto& loadingWindow=(*sequenceWindow)->Get();
+            const std::string loadingTitle="DYF / Loading "+scenePreset;
+            loadingWindow.SetTitle(loadingTitle.c_str());
+            auto loading=std::async(std::launch::async,[&] {
+                return LoadModelAsset(scene,model.path,model.loadOptions,&environmentAsset);
+            });
+            bool closing=false;
+            while(loading.wait_for(std::chrono::milliseconds(10))!=std::future_status::ready)
+            {
+                loadingWindow.PollEvents();
+                if(dy_examples::ExampleInput(loadingWindow).WasPressed(Key::Escape))
+                    dy_examples::RequestExampleClose(loadingWindow);
+                if(!dy_examples::BeginExampleFrame(loadingWindow) || !dy_examples::ExampleRunning(loadingWindow))
+                {
+                    closing=true;
+                    loadingWindow.SetTitle("DYF / Closing after asset decode");
+                }
+            }
+            loadingWindow.PollEvents();
+            if(closing || !dy_examples::ExampleRunning(loadingWindow)) co_return 0;
+            if(!loading.get()) co_return 1;
+        }
+        else if(!LoadModelAsset(scene,model.path,model.loadOptions,&environmentAsset)) co_return 1;
         model.transform=model.transform*scene.GetModelAsset(environmentAsset).sourceToYUp;
-        if(!InstantiateModel(scene,environmentAsset,model,&modelInstance)) return 1;
+        if(!InstantiateModel(scene,environmentAsset,model,&modelInstance)) co_return 1;
         const auto* instance = scene.TryGetModelInstance(modelInstance);
         const auto& asset = scene.GetModelAsset(instance ? instance->assetId : static_cast<ModelAssetID>(0));
         auto sourceToWorld = Math::Translation(model.position) * model.transform;
@@ -738,7 +789,7 @@ int main(int argc, char** argv)
                     material.thickness *= unitsPerMeter;
                     material.attenuationDistance *= unitsPerMeter;
                 }
-                if(!handle.SetMaterial(material)) return 1;
+                if(!handle.SetMaterial(material)) co_return 1;
                 updated[materialIndex] = true;
             }
         }
@@ -754,7 +805,7 @@ int main(int argc, char** argv)
             if(!LoadModelLights(path.string(), lights, bounds, model.loadOptions) || lights.pointLights.empty())
             {
                 std::fputs("Wine interior requires analytic lights from BistroInterior.fbx.\n", stderr);
-                return 1;
+                co_return 1;
             }
             const float scale = Math::Length(Math::TransformVector(sourceToWorld, {1, 0, 0}));
             for(auto light : lights.pointLights)
@@ -763,7 +814,7 @@ int main(int argc, char** argv)
                 light.range *= scale;
                 light.sourceRadius *= scale;
                 light.intensity *= scale * scale;
-                if(!scene.Add(light)) return 1;
+                if(!scene.Add(light)) co_return 1;
             }
             std::fprintf(stderr, "Wine interior: restored %zu authored point lights from %s.\n",
                 lights.pointLights.size(), path.string().c_str());
@@ -793,7 +844,7 @@ int main(int argc, char** argv)
             if(cameraNode == asset.nodes.end())
             {
                 std::fprintf(stderr,"%s has no imported Camera node; an authored camera is required.\n",filename.c_str());
-                return 1;
+                co_return 1;
             }
             const uint32_t cameraIndex = static_cast<uint32_t>(cameraNode - asset.nodes.begin());
             const auto sourceCamera=std::find_if(asset.cameras.begin(),asset.cameras.end(),[&](const ModelCamera& camera) {
@@ -809,13 +860,13 @@ int main(int argc, char** argv)
             for(int32_t node = static_cast<int32_t>(cameraIndex); node >= 0; node = asset.nodes[node].parentIndex)
             {
                 if(static_cast<size_t>(node) >= asset.nodes.size() ||
-                    std::find(cameraChain.begin(), cameraChain.end(), static_cast<uint32_t>(node)) != cameraChain.end()) return 1;
+                    std::find(cameraChain.begin(), cameraChain.end(), static_cast<uint32_t>(node)) != cameraChain.end()) co_return 1;
                 cameraChain.push_back(static_cast<uint32_t>(node));
             }
             std::reverse(cameraChain.begin(), cameraChain.end());
             for(uint32_t node : cameraChain)
             {
-                if(asset.nodes[node].parentIndex < -1) return 1;
+                if(asset.nodes[node].parentIndex < -1) co_return 1;
                 cameraBindPose.push_back(asset.nodes[node].bindTransform);
             }
             cameraLocalPose = cameraBindPose;
@@ -845,7 +896,7 @@ int main(int argc, char** argv)
             // The node chain retains FBX units, pivots, parent motion and roll.
             // FBX cameras use node origin/+X/+Y, not legacy Camera attributes.
             Shot openingPose;
-            if(!sampleAuthoredCamera(0, openingPose)) return 1;
+            if(!sampleAuthoredCamera(0, openingPose)) co_return 1;
             shots = {openingPose, openingPose};
             shots.back().seconds = tourSeconds;
             const auto& opening = shots.front();
@@ -910,7 +961,7 @@ int main(int argc, char** argv)
             output.close();
             if(!output) throw std::runtime_error("Camera export write failed");
             std::fprintf(stderr,"Camera export written: %s; no window or GPU device created.\n",exportCameraPath.c_str());
-            return 0;
+            co_return 0;
         }
         if(night)
         {
@@ -920,7 +971,7 @@ int main(int argc, char** argv)
                 auto handle=scene.GetLight<DirectionalLight>(i);
                 auto light=handle.Get();
                 light.color={.40f,.55f,1.f};light.intensity=.45f;
-                if(!handle.Set(light)) return 1;
+                if(!handle.Set(light)) co_return 1;
             }
         }
         DirectionalLight sun;
@@ -931,14 +982,14 @@ int main(int argc, char** argv)
         // 태양의 약 0.53도 시직경에서 각반경을 구한다.
         sun.angularRadius = .00465f;
         if(!bistroInterior && !emerald && scene.DirectionalLights().empty() && scene.PointLights().empty() && scene.SpotLights().empty() &&
-            !scene.Add(sun)) return 1;
+            !scene.Add(sun)) co_return 1;
         if((bistro || emerald) && !bistroInterior)
             for(uint32_t i=0;i<scene.DirectionalLights().size();++i)
             {
                 auto handle=scene.GetLight<DirectionalLight>(i);
                 auto light=handle.Get();
                 if(light.angularRadius==0) light.angularRadius=sun.angularRadius;
-                if(!handle.Set(light)) return 1;
+                if(!handle.Set(light)) co_return 1;
             }
         if(lightRadius>0)
         {
@@ -946,23 +997,29 @@ int main(int argc, char** argv)
             for(uint32_t i=0;i<scene.PointLights().size();++i)
             {
                 auto handle=scene.GetLight<PointLight>(i);auto light=handle.Get();
-                light.sourceRadius=lightRadius;if(!handle.Set(light)) return 1;
+                light.sourceRadius=lightRadius;if(!handle.Set(light)) co_return 1;
             }
             for(uint32_t i=0;i<scene.SpotLights().size();++i)
             {
                 auto handle=scene.GetLight<SpotLight>(i);auto light=handle.Get();
-                light.sourceRadius=lightRadius;if(!handle.Set(light)) return 1;
+                light.sourceRadius=lightRadius;if(!handle.Set(light)) co_return 1;
             }
         }
 
-        const uint32_t renderWidth=profile.Width()/(benchmarkHalfResolution?2u:1u);
-        const uint32_t renderHeight=profile.Height()/(benchmarkHalfResolution?2u:1u);
-        DY_EXAMPLE_WINDOW(window, renderWidth, renderHeight,night ? "dy_engine / Bistro Night - Space pause | R restart | Tab free camera" :
-            "dy_engine / Cinematic Showcase - Space pause | R restart | Tab free camera");
+        const uint32_t divisor = benchmarkHalfResolution ? 2u : 1u;
+        const uint32_t renderWidth = (render1080p ? 1920u : profile.Width()) / divisor;
+        const uint32_t renderHeight = (render1080p ? 1080u : profile.Height()) / divisor;
+        std::unique_ptr<dy_examples::ExampleWindowLease> localWindow;
+        auto& windowLease=sequenceWindow ? *sequenceWindow : localWindow;
+        const char* windowTitle=night ? "dy_engine / Bistro Night - Space pause | R restart | Tab free camera" :
+            "dy_engine / Cinematic Showcase - Space pause | R restart | Tab free camera";
+        if(!windowLease) windowLease=std::make_unique<dy_examples::ExampleWindowLease>(renderWidth,renderHeight,windowTitle);
+        auto& window=windowLease->Get();
+        window.SetTitle(windowTitle);
 #ifdef DY_PROFILER_TRACING_ENABLED
         dyf::TracyAdapter tracy;
 #endif
-        if(!window.GetHandle()) return 1;
+        if(!window.GetHandle()) co_return 1;
         RendererConfig config;
         config.allowReadback=!benchmarkCaptureDirectory.empty();
         config.renderWidth = renderWidth;
@@ -981,7 +1038,7 @@ int main(int argc, char** argv)
         if(!bistroInterior && !night && !LoadHdrImage(environmentPath, config.lighting.environment.radiance,profile.EnvironmentLimit()))
         {
             std::fprintf(stderr,"Could not load the scene's configured equirectangular HDR sky: %s\n",environmentPath);
-            return 1;
+            co_return 1;
         }
         if(bistro)
         {
@@ -1019,6 +1076,7 @@ int main(int argc, char** argv)
         }
         // Preserve the authored sun/sky radiance; meter exposure in the HDR graph.
         config.advanced.autoExposure = emerald;
+        if(presentation && emerald) config.advanced.exposureAdaptationSpeed=1000000;
         // Quality captures compare the same exposure target without wall-clock adaptation drift.
         if(!benchmarkCaptureDirectory.empty())config.advanced.exposureAdaptationSpeed=1000000;
         // The room probe supplies reflected diffuse illumination without noisy
@@ -1027,7 +1085,9 @@ int main(int argc, char** argv)
         config.enableProfilerHud = false;
         config.enableParallelRenderGraph = true;
         config.enableGpuCulling = true;
+        config.advanced.reuseSurfaceMaterials = surfaceMaterialReuse;
         config.enableOcclusionCulling = true;
+        if(presentation) showcase::ConfigurePresentation(config);
         if(cpuCulling) config.enableGpuCulling = config.enableOcclusionCulling = false;
         config.recordingThreadCount = recordingWorkers;
         config.texturePreparationThreadCount = profile.Workers();
@@ -1045,16 +1105,25 @@ int main(int argc, char** argv)
         const auto createRenderer = [&](const void* nativeWindow) {
             if(renderer || diagnosticDevice)
                 throw std::logic_error("Cinematic GPU owners must be released before recreation.");
-            if(framesInFlight != 2)
+            if(sequenceDevice)
+            {
+                if(!*sequenceDevice)
+                {
+                    RHI::DeviceDesc desc;
+                    desc.maxFramesInFlight=framesInFlight;
+                    sequenceDevice->reset(RHI::IDevice::Create(desc));
+                }
+                if(!*sequenceDevice) throw std::runtime_error("Presentation device creation failed.");
+            }
+            else if(framesInFlight != 2)
             {
                 RHI::DeviceDesc desc;
                 desc.maxFramesInFlight = framesInFlight;
                 diagnosticDevice.reset(RHI::IDevice::Create(desc));
                 if(!diagnosticDevice) throw std::runtime_error("Cinematic device creation failed.");
             }
-            renderer = diagnosticDevice
-                ? Renderer::Create(*diagnosticDevice, nativeWindow, config)
-                : Renderer::Create(nativeWindow, config);
+            renderer = sequenceDevice ? Renderer::Create(**sequenceDevice,nativeWindow,config) :
+                diagnosticDevice ? Renderer::Create(*diagnosticDevice,nativeWindow,config) : Renderer::Create(nativeWindow,config);
             if(!renderer || !renderer->AddExtension(std::make_unique<dyf::AdvancedRendering>()))
                 throw std::runtime_error("Cinematic renderer creation failed.");
             rendererWindow = nativeWindow;
@@ -1085,7 +1154,7 @@ int main(int argc, char** argv)
                 span.x <= 0 || span.y <= 0 || span.z <= 0)
             {
                 std::fputs("Bistro spatial probes require finite three-dimensional scene bounds.\n", stderr);
-                return 1;
+                co_return 1;
             }
             const auto halfBox = span * .22f;
             const double captureTimes[] = {0, tourSeconds * .5, tourSeconds * .85};
@@ -1112,9 +1181,9 @@ int main(int argc, char** argv)
                 probe.intensity = 1;
                 std::fprintf(stderr,"Probe %u/%u at tour %.1f s, world (%.3f %.3f %.3f): specular HDR capture 1/2...\n",
                     i + 1,captureCount,captureTimes[i],probe.position.x,probe.position.y,probe.position.z);
-                if(!renderer->CaptureEnvironment(scene,probe.position,probeFaceSize,.03f,160,probe.radiance,true,&probe.visibility)) return 1;
+                if(!renderer->CaptureEnvironment(scene,probe.position,probeFaceSize,.03f,160,probe.radiance,true,&probe.visibility)) co_return 1;
                 std::fprintf(stderr,"Probe %u/%u: reflected diffuse HDR capture 2/2, emitters excluded...\n",i + 1,captureCount);
-                if(!renderer->CaptureEnvironment(scene,probe.position,probeFaceSize,.03f,160,probe.diffuseRadiance,false)) return 1;
+                if(!renderer->CaptureEnvironment(scene,probe.position,probeFaceSize,.03f,160,probe.diffuseRadiance,false)) co_return 1;
                 cachedProbes.push_back(std::move(probe));
             }
             config = renderer->GetConfig();
@@ -1134,7 +1203,7 @@ int main(int argc, char** argv)
             }
             if(bakeSpatialProbes) environment.probes = cachedProbes;
             else cachedProbes.clear();
-            if(!renderer->SetConfig(config)) return 1;
+            if(!renderer->SetConfig(config)) co_return 1;
             if(bakeSpatialProbes)
                 std::fprintf(stderr,"Bistro spatial lighting ready: %zu local %u x %u HDR probes, overlapping influence boxes and global fallback. I toggles cached probes; no per-frame capture.\n",
                     cachedProbes.size(),probeFaceSize*4,probeFaceSize*2);
@@ -1143,7 +1212,7 @@ int main(int argc, char** argv)
         else if(bistro)
             std::fputs("Bistro spatial probe baking skipped by --no-probes; preserving the original global HDR environment.\n",stderr);
         showcase::AnimatedActor actor;
-        if(!actor.Load(scene,actorDescription,actorClip,shots.front().eye,shots.front().target,actorPositioned)) return 1;
+        if(!actor.Load(scene,actorDescription,actorClip,shots.front().eye,shots.front().target,actorPositioned)) co_return 1;
         auto modelRenderer = std::make_unique<ModelRenderer>(*renderer);
         auto savedSkinningMode = modelRenderer->GetSkinningExecutionMode();
         auto savedModelOptimization = modelRenderer->GetOptimizationConfig();
@@ -1167,6 +1236,22 @@ int main(int argc, char** argv)
         unsigned comparisonMode = requestedComparisonMode != UINT32_MAX ? requestedComparisonMode :
             emerald ? 3u : bistroInterior ? 0u : 1u;
         const char* const comparisonLabels[] = {"STATIC SHADOW CACHE", "PARALLEL RECORDING", "INSTANCING", "INDEXED LOD", "CPU / GPU DEFORMATION"};
+        const auto presentationScene=emerald ? showcase::PresentationScene::Emerald :
+            bistroInterior ? showcase::PresentationScene::Interior : showcase::PresentationScene::Exterior;
+        const auto presentationBaseline=renderer->GetConfig();
+        const bool presentationWireframe=renderer->GetDevice().Supports(RHI::Feature::Wireframe);
+        showcase::PresentationTimeline presentationTimeline;
+        bool presentationAutomatic=presentation;
+        bool presentationCompletionReported=false;
+        unsigned presentationToken=UINT32_MAX;
+        unsigned presentationWarmupShot=0;
+        if(playback) paused=true;
+        if(presentation)
+        {
+            hud.SetProfilerVisible(false);
+            std::fputs("Presentation: 5 shots x 6 seconds; OFF 2 s / ON 2 s / OFF 2 s. Loading is covered and excluded from playback.\n",stderr);
+        }
+        if(playback && playback->verification) metrics=true;
         std::fputs("Space pause tour/actor/wind | R restart | Tab tour/free | RMB look | WASD/QE move | Shift faster | N wind\n"
             "Left/Right seek 5 s | Home/End first/last pose | U GPU frustum/LOD | O Hi-Z occlusion\n"
             "1 lit/base-color | 2 shadows | 3 HDR | 4 CPU culling | 5 instancing | 6 parallel recording\n"
@@ -1196,7 +1281,7 @@ int main(int argc, char** argv)
             const double benchmarkStartTime = tourTime;
             pose = sampleTour(tourTime);
             if(!camera.LookAt(pose.eye, pose.target, pose.up) ||
-                !camera.SetPerspective(float(renderWidth) / renderHeight, pose.fov * pi / 180, .03f, cameraFarPlane)) return 1;
+                !camera.SetPerspective(float(renderWidth) / renderHeight, pose.fov * pi / 180, .03f, cameraFarPlane)) co_return 1;
             benchmarkTrace=std::make_unique<BenchmarkTrace>(benchmarkCpuZones,benchmarkWsiTiming,benchmarkGpuTiming);
             auto& trace=*benchmarkTrace;
             trace.diagnostics.reserve(size_t(benchmarkFrames)*(benchmarkCpuZones?128:7));
@@ -1244,9 +1329,9 @@ int main(int argc, char** argv)
                     tourTime = sceneTime = std::min(tourSeconds,benchmarkStartTime + double(measured.size())*benchmarkStep);
                     pose = sampleTour(tourTime);
                     if(!camera.LookAt(pose.eye,pose.target,pose.up) ||
-                        !camera.SetPerspective(float(renderWidth)/renderHeight,pose.fov*pi/180,.03f,cameraFarPlane)) return 1;
+                        !camera.SetPerspective(float(renderWidth)/renderHeight,pose.fov*pi/180,.03f,cameraFarPlane)) co_return 1;
                 }
-                if(!actor.Update(scene,sceneTime)) return 1;
+                if(!actor.Update(scene,sceneTime)) co_return 1;
                 for(const auto& object : windObjects)
                 {
                     const auto center = object.bounds.Center();
@@ -1259,7 +1344,7 @@ int main(int argc, char** argv)
                         Math::RotationAxis({.9f, .42f, 0}, windEnabled ? object.amplitude * .25f * std::sin(t * 1.13f + phase * .83f) : 0) *
                         Math::Translation(pivot * -1.0f);
                     for(const auto& part : object.parts)
-                    { auto entity = part.first; if(!entity.SetTransform(windEnabled ? sway * part.second : part.second)) return 1; }
+                    { auto entity = part.first; if(!entity.SetTransform(windEnabled ? sway * part.second : part.second)) co_return 1; }
                 }
                 const auto previous = renderer->GetLastRenderCompletion();
                 trace.received = false;
@@ -1282,11 +1367,11 @@ int main(int argc, char** argv)
                         warming?uint32_t(submitted+1):uint32_t(measured.size()+1),
                         warming?benchmarkWarmup:benchmarkFrames,tourTime,tourSeconds);
                     hud.Draw(overlay,*renderer,emerald?"EMERALD SQUARE":bistro?"BISTRO":"CINEMATIC",status);
-                    if(actor.Loaded()) {if(!modelRenderer->Render(scene,camera,overlay,capture?&captured:nullptr))return 1;}
-                    else if(!renderer->Render(scene,camera,overlay,capture?&captured:nullptr))return 1;
+                    if(actor.Loaded()) {if(!modelRenderer->Render(scene,camera,overlay,capture?&captured:nullptr))co_return 1;}
+                    else if(!renderer->Render(scene,camera,overlay,capture?&captured:nullptr))co_return 1;
                 }
-                else if(actor.Loaded()) { if(!modelRenderer->Render(scene,camera,capture?&captured:nullptr)) return 1; }
-                else if(!renderer->Render(scene,camera,capture?&captured:nullptr)) return 1;
+                else if(actor.Loaded()) { if(!modelRenderer->Render(scene,camera,capture?&captured:nullptr)) co_return 1; }
+                else if(!renderer->Render(scene,camera,capture?&captured:nullptr)) co_return 1;
                 BenchmarkFrame frame;
                 frame.renderWall = renderTimer.ElapsedMilliseconds();
                 frame.wall = frameTimer.ElapsedMilliseconds();
@@ -1396,6 +1481,7 @@ int main(int argc, char** argv)
                 << " taa=" << applied.advanced.temporalAA << " bloom=" << applied.advanced.bloom
                 << " transparency=" << applied.advanced.transparency << " auto_exposure=" << applied.advanced.autoExposure << '\n'
                 << "# paths gpu_culling=" << applied.enableGpuCulling << " occlusion=" << applied.enableOcclusionCulling
+                << " surface_material_reuse=" << applied.advanced.reuseSurfaceMaterials
                 << " cpu_culling=" << applied.enableFrustumCulling << " instancing=" << applied.enableInstancing
                 << " lod=" << applied.enableLod << " lod_error=" << applied.lodPixelError
                 << " parallel=" << applied.enableParallelRenderGraph << " workers=" << applied.recordingThreadCount
@@ -1443,8 +1529,8 @@ int main(int argc, char** argv)
             enum Column { Kind, Index, SceneTime, Interval, Wall, RenderWall, Cpu, Acquire, Prepare, Record, Submit, Present,
                 Sequence, CpuSamples, Gpu, GpuSamples, Draws, ShadowDraws, Instances, Triangles,
                 ShadowTriangles, Culled, Batches, GpuVisibility, GpuOcclusion, ShadowReuse,
-                RenderWidth, RenderHeight, OutputWidth, OutputHeight, Pass, PassMs, PassSamples, ColumnCount };
-            output << "record_type,index,scene_time_seconds,submission_interval_ms,frame_work_wall_ms,render_work_wall_ms,cpu_render_ms,cpu_acquire_ms,cpu_prepare_ms,cpu_record_ms,cpu_submit_ms,cpu_present_ms,profiler_sequence,cpu_samples,gpu_frame_ms,gpu_samples,main_draws,shadow_draws,main_instances,main_triangles,shadow_triangles,culled_entities,indirect_batches,gpu_visibility,gpu_occlusion,shadow_reused,render_width,render_height,output_width,output_height,gpu_pass_name,gpu_pass_ms,gpu_pass_samples\n";
+                RenderWidth, RenderHeight, OutputWidth, OutputHeight, Pass, PassMs, PassSamples, GpuShadowCulling, ColumnCount };
+            output << "record_type,index,scene_time_seconds,submission_interval_ms,frame_work_wall_ms,render_work_wall_ms,cpu_render_ms,cpu_acquire_ms,cpu_prepare_ms,cpu_record_ms,cpu_submit_ms,cpu_present_ms,profiler_sequence,cpu_samples,gpu_frame_ms,gpu_samples,main_draws,shadow_draws,main_instances,main_triangles,shadow_triangles,culled_entities,indirect_batches,gpu_visibility,gpu_occlusion,shadow_reused,render_width,render_height,output_width,output_height,gpu_pass_name,gpu_pass_ms,gpu_pass_samples,gpu_shadow_culling\n";
             using Row = std::array<std::string,ColumnCount>;
             const auto set = [](Row& row,Column column,const auto& value) {
                 std::ostringstream text; text.imbue(std::locale::classic()); text << std::setprecision(10) << value;
@@ -1475,7 +1561,9 @@ int main(int argc, char** argv)
                     set(row,Submit,frame.cpu.cpuSubmitMilliseconds); set(row,Present,frame.cpu.cpuPresentMilliseconds);
                     set(row,CpuSamples,1); cpus.push_back(frame.cpu.cpuRenderMilliseconds);
                 }
-                set(row,Draws,s.mainDrawCount); set(row,ShadowDraws,s.shadowDrawCount); set(row,ShadowTriangles,s.shadowTriangleCount);
+                set(row,Draws,s.mainDrawCount); set(row,ShadowDraws,s.shadowDrawCount);
+                if(!s.gpuShadowCulling)set(row,ShadowTriangles,s.shadowTriangleCount);
+                set(row,GpuShadowCulling,s.gpuShadowCulling);
                 if(!s.gpuVisibility) { set(row,Instances,s.mainInstanceCount); set(row,Triangles,s.mainTriangleCount); set(row,Culled,s.culledEntityCount); }
                 set(row,Batches,s.indirectBatchCount); set(row,GpuVisibility,s.gpuVisibility); set(row,GpuOcclusion,s.gpuOcclusion);
                 set(row,ShadowReuse,s.reusedShadowAtlas); set(row,RenderWidth,s.renderWidth); set(row,RenderHeight,s.renderHeight);
@@ -1561,11 +1649,35 @@ int main(int argc, char** argv)
             }
             std::fprintf(stderr,"Benchmark CSV written: %s (%zu measured submissions, %zu interior profiler windows, %llu GPU samples).\n",
                 benchmarkOutput.c_str(),measured.size(),windows.size(),static_cast<unsigned long long>(gpuCount));
-            return 0;
+            co_return 0;
         }
 
         while(dy_examples::ExampleRunning(window))
         {
+            if(playback && playback->activate)
+            {
+                playback->activate=false;
+                ready=false; // Present the activated scene once even when the window is not focused.
+                presentationTimeline.Seek(0);
+                presentationAutomatic=true;
+                presentationCompletionReported=false;
+                presentationToken=UINT32_MAX;
+                tourTime=sceneTime=std::min(initialTourTime,tourSeconds);
+                paused=playback->startPaused;
+                playback->startPaused=false;
+                freeCamera=false;
+                comparison.Clear();
+                config=presentationBaseline;
+                if(!renderer->SetConfig(config)) co_return 1;
+                renderer->InvalidateHistory();
+                modelRenderer->InvalidateHistory();
+                hud.ClosePanels();
+                hud.SetProfilerVisible(false);
+                const std::string title="DYF / "+scenePreset+" - R restart all | Space pause";
+                window.SetTitle(title.c_str());
+                clock.Reset();
+                std::fprintf(stderr,"Presentation active: %s (prepared scene, no reload).\n",scenePreset.c_str());
+            }
             window.PollEvents();
             if(!dy_examples::BeginExampleFrame(window)) break;
             const auto& input = dy_examples::ExampleInput(window);
@@ -1594,13 +1706,16 @@ int main(int argc, char** argv)
             const auto size = window.GetFramebufferSize();
             const bool focused = window.HasFocus();
             // Present once before requiring focus: Wayland maps the first buffer.
-            const bool suspended = !nativeWindow || window.IsMinimized() || size.width <= 0 || size.height <= 0 || (ready && !focused);
-            const double elapsed = clock.Tick(suspended || !focused);
+            const bool preloading=playback && playback->preloading;
+            const bool ignoreFocus=preloading || (presentation && presentationAutomatic);
+            const bool suspended = !nativeWindow || window.IsMinimized() || size.width <= 0 || size.height <= 0 || (ready && !focused && !ignoreFocus);
+            const double elapsed = clock.Tick(suspended || (!focused && !ignoreFocus));
             if(suspended)
             {
                 comparison.Cancel("window inactive or minimized");
                 window.SetCursorMode(Platform::CursorMode::Normal);
                 waitForEvents();
+                if(playback) co_yield showcase::PresentationStep::Frame;
                 continue;
             }
             if(!renderer)
@@ -1617,13 +1732,18 @@ int main(int argc, char** argv)
                 renderer->GetDevice().Supports(RHI::Feature::IndirectDraw);
             hud.Update(window, {
                 {Key::Space,paused?"Resume scene":"Pause scene",paused},
-                {Key::R,"Restart tour"},
+                {Key::R,playback?"Restart entire presentation":"Restart tour",false,!playback || !playback->preloading},
+                {Key::H,"Automatic presentation",presentationAutomatic,presentation},
                 {Key::Tab,"Free camera",freeCamera,true,Group::Camera},
-                {Key::Left,"Tour: back 5 seconds"},{Key::Right,"Tour: forward 5 seconds"},
-                {Key::Home,"Tour: first pose"},{Key::End,"Tour: last pose"},
-                {Key::N,"Wind animation",windEnabled,!windObjects.empty()},
-                {Key::F5,"Freeze and capture A"},{Key::F6,"Capture same-state B",false,comparison.HasBaseline()},
-                {Key::F7,"Clear comparison"},{Key::F8,"Change comparison mode"},
+                {Key::Left,presentation?"Previous 6-second shot":"Tour: back 5 seconds"},
+                {Key::Right,presentation?"Next 6-second shot":"Tour: forward 5 seconds"},
+                {Key::Home,"Tour: first pose"},
+                {Key::End,"Tour: last pose"},
+                {Key::N,"Wind animation",windEnabled,!presentationAutomatic && !windObjects.empty()},
+                {Key::F5,"Freeze and capture A",false,!presentationAutomatic},
+                {Key::F6,"Capture same-state B",false,!presentationAutomatic && comparison.HasBaseline()},
+                {Key::F7,"Clear comparison",false,!presentationAutomatic},
+                {Key::F8,"Change comparison mode",false,!presentationAutomatic},
                 {Key::M,"Console frame statistics",metrics},
                 {Key::Escape,"Back to examples"},
 #ifdef DY_RENDERDOC_ENABLED
@@ -1669,14 +1789,25 @@ int main(int argc, char** argv)
                 {Key::Q,"Move down",false,freeCamera,Group::Camera,true},
                 {Key::E,"Move up",false,freeCamera,Group::Camera,true},
                 {Key::LeftShift,"Move faster",false,freeCamera,Group::Camera,true}
-            });
+            },!presentationAutomatic,!(playback && playback->preloading));
             if(hud.Pressed(Key::Escape)) {dy_examples::RequestExampleClose(window);break;}
             if(hadProfiler!=hud.IsProfilerVisible() || hadPanel!=hud.IsPanelOpen()) comparison.Cancel("HUD changed");
+            if(presentationAutomatic && hadProfiler!=hud.IsProfilerVisible())
+                presentationAutomatic=false;
+            if(presentation && hud.Pressed(Key::H))
+            {
+                presentationAutomatic=!presentationAutomatic;
+                if(!presentationAutomatic)
+                {
+                    comparison.Cancel("manual presentation control");
+                }
+                presentationToken=UINT32_MAX;
+            }
 #ifdef DY_RENDERDOC_ENABLED
             if(hud.Pressed(Key::F12)) (void)dyf::RenderDocCapture::TriggerNextFrame();
 #endif
-            const auto sceneDrag=hud.SceneDragDelta();
-            const bool pointerLook=!hud.CapturesPointer() && input.IsDown(MouseButton::Right);
+            const auto sceneDrag=playback && playback->preloading ? Platform::InputPoint{} : hud.SceneDragDelta();
+            const bool pointerLook=!(playback && playback->preloading) && !hud.CapturesPointer() && input.IsDown(MouseButton::Right);
             const auto previousPose = pose;
             bool historyDiscontinuity = false;
             if(hud.Pressed(Key::F7)) comparison.Clear();
@@ -1729,6 +1860,12 @@ int main(int argc, char** argv)
                     freeCamera ? " | free camera active; Tab returns to tour" : "");
             }
             const bool restart = hud.Pressed(Key::R);
+            if(restart && playback)
+            {
+                if(!renderer->GetDevice().WaitIdle()) throw std::runtime_error("GPU drain failed before presentation restart.");
+                co_yield showcase::PresentationStep::Restart;
+                continue;
+            }
             if(restart)
             {
                 tourTime = 0;
@@ -1736,6 +1873,15 @@ int main(int argc, char** argv)
                 paused = freeCamera = false;
                 historyDiscontinuity = true;
                 std::fputs("Tour restarted (playing).\n", stderr);
+                if(presentation)
+                {
+                    presentationAutomatic=true;
+                    presentationTimeline.Seek(0);
+                    presentationCompletionReported=false;
+                    presentationToken=UINT32_MAX;
+                    if(emerald) comparison.Clear();
+                    tourTime=sceneTime=std::min(tourSeconds,initialTourTime);
+                }
             }
             const bool seek = hud.Pressed(Key::Left) || hud.Pressed(Key::Right) ||
                 hud.Pressed(Key::Home) || hud.Pressed(Key::End);
@@ -1763,7 +1909,23 @@ int main(int argc, char** argv)
             // 배우와 바람은 자유 카메라·투어 종료 뒤에도 진행하고 Space·포커스 상실·A/B에서 멈춘다.
             if(ready && !paused && !restart && !seek && !comparison.IsRunning() && !captureA &&
                 !(captureB && comparison.HasBaseline()) && (windEnabled || actor.Loaded())) sceneTime += elapsed;
-            if(!actor.Update(scene,sceneTime)) return 1;
+            if(presentation && presentationAutomatic)
+            {
+                if(seek)
+                {
+                    const double target=hud.Pressed(Key::Home) ? 0 : hud.Pressed(Key::End) ? 30 :
+                        presentationTimeline.Seconds()+(hud.Pressed(Key::Right) ? showcase::PresentationShotSeconds : -showcase::PresentationShotSeconds);
+                    presentationTimeline.Seek(target);
+                    presentationCompletionReported=false;
+                    presentationToken=UINT32_MAX;
+                }
+                presentationTimeline.Advance(elapsed,ready && !paused && !freeCamera && !restart && !seek &&
+                    !comparison.IsRunning() && !captureA && !captureB && !preloading);
+                tourTime=std::min(tourSeconds,initialTourTime+std::min(30.0,presentationTimeline.Seconds()));
+                sceneTime=tourTime;
+                if(presentationTimeline.Frame().finished && !advanceWhenFinished) paused=true;
+            }
+            if(!actor.Update(scene,sceneTime)) co_return 1;
             for(const auto& object : windObjects)
             {
                 const auto center = object.bounds.Center();
@@ -1779,7 +1941,7 @@ int main(int argc, char** argv)
                 for(const auto& part : object.parts)
                 {
                     auto entity = part.first;
-                    if(!entity.SetTransform(windEnabled ? sway * part.second : part.second)) return 1;
+                    if(!entity.SetTransform(windEnabled ? sway * part.second : part.second)) co_return 1;
                 }
             }
             window.SetCursorMode(freeCamera && pointerLook ?
@@ -1824,10 +1986,35 @@ int main(int argc, char** argv)
             }
             if(!camera.LookAt(pose.eye, pose.target, pose.up) ||
                 !camera.SetPerspective(float(config.renderWidth ? config.renderWidth : size.width) /
-                    (config.renderHeight ? config.renderHeight : size.height), pose.fov * pi / 180, .03f, cameraFarPlane)) return 1;
+                    (config.renderHeight ? config.renderHeight : size.height), pose.fov * pi / 180, .03f, cameraFarPlane)) co_return 1;
 
             config = renderer->GetConfig();
             bool changed = false;
+            if(presentation && presentationAutomatic)
+            {
+                const auto frame=playback && playback->preloading ? showcase::PresentationFrame{presentationWarmupShot,1,false} :
+                    presentationTimeline.Frame();
+                if(presentationToken!=frame.Token())
+                {
+                    presentationToken=frame.Token();
+                    if(!preloading) presentationTimeline.WaitForFrame();
+                    const auto shot=showcase::GetPresentationShot(presentationScene,frame.shot,presentationWireframe);
+                    showcase::ApplyPresentationFeature(config,presentationBaseline,shot.feature,frame.Enabled());
+                    changed=true;
+                    hud.ClosePanels();
+                    hud.SetProfilerVisible(false);
+                    if(frame.Enabled() && !preloading)
+                    {
+                        using F=showcase::PresentationFeature;
+                        if(shot.feature==F::GpuPasses) hud.ShowProfiler(0);
+                        if(shot.feature==F::CpuTiming) hud.ShowProfiler(1);
+                    }
+                    std::fprintf(stderr,"Presentation%s %.3f s | shot %u/5 | %s | %s\n",
+                        playback && playback->preloading ? " warmup" : "",
+                        presentationTimeline.Seconds(),frame.shot+1,shot.title,
+                        frame.phase==0 ? "OFF" : frame.phase==1 ? "ON" : "OFF / HOLD");
+                }
+            }
             static constexpr Key settingKeys[] = {
                 Key::Num1,Key::Num2,Key::Num3,Key::Num4,Key::Num5,Key::Num6,Key::U,Key::O,
                 Key::Num7,Key::Num8,Key::Num9,Key::Num0,Key::B,Key::F,Key::K,Key::J,Key::P,
@@ -1908,7 +2095,7 @@ int main(int argc, char** argv)
             if(changed)
             {
                 comparison.Cancel("render settings changed");
-                if(!renderer->SetConfig(config)) return 1;
+                if(!renderer->SetConfig(config)) co_return 1;
                 std::fprintf(stderr, "Shading %s | shadows %d | HDR %d | CPU culling %d | instancing %d | parallel %d | exposure %.2f\n",
                     config.lighting.enabled ? "lit" : "base-color", config.lighting.shadows, config.enableHdrRendering,
                     config.enableFrustumCulling, config.enableInstancing, config.enableParallelRenderGraph, config.exposure);
@@ -2028,7 +2215,7 @@ int main(int argc, char** argv)
                         if(comparisonMode == 4)
                             std::fprintf(stderr, "Deformation %c: %s at the same frozen scene/actor pose.\n",
                                 captureB ? 'B' : 'A', captureB ? "GPU compute" : "CPU skinning");
-                        if(!renderer->SetConfig(config)) return 1;
+                        if(!renderer->SetConfig(config)) co_return 1;
                     }
                     else if(comparisonMode == 4 && !modelRenderer->SetSkinningExecutionMode(previousMode))
                         std::fputs("Could not restore the previous deformation mode after capture rejection.\n", stderr);
@@ -2037,15 +2224,38 @@ int main(int argc, char** argv)
             comparison.CheckConditions(conditions());
             const auto previous = renderer->GetLastRenderCompletion();
             Canvas overlay(uint32_t(size.width),uint32_t(size.height));
-            comparison.Draw(overlay,uint32_t(size.width),uint32_t(std::max(0.f,float(size.height)-hud.BottomInset())));
+            const auto presentationFrame=presentationTimeline.Frame();
+            if(!presentation || !presentationAutomatic)
+                comparison.Draw(overlay,uint32_t(size.width),uint32_t(std::max(0.f,float(size.height)-hud.BottomInset())));
             char status[120];
             std::snprintf(status,sizeof(status),"Tour %.0f / %.0f s / %s",tourTime,tourSeconds,
                 freeCamera?"Free camera":paused?"Paused":"Playing");
-            hud.Draw(overlay,*renderer,emerald?"EMERALD SQUARE":bistro?"BISTRO":"CINEMATIC",status);
+            const char* title=emerald?"EMERALD SQUARE":bistroInterior?"BISTRO INTERIOR":bistro?"BISTRO":"CINEMATIC";
+            if(presentation && presentationAutomatic)
+            {
+                if(preloading)
+                {
+                    overlay.FillRect({0,0,float(size.width),float(size.height)},{.015f,.025f,.035f,1});
+                    title="PREPARING PRESENTATION";
+                    std::snprintf(status,sizeof(status),"Loading assets and GPU resources.\nPlayback starts when all 3 scenes are ready.");
+                }
+                else
+                {
+                    title=showcase::GetPresentationShot(presentationScene,presentationFrame.shot,presentationWireframe).title;
+                    std::snprintf(status,sizeof(status),"%02.1f / 30 s | %u/5 | %s\n%s",
+                        std::min(30.0,presentationTimeline.Seconds()),presentationFrame.shot+1,
+                        presentationFrame.phase==0 ? "OFF" : presentationFrame.phase==1 ? "ON" : "OFF / HOLD",
+                        presentationFrame.finished ? (advanceWhenFinished ? "Next scene in 1 second" : "Complete - R restart all") :
+                        paused ? "Paused - Space resume" : "R restart all / Space pause");
+                }
+            }
+            hud.Draw(overlay,*renderer,title,status,presentationAutomatic && !preloading ?
+                (presentationFrame.Enabled() ? "ON" : "OFF") : nullptr);
             if(actor.Loaded())
-            { if(!modelRenderer->Render(scene,camera,overlay)) return 1; }
-            else if(!renderer->Render(scene,camera,overlay)) return 1;
+            { if(!modelRenderer->Render(scene,camera,overlay)) co_return 1; }
+            else if(!renderer->Render(scene,camera,overlay)) co_return 1;
             const auto completion = renderer->GetLastRenderCompletion();
+            if(completion && completion!=previous && presentationTimeline.FrameSubmitted()) clock.Reset();
             comparison.Update(elapsed, bool(completion && completion != previous),
                 renderer->GetProfilerTimingSnapshot(), renderer->GetLastRenderStatistics());
             if(completion && completion != previous && metrics) ++frames;
@@ -2054,11 +2264,44 @@ int main(int argc, char** argv)
                 ready = true;
                 releaseCpuImageCache();
                 clock.Reset();
-                std::fputs("First frame submitted.\n", stderr);
+                const auto& stats = renderer->GetLastRenderStatistics();
+                std::fprintf(stderr, "First frame submitted.\nRender size %ux%u, output %ux%u.\n",
+                    stats.renderWidth, stats.renderHeight, stats.outputWidth, stats.outputHeight);
+            }
+            if(presentation && presentationAutomatic && !preloading && presentationFrame.finished &&
+                completion && completion!=previous && !presentationCompletionReported)
+            {
+                presentationCompletionReported=true;
+                std::fputs("Presentation complete: 30 seconds. R replay / H manual.\n",stderr);
+                if(playback && playback->verification && !advanceWhenFinished) co_return 0;
+            }
+            if(presentation && presentationAutomatic && advanceWhenFinished && presentationTimeline.TransitionReady() &&
+                completion && completion!=previous)
+            {
+                if(!renderer->GetDevice().WaitIdle()) throw std::runtime_error("GPU drain failed at the presentation scene boundary.");
+                std::fprintf(stderr,"Presentation advance: %s at %.3f s.\n",scenePreset.c_str(),presentationTimeline.Seconds());
+                if(playback) { co_yield showcase::PresentationStep::Next; continue; }
+                co_return 2;
+            }
+            if(preloading && completion && completion!=previous)
+            {
+                if(++presentationWarmupShot>=showcase::PresentationShotCount)
+                {
+                    if(!renderer->GetDevice().WaitIdle()) throw std::runtime_error("Presentation preload GPU drain failed.");
+                    co_yield showcase::PresentationStep::Ready;
+                    continue;
+                }
             }
             if(metrics) metricsTime += elapsed;
             if(metrics && metricsTime >= 1)
             {
+                if(presentation)
+                {
+                    const auto& timing=renderer->GetProfilerTimingSnapshot();
+                    std::fprintf(stderr,"Presentation metrics: %s time=%.3f frame=%.3f cpu=%.3f gpu=%.3f ms\n",
+                        scenePreset.c_str(),presentationTimeline.Seconds(),timing.frameAverageMilliseconds,
+                        timing.cpuRenderAverageMilliseconds,timing.gpuFrameAverageMilliseconds);
+                }
                 std::fprintf(stderr, "Tour %.1f/%.0f s | %s | submitted frames %.1f/s\n",
                     tourTime, tourSeconds, freeCamera ? "free" : paused ? "paused" : tourTime == tourSeconds ? "ended" : "playing", frames / metricsTime);
                 const auto& statistics = renderer->GetLastRenderStatistics();
@@ -2069,12 +2312,89 @@ int main(int argc, char** argv)
                 frames = 0;
             }
             if(completion == previous) waitForEvents(.001);
+            if(playback) co_yield showcase::PresentationStep::Frame;
         }
-        return 0;
+        co_return 0;
     }
     catch(const std::exception& error)
     {
         std::fprintf(stderr, "Cinematic Showcase: %s\n", error.what());
+        co_return 1;
+    }
+}
+
+int main(int argc, char** argv)
+{
+#ifdef DY_PRESENTATION_DEFAULT
+    bool sequence=true;
+#else
+    bool sequence=false;
+#endif
+    bool verification=false;
+    std::vector<std::string> forwarded;
+    for(int i=1;i<argc;++i)
+    {
+        if(std::string_view(argv[i])=="--presentation-all") sequence=true;
+        else if(std::string_view(argv[i])=="--presentation-verify") sequence=verification=true;
+        else forwarded.emplace_back(argv[i]);
+    }
+    if(!sequence)
+    {
+        auto task=RunCinematic(argc,argv);
+        while(!task.Done()) task.Resume();
+        return task.Result();
+    }
+    try
+    {
+        std::unique_ptr<dy_examples::ExampleWindowLease> window;
+        std::unique_ptr<dyf::RHI::IDevice> device;
+        const char* scenes[]={"exterior","interior","emerald"};
+        std::array<showcase::PresentationPlayback,3> playback;
+        std::array<std::vector<std::string>,3> arguments;
+        std::array<std::vector<char*>,3> pointers;
+        std::vector<showcase::CinematicTask> tasks;
+        struct DrainBeforeScenes
+        {
+            std::unique_ptr<dyf::RHI::IDevice>& device;
+            ~DrainBeforeScenes() { if(device) (void)device->WaitIdle(); }
+        } drain{device};
+        tasks.reserve(3);
+        playback[0].startPaused=std::find(forwarded.begin(),forwarded.end(),"--paused")!=forwarded.end();
+        for(unsigned i=0;i<3;++i)
+        {
+            playback[i].verification=verification;
+            arguments[i]={argv[0],scenes[i],"--presentation"};
+            arguments[i].insert(arguments[i].end(),forwarded.begin(),forwarded.end());
+            for(auto& argument:arguments[i]) pointers[i].push_back(argument.data());
+            std::fprintf(stderr,"Presentation preload %u/3: %s.\n",i+1,scenes[i]);
+            tasks.push_back(RunCinematic(static_cast<int>(pointers[i].size()),pointers[i].data(),&window,i<2,&device,&playback[i]));
+            while(!tasks.back().Done())
+                if(tasks.back().Resume()==showcase::PresentationStep::Ready) break;
+            if(tasks.back().Done()) return tasks.back().Result();
+            playback[i].preloading=false;
+        }
+        unsigned current=0;
+        playback[current].activate=true;
+        while(dy_examples::ExampleRunning(window->Get()))
+        {
+            const auto step=tasks[current].Resume();
+            if(tasks[current].Done())
+            {
+                (void)device->WaitIdle();
+                return tasks[current].Result();
+            }
+            if(step==showcase::PresentationStep::Next || step==showcase::PresentationStep::Restart)
+            {
+                current=showcase::NextPresentationScene(current,step);
+                playback[current].activate=true;
+            }
+        }
+        (void)device->WaitIdle();
+        return 0;
+    }
+    catch(const std::exception& error)
+    {
+        std::fprintf(stderr,"Presentation: %s\n",error.what());
         return 1;
     }
 }

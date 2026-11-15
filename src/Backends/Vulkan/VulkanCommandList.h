@@ -51,6 +51,65 @@ namespace dyf::Backends
 		std::map<std::pair<VulkanTexture*, uint32_t>, dyf::RHI::ResourceState> textureSubresources;
 	};
 
+    struct VulkanCommandScratch
+    {
+		enum class OperationKind : uint8_t
+		{
+			BufferBarrier,
+			TextureBarrier,
+			BufferRequirement,
+			TextureRequirement,
+			BufferWrite,
+			TextureWrite
+		};
+
+		struct Operation
+		{
+			OperationKind kind = OperationKind::BufferBarrier;
+			VulkanBuffer* buffer = nullptr;
+			VulkanTexture* texture = nullptr;
+			dyf::RHI::ResourceState before = dyf::RHI::ResourceState::Undefined;
+			dyf::RHI::ResourceState after = dyf::RHI::ResourceState::Undefined;
+			uint32_t mipLevel = 0;
+			uint32_t arrayLayer = 0;
+		};
+
+		struct VertexBinding
+		{
+			VulkanBuffer* buffer = nullptr;
+			uint32_t offset = 0;
+		};
+
+        struct QueryReset { VulkanTimestampQuery* query; uint32_t first, count; };
+        std::vector<QueryReset> m_queryResets;
+        std::vector<std::pair<VulkanTimestampQuery*,uint32_t>> m_queryWrites;
+		std::vector<Operation> m_operations;
+		RHI::Backend::StateTable<VulkanBuffer*, RHI::ResourceState> m_bufferStates;
+		RHI::Backend::StateTable<std::pair<VulkanTexture*,uint32_t>,RHI::ResourceState,RHI::Backend::SubresourceHash> m_textureStates;
+        RHI::Backend::StateTable<const VulkanResourceSet*, bool> m_validatedResourceSets;
+        RHI::Backend::StateTable<VulkanBuffer*, RHI::CommandStateSummary> m_closedBufferStates;
+        RHI::Backend::StateTable<std::pair<VulkanTexture*,uint32_t>,RHI::CommandStateSummary,RHI::Backend::SubresourceHash> m_closedTextureStates;
+		RHI::Backend::StateTable<uint32_t, VertexBinding> m_vertexBindings;
+		std::vector<VulkanTexture*> m_referencedSwapchainImages;
+		std::vector<dyf::RHI::Format> m_colorFormats;
+		RHI::Detail::InlineConstantCoverage m_inlineConstantCoverage;
+        void Clear() noexcept
+        {
+            m_queryResets.clear();
+            m_queryWrites.clear();
+            m_operations.clear();
+            m_bufferStates.clear();
+            m_textureStates.clear();
+            m_validatedResourceSets.clear();
+            m_closedBufferStates.clear();
+            m_closedTextureStates.clear();
+            m_vertexBindings.clear();
+            m_referencedSwapchainImages.clear();
+            m_colorFormats.clear();
+            m_inlineConstantCoverage.Reset(0);
+        }
+    };
+
 	class VulkanCommandList final : public dyf::RHI::ICommandList
 	{
 	public:
@@ -102,7 +161,7 @@ namespace dyf::Backends
 		[[nodiscard]] bool IsValid() const { return m_closed && !m_failed; }
 		[[nodiscard]] const std::vector<VulkanTexture*>& GetReferencedSwapchainImages() const
 		{
-			return m_referencedSwapchainImages;
+			return m_scratch.m_referencedSwapchainImages;
 		}
 		[[nodiscard]] bool ValidateForSubmit(VulkanSubmissionState& state) const;
         [[nodiscard]] VkPipelineStageFlags GetAcquireWaitStage(const VulkanTexture*,bool firstReference) const;
@@ -113,38 +172,14 @@ namespace dyf::Backends
         uint32_t m_maxComputeGroups[3]={};
 
 	private:
+        using Operation = VulkanCommandScratch::Operation;
+        using OperationKind = VulkanCommandScratch::OperationKind;
+        VulkanCommandScratch m_scratch;
         void ResetTimestampsNative(RHI::TimestampQueryHandle,uint32_t,uint32_t) override;
         void WriteTimestampNative(RHI::TimestampQueryHandle,uint32_t) override;
 		friend struct VulkanObjectDeleter;
 
 		~VulkanCommandList() override;
-
-		enum class OperationKind : uint8_t
-		{
-			BufferBarrier,
-			TextureBarrier,
-			BufferRequirement,
-			TextureRequirement,
-			BufferWrite,
-			TextureWrite
-		};
-
-		struct Operation
-		{
-			OperationKind kind = OperationKind::BufferBarrier;
-			VulkanBuffer* buffer = nullptr;
-			VulkanTexture* texture = nullptr;
-			dyf::RHI::ResourceState before = dyf::RHI::ResourceState::Undefined;
-			dyf::RHI::ResourceState after = dyf::RHI::ResourceState::Undefined;
-			uint32_t mipLevel = 0;
-			uint32_t arrayLayer = 0;
-		};
-
-		struct VertexBinding
-		{
-			VulkanBuffer* buffer = nullptr;
-			uint32_t offset = 0;
-		};
 
 		[[nodiscard]] bool RequireBufferState(VulkanBuffer* buffer, dyf::RHI::ResourceState state);
 		[[nodiscard]] bool RequireTextureState(
@@ -172,9 +207,6 @@ namespace dyf::Backends
         uint32_t m_maxColorAttachments=0;
         uint32_t m_maxViewportDimensions[2]={};
         float m_viewportBounds[2]={};
-        struct QueryReset { VulkanTimestampQuery* query; uint32_t first, count; };
-        std::vector<QueryReset> m_queryResets;
-        std::vector<std::pair<VulkanTimestampQuery*,uint32_t>> m_queryWrites;
 		bool m_supportsCompute = false;
 		VkCommandBuffer m_commandBuffer = VK_NULL_HANDLE;
 		VulkanPipeline* m_boundPipeline = nullptr;
@@ -182,8 +214,6 @@ namespace dyf::Backends
 		VulkanBuffer* m_indexBuffer = nullptr;
 		VulkanTexture* m_depthTexture = nullptr;
 		VulkanUploadArena m_uploadArena;
-		std::vector<Operation> m_operations;
-		std::unordered_map<VulkanBuffer*, dyf::RHI::ResourceState> m_bufferStates;
         struct RecentBufferState
         {
             VulkanBuffer* buffer=nullptr;
@@ -192,15 +222,7 @@ namespace dyf::Backends
         std::array<RecentBufferState,8> m_recentBufferStates{};
         uint32_t m_recentBufferStateCount=0,m_recentBufferStateNext=0;
         void ClearRecentBufferStates() noexcept {m_recentBufferStateCount=m_recentBufferStateNext=0;}
-		RHI::Backend::StateTable<std::pair<VulkanTexture*,uint32_t>,RHI::ResourceState,RHI::Backend::SubresourceHash> m_textureStates;
-        std::unordered_set<const VulkanResourceSet*> m_validatedResourceSets;
-        std::unordered_map<VulkanBuffer*, RHI::CommandStateSummary> m_closedBufferStates;
-        RHI::Backend::StateTable<std::pair<VulkanTexture*,uint32_t>,RHI::CommandStateSummary,RHI::Backend::SubresourceHash> m_closedTextureStates;
         bool m_stateSummaryValid=false;
-		std::unordered_map<uint32_t, VertexBinding> m_vertexBindings;
-		std::vector<VulkanTexture*> m_referencedSwapchainImages;
-		std::vector<dyf::RHI::Format> m_colorFormats;
-		RHI::Detail::InlineConstantCoverage m_inlineConstantCoverage;
 		dyf::RHI::Format m_indexFormat = dyf::RHI::Format::Unknown;
 		dyf::RHI::Format m_depthFormat = dyf::RHI::Format::Unknown;
 		dyf::RHI::ResourceState m_depthState = dyf::RHI::ResourceState::Undefined;

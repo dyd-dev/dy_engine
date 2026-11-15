@@ -751,7 +751,7 @@ namespace dyf
 			Math::float4x4 entityTransform = transform;
 			if(assetMesh.nodeIndex != UINT32_MAX)
 			{
-				const ModelInstance& instance = scene.GetModelInstance(instanceId);
+				const ModelInstance& instance = static_cast<const ModelScene&>(scene).GetModelInstance(instanceId);
 				if(assetMesh.nodeIndex >= instance.globalPose.size()) return false;
 				entityTransform = transform * instance.globalPose[assetMesh.nodeIndex];
 			}

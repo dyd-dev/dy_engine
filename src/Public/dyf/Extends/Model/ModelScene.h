@@ -11,10 +11,14 @@ namespace dyf
 	class ModelScene final : public Scene
 	{
 	public:
+		ModelScene();
+		~ModelScene() override;
+		// 등록 입력은 독립된 소유 스냅샷이다. 이후 편집은 가변 인스턴스 조회 API로 한다.
 		[[nodiscard]] ModelInstanceID CreateModelInstance(ModelInstance instance);
 		[[nodiscard]] ModelAssetID CreateModelAsset(ModelAsset asset)
 		{
-			m_modelAssets.push_back(std::move(asset));
+			// 이동 전 보관한 vector 원소 참조도 불변 자산 저장소와 분리한다.
+			m_modelAssets.push_back(asset);
 			return static_cast<ModelAssetID>(m_modelAssets.size() - 1u);
 		}
 		[[nodiscard]] ModelAssetID FindModelAsset(const std::string& cacheKey) const
@@ -58,6 +62,7 @@ namespace dyf
 			float weight);
 		[[nodiscard]] bool IsValidModelInstance(ModelInstanceID instance) const;
 		[[nodiscard]] const ModelInstance* TryGetModelInstance(ModelInstanceID instance) const;
+		// 가변 참조를 제공한 인스턴스는 보관된 참조의 후속 수정까지 매 갱신에 반영한다.
 		[[nodiscard]] ModelInstance* TryGetModelInstance(ModelInstanceID instance);
 		[[nodiscard]] const ModelInstance& GetModelInstance(ModelInstanceID instance) const;
 		[[nodiscard]] ModelInstance& GetModelInstance(ModelInstanceID instance);
@@ -72,6 +77,8 @@ namespace dyf
         bool HasEntityMorphTargets(EntityID entity) const;
 
 	private:
+		struct AnimationState;
+		std::unique_ptr<AnimationState> m_animationState;
 		// StopAnimation은 지정한 인스턴스의 실패 여부만 반환하며 공유 포즈 저장소는 함께 갱신한다.
 		bool UpdateAnimations(float deltaSeconds, ModelInstanceID resultInstance);
         // 확장 로더가 기반 Scene에 입력을 등록한다. 기본 구현의 저장소를 우회 참조하지 않는다.

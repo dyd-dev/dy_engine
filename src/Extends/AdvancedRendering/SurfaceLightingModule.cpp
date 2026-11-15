@@ -2,14 +2,16 @@
 #include "ScreenSpaceLighting.h"
 #include "DepthPrepassValidation.h"
 #include "GpuVisibility.h"
+#include "SceneAlgorithms.h"
 #include "dyf/Camera.h"
+#include "dyf/Scene.h"
 #include <cmath>
 
 namespace dyf::Detail
 {
 namespace
 {
-class SurfaceLightingModule final : public RenderExtension
+class SurfaceLightingModule final : public ReadOnlyRenderExtension
 {
 public:
     const char* GetName() const override { return "SurfaceLighting"; }
@@ -17,6 +19,7 @@ public:
     RenderRequirements GetRequirements(const Renderer& renderer) const override
     {
         RenderRequirements requirements;
+        requirements.acceptsPackedMaterialOwner=true;
         if(!AdvancedModuleEnabled(renderer)) return requirements;
         const auto& config=renderer.GetAppliedConfig();
         const auto& quality=config.advanced;
@@ -41,7 +44,7 @@ public:
         return requirements;
     }
 
-    bool Prepare(RenderFrame& frame,RHI::ICommandList& uploads) override
+    bool Prepare(ReadOnlyRenderFrame& frame,RHI::ICommandList& uploads) override
     {
         m_prepared=m_recorded=false;
         if(!AdvancedModuleEnabled(frame.renderer)) return true;
@@ -54,6 +57,19 @@ public:
         const auto& quality=config.advanced;
         ScreenSpaceLighting::Settings settings;
         settings.surfaceMask=frame.requirements.SurfaceOutputMask();
+        // Ownership is lighting-independent; Main validates uploaded light counts and graph writes later.
+        settings.captureOwner=quality.reuseSurfaceMaterials && settings.surfaceMask==7 && frame.gpuVisibility && frame.visibleInstanceKeys.buffer &&
+            frame.renderer.GetDevice().Supports(RHI::Feature::FragmentPrimitiveId) && !frame.wireframe && !frame.lodDebug;
+        settings.instanceKeys=frame.visibleInstanceKeys.buffer;
+        if(settings.captureOwner && frame.requirements.acceptsPackedMaterialOwner)
+            settings.ownerStride=SurfaceOwnerStride(frame.scene.GetEntityCount());
+        for(const auto& draw:frame.geometry) {
+            if(!draw.material || UsesBlendedRendering(*draw.material) || !draw.indexCount)continue;
+            if(!draw.instanceBuffer || !draw.indirectArguments){settings.captureOwner=false;settings.ownerStride=0;break;}
+            // The actual R32 index buffer also bounds GPU-selected LOD and spatial-range offsets.
+            if(settings.ownerStride && (!draw.indexBuffer || !SurfaceOwnerIndicesFit(settings.ownerStride,draw.indexBuffer->GetDesc().size)))
+                settings.ownerStride=0;
+        }
         settings.frustumCulling=config.enableFrustumCulling;
         settings.ambientOcclusion=config.lighting.enabled && quality.ambientOcclusion && !frame.lodDebug;
         settings.diffuseGI=config.lighting.enabled && quality.diffuseGI && !frame.lodDebug;
@@ -67,6 +83,8 @@ public:
         if(!m_lighting->Prepare(frame.renderer.GetDevice(),uploads,frame.depth.texture,
             frame.camera,frame.geometry,settings)) return false;
         m_depthGeometry.Capture(frame.geometry);
+        if(m_lighting->GetOwner())m_materialGeometry.Capture(frame.geometry);
+        else m_materialGeometry.inputs.clear();
         m_depthView=frame.camera.view;m_depthProjection=frame.camera.projection;
         m_depthTexture=frame.depth.texture;
         frame.ao.texture=m_lighting->GetAO();
@@ -74,7 +92,7 @@ public:
         return true;
     }
 
-    bool AddPasses(RenderStage stage,RenderFrame& frame,RHI::RenderGraph& graph) override
+    bool AddPasses(RenderStage stage,ReadOnlyRenderFrame& frame,RHI::RenderGraph& graph) override
     {
         if(!AdvancedModuleEnabled(frame.renderer) || frame.outputWritten || !frame.requirements.RequiresDepth()) return true;
         if(stage!=RenderStage::BeforeOpaque && stage!=RenderStage::AfterOpaque) return true;
@@ -82,12 +100,14 @@ public:
         if(stage==RenderStage::BeforeOpaque)
         {
             if(!m_lighting->Import(graph) || !m_lighting->AddSurface(graph,frame.depth.resource,
-                frame.visibleInstances.resource,frame.indirectArguments.resource) ||
+                frame.visibleInstances.resource,frame.indirectArguments.resource,frame.visibleInstanceKeys.resource) ||
                 !m_lighting->AddAO(graph)) return AdvancedPassFailure("Surface/AO pass creation failed.");
             frame.opaqueDepthComplete=m_depthTexture==frame.depth.texture &&
                 SameDepthCamera(m_depthView,m_depthProjection,frame.camera) &&
                 m_depthGeometry.Matches(frame.geometry);
             const auto& surface=m_lighting->GetGraphResources();
+            frame.materialOwner={m_lighting->GetOwner(),surface.owner};
+            frame.surfaceMaterialComplete=frame.opaqueDepthComplete && frame.materialOwner.texture && m_materialGeometry.Matches(frame.geometry);
             frame.normal={m_lighting->GetNormal(),surface.normal};
             frame.albedo={m_lighting->GetAlbedoMetal(),surface.albedo};
             frame.ao={m_lighting->GetAO(),surface.ao};
@@ -129,6 +149,7 @@ public:
 private:
     std::unique_ptr<ScreenSpaceLighting> m_lighting;
     DepthGeometrySnapshot m_depthGeometry;
+    SurfaceGeometrySnapshot m_materialGeometry;
     Math::float4x4 m_depthView,m_depthProjection;
     RHI::TextureHandle m_depthTexture=nullptr;
     bool m_prepared=false,m_recorded=false;

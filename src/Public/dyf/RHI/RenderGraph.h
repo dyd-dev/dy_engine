@@ -74,6 +74,8 @@ namespace dyf::RHI
         [[nodiscard]] bool Execute(ICommandList* commandList) const;
 
     private:
+        friend class RenderGraph;
+        void Reset() noexcept;
         std::string m_name;
         uint32_t m_index = 0;
         RGRecordingMode m_recordingMode = RGRecordingMode::Ordered;
@@ -131,7 +133,8 @@ namespace dyf::RHI
         // including its barriers. Reset is recorded once before all pass lists.
         // The caller retains the query through Submit and reads after its completion fence.
         void SetTimestampQuery(TimestampQueryHandle query) { m_timestampQuery=query; }
-        void Reset();
+        // Releases callbacks and resource references while retaining build/compile capacity.
+        void Reset() noexcept;
 
         [[nodiscard]] bool IsCompiled() const;
         [[nodiscard]] const std::vector<uint32_t>& GetExecutionOrderIndices() const { return m_executionOrder; }
@@ -154,6 +157,9 @@ namespace dyf::RHI
             uint32_t index;
             ResourceState state;
         };
+        struct CompileUse { ResourceState state = ResourceState::Undefined; bool write = false; };
+        struct Reader { uint32_t pass; std::size_t next; };
+        void ClearCompiled() noexcept;
         RGResourceHandle Import(const std::string& name, BufferHandle buffer, TextureHandle texture,
             ResourceState initialState, ResourceState finalState);
         bool RequireResource(ICommandList* commands, const Resource& resource, ResourceState state) const;
@@ -165,14 +171,22 @@ namespace dyf::RHI
         std::unordered_map<BufferHandle, RGResourceHandle> m_bufferHandles;
         std::unordered_map<TextureHandle, RGResourceHandle> m_textureHandles;
         std::vector<std::unique_ptr<RenderGraphPass>> m_passes;
+        std::vector<std::unique_ptr<RenderGraphPass>> m_passStorage;
         std::vector<uint32_t> m_executionOrder;
         std::vector<RGExecutionStage> m_executionStages;
+        std::vector<RGExecutionStage> m_stageStorage;
         std::vector<RGDependency> m_dependencies;
-        std::vector<std::vector<ResourceBarrierDesc>> m_passBarriers;
+        std::vector<ResourceBarrierDesc> m_passBarriers;
+        std::vector<std::size_t> m_passBarrierOffsets;
         std::vector<ResourceBarrierDesc> m_finalBarriers;
         std::vector<ResourceUse> m_passUses;
         std::vector<std::size_t> m_passUseOffsets;
         std::vector<uint64_t> m_compiledRevisions;
+        std::vector<uint32_t> m_lastWriters, m_usedIndices, m_stageIndices, m_lastDependencies;
+        std::vector<std::size_t> m_readerHeads;
+        std::vector<Reader> m_readers;
+        std::vector<ResourceState> m_states;
+        std::vector<CompileUse> m_uses;
         bool m_compiled = false;
         TimestampQueryHandle m_timestampQuery = nullptr;
     };

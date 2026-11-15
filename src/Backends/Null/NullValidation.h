@@ -42,6 +42,7 @@ namespace dyf::Backends::NullValidation
         case RHI::Format::R32_FLOAT:
             return 4;
         case RHI::Format::R16G16B16A16_FLOAT:
+        case RHI::Format::R32G32_UINT:
         case RHI::Format::R32G32_FLOAT:
         case RHI::Format::D32_FLOAT_S8_UINT:
             return 8;

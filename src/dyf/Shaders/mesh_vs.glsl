@@ -21,6 +21,10 @@ layout(location = 1) in vec3 inNormal;
 layout(location = 2) in vec2 inUv;
 layout(location = 3) in vec4 inTangent;
 layout(location = 8) in vec4 inColor;
+#if RENDERER_SURFACE_CACHE
+layout(location=9) in uvec2 sourceKey;
+layout(location=6) flat out uvec2 instanceKey;
+#endif
 #if RENDERER_INSTANCING
 layout(location = 4) in mat4 instanceModel;
 #endif
@@ -107,6 +111,9 @@ mat3 MeshNormalMatrix(mat4 matrix)
 // 모델 행렬 선택 → 월드·clip 위치 계산 → 법선 변환 → 접선 직교화 순서다. 확대·반전 뒤에도 법선 맵의 기준축을 일관되게 유지한다.
 void main()
 {
+#if RENDERER_SURFACE_CACHE
+    instanceKey=sourceKey;
+#endif
 #if RENDERER_INSTANCING // 인스턴싱 빌드에서만 물체별 행렬 입력을 사용하며, 일반 경로는 draw 상수의 모델 행렬을 쓴다.
     mat4 world = instanceModel;
 #else

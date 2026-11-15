@@ -15,7 +15,7 @@ enum class AdvancedRenderModule
 std::unique_ptr<RenderExtension> CreateAdvancedRenderingModule(AdvancedRenderModule);
 
 // 기존 사용법을 유지하며 독립 모듈을 함께 소유하는 프리셋이다.
-class AdvancedRendering final : public RenderExtension
+class AdvancedRendering final : public ReadOnlyRenderExtension
 {
 public:
     AdvancedRendering();
@@ -25,9 +25,12 @@ public:
     RenderRequirements GetRequirements(const Renderer&) const override;
     bool UsesSurfacePipeline(const Renderer&) const override;
     bool NeedsSurface(const Renderer&) const override;
-    bool PrepareCamera(RenderFrame&) override;
-    bool Prepare(RenderFrame&, RHI::ICommandList&) override;
-    bool AddPasses(RenderStage, RenderFrame&, RHI::RenderGraph&) override;
+    using ReadOnlyRenderExtension::PrepareCamera;
+    bool PrepareCamera(Camera&,ReadOnlyRenderFrame&) override;
+    using ReadOnlyRenderExtension::Prepare;
+    using ReadOnlyRenderExtension::AddPasses;
+    bool Prepare(ReadOnlyRenderFrame&, RHI::ICommandList&) override;
+    bool AddPasses(RenderStage, ReadOnlyRenderFrame&, RHI::RenderGraph&) override;
     void CommitFrame(const RenderFrame&) override;
     void InvalidateHistory(bool release = false) override;
 private:

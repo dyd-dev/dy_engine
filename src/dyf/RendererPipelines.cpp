@@ -13,7 +13,7 @@
 using namespace dyf;
 
 // 셰이더의 binding 번호·종류·개수·가시 단계·상수 크기를 하나의 계약으로 만든다. 지원 질의와 실제 파이프라인 생성이 이 함수를 공유한다.
-RHI::PipelineLayoutDesc Renderer::Impl::MeshLayout(bool bindless, std::vector<RHI::ResourceBindingLayout>& bindings) const
+RHI::PipelineLayoutDesc Renderer::Impl::MeshLayout(bool bindless, std::vector<RHI::ResourceBindingLayout>& bindings,bool surfaceOwner) const
 {
 	// 재질은 반복 주소와 선형 mip 필터를 사용한다. maxAnisotropy는 장치 한도를 읽어 1 이상 8 이하로 제한한다.
 	RHI::SamplerDesc materialSampler = {};
@@ -75,6 +75,8 @@ RHI::PipelineLayoutDesc Renderer::Impl::MeshLayout(bool bindless, std::vector<RH
         bindings.push_back({19,RHI::ResourceBindingType::ReadOnlyStorageBuffer,1,RHI::ShaderStageFlags::Fragment,{}});
         bindings.push_back({20,RHI::ResourceBindingType::ReadOnlyStorageBuffer,1,RHI::ShaderStageFlags::Fragment,{}});
         bindings.push_back({21,RHI::ResourceBindingType::ConstantBuffer,1,RHI::ShaderStageFlags::Fragment,{}});
+        if(surfaceOwner)
+            bindings.push_back({25,RHI::ResourceBindingType::SampledTexture,1,RHI::ShaderStageFlags::Fragment,{}});
         bindings.push_back({26,RHI::ResourceBindingType::SampledTexture,1,RHI::ShaderStageFlags::Fragment,{}});
         bindings.push_back({27,RHI::ResourceBindingType::SampledTexture,1,RHI::ShaderStageFlags::Fragment,{}});
     }
@@ -144,7 +146,11 @@ bool Renderer::Impl::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorF
 	desc.colorAttachments = &colorAttachment;
 	desc.colorAttachmentCount = 1;
     std::vector<RHI::ResourceBindingLayout> bindings;
-    desc.layout=MeshLayout(UsesBindlessMaterials(),bindings);
+    const bool bindless=UsesBindlessMaterials();
+    const bool surfaceCache=surfaceCacheVertex && surfaceCacheFragment && UsesInstanceStream() && UsesAdvancedRendering() &&
+        shaderSources.bytes[MeshVertex].empty() && shaderSources.bytes[MeshFragment].empty() &&
+        device->Supports(MeshLayout(bindless,bindings,true));
+    desc.layout=MeshLayout(bindless,bindings,surfaceCache);
     const bool stockFragment=shaderSources.bytes[MeshFragment].empty();
     if(stockFragment) colorAttachment.blend.enabled=false; // 기본 불투명 파이프라인은 알파 합성을 끄고 색을 직접 쓴다.
     pipeline = device->CreateGraphicsPipeline(desc);
@@ -184,6 +190,31 @@ bool Renderer::Impl::BuildPipelineStates(RHI::IDevice* device,RHI::Format colorF
         desc.fragmentShader=fragmentShader;
     }
 
+    if(surfaceCache)
+    {
+        vertexBuffers.push_back({2,8,RHI::VertexStepMode::Instance});
+        attributes.push_back({9,2,RHI::Format::R32G32_UINT,0});
+        desc.vertexBuffers=vertexBuffers.data();desc.vertexBufferCount=static_cast<uint32_t>(vertexBuffers.size());
+        desc.vertexAttributes=attributes.data();desc.vertexAttributeCount=static_cast<uint32_t>(attributes.size());
+        desc.vertexShader=surfaceCacheVertex;desc.fragmentShader=surfaceCacheFragment;
+        desc.depthStencil.depthWriteEnabled=false;desc.depthStencil.depthCompareOp=RHI::CompareOp::LessEqual;
+        colorAttachment.blend.enabled=false;
+        for(uint32_t variant=0;variant<surfaceCachePipelines.size();++variant)
+        {
+            if(variant&2u)continue;
+            desc.raster.cullMode=(variant&1u)?RHI::CullMode::None:RHI::CullMode::Back;
+            desc.raster.frontFace=(variant&4u)?RHI::FrontFace::Clockwise:RHI::FrontFace::CounterClockwise;
+            surfaceCachePipelines[variant]=device->CreateGraphicsPipeline(desc);
+            if(!surfaceCachePipelines[variant])
+            {
+                for(auto& value:surfaceCachePipelines) {device->DestroyPipeline(value);value=nullptr;}
+                break;
+            }
+        }
+        vertexBuffers.pop_back();attributes.pop_back();
+        desc.vertexBufferCount=static_cast<uint32_t>(vertexBuffers.size());desc.vertexAttributeCount=static_cast<uint32_t>(attributes.size());
+        desc.vertexShader=vertexShader;desc.fragmentShader=fragmentShader;
+    }
     if(depthPrepassFragmentShader && UsesStockGeometry() && UsesAdvancedRendering())
     {
         desc.fragmentShader=depthPrepassFragmentShader;

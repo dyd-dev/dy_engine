@@ -7,7 +7,7 @@ namespace dyf::Detail
 {
 namespace
 {
-class TransparencyModule final : public RenderExtension
+class TransparencyModule final : public ReadOnlyRenderExtension
 {
 public:
     explicit TransparencyModule(std::shared_ptr<EnvironmentFilteringProof> proof):m_proof(std::move(proof)) {}
@@ -16,6 +16,7 @@ public:
     RenderRequirements GetRequirements(const Renderer& renderer) const override
     {
         RenderRequirements requirements;
+        requirements.acceptsPackedMaterialOwner=true;
         const auto& config=renderer.GetAppliedConfig();
         if(AdvancedModuleEnabled(renderer) && config.advanced.transparency && !config.debugWireframe)
         {
@@ -25,7 +26,7 @@ public:
         return requirements;
     }
 
-    bool Prepare(RenderFrame& frame,RHI::ICommandList& uploads) override
+    bool Prepare(ReadOnlyRenderFrame& frame,RHI::ICommandList& uploads) override
     {
         m_prepared=false;
         if(!GetRequirements(frame.renderer).handlesTransparency || frame.wireframe)
@@ -36,7 +37,7 @@ public:
         if(!m_transparency) m_transparency=std::make_unique<TransparentRendering>();
         const auto& config=frame.renderer.GetAppliedConfig();
         const auto& resources=frame.lighting.environment;
-        const bool trusted=m_proof && m_proof->nativeFiltering && m_proof->frame==&frame &&
+        const bool trusted=m_proof && m_proof->nativeFiltering && m_proof->frame==frame.GetIdentity() &&
             m_proof->device==&frame.renderer.GetDevice() &&
             m_proof->resources.prefilter==resources.prefilter && m_proof->resources.probeData==resources.probeData &&
             m_proof->resources.probePrefilter==resources.probePrefilter &&
@@ -49,7 +50,7 @@ public:
         return m_prepared;
     }
 
-    bool AddPasses(RenderStage stage,RenderFrame& frame,RHI::RenderGraph& graph) override
+    bool AddPasses(RenderStage stage,ReadOnlyRenderFrame& frame,RHI::RenderGraph& graph) override
     {
         if(stage!=RenderStage::Transparency || frame.outputWritten || !m_prepared ||
             !m_transparency->HasDraws()) return true;

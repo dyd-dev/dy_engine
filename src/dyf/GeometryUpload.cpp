@@ -42,6 +42,7 @@ namespace
 // 한 메시의 원본/LOD 버퍼, 인덱스 수, 경계, 준비 상태를 함께 정리한다. 이 함수 자체는 Scene의 CPU MeshData를 삭제하지 않는다.
 void Renderer::Impl::DestroyMeshState(RHI::IDevice* device, SceneMeshState& mesh)
 {
+    ++geometryRevision;
     mesh.shadowArena={};
     shadowArenaDirty=true;shadowArenaAttempted=false;
 	DestroyBuffer(device, mesh.vertexBuffer, mesh.vertexReady);
@@ -51,9 +52,13 @@ void Renderer::Impl::DestroyMeshState(RHI::IDevice* device, SceneMeshState& mesh
 	DestroyBuffer(device, mesh.mainIndexBuffer, mesh.mainIndexReady);
     DestroyBuffer(device,mesh.indirectIndexBuffer,mesh.indirectIndexReady);
     mesh.indirectFirstIndices={};
+    mesh.mainClusters.clear();
     mesh.indirectIndexAttemptedBytes=0;
     mesh.shadowIndexFormat=RHI::Format::R32_UINT;
-	for(auto& lod:mesh.lods) DestroyBuffer(device,lod.buffer,lod.ready);
+    for(auto& lod:mesh.lods) {
+        DestroyBuffer(device,lod.buffer,lod.ready);
+        DestroyBuffer(device,lod.rangeBuffer,lod.rangeReady);
+    }
 	mesh.lods.clear();mesh.lodsGenerated=false;
 	mesh.indexCount = 0;
     mesh.bounds={};
@@ -98,13 +103,66 @@ bool Renderer::Impl::BuildCompactShadowGeometry(const std::vector<RendererVertex
     return true;
 }
 
+template<class Vertex,class Cluster>
+void BuildSpatialClusters(const std::vector<Vertex>& vertices,
+    std::vector<uint32_t>& indices,std::vector<Cluster>& clusters)
+{
+    clusters.clear();
+    if(vertices.empty() || indices.size()%3 || indices.size()>UINT32_MAX)return;
+    const size_t triangles=indices.size()/3;
+    // Both main and shadow draws can reject these immutable spatial ranges on the GPU.
+    const size_t count=std::min<size_t>(triangles/1024,256);
+    if(count<2)return;
+    for(uint32_t index:indices) {
+        if(index>=vertices.size())return;
+        const auto& v=vertices[index];
+        for(float value:{v.px,v.py,v.pz})if(!std::isfinite(value) || std::abs(value)>1e10f)return;
+    }
+    Math::Bounds3 centers;
+    for(size_t i=0;i<indices.size();i+=3) {
+        const auto& a=vertices[indices[i]];const auto& b=vertices[indices[i+1]];const auto& c=vertices[indices[i+2]];
+        centers.Include({(a.px+b.px+c.px)/3.f,(a.py+b.py+c.py)/3.f,(a.pz+b.pz+c.pz)/3.f});
+    }
+    const float extent=std::max({centers.max.x-centers.min.x,centers.max.y-centers.min.y,centers.max.z-centers.min.z});
+    // meshoptimizer quantizes triangle centers with 65535/extent before converting to integers.
+    if(extent==0 || !std::isfinite(65535.f/extent))return;
+    std::vector<uint32_t> spatial(indices.size());
+    meshopt_spatialSortTriangles(spatial.data(),indices.data(),indices.size(),
+        &vertices.front().px,vertices.size(),sizeof(Vertex));
+    const size_t step=((triangles+count-1)/count)*3;
+    for(size_t first=0;first<spatial.size();first+=step) {
+        Cluster cluster;
+        cluster.firstIndex=static_cast<uint32_t>(first);
+        cluster.indexCount=static_cast<uint32_t>(std::min(step,spatial.size()-first));
+        for(size_t i=first;i<first+cluster.indexCount;++i) {
+            const auto& v=vertices[spatial[i]];
+            cluster.bounds.Include({v.px,v.py,v.pz});
+        }
+        meshopt_optimizeVertexCache(spatial.data()+first,spatial.data()+first,cluster.indexCount,vertices.size());
+        clusters.push_back(cluster);
+    }
+    indices.swap(spatial);
+}
+
+void Renderer::Impl::BuildShadowClusters(const std::vector<CompactShadowVertex>& vertices,
+    std::vector<uint32_t>& indices,std::vector<ShadowCluster>& clusters)
+{BuildSpatialClusters(vertices,indices,clusters);}
+
+void Renderer::Impl::BuildMainClusters(const std::vector<RendererVertex>& vertices,
+    std::vector<uint32_t>& indices,std::vector<ShadowCluster>& clusters)
+{BuildSpatialClusters(vertices,indices,clusters);}
+
 RHI::BufferHandle Renderer::Impl::MainIndexBuffer(const SceneMeshState& mesh,uint32_t level,
     const MaterialDesc& material,const RendererDrawDesc* input) const
 {
-    if(level)return mesh.lods[level-1].buffer;
     const bool originalVertices=!input ||
         ((!input->vertexBuffer || input->vertexBuffer==mesh.vertexBuffer) &&
          (!input->previousVertexBuffer || input->previousVertexBuffer==mesh.vertexBuffer));
+    if(level) {
+        const auto& lod=mesh.lods[level-1];
+        return stockDrawInputs && !UsesBlendedRendering(material) && originalVertices && lod.rangeReady && lod.rangeBuffer
+            ? lod.rangeBuffer : lod.buffer;
+    }
     return stockDrawInputs && !UsesBlendedRendering(material) && originalVertices &&
         mesh.mainIndexBuffer && mesh.mainIndexReady ? mesh.mainIndexBuffer : mesh.indexBuffer;
 }
@@ -167,6 +225,7 @@ bool Renderer::Impl::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 		// 원본·LOD·추가 주/그림자 인덱스의 업로드 제출 상태가 모두 준비된 메시만 재사용한다. prepared는 GPU 완료 확인값이 아니다.
 		if(mesh.prepared && (!config.enableLod || mesh.lodsGenerated) && (!preparePerMeshShadow || (mesh.shadowIndexReady && mesh.shadowVertexReady)) &&
             (!needMain || mesh.mainIndexReady)) continue;
+        ++geometryRevision;
         const MeshData& source = *sourceMesh;
 		mesh.prepared=false;
         mesh.bounds={};
@@ -273,6 +332,11 @@ bool Renderer::Impl::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
                     if(sharedReferenced==sourceReferenced)mainIndices.clear();
                 }
             }
+            if(indices.size()>=6144 && UsesGpuVisibility()) {
+                if(mainIndices.empty())mainIndices=indices;
+                BuildMainClusters(vertices,mainIndices,mesh.mainClusters);
+                if(mesh.mainClusters.empty() && mainIndices==indices)mainIndices.clear();
+            }
             if(mainIndices.empty())mesh.mainIndexReady=true;
         }
 		if(config.enableLod && !mesh.lodsGenerated) // LOD가 켜져 있고 아직 생성하지 않은 메시만 LOD를 준비한다.
@@ -296,7 +360,13 @@ bool Renderer::Impl::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 			for(auto& level:levels)
 			{
 				SceneMeshState::IndexLod lod;lod.count=static_cast<uint32_t>(level.indices.size());lod.error=level.error;
-				lod.indices=std::move(level.indices);pendingLods.push_back(std::move(lod));
+                lod.indices=std::move(level.indices);
+                if(UsesGpuVisibility() && lod.indices.size()>=6144) {
+                    lod.rangeIndices=lod.indices;
+                    BuildMainClusters(vertices,lod.rangeIndices,lod.clusters);
+                    if(lod.clusters.empty())lod.rangeIndices.clear();
+                }
+                pendingLods.push_back(std::move(lod));
 			}
 			mesh.lods=std::move(pendingLods);
 			// 생성된 LOD가 없어도 lodsGenerated를 켜서, 더 줄일 수 없는 메시를 다음 호출에서 다시 단순화하지 않는다.
@@ -383,13 +453,20 @@ bool Renderer::Impl::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
         }
 		for(auto& lod:mesh.lods)
 		{
-			if(lod.ready) continue; // 이미 제출한 LOD 버퍼는 다시 보내지 않는다.
 			const uint32_t bytes=lod.count*sizeof(uint32_t);
-			if(lod.indices.size()!=lod.count || !EnsureBuffer(device,lod.buffer,lod.ready,bytes, // LOD CPU 개수·GPU 버퍼 확보·업로드 기록 중 하나라도 실패하면 중단한다.
-				sizeof(uint32_t),RHI::BufferUsage::Index) ||
-				!RecordBufferUpload(device,*commands,lod.buffer,lod.indices.data(),bytes,RHI::ResourceState::IndexBuffer))
-			{uploadFailed=true;break;}
-			uploaded.push_back(&lod.ready);
+            if(!lod.ready) {
+                if(lod.indices.size()!=lod.count || !EnsureBuffer(device,lod.buffer,lod.ready,bytes,
+                    sizeof(uint32_t),RHI::BufferUsage::Index) ||
+                    !RecordBufferUpload(device,*commands,lod.buffer,lod.indices.data(),bytes,RHI::ResourceState::IndexBuffer))
+                    {uploadFailed=true;break;}
+                uploaded.push_back(&lod.ready);
+            }
+            if(!lod.rangeReady && !lod.rangeIndices.empty()) {
+                if(!EnsureBuffer(device,lod.rangeBuffer,lod.rangeReady,bytes,sizeof(uint32_t),RHI::BufferUsage::Index) ||
+                    !RecordBufferUpload(device,*commands,lod.rangeBuffer,lod.rangeIndices.data(),bytes,RHI::ResourceState::IndexBuffer))
+                    {uploadFailed=true;break;}
+                uploaded.push_back(&lod.rangeReady);
+            }
 		}
 		if(uploadFailed) break; // LOD 준비에서 생긴 실패도 바깥 메시 반복까지 중단시킨다.
 	}
@@ -408,8 +485,9 @@ bool Renderer::Impl::PrepareGeometry(const Scene& scene, RHI::IDevice* device)
 			bool lodsReady=true;
 			for(auto& lod:mesh.lods)
 			{
-				lodsReady=lodsReady && lod.ready;
+                lodsReady=lodsReady && lod.ready && (lod.rangeIndices.empty() || lod.rangeReady);
 				if(lod.ready) std::vector<uint32_t>().swap(lod.indices); // LOD 업로드가 제출되었으면 재시도용 CPU 인덱스 저장소를 비운다.
+                if(lod.rangeReady)std::vector<uint32_t>().swap(lod.rangeIndices);
 			}
 			// 필요한 원본·주/그림자 버퍼와 LOD의 업로드 제출이 성공했을 때만 prepared를 확정한다.
             // Original geometry is renderable while the optional first arena is
@@ -492,6 +570,8 @@ bool Renderer::Impl::PrepareShadowArena(const Scene& scene,RHI::IDevice* device)
             if(!BuildCompactShadowGeometry(sourceVertices,inputIndices,compactVertices,compactIndices))return false;
             if(compactIndices.empty())continue;
             if(compactIndices.size()!=mesh.indexCount)return false;
+            auto& range=ranges[index];
+            BuildShadowClusters(compactVertices,compactIndices,range.clusters);
             const uint32_t maximum=*std::max_element(compactIndices.begin(),compactIndices.end());
             const auto format=maximum<=UINT16_MAX?RHI::Format::R16_UINT:RHI::Format::R32_UINT;
             const uint32_t indexSize=format==RHI::Format::R16_UINT?2u:4u;
@@ -502,7 +582,6 @@ bool Renderer::Impl::PrepareShadowArena(const Scene& scene,RHI::IDevice* device)
                 vertices.size()>INT32_MAX || indexOffset>UINT32_MAX || indexBytes>UINT32_MAX-indexOffset ||
                 indexOffset+indexBytes>indices.max_size())
                 return true; // Keep existing arena/per-mesh/original-buffer fallbacks.
-            auto& range=ranges[index];
             range.generation=generation;range.baseVertex=static_cast<uint32_t>(vertices.size());
             range.indexByteOffset=static_cast<uint32_t>(indexOffset);range.indexFormat=format;
             range.sortSafeInputs=true;
@@ -586,6 +665,7 @@ bool Renderer::Impl::PrepareShadowArena(const Scene& scene,RHI::IDevice* device)
 void Renderer::Impl::ReleaseGeometry(RHI::IDevice* device)
 {
 	if(device == nullptr) return; // 장치가 없으면 GPU 캐시 해제 루틴을 호출하지 않는다.
+    gpuShadows={};
 	for(auto& mesh : m_meshes) DestroyMeshState(device, mesh);
 	m_meshes.clear();
     if(shadowArenaVertices)device->DestroyBuffer(shadowArenaVertices);
@@ -638,11 +718,12 @@ bool Renderer::Impl::PrepareMainIndirectGeometry(const Scene& scene,RHI::IDevice
                 if(levels==sources.size() || !lod.ready || !lod.buffer || !lod.count)break;
                 if(indexCount>UINT32_MAX/sizeof(uint32_t))break;
                 firstIndices[levels]=static_cast<uint32_t>(indexCount);
-                sources[levels]=lod.buffer;counts[levels]=lod.count;
+                sources[levels]=lod.rangeReady && lod.rangeBuffer?lod.rangeBuffer:lod.buffer;counts[levels]=lod.count;
                 indexCount+=lod.count;++levels;
             }
             if(levels<2 || indexCount>UINT32_MAX/sizeof(uint32_t))
             {
+                if(mesh.indirectIndexReady)++geometryRevision;
                 mesh.indirectIndexReady=false;
                 continue;
             }
@@ -650,6 +731,7 @@ bool Renderer::Impl::PrepareMainIndirectGeometry(const Scene& scene,RHI::IDevice
             if(mesh.indirectIndexReady && mesh.indirectIndexBuffer && mesh.indirectIndexBuffer->GetDesc().size==bytes &&
                 mesh.indirectFirstIndices==firstIndices)continue;
             // Expanded LOD layouts must not use offsets from the previous copy.
+            if(mesh.indirectIndexReady)++geometryRevision;
             mesh.indirectIndexReady=false;
             bool valid=true;
             for(uint32_t level=0;level<levels;++level)
@@ -686,6 +768,7 @@ bool Renderer::Impl::PrepareMainIndirectGeometry(const Scene& scene,RHI::IDevice
             mesh.indirectIndexBuffer=std::exchange(replacement.buffer,nullptr);
             mesh.indirectFirstIndices=replacement.firstIndices;
             mesh.indirectIndexReady=true;
+            ++geometryRevision;
             mesh.indirectIndexAttemptedBytes=0;
             if(previous)device->DestroyBuffer(previous);
         }

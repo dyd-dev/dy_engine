@@ -67,6 +67,7 @@ namespace dyf::Backends
         case RHI::Format::BC5_UNORM: return DXGI_FORMAT_BC5_UNORM;
         case RHI::Format::R16G16B16A16_FLOAT: return DXGI_FORMAT_R16G16B16A16_FLOAT;
         case RHI::Format::R16_FLOAT: return DXGI_FORMAT_R16_FLOAT;
+        case RHI::Format::R32G32_UINT: return DXGI_FORMAT_R32G32_UINT;
         case RHI::Format::R32G32_FLOAT: return DXGI_FORMAT_R32G32_FLOAT;
         case RHI::Format::R32_FLOAT: return DXGI_FORMAT_R32_FLOAT;
         case RHI::Format::R32G32B32_FLOAT: return DXGI_FORMAT_R32G32B32_FLOAT;

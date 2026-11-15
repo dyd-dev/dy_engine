@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <limits>
 #include <stdexcept>
@@ -162,10 +163,21 @@ public:
     };
     RHI::Format reactiveFormat=RHI::Format::Unknown;
     bool nearestDepth=false;
+    bool surfaceCacheDemand=false,surfaceCachePass=false;
+    bool suppressSurfaceCache=false,mutateSurfaceInput=false;
+    bool acceptsPackedOwner=false;
+    std::function<void(RenderFrame&)> surfaceMutation;
+#if defined(DY_SURFACE_OWNER_PROBE)
+    RenderingProbe::SurfaceOwnerProbe* surfaceOwnerProbe=nullptr;
+#endif
+    bool rangesBefore=false,rangesAfter=false;
+    RenderRequirements GetRequirements(const Renderer&) const override
+    {RenderRequirements r;r.needsSurface=surfaceCacheDemand;r.acceptsPackedMaterialOwner=acceptsPackedOwner;return r;}
     std::vector<DeformedDraw> deformedDraws;
     bool Prepare(RenderFrame& frame,RHI::ICommandList&) override
     {
-        reactiveFormat=RHI::Format::Unknown;nearestDepth=false;
+        reactiveFormat=RHI::Format::Unknown;nearestDepth=false;surfaceCachePass=false;
+        rangesBefore=rangesAfter=false;
         deformedDraws.clear();
         if(frame.draws)for(uint32_t entity=0;entity<frame.draws->size();++entity)
         {
@@ -177,10 +189,23 @@ public:
     }
     bool AddPasses(RenderStage stage,RenderFrame& frame,RHI::RenderGraph& graph) override
     {
+        if(stage==RenderStage::OpaqueLighting)
+        {
+            if(suppressSurfaceCache)frame.surfaceMaterialComplete=false;
+            if(mutateSurfaceInput && !frame.geometry.empty())frame.geometry.front().baseColor.y+=.125f;
+            if(surfaceMutation)surfaceMutation(frame);
+        }
         if(stage!=RenderStage::PostProcess)return true;
+#if defined(DY_SURFACE_OWNER_PROBE)
+        if(surfaceOwnerProbe)surfaceOwnerProbe->Capture(graph,frame.materialOwner,
+            acceptsPackedOwner?SurfaceOwnerStride(frame.scene.GetEntityCount()):0);
+#endif
         if(frame.reactive.texture)reactiveFormat=frame.reactive.texture->GetDesc().format;
         for(uint32_t index=0;const auto* pass=graph.GetPass(index);++index)
-            nearestDepth|=pass->GetName()=="Transparency nearest depth";
+            {nearestDepth|=pass->GetName()=="Transparency nearest depth";
+            surfaceCachePass|=pass->GetName()=="Surface primitive material cache";
+            rangesBefore|=pass->GetName()=="GPU spatial range selection";
+            rangesAfter|=pass->GetName()=="GPU ranges after HiZ";}
         return true;
     }
 };
@@ -421,6 +446,71 @@ public:
                 Expect(image,x,128,{center[0],center[1],center[2],center[3]},"Orthographic view direction is constant across the plane",2);
         }
         std::puts("PASS orthographic specular: basic, advanced opaque and transparent plane pixels are spatially constant.");
+    }
+
+    void TransparentDeformedBounds()
+    {
+        auto config=Config();config.clearColor={0,0,0,1};config.lighting.shadows=false;
+        Require(m_renderer->SetConfig(config),"Transparent deformation configuration failed.");
+        auto red=Unlit({1,0,0}),blue=Unlit({0,0,1});
+        red.alphaMode=blue.alphaMode=MaterialAlphaMode::Blend;
+        red.baseColor.w=blue.baseColor.w=.5f;
+        const auto finalMesh=Quad(-.8f,.8f,-.8f,.8f,-4);
+        Scene baked,deformed;
+        Require(bool(baked.Add(finalMesh,red)) && bool(baked.Add(Quad(-.8f,.8f,-.8f,.8f,-5),blue)),
+            "Baked transparency fixture failed.");
+        Require(bool(deformed.Add(Quad(-.8f,.8f,-.8f,.8f,-6),red)) &&
+            bool(deformed.Add(Quad(-.8f,.8f,-.8f,.8f,-5),blue)),"Deformed transparency fixture failed.");
+        // Public Mesh vertices store color before tangent; stock GPU vertices use the reverse order.
+        struct StockVertex {float x,y,z,nx,ny,nz,u,v,tx,ty,tz,tw,r,g,b,a;};
+        static_assert(sizeof(StockVertex)==64);
+        std::vector<StockVertex> vertices;
+        std::vector<RendererDrawDesc> draws(deformed.GetEntityCount());
+        for(auto& draw:draws)draw.stockGeometry=true;
+        for(const auto& vertex:finalMesh.vertices)
+        {
+            vertices.push_back({vertex.position.x,vertex.position.y,vertex.position.z,
+                vertex.normal.x,vertex.normal.y,vertex.normal.z,vertex.uv.x,vertex.uv.y,
+                vertex.tangent.x,vertex.tangent.y,vertex.tangent.z,vertex.tangent.w,
+                vertex.color.x,vertex.color.y,vertex.color.z,vertex.color.w});
+            draws[0].localBounds.Include(vertex.position);
+        }
+        RHI::ResourceScope resources(*m_device);
+        const auto bytes=static_cast<uint32_t>(vertices.size()*sizeof(StockVertex));
+        draws[0].vertexBuffer=resources.Keep(m_device->CreateBuffer({bytes,sizeof(StockVertex),
+            RHI::BufferUsage::Vertex,RHI::ResourceState::CopyDestination}));
+        draws[0].hasLocalBounds=true;draws[0].geometryRevision=1;
+        auto* commands=resources.Keep(m_device->AcquireCommandList());
+        Require(m_device->UpdateBuffer(*commands,draws[0].vertexBuffer,0,vertices.data(),bytes),
+            "Deformed transparency vertex upload failed.");
+        RenderingProbe::Barrier(*commands,draws[0].vertexBuffer,RHI::ResourceState::CopyDestination,RHI::ResourceState::VertexBuffer);
+        Require(commands->Close() && m_device->Submit(&commands,1) && m_device->WaitIdle(),
+            "Deformed transparency vertex submission failed.");
+        const auto capture=[&](const Scene& scene,const std::vector<RendererDrawDesc>& inputs,const char* name) {
+            Image image;
+            for(uint32_t attempt=0;attempt<16 && !image.IsValid();++attempt)
+            {
+                Platform::Window::PollEvents();
+                Require(m_renderer->Render(scene,m_camera,inputs,nullptr,&image),std::string(name)+": render failed.");
+                if(!image.IsValid())Platform::Window::WaitEvents(.01);
+            }
+            Require(image.IsValid(),std::string(name)+": no readback within sixteen acquisition attempts.");
+            ++m_frames;
+            if(!m_options.captures.empty())
+            {
+                const auto path=m_options.captures/(std::string(name)+".png");
+                Require(stbi_write_png(path.string().c_str(),int(image.GetWidth()),int(image.GetHeight()),4,
+                    image.GetPixels().data(),int(image.GetWidth()*4))!=0,"Cannot write "+path.string());
+            }
+            return image;
+        };
+        auto bakedDraws=draws;bakedDraws[0]={};bakedDraws[0].stockGeometry=true;
+        const auto reference=capture(baked,bakedDraws,"transparent-baked-bounds");
+        const auto candidate=capture(deformed,draws,"transparent-deformed-bounds");
+        const auto center=(size_t(reference.GetHeight()/2)*reference.GetWidth()+reference.GetWidth()/2)*4;
+        Require(reference.GetPixels()[center]>reference.GetPixels()[center+2]+20,
+            "Baked transparency control must place the red layer in front of blue.");
+        CompareModelInteriors(reference,candidate,"Forward deformed transparent bounds","baked/override");
     }
 
     void NormalsAndInstancing()
@@ -822,11 +912,316 @@ public:
         }
     }
 
+    void ShadowClusterCoverage()
+    {
+        const auto cube=CreateCubeMesh(.45f);
+        MeshData mesh;
+        for(float x:{-.3f,30.f})for(auto vertex:cube.vertices) {
+            vertex.position.x+=x;vertex.position.z+=.3f;mesh.vertices.push_back(vertex);
+        }
+        // Interleave complete triangles, retaining the original cube winding.
+        for(uint32_t repeat=0;repeat<1024;++repeat)for(size_t i=0;i<cube.indices.size();i+=3)
+            for(uint32_t offset:{0u,static_cast<uint32_t>(cube.vertices.size())})
+                for(size_t corner=0;corner<3;++corner)mesh.indices.push_back(cube.indices[i+corner]+offset);
+        for(bool masked:{false,true})for(bool localLight:{false,true})
+        {
+            Scene scene;MaterialDesc material;material.baseColor={.7f,.7f,.7f,1};material.roughnessFactor=1;
+            auto receiver=scene.Add(Quad(-.95f,.95f,-.95f,.95f,-.2f),material);
+            Require(bool(receiver) && receiver.SetLighting({false,true}),"Shadow cluster receiver failed.");
+            if(masked) {
+                material.alphaMode=MaterialAlphaMode::Mask;
+                material.baseColorTexture=Image(2,2,{255,255,255,0,255,255,255,255,255,255,255,255,255,255,255,0});
+            }
+            auto caster=scene.Add(mesh,material);Require(bool(caster),"Shadow cluster mesh failed.");
+            if(localLight) {
+                PointLight light;light.position={.7f,.5f,1.5f};light.range=5;light.shadowStrength=1;
+                Require(bool(scene.Add(light)),"Shadow cluster point light failed.");
+            } else {
+                DirectionalLight light;light.direction={.6f,.2f,1};light.shadowStrength=1;
+                Require(bool(scene.Add(light)),"Shadow cluster directional light failed.");
+            }
+            for(float mirror:{1.f,-1.f})
+            {
+                auto transform=Math::RotationZ(.15f)*Math::Scaling({mirror,.8f,1.2f});transform.m[4]+=.1f;
+                Require(caster.SetTransform(transform),"Shadow cluster transform failed.");
+                auto config=Config();config.lighting.shadows=true;config.lighting.shadowQuality=ShadowQuality::Low;
+                // Paged stock shadows exceed D3D12's root-signature budget; use the supported material array.
+                config.enableBindlessMaterials=true;
+                config.lighting.shadowDistance=8;config.lighting.reuseStaticShadows=false;
+                config.enableInstancing=true;config.enableFrustumCulling=false;
+                const auto reference=Render(scene,"shadow-cluster-reference",config);
+                const auto triangles=m_renderer->GetLastRenderStatistics().shadowTriangleCount;
+                config.enableFrustumCulling=true;
+                const auto actual=Render(scene,"shadow-cluster-culled",config);
+                Require(reference.pixels==actual.pixels,"Coarse shadow culling changed RGBA (mask, mirror, shear or point face).");
+                if(m_device->Supports(RHI::Feature::IndirectDraw) && m_device->Supports(RHI::Feature::IndirectFirstInstance))
+                    Require(m_renderer->GetLastRenderStatistics().shadowTriangleCount<triangles,
+                        "Coarse shadow ranges did not reject the distant island.");
+                if(m_device->Supports(RHI::Feature::Compute) && m_device->Supports(RHI::Feature::IndirectDraw) &&
+                    m_device->Supports(RHI::Feature::IndirectFirstInstance)) {
+                    config.enableGpuCulling=true;
+                    const auto gpu=Render(scene,"shadow-cluster-gpu",config);
+                    Require(m_renderer->GetLastRenderStatistics().gpuShadowCulling &&
+                        m_renderer->GetLastRenderStatistics().shadowTriangleCount==0,
+                        "GPU shadow path was not used or reported a CPU visibility count.");
+                    Require(reference.pixels==gpu.pixels,"GPU shadow culling changed opaque/MASK light coverage.");
+                }
+                config.lighting.reuseStaticShadows=true;
+                const auto cached=Render(scene,"shadow-cluster-cache-prime",config);
+                const auto reused=Render(scene,"shadow-cluster-cache-reuse",config);
+                Require(reference.pixels==cached.pixels && reference.pixels==reused.pixels &&
+                    m_renderer->GetLastRenderStatistics().reusedShadowAtlas,
+                    "Shadow atlas reuse changed pixels or missed an unchanged scene.");
+                config.lighting.shadows=false;
+                const auto unshadowed=Render(scene,"shadow-cluster-disabled",config);
+                Require(reference.pixels!=unshadowed.pixels,"Shadow cluster fixture contains no visible shadow.");
+            }
+        }
+        std::puts("PASS coarse shadow ranges: exact RGBA with opaque/MASK, mirrored shear, directional/point lights; fewer submitted triangles.");
+    }
+
+    void SurfaceMaterialCache()
+    {
+        if(!m_device->Supports(RHI::Feature::FragmentPrimitiveId) ||
+            !m_device->Supports(RHI::Feature::Compute) || !m_device->Supports(RHI::Feature::IndirectFirstInstance))
+        {std::puts("SKIP Surface material cache: primitive/compute/instance support unavailable.");return;}
+        m_transparencyObserver->surfaceCacheDemand=true;
+        auto config=Config(true);config.enableGpuCulling=true;config.enableInstancing=true;
+        config.advanced.reuseSurfaceMaterials=true;
+        config.enableOcclusionCulling=false;config.lighting.shadows=false;config.lighting.ambientIntensity=.2f;
+        const auto illuminate=[](Scene& scene) {
+            DirectionalLight light;light.direction={.2f,.15f,1};light.intensity=.5f;light.castShadow=false;
+            Require(bool(scene.Add(light)),"Surface cache light failed.");
+        };
+        const auto quad=[](Math::float4 color=Math::float4{1,1,1,1}) {
+            auto mesh=Quad(-.8f,.8f,-.8f,.8f,0,color);
+            const Math::float2 uv[]={{0,0},{1,0},{1,1},{0,1}};
+            for(size_t i=0;i<mesh.vertices.size();++i) {mesh.vertices[i].uv=uv[i];mesh.vertices[i].tangent={1,0,0,1};}
+            return mesh;
+        };
+        const auto compare=[&](Scene& scene,const std::string& label,bool expectedReuse=true) {
+            m_transparencyObserver->suppressSurfaceCache=false;
+            const auto actual=Render(scene,(label+"-cache").c_str(),config);
+            Require(m_transparencyObserver->surfaceCachePass,"GPU full Surface did not capture primitive material cache.");
+            Require(m_renderer->GetLastRenderStatistics().surfaceMaterialReuse==expectedReuse,
+                label+": unexpected Main material reuse selection.");
+#if defined(DY_SURFACE_OWNER_PROBE)
+            if(m_transparencyObserver->surfaceOwnerProbe)m_transparencyObserver->surfaceOwnerProbe->VerifyQuad();
+#endif
+            m_transparencyObserver->suppressSurfaceCache=true;
+            const auto reference=Render(scene,(label+"-reference").c_str(),config);
+            Require(!m_renderer->GetLastRenderStatistics().surfaceMaterialReuse,
+                "Explicit provider opt-out must retain original material sampling.");
+            m_transparencyObserver->suppressSurfaceCache=false;
+            for(uint32_t y=0;y<Size;++y)for(uint32_t x=0;x<Size;++x)for(uint32_t c=0;c<4;++c)
+            {
+                const auto a=actual.pixels[size_t(y)*actual.rowPitch+x*4+c];
+                const auto b=reference.pixels[size_t(y)*reference.rowPitch+x*4+c];
+                Require(std::abs(int(a)-int(b))<=2,label+": cached material changed native pixel coverage/radiance.");
+            }
+            return actual;
+        };
+        const auto litConfig=config;
+        config.lighting.ambientIntensity=0;
+        for(bool packed:{false,true})
+        {
+            m_transparencyObserver->acceptsPackedOwner=packed;
+            for(float roughness:{.04f,3.f/64.f})
+            {
+                Scene glossy;MaterialDesc metal;metal.metallicFactor=1;metal.roughnessFactor=roughness;
+                auto triangle=quad();triangle.vertices.resize(3);triangle.vertices[2].position.x=0;
+                triangle.indices={0,1,2};
+                for(auto& vertex:triangle.vertices)vertex.normal=Math::Normalize(Math::float3{1,1,1});
+                Require(bool(glossy.Add(triangle,metal)),"Glossy Surface precision fixture failed.");
+                DirectionalLight light;light.direction={2.f/3.f,2.f/3.f,-1.f/3.f};light.intensity=.00002f;light.castShadow=false;
+                Require(bool(glossy.Add(light)),"Glossy Surface precision light failed.");
+                // 3/64 is exact in FP16, isolating the cached oct-normal error from roughness rounding.
+                const auto label=std::string("surface-cache-glossy-")+(packed?"packed-":"full-")+std::to_string(roughness);
+                const auto glossyImage=compare(glossy,label);
+                const auto value=glossyImage.pixels[size_t(Size/2)*glossyImage.rowPitch+(Size/2)*4];
+                Require(value>30 && value<245,"Glossy Surface precision control must be visible and unsaturated.");
+            }
+        }
+        config=litConfig;m_transparencyObserver->acceptsPackedOwner=false;
+        MaterialDesc material;material.baseColor={.8f,.4f,.2f,1};material.roughnessFactor=.6f;
+        material.metallicFactor=.25f;material.emissiveColor={.01f,.02f,.01f};
+        material.baseColorTexture=Image(2,2,{220,80,50,255,40,180,100,255,80,40,200,255,190,160,40,255});
+        material.metallicRoughnessTexture=Image(1,1,{0,180,160,255},ColorSpace::Linear);
+        material.normalTexture=Image(1,1,{150,135,252,255},ColorSpace::Linear);
+        material.occlusionTexture=Image(1,1,{150,150,150,255},ColorSpace::Linear);
+        Scene scene;illuminate(scene);
+        auto entity=scene.Add(quad(),material);Require(bool(entity),"Surface cache fixture failed.");
+        auto disabled=config;disabled.advanced.reuseSurfaceMaterials=false;
+        (void)Render(scene,"surface-cache-disabled",disabled);
+        Require(!m_transparencyObserver->surfaceCachePass && !m_renderer->GetLastRenderStatistics().surfaceMaterialReuse,
+            "Disabled material reuse must skip both ownership capture and Main reuse.");
+#if defined(DY_SURFACE_OWNER_PROBE)
+        RenderingProbe::SurfaceOwnerProbe ownerProbe(*m_device);m_transparencyObserver->surfaceOwnerProbe=&ownerProbe;
+#endif
+        const auto image=compare(scene,"surface-cache-textures");
+        m_transparencyObserver->acceptsPackedOwner=true;
+        const auto packed=compare(scene,"surface-cache-packed-textures");
+        Require(packed.pixels==image.pixels,"Packed and full Surface ownership changed the shaded quad.");
+#if defined(DY_SURFACE_OWNER_PROBE)
+        m_transparencyObserver->surfaceOwnerProbe=nullptr;
+#endif
+        const auto* center=image.pixels.data()+size_t(128)*image.rowPitch+128*4;
+        Require(std::max({center[0],center[1],center[2]})>30,"Surface cache control must contain lit, nonblack pixels.");
+
+        auto updated=material;updated.baseColor={.2f,.8f,.4f,1};updated.roughnessFactor=.2f;
+        updated.baseColorTexture=Image(1,1,{80,150,220,255});
+        Require(entity.SetMaterial(updated),"Surface material replacement failed.");
+        compare(scene,"surface-cache-material-change");
+        m_transparencyObserver->mutateSurfaceInput=true;
+        (void)Render(scene,"surface-cache-mutated-provider-input",config);
+        Require(!m_renderer->GetLastRenderStatistics().surfaceMaterialReuse,
+            "Late provider material-input mutation must invalidate Surface reuse.");
+        m_transparencyObserver->mutateSurfaceInput=false;
+
+        Scene mixed;illuminate(mixed);
+        const auto mixedSource=mixed.Add(quad(),material);
+        auto blend=material;blend.alphaMode=MaterialAlphaMode::Blend;blend.baseColor.w=.5f;
+        Require(bool(mixedSource) && bool(mixed.AddInstance(mixedSource)) && bool(mixed.Add(quad(),blend)) &&
+            bool(mixed.AddInstance(mixedSource)) && bool(mixed.AddInstance(mixedSource,Math::Scaling({-1,1,1}))),
+            "Mixed geometry preparation fixture failed.");
+        bool observed=false;
+        m_transparencyObserver->surfaceMutation=[&](RenderFrame& frame) {
+            const auto& geometry=frame.geometry;
+            Require(frame.gpuVisibility && geometry.size()==3 && geometry[0].indirectArguments &&
+                !geometry[1].indirectArguments && geometry[1].material->alphaMode==MaterialAlphaMode::Blend &&
+                geometry[2].indirectArguments && Math::Determinant3x3(geometry[2].model)<0,
+                "Geometry must retain both GPU representatives and the intervening direct transparent draw.");
+            observed=true;
+        };
+        (void)Render(mixed,"surface-mixed-geometry",config);
+        Require(observed,"Mixed geometry preparation was not observed.");
+        m_transparencyObserver->surfaceMutation={};
+
+        Scene canonical;illuminate(canonical);
+        auto hidden=canonical.Add(quad(),material,Math::Translation({30,0,0}));
+        auto visible=canonical.Add(quad(),material);
+        Require(bool(hidden) && bool(visible),"Canonical material fixture failed.");
+        auto changedCanonical=material;changedCanonical.baseColor={.15f,.7f,.25f,1};
+        config.enableFrustumCulling=true;
+        m_transparencyObserver->surfaceMutation=[&](RenderFrame& frame) {
+            Require(frame.geometry.size()==1 && frame.geometry.front().material==&canonical.Materials()[0],
+                "Surface must snapshot Main's canonical material even when its source mesh is culled.");
+            Require(hidden.SetMaterial(changedCanonical),"Late canonical material mutation failed.");
+        };
+        const auto canonicalChanged=Render(canonical,"surface-cache-canonical-mutation",config);
+        Require(!m_renderer->GetLastRenderStatistics().surfaceMaterialReuse,
+            "Late canonical material mutation must invalidate Surface reuse.");
+        m_transparencyObserver->surfaceMutation={};
+        Require(visible.SetMaterial(changedCanonical),"Canonical reference material replacement failed.");
+        m_transparencyObserver->suppressSurfaceCache=true;
+        const auto canonicalReference=Render(canonical,"surface-cache-canonical-reference",config);
+        m_transparencyObserver->suppressSurfaceCache=false;
+        Require(canonicalChanged.pixels==canonicalReference.pixels,
+            "Invalidated canonical cache must render the updated Main material.");
+
+        const auto previousConfig=config;
+        config.lighting.direct=false;config.lighting.environment.diffuse=true;config.lighting.ambientIntensity=.5f;
+        MaterialDesc unusual;unusual.baseColor={.7f,.5f,.3f,1};unusual.roughnessFactor=1;
+        unusual.occlusionTexture=Image(1,1,{204,204,204,255},ColorSpace::Linear);unusual.occlusionStrength=1.5f;
+        Scene aoStrength;Require(bool(aoStrength.Add(quad(),unusual)),"AO strength fixture failed.");
+        compare(aoStrength,"surface-cache-ao-strength-outside-unit-range");
+        config.lighting.enabled=false;
+        unusual={};unusual.baseColor={-.5f,.4f,.4f,1};unusual.emissiveColor={1,0,0};
+        Scene negativeMaterial;Require(bool(negativeMaterial.Add(quad(),unusual)),"Negative material fixture failed.");
+        const auto negative=compare(negativeMaterial,"surface-cache-negative-material");
+        Expect(negative,Size/2,Size/2,Display({.5,.4,.4}),"Negative base plus emissive preserves signed Main radiance",2);
+        unusual.baseColor={.5f,.4f,.4f,1};
+        Scene negativeVertex;Require(bool(negativeVertex.Add(quad({-1,1,1,1}),unusual)),"Negative vertex fixture failed.");
+        compare(negativeVertex,"surface-cache-negative-vertex");
+        unusual.baseColor={70000,1,1,1};
+        Scene overflowMaterial;Require(bool(overflowMaterial.Add(quad(),unusual)),"Half-float overflow fixture failed.");
+        compare(overflowMaterial,"surface-cache-half-overflow");
+        config=previousConfig;
+
+        Scene coplanar;illuminate(coplanar);
+        Require(bool(coplanar.Add(quad({1,.1f,.1f,1}),material)) &&
+            bool(coplanar.Add(quad({.1f,1,.1f,1}),material)),"Coplanar cache instances failed.");
+        compare(coplanar,"surface-cache-coplanar-instances");
+        auto overlap=quad({1,.1f,.1f,1});const auto green=quad({.1f,1,.1f,1});
+        const auto base=static_cast<uint32_t>(overlap.vertices.size());
+        overlap.vertices.insert(overlap.vertices.end(),green.vertices.begin(),green.vertices.end());
+        for(auto index:green.indices)overlap.indices.push_back(base+index);
+        Scene self;illuminate(self);Require(bool(self.Add(overlap,material)),"Self-overlap fixture failed.");
+        compare(self,"surface-cache-self-overlap");
+
+        Scene instances;illuminate(instances);
+        auto transform=Math::Translation({-.4f,0,0})*Math::Scaling({.45f,.7f,1});
+        auto source=instances.Add(quad(),material,transform);Require(bool(source),"Surface instance fixture failed.");
+        transform=Math::Translation({.4f,0,0})*Math::Scaling({-.45f,.7f,1});transform.m[4]+=.12f;
+        Require(bool(instances.AddInstance(source,transform)),"Mirrored/sheared instance failed.");
+        config.enableOcclusionCulling=true;
+        compare(instances,"surface-cache-mirror-shear-hiz");
+        Require(m_renderer->GetLastRenderStatistics().gpuOcclusion,"Cache fixture did not exercise current-frame HiZ.");
+
+        MeshData clustered;const auto island=quad();
+        for(float x:{0.f,30.f})for(auto vertex:island.vertices){vertex.position.x+=x;clustered.vertices.push_back(vertex);}
+        // Keep complete triangle corners together while interleaving the two islands.
+        for(uint32_t repeat=0;repeat<1024;++repeat)for(size_t first=0;first<island.indices.size();first+=3)
+            for(uint32_t offset:{0u,4u})for(size_t corner=0;corner<3;++corner)clustered.indices.push_back(island.indices[first+corner]+offset);
+        Scene ranges;illuminate(ranges);Require(bool(ranges.Add(clustered,material)),"Main range fixture failed.");
+        compare(ranges,"surface-cache-spatial-ranges");
+        Require(m_transparencyObserver->rangesBefore && m_transparencyObserver->rangesAfter,
+            "Main geometry ranges must execute both before Surface and after HiZ.");
+
+        config.enableOcclusionCulling=false;
+        Scene replacements;illuminate(replacements);
+        MaterialDesc replacement;replacement.baseColorTexture=Image(1,1,{128,180,220,255},ColorSpace::Linear);
+        auto replaced=replacements.Add(quad(),replacement);Require(bool(replaced),"Surface texture lifetime fixture failed.");
+        const auto frameWindow=std::max(1u,m_device->GetDesc().maxFramesInFlight);
+        const auto drawReplacement=[&](const std::string& name) {
+            (void)Render(replacements,name.c_str(),config);
+            Require(m_transparencyObserver->surfaceCachePass && m_renderer->GetLastRenderStatistics().surfaceMaterialReuse,
+                "Texture replacements must exercise the Surface material cache.");
+            Require(m_device->WaitIdle(),"Surface texture lifetime GPU wait failed.");
+            return m_device->GetResourceAllocationCounters().textures.live;
+        };
+        for(uint32_t frame=0;frame<=frameWindow;++frame)drawReplacement("surface-texture-warmup-"+std::to_string(frame));
+        const auto baseline= m_device->GetResourceAllocationCounters().textures.live;
+        uint64_t peak=baseline;
+        for(uint32_t frame=0;frame<frameWindow*4+8;++frame)
+        {
+            replacement.baseColorTexture=Image(1,1,{uint8_t(32+frame),180,220,255},ColorSpace::Linear);
+            Require(replaced.SetMaterial(replacement),"Surface texture replacement failed.");
+            const auto live=drawReplacement("surface-texture-replace-"+std::to_string(frame));
+            peak=std::max(peak,live);
+            Require(live<=baseline+frameWindow,"Surface material bindings retained textures beyond the in-flight frame window.");
+        }
+        for(uint32_t frame=0;frame<=frameWindow;++frame)drawReplacement("surface-texture-drain-"+std::to_string(frame));
+        const auto settled=m_device->GetResourceAllocationCounters().textures.live;
+        Require(settled<=baseline,"Replaced Surface textures did not retire after unchanged frames.");
+        std::printf("PASS Surface texture lifetime: baseline=%llu peak=%llu settled=%llu frame_window=%u.\n",
+            static_cast<unsigned long long>(baseline),static_cast<unsigned long long>(peak),
+            static_cast<unsigned long long>(settled),frameWindow);
+
+        (void)Render(scene,"surface-cache-disabled-after-use",disabled);
+        Require(!m_transparencyObserver->surfaceCachePass && !m_renderer->GetLastRenderStatistics().surfaceMaterialReuse,
+            "Disabling material reuse after use must retire the ownership pass.");
+
+        updated.alphaMode=MaterialAlphaMode::Mask;
+        updated.baseColorTexture=Image(2,1,{255,255,255,0,255,255,255,255});
+        Require(entity.SetMaterial(updated),"MASK replacement failed.");
+        compare(scene,"surface-cache-mask-fallback",false);
+        updated.alphaMode=MaterialAlphaMode::Opaque;updated.unlit=true;
+        Require(entity.SetMaterial(updated),"Unlit replacement failed.");
+        compare(scene,"surface-cache-unlit-fallback",false);
+        config.enableGpuCulling=false;
+        (void)Render(scene,"surface-cache-cpu-fallback",config);
+        Require(!m_transparencyObserver->surfaceCachePass && !m_renderer->GetLastRenderStatistics().surfaceMaterialReuse,
+            "CPU path must retain original material sampling.");
+        m_transparencyObserver->surfaceCacheDemand=false;
+        m_transparencyObserver->acceptsPackedOwner=false;
+        std::puts("PASS Surface cache: native activation, packed/full primitive ownership, glossy normal precision, bounded texture lifetime, MASK/unlit fallback, mirrored HiZ, spatial ranges, canonical mutation, AO range and signed/overflow color fallback.");
+    }
     void Run()
     {
-        VertexColors();Coverage(false);
+        VertexColors();Coverage(false);TransparentDeformedBounds();
         for(uint32_t layers:{1u,2u}){Coverage(true,layers);Transmission(layers);}
-        NearestDepthAlphaHoles();ProjectiveVisibility();OrthographicSpecular();NormalsAndInstancing();Bc5Normals();ImportedModel();SkinnedModel();
+        SurfaceMaterialCache();NearestDepthAlphaHoles();ProjectiveVisibility();OrthographicSpecular();NormalsAndInstancing();Bc5Normals();ImportedModel();SkinnedModel();ShadowClusterCoverage();
         Require(m_device->WaitIdle(),"Final GPU wait failed.");
         std::printf("INFO reactive storage=%s; direct half-value precision readback unavailable (ReadTexture supports RGBA8/BGRA8 only).\n",
             m_reactiveFormat==RHI::Format::R16_FLOAT?"R16_FLOAT":"RGBA16_FLOAT");
@@ -864,6 +1259,9 @@ int main(int argc,char** argv) try
         else throw std::runtime_error("Unknown or incomplete argument: "+argument);
     }
     CpuVisibilityRegression();
+    const bool defaultReuse=RendererConfig{}.advanced.reuseSurfaceMaterials;
+    Require(!defaultReuse,"Surface material reuse must remain opt-in.");
+    std::puts("PASS Surface material reuse defaults off.");
     if(!options.cpuOnly)RenderingTests(options).Run();
     return 0;
 }

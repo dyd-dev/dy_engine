@@ -3,6 +3,7 @@
 #include <dyf/Extends/Model/ModelScene.h>
 
 #include <ufbx.h>
+#include <fastgltf/types.hpp>
 
 #include <algorithm>
 #include <array>
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -337,6 +339,60 @@ bool ImporterTests()
         return Require(dyf::LoadModel((fixtures/file).string(),model,options),file);
     };
     bool passed=true;
+    for(const char* text : {"texture%", "texture%2", "texture%GG.png", "texture%00.png"})
+    {
+        const fastgltf::URI uri{std::string_view(text)};
+        passed &= Require(!uri.valid(), "malformed percent escapes are rejected");
+        const fastgltf::URI copied=uri;
+        passed &= Require(!copied.valid(), "URI copies preserve invalid input");
+    }
+    const fastgltf::URI spaced{std::string_view("texture%20name.png")};
+    const fastgltf::URI percent{std::string_view("texture%25name.png")};
+    passed &= Require(spaced.valid() && spaced.path()=="texture name.png"
+        && percent.valid() && percent.path()=="texture%name.png", "valid escapes are decoded once");
+    fastgltf::URI reassigned{std::string_view("texture%")};
+    reassigned=fastgltf::URIView("texture%20name.png");
+    passed &= Require(reassigned.valid() && reassigned.path()=="texture name.png",
+        "a valid URI replaces a previous invalid value");
+    for(const std::string text : {std::string("a.bin"), std::string(128,'a')+".bin"})
+    {
+        fastgltf::URI source{std::string_view(text)}, destination;
+        destination=std::move(source);
+        passed &= Require(destination.valid() && destination.path()==text && !source.valid(),
+            "URI move assignment preserves validity for short and allocated strings");
+    }
+    for(const char* text : {"texture%20name.png", "texture%"})
+    {
+        fastgltf::URI uri{std::string_view(text)};
+        const bool valid=uri.valid();
+        const std::string path(uri.path());
+        uri=uri;
+        passed &= Require(uri.valid()==valid && uri.path()==path, "URI self-copy preserves its state");
+        uri=std::move(uri);
+        passed &= Require(uri.valid()==valid && uri.path()==path, "URI self-move preserves its state");
+    }
+    const auto inputDirectory=std::filesystem::temp_directory_path()
+        /("dyf-model-input-"+std::to_string(std::random_device{}()));
+    if(Require(std::filesystem::create_directory(inputDirectory), "input tests use a new temporary directory"))
+    {
+        const auto input=inputDirectory/"unsupported.gltf";
+        for(const char* document : {
+            R"({"asset":{"version":"2.0"},"buffers":[{"byteLength":4,"uri":"unsupported:buffer"}]})",
+            R"({"asset":{"version":"2.0"},"images":[{"uri":"unsupported:image"}]})"})
+        {
+            std::ofstream output(input);
+            output << document;
+            output.close();
+            if(!Require(bool(output), "a small invalid-input fixture is written")) {passed=false;continue;}
+            dyf::ModelData rejected;
+            rejected.meshes.emplace_back();
+            passed &= Require(!dyf::LoadModel(input.string(),rejected) && rejected.meshes.empty(),
+                "unsupported external URI input fails and clears the output model");
+        }
+        std::filesystem::remove(input);
+        std::filesystem::remove(inputDirectory);
+    }
+    else passed=false;
     dyf::ModelData coverage;
     if(load("MaterialCoverage.gltf",coverage))
     {

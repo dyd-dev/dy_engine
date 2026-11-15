@@ -53,6 +53,9 @@ struct VSInput
     float2 uv : TEXCOORD2;
     float4 tangent : TEXCOORD3;
     float4 color : TEXCOORD8;
+#if RENDERER_SURFACE_CACHE
+    uint2 sourceKey:TEXCOORD9;
+#endif
 #if RENDERER_INSTANCING
     float4 model0 : TEXCOORD4;
     float4 model1 : TEXCOORD5;
@@ -70,6 +73,9 @@ struct VSOutput
     float3 worldNormal : TEXCOORD2;
     float4 worldTangent : TEXCOORD3;
     float4 color : TEXCOORD5;
+#if RENDERER_SURFACE_CACHE
+    nointerpolation uint2 instanceKey:TEXCOORD6;
+#endif
 #if RENDERER_ENABLE_SHADOWS
     float4 lightSpacePosition : TEXCOORD4;
 #endif
@@ -126,6 +132,9 @@ VSOutput main(VSInput input)
     const float3x3 normalMatrix = MeshNormalMatrix(world);
 
     VSOutput output;
+#if RENDERER_SURFACE_CACHE
+    output.instanceKey=input.sourceKey;
+#endif
     output.position = clipPosition;
     output.uv = input.uv;
     output.color = input.color;

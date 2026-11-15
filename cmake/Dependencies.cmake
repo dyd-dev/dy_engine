@@ -1,4 +1,5 @@
 include(FetchContent)
+include(DependencyInputChecks)
 
 # Desktop windows use GLFW. Android and iOS use their native window APIs.
 if(WIN32 OR CMAKE_SYSTEM_NAME MATCHES "^(Linux|Darwin)$")
@@ -127,6 +128,7 @@ if(DY_ENABLE_TRACY)
             GIT_TAG "v0.13.1"
             GIT_SHALLOW TRUE)
         FetchContent_MakeAvailable(tracy)
+        dy_check_tracy_inputs()
     endif()
 endif()
 

@@ -67,7 +67,7 @@ bool Renderer::Impl::PrepareFrameResources(RenderFrame& frame,RHI::ICommandList&
     frame.history={previousCameraView,previousCameraProjection,frameIndex,frameHistoryValid};
     for(auto& extension:extensions)
         if(!extension->PrepareCamera(frame)) return false; // 확장 카메라 준비 실패면 뒤의 가시성/자원 준비를 중단한다.
-    if(!PrepareVisibility(scene,camera,uploads,target.width,target.height,frame.draws)) return false; // GPU 가시성 입력 준비/업로드 기록 실패를 호출부에 전달한다.
+    if(!PrepareVisibility(scene,camera,uploads,target.width,target.height,frame.draws,(frame.requirements.SurfaceOutputMask()&4u)!=0)) return false; // GPU 가시성 입력 준비/업로드 기록 실패를 호출부에 전달한다.
     if(!PrepareCpuBatches(scene,camera,uploads,frame.draws,(frame.requirements.SurfaceOutputMask()&4u)!=0)) return false;
     if(shaderSources.bytes[MeshFragment].empty()) // 기본 fragment를 쓰는 경우에만 기본 조명 자원을 보충한다.
     {
@@ -109,7 +109,7 @@ bool Renderer::Impl::PrepareFrameResources(RenderFrame& frame,RHI::ICommandList&
                     std::fprintf(stderr,"dyf: Render module %s preparation failed.\n",extension->GetName());
                     return false;
                 }
-                if(depthGeometryUnchanged && (!depthGeometrySnapshot.Matches(frame.geometry) ||
+                if(depthGeometryUnchanged && !extension->HasReadOnlyGeometryInputs() && (!depthGeometrySnapshot.Matches(frame.geometry) ||
                     !SameDepthCamera(depthGeometryView,depthGeometryProjection,frame.camera)))depthGeometryUnchanged=false;
             }
     frameAmbientOcclusion=frame.ao.texture;
